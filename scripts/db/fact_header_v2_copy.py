@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from portal.backend.db import Base, MarketFactVersionRecord
 from scripts.db.fact_header_v2_capture import (
-    SCHEMA, SOURCE, QUEUE, install_capture, inspect_capture,
+    SCHEMA, SOURCE, QUEUE, DEFAULT_ATTEMPT_SECONDS, install_capture, inspect_capture,
     install_identity_capture, inspect_identity_capture, migration_step,
 )
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission
@@ -118,11 +118,12 @@ def _inspect_progress(conn):
     return state
 
 
-def prepare_copy(conn, *, placement=None, timeout_seconds=30):
+def prepare_copy(conn, *, placement=None, timeout_seconds=30,
+                 attempt_seconds=DEFAULT_ATTEMPT_SECONDS):
     """Create a private target atomically; retry never resets copied progress."""
     with migration_step(conn, timeout_seconds), (physical.tablespace(conn,"") if placement is not None else nullcontext()):
         binding=physical.observe(conn,placement)[0] if placement is not None else None
-        install_capture(conn)
+        install_capture(conn, attempt_seconds=attempt_seconds)
         if binding is not None:
             physical.verify_group(conn,SOURCE,history=False,saved=binding,pid=physical.verify(conn,binding))
         _source_columns(conn)

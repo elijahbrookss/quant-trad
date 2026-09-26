@@ -20,7 +20,7 @@ from portal.backend.service.storage.header_resources import observe_header_resou
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
 from scripts.db import fact_header_v2_references as references
 from scripts.db.fact_header_v2_admission import _columns, _constraints, _secondary_indexes
-from scripts.db.fact_header_v2_capture import SCHEMA, migration_step
+from scripts.db.fact_header_v2_capture import SCHEMA, migration_step, capture_remaining_seconds
 
 RELATIONS = ("market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies")
 RETAINED_LEGACY = "qt_fact_storage_cutover_v1.fact_versions"
@@ -230,10 +230,7 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                         receipt = {"relation": relation, "relation_oid": observed["relation_oid"],
                                    "placement": "history", "reused": True, "migration_ready": False}
                     else:
-                        remaining = conn.scalar(text(f"""
-                            SELECT EXTRACT(EPOCH FROM prepared_at+interval '24 hours'-clock_timestamp())
-                            FROM {SCHEMA}.capture WHERE id=1
-                        """))
+                        remaining = capture_remaining_seconds(conn)
                         deadline = min(deadline, monotonic()+float(remaining))
                         resources = observe_header_resources(conn, targets,
                             pg_controldata=plan.pg_controldata, timeout_seconds=min(30,limits["movement_timeout_seconds"]))

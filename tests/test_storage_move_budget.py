@@ -83,7 +83,7 @@ def test_future_or_stale_capacity_cannot_authorize_a_budget(request_data, second
 
 
 @pytest.mark.parametrize("name,value", [
-    ("timeout_seconds", True), ("timeout_seconds", 0), ("timeout_seconds", 86401),
+    ("timeout_seconds", True), ("timeout_seconds", 0), ("timeout_seconds", 4*86400+1),
     ("cancellation_grace_seconds", 0), ("cancellation_grace_seconds", 61),
     ("copy_bytes", -1), ("copy_bytes", 1201), ("own_reserved_bytes", 0),
     ("own_reserved_bytes", 1600), ("wal_bytes", 0), ("wal_bytes", 1.5),
@@ -168,12 +168,12 @@ def test_initial_migration_horizon_counts_growth_without_relaxing_routine_limits
     from portal.backend.service.storage.header_resource_claims import _limits
     limits={key:request_data[key] for key in ("wal_bytes","temporary_bytes",
         "growth_bytes_per_second","maintenance_bytes","cancellation_grace_seconds")}
-    limits["movement_timeout_seconds"]=7200
+    limits["movement_timeout_seconds"]=4*86400
     with pytest.raises(ValueError,match="limits_invalid"):_limits(limits)
-    assert _limits(limits,migration=True)["movement_timeout_seconds"]==7200
-    result=assess_header_move_resources(**{**request_data,"timeout_seconds":7200})
-    assert rows(result)["ssd"]["ingestion_and_other_growth_bytes"]==10*(7200+2)
-    assert rows(result)["hdd"]["ingestion_and_other_growth_bytes"]==20*(7200+2)
+    assert _limits(limits,migration=True)["movement_timeout_seconds"]==4*86400
+    result=assess_header_move_resources(**{**request_data,"timeout_seconds":4*86400})
+    assert rows(result)["ssd"]["ingestion_and_other_growth_bytes"]==10*(4*86400+2)
+    assert rows(result)["hdd"]["ingestion_and_other_growth_bytes"]==20*(4*86400+2)
     assert not result["capacity_sufficient_for_declared_limits"]
     with pytest.raises(ValueError,match="limits_invalid"):
-        _limits({**limits,"movement_timeout_seconds":86401},migration=True)
+        _limits({**limits,"movement_timeout_seconds":4*86400+1},migration=True)

@@ -837,7 +837,7 @@ PostgreSQL 15 control/dump utilities without creating a distribution-managed
 database cluster. The default server mounts
 still do not provide the matching PostgreSQL namespace. Configure the
 runtime only as part of the explicit preserving cutover after those deployment
-prerequisites and the one-day migration rehearsal are qualified. No live
+prerequisites and the bounded preserving migration are qualified. No live
 configuration or deployment is implied by this local implementation.
 
 ### Runtime-image storage rehearsal
@@ -1019,7 +1019,7 @@ between pages. This caches no database observations: source definitions, capture
 state, copied content and physical placement are still admitted on every page.
 A physical-drive profile identified repeated reconstruction of the entire model
 graph as a significant part of the copy time. The optimization does not change
-transaction boundaries, the original one-day deadline or recovery. The internal
+transaction boundaries, the original persisted deadline or recovery. The internal
 operator admits up to 4,096 rows per page, matching the existing header and raw
 copy primitives; the default remains 128. Measured requests may select the larger
 bounded batch while retaining the same per-step duration and resource limits.
@@ -1106,3 +1106,15 @@ logical definitions and guards in one transaction, verifies physical placement,
 and reuses committed placement after interruption. The existing capacity/WAL
 watch and original migration deadline apply. A clean installation with no legacy
 rollback table has nothing to relocate; no generic placement control is added.
+
+### Initial migration duration
+
+The explicit initial operator accepts at most 96 hours, justified as a bounded
+prospective allowance by the 47.90-hour partial copy/verification projection.
+It is not a whole-migration ETA or proof of acceptable collector downtime.
+At first preparation, capture persists the requested duration with prepared_at.
+Every phase and retry uses that original clock. Existing captures without the
+new column retain 24 hours and are never altered or revived. Direct capture/copy
+primitives default to 24 hours. The earlier host deadline and per-step statement
+timeouts still apply. Routine automatic movement remains limited to one hour;
+longer initial admission must count its entire growth window. See ADR0070.

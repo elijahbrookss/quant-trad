@@ -18,6 +18,8 @@ from time import monotonic
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
+
 from portal.backend.db.fact_storage_schema import assert_fact_storage_contract
 from portal.backend.service.storage.header_movement import _MoveWatch
 from portal.backend.service.storage.header_resource_claims import _limits
@@ -26,7 +28,7 @@ from scripts.db import archive_reference_v2_placement as reference_move
 from scripts.db import archive_root_v2_copy as archives
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
 from scripts.db import fact_header_v2_references as references, raw_mapping_v2_copy as raw
-from scripts.db.fact_header_v2_capture import LOCK, SCHEMA, migration_step
+from scripts.db.fact_header_v2_capture import LOCK, SCHEMA, migration_step, capture_remaining_seconds
 
 logger = logging.getLogger(__name__)
 RETAINED = "qt_fact_header_retained_v1"
@@ -54,9 +56,7 @@ def _staging_transaction(engine, *, placement, policy, limits, deadline, cancell
                     targets = (placement.recent, placement.history)
                     if conn.scalar(text("SELECT to_regclass(:name)"),
                                    {"name": SCHEMA+".capture"}) is not None:
-                        seconds = conn.scalar(text(f"""SELECT EXTRACT(EPOCH FROM
-                            prepared_at+interval '24 hours'-clock_timestamp())
-                            FROM {SCHEMA}.capture WHERE id=1"""))
+                        seconds = capture_remaining_seconds(conn)
                         deadline = min(deadline, monotonic()+float(seconds))
                     resources = observe_header_resources(conn, targets,
                         pg_controldata=placement.pg_controldata,
@@ -93,12 +93,12 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
     Retry rechecks those identities and reuses verified archive objects; archive
     scans restart from the beginning. This pass is not final concurrent-inventory
     readiness. The original capture clock, including time between retries,
-    remains the one-day limit. Callers must supply measured per-step allowances.
+    remains fixed at the first preparation. Callers must supply measured per-step allowances.
     """
     limits = _limits(resource_limits, migration=True)
     if (not isinstance(placement, physical.CopyPlacement)
             or type(page_rows) is not int or not 1 <= page_rows <= 4096
-            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
+            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= MAX_MIGRATION_SECONDS
             or type(max_page_bytes) is not int or max_page_bytes <= 0
             or (cancelled is not None and not callable(cancelled))):
         raise ValueError("fact_header_staging_inputs_invalid")
@@ -342,10 +342,7 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                     plan = physical._restore(saved["plan"])
                     targets = (plan.recent, plan.history)
                     reference_move._fixed_inputs(policy, limits, targets)
-                    seconds = conn.scalar(text(f"""
-                        SELECT EXTRACT(EPOCH FROM prepared_at+interval '24 hours'-clock_timestamp())
-                        FROM {SCHEMA}.capture WHERE id=1
-                    """))
+                    seconds = capture_remaining_seconds(conn)
                     deadline = min(deadline, monotonic()+float(seconds))
                     resources = observe_header_resources(conn, targets,
                         pg_controldata=plan.pg_controldata,
@@ -575,8 +572,7 @@ def activate_handoff_policy(engine, *, policy, resource_limits, source_root, des
                     if not Path(destination_root).resolve(strict=True).is_relative_to(
                             Path(placement.history.root).resolve(strict=True)):
                         raise RuntimeError("fact_header_policy_archive_outside_history_target")
-                    seconds = conn.scalar(text(f"""SELECT EXTRACT(EPOCH FROM
-                        prepared_at+interval '24 hours'-clock_timestamp()) FROM {SCHEMA}.capture WHERE id=1"""))
+                    seconds = capture_remaining_seconds(conn)
                     deadline = min(deadline, monotonic()+float(seconds))
                     resources = observe_header_resources(conn, targets,
                         pg_controldata=placement.pg_controldata,
@@ -683,7 +679,7 @@ def finish_database_handoff(engine, *, placement, policy, resource_limits,
     """
     limits = _limits(resource_limits, migration=True)
     if (not isinstance(placement, physical.CopyPlacement)
-            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
+            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= MAX_MIGRATION_SECONDS
             or type(page_rows) is not int or not 1 <= page_rows <= 4096
             or any(type(value) is not int or value <= 0
                    for value in (max_page_bytes, max_objects, max_bytes))
@@ -795,7 +791,7 @@ def run_database_operator(request, *, engine):
     for key in ("max_page_bytes", "max_objects", "max_bytes", "page_rows", "max_duration_seconds"):
         if type(request[key]) is not int or request[key] <= 0:
             raise ValueError("storage_database_operator_budget_invalid")
-    if request["page_rows"] > 4096 or request["max_duration_seconds"] > 86400:
+    if request["page_rows"] > 4096 or request["max_duration_seconds"] > MAX_MIGRATION_SECONDS:
         raise ValueError("storage_database_operator_budget_invalid")
     for key in ("inventory_path", "source_root", "destination_root"):
         value = request[key]

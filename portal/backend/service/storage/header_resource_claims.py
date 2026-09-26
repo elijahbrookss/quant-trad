@@ -15,6 +15,8 @@ from collections.abc import Mapping
 
 from sqlalchemy import text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
+
 from portal.backend.db.storage_target_models import StorageHeaderMoveRecord, StorageHeaderBatchRecord
 from portal.backend.service.storage_management import StorageConflict
 from .header_admission import lock_header_storage, registered_header_targets
@@ -42,7 +44,7 @@ def _limits(values, *, migration=False):
         result[key] = dict(value)
     if any(set(result[key]) != set(result[_MAPS[0]]) for key in _MAPS):
         raise ValueError("storage_resource_claim_limits_invalid")
-    for key, maximum in (("wal_bytes", _MAX), ("movement_timeout_seconds", 86400 if migration else 3600),
+    for key, maximum in (("wal_bytes", _MAX), ("movement_timeout_seconds", MAX_MIGRATION_SECONDS if migration else 3600),
                          ("cancellation_grace_seconds", 60)):
         value = values[key]
         if type(value) is not int or not 1 <= value <= maximum:

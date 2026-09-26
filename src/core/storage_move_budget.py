@@ -16,6 +16,8 @@ from .storage_mounts import FilesystemEvidence
 from .storage_targets import StoragePolicy, StorageTarget
 
 _MAX = 2**63 - 1
+# Prospective operator ceiling, not a duration estimate or a routine move limit.
+MAX_MIGRATION_SECONDS = 4 * 24 * 3600
 
 
 def _integer(value, name, minimum=0, maximum=_MAX):
@@ -54,7 +56,7 @@ def assess_header_move_resources(
     temporary and maintenance demand. Existing occupied bytes are already
     reflected in available_bytes; neither those bytes nor future source frees
     are added to available capacity. Zero allowances must be explicit. Arithmetic
-    admits the one-day initial migration horizon; routine movement admission
+    admits the bounded initial migration horizon; routine movement admission
     independently retains its one-hour limit.
     """
     if (not isinstance(targets, Sequence) or not 1 <= len(targets) <= 32
@@ -76,7 +78,7 @@ def assess_header_move_resources(
     age = (now - observed_at).total_seconds()
     if not 0 <= age <= 30:
         raise ValueError("storage_move_budget_invalid: stale or future observation")
-    _integer(timeout_seconds, "movement timeout", 1, 86400)
+    _integer(timeout_seconds, "movement timeout", 1, MAX_MIGRATION_SECONDS)
     _integer(cancellation_grace_seconds, "cancellation grace", 1, 60)
     observation_age = ceil(age)
     window = observation_age + timeout_seconds + cancellation_grace_seconds

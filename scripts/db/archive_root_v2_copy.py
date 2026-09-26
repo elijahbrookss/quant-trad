@@ -27,7 +27,7 @@ from portal.backend.service.storage.recovery_copies import _FAMILIES
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db import archive_reference_v2_placement as reference_move
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
-from scripts.db.fact_header_v2_capture import SCHEMA, migration_step
+from scripts.db.fact_header_v2_capture import SCHEMA, migration_step, capture_remaining_seconds
 
 logger = logging.getLogger(__name__)
 FAMILIES = dict(_FAMILIES)
@@ -136,10 +136,7 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
                     destination, destination_identity = _root(destination_root, saved["history_device"])
                     if not destination.is_relative_to(Path(plan.history.root)):
                         raise RuntimeError("archive_copy_destination_outside_history_target")
-                    seconds = conn.scalar(text(f"""
-                        SELECT EXTRACT(EPOCH FROM prepared_at+interval '24 hours'-clock_timestamp())
-                        FROM {SCHEMA}.capture WHERE id=1
-                    """))
+                    seconds = capture_remaining_seconds(conn)
                     deadline = min(deadline, monotonic()+float(seconds))
                     rows = _catalog_page(conn, family, after_id, page_rows)
                     byte_count = sum(row["byte_count"] for row in rows)
@@ -257,10 +254,7 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
             destination, destination_identity = _root(destination_root, saved["history_device"])
             if not destination.is_relative_to(Path(plan.history.root)):
                 raise RuntimeError("archive_copy_destination_outside_history_target")
-            seconds = conn.scalar(text(f"""
-                SELECT EXTRACT(EPOCH FROM prepared_at+interval '24 hours'-clock_timestamp())
-                FROM {SCHEMA}.capture WHERE id=1
-            """))
+            seconds = capture_remaining_seconds(conn)
             deadline = min(deadline, monotonic()+float(seconds))
             resources = observe_header_resources(conn, targets, pg_controldata=plan.pg_controldata,
                 timeout_seconds=min(30, limits["movement_timeout_seconds"]))

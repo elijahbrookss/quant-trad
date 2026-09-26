@@ -13,22 +13,50 @@ from time import monotonic
 
 from sqlalchemy import event, inspect, text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
+
 SCHEMA = "qt_fact_header_cutover_v2"
 SOURCE = "market.fact_versions"
 QUEUE = SCHEMA + ".pending_fact_ids"
 STATE = SCHEMA + ".capture"
 LOCK = "quant-trad:fact-header-cutover:v2"
 logger = logging.getLogger(__name__)
+DEFAULT_ATTEMPT_SECONDS = 24 * 3600
+
+
+def _attempt_seconds(saved):
+    # Old captures have no duration column and retain their original 24 hours.
+    # Never ALTER an existing capture or infer a new duration from a retry.
+    value = saved.get("attempt_seconds", DEFAULT_ATTEMPT_SECONDS)
+    if type(value) is not int or not 1 <= value <= MAX_MIGRATION_SECONDS:
+        raise RuntimeError("fact_header_migration_attempt_duration_invalid")
+    return value
+
+
+def capture_remaining_seconds(conn):
+    """Read the persisted attempt budget; no phase or retry can reset its clock."""
+    row = conn.execute(text(f"""
+        SELECT to_jsonb(c) AS capture,
+               EXTRACT(EPOCH FROM clock_timestamp()-prepared_at)::double precision AS age
+        FROM {STATE} c WHERE id=1
+    """)).mappings().one_or_none()
+    if row is None or row["age"] is None or row["age"] < 0:
+        raise RuntimeError("fact_header_migration_start_time_invalid")
+    seconds = _attempt_seconds(row["capture"]) - row["age"]
+    if seconds <= 0:
+        raise RuntimeError("fact_header_migration_attempt_expired")
+    return seconds
+
 
 
 @contextmanager
 def migration_step(conn, timeout_seconds=30):
-    """Bound one fixed migration step and reuse capture's original 24-hour clock.
+    """Bound one fixed migration step and reuse capture's original persisted clock.
 
     The caller owns commit. This is not a cutover or a duration qualification.
     A rejected/expired step leaves the original source and capture intact.
     """
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400:
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS:
         raise ValueError("fact_header_migration_timeout_out_of_bounds")
     if not conn.in_transaction():
         raise ValueError("fact_header_copy_caller_transaction_required")
@@ -89,15 +117,7 @@ def migration_step(conn, timeout_seconds=30):
                                {"name": LOCK}):
                 raise RuntimeError("fact_header_copy_migration_busy")
             if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
-                seconds = conn.scalar(text(f"""
-                    SELECT EXTRACT(EPOCH FROM
-                        prepared_at + interval '24 hours' - clock_timestamp())::double precision
-                    FROM {STATE} WHERE id=1
-                """))
-                if seconds is None or seconds > 86400:
-                    raise RuntimeError("fact_header_migration_start_time_invalid")
-                if seconds <= 0:
-                    raise RuntimeError("fact_header_migration_attempt_expired")
+                seconds = capture_remaining_seconds(conn)
                 deadline = min(deadline, monotonic() + seconds)
             yield
             remaining()
@@ -173,6 +193,8 @@ def inspect_capture(conn):
             raise RuntimeError("fact_header_capture_layout_incomplete")
         columns = inspector.get_columns(name,schema=SCHEMA)
         observed = {item["name"]:str(item["type"].compile(dialect=conn.dialect)) for item in columns}
+        if name == "capture" and "attempt_seconds" in observed:
+            expected = {**expected, "attempt_seconds": "INTEGER"}
         if observed != expected or any(item["nullable"] for item in columns):
             raise RuntimeError("fact_header_capture_layout_changed")
         if inspector.get_pk_constraint(name,schema=SCHEMA)["constrained_columns"] != ["id"]:
@@ -183,7 +205,7 @@ def inspect_capture(conn):
         if tuple(kind) != ("r","p"):
             raise RuntimeError("fact_header_capture_durable_tables_required")
     saved = conn.execute(text(f"""
-        SELECT id,source_oid::bigint,database_oid::bigint,cluster_id,queue_oid::bigint,prepared_at FROM {STATE}
+        SELECT * FROM {STATE}
     """)).mappings().one()
     queue_oid = conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),{"name":QUEUE})
     if (saved["id"] != 1 or saved["queue_oid"] != queue_oid
@@ -221,16 +243,17 @@ def inspect_capture(conn):
     return {"schema_version":"qt.fact_header_capture.v1",**context,
             "capture_active":True,"migration_ready":False,
             "started_at":saved["prepared_at"].isoformat(),
-            "deadline_at":(saved["prepared_at"]+timedelta(hours=24)).isoformat()}
+            "deadline_at":(saved["prepared_at"]+timedelta(seconds=_attempt_seconds(saved))).isoformat()}
 
 
-def install_capture(conn, *, timeout_seconds=30):
+def install_capture(conn, *, timeout_seconds=30, attempt_seconds=DEFAULT_ATTEMPT_SECONDS):
     """Stage insert capture atomically; retry only reuses an intact capture."""
+    _attempt_seconds({"attempt_seconds": attempt_seconds})
     with migration_step(conn, timeout_seconds):
-        return _install_capture(conn)
+        return _install_capture(conn, attempt_seconds=attempt_seconds)
 
 
-def _install_capture(conn):
+def _install_capture(conn, *, attempt_seconds):
     started_at = conn.scalar(text("SELECT clock_timestamp()"))
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),{"name":LOCK}):
         raise RuntimeError("fact_header_capture_migration_busy")
@@ -247,12 +270,13 @@ def _install_capture(conn):
         CREATE TABLE {STATE}(
             id integer PRIMARY KEY CHECK(id=1),source_oid oid NOT NULL,
             database_oid oid NOT NULL,cluster_id text NOT NULL,queue_oid oid NOT NULL,
-            prepared_at timestamptz NOT NULL DEFAULT clock_timestamp())
+            prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            attempt_seconds integer NOT NULL CHECK(attempt_seconds BETWEEN 1 AND {MAX_MIGRATION_SECONDS}))
     """)
     conn.execute(text(f"""
-        INSERT INTO {STATE}(id,source_oid,database_oid,cluster_id,queue_oid,prepared_at)
-        VALUES(1,:source_oid,:database_oid,:cluster_id,to_regclass(:queue),:started_at)
-    """),{**context,"queue":QUEUE,"started_at":started_at})
+        INSERT INTO {STATE}(id,source_oid,database_oid,cluster_id,queue_oid,prepared_at,attempt_seconds)
+        VALUES(1,:source_oid,:database_oid,:cluster_id,to_regclass(:queue),:started_at,:attempt_seconds)
+    """),{**context,"queue":QUEUE,"started_at":started_at,"attempt_seconds":attempt_seconds})
     for name,body,security in (
         ("capture_fact_insert",_capture_body(context["source_oid"]),"DEFINER"),
         ("reject_fact_source_change",_REJECT_BODY,"INVOKER"),

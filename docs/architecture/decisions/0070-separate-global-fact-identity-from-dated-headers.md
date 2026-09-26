@@ -319,7 +319,7 @@ checks now run between checksum and copy chunks; default publication is unchange
 
 Each page owns the existing migration/storage locks and shared archive-expiry
 fence, binds both roots to the admitted SSD/HDD filesystems, and uses the original
-one-day attempt clock and existing resource watcher. Policy reserve, existing
+persisted attempt clock (legacy captures retain one day) and existing resource watcher. Policy reserve, existing
 claims and declared WAL/temp/growth/maintenance allowances remain protected.
 A wrong root, symlink, corrupt object, changed root, insufficient headroom,
 cancellation or elapsed budget refuses work. Source records and files remain
@@ -472,7 +472,7 @@ later policy revision fails without selecting an alternative automatically.
 The supplied fixed placement must match the committed receipt. Canonical archive
 roots, automatic history/local-copy policy and positive work budgets are required.
 Mutating steps share an invocation ceiling and retain their existing original
-one-day attempt clock. Read-only reconciliation may recognize an already-complete
+persisted attempt clock (legacy captures retain one day). Read-only reconciliation may recognize an already-complete
 sequence after that attempt expired. Inspection rolls back its read-only
 transaction and introduces no new progress table or host state.
 
@@ -528,3 +528,29 @@ the same candidate and bounded attempt. Only verified completion records the new
 storage layout and retires the hold. Pre-migration software is excluded from the
 initial release's automatic rollback field. The combined real-service rehearsal
 remains required. The database-only entry point continues to leave clients held.
+
+## Prospective migration duration amendment — September 26, 2026
+
+The representative SSD/HDD copy and exact-verification measurements project
+47.90 hours for header/identity/raw phases under constrained fixture resources.
+That excludes the retained-table relocation, reference validation, archive
+reconciliation and runtime activation. A universal 24-hour ceiling cannot admit
+this candidate. The fixed operator now accepts an explicitly chosen new-attempt
+budget up to 96 hours. This is a bounded failure deadline, not a measured full
+migration ETA, guaranteed completion time or authorization for four days of
+collector downtime. The remaining phase/space plan and outage tradeoff still
+precede production cutover.
+
+New capture creation persists the requested duration beside its original
+prepared_at timestamp. Every copy, reference, archive and handoff phase reads
+that same start and duration. Retries reuse it, even when their requested
+duration differs. Existing captures without the duration column keep their
+original 24-hour deadline; the operator never adds the column to an existing
+capture or revives an expired attempt. Direct primitives still default to
+24 hours. The host's saved deadline and invocation/statement limits can only
+shorten the remaining allowance. No phase gets a fresh cumulative budget.
+
+Resource admission counts growth across the longer requested horizon. The
+routine movement ceiling remains one hour, and backup/recovery and activation
+limits are unchanged. Full-size logical disaster-restore validation remains
+user-waived; this migration deadline amendment does not restart it.

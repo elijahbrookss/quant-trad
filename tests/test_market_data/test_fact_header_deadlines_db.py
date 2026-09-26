@@ -165,3 +165,52 @@ def test_expired_child_releases_its_deadline_without_poisoning_parent(capture_so
             assert conn.execute(text(f"SELECT id FROM {SOURCE} ORDER BY id")).scalars().all() == [
                 "existing", "outer-survives-child"]
         assert conn.scalar(text("SHOW statement_timeout")) == "0"
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_larger_request_never_revives_old_default_attempt(capture_source, legacy):
+    with capture_source.begin() as conn:
+        install_capture(conn)
+        if legacy:
+            # Reproduce the pre-duration-column capture schema exactly.
+            conn.exec_driver_sql(f"ALTER TABLE {STATE} DROP COLUMN attempt_seconds")
+        conn.exec_driver_sql(f"UPDATE {STATE} SET prepared_at=clock_timestamp()-interval '25 hours'")
+        original = inspect_capture(conn)
+    capture_source.dispose()
+    with capture_source.begin() as conn:
+        with pytest.raises(RuntimeError, match="attempt_expired"):
+            install_capture(conn, attempt_seconds=4*86400, timeout_seconds=4*86400)
+        assert inspect_capture(conn) == original
+        insert(conn, "source-still-live")
+
+
+def test_new_bounded_attempt_reuses_original_budget_across_phases_and_connections(capture_source):
+    from datetime import datetime
+    with capture_source.begin() as conn:
+        first = install_capture(conn, attempt_seconds=4*86400)
+        assert (datetime.fromisoformat(first["deadline_at"]) -
+                datetime.fromisoformat(first["started_at"])).total_seconds() == 4*86400
+        conn.exec_driver_sql(f"UPDATE {STATE} SET prepared_at=clock_timestamp()-interval '25 hours'")
+        original = inspect_capture(conn)
+    capture_source.dispose()
+    with capture_source.begin() as conn:
+        # Neither a short retry nor the maximum request overwrites the budget.
+        for requested in (30, 4*86400):
+            resumed = install_capture(conn, attempt_seconds=requested)
+            assert resumed == {**original, "reused": True}
+            with migration_step(conn, timeout_seconds=4*86400):
+                assert conn.scalar(text("SELECT 1")) == 1
+        conn.exec_driver_sql(f"UPDATE {STATE} SET prepared_at=clock_timestamp()-interval '97 hours'")
+        expired = inspect_capture(conn)
+    with capture_source.begin() as conn:
+        with pytest.raises(RuntimeError, match="attempt_expired"):
+            install_capture(conn, attempt_seconds=4*86400)
+        assert inspect_capture(conn) == expired
+        insert(conn, "source-after-expiry")
+
+
+@pytest.mark.parametrize("seconds", [0, True, 4*86400+1])
+def test_new_attempt_rejects_invalid_budget_without_creating_capture(capture_source, seconds):
+    with capture_source.begin() as conn:
+        with pytest.raises(RuntimeError, match="attempt_duration_invalid"):
+            install_capture(conn, attempt_seconds=seconds)
+        assert conn.scalar(text("SELECT to_regnamespace('qt_fact_header_cutover_v2')")) is None
