@@ -2124,6 +2124,9 @@ def _check_comparison_side(item: Mapping[str, Any], result: Mapping[str, Any]) -
         "recommendation": result.get("recommendation"),
         "detector": dict(result.get("detector") or {}),
         "outcomes": dict(result.get("outcomes") or {}),
+        "descriptive_outcomes": dict(result.get("descriptive_outcomes") or {}),
+        "outcome_resolution": dict(result.get("outcome_resolution") or {}),
+        "timeframe": item.get("timeframe"),
     }
 
 

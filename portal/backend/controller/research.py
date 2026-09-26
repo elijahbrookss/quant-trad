@@ -22,7 +22,7 @@ class ResearchItemRequest(BaseModel):
     kind: str
     title: str
     status: str = "draft"
-    body: Optional[str] = None
+    body: Optional[str] = Field(default=None, max_length=8192)
     instrument_id: Optional[str] = None
     symbol: Optional[str] = None
     timeframe: Optional[str] = None
@@ -68,7 +68,7 @@ class ResearchCheckRunRequest(BaseModel):
 
 class ResearchObservationFromCheckRequest(BaseModel):
     title: Optional[str] = None
-    body: Optional[str] = None
+    body: Optional[str] = Field(default=None, max_length=8192)
     status: str = "active"
     tags: List[str] = Field(default_factory=list)
 
