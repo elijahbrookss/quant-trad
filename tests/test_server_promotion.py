@@ -137,6 +137,70 @@ def test_release_reports_hold_even_without_successful_release(tmp_path):
     assert "No successful release" in result.stdout
 
 
+@pytest.mark.parametrize("marker_name", ["storage-online-request.json", "storage-online-worker.json"])
+@pytest.mark.parametrize("state_kind", ["partial", "canceled", "expired", "directory", "dangling_link"])
+@pytest.mark.parametrize("entry", ["deploy_release fixture", "recover_promotion", "promote_release fixture"])
+def test_online_intent_blocks_old_runtime_without_live_controller(tmp_path, marker_name, state_kind, entry):
+    state = tmp_path / "state"
+    state.mkdir()
+    marker = state / marker_name
+    if state_kind == "directory":
+        marker.mkdir()
+    elif state_kind == "dangling_link":
+        marker.symlink_to(state / "missing")
+    else:
+        marker.write_text({
+            "partial": "{",
+            "canceled": '{"status":"canceled","container_id":null}',
+            "expired": '{"deadline":1,"container_id":null}',
+        }[state_kind])
+    # No live controller or lock owner: durable intent must independently exclude
+    # old-image deployment/recovery, even before the worker receipt was written.
+    result = shell(tmp_path, "require_runtime() { echo INCORRECT_RUNTIME; }; select_release() { echo INCORRECT_CHECKOUT; }; " + entry)
+    assert result.returncode != 0
+    assert "storage online intent is unresolved" in result.stderr
+    assert "INCORRECT" not in result.stdout
+    assert os.path.lexists(marker)
+
+
+@pytest.mark.parametrize("marker_name", ["storage-online-request.json", "storage-online-worker.json"])
+@pytest.mark.parametrize("action", ["init-env", "deploy", "rollback", "promote", "recover", "apply-alerts", "preview-alerts", "restore-alerts", "stop", "qt", "credentials-coinbase"])
+def test_mutating_dispatch_refuses_online_intent_before_external_commands(tmp_path, marker_name, action):
+    state = tmp_path / "state"
+    state.mkdir()
+    marker = state / marker_name
+    marker.write_text("{")
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    for name in ("docker", "git"):
+        command = commands / name
+        command.write_text("#!/bin/sh\necho INCORRECT_EXTERNAL_COMMAND\nexit 99\n")
+        command.chmod(0o755)
+    result = subprocess.run(["bash", str(SCRIPT), action], capture_output=True, text=True, timeout=10,
+                            env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state),
+                                 "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+                                 "QT_SINGLE_NODE_ENV_FILE": str(tmp_path / "nonexistent-synthetic.env")})
+    assert result.returncode != 0
+    assert "storage online intent is unresolved" in result.stderr
+    assert "INCORRECT" not in result.stdout + result.stderr
+    assert marker.read_text() == "{"
+
+
+@pytest.mark.parametrize("marker_name", ["storage-online-request.json", "storage-online-worker.json"])
+def test_read_only_release_reports_online_intent_without_parsing_private_receipt(tmp_path, marker_name):
+    state = tmp_path / "state"
+    state.mkdir()
+    marker = state / marker_name
+    marker.write_text('{"private":"DO_NOT_PRINT"')
+    result = subprocess.run(["bash", str(SCRIPT), "release"], capture_output=True, text=True, timeout=10,
+                            env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state)})
+    assert result.returncode == 0, result.stderr
+    assert "Storage online intent: unresolved" in result.stdout
+    assert "No successful release" in result.stdout
+    assert "DO_NOT_PRINT" not in result.stdout + result.stderr
+    assert marker.exists()
+
+
 def fixed_state(tmp_path):
     state = tmp_path / "state"
     state.mkdir()

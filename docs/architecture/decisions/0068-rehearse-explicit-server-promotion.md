@@ -312,3 +312,15 @@ historical reads survive controller interruption and retry, with the recent/hist
 placement preserved. Successful database handoff still does not authorize resuming
 application clients or removing the durable hold. The complete activation/recovery
 path and representative physical performance/capacity remain release blockers.
+
+
+The same mutation boundary now also refuses durable online intent recorded by
+storage-online-request.json or storage-online-worker.json, even after the
+controller's deployment flock has been released. Presence alone blocks ordinary
+deployment, rollback, recovery and other mutating commands; corrupt/partial state
+and dangling links fail closed. The read-only release command reports this state
+without exposing private contents. SQL cancellation or attempt expiry cannot
+clear it: retained source data may already require the HDD recipe. No automatic
+marker removal or old-runtime restart is provided. The qualified terminal host
+reconciliation and initial pre-mutation intent ordering remain pending; see
+[ADR 0073](0073-prepare-storage-migrations-with-live-collection.md).

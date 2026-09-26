@@ -9,6 +9,8 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/server_deploy.sh
+  - tests/test_server_promotion.py
   - scripts/automation/storage_online_controller.py
   - scripts/automation/storage_online_launch.py
   - scripts/ci/rehearse_online_launch.py
@@ -388,3 +390,25 @@ runtime activation, full launcher-context lifecycle, or production throughput.
 The synthetic UUID metadata and small application fixture establish only this
 entrypoint boundary. Existing native UID1000 publication/permission evidence is
 separate; this positive application fixture's source owner is UID70.
+
+
+### Durable online intent exclusion
+
+The online launcher retains both storage-online-request.json and
+storage-online-worker.json in the deployment state directory. The sealed request
+can exist before a worker receipt or container exists. Ordinary server mutation
+dispatch, direct deployment, promotion and recovery refuse the presence of either
+marker independently of the process-lifetime deployment lock. Partial JSON,
+canceled/expired records, directories and dangling links are unresolved intent,
+not permission to restart an old database recipe. Read-only release inspection
+reports the exclusion without printing private receipt content.
+
+A stopped controller or terminal SQL cancellation does not prove that a previous
+runtime and its mounts can serve retained or relocated source data. Neither path
+removes these markers. Exact terminal host reconciliation and receipt retention
+must be qualified before any release mechanism is added; deleting evidence is
+not reconciliation. The future initial preparation operator must persist intent
+before its first database/mount/capture mutation and verify that the host's
+ordinary deployment entrypoint enforces this interlock. The current launcher
+accepts already prepared attempts and does not implement that initial ordering.
+This guard does not authorize a production preparation, final switch or restart.
