@@ -10,6 +10,9 @@ tags:
   - migration
 code_paths:
   - scripts/db/fact_header_v2_cancel.py
+  - scripts/automation/storage_online_worker.py
+  - scripts/ci/rehearse_online_worker.py
+  - tests/test_storage_online_worker.py
   - scripts/db/fact_header_v2_online.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
@@ -250,3 +253,36 @@ read-only receipt inspection. Cancellation is not a host abort or runtime
 restart instruction. The persistent online host controller must invoke and
 qualify this boundary explicitly; source collection continues on the old layout.
 Production-cardinality lock/admission cost remains unmeasured.
+
+
+### Reading legacy archives while their owners continue publishing
+
+The installed SSD working root is owned by UID1000 and includes private-mode
+archive files owned by root. A plain UID70 reader cannot access those files;
+running the legacy ownership sweep beside live publishers is not acceptable.
+
+The internal storage_online_worker.enter_source_read_identity boundary requires
+a separately mounted read-only source with an exact device/inode binding. A
+single-threaded Linux process starts with only DAC_READ_SEARCH, SETUID and
+SETGID, clears supplementary groups, permanently drops all user/group IDs to70,
+and retains only effective/permitted DAC_READ_SEARCH with no inherited/ambient
+capability and no-new-privileges. It does this before application imports that
+may create threads. Unexpected capabilities, writable source, identity drift or
+a threaded entry refuse admission. A transition failure is fatal, with no root
+or ownership-change fallback.
+
+This capability permits reading all files visible to the worker, not only its
+source directory. The host must confine its mount inventory, exclude keys and
+unrelated host paths, and reject any writable alias of the source. The helper
+alone does not prove that host mount inventory. It grants no write bypass:
+ordinary UID70 permissions control destination writes; read-only source mount
+enforcement remains separate. Executed child programs do not inherit read
+bypass. File ownership, modes and contents are never changed by the transition.
+
+The disposable native rehearsal uses private root/UID1000 files, exact archive
+copying and live file proofs, rejects write bypass/root recovery/extra authority,
+and exercises an independent UID1000 publisher through its own RW fixture mount.
+It is a permission/ownership boundary proof, not a running QT collector, full
+production inventory admission or final ownership/runtime activation proof.
+No production entrypoint invokes this helper yet; persistent controller wiring
+and final spool ownership remain required.

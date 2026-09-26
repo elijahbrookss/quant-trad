@@ -116,6 +116,9 @@ jobs:
             --pg-bin /usr/lib/postgresql/15/bin --pgbackrest /usr/local/bin/pgbackrest \
             --restic /usr/local/bin/restic
 
+      - name: Prove online worker reads legacy archives without changing ownership
+        run: python3 scripts/ci/rehearse_online_worker.py --image qt-incremental-runtime-proof
+
       - name: Prove encrypted restore through actual QT current and frozen readers
         run: ./scripts/ci/run_test_suite.sh incremental-recovery
 
