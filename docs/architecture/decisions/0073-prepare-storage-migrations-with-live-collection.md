@@ -130,6 +130,22 @@ not authorize destination deletion. Root identity and catalog/trigger drift
 refuse resume. Queue emptiness remains only an observation; publisher drain is a separate
 host boundary.
 
+Archive capture retirement is explicit and transaction-bound. Only the live
+verified inventory context on the same connection/transaction can remove the
+temporary catalog capture/change-rejection triggers and insert function.
+Completed finite baselines and an empty committed queue are required in addition
+to exact file inventory. The original capture state, progress and queue remain;
+a terminal receipt retains their bindings and the inventory. A closed attempt
+cannot prepare or copy again. The caller includes retirement in its final switch
+transaction: abort restores all triggers and removes the uncommitted receipt,
+allowing same-attempt catch-up; successful commit leaves the terminal receipt.
+Saved reports and contexts from another connection are not permission. The
+original deadline remains enforced, including retirement. This is not terminal
+cleanup of expired attempts, publisher drain or host activation. The actual SQL switch invokes retirement when online
+capture exists, and commit_handoff accepts the caller's still-live file proof.
+The proof remains owned by that caller through commit/outcome reconciliation;
+no host operator uses this mode yet.
+
 An opt-in live file proof now acquires Linux read leases on destination files
 before hashing them in the background. Existing writable descriptors or mappings
 refuse admission; later write/truncate attempts permanently invalidate the live
@@ -193,3 +209,17 @@ paired recovery publication.
 The user-waived full-size logical restore remains deferred and unverified. It is
 not reintroduced here as a gate. Preserve the completed backup, partial restore,
 keys and historical failed/canceled receipts.
+
+Archive capture preparation requires the raw-mapping shadow to be prepared
+first: its foreign key adds native triggers to the raw manifest catalog.
+Sealing the archive catalog binding before that DDL would correctly reject the
+later trigger change. Existing bound captures are never rewritten to accept it.
+
+Disposable combined handoff qualification retains one owning file-proof context
+through an actual protected SQL switch. Killing the database connection after
+the first rename restores archive capture and SQL guards. Retrying with a lost
+commit reply keeps file leases through commit and resolves the durable outcome
+using the existing bounded read-only inspection; frozen bindings remain exact.
+Both full-content archive hashing and full-history SQL verification are disabled
+by failing test hooks for this combined case. It does not measure host downtime
+or qualify the persistent host controller, publisher drain or paired recovery.

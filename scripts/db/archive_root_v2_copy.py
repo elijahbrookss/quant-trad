@@ -343,10 +343,22 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
                 "publisher_drain_and_caller_commit_supervision_required": True}
             logger.info("archive_migration_inventory_verified | objects=%s bytes=%s duration_seconds=%s",
                         count, byte_count, report["verification_seconds"])
-            yield report
-            watch.check()
-            if file_proof is not None:
-                file_proof.verify_all(check_budget=watch.check)
+            # Only this live context on this transaction can retire online
+            # capture. A returned inventory dict is deliberately not authority.
+            key = "qt.archive_inventory_context.v2"
+            metadata = conn.info
+            if key in metadata:
+                raise RuntimeError("archive_inventory_context_already_active")
+            context = {"transaction": conn.get_transaction(), "report": report,
+                       "source_root": str(source), "destination_root": str(destination)}
+            metadata[key] = context
+            try:
+                yield report
+                watch.check()
+                if file_proof is not None:
+                    file_proof.verify_all(check_budget=watch.check)
+            finally:
+                metadata.pop(key, None)
         finally:
             if watch is not None:
                 watch.stop(conn)

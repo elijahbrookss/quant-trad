@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 STATE = SCHEMA + ".archive_online_capture"
 PROGRESS = SCHEMA + ".archive_online_progress"
 QUEUE = SCHEMA + ".pending_archive_objects"
+CLOSED = SCHEMA + ".archive_online_closed"
 TRIGGER = "trg_qt_archive_v2_capture"
 GUARD = "trg_qt_archive_v2_reject_change"
 _FUNCTION = SCHEMA + ".capture_archive_insert"
@@ -57,7 +58,13 @@ def _binding(conn):
     return json.loads(json.dumps(result))
 
 
+def _require_open(conn):
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": CLOSED}) is not None:
+        raise RuntimeError("archive_online_capture_closed")
+
+
 def _inspect(conn, source_root, destination_root):
+    _require_open(conn)
     row = conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one()
     if row["roots"] != _roots(conn, source_root, destination_root) or row["binding"] != _binding(conn):
         raise RuntimeError("archive_online_capture_binding_changed")
@@ -69,9 +76,15 @@ def _inspect(conn, source_root, destination_root):
 def prepare(conn, *, source_root, destination_root, timeout_seconds=30):
     """Install capture and a finite baseline at one short catalog writer fence."""
     with migration_step(conn, timeout_seconds):
+        _require_open(conn)
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
             _inspect(conn, source_root, destination_root)
             return {"reused": True, "migration_ready": False}
+        # The raw shadow's FK installs internal triggers on its manifest
+        # catalog. Prepare that dependency before sealing the exact trigger set.
+        if conn.scalar(text("SELECT to_regclass(:name)"), {"name": raw.STATE}) is None:
+            raise RuntimeError("archive_online_raw_shadow_preparation_required")
+        raw._inspect(conn)
         relations = ",".join("market."+name for name in archives.FAMILIES)
         conn.exec_driver_sql("LOCK TABLE "+relations+" IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         roots = _roots(conn, source_root, destination_root)
@@ -190,3 +203,43 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, *
     return archives._copy_archive_page(engine, select_page=select, record_page=record,
         family=family, source_root=source_root, destination_root=destination_root,
         page_rows=page_rows, **kwargs)
+
+
+def retire_capture(conn, *, source_root, destination_root, timeout_seconds=30):
+    """Remove temporary triggers inside the live verified inventory transaction.
+
+    The caller must include this in the final switch transaction. Any abort
+    restores capture; successful commit retains state/progress/queue and a
+    terminal receipt, refusing preparation/copy retries of the closed attempt.
+    This is neither publisher drain, root activation nor collection permission.
+    """
+    context = conn.info.get("qt.archive_inventory_context.v2")
+    if (context is None or context["transaction"] is not conn.get_transaction()
+            or not context["transaction"].is_active
+            or str(source_root) != context["source_root"]
+            or str(destination_root) != context["destination_root"]):
+        raise RuntimeError("archive_online_live_inventory_context_required")
+    with migration_step(conn, timeout_seconds):
+        state = dict(_inspect(conn, source_root, destination_root))
+        progress = [dict(row) for row in conn.execute(
+            text(f"SELECT * FROM {PROGRESS} ORDER BY family")).mappings()]
+        if (any(not row["baseline_complete"] for row in progress)
+                or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))):
+            raise RuntimeError("archive_online_capture_not_closed")
+        # Exact inventory holds all catalog publication locks until caller
+        # commit. No queued late commit can race trigger removal.
+        receipt = {"capture": state, "progress": progress,
+                   "inventory": dict(context["report"]),
+                   "source_retained": True, "root_activation_authorized": False}
+        conn.exec_driver_sql(f"CREATE TABLE {CLOSED}(id integer PRIMARY KEY CHECK(id=1),"
+                             "closed_at timestamptz NOT NULL DEFAULT clock_timestamp(),"
+                             "receipt jsonb NOT NULL)")
+        conn.execute(text(f"INSERT INTO {CLOSED}(id,receipt) VALUES(1,CAST(:receipt AS jsonb))"),
+                     {"receipt": json.dumps(receipt)})
+        for family in archives.FAMILIES:
+            for trigger in (TRIGGER, GUARD):
+                conn.exec_driver_sql(f"DROP TRIGGER {trigger} ON market.{family}")
+        conn.exec_driver_sql(f"DROP FUNCTION {_FUNCTION}()")
+        logger.info("archive_online_capture_retired | families=%s source_retained=true",
+                    len(archives.FAMILIES))
+        return receipt

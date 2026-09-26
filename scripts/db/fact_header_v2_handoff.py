@@ -251,6 +251,16 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
         # guards must disappear atomically with the rename so new runtime writes
         # are never checked against the retained old source.
         online_proof.release_for_switch(conn)
+    from scripts.db import archive_root_v2_online as online_archives
+    if conn.scalar(text("SELECT to_regclass(:name)"),
+                   {"name": online_archives.STATE}) is not None:
+        # An online archive capture must retire atomically with the SQL switch.
+        # Absence of the enclosing live inventory context refuses this route.
+        inventory = conn.info.get("qt.archive_inventory_context.v2")
+        if inventory is None:
+            raise RuntimeError("archive_online_live_inventory_context_required")
+        online_archives.retire_capture(conn, source_root=inventory["source_root"],
+                                       destination_root=inventory["destination_root"])
     conn.exec_driver_sql(f"CREATE SCHEMA {retained}")
     conn.exec_driver_sql(f"REVOKE ALL ON SCHEMA {retained} FROM PUBLIC")
     conn.exec_driver_sql(f"""
@@ -315,7 +325,7 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
 
 
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
-                   max_objects, max_bytes, page_rows=128, cancelled=None):
+                   max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None):
     """Commit one fully verified fixed handoff; sources remain retained.
 
     Rechecks every copied header, identity, lookup and archive object under
@@ -365,7 +375,8 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                     with archives.verified_archive_inventory(conn, source_root=source_root,
                             destination_root=destination_root, max_objects=max_objects,
                             max_bytes=max_bytes, page_rows=min(page_rows, 256), policy=policy,
-                            resource_limits=limits, cancelled=cancelled) as inventory:
+                            resource_limits=limits, cancelled=cancelled,
+                            file_proof=file_proof) as inventory:
                         with headers.verified_copy(conn, page_rows=page_rows,
                                 timeout_seconds=limits["movement_timeout_seconds"]) as verified:
                             with raw.verified_copy(conn, page_rows=page_rows,
@@ -403,6 +414,8 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                 # Successful savepoint contexts have ended, but watcher and
                 # transaction locks still protect the actual COMMIT.
             watch.check()
+            if file_proof is not None:
+                file_proof.check()
             logger.info("fact_header_preserving_handoff_committed | rows=%s duration_seconds=%s",
                         receipt["verified_header_rows"], monotonic()-started)
             return {"database_handoff_committed": True, "source_preserved": True,

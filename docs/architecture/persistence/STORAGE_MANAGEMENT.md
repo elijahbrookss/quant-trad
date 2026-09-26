@@ -1192,3 +1192,23 @@ switch remain unfinished. The held host operator cannot be advertised as a
 short-outage path. Additional source lookups in protected inserts require
 throughput/collector-impact qualification. The old held-growth capacity
 sensitivity must be replaced by live-ingestion and capture-backlog admission.
+
+### Online archive capture retirement
+
+The internal archive_root_v2_online.retire_capture helper is admitted only by
+the live exact inventory context on the same transaction and matching roots.
+It additionally requires complete baselines and an empty committed queue.
+It removes only temporary catalog triggers and their insert function, retaining
+original capture/progress/queue tables and a terminal inventory receipt.
+The caller must include it in the final switch transaction. Rollback restores
+capture for same-attempt catch-up; committed closure refuses prepare/copy reuse.
+No files, source rows or saved attempt timestamps are changed. Expired attempts
+remain refused, and a saved report cannot authorize retirement. The SQL switch automatically requires this live retirement when capture exists;
+commit_handoff accepts the caller-owned live file proof through commit. Host
+integration, publisher drain, activation and terminal cleanup of expired attempts remain
+separate, unqualified steps.
+
+Archive capture preparation requires the raw-mapping shadow to be prepared
+first: its foreign key adds native triggers to the raw manifest catalog.
+Sealing the archive catalog binding before that DDL would correctly reject the
+later trigger change. Existing bound captures are never rewritten to accept it.

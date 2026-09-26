@@ -47,6 +47,9 @@ def _prepare(storage, tmp_path, monkeypatch):
     engine = storage.database._engine
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan)
+        with pytest.raises(RuntimeError, match="raw_shadow_preparation_required"):
+            online.prepare(conn, source_root=options["source_root"], destination_root=destination)
+        online.raw.prepare_copy(conn)
         assert not online.prepare(conn, source_root=options["source_root"],
                                   destination_root=destination)["reused"]
         assert online.prepare(conn, source_root=options["source_root"],
@@ -289,3 +292,170 @@ def test_file_proof_reentry_requires_background_reverification_and_detects_repla
                 with pytest.raises(RuntimeError, match="path_changed"):
                     resumed.verify_all()
                 # The final context exit must refuse this change as well.
+
+
+def test_archive_capture_retirement_requires_live_fence_and_rolls_back(storage, tmp_path, monkeypatch):
+    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch)
+    roots = {k: options[k] for k in ("source_root", "destination_root")}
+    verify = {k: v for k, v in options.items() if k != "max_page_bytes"}
+    original_hashes = _hashes(options["source_root"])
+    with engine.connect() as conn:
+        original_start = conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture"))
+    with pytest.raises(RuntimeError, match="live_inventory_context"), engine.begin() as conn:
+        online.retire_capture(conn, **roots)
+    # Copying files via another path does not retire unfinished online baselines.
+    for family in archives.FAMILIES:
+        after = ""
+        for _ in range(128):
+            report = archives.copy_archive_page(engine, family=family, after_id=after, **options)
+            if not report["page_objects"]:
+                break
+            after = report["next_after_id"]
+        else:
+            pytest.fail("fixture baseline exceeded bound")
+    with engine.begin() as conn:
+        with archives.verified_archive_inventory(conn, max_objects=1000,
+                max_bytes=64*1024**2, **verify):
+            with pytest.raises(RuntimeError, match="capture_not_closed"):
+                online.retire_capture(conn, **roots)
+    for family in archives.FAMILIES:
+        _drain(engine, options, family)
+    with engine.begin() as writer:
+        _synthetic_descriptor(writer, source, "!retire-tail-"+uuid4().hex)
+    # The final verifier sees the complete catalog, but an undrained queue must
+    # still prevent capture retirement even when its file was separately copied.
+    archives.copy_archive_page(engine, family="raw_archive_manifests", **options)
+    with engine.begin() as conn:
+        with archives.verified_archive_inventory(conn, max_objects=1000,
+                max_bytes=64*1024**2, **verify):
+            with pytest.raises(RuntimeError, match="capture_not_closed"):
+                online.retire_capture(conn, **roots)
+    _drain(engine, options, "raw_archive_manifests")
+    with pytest.raises(RuntimeError, match="abort after retirement"), engine.begin() as conn:
+        with archives.verified_archive_inventory(conn, max_objects=1000,
+                max_bytes=64*1024**2, **verify):
+            receipt = online.retire_capture(conn, **roots)
+            assert not receipt["root_activation_authorized"]
+            assert conn.scalar(text("SELECT to_regclass(:name)"), {"name": online.CLOSED})
+            raise RuntimeError("abort after retirement")
+    with engine.begin() as writer:
+        # Rollback restored the capture function and every trigger.
+        online._inspect(writer, **roots)
+        _synthetic_descriptor(writer, source, "!after-abort-"+uuid4().hex)
+    _drain(engine, options, "raw_archive_manifests")
+    before_close = _hashes(options["source_root"])
+    with engine.begin() as conn:
+        with archives.verified_archive_inventory(conn, max_objects=1000,
+                max_bytes=64*1024**2, **verify) as old_report:
+            with engine.begin() as other:
+                with pytest.raises(RuntimeError, match="live_inventory_context"):
+                    online.retire_capture(other, **roots)
+            receipt = online.retire_capture(conn, **roots)
+        with pytest.raises(RuntimeError, match="live_inventory_context"):
+            online.retire_capture(conn, **roots)
+    with engine.begin() as conn:
+        saved = conn.scalar(text(f"SELECT receipt FROM {online.CLOSED}"))
+        assert saved == receipt and saved["inventory"] == old_report
+        assert conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture")) == original_start
+        assert conn.scalar(text(f"SELECT count(*) FROM {online.PROGRESS}")) == len(archives.FAMILIES)
+        assert conn.scalar(text(f"SELECT count(*) FROM {online.QUEUE}")) == 0
+        assert conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgname IN (:capture,:guard)"),
+                           {"capture": online.TRIGGER, "guard": online.GUARD}) == 0
+        with pytest.raises(RuntimeError, match="capture_closed"):
+            online.prepare(conn, **roots)
+    with pytest.raises(RuntimeError, match="capture_closed"):
+        online.copy_page(engine, family="raw_archive_manifests", **options)
+    assert _hashes(options["source_root"]) == before_close
+    assert all(before_close[key] == value for key, value in original_hashes.items())
+
+
+def test_expired_capture_cannot_be_retired_or_restarted(storage, tmp_path, monkeypatch):
+    engine, options, _, _ = _prepare(storage, tmp_path, monkeypatch)
+    roots = {k: options[k] for k in ("source_root", "destination_root")}
+    verify = {k: v for k, v in options.items() if k != "max_page_bytes"}
+    for family in archives.FAMILIES:
+        _drain(engine, options, family)
+    with engine.begin() as conn:
+        with archives.verified_archive_inventory(conn, max_objects=1000,
+                max_bytes=64*1024**2, **verify):
+            with conn.begin_nested() as rewind:
+                conn.exec_driver_sql(f"UPDATE {SCHEMA}.capture SET prepared_at="
+                                     "clock_timestamp()-interval '25 hours'")
+                with pytest.raises(RuntimeError, match="expired"):
+                    online.retire_capture(conn, **roots)
+                rewind.rollback()
+            assert conn.scalar(text("SELECT to_regclass(:name)"), {"name": online.CLOSED}) is None
+    with engine.begin() as conn:
+        online._inspect(conn, **roots)
+
+
+def test_live_archive_proof_spans_real_handoff_commit_and_killed_switch(
+        storage, tmp_path, monkeypatch):
+    from time import monotonic
+    from sqlalchemy import event
+    from scripts.db import fact_header_v2_handoff as handoff
+    from scripts.db.archive_file_v2_proof import ArchiveFileProof
+    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch)
+    roots = {k: options[k] for k in ("source_root", "destination_root")}
+    with engine.connect() as conn:
+        frozen = _frozen_records(conn)
+        started = conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture"))
+    from scripts.db import fact_header_v2_online_proof as sql_proof
+    with engine.begin() as conn:
+        sql_proof.prepare(conn)
+    # Existing admitted staging fixture; no host hold or production action.
+    handoff.stage_handoff(engine, placement=storage.copy_plan,
+        max_duration_seconds=120, **options)
+    with ArchiveFileProof(options["destination_root"], max_files=128,
+                          max_bytes=64*1024**2, deadline=monotonic()+120) as proof:
+        for family in archives.FAMILIES:
+            _drain(engine, options | {"file_proof": proof}, family)
+        hashed = proof.hashed_bytes
+        def no_final_hash(*args, **kwargs):
+            pytest.fail("leased final handoff reread file contents")
+        monkeypatch.setattr(archives, "_sha256_file", no_final_hash)
+        monkeypatch.setattr(headers, "_verified_pages", no_final_hash)
+        finish = {k: v for k, v in options.items() if k != "max_page_bytes"}
+        finish.update(max_objects=1000, max_bytes=64*1024**2, file_proof=proof)
+        killed = [False]
+        def kill(conn, cursor, statement, parameters, context, executemany):
+            if not killed[0] and statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+                killed[0] = True
+                with engine.begin() as killer:
+                    killer.execute(text("SELECT pg_terminate_backend(:pid,5000)"),
+                        {"pid": conn.connection.driver_connection.get_backend_pid()})
+                conn.exec_driver_sql("SELECT 1")
+        event.listen(engine, "after_cursor_execute", kill)
+        try:
+            with pytest.raises(DBAPIError):
+                handoff.commit_handoff(engine, **finish)
+        finally:
+            event.remove(engine, "after_cursor_execute", kill)
+        assert killed[0]
+        with engine.begin() as conn:
+            online._inspect(conn, **roots)
+            assert conn.scalar(text("SELECT to_regclass(:name)"), {"name": online.CLOSED}) is None
+            assert conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture")) == started
+        # The same owning process retains leases across failed SQL and through
+        # the actual retry COMMIT, including a simulated lost commit response.
+        original_commit = Connection._commit_impl
+        observed = []
+        def lost_reply(conn):
+            proof.verify_all()
+            original_commit(conn)
+            proof.verify_all()
+            observed.append(True)
+            raise RuntimeError("archive handoff commit reply lost")
+        with monkeypatch.context() as lost:
+            lost.setattr(Connection, "_commit_impl", lost_reply)
+            with pytest.raises(RuntimeError, match="commit reply lost"):
+                handoff.commit_handoff(engine, **finish)
+        assert observed == [True] and proof.hashed_bytes == hashed
+        with engine.begin() as conn:
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            conn.exec_driver_sql("SET LOCAL statement_timeout='10s'")
+            inspected = handoff.inspect_handoff(conn, policy=options["policy"], **roots)
+            assert inspected["database_handoff_committed"]
+            assert conn.scalar(text(f"SELECT receipt FROM {online.CLOSED}"))["source_retained"]
+            assert _frozen_records(conn) == frozen
+        proof.verify_all()
