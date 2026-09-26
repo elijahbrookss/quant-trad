@@ -11,6 +11,7 @@ tags:
 code_paths:
   - scripts/db/fact_header_v2_online.py
   - scripts/db/fact_header_v2_online_proof.py
+  - scripts/db/archive_root_v2_online.py
   - cli/main.py
   - src/core/storage_targets.py
   - src/core/storage_header_placement.py
@@ -1156,6 +1157,14 @@ closes capture and checks exact guards, definitions, partition catalog and
 physical placement without scanning every header/identity/raw row. Guard removal
 and the existing SQL switch commit or roll back together. Older unprotected
 shadows retain the full verifier; proof cannot be retrofitted after copying.
+
+Archive preparation also has durable capture for the three fixed immutable
+manifest families. Each finite baseline or captured-tail page uses the existing
+guarded exact file copier and commits its cursor/queue changes in the same
+transaction. Late lower-ID commits remain visible through capture. Failed pages
+reuse published files without losing pending work. Expiry semantics, root
+identity, source preservation and the original attempt deadline remain enforced.
+An empty archive tail does not certify the files or authorize root activation.
 
 The complete online operator, archive reconciliation and measured short final
 switch remain unfinished. The held host operator cannot be advertised as a

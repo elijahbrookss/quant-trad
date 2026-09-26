@@ -11,6 +11,7 @@ tags:
 code_paths:
   - scripts/db/fact_header_v2_online.py
   - scripts/db/fact_header_v2_online_proof.py
+  - scripts/db/archive_root_v2_online.py
   - scripts/db/fact_header_v2_capture.py
   - scripts/db/fact_header_v2_copy.py
   - scripts/db/raw_mapping_v2_copy.py
@@ -18,6 +19,7 @@ code_paths:
   - scripts/automation/storage_handoff_pause.py
   - tests/test_market_data/test_fact_header_online_db.py
   - tests/test_market_data/test_fact_header_online_proof_db.py
+  - tests/test_market_data/test_archive_online_copy_db.py
 ---
 # ADR 0073: Prepare storage migrations with live collection
 
@@ -113,6 +115,17 @@ same transaction; a failed switch restores both guards and old serving source.
 An unprotected older shadow keeps the original full verifier and cannot be
 retroactively certified. Privileged operators must not disable protections or
 edit progress; this is not protection against a malicious database owner.
+
+The fixed archive catalogs now have an opt-in transactional insert queue and
+separate finite baseline cursors. Each bounded archive page reuses the existing
+checksum/fsync copy, expiry fence, resource watchdog and original capture
+deadline, then commits cursor advancement and queue retirement together.
+Out-of-order commits behind a baseline cursor remain queued. A failed page keeps
+its SQL progress pending while retry reuses already published immutable files.
+Existing retention expiry can skip legitimately expired source objects; it does
+not authorize destination deletion. Root identity and catalog/trigger drift
+refuse resume. Queue emptiness is still only an observation: the complete final
+filesystem proof and publisher drain are not replaced by this slice.
 
 This slice does not install a production supervisor, expose a new user command,
 remove the archive final scan or authorize the old host hold. Additional indexed

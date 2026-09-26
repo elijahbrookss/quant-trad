@@ -120,7 +120,7 @@ jobs:
         run: ./scripts/ci/run_test_suite.sh incremental-recovery
 
       - name: Prove bounded online copy and protected exact switch with concurrent intake
-        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py
+        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py tests/test_market_data/test_archive_online_copy_db.py
 
       - name: Recreate actual QT core on disposable storage without provider egress
         run: python3 scripts/ci/test_server_core_recreation.py

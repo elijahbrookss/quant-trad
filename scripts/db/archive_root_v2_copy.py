@@ -77,14 +77,18 @@ def _catalog_page(conn, family, after_id, page_rows):
         FROM market.{family} m WHERE m.id>:after {predicate}
         ORDER BY m.id LIMIT :limit
     """), {"after": after_id, "kind": kind, "limit": page_rows}).mappings().all()
+    _validate_descriptors(rows)
+    return rows
+
+
+def _validate_descriptors(rows):
     for row in rows:
         if (not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
                 or type(row["byte_count"]) is not int or row["byte_count"] <= 0):
             raise RuntimeError("archive_copy_descriptor_invalid")
-    return rows
 
 
-def copy_archive_page(engine, *, family, source_root, destination_root, after_id="",
+def _copy_archive_page(engine, *, select_page, record_page, family, source_root, destination_root, after_id="",
                       page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None):
     """Copy one known catalog page; retry re-verifies and reuses completed files.
 
@@ -138,7 +142,7 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
                         raise RuntimeError("archive_copy_destination_outside_history_target")
                     seconds = capture_remaining_seconds(conn)
                     deadline = min(deadline, monotonic()+float(seconds))
-                    rows = _catalog_page(conn, family, after_id, page_rows)
+                    rows = select_page(conn, family, after_id, page_rows)
                     byte_count = sum(row["byte_count"] for row in rows)
                     if byte_count > max_page_bytes:
                         raise RuntimeError("archive_copy_page_byte_budget_exceeded")
@@ -186,6 +190,7 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
                         "verified_bytes": byte_count, "resource_budget": budget,
                         "source_preserved": True, "migration_ready": False,
                         "final_fenced_inventory_verification_required": True}
+                    report.update(record_page(conn, rows))
                 # Keep watcher and filesystem claims until this transaction ends.
             watch.check()
             logger.info("archive_migration_page_verified | family=%s copied=%s reused=%s duration_seconds=%s",
@@ -198,6 +203,16 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
         finally:
             if watch is not None:
                 watch.stop(conn)
+
+def copy_archive_page(engine, *, family, source_root, destination_root, after_id="",
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None):
+    """Copy one cursor page; an online cursor alone is never completeness."""
+    return _copy_archive_page(engine, select_page=_catalog_page,
+        record_page=lambda conn, rows: {}, family=family, source_root=source_root,
+        destination_root=destination_root, after_id=after_id, page_rows=page_rows,
+        max_page_bytes=max_page_bytes, policy=policy, resource_limits=resource_limits,
+        cancelled=cancelled)
+
 
 @contextmanager
 def verified_archive_inventory(conn, *, source_root, destination_root, max_objects,
