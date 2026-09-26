@@ -1,6 +1,6 @@
 """Owned prepared-host launcher rehearsal with real QT publication.
 
-Synthetic service peers; no production state, provider egress, pause or switch.
+Synthetic service peers; optional owned initial pause, no production or final switch.
 All created containers, volume, network and scratch files are owned by this run.
 """
 import argparse,json,os,select,subprocess,sys,time,uuid
@@ -12,10 +12,12 @@ parser.add_argument('--database-image',required=True)
 parser.add_argument('--output-root',type=Path,required=True)
 parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
+parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
 options=parser.parse_args()
 ROOT=options.output_root.resolve(strict=True)
 history_parent=options.history_parent.resolve(strict=True)
 from scripts.automation import storage_online_launch as launch
+from scripts.automation import storage_online_prepare as initial
 project='qt-online-host-'+uuid.uuid4().hex[:12]
 state=ROOT/project;state.mkdir(mode=0o700)
 history=history_parent/project
@@ -51,39 +53,77 @@ try:
  run(['run','--name',prep,'--user','0:0','--network','none','--memory','64m','--cpus','0.25',
       '--mount','type=bind,source='+str(history)+',target=/h',
       '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
-      "import os;[(os.chown(p,70,70),os.chmod(p,0o755)) for p in ('/h','/s')]"])
+      "import os;os.mkdir('/s/objects');[(os.chown(p,70,70),os.chmod(p,0o755)) for p in ('/h','/s','/s/objects')];os.chmod('/h',0o777)"])
  assert run(['volume','inspect',volume],check=False).returncode != 0
  run(['volume','create','--label','qt.disposable='+project,volume]);created_volume=True
  run(['network','create','--internal',network]);created_network=True
  pgname=project+'-db';owned.append(pgname)
  password=uuid.uuid4().hex
  dbname='qt_migration_online_'+uuid.uuid4().hex[:16]
- run(['run','-d','--name',pgname,'--network',network,'--network-alias','tsdb','--hostname','tsdb.quanttrad',*labels('tsdb'),'--memory','256m','--cpus','2',
-      '--mount','type=volume,source='+volume+',target=/var/lib/postgresql/data',
-      '--mount','type=bind,source='+str(history)+',target=/qt-history',
-      '--env','POSTGRES_USER=fixture','--env','POSTGRES_DB='+dbname,'--env','POSTGRES_PASSWORD='+password,
-      '--env','PGDATA=/var/lib/postgresql/data',pg,'postgres','-c','shared_buffers=32MB','-c','timescaledb.telemetry_level=off'])
+ if options.prepare_source:
+  pgname=project+'-tsdb-1';owned.append(pgname)
+  service=dict(image=pg,pull_policy='never',hostname='tsdb.quanttrad',
+    command=['postgres','-c','shared_buffers=32MB','-c','timescaledb.telemetry_level=off'],
+    environment=dict(POSTGRES_USER='fixture',POSTGRES_DB=dbname,POSTGRES_PASSWORD=password,PGDATA='/var/lib/postgresql/data'),
+    init=True,restart='no',shm_size=134217728,labels={'qt.disposable':project},
+    healthcheck=dict(test=launch.held._TCP_PROBE,interval='1s',timeout='2s',retries=90,start_period='10s'),
+    volumes=[dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data')],
+    networks={'quanttrad':{'aliases':['tsdb.quanttrad']}})
+  model=dict(name=project,services={'tsdb':service},
+    volumes={'postgres-data':dict(name=volume,external=True)},
+    networks={'quanttrad':dict(name=network,external=True)})
+  source_recipe=state/'source.compose.json';source_recipe.write_text(json.dumps(model));source_recipe.chmod(0o600)
+  recipe=json.loads(json.dumps(model))
+  recipe['services']['tsdb']['volumes'].append(dict(type='bind',source=str(history),target='/qt-history',bind=dict(create_host_path=False)))
+  target_recipe=state/launch.held.DATABASE_RECIPE;target_recipe.write_text(json.dumps(recipe));target_recipe.chmod(0o600)
+  run(['compose','--project-name',project,'--file',str(source_recipe),'up','-d','--no-build','--pull','never','--wait','--wait-timeout','90'])
+ else:
+  run(['run','-d','--name',pgname,'--network',network,'--network-alias','tsdb','--hostname','tsdb.quanttrad',*labels('tsdb'),'--memory','256m','--cpus','2',
+       '--mount','type=volume,source='+volume+',target=/var/lib/postgresql/data',
+       '--mount','type=bind,source='+str(history)+',target=/qt-history',
+       '--env','POSTGRES_USER=fixture','--env','POSTGRES_DB='+dbname,'--env','POSTGRES_PASSWORD='+password,
+       '--env','PGDATA=/var/lib/postgresql/data',pg,'postgres','-c','shared_buffers=32MB','-c','timescaledb.telemetry_level=off'])
  pgid=run(['inspect',pgname,'--format','{{.Id}}']).stdout.strip()
  until=time.monotonic()+90
  while run(['exec',pgid,'pg_isready','-h','127.0.0.1','-U','fixture'],check=False).returncode:
   if time.monotonic()>until:raise RuntimeError('fixture_db_timeout')
   time.sleep(.2)
  for service in launch.held.STOP+launch.held.PASSIVE:
-  if service in ('tsdb','market-data-collector'):continue
+  if service=='tsdb' or (service=='market-data-collector' and not options.prepare_source):continue
   name=project+'-'+service;owned.append(name)
+  extra=[]
+  command_text='exit 0' if service=='initialize' else "trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"
+  if service=='market-data-collector':
+   extra=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN=postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname]
+   command_text="trap 'exit 0' TERM; while :; do printf x >> /app/logs/market-structure/objects/native-intake; sleep 1 & wait $!; done"
   run(['run','-d','--name',name,'--pull','never','--network',network,
     '--user','70:70','--read-only','--memory','32m','--cpus','0.1',
-    '--pids-limit','32',*labels(service),'--entrypoint','sh',image,'-c',
-    'exit 0' if service=='initialize' else "trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"])
+    '--pids-limit','32',*labels(service),*extra,'--entrypoint','sh',image,'-c',command_text])
+ if options.prepare_source:
+  udev=state/'initial-udev';udev.mkdir()
+  device=history.stat().st_dev
+  (udev/f'b{os.major(device)}:{os.minor(device)}').write_text('E:ID_FS_UUID=uuid-copy-hdd\n')
+  os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
+  original_cluster=launch.held._cluster_identifier(pgid)
+  preparation=initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')
+  prepared_bytes=(state/initial.STATE).read_bytes()
+  assert preparation['phase']=='serving' and preparation['deadline']-preparation['started_at']==600
+  assert initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')==preparation
+  pgid=launch.held._inventory(project)['tsdb']['id']
+  assert launch.held._cluster_identifier(pgid)==original_cluster
+  assert not launch.held._inventory(project)['initialize']['running']
+  intake_before=(working/'objects'/'native-intake').stat().st_size
+  report['initial_preparation_seconds']=preparation['completed_at']-preparation['started_at']
+  report['initial_preparation_receipt_retained']=True
  test=project+'-collector';owned.append(test)
  args=['docker','run','--name',test,'--label','qt.disposable='+project,'--user','70:70','--network','container:'+pgid,'--pid','container:'+pgid,
-   *labels('market-data-collector'),'--memory','2g','--cpus','2','--mount','type=volume,source='+volume+',target=/var/lib/postgresql/data',
+   *(['--label','com.docker.compose.project='+project+'-application','--label','com.docker.compose.service=fixture'] if options.prepare_source else labels('market-data-collector')),'--memory','2g','--cpus','2','--mount','type=volume,source='+volume+',target=/var/lib/postgresql/data',
    '--mount','type=bind,source='+str(history)+',target=/qt-history',
    '--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure',
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=',
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
-   '--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
+   '--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
  log=(state/'fixture.log').open('w')
@@ -175,6 +215,13 @@ try:
  report['original_deadline_preserved']=True
  report['first_process_hashed_bytes']=final['background_hashed_bytes']
  report['source_clients_unchanged']=True
+ if options.prepare_source:
+  assert (state/initial.STATE).read_bytes()==prepared_bytes
+  assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
+  assert (working/'objects'/'native-intake').stat().st_size>intake_before
+  assert not launch.held._inventory(project,operator_id=first_id)['initialize']['running']
+  report['initial_to_worker_receipt_admission']=True
+  report['synthetic_intake_continued']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
  report.update(passed=True,image=image,first_process_commands=final['last_sequence']+1,final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)

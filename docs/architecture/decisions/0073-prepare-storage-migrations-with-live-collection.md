@@ -411,7 +411,7 @@ scratch history parent on a distinct filesystem. It generates private test
 credentials, uses an internal network, and removes only its owned containers,
 network, volume and scratch children while retaining logs and receipts. This
 manual fixture is not part of the ordinary database suite. Its source owner is
-UID70; the earlier legacy UID1000/private-file proof remains separate. It starts
+UID70; the earlier legacy UID1000/private-file proof remains separate. The default fixture mode starts
 from prepared SQL state without an initial preparation receipt, so it does not
 qualify the combined initial-resumption-to-launch transition, production guard
 installation, a running collector's performance, recovery activation, or final
@@ -506,3 +506,30 @@ Host admission and durable host intent must precede this internal call. Retained
 relocation remains explicit and must commit and be observed before bulk copying.
 Private identity/raw relocation, reference preparation/validation, combined
 initial-host resumption and final recovery activation remain separate boundaries.
+
+
+### Initial preparation through background worker admission
+
+The opt-in prepared-host rehearsal also accepts --prepare-source. This starts
+with a fresh owned database exposing only PGDATA and synthetic serving clients.
+It runs prepare_online_source, verifies the preserved cluster and original
+600-second receipt, and resumes the same clients before invoking atomic SQL/raw/
+archive capture preparation. The full launcher then admits the retained hold
+through that completed source receipt. Receipt bytes remain unchanged across
+background copy, concurrent QT archive publication, worker reentry and host
+exception cleanup. The completed initializer stays stopped and synthetic file
+intake continues.
+
+Real QT publication runs in a separately owned application fixture; it is not
+the synthetic collector service. Source directories use UID70, and disposable
+history permissions allow both the host fixture user and database user to pass
+the normal writability admission. UUID evidence is synthetic; the optional
+distinct-device check independently verifies SSD/HDD separation. These facts
+do not establish production permission admission, collector/query performance,
+production-size outage duration or complete final recovery activation.
+
+The fixture reuses the finite stage_handoff helper after atomic preparation.
+This is small disposable database setup with source peers serving, not the
+rejected production whole-copy hold. Production still needs explicit bounded
+phase orchestration, measured large reference relocation impact, final
+stop/drain/switch, and recovery activation after the read-capability worker exits.

@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from scripts.db import fact_header_v2_capture as capture
 from scripts.db import fact_header_v2_handoff as handoff
 from scripts.db import fact_header_v2_online_proof as protection
+from scripts.db import fact_header_v2_online as online
 from tests.test_market_data.test_archive_online_copy_db import _prepare
 from tests.test_market_data.test_fact_header_copy_db import _frozen_records
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
@@ -57,10 +58,14 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
             if time.monotonic() >= deadline:
                 raise AssertionError("online entrypoint fixture host deadline: "+name)
             time.sleep(0.1)
+    atomic = os.getenv("QT_ONLINE_ATOMIC_PREPARE") == "1"
     engine, options, source, _ = _prepare(storage, control, monkeypatch,
         source_directory="/app/logs/market-structure",
         destination_directory="/qt-history/archives/objects",
-        recent_root="/var/lib/postgresql/data")
+        recent_root="/var/lib/postgresql/data", prepare_captures=not atomic)
+    if atomic:
+        online.prepare_attempt(engine, placement=storage.copy_plan, attempt_seconds=180,
+            **{k:v for k,v in options.items() if k not in {"page_rows", "max_page_bytes"}})
     with engine.begin() as conn:
         protection.prepare(conn)
         started = capture.inspect_capture(conn)["started_at"]
