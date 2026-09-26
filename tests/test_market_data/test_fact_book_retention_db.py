@@ -19,8 +19,7 @@ from tests.test_market_data.test_fact_reclamation_db import _physical
 pytestmark = pytest.mark.db
 
 
-@pytest.mark.parametrize("split_sources", [False, True, "handoff", "legacy", "paged"])
-def test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(storage, tmp_path, monkeypatch, split_sources):
+def _cold_book_handoff(storage, tmp_path, monkeypatch, split_sources):
     legacy_page = split_sources == "legacy"
     paged = split_sources == "paged"
     if legacy_page or paged:
@@ -220,3 +219,9 @@ def test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(stora
     unrelated = _raw_trade_fixture(storage, tmp_path, monkeypatch)
     status = unrelated.structures.archive_retention_status(target_kind="raw_manifest", target_id=unrelated.manifests[0])
     assert status["canonical_dependency_count"] == 0 and status["pinned"] is False
+    return fixture
+
+
+@pytest.mark.parametrize("split_sources", [False, True, "handoff", "legacy", "paged"])
+def test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(storage, tmp_path, monkeypatch, split_sources):
+    _cold_book_handoff(storage, tmp_path, monkeypatch, split_sources)

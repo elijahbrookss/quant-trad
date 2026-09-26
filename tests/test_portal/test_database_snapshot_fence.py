@@ -36,7 +36,9 @@ class Connection:
         operation = "unlock" if "pg_advisory_unlock" in str(sql) else "lock"
         self._step(operation)
         self.transaction = True
-        return SimpleNamespace(scalar_one=lambda: not (operation == "unlock" and self.failure == "unlock.false"))
+        return SimpleNamespace(scalar_one=lambda: not (
+            (operation == "unlock" and self.failure == "unlock.false")
+            or ("pg_try_advisory_lock_shared" in str(sql) and self.failure == "try.false")))
 
     def commit(self):
         self._step("connection.commit")
@@ -122,3 +124,20 @@ def test_failed_cleanup_rollback_invalidates_connection(monkeypatch):
             connection.transaction = True
     assert connection.invalidated
     assert "unlock" not in events
+
+def test_nonwaiting_snapshot_refuses_busy_fence_before_establishing_snapshot(monkeypatch):
+    database, connection, events = _database(monkeypatch, failure="try.false")
+    with pytest.raises(RuntimeError, match="database_snapshot_busy"):
+        with database.locked_snapshot_session(shared_lock_name="test", wait_for_lock=False):
+            pytest.fail("busy snapshot must not be yielded")
+    assert "REPEATABLE READ" not in events and "session.open" not in events
+    assert connection.invalidated
+
+
+def test_nonwaiting_snapshot_keeps_fence_until_commit(monkeypatch):
+    database, connection, events = _database(monkeypatch)
+    with database.locked_snapshot_session(shared_lock_name="test", wait_for_lock=False):
+        events.append("read")
+    assert events.index("lock") < events.index("REPEATABLE READ") < events.index("read")
+    assert events.index("session.commit") < events.index("unlock")
+    assert not connection.invalidated

@@ -127,7 +127,7 @@ def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
 
 def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=False, replay_features=False,
                       definition_id="book-prefix", instrument_id="storage-fixture", provider_product_id="BTC-USD",
-                      response_window=False, continuous_sequence=False):
+                      response_window=False, event_start=None, continuous_sequence=False):
     from data_providers.streams.coinbase import CoinbaseMessageParser
     from data_providers.streams.contracts import ProviderRawMessage
     from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_l2_mutation_batch
@@ -170,7 +170,9 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
     ordinals = (1, 2, 3, 4, 5) if response_window else ((1, 2, 3, 4) if trailing_heartbeat else (1, 2, 3))
     for ordinal in ordinals:
         seconds = {1: 1, 2: 1.4, 3: 1.6, 4: 2.2, 5: 10}[ordinal] if response_window else ordinal
-        event_base = BASE.replace(microsecond=0) if response_window else BASE
+        event_base = event_start or BASE
+        if response_window:
+            event_base = event_base.replace(microsecond=0)
         timestamp = (event_base + timedelta(seconds=seconds)).isoformat()
         heartbeat = ordinal in (2, 4) and not response_window
         if heartbeat:

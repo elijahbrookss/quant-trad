@@ -426,3 +426,76 @@ The actual-core disposable rehearsal verifies clean collector stop and renewed
 heartbeat with enrollment disabled. It does not certify active provider-stream
 continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
+
+The container health probe reads the latest live heartbeat for its own hostname
+through a bounded, read-only `PG_DSN` connection. The returned row retains both
+start and heartbeat timestamps so restart verification can distinguish a new
+worker from the prior process. It does not initialize or provision
+schema; the worker retains startup schema validation. Missing/stale heartbeats and
+a failed continuous supervisor fail the probe. Maintenance readiness separately
+requires its completed outcomes and recovery-copy evidence.
+
+
+The existing storage-lifecycle supervisor accepts optional history-movement and
+local-recovery runners after retention releases its transaction/fence. They use
+the same recurring thread, in that order; no second timer is introduced. History
+handles at most one eligible day per pass so recovery has a turn between moves.
+An exception or busy retention phase does not suppress these attempts, and a
+history failure does not suppress recovery. Each phase has a separate outcome in
+the worker's lifecycle snapshot. Configured phases publish in-progress state before
+calling their runner and timestamp their returned outcome afterward. The
+existing collector heartbeat persists these observations for Storage settings;
+an active heartbeat alone is not evidence of a successful maintenance pass.
+Failures returned by retention remain degraded even if the following phases
+succeed. Shutdown cancellation reaches active work
+and skips later phases. A maintenance-only configuration never executes disabled
+retention.
+
+The collector entrypoint supplies these runners only when the optional central
+storage.maintenance_limits_path setting names an explicit operating-limits file
+(QT_STORAGE_MAINTENANCE_LIMITS_PATH). Default configuration leaves the connection
+absent. The file contains resource limits only; placement and enablement remain
+in the saved Storage policy. Invalid configured files fail startup instead of
+silently selecting fallback budgets. Both runners receive the same database,
+archive root and shutdown callback used by the existing loop.
+
+The configured worker must run in the verified PostgreSQL storage namespace
+with qualified resource limits and PostgreSQL 15 tools. The runtime image
+provides PostgreSQL 15 utilities, but the ordinary server collector mounts and
+permissions are not yet qualified for this layout and cannot substitute
+similar-looking filesystem paths. This is local implementation and disposable
+validation, not activation of backups or storage policy on a server.
+
+With explicit storage-maintenance limits, the same lifecycle service binds
+canonical payload archival to the saved Storage recent-days window and movement
+switch. Legacy canonical per-type hot windows do not override that saved window.
+The existing deployment execution gates still apply. Archive/reclaim transactions
+recheck the policy under the storage-management lock, so a pause or revision
+change after planning prevents mutation under stale authority. This connection
+does not change raw-object expiry rules or add a timer.
+
+### Live working files and finished archives
+
+The continuous runtime and bounded stream-capture path can keep live spool and
+raw encoding scratch on SSD while publishing immutable objects to HDD.
+MARKET_STRUCTURE_WORKING_ROOT selects the existing live working directory;
+QT_MARKET_DATA_WORKING_EXPECTED_UUID identifies its filesystem. Archive root and
+identity remain MARKET_STRUCTURE_STORAGE_ROOT and QT_MARKET_DATA_EXPECTED_UUID.
+These filesystem settings remain owned by core.storage_mounts, alongside the
+existing archive mount configuration; they are not additional portal placement
+controls.
+
+Without an explicit working root, spool/scratch paths and archive admission
+retain their existing behavior. In dedicated archive mode, an explicit working
+root requires its own UUID. Startup checks both mounts; spool creation and reads
+(including crash-tail repair) enforce the working boundary. A missing/wrong mount
+never creates a fallback directory. Raw publication admits staging on the
+configured working filesystem or the archive filesystem; a failed working-mount
+check cannot fall back to archive admission. Canonical historical staging and
+existing raw compaction placement remain unchanged.
+
+For a preserving cutover, retain the old working-root path and move/verify only
+the intended archived objects before changing the archive root. Existing spool
+paths and raw record identities remain valid. Private file ownership must also
+be qualified across API, initializer and collector processes; the root separation
+does not itself establish production permissions or authorize a server change.

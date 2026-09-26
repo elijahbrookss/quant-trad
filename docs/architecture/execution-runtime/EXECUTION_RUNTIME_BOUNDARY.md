@@ -429,3 +429,18 @@ controls.
 - [ADR 0049: Keep live order submission closed](../decisions/0049-keep-live-order-submission-closed.md)
 - [Venue-neutral execution context](VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
 - [ADR 0056: Pin venue-neutral execution contexts per run](../decisions/0056-pin-venue-neutral-execution-contexts-per-run.md)
+
+## Server archive reads
+
+The Docker bot runner uses the server's existing QT_MARKET_DATA_ROOT host
+directory to mount archived data read-only at MARKET_STRUCTURE_STORAGE_ROOT.
+It passes that container path to the runtime, so canonical and frozen reads use
+the same immutable objects as the backend. Dedicated filesystem mode also mounts
+host udev metadata read-only and keeps UUID verification. Missing host mapping,
+invalid mount paths or a mismatched backend mount prevents launch; Docker bind
+mounts do not create an absent host source directory.
+
+This is the existing single-node server bind layout. Unconfigured development
+launch behavior is preserved. Readers receive no working-spool, PostgreSQL data
+or Docker socket mount. They still use PG_DSN for database queries. Server
+writer ownership and the complete preserving cutover require separate rehearsal.

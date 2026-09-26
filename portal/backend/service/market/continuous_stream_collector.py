@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
+from core.storage_mounts import configured_working_root, require_configured_working_mount
 from data_providers.providers.factory import get_provider
 from data_providers.streams.coinbase import (
     CoinbaseAdvancedTradeStream,
@@ -608,9 +609,11 @@ class ContinuousStreamRuntime:
             policy_payload if isinstance(policy_payload, Mapping) else None
         )
         storage = Path(storage_root).expanduser().resolve()
-        spool_root = storage / "spool"
+        working = configured_working_root(storage).expanduser().resolve()
+        require_configured_working_mount(working)
+        spool_root = working / "spool"
         object_store = FilesystemRawArchiveObjectStore(storage / "objects")
-        temporary_root = storage / "tmp"
+        temporary_root = working / "tmp"
         temporary_root.mkdir(parents=True, exist_ok=True)
         await self._recover_orphaned_spools(
             definition=definition,

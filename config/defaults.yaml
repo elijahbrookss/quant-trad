@@ -18,6 +18,10 @@ backend:
     - http://127.0.0.1:5173
     - http://127.0.0.1:5174
 
+storage:
+  inventory_path: /run/quanttrad/storage-inventory.json
+  maintenance_limits_path: null
+
 database:
   dsn: null
   application_name: quant_trad_portal

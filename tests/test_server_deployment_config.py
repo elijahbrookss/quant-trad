@@ -593,3 +593,10 @@ def test_alert_preview_cleanup_replaces_legacy_provisioning_root_mount() -> None
 
     deploy = (ROOT / "scripts/automation/server_deploy.sh").read_text()
     assert 'QT_ALERT_CLEANUP_PROVISIONING_ROOT="$cleanup_provisioning_root"' in deploy
+
+
+def test_database_readiness_uses_application_transport_not_bootstrap_socket():
+    health = _server_compose()["services"]["tsdb"]["healthcheck"]["test"]
+    # The pinned image's initialization server explicitly disables TCP; a
+    # socket-only probe can report healthy before initialization completes.
+    assert health == ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

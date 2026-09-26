@@ -7,6 +7,7 @@ import logging
 import socket
 import threading
 from collections import defaultdict
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -33,6 +34,7 @@ from ..storage.repos.market_structure import (
 from ..storage.repos.fact_retention import canonical_fact_retention_repository
 from .market_structure_service import DEFAULT_STORAGE_ROOT
 from .canonical_retention import CanonicalFactRetentionExecutor
+from ..storage.history_policy import saved_canonical_policy
 
 
 logger = logging.getLogger(__name__)
@@ -66,11 +68,21 @@ class MarketStorageLifecycleService:
         ),
         canonical_repository=canonical_fact_retention_repository,
         canonical_executor=None,
+        use_saved_history_policy=False,
     ) -> None:
         self.lifecycle_repository = lifecycle_repository
         self.market_repository = market_repository
         self.canonical_repository = canonical_repository
-        self.canonical_executor = canonical_executor or CanonicalFactRetentionExecutor(repository=canonical_repository)
+        self.use_saved_history_policy = use_saved_history_policy
+        self.canonical_executor = canonical_executor or CanonicalFactRetentionExecutor(
+            repository=canonical_repository, use_saved_history_policy=use_saved_history_policy)
+
+    def _canonical_policy(self, policy, storage_root):
+        if not self.use_saved_history_policy:
+            return policy
+        canonical, _ = saved_canonical_policy(self.canonical_repository.database,
+            policy=policy.canonical_retention, storage_root=storage_root)
+        return replace(policy, canonical_retention=canonical)
 
     def plan(
         self,
@@ -80,6 +92,7 @@ class MarketStorageLifecycleService:
         storage_root: Path = DEFAULT_STORAGE_ROOT,
         canonical_after_storage_day: date | None = None,
     ) -> dict[str, Any]:
+        policy = self._canonical_policy(policy, storage_root)
         observed_at = _utc(now or datetime.now(UTC))
         canonical = self.canonical_repository.plan(
             policy=policy.canonical_retention, storage_root=storage_root,
@@ -145,6 +158,7 @@ class MarketStorageLifecycleService:
         canonical_after_storage_day: date | None = None,
         cancelled=None,
     ) -> dict[str, Any]:
+        policy = self._canonical_policy(policy, storage_root)
         requested_execute = bool(execute)
         if requested_execute and not policy.execution_enabled:
             raise ValueError(
@@ -726,7 +740,15 @@ class MarketStorageLifecycleSupervisor:
         service: Optional[MarketStorageLifecycleService] = None,
         storage_root: Path = DEFAULT_STORAGE_ROOT,
         owner_id: Optional[str] = None,
+        recovery_runner=None,
+        history_runner=None,
     ) -> None:
+        for name,runner in (("recovery",recovery_runner),("history",history_runner)):
+            if runner is not None and not callable(runner):
+                raise ValueError(f"market_storage_{name}_runner_invalid")
+        self.recovery_runner = recovery_runner
+        self.history_runner = history_runner
+        self._enabled = policy.enabled or recovery_runner is not None or history_runner is not None
         self.policy = policy
         self.service = service or MarketStorageLifecycleService()
         self.storage_root = Path(storage_root)
@@ -734,10 +756,15 @@ class MarketStorageLifecycleSupervisor:
         self._stop = threading.Event()
         self._snapshot_lock = threading.Lock()
         self._snapshot: dict[str, Any] = {
-            "state": "disabled" if not policy.enabled else "starting",
+            "state": "disabled" if not self._enabled else "starting",
             "policy": policy.to_dict(),
             "last_run": None,
             "last_error": None,
+            "maintenance": {
+                key: {"configured": runner is not None, "state": "starting"}
+                for key, runner in (("history_movement", history_runner),
+                                    ("local_recovery", recovery_runner))
+            },
         }
         self._thread = threading.Thread(
             target=self._run,
@@ -746,11 +773,11 @@ class MarketStorageLifecycleSupervisor:
         )
 
     def start(self) -> None:
-        if self.policy.enabled:
+        if self._enabled:
             self._thread.start()
 
     def stop(self, *, timeout_seconds: float = 30.0) -> None:
-        if not self.policy.enabled:
+        if not self._enabled:
             return
         self._stop.set()
         self._thread.join(timeout=max(1.0, timeout_seconds))
@@ -764,16 +791,87 @@ class MarketStorageLifecycleSupervisor:
             return dict(self._snapshot)
 
     def run_once(self) -> dict[str, Any]:
-        result = self.service.run(
-            policy=self.policy,
-            storage_root=self.storage_root,
-            execute=self.policy.execution_enabled,
-            owner_id=self.owner_id,
-            cancelled=self._stop.is_set,
-        )
+        with self._snapshot_lock:
+            if self._snapshot["state"] in {"starting", "disabled"}:
+                self._snapshot["state"] = "running"
+        phase_results = {}
+        failure = None
+        followups = self.history_runner is not None or self.recovery_runner is not None
+        try:
+            if followups and not self.policy.enabled:
+                result = {"schema_version": "market.storage_lifecycle_run.v1",
+                          "status": "disabled", "plan": {"summary": {}},
+                          "outcomes": [], "failure_count": 0}
+            else:
+                result = self.service.run(
+                    policy=self.policy,
+                    storage_root=self.storage_root,
+                    execute=self.policy.execution_enabled,
+                    owner_id=self.owner_id,
+                    cancelled=self._stop.is_set,
+                )
+        except MarketStorageLifecycleBusyError:
+            if not followups:
+                raise
+            result = {"schema_version": "market.storage_lifecycle_run.v1",
+                      "status": "busy", "plan": {"summary": {}},
+                      "outcomes": [], "failure_count": 0}
+        except Exception as exc:
+            if not followups:
+                raise
+            # Follow-up work acquires independent admission only after the
+            # failed retention context has released its transaction.
+            logger.exception("market_storage_lifecycle_phase_failed | owner_id=%s", self.owner_id)
+            failure = f"{type(exc).__name__}: {exc}"
+            result = {"schema_version": "market.storage_lifecycle_run.v1",
+                      "status": "degraded", "plan": {"summary": {}},
+                      "outcomes": [], "failure_count": 1, "error": failure}
+        for key,name,runner,states,cancellation in (
+            ("history_movement","history",self.history_runner,
+             {"disabled","unconfigured","busy","idle","blocked","completed","cancelled"},
+             "storage_move_cancelled"),
+            ("local_recovery","recovery",self.recovery_runner,
+             {"disabled","unconfigured","busy","not_due","blocked","completed"},
+             "recovery_cancelled"),
+        ):
+            if runner is None:
+                continue
+            if self._stop.is_set():
+                outcome = {"state": "cancelled"}
+            else:
+                with self._snapshot_lock:
+                    self._snapshot["maintenance"] = {
+                        **self._snapshot["maintenance"],
+                        key: {"configured": True, "state": "running",
+                              "started_at": datetime.now(UTC).isoformat()},
+                    }
+                try:
+                    outcome = runner(cancelled=self._stop.is_set)
+                    if not isinstance(outcome, dict) or outcome.get("state") not in states:
+                        raise RuntimeError(f"market_storage_{name}_result_invalid")
+                except Exception as exc:
+                    if self._stop.is_set() and str(exc) == cancellation:
+                        outcome = {"state": "cancelled"}
+                    else:
+                        logger.exception("market_storage_%s_phase_failed | owner_id=%s", name,self.owner_id)
+                        outcome = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                if outcome["state"] in {"blocked", "failed"}:
+                    result["status"] = "degraded"
+                    result["failure_count"] += 1
+                    detail = outcome.get("error") or outcome.get("reason") or outcome["state"]
+                    failure = f"{failure}; {name}: {detail}" if failure else f"{name}: {detail}"
+            phase_results[key] = outcome
+            result[key] = outcome
+            with self._snapshot_lock:
+                self._snapshot["maintenance"] = {
+                    **self._snapshot["maintenance"],
+                    key: {"configured": True, "state": outcome["state"],
+                          "checked_at": datetime.now(UTC).isoformat(),
+                          "outcome": dict(outcome)},
+                }
         with self._snapshot_lock:
             self._snapshot = {
-                "state": "running",
+                "state": "degraded" if failure or result["failure_count"] else "running",
                 "policy": self.policy.to_dict(),
                 "last_run": {
                     "status": result["status"],
@@ -782,8 +880,10 @@ class MarketStorageLifecycleSupervisor:
                     "canonical_retention": {name: result.get("canonical_retention", {}).get(name)
                         for name in ("status", "stop_reason", "next_after_storage_day", "failure_count")},
                     "finished_at": datetime.now(UTC).isoformat(),
+                    **phase_results,
                 },
-                "last_error": None,
+                "last_error": failure,
+                "maintenance": self._snapshot["maintenance"],
             }
         return result
 

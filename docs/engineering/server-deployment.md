@@ -540,6 +540,68 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
+The opt-in fixed layout is defined in `docker/docker-compose.storage-server.yml`.
+It is not automatically activated by the normal deployment helper. Its host
+inputs are prepared HDD root (`QT_STORAGE_HDD_ROOT`), that HDD's `archives`
+subdirectory (`QT_MARKET_DATA_ROOT`), its UUID (`QT_MARKET_DATA_EXPECTED_UUID`),
+the unchanged SSD spool directory (`QT_MARKET_DATA_WORKING_ROOT`) and SSD UUID
+(`QT_MARKET_DATA_WORKING_EXPECTED_UUID`), prepared inventory/limits files
+(`QT_STORAGE_INVENTORY_HOST_PATH`, `QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH`),
+the backend's existing Docker socket group (`QT_DOCKER_SOCKET_GID`), and the
+private SSD recovery directory (`QT_STORAGE_RECOVERY_SECRETS_ROOT`).
+
+Inside the fixed layout, history is `/qt-history`, archives are
+`/qt-history/archives`, PostgreSQL retains `/var/lib/postgresql/data`, and spool
+references retain `/app/logs/market-structure`. All three application writers use
+UID/GID 70. The collector also shares the database PID namespace. Existing host
+files must be admitted for that ownership; neither this overlay nor image build
+changes host ownership, mounts or formats a device. Runtime reads injected Compose
+environment values instead of attempting to open the host-owner-only secrets file.
+
+The fixed-layout disposable core rehearsal is available as
+`python scripts/ci/test_server_core_recreation.py --storage-layout`. It requires
+built matching application images and the pinned PostgreSQL image. Its temporary
+volumes and synthetic UUID/configuration fixtures do not establish production
+permissions or physical-HDD performance. The complete preserving activation and
+recovery procedure remains required before this overlay is used on a host.
+
+
+The preserving procedure is implemented in the internal
+`run_held_runtime_handoff` entrypoint in
+`scripts/automation/storage_handoff_pause.py`. It records a persistent
+`storage-handoff.json` in the existing deployment state directory before stopping
+the fixed application and query clients. All ordinary mutating deployment-helper
+actions refuse that hold, including compatible old-image recovery.
+`server_deploy.sh release` continues to show the hold even if no successful release
+is recorded. An ordinary deployment does not perform the initial storage cutover.
+
+Do not remove the hold to bypass an interrupted storage switch or use an older
+checkout/direct Docker command to restart clients. The preserving procedure
+reconciles the database certificate, archive root and policy, then starts the
+admitted candidate services under the same deployment lock. Interrupted calls
+resume the saved worker or candidate containers with the original deadline and
+bound inputs. Only verified layout, service health and a published recovery copy
+for the current layout permit the procedure to record the release and retire the
+hold. Automatic rollback to a pre-migration image is disabled after that switch.
+
+The combined disposable rehearsal passed migration and activation interruption,
+recent and frozen reads, service health, recovery publication and repeat-call
+reconciliation. This establishes functional recovery, not production readiness:
+physical SSD/HDD performance during movement, measured total migration and
+collector downtime, and complete capacity accounting must still qualify the release.
+Existing cumulative operator deadlines require an explicit bounded adjustment
+if the measured plan needs longer; do not reset them between phases. The
+internal entrypoint requires an explicitly prepared request, inventory, operating
+limits and pinned runtime recipe; there is no public pause/resume command.
+
+The fixed pause refuses unexpected project/network peers, including bot runtime
+containers; it does not silently stop trading work. It retains PostgreSQL and
+passive telemetry, accepts only `no`/`unless-stopped` restart policies, and checks
+that known clients actually exited without a forced kill. Stopped processes are
+not proof that spool contents or a database switch are safe; those remain
+separate checks in the preserving procedure.
+
+
 For a dedicated HDD, configure both values in the private operator environment:
 
 ```dotenv
@@ -572,7 +634,8 @@ formatting, fstab/systemd changes, and data moves are separate operator actions;
 the deploy helper performs none of them. Do not combine an unverified archive
 move with enabling destructive retention.
 
-Schedule database backups outside application containers and restore-test them.
+Use the existing storage-maintenance supervisor for the explicitly configured
+recovery policy, and restore-test its paired database and archive points.
 Loki retains seven days in its single-host filesystem store. Docker JSON logs
 rotate independently so a failed log pipeline cannot consume the host without
 bound. PostgreSQL emits to container stderr in this server preset, so Alloy
@@ -654,3 +717,79 @@ Keep a release that can read both hot and cold payloads. Do not roll back to an
 inline-only reader after reclaiming a hot partition, drop the cold catalogs, or
 point readers at an older archive copy. Restoration to the old layout requires
 an explicit offline restore/rehydration plan and verification, not a config flip.
+
+
+### Retaining the first SSD/HDD layout
+
+The preserving storage procedure owns first activation. Once it records
+`storage_layout=ssd-hdd-v1` in private `release.env`, subsequent helper operations
+retain the fixed storage overlay; a candidate without that overlay is refused
+before service replacement. Do not activate storage by manually editing this
+field. The complete preserving cutover is still under local qualification.
+
+Compatible recovery retains the exact rendered mounts and image tags captured
+before promotion. Its recorded layout and snapshot fingerprint must match before
+recovery changes the checkout. Current storage/alert overlays are not merged into
+the saved recovery configuration. A mismatch retains the promotion evidence and
+requires investigation; do not clear the marker or replace the fingerprint to
+force an old layout to start. The separate storage-handoff hold continues to
+block all ordinary deployment/recovery during an incompatible database cutover.
+
+The disposable controller rehearsal also accepts `--storage-layout` to exercise
+this behavior with synthetic services, owned history/working directories and no
+provider egress. It is not a database migration or actual-drive performance test.
+
+
+### Encrypted incremental recovery activation
+
+This is an explicit operator sequence on the existing SSD/HDD. Preserve all
+completed logical copies and any running restore. Neither repository preparation
+nor mounting the recovery directory activates backups.
+
+1. Preserve independent 256-bit database/archive keys in a private location off
+   this server. Provision matching UID/GID70, mode0600 files beneath a mode0700
+   SSD directory outside PGDATA and the HDD. Record fingerprints, never key values.
+2. Build and pin the database and worker images containing the reviewed native
+   backup tools. The deployment helper reuses an existing PostgreSQL image unless
+   QT_REBUILD_DATABASE_IMAGE=1; verify the actual image contains the pinned tools.
+   Database image replacement is a separately verified restart before the held
+   migration recipe is bound, not an unrecorded image change during that recipe.
+3. Pre-create the named recovery socket volume. Admit the database recipe's
+   existing PGDATA and HDD plus only the read-only private recovery bind and socket.
+   The collector gets the identical pair; API/frontends receive no recovery keys.
+   The held procedure retains its image, cluster, deadline and mount checks.
+   Activation and retries revalidate the same admitted key bind and socket volume,
+   including read-only key access, private propagation and exact socket identity.
+4. Run packaged storage_recovery_prepare.py as UID70 in the serving database's
+   filesystem/PID namespace with canonical PG_DSN, the two-target inventory,
+   expected database identity and explicit measured resource limits. Its private
+   incremental configuration points at the shared socket, actual PGDATA and keys.
+   Only this preparation invocation may mount the key directory writable to create
+   pgbackrest.conf; routine services mount it read-only. Require the returned
+   preparation receipt. Re-entry uses exactly the same keys, cluster and UUID.
+5. Only after preparation, configure PostgreSQL's archive_command to invoke the
+   pinned pgBackRest with that private configuration and enable archive_mode=on
+   in the admitted restart sequence. Verify native archive delivery. Never enable
+   archive_mode with an empty command, discard unarchived WAL or hide errors.
+   This must precede the first physical backup. WAL generated during migration
+   belongs in the space/outage model.
+6. Supply reviewed maintenance-limits v2 to the existing supervisor, retaining
+   saved interval/count semantics. Pin max_chain_backups and resource bounds from
+   measured workload; an initial baseline is required, not a mandatory Sunday full.
+   Release readiness reads the configured recovery format and requires a complete
+   current-layout pair. A legacy receipt cannot satisfy encrypted readiness.
+7. Restore a selected pair into empty isolated destinations with compatible PG15
+   extensions, explicit tablespace mappings and the matching archive snapshot.
+   Use immediate consistency recovery; later arbitrary WAL times are not covered
+   by the paired archive inventory. Verify inventory checksums, current/corrected/
+   frozen reads and independent key recovery. Account for full native chains,
+   changed blocks, WAL, archive packs, rotation peak and preserved legacy copies.
+
+
+For preserving storage activation, prepare routine maintenance limits separately
+from the initial migration request. The pinned worker parser validates the
+routine file in a networkless container with only that read-only file mounted;
+routine movement remains capped at one hour even when the original migration
+attempt has a longer budget. Activation binds the validated file hash and
+refuses later drift. Migration and routine growth/resource allowances need not
+match, since collection is held for the former and running for the latter.

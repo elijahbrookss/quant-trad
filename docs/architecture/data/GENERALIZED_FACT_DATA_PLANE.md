@@ -370,6 +370,17 @@ PostgreSQL bytes.
 
 ### Canonical Retention Planning
 
+Storage totals include all dated header relations and their indexes/TOAST,
+including headers whose hot payloads have already been reclaimed. The global
+identity registry and its indexes are reported separately as
+`global_identity_bytes`; they are neither hot payloads nor reclaimable header
+bytes. Header inventory uses the same partition-count budget independently of
+the hot inventory and fails rather than reporting a partial total. These
+relation totals are components of `database_bytes`, not additional bytes to
+add to the whole database size. They do not replace filesystem or backup
+capacity accounting. The series/day lookup directory is separately reported as
+`series_day_directory_bytes` and grows with series/day combinations.
+
 `market_data_lifecycle.canonical_retention` is the typed policy for generalized
 hot payloads. The default hot window is 30 complete UTC placement days, with
 exact `hot_days_by_fact_type` overrides. A daily partition waits for the longest
@@ -1501,6 +1512,41 @@ See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
 [Chainlink Structured Facts](CHAINLINK_STRUCTURED_FACTS.md),
 [Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
 and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).
+
+### Saved Storage policy and canonical archival
+
+In a worker configured with explicit storage-maintenance limits, canonical
+payload archival and historical-header movement use the same saved recent-days
+window. Paused or missing saved policy cannot execute canonical archival, and
+the saved policy cannot override disabled deployment execution gates. The archive
+transaction and final reclamation handoff fence and recheck the policy revision,
+movement switch and assigned archive filesystem. Policy changes require replanning;
+they do not change Fact identity, causal selection or frozen Dataset binding.
+Unconfigured/manual canonical retention retains its existing explicit policy.
+
+### Historical book replay and disposable current state
+
+Book replay reconciliation reads retained canonical snapshot/update identities
+through the same hot/cold reader and lifecycle snapshot. Its terminal hash comes
+from the last accepted canonical event in source-position order. The latest
+immutable validity revision for that event's interval distinguishes a clean
+close from invalidation: a matching clean close retains the last accepted replay
+hash, while a matching invalidated close requires no valid terminal state.
+Closure scope, last position/hash and closing position must agree with retained
+canonical evidence. Incorrect hashes, missing event identities or inconsistent
+terminal evidence fail reconciliation.
+
+The mutable book_reconstruction_state row remains a current per-series
+projection. A later collector session replaces it, and clean shutdown may clear
+its live hash. Neither event changes the authority or readability of an older
+session's immutable history. Replay no longer uses this disposable projection
+as the historical terminal reference. No new history table, alternate reducer,
+schema migration, hash rule or weakened archive verification is introduced.
+
+Disposable coverage includes actual lease release and same-series session
+rollover with later event times; preserved cold history and frozen results;
+loss of the current projection; clean and invalidated terminal intervals; and
+rejection of incorrect hashes, missing events and mismatched terminal evidence.
 
 
 ### Registered series discovery

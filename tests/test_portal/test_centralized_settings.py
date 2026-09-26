@@ -148,3 +148,13 @@ def test_yaml_defaults_cover_all_canonical_env_bindings():
     assert settings_module._path_get(defaults, ("profile",), sentinel) == "dev"
     assert settings_module._path_get(merged_prod, ("profile",), sentinel) == "prod"
     assert not missing, missing
+
+
+def test_storage_maintenance_limits_are_optional_and_explicit(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    monkeypatch.delenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", raising=False)
+    assert get_settings(force_reload=True).storage.maintenance_limits_path is None
+    monkeypatch.setenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", "/run/quanttrad/measured-storage-limits.json")
+    assert get_settings(force_reload=True).storage.maintenance_limits_path == "/run/quanttrad/measured-storage-limits.json"
+    monkeypatch.setenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", "")
+    assert get_settings(force_reload=True).storage.maintenance_limits_path is None

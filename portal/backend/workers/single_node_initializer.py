@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from core.storage_mounts import require_configured_archive_mount
+from core.storage_mounts import require_configured_archive_mount, require_configured_working_mount
 from data_providers.structured_facts import load_structured_fact_manifest
 from market_data.instrument_enrollment import load_instrument_enrollment_manifest
 from market_data.stream_enrollment import load_stream_enrollment_manifest
@@ -230,6 +230,7 @@ def initialize_single_node_market_data() -> dict[str, Any]:
 
 def main() -> int:
     require_configured_archive_mount()
+    require_configured_working_mount()
     print(
         json.dumps(
             initialize_single_node_market_data(),

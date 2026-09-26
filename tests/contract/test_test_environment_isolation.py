@@ -57,6 +57,7 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
         "args=\"${args//$'\\n'/ }\"\n"
         "printf '%s\\t%s\\t%s\\t%s\\n' \"$args\" \"$QT_TEST_POSTGRES_USER\" "
         "\"$QT_TEST_POSTGRES_PASSWORD\" \"$QT_TEST_POSTGRES_DB\" >> \"$QT_TEST_DOCKER_LOG\"\n"
+        "if [[ \" $* \" == *\" ps --all --quiet timescaledb \"* ]]; then printf '%s\\n' " + repr("c" * 64) + "; fi\n"
         "if [[ \" $* \" == *\" run \"* ]]; then exit \"${QT_TEST_FAKE_RUN_STATUS:-0}\"; fi\n",
         encoding="utf-8",
     )
@@ -76,6 +77,8 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
         "QT_TEST_POSTGRES_DB": "ambient-database-must-be-replaced",
     }
 
+    invocations = []
+    offset = 0
     for expected_status in (0, 23):
         completed = subprocess.run(
             ["bash", str(_RUNNER), "db", *pytest_args],
@@ -86,32 +89,36 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
             text=True,
         )
         assert completed.returncode == expected_status, completed.stdout + completed.stderr
+        rows = [line.split("\t") for line in docker_log.read_text(encoding="utf-8").splitlines()]
+        invocations.append((expected_status, rows[offset:]))
+        offset = len(rows)
 
-    rows = [
-        line.split("\t")
-        for line in docker_log.read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(rows) == 6
-    invocations = (rows[:3], rows[3:])
     identities: list[tuple[str, str, str, str]] = []
-    for invocation in invocations:
+    for status, invocation in invocations:
         commands = [row[0].split() for row in invocation]
         projects = {
             command[command.index("--project-name") + 1]
-            for command in commands
+            for command in commands if command[0] == "compose"
         }
         assert len(projects) == 1
         assert "build" in commands[0]
         assert "run" in commands[1]
         if pytest_args:
             assert "tests/test_market_data -k cutover\\ and\\ not\\ archived" in invocation[1][0]
-        assert commands[2][-5:] == [
+        assert commands[-1][-5:] == [
             "down",
             "--volumes",
             "--remove-orphans",
             "--rmi",
             "local",
         ]
+        diagnostics = commands[2:-1]
+        if status:
+            assert diagnostics[0][-5:] == ["logs", "--no-color", "--tail", "120", "timescaledb"]
+            assert diagnostics[1][-4:] == ["ps", "--all", "--quiet", "timescaledb"]
+            assert diagnostics[2] == ["inspect", "--format", "{{json", ".State}}", "c" * 64]
+        else:
+            assert not diagnostics
         assert all(
             "must-not-appear-in-docker-arguments" not in row[0]
             for row in invocation

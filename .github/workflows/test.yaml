@@ -101,8 +101,43 @@ jobs:
             --file docker/docker-compose.server.yml \
             build tsdb backend frontend frontend-v2
 
+      - name: Prove production worker encrypted pairing and dependency retirement
+        run: |
+          revision="$(git rev-parse HEAD)"
+          tree_hash="$(python3 scripts/provenance/source_tree_hash.py --root . --git-revision "$revision")"
+          docker build --file portal/backend/Dockerfile --target storage-test \
+            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
+            --tag qt-incremental-runtime-proof .
+          docker run --rm --network none --user postgres --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
+            qt-incremental-runtime-proof \
+            python /app/scripts/ci/rehearse_incremental_runtime.py \
+            --pg-bin /usr/lib/postgresql/15/bin --pgbackrest /usr/local/bin/pgbackrest \
+            --restic /usr/local/bin/restic
+
+      - name: Prove online worker reads legacy archives without changing ownership
+        run: python3 scripts/ci/rehearse_online_worker.py --image qt-incremental-runtime-proof
+      - name: Prove confined online worker launch and refusal
+        run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
+
+      - name: Prove encrypted restore through actual QT current and frozen readers
+        run: ./scripts/ci/run_test_suite.sh incremental-recovery
+
+      - name: Prove bounded online copy and protected exact switch with concurrent intake
+        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py tests/test_market_data/test_archive_online_copy_db.py tests/test_market_data/test_fact_header_online_references_db.py tests/test_market_data/test_fact_header_cancel_db.py tests/test_market_data/test_storage_online_controller_db.py
+
       - name: Recreate actual QT core on disposable storage without provider egress
         run: python3 scripts/ci/test_server_core_recreation.py
+
+      - name: Prove fixed SSD/HDD runtime and held preserving cutover
+        run: |
+          python3 scripts/ci/test_server_core_recreation.py --storage-layout
+          docker pull python:3.12.3-slim
+          revision="$(git rev-parse HEAD)"
+          python3 scripts/ci/test_storage_database_preparation.py \
+            --runtime-images qt-incremental-runtime-proof \
+            "quanttrad-frontend:$revision" "quanttrad-frontend-v2:$revision"
 
   deployment-rehearsal:
     runs-on: ubuntu-latest
@@ -151,6 +186,10 @@ jobs:
       - name: Prepare isolated database contracts
         run: |
           docker exec "${{ job.services.timescaledb.id }}" \
+            psql -v ON_ERROR_STOP=1 -U quanttrad -d quanttrad_bootstrap \
+            -c "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" \
+            -c "SELECT pg_reload_conf()"
+          docker exec "${{ job.services.timescaledb.id }}" \
             createdb -U quanttrad quanttrad_contracts
           for database in quanttrad_bootstrap quanttrad_contracts; do
             docker exec "${{ job.services.timescaledb.id }}" \
@@ -169,6 +208,17 @@ jobs:
           QT_LOGGING_DEBUG: 'false'
         run: python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
 
+      - name: Verify PostgreSQL filesystem namespace
+        run: ./scripts/ci/run_test_suite.sh db tests/test_market_data/test_header_namespace_db.py
+
+      - name: Prove encrypted incremental database and archive recovery
+        run: |
+          docker build --file docker/test/incremental-recovery.Dockerfile \
+            --tag qt-incremental-recovery-proof .
+          docker run --rm --network none --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            qt-incremental-recovery-proof
+
       - name: Run PostgreSQL-backed contract tests
         env:
           PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts
@@ -179,3 +229,4 @@ jobs:
         run: >-
           python -m pytest -q -m db
           --ignore=tests/test_portal/test_clean_database_bootstrap_db.py
+          --ignore=tests/test_market_data/test_header_namespace_db.py
