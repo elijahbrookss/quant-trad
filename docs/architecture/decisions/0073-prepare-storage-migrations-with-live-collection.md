@@ -20,6 +20,7 @@ code_paths:
   - tests/test_market_data/test_fact_header_online_db.py
   - tests/test_market_data/test_fact_header_online_proof_db.py
   - tests/test_market_data/test_archive_online_copy_db.py
+  - tests/test_market_data/test_fact_header_online_references_db.py
 ---
 # ADR 0073: Prepare storage migrations with live collection
 
@@ -126,6 +127,21 @@ Existing retention expiry can skip legitimately expired source objects; it does
 not authorize destination deletion. Root identity and catalog/trigger drift
 refuse resume. Queue emptiness is still only an observation: the complete final
 filesystem proof and publisher drain are not replaced by this slice.
+
+Reference preparation reuses the existing separate transactions for brief
+NOT VALID installation, background VALIDATE and parent adoption. Disposable
+SSD/HDD qualification combines those steps with the protected SQL shadow:
+concurrent native v1 header/payload insertion commits while validation owns its
+locks; a newly populated leaf before adoption prevents completion until it is
+validated; a leaf created after parent adoption inherits both original and
+staged references. The deployed v1 partition writer is frozen as a test fixture,
+without the v2-only header provisioning step. Interrupted validation preserves
+earlier committed constraints, and a failed final SQL switch restores the
+protected proof and validated references. After the successful disposable switch, the matching runtime appends a
+correction on the new day; current application reads select that revision while
+frozen cold reads and retained archive bytes remain identical. This is correctness evidence
+for small fixtures, not production-cardinality timing or a live collector
+throughput measurement.
 
 This slice does not install a production supervisor, expose a new user command,
 remove the archive final scan or authorize the old host hold. Additional indexed

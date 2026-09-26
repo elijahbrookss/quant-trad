@@ -1166,6 +1166,14 @@ reuse published files without losing pending work. Expiry semantics, root
 identity, source preservation and the original attempt deadline remain enforced.
 An empty archive tail does not certify the files or authorize root activation.
 
+Existing reference prevalidation is qualified with the protected shadow and
+concurrent native v1 header/payload inserts. The final inventory catches new
+payload leaves before adoption; newly created leaves after parent adoption
+inherit validated references. Validation interruption preserves earlier committed
+work, while failed SQL switching restores guards and reference state. This uses
+the deployed v1 partition writer as a frozen fixture and does not establish
+production-scale validation time or running collector throughput.
+
 The complete online operator, archive reconciliation and measured short final
 switch remain unfinished. The held host operator cannot be advertised as a
 short-outage path. Additional source lookups in protected inserts require

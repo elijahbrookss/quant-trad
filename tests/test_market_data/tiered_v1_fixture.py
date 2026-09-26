@@ -4,10 +4,15 @@ The rest of the application schema and records come from the clean fixture.
 This is test setup only, not a downgrade or operator migration command.
 """
 from contextlib import nullcontext
+from datetime import date, timedelta
+import logging
 import os
 from pathlib import Path
 
 from sqlalchemy import text
+from portal.backend.db.fact_storage_schema import fact_partition_name
+
+logger = logging.getLogger(__name__)
 
 DDL = Path(__file__).parents[1] / "fixtures" / "fact_header_tiered_v1.sql"
 
@@ -110,3 +115,46 @@ def _switch_tiny_verified_fixture(conn, storage, verified, *, prevalidated, raw_
     result = _switch_verified_tables(conn, verified, prevalidated=prevalidated,
         raw_mapping=raw_mapping, evidence={"source_retained": True, "disposable_rehearsal": True})
     return {**result, "scope": "disposable_fixture_only"}
+
+
+# Frozen deployed f673cb62 partition writer; only the Python name is changed.
+# V1 has no header-partition step. Do not call the v2 provisioning entrypoint
+# against an intentionally restored v1 source.
+def ensure_v1_payload_partition(conn, storage_day: date) -> str:
+    """Provision an empty, deterministic daily table once; never adopt unknown data."""
+    name = fact_partition_name(storage_day)
+    relation = "market." + name
+    state = conn.execute(text(
+        "SELECT state FROM market.fact_retention_partitions WHERE storage_day = :day"
+    ), {"day": storage_day}).scalar_one_or_none()
+    if state is not None:
+        if state != "open":
+            raise RuntimeError(f"fact_hot_partition_not_open: storage_day={storage_day} state={state}")
+        return relation
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:name, 0))"), {"name": relation})
+    state = conn.execute(text(
+        "SELECT state FROM market.fact_retention_partitions WHERE storage_day = :day"
+    ), {"day": storage_day}).scalar_one_or_none()
+    if state is not None:
+        if state != "open":
+            raise RuntimeError(f"fact_hot_partition_not_open: storage_day={storage_day} state={state}")
+        return relation
+    if conn.execute(text("SELECT to_regclass(:name)"), {"name": relation}).scalar_one_or_none() is not None:
+        raise RuntimeError(f"fact_hot_partition_unregistered: relation={relation} manual inspection required")
+    until = storage_day + timedelta(days=1)
+    # All identifiers/date literals are generated from a validated datetime.date.
+    # ATTACH uses a less restrictive parent lock than CREATE TABLE ... PARTITION OF.
+    conn.exec_driver_sql(f'CREATE TABLE market."{name}" (LIKE market.fact_hot_payloads INCLUDING ALL)')
+    conn.exec_driver_sql(
+        f'ALTER TABLE market."{name}" ADD CONSTRAINT "{name}_day" '
+        f"CHECK (storage_day >= DATE '{storage_day.isoformat()}' AND storage_day < DATE '{until.isoformat()}')"
+    )
+    conn.exec_driver_sql(
+        f'ALTER TABLE market.fact_hot_payloads ATTACH PARTITION market."{name}" '
+        f"FOR VALUES FROM ('{storage_day.isoformat()}') TO ('{until.isoformat()}')"
+    )
+    conn.execute(text(
+        "INSERT INTO market.fact_retention_partitions (storage_day, state) VALUES (:day, 'open')"
+    ), {"day": storage_day})
+    logger.warning("market_fact_partition_created | storage_day=%s relation=%s", storage_day, relation)
+    return relation
