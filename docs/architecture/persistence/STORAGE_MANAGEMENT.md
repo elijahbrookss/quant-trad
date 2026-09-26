@@ -9,6 +9,9 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_online_controller.py
+  - tests/test_storage_online_controller.py
+  - tests/test_market_data/test_storage_online_controller_db.py
   - scripts/db/fact_header_v2_cancel.py
   - scripts/automation/storage_online_worker.py
   - scripts/ci/rehearse_online_worker.py
@@ -1275,3 +1278,46 @@ It is a permission/ownership boundary proof, not a running QT collector, full
 production inventory admission or final ownership/runtime activation proof.
 No production entrypoint invokes this helper yet; persistent controller wiring
 and final spool ownership remain required.
+
+
+### Persistent online controller and private command channel
+
+The internal storage_online_controller.OnlineController owns one live destination
+file proof and a dedicated PostgreSQL session lock for an already prepared,
+protected attempt. It binds the original capture record, fixed placement and
+archive roots. Loss of the owning connection never transparently reconnects.
+Existing page transactions retain their own migration/resource locks; an
+in-flight bounded page may commit before ownership loss is observed, and its
+durable progress is re-admitted on restart. Closing the context closes every
+proof descriptor and invalidates the dedicated session rather than returning a
+session-level lock to a pool.
+
+The fixed pipe protocol permits status, bounded SQL copy, one rotating archive
+page, one rotating background file-reproof page, terminal cancellation and close.
+It admits no paths, limits, arbitrary SQL, shell commands or activation request.
+A process-generated controller identity and strictly ordered sequence bind each
+command. Only the identical last command can replay its bounded cached response
+in that process. Requests are limited to 4 KiB, responses to 16 KiB, partial
+frames and stalled responses to five seconds; poll supports descriptor numbers
+above 1024 without raising limits. Cancellation retains its full database
+receipt and returns only a bounded summary. EOF/error closes the caller-owned
+context. It does not automatically cancel capture or restart any service.
+
+A new controller starts with zero file proof regardless of durable copy cursors.
+It can rehash existing objects in bounded pages while the source serves; tails,
+saved responses and completed reproof cursors never confer switch authority.
+An internal database-commit method retains the same proof through real commit
+and explicit bounded outcome reconciliation. Any commit exception enters an
+uncertain state; ordinary commands and blind switch retries are refused.
+Read-only reconciliation remains available after proof expiry and never
+authorizes runtime restart. The pipe deliberately does not expose this final
+method until the host stop/drain/admission path is qualified.
+
+This is an internal controller component, not a deployed host supervisor.
+Production launcher/mount admission, entry through the source-read identity,
+initial preparation and old-runtime resumption, short final publisher drain,
+safe host abort/re-entry, final working-spool ownership and matching runtime/
+recovery activation remain required. The small SSD/HDD fixtures exercise real QT
+publication and database switching, not running collector performance or measured
+production downtime. Original attempt clocks and file/resource limits remain;
+online capacity and production-cardinality metadata costs are still unqualified.
