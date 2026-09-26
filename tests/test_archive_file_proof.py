@@ -128,8 +128,12 @@ with ArchiveFileProof(sys.argv[1],max_files=2,max_bytes=1048576,deadline=monoton
  proof.observe(key='object',sha256=sys.argv[2],byte_count=int(sys.argv[3]))
  os.kill(os.getpid(),signal.SIGKILL)
 """
+    # pytest adds QT source roots to sys.path in conftest; a fresh interpreter
+    # does not inherit that state. Preserve those roots for the killed worker.
+    child_env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
     process = subprocess.run([sys.executable, "-c", code, str(tmp_path),
-                              row["sha256"], str(row["byte_count"])], timeout=10)
+                              row["sha256"], str(row["byte_count"])],
+                             env=child_env, timeout=10)
     assert process.returncode == -signal.SIGKILL
     path = tmp_path/"object"
     fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
