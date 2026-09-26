@@ -1118,3 +1118,19 @@ new column retain 24 hours and are never altered or revived. Direct capture/copy
 primitives default to 24 hours. The earlier host deadline and per-step statement
 timeouts still apply. Routine automatic movement remains limited to one hour;
 longer initial admission must count its entire growth window. See ADR0070.
+
+
+### Migration and routine budgets at activation
+
+The initial migration request retains its original multi-day attempt budget.
+The prepared routine maintenance file is separate: activation validates it with
+the pinned worker image's existing strict parser, including the one-hour movement
+ceiling and exact SSD/HDD target IDs for both history and recovery. The host does
+not require the two budgets to be equal, because collection resumes with different
+growth allowances and routine work must not inherit a multi-day timeout.
+
+The validation container has no network, database mount, keys or Docker socket;
+only the limits file is mounted read-only. The host checks the file again after
+validation and binds its hash in the existing activation receipt. Changes during
+validation or an interrupted activation remain refused. This changes no saved
+placement/retention policy, capture deadline or automatic restart behavior.

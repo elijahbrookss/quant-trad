@@ -700,18 +700,31 @@ def test_held_database_operator_refuses_additional_ownership_capability(operator
 
 
 @pytest.fixture
-def runtime_recipe_setup(operator_setup):
+def runtime_recipe_setup(operator_setup, monkeypatch):
     import copy
     from pathlib import Path
     state,database,operator,options=operator_setup
-    options["request"]["resource_limits"]={"fixture_limit":1}
+    routine=dict(temporary_bytes={"ssd":1,"hdd":1}, growth_bytes_per_second={"ssd":1,"hdd":1},
+        maintenance_bytes={"ssd":1,"hdd":1}, wal_bytes=1,
+        movement_timeout_seconds=3600,cancellation_grace_seconds=1)
+    options["request"]["resource_limits"]={**routine,"movement_timeout_seconds":345600}
+    def validate(image,path,target_ids):
+        # Exercise the exact packaged parser program with disposable inputs.
+        # Docker isolation/arguments are covered independently below.
+        with monkeypatch.context() as patch:
+            patch.setattr(sys,"argv",["probe",str(path),json.dumps(target_ids)])
+            exec(pause._RUNTIME_MAINTENANCE_PROBE,{})
+    monkeypatch.setattr(pause,"_validate_runtime_maintenance",validate)
     pause.run_held_database_handoff(state,**options)
     receipt=pause._load(state/pause.HOLD)
     binding=pause._load(state/pause._OPERATOR_STATE)["binding"]
     source=pause._load(state/pause.DATABASE_RECIPE)
     model=copy.deepcopy(source)
     secret=state/"old-secrets.env";secret.write_text("synthetic-only")
-    limits=state/"limits.json";limits.write_text(json.dumps({"history":options["request"]["resource_limits"]}))
+    limits=state/"limits.json";limits.write_text(json.dumps({
+        "schema_version":"qt.storage_maintenance_limits.v1","history":routine,
+        "recovery":{"max_bytes":1000,"timeout_seconds":3600,
+                    "headroom_bytes":{"ssd":1,"hdd":1},"max_objects":100}}))
     for name,row in receipt["containers"].items():
         if name=="tsdb":continue
         details=database.details.setdefault(row["id"],dict(config={"Env":[]},mounts=[]))
@@ -754,9 +767,51 @@ def test_runtime_recipe_keeps_clients_held_and_binds_fixed_images_and_files(runt
     result=check()
     assert result["recipe_sha256"]==pause._digest(model)
     assert len(result["files"])==2
+    assert json.loads((state/pause._OPERATOR_REQUEST).read_text())["resource_limits"]["movement_timeout_seconds"]==345600
+    assert json.loads((state/"limits.json").read_text())["history"]["movement_timeout_seconds"]==3600
     assert set(result["images"])==set(pause.STOP+pause.PASSIVE)
     assert not any(database.rows[name]["running"] for name in pause.STOP)
     assert (state/pause.HOLD).exists()
+
+
+@pytest.mark.parametrize("change",["multi-day","unknown-target","bad-recovery","drift"])
+def test_runtime_recipe_refuses_invalid_routine_limits(runtime_recipe_setup,monkeypatch,change):
+    state,database,operator,model,check=runtime_recipe_setup
+    path=state/"limits.json"
+    values=json.loads(path.read_text())
+    if change=="multi-day": values["history"]["movement_timeout_seconds"]=345600
+    elif change=="unknown-target":
+        for key in ("temporary_bytes","growth_bytes_per_second","maintenance_bytes"):
+            values["history"][key]={"foreign":1}
+    elif change=="bad-recovery": values["recovery"]["timeout_seconds"]=86401
+    elif change=="drift":
+        original=pause._validate_runtime_maintenance
+        def drift(*args):
+            original(*args)
+            path.write_text(json.dumps(values)+" ")
+        monkeypatch.setattr(pause,"_validate_runtime_maintenance",drift)
+    path.write_text(json.dumps(values))
+    with pytest.raises((ValueError,RuntimeError),match="storage_|recovery_"):
+        check()
+    assert (state/pause.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+
+
+def test_runtime_maintenance_validation_uses_only_pinned_image_and_readonly_config(tmp_path,monkeypatch):
+    calls=[]
+    def docker(*args,**kwargs):
+        calls.append(args)
+        return '{"validated":true}'
+    monkeypatch.setattr(pause,"_docker",docker)
+    path=tmp_path/"limits.json"
+    pause._validate_runtime_maintenance("sha256:"+"a"*64,path,["ssd","hdd"])
+    args=calls[0]
+    assert args[:3]==("run","--rm","--pull")
+    assert args[args.index("--network")+1]=="none"
+    assert "--read-only" in args and args[args.index("--cap-drop")+1]=="ALL"
+    assert args[args.index("--user")+1]=="70:70"
+    assert args.count("--mount")==1 and args[args.index("--mount")+1].endswith(",readonly")
+    assert "sha256:"+"a"*64 in args
 
 
 @pytest.mark.parametrize("change",["image","database","working","history","identity","policy","namespace","shadow","volumes","secrets","entrypoint","shared-memory"])

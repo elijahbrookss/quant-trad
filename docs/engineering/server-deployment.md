@@ -784,3 +784,12 @@ nor mounting the recovery directory activates backups.
    by the paired archive inventory. Verify inventory checksums, current/corrected/
    frozen reads and independent key recovery. Account for full native chains,
    changed blocks, WAL, archive packs, rotation peak and preserved legacy copies.
+
+
+For preserving storage activation, prepare routine maintenance limits separately
+from the initial migration request. The pinned worker parser validates the
+routine file in a networkless container with only that read-only file mounted;
+routine movement remains capped at one hour even when the original migration
+attempt has a longer budget. Activation binds the validated file hash and
+refuses later drift. Migration and routine growth/resource allowances need not
+match, since collection is held for the former and running for the latter.

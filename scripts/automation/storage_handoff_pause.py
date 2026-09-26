@@ -832,6 +832,40 @@ def _runtime_configuration_bytes(path: Path, maximum: int = 128*1024) -> bytes:
         return raw
 
 
+_RUNTIME_MAINTENANCE_PROBE = """
+import json, sys
+from portal.backend.service.storage.maintenance_runtime import read_storage_maintenance_limits
+history, recovery, _ = read_storage_maintenance_limits(sys.argv[1])
+ids = set(json.loads(sys.argv[2]))
+if any(set(history[key]) != ids for key in
+       ("temporary_bytes", "growth_bytes_per_second", "maintenance_bytes")):
+    raise ValueError("storage_runtime_history_targets_changed")
+if set(recovery["headroom_bytes"]) != ids:
+    raise ValueError("storage_runtime_recovery_targets_changed")
+print(json.dumps({"validated": True}))
+"""
+
+
+def _validate_runtime_maintenance(image: str, path: Path, target_ids: list[str]):
+    """Use the pinned worker's routine parser without database, keys or network.
+
+    Migration budgets belong to the original capture attempt. The independently
+    prepared routine file keeps its one-hour limit and is bound by its hash in
+    the activation receipt; equality with multi-day migration limits is invalid.
+    """
+    if "," in str(path):
+        raise RuntimeError("storage_runtime_maintenance_path_invalid")
+    output = _docker("run", "--rm", "--pull", "never", "--network", "none",
+        "--read-only", "--user", "70:70", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges", "--memory", "512m", "--cpus", "1",
+        "--pids-limit", "64", "--env", "QT_DISABLE_DOTENV=1",
+        "--mount", "type=bind,source="+str(path)+",target=/run/qt-maintenance.json,readonly",
+        "--entrypoint", "python", image, "-c", _RUNTIME_MAINTENANCE_PROBE,
+        "/run/qt-maintenance.json", json.dumps(sorted(target_ids)))
+    if json.loads(output) != {"validated": True}:
+        raise RuntimeError("storage_runtime_maintenance_validation_failed")
+
+
 def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dict):
     """Admit the fixed candidate before any application container is changed.
 
@@ -976,8 +1010,10 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
                     or not limits_path.is_absolute() or limits_path.resolve(strict=True)!=limits_path):
                 raise RuntimeError("storage_runtime_maintenance_mount_changed")
             raw=_runtime_configuration_bytes(limits_path)
-            if len(raw)>128*1024 or json.loads(raw).get("history")!=request["resource_limits"]:
-                raise RuntimeError("storage_runtime_history_limits_changed")
+            _validate_runtime_maintenance(binding["image"], limits_path,
+                [target["target_id"] for target in targets])
+            if _runtime_configuration_bytes(limits_path) != raw:
+                raise RuntimeError("storage_runtime_maintenance_changed_during_validation")
             file_bindings[str(limits_path)]=hashlib.sha256(raw).hexdigest()
     if _digest(_load(path,max_bytes=524288))!=recipe_hash:
         raise RuntimeError("storage_runtime_recipe_changed_during_admission")

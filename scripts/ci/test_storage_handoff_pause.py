@@ -125,7 +125,7 @@ def runtime_recipe_rehearsal():
         root=Path(folder)
         database=fixture.database_setup.__wrapped__(root,monkeypatch)
         operator=fixture.operator_setup.__wrapped__(database,root,monkeypatch)
-        state,database,worker,model,check=fixture.runtime_recipe_setup.__wrapped__(operator)
+        state,database,worker,model,check=fixture.runtime_recipe_setup.__wrapped__(operator,monkeypatch)
         synthetic="postgresql+psycopg2://fixture:literal$secret@tsdb:5432/fixture"
         collector=database.details[database.rows["market-data-collector"]["id"]]
         collector["config"]["Env"]=["PG_DSN="+synthetic]
