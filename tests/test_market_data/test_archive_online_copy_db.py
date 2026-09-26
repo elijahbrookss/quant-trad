@@ -210,3 +210,82 @@ def test_online_archive_binding_guard_and_original_deadline_refuse_drift(storage
         conn.exec_driver_sql(f"UPDATE {SCHEMA}.capture SET prepared_at=clock_timestamp()-interval '25 hours'")
     with pytest.raises(RuntimeError, match="expired"):
         online.copy_page(engine, family="raw_archive_manifests", **options)
+
+
+@pytest.mark.parametrize("scenario", [
+    "test_online_archive_real_publication_converges_without_losing_frozen_objects",
+    "test_online_archive_captures_lower_id_after_empty_observation_and_preserves_failed_page",
+])
+def test_live_file_leases_preserve_real_publication_proof_without_final_hashing(
+        storage, tmp_path, monkeypatch, scenario):
+    from contextlib import ExitStack
+    from time import monotonic
+    from scripts.db.archive_file_v2_proof import ArchiveFileProof
+    original = _prepare
+    held = []
+    with ExitStack() as stack:
+        def prepare_leased(*args):
+            engine, options, source, book = original(*args)
+            proof = stack.enter_context(ArchiveFileProof(options["destination_root"],
+                max_files=128, max_bytes=64*1024**2, deadline=monotonic()+120))
+            held.append(proof)
+            # A catalog fence cannot see or authorize losing an upload that
+            # has not published its descriptor. Keep that source file intact.
+            unpublished = options["source_root"]/"unpublished-upload.partial"
+            unpublished.write_bytes(b"not yet catalogued")
+            held.append(unpublished)
+            options["file_proof"] = proof
+            return engine, options, source, book
+        def no_final_hash(*args, **kwargs):
+            pytest.fail("leased inventory reread all destination contents")
+        monkeypatch.setitem(globals(), "_prepare", prepare_leased)
+        monkeypatch.setattr(archives, "_sha256_file", no_final_hash)
+        globals()[scenario](storage, tmp_path, monkeypatch)
+        assert held[0].hashed_bytes > 0
+        assert held[1].read_bytes() == b"not yet catalogued"
+        assert not (held[0].root/held[1].name).exists()
+
+
+def test_file_proof_reentry_requires_background_reverification_and_detects_replacement(
+        storage, tmp_path, monkeypatch):
+    from time import monotonic
+    from scripts.db.archive_file_v2_proof import ArchiveFileProof
+    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch)
+    def fresh():
+        return ArchiveFileProof(options["destination_root"], max_files=128,
+                                max_bytes=64*1024**2, deadline=monotonic()+120)
+    verification = {k:v for k,v in options.items() if k != "max_page_bytes"}
+    with fresh() as first:
+        for family in archives.FAMILIES:
+            _drain(engine, options | {"file_proof": first}, family)
+    # Copy progress survives a controller lifetime; lease proof does not.
+    with fresh() as resumed:
+        with pytest.raises(RuntimeError, match="object_not_verified"), engine.begin() as conn:
+            with archives.verified_archive_inventory(conn, max_objects=1000,
+                    max_bytes=64*1024**2, file_proof=resumed, **verification):
+                pytest.fail("saved copy cursor substituted for live proof")
+        # Existing cursor copier re-verifies bounded pages without altering the
+        # original online cursors, queues, capture start or copying source anew.
+        for family in archives.FAMILIES:
+            after = ""
+            for _ in range(128):
+                report = archives.copy_archive_page(engine, family=family,
+                    after_id=after, file_proof=resumed, **options)
+                if not report["page_objects"]:
+                    break
+                assert not report["copied_objects"]
+                after = report["next_after_id"]
+            else:
+                pytest.fail("reverification page budget exceeded")
+        with pytest.raises(RuntimeError, match="path_changed"), engine.begin() as conn:
+            with archives.verified_archive_inventory(conn, max_objects=1000,
+                    max_bytes=64*1024**2, file_proof=resumed, **verification):
+                # A changed pathname must not inherit the old inode's proof,
+                # even if replacement bytes are exactly equal.
+                path = next(p for p in options["destination_root"].rglob("*") if p.is_file())
+                data = path.read_bytes()
+                path.unlink()
+                path.write_bytes(data)
+                with pytest.raises(RuntimeError, match="path_changed"):
+                    resumed.verify_all()
+                # The final context exit must refuse this change as well.

@@ -12,6 +12,7 @@ code_paths:
   - scripts/db/fact_header_v2_online.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
+  - scripts/db/archive_file_v2_proof.py
   - scripts/db/fact_header_v2_capture.py
   - scripts/db/fact_header_v2_copy.py
   - scripts/db/raw_mapping_v2_copy.py
@@ -20,6 +21,7 @@ code_paths:
   - tests/test_market_data/test_fact_header_online_db.py
   - tests/test_market_data/test_fact_header_online_proof_db.py
   - tests/test_market_data/test_archive_online_copy_db.py
+  - tests/test_archive_file_proof.py
   - tests/test_market_data/test_fact_header_online_references_db.py
 ---
 # ADR 0073: Prepare storage migrations with live collection
@@ -125,8 +127,36 @@ Out-of-order commits behind a baseline cursor remain queued. A failed page keeps
 its SQL progress pending while retry reuses already published immutable files.
 Existing retention expiry can skip legitimately expired source objects; it does
 not authorize destination deletion. Root identity and catalog/trigger drift
-refuse resume. Queue emptiness is still only an observation: the complete final
-filesystem proof and publisher drain are not replaced by this slice.
+refuse resume. Queue emptiness remains only an observation; publisher drain is a separate
+host boundary.
+
+An opt-in live file proof now acquires Linux read leases on destination files
+before hashing them in the background. Existing writable descriptors or mappings
+refuse admission; later write/truncate attempts permanently invalidate the live
+context. The original file descriptors remain open. At the final catalog fence,
+every required descriptor, unsymlinked path, inode and live lease is checked,
+without rereading contents. All retained bindings are checked again after caller
+work and before leaving that verification context. The full catalog/metadata
+scan remains and its production cost must be measured. Leases do not protect
+names, replace publisher drain, or authorize root activation.
+
+Proof is deliberately process-local: a killed or closed controller loses it.
+A restart must rehash bounded existing-object pages while collection continues;
+it never trusts a saved checksum or advances/resets the original capture clock.
+File count, byte count, original migration/resource watchers and proof lifetime
+are bounded. The process must already have the requested descriptor capacity
+plus headroom; the helper never increases limits. It owns SIGIO in its main
+thread, targeting lease notifications there even when a watchdog thread exists.
+Kernel descriptor/inode memory and production-cardinality final metadata time
+are not yet admitted. The old full verifier remains the default.
+
+This choice uses existing Linux leases rather than changing filesystem features.
+An owned file on the actual HDD refused fs-verity with EOPNOTSUPP; no filesystem
+setting was changed. The guarantees and limitations follow the
+[Linux lease interface](https://man7.org/linux/man-pages/man2/F_SETLEASE.2const.html)
+and [thread-directed signal ownership](https://man7.org/linux/man-pages/man2/F_SETOWN_EX.2const.html).
+This is a controlled operator boundary, not protection against privileged kernel,
+raw-device, clock or process tampering; no saved proof survives a process exit.
 
 Reference preparation reuses the existing separate transactions for brief
 NOT VALID installation, background VALIDATE and parent adoption. Disposable
@@ -144,7 +174,7 @@ for small fixtures, not production-cardinality timing or a live collector
 throughput measurement.
 
 This slice does not install a production supervisor, expose a new user command,
-remove the archive final scan or authorize the old host hold. Additional indexed
+remove the archive catalog/metadata scan or authorize the old host hold. Additional indexed
 source lookups for protected inserts need measured throughput and collector/query
 impact; earlier unchanged-copy projections do not qualify that new cost.
 Complete reference/archive preparation and a measured end-to-end short switch

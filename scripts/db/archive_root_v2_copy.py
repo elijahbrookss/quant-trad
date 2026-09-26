@@ -89,7 +89,7 @@ def _validate_descriptors(rows):
 
 
 def _copy_archive_page(engine, *, select_page, record_page, family, source_root, destination_root, after_id="",
-                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None):
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None):
     """Copy one known catalog page; retry re-verifies and reuses completed files.
 
     Owns the existing storage lock, expiry fence, clock and capacity watcher.
@@ -137,6 +137,11 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                     if policy.archives != (plan.history.target_id,):
                         raise ValueError("archive_copy_history_archive_policy_required")
                     source, source_identity = _root(source_root, saved["recent_device"])
+                    if file_proof is not None:
+                        from scripts.db.archive_file_v2_proof import ArchiveFileProof
+                        if type(file_proof) is not ArchiveFileProof or file_proof.root != Path(destination_root):
+                            raise ValueError("archive_copy_file_proof_root_mismatch")
+                        file_proof.check()
                     destination, destination_identity = _root(destination_root, saved["history_device"])
                     if not destination.is_relative_to(Path(plan.history.root)):
                         raise RuntimeError("archive_copy_destination_outside_history_target")
@@ -182,6 +187,9 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                         if (stable(before) != stable(after)
                                 or acknowledgement.byte_count != row["byte_count"]):
                             raise RuntimeError("archive_copy_source_changed")
+                        if file_proof is not None:
+                            file_proof.observe(key=key, sha256=row["object_sha256"],
+                                               byte_count=row["byte_count"], check_budget=check)
                         reused += int(acknowledgement.reused_existing)
                         copied += int(not acknowledgement.reused_existing)
                     watch.check()
@@ -205,19 +213,19 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                 watch.stop(conn)
 
 def copy_archive_page(engine, *, family, source_root, destination_root, after_id="",
-                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None):
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None):
     """Copy one cursor page; an online cursor alone is never completeness."""
     return _copy_archive_page(engine, select_page=_catalog_page,
         record_page=lambda conn, rows: {}, family=family, source_root=source_root,
         destination_root=destination_root, after_id=after_id, page_rows=page_rows,
         max_page_bytes=max_page_bytes, policy=policy, resource_limits=resource_limits,
-        cancelled=cancelled)
+        cancelled=cancelled, file_proof=file_proof)
 
 
 @contextmanager
 def verified_archive_inventory(conn, *, source_root, destination_root, max_objects,
                                max_bytes, policy, resource_limits, page_rows=128,
-                               cancelled=None):
+                               cancelled=None, file_proof=None):
     """Verify the complete committed catalog while its publication is fenced.
 
     The caller owns the transaction and must drain in-flight file publishers
@@ -266,6 +274,11 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
             if policy.archives != (plan.history.target_id,):
                 raise ValueError("archive_copy_history_archive_policy_required")
             source, source_identity = _root(source_root, saved["recent_device"])
+            if file_proof is not None:
+                from scripts.db.archive_file_v2_proof import ArchiveFileProof
+                if type(file_proof) is not ArchiveFileProof or file_proof.root != Path(destination_root):
+                    raise ValueError("archive_copy_file_proof_root_mismatch")
+                file_proof.check()
             destination, destination_identity = _root(destination_root, saved["history_device"])
             if not destination.is_relative_to(Path(plan.history.root)):
                 raise RuntimeError("archive_copy_destination_outside_history_target")
@@ -308,13 +321,16 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
 
                         check()
                         path = _path(destination, key, destination_identity[0])
-                        before = path.stat()
-                        actual = _sha256_file(path, check_budget=check)
-                        after = path.stat()
-                        stable = lambda value: (value.st_dev, value.st_ino, value.st_size,
-                                                value.st_mtime_ns, value.st_ctime_ns)
-                        if before.st_size != size or actual != expected or stable(before) != stable(after):
-                            raise RuntimeError("archive_inventory_object_mismatch: key="+key)
+                        if file_proof is None:
+                            before = path.stat()
+                            actual = _sha256_file(path, check_budget=check)
+                            after = path.stat()
+                            stable = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                                    value.st_mtime_ns, value.st_ctime_ns)
+                            if before.st_size != size or actual != expected or stable(before) != stable(after):
+                                raise RuntimeError("archive_inventory_object_mismatch: key="+key)
+                        else:
+                            file_proof.verify(key=key, sha256=expected, byte_count=size, check_budget=check)
                         digest.update((json.dumps({"family": family, **dict(row)}, sort_keys=True,
                                                   separators=(",", ":"))+"\n").encode())
                     after_id = rows[-1]["id"]
@@ -322,12 +338,15 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
             report = {"verified_catalog_objects": count, "verified_catalog_bytes": byte_count,
                 "inventory_sha256": digest.hexdigest(), "destination_root": str(destination),
                 "verification_seconds": monotonic()-started, "resource_budget": budget,
+                "verification_method": "live_read_leases_and_exact_paths" if file_proof else "full_file_hashes",
                 "migration_ready": False, "root_activation_authorized": False,
                 "publisher_drain_and_caller_commit_supervision_required": True}
             logger.info("archive_migration_inventory_verified | objects=%s bytes=%s duration_seconds=%s",
                         count, byte_count, report["verification_seconds"])
             yield report
             watch.check()
+            if file_proof is not None:
+                file_proof.verify_all(check_budget=watch.check)
         finally:
             if watch is not None:
                 watch.stop(conn)

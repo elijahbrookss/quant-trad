@@ -12,6 +12,7 @@ code_paths:
   - scripts/db/fact_header_v2_online.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
+  - scripts/db/archive_file_v2_proof.py
   - cli/main.py
   - src/core/storage_targets.py
   - src/core/storage_header_placement.py
@@ -1173,6 +1174,18 @@ inherit validated references. Validation interruption preserves earlier committe
 work, while failed SQL switching restores guards and reference state. This uses
 the deployed v1 partition writer as a frozen fixture and does not establish
 production-scale validation time or running collector throughput.
+
+An optional live archive proof hashes copied files while holding Linux read
+leases. Existing writers refuse protection; later write/truncate attempts
+invalidate the proof. The final fence still enumerates the complete catalog and
+checks every required path, inode and lease, then rechecks retained bindings
+before leaving. It avoids rereading contents only while that exact controller
+retains its proof. Restart requires bounded background re-verification; saved
+hashes alone cannot substitute. File descriptors and proof bytes/time are
+bounded without changing host limits. Descriptor/kernel-memory capacity and the
+remaining metadata scan require measured admission. The default final verifier
+still hashes all files. Publisher drain, capture cleanup and runtime activation
+remain separate unfinished host integration.
 
 The complete online operator, archive reconciliation and measured short final
 switch remain unfinished. The held host operator cannot be advertised as a
