@@ -1,4 +1,5 @@
 """Owned host-driven positive entrypoint fixture, no production inputs."""
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import timedelta
 import json
@@ -7,7 +8,8 @@ from pathlib import Path
 import time
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 from scripts.db import fact_header_v2_capture as capture
 from scripts.db import fact_header_v2_handoff as handoff
@@ -15,10 +17,36 @@ from scripts.db import fact_header_v2_online_proof as protection
 from tests.test_market_data.test_archive_online_copy_db import _prepare
 from tests.test_market_data.test_fact_header_copy_db import _frozen_records
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
-from tests.test_market_data.test_fact_storage_tiers_db import BASE, storage
+from tests.test_market_data import test_fact_storage_tiers_db as tiers
+from tests.test_market_data.test_fact_storage_tiers_db import BASE
+from tests.test_market_data.migration_test_support import _isolated_parent_dsn
 
 pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_ONLINE_ENTRYPOINT_FIXTURE") != "1",
     reason="requires owned host-controlled online entrypoint topology")]
+
+
+@pytest.fixture
+def storage(monkeypatch):
+    if os.getenv("QT_ONLINE_HOST_FIXTURE") == "1":
+        # The host owns this entire fresh cluster and binds POSTGRES_DB to this
+        # database. Do not create a different database behind host admission.
+        @contextmanager
+        def fresh_host_database(_label):
+            dsn = _isolated_parent_dsn()
+            name = make_url(dsn).database
+            assert name.startswith("qt_migration_online_") and len(name) == len("qt_migration_online_")+16
+            assert all(c in "0123456789abcdef" for c in name[len("qt_migration_online_"):])
+            engine = create_engine(dsn)
+            try:
+                with engine.begin() as conn:
+                    assert conn.scalar(text("SELECT to_regnamespace('market')")) is None
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+                yield dsn
+            finally:
+                engine.dispose()
+        monkeypatch.setattr(tiers, "fresh_migration_database", fresh_host_database)
+    yield from tiers.storage.__wrapped__(monkeypatch)
 
 
 def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, monkeypatch):

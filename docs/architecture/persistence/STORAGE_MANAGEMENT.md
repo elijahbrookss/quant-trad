@@ -16,6 +16,7 @@ code_paths:
   - scripts/automation/storage_online_controller.py
   - scripts/automation/storage_online_launch.py
   - scripts/ci/rehearse_online_launch.py
+  - scripts/ci/rehearse_online_prepared.py
   - tests/test_storage_online_launch.py
   - tests/test_storage_online_controller.py
   - tests/test_market_data/test_storage_online_controller_db.py
@@ -1382,6 +1383,27 @@ The synthetic UUID metadata and small application fixture establish only this
 entrypoint boundary. Existing native UID1000 publication/permission evidence is
 separate; this positive application fixture's source owner is UID70.
 
+
+The separate opt-in scripts/ci/rehearse_online_prepared.py now drives the
+complete launched_online_worker context against a fresh owned cluster. Its
+application fixture uses that cluster's bound database instead of creating a
+different database behind host admission; the existing disposable-database
+prefix and isolation guards remain. Real QT archive publication overlaps
+bounded copying and live file proof while synthetic service peers remain
+running. The rehearsal checks the deployment lock, exact source container
+identities, saved request/resource bindings, original deadline, normal exit,
+same-container reentry with empty proof, and host-exception cleanup.
+
+Run it only with owned test image IDs, a disposable output directory and a
+scratch history parent on a distinct filesystem. It generates private test
+credentials, uses an internal network, and removes only its owned containers,
+network, volume and scratch children while retaining logs and receipts. This
+manual fixture is not part of the ordinary database suite. Its source owner is
+UID70; the earlier legacy UID1000/private-file proof remains separate. It starts
+from prepared SQL state without an initial preparation receipt, so it does not
+qualify the combined initial-resumption-to-launch transition, production guard
+installation, a running collector's performance, recovery activation, or final
+outage. No production algorithm or switch authority is changed by this fixture.
 
 ### Durable online intent exclusion
 
