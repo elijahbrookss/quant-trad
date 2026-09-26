@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/fact_header_v2_online.py
   - cli/main.py
   - src/core/storage_targets.py
   - src/core/storage_header_placement.py
@@ -1134,3 +1135,20 @@ only the limits file is mounted read-only. The host checks the file again after
 validation and binds its hash in the existing activation receipt. Changes during
 validation or an interrupted activation remain refused. This changes no saved
 placement/retention policy, capture deadline or automatic restart behavior.
+
+
+### Online migration preparation
+
+[ADR 0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md)
+records the replacement for the rejected whole-migration collector hold.
+The internal fact_header_v2_online.copy_pass commits bounded verified pages
+while the existing v1 source continues serving. It requires the exact prepared
+placement, preserves the original capture deadline and enforces existing
+resource guards. Finite baselines precede fairly alternating catch-up passes.
+Private relocation is a separate phase; source data is never deleted.
+
+An empty tail observation is not switch readiness. The complete online operator,
+proof-preserving background verification and measured short final switch remain
+unfinished; the existing full-scan final verifier and held host operator cannot
+be advertised as a short-outage path. The old held-growth capacity sensitivity
+must be replaced by live-ingestion and capture-backlog admission.
