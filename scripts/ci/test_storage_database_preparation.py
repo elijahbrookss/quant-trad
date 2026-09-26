@@ -27,18 +27,20 @@ def run(args, *, env, timeout=300, ok=True):
     return result
 
 
-def main():
+def main(*, online_source=False):
     project = "qt-database-hold-"+uuid.uuid4().hex[:12]
     network = project+"_quanttrad"
     volume = project+"-postgres"
     env = {key: value for key, value in os.environ.items() if not key.startswith(("QT_", "PG_", "POSTGRES_", "COMPOSE_"))}
     print("Owned disposable project: "+project, flush=True)
-    pg_image = run(["docker", "image", "inspect", "quanttrad-postgres:2.14.2-pg15", "--format", "{{.Id}}"], env=env).stdout.strip()
-    client_image = run(["docker", "image", "inspect", "python:3.12.3-slim", "--format", "{{.Id}}"], env=env).stdout.strip()
+    pg_image = run(["docker", "image", "inspect", os.environ.get("QT_STORAGE_TEST_DB_IMAGE", "quanttrad-postgres:2.14.2-pg15"), "--format", "{{.Id}}"], env=env).stdout.strip()
+    client_image = run(["docker", "image", "inspect", os.environ.get("QT_STORAGE_TEST_CLIENT_IMAGE", "python:3.12.3-slim"), "--format", "{{.Id}}"], env=env).stdout.strip()
     created_network = created_volume = False
     with tempfile.TemporaryDirectory(prefix="qt-database-hold-") as directory:
         root = Path(directory)
-        state = root/"state"; state.mkdir()
+        state = root/"state"; state.mkdir(mode=0o700)
+        working = root/"working"; working.mkdir(); working.chmod(0o777)
+        (working/"objects").mkdir(); (working/"objects").chmod(0o777)
         history = root/"history"; history.mkdir(); history.chmod(0o777)
         (history/"preparation-proof").write_text("retained-history-path")
         udev = root/"udev"; udev.mkdir()
@@ -83,12 +85,22 @@ def main():
             cluster = query("SELECT system_identifier FROM pg_control_system()")
             query("CREATE TABLE public.qt_host_hold_proof(value text PRIMARY KEY); INSERT INTO public.qt_host_hold_proof VALUES ('retained')")
             for name in pause.STOP+tuple(value for value in pause.PASSIVE if value != "tsdb"):
+                extra = (["--mount", "type=bind,source="+str(working)+",target=/app/logs/market-structure"]
+                         if online_source and name == "market-data-collector" else [])
+                command = ("trap 'exit 0' TERM; while :; do printf x >> /app/logs/market-structure/objects/intake; sleep 1 & wait $!; done"
+                           if extra else "trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done")
+                if online_source and name == "initialize":
+                    command = "exit 0"
                 run(["docker", "run", "--detach", "--pull", "never", "--network", network,
-                    "--name", project+"-"+name, "--read-only", "--user", "65534:65534", "--init",
-                    "--memory", "32m", "--cpus", "0.1", "--pids-limit", "32", "--restart", "unless-stopped",
+                    "--name", project+"-"+name, "--read-only", "--user", ("70:70" if extra else "65534:65534"), "--init",
+                    "--memory", "32m", "--cpus", "0.1", "--pids-limit", "32", "--restart",
+                    ("no" if online_source and name == "initialize" else "unless-stopped"),
                     "--label", "com.docker.compose.project="+project, "--label", "com.docker.compose.service="+name,
-                    "--label", "com.docker.compose.oneoff=False", client_image, "sh", "-c",
-                    "trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"], env=env)
+                    "--label", "com.docker.compose.oneoff=False", *extra, client_image, "sh", "-c",
+                    command], env=env)
+            if online_source:
+                online_source_rehearsal(state, project, env, working, query, cid, cluster)
+                return
             child_code = "\n".join([
                 "import os,signal,sys",
                 "from pathlib import Path",
@@ -159,6 +171,78 @@ def main():
             if created_network:
                 run(["docker", "network", "rm", network], env=env)
             print("Owned disposable host-hold resources removed.", flush=True)
+
+
+def online_source_rehearsal(state, project, env, working, query, cid, cluster):
+    """Synthetic serving clients, real PG/Docker interruption and disk binding."""
+    import time
+    from scripts.automation import storage_online_prepare as online
+    marker = working/"objects"/"intake"
+    wait_until = time.monotonic()+10
+    while not marker.exists() or marker.stat().st_size == 0:
+        if time.monotonic() > wait_until:
+            raise RuntimeError("online_source_fixture_initial_intake_absent")
+        time.sleep(0.2)
+    source = pause._identities(pause._inventory(project))
+    metadata = online._source_roots(pause._database_details(source["market-data-collector"]["id"]))
+    code = "\n".join([
+        "import os,signal,sys",
+        "from pathlib import Path",
+        "from scripts.automation import storage_handoff_pause as pause",
+        "from scripts.automation import storage_online_prepare as online",
+        "actual=pause._docker",
+        "def interrupt(*args,**kwargs):",
+        "    value=actual(*args,**kwargs)",
+        "    if args[0]=='start' and online._load(Path(sys.argv[1]))['phase']=='resuming':",
+        "        print('SOURCE_STARTED_BEFORE_PROCESS_DEATH',flush=True)",
+        "        os.kill(os.getpid(),signal.SIGKILL)",
+        "    return value",
+        "pause._docker=interrupt",
+        "online.prepare_online_source(Path(sys.argv[1]),project=sys.argv[2],source_revision='a'*40,history_uuid='fixture-history')",
+    ])
+    started = time.monotonic()
+    child = run([sys.executable,"-c",code,str(state),project],env=env,timeout=600,ok=False)
+    if child.returncode != -9 or "SOURCE_STARTED_BEFORE_PROCESS_DEATH" not in child.stdout:
+        raise RuntimeError("online_source_interruption_failed: "+child.stderr[-5000:])
+    saved = online._load(state)
+    assert saved["phase"] == "resuming"
+    assert (state/pause.HOLD).exists()
+    # No owning process remains: ordinary old-recipe recovery still refuses.
+    for action in ("deploy","recover","rollback"):
+        blocked = run(["bash","scripts/automation/server_deploy.sh",action],
+            env={**env,"QT_SINGLE_NODE_STATE_ROOT":str(state)},ok=False)
+        assert blocked.returncode and "storage online intent" in blocked.stderr
+    with __import__("unittest.mock",fromlist=["patch"]).patch.dict(os.environ, {"QT_STORAGE_UDEV_ROOT":env["QT_STORAGE_UDEV_ROOT"]}):
+        result = online.prepare_online_source(state,project=project,source_revision="a"*40,history_uuid="fixture-history")
+        assert result["started_at"] == saved["started_at"] and result["deadline"] == saved["deadline"]
+        assert result["phase"] == "serving"
+        assert pause._load(state/pause.HOLD)["database_preparation"]["deadline"] == result["deadline"]
+        rows = pause._inventory(project)
+        assert pause._source_clients_serving(rows)
+        assert not rows["initialize"]["running"] and rows["initialize"]["exit_code"] == 0
+        assert {k:v for k,v in pause._identities(rows).items() if k!="tsdb"} == {k:v for k,v in source.items() if k!="tsdb"}
+        assert metadata == online._source_roots(pause._database_details(rows["market-data-collector"]["id"]))
+        assert query("SELECT value FROM public.qt_host_hold_proof") == "retained"
+        assert query("SELECT system_identifier FROM pg_control_system()") == cluster
+        assert query("SHOW archive_mode") == "off"
+        marker = working/"objects"/"intake"
+        before = marker.stat().st_size
+        deadline = time.monotonic()+10
+        while marker.stat().st_size <= before:
+            if time.monotonic() > deadline:
+                raise RuntimeError("online_source_fixture_intake_did_not_resume")
+            time.sleep(0.2)
+        prior = (state/online.STATE).read_bytes()
+        assert online.prepare_online_source(state,project=project,source_revision="a"*40,history_uuid="fixture-history") == result
+        assert (state/online.STATE).read_bytes() == prior
+        print(json.dumps(dict(status="passed",project=project,
+            initial_transition_seconds=result["completed_at"]-result["started_at"],
+            total_fixture_seconds=time.monotonic()-started,
+            deadline=result["deadline"],source_clients_unchanged=True,
+            cluster_preserved=True,source_metadata_preserved=True,
+            synthetic_intake_resumed=True,completed_initializer_not_restarted=True,
+            production_downtime_measured=False)),flush=True)
+
 
 
 
@@ -599,6 +683,8 @@ if __name__ == "__main__":
         operator_rehearsal_outer(*sys.argv[2:])
     elif len(sys.argv) in (7,9) and sys.argv[1]=='--operator-inner':
         operator_rehearsal_inner(*sys.argv[2:])
+    elif sys.argv[1:] == ["--online-source"]:
+        main(online_source=True)
     elif len(sys.argv)==1:
         main()
     else:

@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_online_prepare.py
+  - tests/test_storage_online_prepare.py
   - scripts/automation/server_deploy.sh
   - tests/test_server_promotion.py
   - scripts/automation/storage_online_controller.py
@@ -1383,10 +1385,10 @@ separate; this positive application fixture's source owner is UID70.
 
 ### Durable online intent exclusion
 
-The online launcher retains both storage-online-request.json and
-storage-online-worker.json in the deployment state directory. The sealed request
+The initial preparation and online launcher retain storage-online-preparation.json,
+storage-online-request.json and storage-online-worker.json in the deployment state directory. The sealed request
 can exist before a worker receipt or container exists. Ordinary server mutation
-dispatch, direct deployment, promotion and recovery refuse the presence of either
+dispatch, direct deployment, promotion and recovery refuse the presence of any
 marker independently of the process-lifetime deployment lock. Partial JSON,
 canceled/expired records, directories and dangling links are unresolved intent,
 not permission to restart an old database recipe. Read-only release inspection
@@ -1396,8 +1398,55 @@ A stopped controller or terminal SQL cancellation does not prove that a previous
 runtime and its mounts can serve retained or relocated source data. Neither path
 removes these markers. Exact terminal host reconciliation and receipt retention
 must be qualified before any release mechanism is added; deleting evidence is
-not reconciliation. The future initial preparation operator must persist intent
-before its first database/mount/capture mutation and verify that the host's
-ordinary deployment entrypoint enforces this interlock. The current launcher
-accepts already prepared attempts and does not implement that initial ordering.
+not reconciliation. The initial preparation operator persists intent before its first source stop.
+Production admission must verify that the host's ordinary deployment entrypoint
+enforces this interlock. The launcher itself accepts already prepared attempts;
+the separate initial transition below does not initialize capture.
 This guard does not authorize a production preparation, final switch or restart.
+
+
+### Bounded key-free initial preparation
+
+The internal storage_online_prepare.prepare_online_source records
+storage-online-preparation.json before the first source stop. It binds exact
+source container IDs, images, private configuration hashes, mounts/networks,
+source-directory device/inode/owner/mode, database cluster, fixed recipe and a
+600-second deadline. This deadline starts before pausing, caps every stop and the
+existing database-preparation deadline, and is retained across interrupted
+replacement and partial client resumption. No legacy clock is modified.
+
+This path admits only an uncaptured source with no nondefault tablespaces,
+disabled WAL archiving, no configured archive command/library, and a key-free
+PGDATA/HDD recipe. It never disables existing archival or changes ownership.
+After the preserving database mount transition, it restarts only the same previously running source
+containers. An initializer already exited successfully remains stopped; its
+identity and completed state stay bound and it must never be rerun to resume
+collection. It records completion only while the original deadline remains and
+the continuously serving clients are running with their declared health checks
+healthy and the initializer retains its admitted lifecycle.
+Completed reentry is read-only validation, never authorization to restart a
+subsequently stopped client. Interruption before completion keeps the same
+deadline and both receipts; drift or expiry refuses further starts.
+
+The held preparation receipt remains. The online launcher may coexist with it
+only after exact read-only admission of the completed source preparation.
+Ordinary deployment still refuses the preparation/request/worker markers.
+The old held cutover entrypoint retains its behavior; extracting its lock-owned
+body permits the new initial transition to hold one deployment lock throughout.
+
+This internal transition is not a production entrypoint or a complete online
+migration. It does not initialize capture, move retained data, expose a final
+switch command, add private recovery mounts, activate encrypted recovery, change
+the database image or complete terminal host reconciliation. Host admission must
+first bind the actual deployment guard. Full production inventory admission, actual intake/query performance and complete initial/final
+outages remain to be qualified; running synthetic clients cannot prove those.
+
+
+The disposable initial-transition rehearsal kills its host controller after the
+first exact source client restarts, then re-enters under the original deadline.
+It verifies preserved cluster/table/source-directory metadata, identical source
+client identities, continued synthetic file intake, retained holds and ordinary
+deployment exclusion. Completed reentry leaves the receipt unchanged. This is a
+real Docker/PostgreSQL boundary proof using synthetic clients and UUID metadata
+on disposable host directories. It is not a running QT collector, distinct-drive
+admission, packaged complete online handoff or production outage measurement.

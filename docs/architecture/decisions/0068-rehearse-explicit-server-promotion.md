@@ -315,7 +315,7 @@ path and representative physical performance/capacity remain release blockers.
 
 
 The same mutation boundary now also refuses durable online intent recorded by
-storage-online-request.json or storage-online-worker.json, even after the
+storage-online-preparation.json, storage-online-request.json or storage-online-worker.json, even after the
 controller's deployment flock has been released. Presence alone blocks ordinary
 deployment, rollback, recovery and other mutating commands; corrupt/partial state
 and dangling links fail closed. The read-only release command reports this state

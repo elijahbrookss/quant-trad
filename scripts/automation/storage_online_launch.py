@@ -186,7 +186,7 @@ def launched_online_worker(state_root, *, project, source_revision, image,
         raise ValueError("storage_online_request_budget_exceeded")
     digest = hashlib.sha256(data).hexdigest()
     with held._deployment_lock(state_root):
-        for name in (held.HOLD, "promotion.env", "alert-preview.env"):
+        for name in ("promotion.env", "alert-preview.env"):
             if os.path.lexists(state_root/name):
                 raise RuntimeError("storage_online_unfinished_host_operation")
         if re.findall(r"^current_revision=(.*)$", (state_root/"release.env").read_text(),
@@ -198,8 +198,13 @@ def launched_online_worker(state_root, *, project, source_revision, image,
         found = held._docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
         if len(found) > 1 or (found and (not saved or saved.get("container_id") not in (None, found[0]))):
             raise RuntimeError("storage_online_unowned_container")
+        if (os.path.lexists(state_root/held.HOLD)
+                or os.path.lexists(state_root/"storage-online-preparation.json")):
+            from scripts.automation.storage_online_prepare import admit_serving_source
+            admit_serving_source(state_root, project=project, source_revision=source_revision,
+                                 operator_id=found[0] if found else None)
         rows = held._inventory(project, operator_id=found[0] if found else None)
-        if any(not rows[service]["running"] for service in held.STOP):
+        if not held._source_clients_serving(rows):
             raise RuntimeError("storage_online_serving_source_required")
         identities = held._identities(rows)
         database_id = rows["tsdb"]["id"]

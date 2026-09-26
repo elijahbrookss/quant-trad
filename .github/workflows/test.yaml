@@ -121,6 +121,11 @@ jobs:
       - name: Prove confined online worker launch and refusal
         run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
 
+      - name: Prove interrupted initial storage preparation and source resumption
+        env:
+          QT_STORAGE_TEST_CLIENT_IMAGE: qt-incremental-runtime-proof
+        run: python3 scripts/ci/test_storage_database_preparation.py --online-source
+
       - name: Prove encrypted restore through actual QT current and frozen readers
         run: ./scripts/ci/run_test_suite.sh incremental-recovery
 

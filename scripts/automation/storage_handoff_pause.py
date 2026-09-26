@@ -87,6 +87,14 @@ def _inventory(project: str, *, database_preparing: bool = False, operator_id: s
     return result
 
 
+
+def _source_clients_serving(rows):
+    """The initializer may have completed; never rerun it to resume collection."""
+    return all(row["running"] or (name == "initialize" and row["status"] == "exited"
+                                  and row["exit_code"] == 0)
+               for name in STOP for row in (rows[name],))
+
+
 def _identities(rows: dict[str, dict]) -> dict[str, dict]:
     return {service: {key: row[key] for key in ("id", "image", "restart")}
             for service, row in rows.items()}
@@ -502,71 +510,91 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
             or (prepare_database and not re.fullmatch(r"[A-Za-z0-9-]{4,128}", history_uuid))):
         raise ValueError("storage_pause_invalid_binding")
     with _deployment_lock(state_root):
-        for name in ("promotion.env", "alert-preview.env"):
-            if os.path.lexists(state_root / name):
-                raise RuntimeError("storage_pause_unfinished_server_operation")
-        release = (state_root / "release.env").read_text()
-        if re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [source_revision]:
-            raise RuntimeError("storage_pause_recorded_release_mismatch")
-        path = state_root / HOLD
-        receipt = _load(path) if os.path.lexists(path) else None
-        preparing = bool(receipt and receipt.get("phase") == "preparing_database")
-        rows = _inventory(project, database_preparing=preparing, operator_id=_operator_id)
-        identities = _identities(rows)
-        if receipt:
-            has_database = "database_preparation" in receipt
-            expected_fields = {"schema_version", "project", "source_revision", "containers", "phase"}
-            if has_database:
-                expected_fields.add("database_preparation")
-            if (set(receipt) != expected_fields or receipt["schema_version"] != SCHEMA
-                    or receipt["project"] != project or receipt["source_revision"] != source_revision
-                    or receipt["phase"] not in ("pausing", "paused", "preparing_database", "database_prepared")
-                    or has_database != (receipt["phase"] in ("preparing_database", "database_prepared"))
-                    or (not preparing and receipt["containers"] != identities)):
-                raise RuntimeError("storage_pause_hold_binding_mismatch")
-            if has_database:
-                preparation = receipt["database_preparation"]
-                if (not prepare_database or not isinstance(preparation, dict) or set(preparation) != _DATABASE_FIELDS
-                        or preparation["history_uuid"] != history_uuid
-                        or type(preparation["source_stopped"]) is not bool
-                        or type(preparation["deadline"]) not in (int, float)
-                        or not 0 < preparation["deadline"] < 1e12
-                        or any(not isinstance(preparation[key], str) or not re.fullmatch(r"[0-9a-f]{64}", preparation[key])
-                               for key in ("original_id", "recipe_sha256", "source_contract", "target_contract"))
-                        or (preparation["replacement_id"] is not None
-                            and (not isinstance(preparation["replacement_id"], str)
-                                 or not re.fullmatch(r"[0-9a-f]{64}", preparation["replacement_id"])))):
-                    raise RuntimeError("storage_pause_database_binding_mismatch")
-                if preparing:
-                    receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
-                else:
-                    # Re-enter through all physical/configuration/cluster checks.
-                    receipt = _prepare_database(state_root, {**receipt, "phase": "preparing_database"}, operator_id=_operator_id)
-                yield receipt
-                return
-        else:
-            receipt = dict(schema_version=SCHEMA, project=project, source_revision=source_revision,
-                           containers=identities, phase="pausing")
-            _save(path, receipt, initial=True)
-        print("event=storage_handoff_pause_started", file=sys.stderr, flush=True)
-        for service in STOP:
-            rows = _inventory(project)
-            if _identities(rows) != identities:
-                raise RuntimeError("storage_pause_container_changed")
-            if rows[service]["running"]:
-                grace = 300 if service == "market-data-collector" else 60
-                _docker("stop", "--time", str(grace), rows[service]["id"], timeout=grace + 30)
+        with _paused_storage_clients_locked(state_root, project=project,
+                source_revision=source_revision, prepare_database=prepare_database,
+                history_uuid=history_uuid, _operator_id=_operator_id) as receipt:
+            yield receipt
+
+
+@contextmanager
+def _paused_storage_clients_locked(state_root, *, project, source_revision,
+                                   prepare_database, history_uuid, _operator_id=None,
+                                   _preparation_deadline=None):
+    """Internal body; caller must own the deployment lock."""
+    for name in ("promotion.env", "alert-preview.env"):
+        if os.path.lexists(state_root / name):
+            raise RuntimeError("storage_pause_unfinished_server_operation")
+    release = (state_root / "release.env").read_text()
+    if re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [source_revision]:
+        raise RuntimeError("storage_pause_recorded_release_mismatch")
+    path = state_root / HOLD
+    receipt = _load(path) if os.path.lexists(path) else None
+    preparing = bool(receipt and receipt.get("phase") == "preparing_database")
+    rows = _inventory(project, database_preparing=preparing, operator_id=_operator_id)
+    identities = _identities(rows)
+    if receipt:
+        has_database = "database_preparation" in receipt
+        expected_fields = {"schema_version", "project", "source_revision", "containers", "phase"}
+        if has_database:
+            expected_fields.add("database_preparation")
+        if (set(receipt) != expected_fields or receipt["schema_version"] != SCHEMA
+                or receipt["project"] != project or receipt["source_revision"] != source_revision
+                or receipt["phase"] not in ("pausing", "paused", "preparing_database", "database_prepared")
+                or has_database != (receipt["phase"] in ("preparing_database", "database_prepared"))
+                or (not preparing and receipt["containers"] != identities)):
+            raise RuntimeError("storage_pause_hold_binding_mismatch")
+        if has_database:
+            preparation = receipt["database_preparation"]
+            if (not prepare_database or not isinstance(preparation, dict) or set(preparation) != _DATABASE_FIELDS
+                    or preparation["history_uuid"] != history_uuid
+                    or type(preparation["source_stopped"]) is not bool
+                    or type(preparation["deadline"]) not in (int, float)
+                    or not 0 < preparation["deadline"] < 1e12
+                    or any(not isinstance(preparation[key], str) or not re.fullmatch(r"[0-9a-f]{64}", preparation[key])
+                           for key in ("original_id", "recipe_sha256", "source_contract", "target_contract"))
+                    or (preparation["replacement_id"] is not None
+                        and (not isinstance(preparation["replacement_id"], str)
+                             or not re.fullmatch(r"[0-9a-f]{64}", preparation["replacement_id"])))):
+                raise RuntimeError("storage_pause_database_binding_mismatch")
+            if preparing:
+                receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
+            else:
+                # Re-enter through all physical/configuration/cluster checks.
+                receipt = _prepare_database(state_root, {**receipt, "phase": "preparing_database"}, operator_id=_operator_id)
+            yield receipt
+            return
+    else:
+        receipt = dict(schema_version=SCHEMA, project=project, source_revision=source_revision,
+                       containers=identities, phase="pausing")
+        _save(path, receipt, initial=True)
+    print("event=storage_handoff_pause_started", file=sys.stderr, flush=True)
+    for service in STOP:
         rows = _inventory(project)
-        if _identities(rows) != identities or any(rows[x]["running"] for x in STOP):
-            raise RuntimeError("storage_pause_clients_not_stopped")
-        receipt = {**receipt, "phase": "paused"}
-        _save(path, receipt, initial=False)
-        if prepare_database:
-            receipt = _begin_database_preparation(state_root, receipt, rows, history_uuid)
-            _save(path, receipt, initial=False)  # intent precedes every DB mutation
-            receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
-        print("event=storage_handoff_clients_stopped resume_authorized=false", file=sys.stderr, flush=True)
-        yield receipt
+        if _identities(rows) != identities:
+            raise RuntimeError("storage_pause_container_changed")
+        if rows[service]["running"]:
+            grace = 300 if service == "market-data-collector" else 60
+            timeout = grace + 30
+            if _preparation_deadline is not None:
+                remaining = int(_preparation_deadline-time.time())
+                if remaining < 1:
+                    raise RuntimeError("storage_online_preparation_deadline_expired")
+                grace, timeout = min(grace, remaining), min(timeout, remaining)
+            _docker("stop", "--time", str(grace), rows[service]["id"], timeout=timeout)
+    rows = _inventory(project)
+    if _identities(rows) != identities or any(rows[x]["running"] for x in STOP):
+        raise RuntimeError("storage_pause_clients_not_stopped")
+    receipt = {**receipt, "phase": "paused"}
+    _save(path, receipt, initial=False)
+    if prepare_database:
+        receipt = _begin_database_preparation(state_root, receipt, rows, history_uuid)
+        if _preparation_deadline is not None:
+            receipt["database_preparation"]["deadline"] = min(
+                receipt["database_preparation"]["deadline"], _preparation_deadline)
+        _save(path, receipt, initial=False)  # intent precedes every DB mutation
+        receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
+    print("event=storage_handoff_clients_stopped resume_authorized=false", file=sys.stderr, flush=True)
+    yield receipt
 
 
 _OPERATOR_STATE = "storage-operator-state.json"
