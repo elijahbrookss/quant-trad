@@ -19,6 +19,7 @@ SCHEMA = "qt_fact_header_cutover_v2"
 SOURCE = "market.fact_versions"
 QUEUE = SCHEMA + ".pending_fact_ids"
 STATE = SCHEMA + ".capture"
+CANCELLED = SCHEMA + ".cancelled"
 LOCK = "quant-trad:fact-header-cutover:v2"
 logger = logging.getLogger(__name__)
 DEFAULT_ATTEMPT_SECONDS = 24 * 3600
@@ -35,6 +36,7 @@ def _attempt_seconds(saved):
 
 def capture_remaining_seconds(conn):
     """Read the persisted attempt budget; no phase or retry can reset its clock."""
+    require_not_cancelled(conn)
     row = conn.execute(text(f"""
         SELECT to_jsonb(c) AS capture,
                EXTRACT(EPOCH FROM clock_timestamp()-prepared_at)::double precision AS age
@@ -49,12 +51,27 @@ def capture_remaining_seconds(conn):
 
 
 
+def require_not_cancelled(conn):
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": CANCELLED}) is not None:
+        raise RuntimeError("fact_header_migration_attempt_cancelled")
+
+
 @contextmanager
 def migration_step(conn, timeout_seconds=30):
-    """Bound one fixed migration step and reuse capture's original persisted clock.
+    """Bound normal work by both the step and original persisted attempt clock."""
+    with _bounded_step(conn, timeout_seconds) as limit:
+        require_not_cancelled(conn)
+        if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
+            limit(capture_remaining_seconds(conn))
+        yield
 
-    The caller owns commit. This is not a cutover or a duration qualification.
-    A rejected/expired step leaves the original source and capture intact.
+
+@contextmanager
+def _bounded_step(conn, timeout_seconds):
+    """Shared transaction/lock/statement bound; no copy or switch authority.
+
+    Normal work must use migration_step. Terminal cancellation uses this only
+    to remove admitted capture dependencies, even after the attempt expired.
     """
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS:
         raise ValueError("fact_header_migration_timeout_out_of_bounds")
@@ -116,10 +133,11 @@ def migration_step(conn, timeout_seconds=30):
             if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
                                {"name": LOCK}):
                 raise RuntimeError("fact_header_copy_migration_busy")
-            if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
-                seconds = capture_remaining_seconds(conn)
+            def limit(seconds):
+                nonlocal deadline
                 deadline = min(deadline, monotonic() + seconds)
-            yield
+                remaining()
+            yield limit
             remaining()
         finally:
             # Remove before savepoint rollback or returning this connection;

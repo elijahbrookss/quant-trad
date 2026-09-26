@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/fact_header_v2_cancel.py
   - scripts/db/fact_header_v2_online.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
@@ -1184,7 +1185,7 @@ retains its proof. Restart requires bounded background re-verification; saved
 hashes alone cannot substitute. File descriptors and proof bytes/time are
 bounded without changing host limits. Descriptor/kernel-memory capacity and the
 remaining metadata scan require measured admission. The default final verifier
-still hashes all files. Publisher drain, capture cleanup and runtime activation
+still hashes all files. Publisher drain, invocation of terminal cancellation and runtime activation
 remain separate unfinished host integration.
 
 The complete online operator, archive reconciliation and measured short final
@@ -1205,10 +1206,36 @@ capture for same-attempt catch-up; committed closure refuses prepare/copy reuse.
 No files, source rows or saved attempt timestamps are changed. Expired attempts
 remain refused, and a saved report cannot authorize retirement. The SQL switch automatically requires this live retirement when capture exists;
 commit_handoff accepts the caller-owned live file proof through commit. Host
-integration, publisher drain, activation and terminal cleanup of expired attempts remain
-separate, unqualified steps.
+integration, publisher drain and activation remain unqualified. Expired-attempt
+cancellation uses the separate terminal boundary below.
 
 Archive capture preparation requires the raw-mapping shadow to be prepared
 first: its foreign key adds native triggers to the raw manifest catalog.
 Sealing the archive catalog binding before that DDL would correctly reject the
 later trigger change. Existing bound captures are never rewritten to accept it.
+
+
+### Terminal cancellation of abandoned capture
+
+The internal fact_header_v2_cancel.cancel_attempt accepts the original capture
+start identity and a caller-owned transaction. It can detach an intact expired
+or abandoned v1 attempt under a separate cumulative limit of at most 30 seconds.
+It shares the existing transaction, advisory-lock and per-statement bounds;
+normal migration work still enforces the original capture deadline. Source,
+raw and archive writer fences are nonwaiting. A busy source refuses cleanup.
+
+Cancellation validates the exact source/capture and any prepared physical,
+archive-root and reference bindings. It removes only staged shadow-identity
+foreign keys before detaching identity mirroring and temporary capture triggers.
+Native source references and immutable guards stay in force. Payload parent
+removal covers inherited staged leaves, including leaves created during copying.
+All original data, partial copies, queues, progress, functions and timestamps
+remain, plus a terminal receipt. No data scan, copy, switch, deadline renewal or
+automatic replacement attempt occurs. Normal preparation, copy and switch
+entrypoints permanently refuse the canceled attempt.
+
+A rollback restores all dependencies and capture; a lost commit reply requires
+read-only receipt inspection. Cancellation is not a host abort or runtime
+restart instruction. The persistent online host controller must invoke and
+qualify this boundary explicitly; source collection continues on the old layout.
+Production-cardinality lock/admission cost remains unmeasured.
