@@ -192,6 +192,10 @@ def _partition(conn, day, *, placement=None, pid=None):
     with (physical.tablespace(conn,space) if placement else nullcontext()):
         clause=" TABLESPACE "+conn.dialect.identifier_preparer.quote(space) if placement else ""
         conn.exec_driver_sql(f"CREATE TABLE {relation} PARTITION OF {SCHEMA}.fact_versions {bound}{clause}")
+        # An opt-in proof for a newly empty shadow protects direct leaf TRUNCATE
+        # as well as the row guards PostgreSQL clones from its parent.
+        from scripts.db.fact_header_v2_online_proof import protect_new_partition
+        protect_new_partition(conn, day)
     if placement:
         physical.verify_group(conn,relation,history=history,saved=placement,pid=pid)
     conn.execute(text(f"INSERT INTO {SCHEMA}.fact_header_partitions(storage_day) VALUES(:day)"),{"day":day})
@@ -420,8 +424,9 @@ def _verify_routing(conn, rows):
 def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
     """Fence and verify the fixed header copy in the caller's transaction.
 
-    Yield only after full header/identity equality, conservative routing coverage
-    and partition/placement checks. The caller may perform its admitted handoff
+    Yield only after exact header/identity equality, conservative routing coverage
+    and partition/placement checks. Newly empty shadows may opt into protected
+    page proofs; existing shadows retain the full-history verifier. The caller may perform its admitted handoff
     inside this context, under the same cumulative deadline. Ordinary reads
     remain allowed; the actual rename needs a separate exclusive fence. Success retains
     locks until caller commit/rollback; failure releases this savepoint's locks.
@@ -431,6 +436,11 @@ def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
         raise ValueError("fact_header_copy_page_rows_out_of_bounds")
     started = monotonic()
     with migration_step(conn, timeout_seconds):
+        from scripts.db import fact_header_v2_online_proof as online_proof
+        if conn.scalar(text("SELECT to_regclass(:name)"), {"name": online_proof.STATE}) is not None:
+            with online_proof.verified_copy(conn, timeout_seconds=timeout_seconds) as report:
+                yield report
+            return
         # Close source writers before inspecting progress or taking a snapshot.
         # Lock all copied data and routing tables too: the shadow is not yet
         # protected by the runtime immutable guards.

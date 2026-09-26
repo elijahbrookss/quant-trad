@@ -10,6 +10,7 @@ tags:
   - recovery
 code_paths:
   - scripts/db/fact_header_v2_online.py
+  - scripts/db/fact_header_v2_online_proof.py
   - cli/main.py
   - src/core/storage_targets.py
   - src/core/storage_header_placement.py
@@ -1147,8 +1148,17 @@ placement, preserves the original capture deadline and enforces existing
 resource guards. Finite baselines precede fairly alternating catch-up passes.
 Private relocation is a separate phase; source data is never deleted.
 
-An empty tail observation is not switch readiness. The complete online operator,
-proof-preserving background verification and measured short final switch remain
-unfinished; the existing full-scan final verifier and held host operator cannot
-be advertised as a short-outage path. The old held-growth capacity sensitivity
-must be replaced by live-ingestion and capture-backlog admission.
+An empty tail observation is not switch readiness. Newly empty shadows may opt
+into protected exact page proofs before copying: source-equal insert guards,
+immutable targets, monotone routing, direct-leaf truncate guards and persistent
+leaf identities keep committed page verification valid. The final SQL fence
+closes capture and checks exact guards, definitions, partition catalog and
+physical placement without scanning every header/identity/raw row. Guard removal
+and the existing SQL switch commit or roll back together. Older unprotected
+shadows retain the full verifier; proof cannot be retrofitted after copying.
+
+The complete online operator, archive reconciliation and measured short final
+switch remain unfinished. The held host operator cannot be advertised as a
+short-outage path. Additional source lookups in protected inserts require
+throughput/collector-impact qualification. The old held-growth capacity
+sensitivity must be replaced by live-ingestion and capture-backlog admission.

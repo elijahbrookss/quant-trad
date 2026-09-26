@@ -245,6 +245,12 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
     """),{"parent":SCHEMA+".fact_versions"}).all()
     if any(schema!=SCHEMA for schema,name in children):
         raise RuntimeError("fact_header_handoff_unexpected_partition")
+    from scripts.db import fact_header_v2_online_proof as online_proof
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": online_proof.STATE}) is not None:
+        # The enclosing live proof holds the source and shadow fences. Temporary
+        # guards must disappear atomically with the rename so new runtime writes
+        # are never checked against the retained old source.
+        online_proof.release_for_switch(conn)
     conn.exec_driver_sql(f"CREATE SCHEMA {retained}")
     conn.exec_driver_sql(f"REVOKE ALL ON SCHEMA {retained} FROM PUBLIC")
     conn.exec_driver_sql(f"""

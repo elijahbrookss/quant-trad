@@ -357,6 +357,11 @@ def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
         raise ValueError("raw_mapping_copy_page_rows_out_of_bounds")
     started = monotonic()
     with _step(conn, timeout_seconds):
+        from scripts.db.fact_header_v2_online_proof import current_lookup_proof
+        protected = current_lookup_proof(conn)
+        if protected is not None:
+            yield protected
+            return
         # Require the actual header fence on this connection, not a saved report.
         if not conn.scalar(text("""
             SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid()

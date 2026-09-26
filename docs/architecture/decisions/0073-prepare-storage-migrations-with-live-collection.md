@@ -10,18 +10,20 @@ tags:
   - migration
 code_paths:
   - scripts/db/fact_header_v2_online.py
+  - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/fact_header_v2_capture.py
   - scripts/db/fact_header_v2_copy.py
   - scripts/db/raw_mapping_v2_copy.py
   - scripts/db/fact_header_v2_handoff.py
   - scripts/automation/storage_handoff_pause.py
   - tests/test_market_data/test_fact_header_online_db.py
+  - tests/test_market_data/test_fact_header_online_proof_db.py
 ---
 # ADR 0073: Prepare storage migrations with live collection
 
 Proposed September 26, 2026 after the user rejected a multi-day collector outage.
-This decision records the required replacement workflow. Only the bounded copy
-pass below is implemented; a complete online operator and short final switch
+This decision records the required replacement workflow. Bounded copying and protected exact SQL page proofs
+are implemented; a complete online operator and short final switch
 remain unqualified. The existing whole-migration host hold is not the authorized
 production release path.
 
@@ -94,9 +96,30 @@ always says migration_ready=false and final_switch_authorized=false.
 Observing both queues empty in separate transactions is explicitly not an atomic
 readiness observation.
 
+The opt-in fact_header_v2_online_proof is installed before the first copied
+row, only on empty fixed shadows. Header, identity and raw inserts must exactly
+match their authoritative source row. Row updates/deletes and parent/direct-leaf
+truncation are refused. Routing can only expand. Immutable partition metadata,
+recorded leaf object identities and exact function/trigger/definition checks
+preserve each committed page's proof. Existing source immutability, transactional
+capture, exact page comparison and cursor/queue retirement establish coverage;
+the saved row counts report that proof, rather than substitute for comparison.
+
+At the final source/shadow fence, completed baselines and empty committed queues
+close coverage. Bounded partition/catalog/physical checks replace rereading all
+header, identity and raw rows. The raw verifier accepts only the live enclosing
+header proof context. The existing SQL switch removes temporary guards in that
+same transaction; a failed switch restores both guards and old serving source.
+An unprotected older shadow keeps the original full verifier and cannot be
+retroactively certified. Privileged operators must not disable protections or
+edit progress; this is not protection against a malicious database owner.
+
 This slice does not install a production supervisor, expose a new user command,
-shorten the final verification scan or authorize the old host hold. Remaining
-qualification is part of this same implementation, not a user approval request.
+remove the archive final scan or authorize the old host hold. Additional indexed
+source lookups for protected inserts need measured throughput and collector/query
+impact; earlier unchanged-copy projections do not qualify that new cost.
+Complete reference/archive preparation and a measured end-to-end short switch
+remain required. This is implementation work, not a new user approval request.
 
 ## Required evidence
 
