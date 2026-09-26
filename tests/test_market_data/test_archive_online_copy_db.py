@@ -29,18 +29,20 @@ pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_STORAGE_DEMO") !=
                 reason="requires owned SSD/HDD storage-demo topology")]
 
 
-def _prepare(storage, tmp_path, monkeypatch):
+def _prepare(storage, tmp_path, monkeypatch, *, source_directory=None, destination_directory=None,
+             recent_root="/qt-source/pgdata"):
     assert os.getuid() == 70 and os.getenv("QT_DB_TEST_ISOLATED") == "1"
-    source = Path("/qt-source/pgdata") / ("archive-online-"+uuid4().hex)
-    source.mkdir()
+    source = Path(source_directory) if source_directory else Path(recent_root) / ("archive-online-"+uuid4().hex)
+    source.mkdir(exist_ok=source_directory is not None)
     book = _cold_book_handoff(storage, source, monkeypatch, split_sources=False)
     storage.open_day = storage.today
     _placement(monkeypatch, storage.open_day)
     restore_tiered_v1_fixture(storage)
-    _configure_placement(storage, tmp_path, monkeypatch)
+    _configure_placement(storage, tmp_path, monkeypatch, recent_root=recent_root)
     storage.copy_plan = replace(storage.copy_plan, history_before=storage.today-timedelta(days=30))
-    destination = Path("/qt-history") / ("archive-online-"+uuid4().hex)
-    destination.mkdir()
+    destination = (Path(destination_directory) if destination_directory else
+                   Path("/qt-history") / ("archive-online-"+uuid4().hex))
+    destination.mkdir(parents=True, exist_ok=destination_directory is not None)
     options = dict(source_root=source/"objects", destination_root=destination,
                    page_rows=2, max_page_bytes=32*1024**2, **_options(storage))
     options["policy"] = replace(options["policy"], movement_enabled=True, backup_enabled=True)

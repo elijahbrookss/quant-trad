@@ -15,6 +15,7 @@ code_paths:
   - tests/test_storage_online_launch.py
   - tests/test_storage_online_controller.py
   - tests/test_market_data/test_storage_online_controller_db.py
+  - tests/test_market_data/test_storage_online_entrypoint_db.py
   - scripts/db/fact_header_v2_cancel.py
   - scripts/automation/storage_online_worker.py
   - scripts/ci/rehearse_online_worker.py
@@ -373,3 +374,17 @@ host recovery preparation or a short outage. Unit tests additionally cover
 configuration drift and interruption after create before receipt persistence.
 The complete initial/final host pauses and resource admission remain release
 requirements. No final switch command is exposed on this channel.
+
+The positive host-driven entrypoint fixture now prepares real QT v1 capture and
+protected shadows on distinct SSD/HDD filesystems with canonical PGDATA, source
+and history paths. It starts the actual root entrypoint through the admitted
+Docker arguments, drops to the restricted identity before imports, and exercises
+bounded copy/reproof commands while a separate real QT publisher adds archives.
+Source/frozen records and original capture start remain unchanged. Restarting the
+same exited worker container produces a new controller ID and zero live proof.
+The fixture database has only PGDATA/HDD mounts and archiving stays off; it does
+not qualify a recovery-key-bearing database, initial/final host pause, matching
+runtime activation, full launcher-context lifecycle, or production throughput.
+The synthetic UUID metadata and small application fixture establish only this
+entrypoint boundary. Existing native UID1000 publication/permission evidence is
+separate; this positive application fixture's source owner is UID70.
