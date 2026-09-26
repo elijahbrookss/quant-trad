@@ -1,4 +1,4 @@
-"""Move the two fixed archive reference catalogs during the preserving upgrade.
+"""Move fixed archive catalogs and the retained rollback source to history.
 
 Internal operator step, not runtime wiring or a generic mover. Each operation
 owns one transaction through commit, reuses existing physical/resource guards
@@ -23,11 +23,12 @@ from scripts.db.fact_header_v2_admission import _columns, _constraints, _seconda
 from scripts.db.fact_header_v2_capture import SCHEMA, migration_step
 
 RELATIONS = ("market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies")
+RETAINED_LEGACY = "qt_fact_storage_cutover_v1.fact_versions"
 logger = logging.getLogger(__name__)
 
 
 def _known(relation):
-    if relation not in RELATIONS:
+    if relation not in (*RELATIONS, RETAINED_LEGACY):
         raise ValueError("archive_reference_move_known_catalog_required")
     return relation
 
@@ -57,13 +58,43 @@ def _definition(conn, relation):
             [tuple(row) for row in indexes], triggers)
 
 
+def _assert_retained_source(conn):
+    """Only the old fenced rollback table is admitted before header copying."""
+    triggers = conn.execute(text("""
+        SELECT t.tgname,t.tgtype,t.tgenabled,n.nspname,p.proname
+        FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+        JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE t.tgrelid=to_regclass(:relation) AND NOT t.tgisinternal
+    """), {"relation": RETAINED_LEGACY}).all()
+    required = {
+        ("trg_storage_cutover_reject_insert", 7, "A", "market", "reject_immutable_mutation"),
+        ("trg_reject_mutation_fact_versions", 27, "A", "market", "reject_immutable_mutation"),
+    }
+    if not required <= {tuple(row) for row in triggers}:
+        raise RuntimeError("retained_source_move_immutable_fence_required")
+    if conn.scalar(text("""
+        SELECT EXISTS(SELECT 1 FROM pg_inherits
+                      WHERE inhrelid=to_regclass(:relation) OR inhparent=to_regclass(:relation))
+            OR EXISTS(SELECT 1 FROM pg_constraint
+                      WHERE contype='f' AND confrelid=to_regclass(:relation))
+            OR EXISTS(SELECT 1 FROM pg_depend d JOIN pg_rewrite r ON r.oid=d.objid
+                      WHERE d.classid='pg_rewrite'::regclass
+                        AND d.refclassid='pg_class'::regclass
+                        AND d.refobjid=to_regclass(:relation))
+    """), {"relation": RETAINED_LEGACY}):
+        raise RuntimeError("retained_source_move_unexpected_dependency")
+
+
 def inspect_reference_catalog(conn, *, relation):
     """Read current placement, including after expiry; never authorize a move."""
     _known(relation)
     state = headers._inspect_progress(conn)
     if state["placement"] is None:
         raise RuntimeError("archive_reference_move_physical_placement_required")
-    references._inventory(conn)
+    if relation == RETAINED_LEGACY:
+        _assert_retained_source(conn)
+    else:
+        references._inventory(conn)
     definition = _definition(conn, relation)
     saved = state["placement"]
     spaces = conn.execute(text("""
@@ -221,7 +252,7 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                         conn.exec_driver_sql(f"ALTER TABLE {relation} SET TABLESPACE {destination}")
                         watch.check()
                         for name in indexes:
-                            conn.exec_driver_sql(f"ALTER INDEX market.{quote(name)} SET TABLESPACE {destination}")
+                            conn.exec_driver_sql(f"ALTER INDEX {quote(relation.split('.', 1)[0])}.{quote(name)} SET TABLESPACE {destination}")
                             watch.check()
                         after = inspect_reference_catalog(conn, relation=relation)
                         if after["placement"] != "history" or after["_definition"] != observed["_definition"]:

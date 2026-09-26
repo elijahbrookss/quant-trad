@@ -251,3 +251,74 @@ def test_reference_move_space_pressure_rolls_back_all_files_and_releases_connect
         _assert_disk(conn,relation,Path("/qt-source/pgdata"))
         _insert(conn,placed,"after-reference-capacity-refusal")
     assert move.move_reference_catalog(engine,relation=relation,**options)["committed"]
+
+def _seed_retained_source(engine):
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS qt_fact_storage_cutover_v1")
+        conn.exec_driver_sql(f"CREATE TABLE {move.RETAINED_LEGACY} (LIKE market.fact_versions INCLUDING ALL)")
+        conn.exec_driver_sql(f"INSERT INTO {move.RETAINED_LEGACY} SELECT * FROM market.fact_versions")
+        conn.exec_driver_sql(f"ALTER TABLE {move.RETAINED_LEGACY} ADD COLUMN rollback_detail text")
+        conn.exec_driver_sql(f"""UPDATE {move.RETAINED_LEGACY} SET rollback_detail=(
+            SELECT string_agg(md5(i::text),'') FROM generate_series(1,512) i)""")
+        conn.exec_driver_sql(f"""CREATE TRIGGER trg_storage_cutover_reject_insert
+            BEFORE INSERT ON {move.RETAINED_LEGACY}
+            FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()""")
+        conn.exec_driver_sql(f"""CREATE TRIGGER trg_reject_mutation_fact_versions
+            BEFORE UPDATE OR DELETE ON {move.RETAINED_LEGACY}
+            FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()""")
+        conn.exec_driver_sql(f"ALTER TABLE {move.RETAINED_LEGACY} ENABLE ALWAYS TRIGGER trg_storage_cutover_reject_insert")
+        conn.exec_driver_sql(f"ALTER TABLE {move.RETAINED_LEGACY} ENABLE ALWAYS TRIGGER trg_reject_mutation_fact_versions")
+        return _rows(conn, move.RETAINED_LEGACY)
+
+
+def test_retained_source_moves_before_copy_preserves_toast_and_recovers(placed):
+    engine=placed.database._engine
+    relation=move.RETAINED_LEGACY
+    before=_seed_retained_source(engine)
+    with engine.begin() as conn:
+        headers.prepare_copy(conn,placement=placed.copy_plan)
+        assert not headers._inspect_progress(conn)["identity_capture"]
+        original_clock=conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1"))
+    options=_options(placed)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"ALTER TABLE {relation} DISABLE TRIGGER trg_storage_cutover_reject_insert")
+    with pytest.raises(RuntimeError,match="immutable_fence_required"):
+        move.move_reference_catalog(engine,relation=relation,**options)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"ALTER TABLE {relation} ENABLE ALWAYS TRIGGER trg_storage_cutover_reject_insert")
+        conn.exec_driver_sql(f"CREATE TABLE public.legacy_dependency(id text REFERENCES {relation}(id))")
+    with pytest.raises(RuntimeError,match="unexpected_dependency"):
+        move.move_reference_catalog(engine,relation=relation,**options)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE public.legacy_dependency")
+    interrupted=[False]
+    def fail_after_index(conn,cursor,statement,parameters,context,executemany):
+        if statement.startswith("ALTER INDEX qt_fact_storage_cutover_v1."):
+            interrupted[0]=True
+            raise RuntimeError("fixture_legacy_move_interrupted")
+    event.listen(engine,"after_cursor_execute",fail_after_index)
+    try:
+        with pytest.raises(RuntimeError,match="fixture_legacy_move_interrupted"):
+            move.move_reference_catalog(engine,relation=relation,**options)
+    finally:
+        event.remove(engine,"after_cursor_execute",fail_after_index)
+    assert interrupted[0]
+    with engine.connect() as conn:
+        _assert_disk(conn,relation,Path("/qt-source/pgdata"))
+        assert _rows(conn,relation)==before
+    moved=move.move_reference_catalog(engine,relation=relation,**options)
+    assert moved["committed"] and not moved["reused"]
+    with engine.connect() as conn:
+        _assert_disk(conn,relation,Path("/qt-history"))
+        assert _rows(conn,relation)==before
+        nodes=_nodes(conn,relation)
+        assert conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1"))==original_clock
+        assert not headers._inspect_progress(conn)["identity_capture"]
+    assert move.move_reference_catalog(engine,relation=relation,**options)["reused"]
+    with engine.connect() as conn:
+        assert _nodes(conn,relation)==nodes
+    with pytest.raises(DBAPIError,match="immutable"):
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"DELETE FROM {relation}")
+    with engine.begin() as conn:
+        _insert(conn,placed,"collection-after-retained-copy-move")

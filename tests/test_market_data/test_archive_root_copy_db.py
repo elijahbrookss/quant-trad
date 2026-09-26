@@ -32,7 +32,7 @@ from tests.test_market_data.test_fact_book_retention_db import _cold_book_handof
 from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement, _assert_disk
 from tests.test_market_data.test_fact_header_copy_db import _insert
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
-from tests.test_market_data.test_archive_reference_placement_db import _options
+from tests.test_market_data.test_archive_reference_placement_db import _options, _seed_retained_source
 from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture
 
 pytestmark = [
@@ -304,9 +304,12 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
 
     # The fixed commit boundary owns complete verification and its transaction.
     # Publisher drain/root activation and full-volume qualification stay separate.
+    _seed_retained_source(engine)
+    from scripts.db import archive_reference_v2_placement as retained_move
     stage_pages = [0]
     def interrupt_staging(conn, cursor, statement, parameters, context, executemany):
         if statement.startswith("INSERT INTO "+SCHEMA+".fact_versions "):
+            _assert_disk(conn, retained_move.RETAINED_LEGACY, Path("/qt-history"))
             stage_pages[0] += 1
             if stage_pages[0] == 2:
                 with engine.begin() as killer:

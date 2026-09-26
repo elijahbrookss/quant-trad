@@ -1095,3 +1095,14 @@ original attempt clock. Retry verifies the HDD placement, catches up intervening
 source inserts and reuses the committed relocation. Identity mirroring remains
 a later bounded source-fence step. This ordering does not authorize source
 deletion or relax filesystem reserves.
+
+The preserving operator also relocates the immutable retained v1 rollback table
+to the HDD before allocating the new header and raw lookup copies, when that
+legacy table exists. This addresses measured SSD staging pressure without deleting
+the rollback data or changing retention. The existing fixed-table mover admits
+only the named, write-fenced ordinary table with no incoming reference/view or
+inheritance dependency. It preserves heap, TOAST, indexes, relation identity,
+logical definitions and guards in one transaction, verifies physical placement,
+and reuses committed placement after interruption. The existing capacity/WAL
+watch and original migration deadline apply. A clean installation with no legacy
+rollback table has nothing to relocate; no generic placement control is added.

@@ -153,6 +153,14 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
         headers.prepare_copy(conn, placement=placement,
                              timeout_seconds=step_limits()["movement_timeout_seconds"])
         raw.prepare_copy(conn, timeout_seconds=step_limits()["movement_timeout_seconds"])
+    # Keep the immutable prior-cutover rollback source intact, but retire its
+    # SSD allocation before allocating the new headers and raw lookup staging.
+    with transaction() as (conn, _):
+        retained = conn.scalar(text("SELECT to_regclass(:relation)"),
+                               {"relation": reference_move.RETAINED_LEGACY}) is not None
+    if retained:
+        reference_move.move_reference_catalog(engine, relation=reference_move.RETAINED_LEGACY,
+            policy=policy, resource_limits=step_limits(), cancelled=cancelled)
     catch_up()
     with transaction() as (conn, _):
         raw.place_on_history(conn,timeout_seconds=step_limits()["movement_timeout_seconds"])
