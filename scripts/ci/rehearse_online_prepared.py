@@ -13,7 +13,10 @@ parser.add_argument('--output-root',type=Path,required=True)
 parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
+parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 options=parser.parse_args()
+if options.worker_phases and not options.prepare_source:
+ parser.error('--worker-phases requires --prepare-source')
 ROOT=options.output_root.resolve(strict=True)
 history_parent=options.history_parent.resolve(strict=True)
 from scripts.automation import storage_online_launch as launch
@@ -123,7 +126,7 @@ try:
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=',
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
-   '--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
+   '--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
  log=(state/'fixture.log').open('w')
@@ -153,9 +156,9 @@ try:
     data+=piece
   return json.loads(data)
  sequence=0
- def command(op):
+ def command(op,**extra):
   global sequence
-  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op))+'\n').encode());return read()
+  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read()
  first_deadline=None
  for attempt in range(2):
   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
@@ -174,6 +177,30 @@ try:
     for _ in range(3):command('reprove')
     assert command('status')['background_hashed_bytes']>0
     (control/'publish').write_text('publish')
+    if options.worker_phases:
+     def phase(step,relation=None):
+      reply=command('prepare_step',step=step,relation=relation,max_duration_seconds=30)
+      assert reply['result']['committed'] and not reply['final_switch_authorized']
+      return reply
+     for _ in range(64):
+      reply=command('sql_copy')
+      outcome=reply['result']['outcome']
+      if outcome=='identity_relocation_required':phase('identity_history')
+      elif outcome=='raw_relocation_required':phase('raw_history')
+      elif outcome=='both_tails_observed_empty' and (control/'published').exists():break
+     else:raise RuntimeError('tiny_worker_phases_did_not_converge')
+     phase('identity_capture')
+     (control/'inspect-references').write_text('inspect')
+     waitfile('references.json')
+     relations=json.loads((control/'references.json').read_text())
+     assert isinstance(relations,list) and len(relations)<=128
+     for relation in relations:
+      phase('reference_prepare',relation);phase('reference_validate',relation)
+     phase('reference_adopt')
+     (control/'phases-finished').write_text('finished')
+     waitfile('catalogs-moved')
+     report['explicit_preparation_through_worker']=True
+     report['worker_reference_relations']=len(relations)
     command('archive_copy')
     waitfile('published')
     for i in range(30):

@@ -1591,3 +1591,16 @@ then prepares/validates/adopts references and catches archive intake. It checks
 original capture/frozen preservation and refusal of excess phase duration.
 This component qualification is not a complete packaged host phase driver,
 production lock-impact measurement or final outage admission.
+
+
+The optional owned host rehearsal adds --worker-phases with --prepare-source.
+After initial source resumption and atomic capture, it sends explicit private
+moves, identity mirroring and reference preparation/validation/adoption through
+the launched worker's real pipe, alongside real QT publication and bounded copy
+commands. The application fixture supplies its incoming-reference names only
+after mirroring; this private diagnostic channel is not a production operator
+discovery interface. Retained/reference catalog moves remain explicit external
+fixture phases. Existing source receipts, empty-proof reentry and worker-only
+exception cleanup are still checked. Synthetic services/UUID metadata/UID70
+directories and small data do not establish production collector performance or
+the final pause/recovery sequence.

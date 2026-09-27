@@ -98,6 +98,8 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
                 raise AssertionError("online entrypoint fixture host deadline: "+name)
             time.sleep(0.1)
     atomic = os.getenv("QT_ONLINE_ATOMIC_PREPARE") == "1"
+    worker_phases = os.getenv("QT_ONLINE_WORKER_PHASES") == "1"
+    assert not worker_phases or atomic
     engine, options, source, _ = _prepare(storage, control, monkeypatch,
         source_directory="/app/logs/market-structure",
         destination_directory="/qt-history/archives/objects",
@@ -112,7 +114,16 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
             "(SELECT oid::text FROM pg_database WHERE datname=current_database()) FROM pg_control_system()"))
         frozen = _frozen_records(conn)
         assert conn.scalar(text("SHOW archive_mode")) == "off"
-    if atomic:
+    if worker_phases:
+        # The retained-table move remains an explicit external phase. Only the
+        # controller's qualified private/reference phases go through its pipe.
+        with engine.begin() as conn:
+            retained = conn.scalar(text("SELECT to_regclass(:name)"),
+                {"name": catalogs.RETAINED_LEGACY}) is not None
+        if retained:
+            catalogs.move_reference_catalog(engine, relation=catalogs.RETAINED_LEGACY,
+                policy=options["policy"], resource_limits=options["resource_limits"])
+    elif atomic:
         _stage_online_fixture(engine, storage.copy_plan, options, started)
     else:
         handoff.stage_handoff(engine, placement=storage.copy_plan, max_duration_seconds=120, **options)
@@ -135,6 +146,22 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         definition_id="host-entrypoint-live",provider_product_id="BTC-USD-HOST-ENTRY",
         event_start=BASE+timedelta(hours=4))
     (control/"published").write_text("published")
+    if worker_phases:
+        wait("inspect-references")
+        # This private diagnostic channel supplies only fixture catalog names;
+        # it is not a production discovery or release-authority interface.
+        with engine.begin() as conn:
+            relations = [r["relation"] for r in references.inspect_references(conn)["references"]
+                         if r["relation"] != references.PARENT]
+        assert len(relations) <= 128
+        (control/"references.json").write_text(json.dumps(relations))
+        wait("phases-finished")
+        with engine.begin() as conn:
+            assert references.inspect_references(conn)["references_complete"]
+        for relation in catalogs.RELATIONS:
+            catalogs.move_reference_catalog(engine, relation=relation,
+                policy=options["policy"], resource_limits=options["resource_limits"])
+        (control/"catalogs-moved").write_text("moved")
     wait("finished")
     with engine.begin() as conn:
         assert _frozen_records(conn)==frozen
