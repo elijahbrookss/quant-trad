@@ -19,6 +19,7 @@ backend:
     - http://127.0.0.1:5174
 
 storage:
+  archive_shared_group_id: null
   inventory_path: /run/quanttrad/storage-inventory.json
   maintenance_limits_path: null
 

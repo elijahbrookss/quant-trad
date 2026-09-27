@@ -9,6 +9,9 @@ tags:
   - storage
   - migration
 code_paths:
+  - src/market_data/archive.py
+  - src/core/settings.py
+  - tests/test_market_data/test_archive_shared_ownership.py
   - scripts/automation/storage_host_boundary.py
   - scripts/automation/storage_online_drain.py
   - tests/test_storage_online_drain.py
@@ -1218,3 +1221,27 @@ Confirmed restoration followed by exact healthy source admission terminalizes
 the controller under its original deadline. Uncertain gate closure, committed
 outcomes and dead/lost owners refuse this route. Full outer-loss reconciliation
 and successful migration recovery remain unfinished release obligations.
+
+## Preserve application ownership across the online transition
+
+Disposable use of the exact legacy collector exposed incompatible private file
+owners: the deployed SSD spool belongs to UID1000, while the online reader
+creates HDD objects as UID70. Running every service as70 breaks retained spool
+recovery; switching every service to1000 breaks copied-object access and the
+PostgreSQL physical-maintenance boundary.
+
+Retain application ownership and give application/database maintenance an
+explicit shared group for immutable HDD objects. Keep PostgreSQL files, recovery
+keys and repositories private to their existing owners. Do not recursively
+change source permissions or give ordinary runtimes filesystem-bypass capability.
+The object store implements opt-in group-readable publication before its existing
+atomic link; existing private paths refuse rather than being repaired. Private
+publication remains the default. The exact directory/object contract is owned by
+[Storage Management](../persistence/STORAGE_MANAGEMENT.md#application-and-database-file-ownership).
+
+The remaining composition must move the existing maintenance supervisor to the
+database-owned process boundary, retaining one lifecycle scheduler and its
+status/recovery guarantees. No separate policy or generic workflow framework is
+introduced. This ownership seam is tested, but deployment wiring, actual
+retained-WAL database recovery, complete encrypted pairing and the final operator
+remain unqualified. Existing server/runtime guards and production stay unchanged.

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Iterable, Iterator, Mapping
@@ -22,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from core.settings import get_settings
 from core.storage_mounts import (
     require_configured_archive_mount, require_configured_working_mount,
     require_configured_staging_mount,
@@ -749,19 +751,72 @@ class FilesystemRawArchiveObjectStore:
     """Local immutable object-store semantics for implementation and tests."""
 
     def __init__(self, root: Path, *, writable: bool = True) -> None:
+        self.shared_group = get_settings().storage.archive_shared_group_id
         self.root = Path(root).resolve()
         self.writable = writable
         require_configured_archive_mount(self.root, require_writable=writable)
-        if writable:
+        if self.shared_group is not None:
+            if Path(root).absolute() != self.root:
+                raise PermissionError("market_archive_shared_root_alias")
+            # Shared publication is explicit and only accepts an operator-prepared
+            # root. Never repair existing directories/files in a runtime path.
+            self._shared_directory(self.root)
+            if self.shared_group not in {os.getegid(), *os.getgroups()}:
+                raise PermissionError("market_archive_shared_group_membership_required")
+        elif writable:
             self.root.mkdir(parents=True, exist_ok=True)
         elif not self.root.is_dir():
             raise FileNotFoundError(f"market_archive_root_missing: root={self.root}")
+
+    def _shared_directory(self, path: Path) -> None:
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_gid != self.shared_group
+                or stat.S_IMODE(info.st_mode) != 0o2770):
+            raise PermissionError(f"market_archive_shared_directory_invalid: path={path}")
+
+    def _prepare_parent(self, destination: Path) -> None:
+        if self.shared_group is None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            return
+        self._shared_directory(self.root)
+        parent = self.root
+        for component in destination.relative_to(self.root).parts[:-1]:
+            parent = parent / component
+            try:
+                parent.mkdir(mode=0o2770)
+            except FileExistsError:
+                pass
+            else:
+                # Only the directory just created by this process is adjusted;
+                # an existing private or malformed path is never widened.
+                fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    info = os.fstat(fd)
+                    if info.st_uid != os.geteuid() or info.st_gid != self.shared_group:
+                        raise PermissionError("market_archive_shared_new_directory_owner")
+                    os.fchmod(fd, 0o2770)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                _fsync_directory(parent.parent)
+            self._shared_directory(parent)
+
+    def _shared_object(self, path: Path) -> None:
+        if self.shared_group is None:
+            return
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_gid != self.shared_group
+                or stat.S_IMODE(info.st_mode) != 0o640):
+            raise PermissionError(f"market_archive_shared_object_invalid: path={path}")
 
     def local_path(self, object_key: str) -> Path:
         parts = Path(str(object_key or "")).parts
         if not parts or any(part in {"", ".", ".."} for part in parts):
             raise ValueError("market_archive_invalid: object key is unsafe")
-        target = (self.root / Path(*parts)).resolve()
+        unresolved = self.root / Path(*parts)
+        target = unresolved.resolve()
+        if self.shared_group is not None and target != unresolved:
+            raise PermissionError("market_archive_shared_object_alias")
         if self.root not in target.parents:
             raise ValueError("market_archive_invalid: object key escapes root")
         require_configured_archive_mount(target, require_writable=False)
@@ -783,8 +838,9 @@ class FilesystemRawArchiveObjectStore:
             raise ValueError("market_archive_upload_invalid: source checksum mismatch")
         destination = self.local_path(object_key)
         require_configured_archive_mount(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._prepare_parent(destination)
         if destination.exists():
+            self._shared_object(destination)
             existing_hash = _sha256_file(destination, check_budget=check_budget)
             if existing_hash != expected:
                 raise RuntimeError(
@@ -820,6 +876,12 @@ class FilesystemRawArchiveObjectStore:
                             break
                         target.write(data)
                 target.flush()
+                if self.shared_group is not None:
+                    if os.fstat(target.fileno()).st_gid != self.shared_group:
+                        raise PermissionError("market_archive_shared_new_object_group")
+                    # The inode is prepared before atomic publication; no world
+                    # access, executable bits, or group write permission.
+                    os.fchmod(target.fileno(), 0o640)
                 os.fsync(target.fileno())
             if _sha256_file(temporary, check_budget=check_budget) != expected:
                 raise RuntimeError("market_archive_upload_invalid: copied checksum mismatch")
@@ -829,6 +891,7 @@ class FilesystemRawArchiveObjectStore:
             try:
                 os.link(temporary, destination)
             except FileExistsError:
+                self._shared_object(destination)
                 if _sha256_file(destination, check_budget=check_budget) != expected:
                     raise RuntimeError(
                         "market_archive_object_conflict: immutable key has different bytes"
@@ -838,6 +901,7 @@ class FilesystemRawArchiveObjectStore:
         finally:
             if temporary.exists():
                 temporary.unlink()
+        self._shared_object(destination)
         if _sha256_file(destination, check_budget=check_budget) != expected:
             raise RuntimeError("market_archive_upload_invalid: acknowledgement checksum mismatch")
         check()

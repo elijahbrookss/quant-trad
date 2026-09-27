@@ -30,6 +30,7 @@ _SETTINGS_CACHE: "AppSettings | None" = None
 _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_STORAGE_INVENTORY_PATH", ("storage", "inventory_path")),
     ("QT_STORAGE_MAINTENANCE_LIMITS_PATH", ("storage", "maintenance_limits_path")),
+    ("QT_ARCHIVE_SHARED_GROUP_ID", ("storage", "archive_shared_group_id")),
     ("QT_LOGGING_LEVEL", ("logging", "level")),
     ("QT_LOGGING_DEBUG", ("logging", "debug")),
     ("QT_LOGGING_ENV_NAME", ("logging", "env_name")),
@@ -756,10 +757,26 @@ class ReportSettings:
     materialization: ReportMaterializationSettings
 
 
+def _archive_shared_group(value):
+    if value is None:
+        return None
+    if type(value) is str and value.isascii() and value.isdecimal():
+        value = int(value)
+    if type(value) is not int or not 0 < value < 2**32 - 1:
+        raise ValueError("storage_archive_shared_group_invalid")
+    return value
+
+
 @dataclass(frozen=True)
 class StorageSettings:
     inventory_path: str = "/run/quanttrad/storage-inventory.json"
     maintenance_limits_path: str | None = None
+    archive_shared_group_id: int | None = None
+
+    def __post_init__(self):
+        value = self.archive_shared_group_id
+        if value is not None and (type(value) is not int or not 0 < value < 2**32 - 1):
+            raise ValueError("storage_archive_shared_group_invalid")
 
 
 @dataclass(frozen=True)
@@ -961,6 +978,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
         ),
         storage=StorageSettings(
+            archive_shared_group_id=_archive_shared_group(
+                _coerce_mapping(payload.get("storage")).get("archive_shared_group_id")),
             inventory_path=_coerce_str(_coerce_mapping(payload.get("storage")).get("inventory_path"),
                                        "/run/quanttrad/storage-inventory.json"),
             maintenance_limits_path=_coerce_optional_str(

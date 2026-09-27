@@ -9,6 +9,9 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - src/market_data/archive.py
+  - src/core/settings.py
+  - tests/test_market_data/test_archive_shared_ownership.py
   - scripts/automation/storage_host_boundary.py
   - scripts/automation/storage_handoff_pause.py
   - tests/test_storage_handoff_pause.py
@@ -2192,3 +2195,42 @@ received restoration reply discarded after actual access reopening. Outer host
 loss, unread framing, late SQL completion and production job/source/spool
 admission remain separate limits. The original preparation, capture and final
 windows are never renewed. The complete production operator remains unfinished.
+
+## Application and database file ownership
+
+The deployed application owns its SSD working/spool files as UID1000; private
+legacy files remain0600. The database and physical maintenance own PostgreSQL
+files as UID70. The online reader can copy those archives without changing the
+source, but its UID70 private copies are not readable by UID1000. The former
+all-UID70 runtime recipe therefore cannot be reused for the preserving online
+transition. Ordinary application processes must not gain root or DAC_READ_SEARCH
+as a workaround, and PostgreSQL's private ownership guards remain unchanged.
+
+The existing immutable archive object store now supports an explicit
+`QT_ARCHIVE_SHARED_GROUP_ID` setting (positive numeric group, default unset).
+When set, it requires membership in that group and an already prepared objects
+root with that group and mode2770. New object directories inherit that group and
+are2770; new object inodes become0640 before atomic publication. Shared members
+can publish/retire names in the directories but cannot edit another owner's
+object inode through group write. There is no world access. This is a trusted
+application/maintenance sharing group, not isolation between its members.
+
+Only newly created paths are prepared. Existing incompatible roots, directories,
+objects or symlink aliases refuse; runtime never broadens their permissions or
+changes their owners. An interrupted directory preparation can require explicit
+operator reconciliation; retry does not repair an existing private directory.
+With the setting absent, publication remains private0600. The setting does not
+change the spool, temporary encoders, PGDATA, keys, repositories or backup files.
+
+This publication seam is implemented and tested with the actual legacy image
+and ordinary UID1000:70 / UID70:70 processes on disposable SSD/HDD. It is NOT an
+activated deployment or complete collector/recovery qualification. The next
+integration must move the existing maintenance supervisor to the database-owned
+process boundary while retaining one lifecycle scheduler, its status and all
+recovery guarantees; application collection retains its original UID. No second
+policy/scheduler or general workflow framework is warranted. The existing server
+overlay and strict runtime admission have not been changed and must continue to
+refuse the incomplete transition. Operator preparation, read-worker retirement,
+complete encrypted pairing, retained-WAL DB recovery and measured final pause
+remain release requirements. Existing prepared production directories are not
+silently converted to the new group contract.
