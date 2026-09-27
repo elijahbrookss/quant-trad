@@ -13,8 +13,11 @@ parser.add_argument('--output-root',type=Path,required=True)
 parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
+parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 options=parser.parse_args()
+if options.final_pause and not (options.worker_phases and options.prepare_source):
+ parser.error('--final-pause requires --prepare-source --worker-phases')
 if options.worker_phases and not options.prepare_source:
  parser.error('--worker-phases requires --prepare-source')
 ROOT=options.output_root.resolve(strict=True)
@@ -160,7 +163,7 @@ try:
   global sequence
   sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read()
  first_deadline=None
- for attempt in range(2):
+ for attempt in range(1 if options.final_pause else 2):
   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
    greeting=read();sequence=0
    assert not greeting['final_switch_authorized']
@@ -209,6 +212,63 @@ try:
     else:raise RuntimeError('tiny_host_tails_did_not_converge')
     final=command('status');assert final['background_hashed_bytes']>0
     first_id=receipt['container_id']
+    if options.final_pause:
+     from scripts.automation import storage_online_final as final_host
+     import multiprocessing,signal
+     pause_args=dict(project=project,source_revision=revision,worker_id=first_id,
+                     controller_id=greeting['controller_id'],max_duration_seconds=60)
+     def interrupt_first_stop():
+      original=launch.held._docker
+      def stop_then_die(*args,**kwargs):
+       value=original(*args,**kwargs)
+       if args[0]=='stop':
+        assert final_host._load(state/final_host.STATE)['phase']=='stopping'
+        os.kill(os.getpid(),signal.SIGKILL)
+       return value
+      launch.held._docker=stop_then_die
+      final_host.stop_online_source_locked(state,**pause_args)
+     child=multiprocessing.get_context('fork').Process(target=interrupt_first_stop)
+     child.start();child.join(timeout=30)
+     if child.is_alive():
+      child.kill();child.join(timeout=10)
+      raise RuntimeError('owned final pause child exceeded fixture deadline')
+     assert child.exitcode == -signal.SIGKILL
+     first=final_host._load(state/final_host.STATE)
+     assert first['phase']=='stopping'
+     rows=launch.held._inventory(project,operator_id=first_id)
+     assert sum(not rows[n]['running'] for n in launch.held.STOP)==2
+     paused=final_host.stop_online_source_locked(state,**pause_args)
+     assert paused['phase']=='paused'
+     assert paused['deadline']==first['deadline'] and paused['deadline_boot']==first['deadline_boot']
+     before=(state/final_host.STATE).read_bytes()
+     assert final_host.stop_online_source_locked(state,**pause_args)==paused
+     assert (state/final_host.STATE).read_bytes()==before
+     try:
+      final_host.stop_online_source_locked(state,**(pause_args|dict(controller_id='f'*32)))
+      raise AssertionError('changed controller admitted')
+     except RuntimeError as exc:
+      assert str(exc)=='storage_online_final_binding_changed'
+     inventory_before=inventory.read_bytes()
+     try:
+      inventory.write_bytes(inventory_before+b' ')
+      try:
+       final_host.stop_online_source_locked(state,**pause_args)
+       raise AssertionError('changed admitted inventory accepted')
+      except RuntimeError as exc:
+       assert str(exc)=='storage_online_final_inventory_changed'
+     finally:
+      inventory.write_bytes(inventory_before)
+     assert (state/final_host.STATE).read_bytes()==before
+     rows=launch.held._inventory(project,operator_id=first_id)
+     assert not any(rows[n]['running'] for n in launch.held.STOP)
+     assert all(rows[n]['running'] for n in launch.held.PASSIVE)
+     assert command('status')['controller_id']==greeting['controller_id']
+     report['final_stop_interrupted_reentry']=True
+     report['final_stop_seconds']=paused['paused_at']-paused['started_at']
+     report['final_original_deadline_preserved']=True
+     report['final_stopped_only_exact_clients']=True
+     report['final_worker_and_proof_retained']=True
+     report['final_source_resumption_qualified']=False
    else:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
@@ -216,35 +276,49 @@ try:
    command('close')
   assert worker.returncode==0
   assert launch.held._identities(launch.held._inventory(project,operator_id=receipt['container_id']))==source
- # A host exception must close only its background worker; source keeps serving.
- class HostInterrupted(RuntimeError):
-  pass
- try:
-  with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
-   greeting=read();sequence=0
-   assert greeting['background_hashed_bytes']==0
-   assert receipt['deadline']==first_deadline
-   raise HostInterrupted()
- except HostInterrupted:
-  pass
- assert worker.returncode==0
- assert launch.held._identities(launch.held._inventory(project,operator_id=first_id))==source
- assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
- report['host_exception_stopped_only_worker']=True
- assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
- saved=(state/launch._STATE).read_bytes()
- try:
-  with launch.launched_online_worker(state,**(kwargs|dict(descriptor_limit=2048))):
-   raise AssertionError('changed resource binding admitted')
- except RuntimeError as exc:
-  assert str(exc)=='storage_online_saved_launch_changed'
- assert (state/launch._STATE).read_bytes()==saved
- report['original_deadline_preserved']=True
- report['first_process_hashed_bytes']=final['background_hashed_bytes']
- report['source_clients_unchanged']=True
+ if not options.final_pause:
+  # A host exception must close only its background worker; source keeps serving.
+  class HostInterrupted(RuntimeError):
+   pass
+  try:
+   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
+    greeting=read();sequence=0
+    assert greeting['background_hashed_bytes']==0
+    assert receipt['deadline']==first_deadline
+    raise HostInterrupted()
+  except HostInterrupted:
+   pass
+  assert worker.returncode==0
+  assert launch.held._identities(launch.held._inventory(project,operator_id=first_id))==source
+  assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
+  report['host_exception_stopped_only_worker']=True
+  assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
+  saved=(state/launch._STATE).read_bytes()
+  try:
+   with launch.launched_online_worker(state,**(kwargs|dict(descriptor_limit=2048))):
+    raise AssertionError('changed resource binding admitted')
+  except RuntimeError as exc:
+   assert str(exc)=='storage_online_saved_launch_changed'
+  assert (state/launch._STATE).read_bytes()==saved
+  report['original_deadline_preserved']=True
+  report['first_process_hashed_bytes']=final['background_hashed_bytes']
+  report['source_clients_unchanged']=True
+ else:
+  try:
+   with launch.launched_online_worker(state,**kwargs):
+    raise AssertionError('final intent permitted ordinary worker relaunch')
+  except RuntimeError as exc:
+   assert str(exc)=='storage_online_final_requires_reconciliation'
+  report['final_intent_blocks_relaunch']=True
+  assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
+  report['first_process_hashed_bytes']=final['background_hashed_bytes']
+  report['source_clients_unchanged']=True
  if options.prepare_source:
   assert (state/initial.STATE).read_bytes()==prepared_bytes
-  assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
+  if options.final_pause:
+   initial._admit_source(state,preparation,require_running=False,operator_id=first_id)
+  else:
+   assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
   assert (working/'objects'/'native-intake').stat().st_size>intake_before
   assert not launch.held._inventory(project,operator_id=first_id)['initialize']['running']
   report['initial_to_worker_receipt_admission']=True

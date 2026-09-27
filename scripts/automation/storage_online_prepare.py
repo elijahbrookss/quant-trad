@@ -198,7 +198,7 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
         raise ValueError("storage_online_preparation_invalid_binding")
     with held._deployment_lock(state_root):
         for name in ("promotion.env", "alert-preview.env",
-                     "storage-online-worker.json", "storage-online-request.json"):
+                     "storage-online-worker.json", "storage-online-request.json", "storage-online-final.json"):
             if os.path.lexists(state_root/name):
                 raise RuntimeError("storage_online_preparation_conflicting_operation")
         saved = _load(state_root) if os.path.lexists(state_root/STATE) else None

@@ -7,6 +7,7 @@ may retire it. A stopped container is not proof of spool or database durability.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import json
@@ -36,8 +37,30 @@ FIELDS = {
 INSPECT = "{" + ",".join(json.dumps(k) + ":{{json (" + v + ")}}" for k, v in FIELDS.items()) + "}"
 
 
+_DOCKER_DEADLINE = ContextVar("storage_pause_docker_deadline", default=None)
+
+
+@contextmanager
+def _docker_deadline(deadline):
+    """Shorten every nested Docker call under one caller-owned host deadline."""
+    previous = _DOCKER_DEADLINE.get()
+    token = _DOCKER_DEADLINE.set(min(deadline, previous) if previous is not None else deadline)
+    try:
+        yield
+    finally:
+        _DOCKER_DEADLINE.reset(token)
+
+
 def _docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
+    deadline = _DOCKER_DEADLINE.get()
+    if deadline is not None:
+        remaining = deadline-time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("storage_pause_host_deadline_expired")
+        timeout = min(timeout, remaining)
     result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, env=env, input=input)
+    if deadline is not None and time.monotonic() >= deadline:
+        raise RuntimeError("storage_pause_host_deadline_expired")
     # Do not expose Docker diagnostics or inspected configuration: these may
     # include credentials. Private database settings are hashed by the caller.
     if result.returncode:

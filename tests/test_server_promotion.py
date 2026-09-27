@@ -137,7 +137,7 @@ def test_release_reports_hold_even_without_successful_release(tmp_path):
     assert "No successful release" in result.stdout
 
 
-@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json"])
+@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json", "storage-online-final.json"])
 @pytest.mark.parametrize("state_kind", ["partial", "canceled", "expired", "directory", "dangling_link"])
 @pytest.mark.parametrize("entry", ["deploy_release fixture", "recover_promotion", "promote_release fixture"])
 def test_online_intent_blocks_old_runtime_without_live_controller(tmp_path, marker_name, state_kind, entry):
@@ -163,7 +163,7 @@ def test_online_intent_blocks_old_runtime_without_live_controller(tmp_path, mark
     assert os.path.lexists(marker)
 
 
-@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json"])
+@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json", "storage-online-final.json"])
 @pytest.mark.parametrize("action", ["init-env", "deploy", "rollback", "promote", "recover", "apply-alerts", "preview-alerts", "restore-alerts", "stop", "qt", "credentials-coinbase"])
 def test_mutating_dispatch_refuses_online_intent_before_external_commands(tmp_path, marker_name, action):
     state = tmp_path / "state"
@@ -186,7 +186,7 @@ def test_mutating_dispatch_refuses_online_intent_before_external_commands(tmp_pa
     assert marker.read_text() == "{"
 
 
-@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json"])
+@pytest.mark.parametrize("marker_name", ["storage-online-preparation.json", "storage-online-request.json", "storage-online-worker.json", "storage-online-final.json"])
 def test_read_only_release_reports_online_intent_without_parsing_private_receipt(tmp_path, marker_name):
     state = tmp_path / "state"
     state.mkdir()

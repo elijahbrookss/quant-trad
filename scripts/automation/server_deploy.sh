@@ -837,7 +837,7 @@ acquire_deployment_lock() {
 # proves that an old runtime/recipe can safely serve retained or relocated data.
 storage_online_pending() {
   local marker
-  for marker in storage-online-preparation.json storage-online-request.json storage-online-worker.json; do
+  for marker in storage-online-preparation.json storage-online-request.json storage-online-worker.json storage-online-final.json; do
     if test -e "$state_root/$marker" || test -L "$state_root/$marker"; then
       return 0
     fi

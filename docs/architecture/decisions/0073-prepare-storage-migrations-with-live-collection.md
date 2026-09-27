@@ -9,6 +9,8 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_final.py
+  - tests/test_storage_online_final.py
   - scripts/automation/storage_online_prepare.py
   - tests/test_storage_online_prepare.py
   - scripts/automation/server_deploy.sh
@@ -648,3 +650,39 @@ interrupted stop/resume and supervision of an in-flight host action remain
 necessary. There is no wire restart/switch command or production entrypoint.
 Loss of the fence while a host action is running must be handled by that
 qualified host transition; the database check alone cannot stop Docker actions.
+
+
+### Durable final source-stop boundary
+
+The internal storage_online_final.stop_online_source_locked runs under the
+existing launcher's deployment lock after completed initial source resumption
+and live worker admission. It persists a separate final intent before the first
+stop. That intent binds the original source preparation, request/capture, exact
+worker container/start/PID and controller greeting identity. Its explicit duration
+must fit the original resource and capture ceilings; no production allowance is
+selected automatically.
+
+The original wall-clock and Linux boot-time deadlines survive re-entry. A changed
+boot, backwards clock, expired window, changed bindings or requested duration
+refuses further stops. All nested Docker observations/actions share the remaining
+absolute host budget. Initial600-second preparation and original capture receipts
+remain unchanged. The same live worker is retained; restarting it is not an
+admissible continuation of this final intent.
+
+Only exact previously serving source clients are stopped; the completed initializer
+stays stopped and passive services remain running. Docker receives a graceful stop
+with no forced-kill timeout. The host still times out at its original deadline:
+a lost reply may leave a daemon stop in flight, so intent remains and no drain,
+switch or resumption is claimed. This follows the documented
+[Docker stop timeout behavior](https://docs.docker.com/reference/cli/docker/container/stop/#stop-container-with-timeout--t---timeout).
+A completed stop can be re-inspected without rewriting its receipt; unexpected
+client restart refuses. Ordinary deploy/recovery and background worker relaunch
+independently refuse the final marker, including corrupt/partial markers.
+
+This helper supplies no SQL switch, source resumption, recovery mount transition,
+terminal marker removal or production entrypoint. The complete host flow must
+still combine publisher/spool drain, same-worker delta/COMMIT/reconciliation,
+the live rollback fence with supervised exact source restart, and matching
+runtime/recovery activation. Host expiry or uncertainty remains held. The optional
+owned --final-pause rehearsal exercises interrupted stop re-entry; it is not a
+complete cutover, running production collector test or outage estimate.

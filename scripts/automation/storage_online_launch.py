@@ -186,6 +186,8 @@ def launched_online_worker(state_root, *, project, source_revision, image,
         raise ValueError("storage_online_request_budget_exceeded")
     digest = hashlib.sha256(data).hexdigest()
     with held._deployment_lock(state_root):
+        if os.path.lexists(state_root/"storage-online-final.json"):
+            raise RuntimeError("storage_online_final_requires_reconciliation")
         for name in ("promotion.env", "alert-preview.env"):
             if os.path.lexists(state_root/name):
                 raise RuntimeError("storage_online_unfinished_host_operation")
