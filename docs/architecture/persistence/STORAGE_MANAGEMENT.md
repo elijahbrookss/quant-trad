@@ -11,6 +11,8 @@ tags:
 code_paths:
   - scripts/automation/storage_online_drain.py
   - tests/test_storage_online_drain.py
+  - tests/test_market_data/test_storage_online_collector_drain_db.py
+  - tests/test_market_data/tiered_v1_ingestion.py
   - scripts/automation/storage_online_final.py
   - tests/test_storage_online_final.py
   - scripts/automation/storage_online_prepare.py
@@ -1697,3 +1699,21 @@ owned sealed diagnostic segment plus acknowledgement, verifies refusal to call
 that spool empty and preservation of the bytes, and removes only its diagnostic
 files. Synthetic peers and small fixture data do not qualify actual collector
 shutdown, production spool cardinality or complete downtime.
+
+### Collector finalization qualification
+
+The disposable online-capture fixture runs ContinuousStreamRuntime with the real
+Coinbase parser, trade projection, archive publication and PostgreSQL repository.
+Only the transport supplies scripted frames. The preserved v1 source uses its
+frozen deployed ingestion method, v1 partition provisioning and v1 read clause;
+the candidate v2 writer cannot serve that schema before the switch.
+
+A blocked canonical acknowledgement keeps the runtime stop pending and the sealed
+WAL present after archive publication. A failed acknowledgement must propagate
+failure and retain the segment. Normal runtime startup recovers it before opening
+a new transport session, with one canonical fact, manifest and raw mapping.
+Preexisting unrelated pending WAL and original capture/frozen bindings remain.
+This tests the runtime finalizer boundary; Docker SIGTERM, supervisor lifecycle,
+all production stream projections, complete publisher exclusion and host
+stop/delta/COMMIT/recovery remain separate qualification requirements. A completed
+runtime or a momentarily empty spool does not authorize a storage switch.
