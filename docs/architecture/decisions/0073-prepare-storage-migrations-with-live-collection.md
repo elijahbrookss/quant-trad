@@ -504,8 +504,9 @@ maximum 60-second bound within the original attempt and resource ceiling.
 
 Host admission and durable host intent must precede this internal call. Retained
 relocation remains explicit and must commit and be observed before bulk copying.
-Private identity/raw relocation, reference preparation/validation, combined
-initial-host resumption and final recovery activation remain separate boundaries.
+Private identity/raw relocation and reference preparation/validation use the
+explicit steps below. Initial-host resumption and final recovery activation
+remain separate boundaries.
 
 
 ### Initial preparation through background worker admission
@@ -528,8 +529,34 @@ distinct-device check independently verifies SSD/HDD separation. These facts
 do not establish production permission admission, collector/query performance,
 production-size outage duration or complete final recovery activation.
 
-The fixture reuses the finite stage_handoff helper after atomic preparation.
-This is small disposable database setup with source peers serving, not the
-rejected production whole-copy hold. Production still needs explicit bounded
-phase orchestration, measured large reference relocation impact, final
-stop/drain/switch, and recovery activation after the read-capability worker exits.
+After atomic preparation, the --prepare-source fixture uses bounded SQL copy
+passes and explicit preparation_step calls for private identity/raw relocation,
+identity mirroring, individual reference preparation/validation and parent
+adoption. Fixed retained/reference catalog moves remain separately invoked
+through the existing catalog mover. Initial archive copying belongs to the live
+controller. The default already-prepared fixture retains its older finite setup.
+
+### Explicit online preparation steps
+
+fact_header_v2_online.preparation_step admits one fixed operation per transaction.
+The caller binds the original capture start, placement, automatic policy and
+resource allowance. Protected shadows and the recent-window boundary are checked
+before work. The committed header baseline precedes private identity relocation;
+raw copying and relocation follow it, then identity mirroring and references.
+Retained data must already be observed on history before these steps.
+
+Each move or validation is explicit, with its own requested duration inside the
+original cumulative attempt and resource ceiling. Long validation does not acquire
+the source writer fence used for brief reference installation. Earlier committed
+steps survive a later failed transaction; retries inspect actual placement and
+constraint identities. A step report never grants switch authority. These internal
+calls add no host pause, ownership change or wire activation command.
+
+Disposable qualification inserts native v1 records while reference validation
+holds its locks, kills a later validation backend, and confirms that earlier
+validation commits, original capture time and frozen records survive. The combined
+host fixture runs these steps after source resumption and before live controller
+copy/reproof. These small fixtures do not measure production lock impact or
+collector throughput. Production still requires admitted phase resources,
+complete final stop/drain/switch, safe abort/reconciliation, and recovery activation
+after the read-capability worker exits.

@@ -18,6 +18,7 @@ from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as ra
 from scripts.db import archive_root_v2_online as archive_online
 from scripts.db import archive_root_v2_copy as archives
 from scripts.db import fact_header_v2_online_proof as protection
+from scripts.db import fact_header_v2_references as references
 from scripts.db.fact_header_v2_capture import (
     DEFAULT_ATTEMPT_SECONDS, capture_remaining_seconds, inspect_capture)
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
@@ -83,6 +84,95 @@ def prepare_attempt(engine, *, placement, policy, resource_limits, source_root,
               "final_switch_authorized": False}
     logger.info("fact_header_online_preparation_completed | attempt=%s elapsed_seconds=%.3f",
                 result["started_at"], result["elapsed_seconds"])
+    return result
+
+
+_PREPARATION_STEPS = {
+    "identity_history": headers.place_identity_on_history,
+    "raw_history": raw.place_on_history,
+    "identity_capture": headers.enable_identity_capture,
+    "reference_prepare": references.prepare_reference,
+    "reference_validate": references.validate_reference,
+    "reference_adopt": references.adopt_payload_references,
+}
+
+
+def preparation_step(engine, *, step, placement, policy, resource_limits,
+                     expected_started_at, relation=None, page_rows=128,
+                     max_duration_seconds=60, cancelled=None):
+    """Execute one explicitly admitted private-move/reference transaction.
+
+    Large relocations and FK validations are never hidden in a copy-page or
+    status request. Their caller supplies measured per-step resource/time
+    allowances. Earlier committed steps survive failure; retry re-inspects
+    actual placement and constraint identities under the original capture clock.
+    This internal boundary has no host pause, runtime or final-switch authority.
+    """
+    limits = _limits(resource_limits, migration=True)
+    relation_step = isinstance(step, str) and step in {"reference_prepare", "reference_validate"}
+    if (not isinstance(step, str) or step not in _PREPARATION_STEPS
+            or not isinstance(placement, CopyPlacement)
+            or not isinstance(expected_started_at, str) or not expected_started_at
+            or (relation_step and (not isinstance(relation, str) or not relation))
+            or (not relation_step and relation is not None)
+            or type(page_rows) is not int or not 1 <= page_rows <= 4096
+            or type(max_duration_seconds) is not int
+            or not 1 <= max_duration_seconds <= MAX_MIGRATION_SECONDS
+            or (cancelled is not None and not callable(cancelled))):
+        raise ValueError("fact_header_online_preparation_step_inputs_invalid")
+    if (policy.archives != policy.history or policy.backups != policy.history
+            or not policy.movement_enabled or not policy.backup_enabled):
+        raise ValueError("fact_header_online_fixed_automatic_policy_required")
+    retained._fixed_inputs(policy, limits, (placement.recent, placement.history))
+    if cancelled is not None and cancelled():
+        raise RuntimeError("storage_move_cancelled")
+    seconds = min(max_duration_seconds, limits["movement_timeout_seconds"])
+    started = monotonic()
+    with _staging_transaction(engine, placement=placement, policy=policy,
+            limits={**limits, "movement_timeout_seconds": seconds},
+            deadline=started+seconds, cancelled=cancelled) as (conn, saved):
+        if inspect_capture(conn)["started_at"] != expected_started_at:
+            raise RuntimeError("fact_header_online_attempt_binding_changed")
+        header, lookup = headers._inspect_progress(conn), raw._inspect(conn)
+        if header["placement"] != saved:
+            raise RuntimeError("fact_header_online_placement_changed")
+        protection.inspect_protection(conn)
+        cutoff = conn.scalar(text(
+            "SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date - :days"),
+            {"days": policy.recent_days})
+        if placement.history_before > cutoff:
+            raise RuntimeError("fact_header_online_recent_window_on_history")
+        if conn.scalar(text("SELECT to_regclass(:relation)"),
+                       {"relation": retained.RETAINED_LEGACY}) is not None:
+            if retained.inspect_reference_catalog(
+                    conn, relation=retained.RETAINED_LEGACY)["placement"] != "history":
+                raise RuntimeError("fact_header_online_retained_relocation_required")
+        if (not header["baseline_complete"]
+                or (step != "identity_history" and not header["identity_history_ready"])
+                or (step not in {"identity_history", "raw_history"}
+                    and not lookup["history_ready"])):
+            raise RuntimeError("fact_header_online_preparation_order_required")
+        args = {"timeout_seconds": seconds}
+        if relation_step:
+            # The existing reference helper admits and quotes only incoming
+            # source FK relations. This is not an arbitrary SQL/table mover.
+            args["relation"] = relation
+        if step == "identity_capture":
+            args["page_rows"] = page_rows
+        report = _PREPARATION_STEPS[step](conn, **args)
+        capture_remaining_seconds(conn)
+    result = {"schema_version": "qt.fact_header_online_preparation_step.v1",
+              "step": step, "relation": relation,
+              "started_at": expected_started_at,
+              "elapsed_seconds": monotonic()-started, "committed": True,
+              "source_authoritative": True, "migration_ready": False,
+              "final_switch_authorized": False}
+    # No serialized placement/resource report can become further authority.
+    for key in ("reused", "validated", "references_complete"):
+        if key in report:
+            result[key] = report[key]
+    logger.info("fact_header_online_preparation_step_completed | step=%s relation=%s elapsed_seconds=%.3f",
+                step, relation, result["elapsed_seconds"])
     return result
 
 def _phase(header, lookup):

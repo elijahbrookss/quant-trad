@@ -15,6 +15,8 @@ from scripts.db import fact_header_v2_capture as capture
 from scripts.db import fact_header_v2_handoff as handoff
 from scripts.db import fact_header_v2_online_proof as protection
 from scripts.db import fact_header_v2_online as online
+from scripts.db import archive_reference_v2_placement as catalogs
+from scripts.db import fact_header_v2_references as references
 from tests.test_market_data.test_archive_online_copy_db import _prepare
 from tests.test_market_data.test_fact_header_copy_db import _frozen_records
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
@@ -50,6 +52,43 @@ def storage(monkeypatch):
     yield from tiers.storage.__wrapped__(monkeypatch)
 
 
+
+def _stage_online_fixture(engine, placement, options, started):
+    """Finite owned fixture using explicit production primitives, no host hold."""
+    args = dict(placement=placement, policy=options["policy"],
+                resource_limits=options["resource_limits"])
+    steps = dict(**args, expected_started_at=started, max_duration_seconds=30)
+    with engine.connect() as conn:
+        retained = conn.scalar(text("SELECT to_regclass(:name)"),
+                                {"name": catalogs.RETAINED_LEGACY}) is not None
+    if retained:
+        catalogs.move_reference_catalog(engine, relation=catalogs.RETAINED_LEGACY,
+            policy=options["policy"], resource_limits=options["resource_limits"])
+    for _ in range(64):
+        result = online.copy_pass(engine, max_pages=2, page_rows=2,
+                                  max_duration_seconds=30, **args)
+        if result["outcome"] == "identity_relocation_required":
+            online.preparation_step(engine, step="identity_history", **steps)
+        elif result["outcome"] == "raw_relocation_required":
+            online.preparation_step(engine, step="raw_history", **steps)
+        elif result["outcome"] == "both_tails_observed_empty":
+            break
+    else:
+        pytest.fail("finite online setup did not converge")
+    online.preparation_step(engine, step="identity_capture", **steps)
+    with engine.begin() as conn:
+        slots = references.inspect_references(conn)["references"]
+    for slot in slots:
+        if slot["relation"] == references.PARENT:
+            continue
+        for step in ("reference_prepare", "reference_validate"):
+            online.preparation_step(engine, step=step, relation=slot["relation"], **steps)
+    online.preparation_step(engine, step="reference_adopt", **steps)
+    for relation in catalogs.RELATIONS:
+        catalogs.move_reference_catalog(engine, relation=relation,
+            policy=options["policy"], resource_limits=options["resource_limits"])
+    # Archive baseline copying belongs to the live controller, not this setup.
+
 def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, monkeypatch):
     control = Path("/qt-control")
     deadline = time.monotonic()+180
@@ -73,7 +112,10 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
             "(SELECT oid::text FROM pg_database WHERE datname=current_database()) FROM pg_control_system()"))
         frozen = _frozen_records(conn)
         assert conn.scalar(text("SHOW archive_mode")) == "off"
-    handoff.stage_handoff(engine, placement=storage.copy_plan, max_duration_seconds=120, **options)
+    if atomic:
+        _stage_online_fixture(engine, storage.copy_plan, options, started)
+    else:
+        handoff.stage_handoff(engine, placement=storage.copy_plan, max_duration_seconds=120, **options)
     info=(source/"objects").stat()
     request=dict(schema_version="qt.storage_online_worker.v1",
         source_revision=os.environ["QT_IMAGE_SOURCE_REVISION"],
