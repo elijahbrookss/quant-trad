@@ -513,3 +513,12 @@ the intended archived objects before changing the archive root. Existing spool
 paths and raw record identities remain valid. Private file ownership must also
 be qualified across API, initializer and collector processes; the root separation
 does not itself establish production permissions or authorize a server change.
+
+
+The opt-in storage collector-drain fixture additionally crosses the explicit
+v1-to-v2 database/archive switch with retained trade WAL, both before and after
+canonical commit with a lost acknowledgement. Recovery retains the SSD spool
+root and uses the HDD object root, then accepts a new frame through candidate
+v2 ingestion. This fixture checks preservation and idempotent recovery, not host
+switch authorization or recovery compatibility for every projection. See
+[ADR0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md).

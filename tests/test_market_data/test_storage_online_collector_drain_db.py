@@ -2,10 +2,13 @@
 import asyncio
 from datetime import UTC, datetime
 import json
+import hashlib
 import os
+import stat
 from pathlib import Path
 from threading import Event
 from types import FunctionType
+from uuid import uuid4
 from time import monotonic
 
 import pytest
@@ -36,18 +39,31 @@ pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_STORAGE_DEMO") !=
                 reason="requires owned SSD/HDD storage-demo topology")]
 
 
-@pytest.mark.parametrize("supervised", [False, True], ids=["runtime", "supervisor"])
-@pytest.mark.parametrize("fail_before_canonical_ack", [False, True])
+@pytest.mark.parametrize("fail_before_canonical_ack,supervised,after_switch,canonical_committed", [
+    pytest.param(False, False, False, False, id="runtime-clean"),
+    pytest.param(True, False, False, False, id="runtime-recovery"),
+    pytest.param(False, True, False, False, id="supervisor-clean"),
+    pytest.param(True, True, False, False, id="supervisor-recovery"),
+    pytest.param(True, True, True, False, id="supervisor-recovery-after-switch"),
+    pytest.param(True, True, True, True, id="supervisor-committed-recovery-after-switch"),
+])
 def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
-        storage, tmp_path, monkeypatch, fail_before_canonical_ack, supervised):
+        storage, tmp_path, monkeypatch, fail_before_canonical_ack, supervised, after_switch,
+        canonical_committed):
     engine, options, source, book = _prepare(
-        storage, tmp_path, monkeypatch, prepare_captures=False)
+        storage, tmp_path, monkeypatch, prepare_captures=False,
+        destination_directory=(Path("/qt-history")/("collector-switch-"+uuid4().hex)/"objects"
+                               if after_switch else None))
     prepare = dict(placement=storage.copy_plan, attempt_seconds=180,
                    **{k: v for k, v in options.items() if k not in ("page_rows", "max_page_bytes")})
     online.prepare_attempt(engine, **prepare)
     with engine.connect() as conn:
         original_capture = conn.scalar(text("SELECT to_jsonb(c) FROM qt_fact_header_cutover_v2.capture c"))
         frozen = _frozen_records(conn)
+    candidate_day = market_data.current_fact_storage_day
+    candidate_range = market_data.CANONICAL_RANGE_ROW_FROM
+    candidate_ingest = market_data.PostgresMarketDataRepository._ingest_canonical_rows_with_session
+    runtime_root = source
     # Execute the deployed v1 partition boundary, not implicit v2 provisioning.
     def source_day(session):
         ensure_v1_payload_partition(session.connection(), storage.today)
@@ -101,7 +117,7 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
                 received_at=timestamp, raw_frame=json.dumps({
                     "channel": "market_trades", "timestamp": timestamp, "sequence_num": 1,
                     "events": [{"type": "update", "trades": [{
-                        "product_id": "BTC-USD", "trade_id": "online-drain-trade",
+                        "product_id": "BTC-USD", "trade_id": "online-drain-trade-"+str(len(frames)),
                         "price": "100", "size": "0.01", "side": "BUY", "time": timestamp}]}]}))
             frames.append(message)
             yield message
@@ -145,6 +161,8 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
         entered.set()
         assert release.wait(20), "fixture canonical acknowledgement gate expired"
         if fail_before_canonical_ack:
+            if canonical_committed:
+                original_ingest(*args, **kwargs)
             raise RuntimeError("fixture_before_canonical_ack")
         return original_ingest(*args, **kwargs)
 
@@ -158,7 +176,13 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
                 "SELECT count(*) FROM market.raw_archive_manifests WHERE definition_id=:definition",
                 "SELECT count(*) FROM market.raw_archive_record_mappings m JOIN market.raw_archive_manifests a ON a.id=m.manifest_id WHERE a.definition_id=:definition"))
 
+    def file_snapshot(root):
+        return {str(p): (p.read_bytes(), p.stat().st_uid, p.stat().st_gid,
+                        stat.S_IMODE(p.stat().st_mode))
+                for p in root.rglob("*") if p.is_file()}
+
     baseline_pending = observe()["pending_files"]
+    baseline_spools = file_snapshot(source/"spool")
     async def exercise():
         if supervised:
             supervisor.start()
@@ -202,15 +226,47 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
             supervisor.stop(timeout_seconds=20)
     assert len(frames) == 1
     if fail_before_canonical_ack:
-        assert counts() == (0, 1, 1)
+        assert counts() == (int(canonical_committed), 1, 1)
         assert observe()["pending_files"] == baseline_pending+1
         retained = {str(p): p.read_bytes() for p in (source/"spool"/definition_id).rglob("*.sealed")}
         assert retained
+        if after_switch:
+            preserved_objects = file_snapshot(options["source_root"])
+            preserved_spools = file_snapshot(source/"spool")
+            # All fixture publishers have joined. This internal DB switch is not
+            # a host publisher-exclusion certificate or a production entrypoint.
+            from scripts.automation.storage_online_controller import OnlineController
+            from scripts.db import fact_header_v2_handoff as handoff
+            from scripts.db import fact_header_v2_online_proof as protection
+            from tests.test_market_data.test_storage_online_controller_db import _drain, _reprove
+            with engine.begin() as conn:
+                protection.prepare(conn)
+                started = conn.scalar(text("SELECT prepared_at FROM qt_fact_header_cutover_v2.capture"))
+            runtime_root = options["destination_root"].parent
+            monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(runtime_root))
+            monkeypatch.setenv("QT_MARKET_DATA_EXPECTED_UUID", storage.copy_plan.history.filesystem_uuid)
+            handoff.stage_handoff(engine, placement=storage.copy_plan,
+                                  max_duration_seconds=120, **options)
+            with OnlineController(engine, placement=storage.copy_plan,
+                    expected_started_at=started.isoformat(), max_objects=128,
+                    max_bytes=64*1024**2, **options) as worker:
+                _drain(worker)
+                _reprove(worker)
+                worker.commit_database(deadline=monotonic()+30)
+                assert worker.inspect_outcome(deadline=monotonic()+4)["database_handoff_committed"]
+            # Preserve the original SSD working/spool root and bytes. Restore
+            # candidate v2 ingestion/read/partition behavior for normal recovery.
+            assert file_snapshot(source/"spool") == preserved_spools
+            assert file_snapshot(options["source_root"]) == preserved_objects
+            monkeypatch.setattr(market_data, "current_fact_storage_day", candidate_day)
+            monkeypatch.setattr(market_data, "CANONICAL_RANGE_ROW_FROM", candidate_range)
+            monkeypatch.setattr(market_data.PostgresMarketDataRepository,
+                               "_ingest_canonical_rows_with_session", candidate_ingest)
         # Actual runtime startup recovers before claiming a new transport session.
         # Stop is already requested, so this retry must not receive another frame.
         result = asyncio.run(ContinuousStreamRuntime(repository=structures).run(
             definition_id=definition_id, owner_id="drain-recovery", stop_requested=stop.is_set,
-            bounded_validation=True, storage_root=source, projection=projection, transport=transport))
+            bounded_validation=True, storage_root=runtime_root, projection=projection, transport=transport))
         assert all(not Path(p).exists() for p in retained)
     assert result["status"] == "stopped"
     assert len(frames) == 1 and counts() == (1, 1, 1)
@@ -219,10 +275,37 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_jsonb(c) FROM qt_fact_header_cutover_v2.capture c")) == original_capture
         assert _frozen_records(conn) == frozen
-        assert conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {archives.QUEUE})"))
+        if not after_switch:
+            assert conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {archives.QUEUE})"))
+    if after_switch:
+        # Normal recovery is idempotent, and a new provider frame can publish
+        # through candidate v2 ingestion into the HDD archive root afterwards.
+        stop.clear()
+        result = asyncio.run(ContinuousStreamRuntime(repository=structures).run(
+            definition_id=definition_id, owner_id="after-switch-intake", stop_requested=stop.is_set,
+            bounded_validation=True, storage_root=runtime_root, projection=projection, transport=transport))
+        assert result["status"] == "stopped" and len(frames) == 2
+        assert counts() == (2, 2, 2)
+        with engine.connect() as conn:
+            manifests = conn.execute(text("SELECT object_key, object_sha256 FROM market.raw_archive_manifests "
+                                           "WHERE definition_id=:definition"), {"definition": definition_id}).all()
+            assert len(manifests) == 2
+            from market_data.archive import FilesystemRawArchiveObjectStore
+            store = FilesystemRawArchiveObjectStore(options["destination_root"])
+            for key, digest in manifests:
+                path = store.local_path(key)
+                assert path.is_relative_to(options["destination_root"])
+                assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+            assert _frozen_records(conn) == frozen
+        assert file_snapshot(options["source_root"]) == preserved_objects
+    final_spools = file_snapshot(source/"spool")
+    assert all(final_spools.get(p) == value for p, value in baseline_spools.items())
+    assert observe()["pending_files"] == baseline_pending
     print("QT_COLLECTOR_DRAIN_RESULT="+json.dumps({
-        "supervisor_owned_stop": supervised,
+        "supervisor_owned_stop": supervised, "recovered_after_guarded_database_switch": after_switch,
         "failure_before_canonical_ack": fail_before_canonical_ack,
+        "canonical_fact_committed_before_lost_ack": canonical_committed,
+        "new_frame_after_switch": after_switch,
         "real_runtime_waited_for_finalizer": True, "facts_manifests_mappings": counts(),
         "preexisting_pending_spools_preserved": baseline_pending,
         "scripted_transport": True, "host_signal_or_switch_authority": False}))

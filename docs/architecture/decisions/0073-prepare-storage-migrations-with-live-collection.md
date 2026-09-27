@@ -968,3 +968,26 @@ cleanup retires it. It then exercises a fresh controller with zero proof under
 the original capture deadline while source clients keep serving. This proves
 cleanup of a live outer launcher; full outer-process death and recovery-mount
 activation remain separate requirements.
+
+
+### Retained collector WAL across the database switch
+
+The disposable collector-drain fixture now also preserves a sealed trade segment
+across the actual guarded v1-to-v2 database and archive-catalog switch. It covers
+failure before canonical publication and failure after that publication commits
+but before acknowledgement. The source supervisor joins before the internal
+switch; candidate recovery uses the original SSD working/spool root and the HDD
+archive root, with the candidate v2 ingestion and range reader restored.
+
+Recovery must produce exactly one fact, manifest and raw mapping before another
+frame is accepted. Fresh post-switch intake must publish a second record into
+the HDD archive root. Original source archive bytes and the unrelated spool
+files, owners and modes stay unchanged; only normal runtime acknowledgement
+retires the recovered segment. Frozen records and the original capture survive.
+No migration helper deletes WAL or changes its ownership to obtain readiness.
+
+This small scripted Coinbase trade fixture does not establish host publisher
+exclusion, source-image admission, all-projector recovery, legacy UID1000 spool
+permissions, encrypted pairing, production performance or COMMIT dispatch
+permission. Pending WAL remains a recovery obligation; its presence cannot be
+ignored on the strength of this fixture alone.
