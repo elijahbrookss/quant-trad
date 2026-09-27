@@ -121,6 +121,51 @@ def test_legacy_private_wal_recovers_and_new_intake_preserves_frozen_reads(stora
     assert (sentinel.read_bytes(), sentinel.stat().st_uid, sentinel.stat().st_gid, sentinel.stat().st_mode) == before
     report = dict(legacy=receipt, facts_manifests_mappings=counts, frozen_preserved=True,
         private_source_preserved=True, normal_wal_retirement=True, fresh_intake=True, current_read_count=len(current),
-        host_switch_or_encrypted_pair_proven=False, provider_transport="scripted")
+        host_switch_proven=False, encrypted_pair_proven=False, provider_transport="scripted")
+    if os.getenv("QT_LEGACY_RECOVERY_PAIR") == "1":
+        report["encrypted_pair"] = _dedicated_pair(storage, control)
+        report["encrypted_pair_proven"] = True
+        assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == frozen_before
     (control/"result.json").write_text(json.dumps(report))
     print("QT_LEGACY_RECOVERY="+json.dumps(report))
+
+
+def _dedicated_pair(storage, control):
+    """Keep this DB alive while the host runs the existing isolated maintenance worker."""
+    from core.storage_targets import StoragePolicy, StorageTarget
+    from portal.backend.db.storage_target_models import StoragePolicyRecord, StorageTargetRecord
+    from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
+    from sqlalchemy import select
+    targets = (StorageTarget("ssd", "Recent", "legacy-pair-ssd", "/qt-source/pgdata", "ssd"),
+               StorageTarget("hdd", "History", "legacy-pair-hdd", "/qt-history", "hdd"))
+    policy = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",), backups=("hdd",),
+                           backup_enabled=True, movement_enabled=False)
+    with storage.database.session() as session:
+        for target in targets:
+            session.add(StorageTargetRecord(id=target.target_id, label=target.label,
+                filesystem_uuid=target.filesystem_uuid, root=target.root, medium=target.medium,
+                roles=list(target.roles), state="active"))
+        session.add(StoragePolicyRecord(id=1, revision=1, policy=policy.to_dict()))
+    # Fixture-only DSN stays in its private control file and is never logged.
+    request = control/"pair-request.tmp"
+    with request.open("w") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        json.dump({"dsn": storage.dsn}, handle)
+    request.rename(control/"pair-request.json")
+    until = monotonic()+240
+    while not (control/"pair-done.json").exists():
+        assert monotonic() < until, "dedicated encrypted pair did not finish within fixture bound"
+        sleep(0.2)
+    receipt = json.loads((control/"pair-done.json").read_text())
+    assert receipt["schema_version"] == "qt.encrypted_recovery_pair.v1"
+    assert receipt["database_type"] == "full" and receipt["archive_objects"] == 2
+    assert receipt["database_label"] and receipt["archive_snapshot"] and receipt["inventory_sha256"]
+    with storage.database.session() as session:
+        rows = session.scalars(select(MarketCollectorWorkerStateRecord).where(
+            MarketCollectorWorkerStateRecord.worker_role == "market_storage_maintenance")).all()
+        assert len(rows) == 1 and rows[0].state == "stopped"
+        outcome = rows[0].context["storage_lifecycle"]["last_run"]["local_recovery"]
+        assert outcome["state"] in {"completed", "not_due"}
+        assert outcome["generation"] == receipt["name"]
+        assert outcome["policy_hash"] == policy.fingerprint
+    return {key: receipt[key] for key in ("name", "database_type", "archive_objects", "inventory_sha256")}
