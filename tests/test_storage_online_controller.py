@@ -95,3 +95,27 @@ def test_channel_high_descriptor_uses_poll_without_raising_limits():
             assert json.loads(client.recv(4096)) == {"bounded": True}
         finally:
             os.close(duplicate)
+
+
+def test_spool_observation_requires_fresh_sequence_and_preserves_pending(tmp_path):
+    from scripts.automation.storage_online_controller import OnlineController
+    root = tmp_path/"objects";root.mkdir()
+    spool = tmp_path/"spool";spool.mkdir();(spool/"pending.sealed").write_bytes(b"WAL")
+    controller = OnlineController.__new__(OnlineController)
+    controller.controller_id = "c"*32;controller.state = "background"
+    controller.source_root = root;controller._sequence = 0
+    controller._last_request = controller._last_reply = None
+    controller._reproved = set();controller.limits = {"movement_timeout_seconds": 30}
+    controller.proof = SimpleNamespace(deadline=monotonic()+60, hashed_bytes=0, check=lambda: None)
+    controller.check = lambda: None
+    request = dict(controller_id=controller.controller_id, sequence=1, operation="source_drain",
+                   max_entries=100, deadline=monotonic()+5)
+    result = controller.command(request)
+    assert not result["result"]["spool_empty_at_observation"]
+    assert (spool/"pending.sealed").read_bytes() == b"WAL"
+    with pytest.raises(RuntimeError, match="fresh_sequence_required"):
+        controller.command(request)
+    for changed in ({"max_entries": 0}, {"deadline": monotonic()-1}, {"deadline": monotonic()+40},
+                    {"source_root": "/arbitrary"}):
+        with pytest.raises(ValueError): controller.command(request | changed | {"sequence": 2})
+    assert controller.state == "background"

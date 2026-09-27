@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_online_drain.py
+  - tests/test_storage_online_drain.py
   - scripts/automation/storage_online_final.py
   - tests/test_storage_online_final.py
   - scripts/automation/storage_online_prepare.py
@@ -1668,3 +1670,30 @@ the live rollback fence with supervised exact source restart, and matching
 runtime/recovery activation. Host expiry or uncertainty remains held. The optional
 owned --final-pause rehearsal exercises interrupted stop re-entry; it is not a
 complete cutover, running production collector test or outage estimate.
+
+
+### Read-only spool observation during the final hold
+
+The source_drain pipe command observes the fixed source working-root spool through
+its already admitted read-only mount. It walks by directory descriptors without
+following symlinks, bounds depth/entries and checks an absolute deadline inside
+the unchanged short command and live proof ceilings. Open/sealed WAL, partial
+acknowledgements and unknown files remain pending, even beside an acknowledgement.
+Only .ack.json sidecars are counted separately; their contents never authorize
+WAL deletion. No file is opened for repair, modified or removed. Directory/path
+replacement, nonregular entries, filesystem drift and exceeded bounds refuse.
+
+The host observe_source_drain_locked boundary re-admits the exact paused source
+and same live worker before and after the request under the original final
+wall/boot window. It does not rewrite receipts. Observations require fresh
+sequences and are not replayed as current. A clean result is momentary and always
+reports publisher_drain_authorized and final_switch_authorized as false. It does
+not prove no in-flight database transaction or unpublished object, perform final
+catch-up, switch roots or authorize collector resumption. Pending WAL remains for
+normal source recovery; forced cleanup is not an admission mechanism.
+
+The owned final-pause rehearsal observes the real fixture spool, injects one
+owned sealed diagnostic segment plus acknowledgement, verifies refusal to call
+that spool empty and preservation of the bytes, and removes only its diagnostic
+files. Synthetic peers and small fixture data do not qualify actual collector
+shutdown, production spool cardinality or complete downtime.

@@ -149,8 +149,8 @@ try:
  kwargs=dict(project=project,source_revision=revision,image=image,request=request,
              inventory_path=inventory,descriptor_limit=1024,memory_bytes=1024**3)
  name=project+'-storage-online';owned.append(name)
- def read():
-  data=b'';deadline=time.monotonic()+40
+ def read(deadline=None):
+  data=b'';deadline=deadline if deadline is not None else time.monotonic()+40
   while not data.endswith(b'\n'):
    if time.monotonic()>deadline or len(data)>16384:raise RuntimeError('worker_protocol_budget')
    if select.select([worker.stdout],[],[],max(.001,deadline-time.monotonic()))[0]:
@@ -161,7 +161,7 @@ try:
  sequence=0
  def command(op,**extra):
   global sequence
-  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read()
+  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read(extra.get('deadline'))
  first_deadline=None
  for attempt in range(1 if options.final_pause else 2):
   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
@@ -263,6 +263,30 @@ try:
      assert not any(rows[n]['running'] for n in launch.held.STOP)
      assert all(rows[n]['running'] for n in launch.held.PASSIVE)
      assert command('status')['controller_id']==greeting['controller_id']
+     drained=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
+     assert not drained['spool_empty_at_observation'] and not drained['publisher_drain_authorized']
+     assert drained['pending_files']>0  # Existing real QT fixture intentionally retains sealed WAL.
+     report['fixture_retained_spool_observation']=drained
+     # Inject ONLY this owned diagnostic WAL after the synthetic source stops.
+     # The observer must retain it even beside a misleading acknowledgement.
+     probe=project+'-spool-probe';owned.append(probe)
+     probe_args=['run','--name',probe,'--user','70:70','--network','none','--memory','64m',
+       '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c']
+     run(probe_args+["from pathlib import Path;p=Path('/s/spool/qt-final-owned-probe');p.mkdir(parents=True);(p/'segment.sealed').write_bytes(b'pending-WAL');(p/'segment.ack.json').write_text('{}')"])
+     pending=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
+     assert not pending['spool_empty_at_observation'] and pending['pending_files']==drained['pending_files']+1
+     assert (working/'spool/qt-final-owned-probe/segment.sealed').read_bytes()==b'pending-WAL'
+     # Remove only diagnostic bytes created immediately above; never source WAL.
+     cleanup_probe=project+'-spool-probe-cleanup';owned.append(cleanup_probe)
+     run(['run','--name',cleanup_probe,'--user','70:70','--network','none','--memory','64m',
+       '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
+       "from pathlib import Path;p=Path('/s/spool/qt-final-owned-probe');(p/'segment.sealed').unlink();(p/'segment.ack.json').unlink();p.rmdir()"])
+     restored=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
+     assert restored['pending_files']==drained['pending_files'] and restored['pending_bytes']==drained['pending_bytes']
+     assert not restored['spool_empty_at_observation']
+     assert (state/final_host.STATE).read_bytes()==before
+     report['read_only_spool_observation']=True
+     report['pending_spool_preserved']=True
      report['final_stop_interrupted_reentry']=True
      report['final_stop_seconds']=paused['paused_at']-paused['started_at']
      report['final_original_deadline_preserved']=True
@@ -325,7 +349,7 @@ try:
   report['synthetic_intake_continued']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
- report.update(passed=True,image=image,first_process_commands=final['last_sequence']+1,final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
+ report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+1,final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
 except BaseException as exc:
  report.update(passed=False,error_type=type(exc).__name__,error=str(exc))
  raise

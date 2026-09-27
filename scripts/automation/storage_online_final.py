@@ -189,3 +189,48 @@ def stop_online_source_locked(state_root, *, project, source_revision, controlle
         print("event=storage_online_final_clients_stopped database_switch_authorized=false",
               file=sys.stderr, flush=True)
         return saved
+
+
+def observe_source_drain_locked(state_root, *, exchange, max_entries):
+    """Observe spool through the SAME live worker while exact clients stay held.
+
+    exchange must send this request over the caller-owned existing pipe and
+    bound both writing and reading to the supplied absolute monotonic deadline.
+    A fresh response is checked, never persisted as switch/restart authority.
+    """
+    if not callable(exchange) or type(max_entries) is not int or not 1 <= max_entries <= 1_000_000:
+        raise ValueError("storage_online_spool_host_inputs_invalid")
+    state_root = launch._canonical(state_root)
+    saved = _load(state_root/STATE)
+    if saved["phase"] != "paused":
+        raise RuntimeError("storage_online_spool_paused_source_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    def admit():
+        _remaining(saved)
+        observed, _, rows, _ = _observe(state_root, **args)
+        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+            raise RuntimeError("storage_online_spool_source_changed")
+        _remaining(saved)
+    with held._docker_deadline(time.monotonic()+_remaining(saved)):
+        admit()
+        request = held._load(state_root/"storage-online-request.json")
+        seconds = min(request["command_seconds"], _remaining(saved))
+        deadline = time.monotonic()+seconds
+        reply = exchange("source_drain", deadline=deadline, max_entries=max_entries)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_spool_reply_deadline_expired")
+        admit()
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != "source_drain" or reply.get("state") != "background"
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False):
+            raise RuntimeError("storage_online_spool_reply_invalid")
+        result = reply.get("result")
+        if (not isinstance(result, dict)
+                or result.get("publisher_drain_authorized") is not False
+                or result.get("final_switch_authorized") is not False
+                or result.get("collection_resume_authorized") is not False
+                or type(result.get("spool_empty_at_observation")) is not bool):
+            raise RuntimeError("storage_online_spool_reply_invalid")
+        return result

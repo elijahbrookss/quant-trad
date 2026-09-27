@@ -33,7 +33,7 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
-_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "cancel", "close"}
+_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "cancel", "close"}
 
 
 class OnlineController:
@@ -194,6 +194,9 @@ class OnlineController:
     def command(self, request):
         fields = {"controller_id", "sequence", "operation"}
         preparing = isinstance(request, dict) and request.get("operation") == "prepare_step"
+        draining = isinstance(request, dict) and request.get("operation") == "source_drain"
+        if draining:
+            fields |= {"deadline", "max_entries"}
         if preparing:
             fields |= {"step", "relation", "max_duration_seconds"}
         if (not isinstance(request, dict)
@@ -205,6 +208,14 @@ class OnlineController:
                 or request["operation"] not in _OPERATIONS):
             raise ValueError("storage_online_command_invalid")
         operation = request["operation"]
+        if draining:
+            if (type(request["deadline"]) not in (int, float)
+                    or not math.isfinite(request["deadline"])
+                    or not 0 < request["deadline"]-monotonic() <= self.limits["movement_timeout_seconds"]
+                    or request["deadline"] > self.proof.deadline
+                    or type(request["max_entries"]) is not int
+                    or not 1 <= request["max_entries"] <= 1_000_000):
+                raise ValueError("storage_online_spool_command_budget_invalid")
         if preparing:
             step, relation = request["step"], request["relation"]
             relation_step = step in {"reference_prepare", "reference_validate"} if isinstance(step, str) else False
@@ -219,6 +230,8 @@ class OnlineController:
             # It is not a restart/resume token and never revives dead proof.
             if self.state not in {"closed", "cancelled"}:
                 self.check()
+            if draining:
+                raise RuntimeError("storage_online_spool_fresh_sequence_required")
             return deepcopy(self._last_reply)
         if request["sequence"] != self._sequence+1 or self.state != "background":
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
@@ -238,6 +251,17 @@ class OnlineController:
                         timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
                 self.state = "cancelled"
                 result = {"attempt_cancelled": True, "source_preserved": True}
+            elif draining:
+                # Read-only and explicit: the same live host supplies its already
+                # decreasing final deadline. It cannot widen page allowances or
+                # create switch/drain authority from this instantaneous result.
+                from scripts.automation.storage_online_drain import inspect_spool
+                result = inspect_spool(self.source_root.parent,
+                    deadline=request["deadline"], max_entries=request["max_entries"],
+                    check=self.proof.check)
+                self.check()
+                if monotonic() >= request["deadline"]:
+                    raise RuntimeError("storage_online_spool_deadline_expired")
             else:
                 self._admit_attempt()
                 if operation == "sql_copy":

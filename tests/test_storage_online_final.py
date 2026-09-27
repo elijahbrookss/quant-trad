@@ -114,3 +114,30 @@ def test_nested_docker_calls_share_one_absolute_budget(monkeypatch):
             held._docker("stop", "--timeout", "-1", "owned", timeout=30)
     assert timeouts == [5,3,1]
     assert held._DOCKER_DEADLINE.get() is None
+
+
+def test_source_drain_rechecks_held_source_and_original_deadline(pause_setup):
+    path, rows, clock, state, stop = pause_setup
+    saved = stop()
+    final.held._save(path/"storage-online-request.json", {"command_seconds": 30}, initial=True)
+    before = (path/final.STATE).read_bytes()
+    calls = []
+    def exchange(operation, **kwargs):
+        calls.append(kwargs)
+        return dict(controller_id=CONTROLLER, operation=operation, state="background",
+                    final_switch_authorized=False, collection_resume_authorized=False,
+                    result=dict(spool_empty_at_observation=False,publisher_drain_authorized=False,
+                                final_switch_authorized=False,collection_resume_authorized=False))
+    assert not final.observe_source_drain_locked(path, exchange=exchange,max_entries=10)["spool_empty_at_observation"]
+    assert calls and (path/final.STATE).read_bytes() == before
+    def restarted(*args, **kwargs):
+        reply = exchange(*args, **kwargs)
+        rows["backend"]["running"] = True
+        return reply
+    with pytest.raises(RuntimeError, match="spool_source_changed"):
+        final.observe_source_drain_locked(path, exchange=restarted,max_entries=10)
+    rows["backend"]["running"] = False
+    clock.update(wall=1061,boot=161)
+    with pytest.raises(RuntimeError, match="deadline_expired"):
+        final.observe_source_drain_locked(path, exchange=exchange,max_entries=10)
+    assert (path/final.STATE).read_bytes() == before
