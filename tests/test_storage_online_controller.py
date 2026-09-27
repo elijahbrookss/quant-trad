@@ -215,3 +215,16 @@ def test_aborted_controller_cannot_outlive_original_final_window(monkeypatch):
     controller=OnlineController.__new__(OnlineController)
     controller.state="aborted";controller._final_deadline=monotonic()-1
     with pytest.raises(RuntimeError,match="terminal_deadline_expired"):controller.check()
+
+
+
+def test_sql_drain_expired_owner_deadline_never_touches_database():
+    from scripts.automation.storage_online_controller import OnlineController
+    class Untouched:
+        closed = invalidated = False
+        def begin(self):
+            pytest.fail("expired SQL ownership check touched database")
+    controller = OnlineController.__new__(OnlineController)
+    controller._owner = Untouched()
+    with pytest.raises(RuntimeError, match="sql_drain_deadline_expired"):
+        controller._ownership(deadline=monotonic()-1)

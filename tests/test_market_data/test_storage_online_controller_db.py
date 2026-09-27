@@ -552,12 +552,20 @@ def test_controller_outcome_wire_pending_negative_and_lost_real_commit(storage, 
                 worker.command(request)
             return reply["result"]
         assert inspect()["outcome"] == "uncommitted"
-        with engine.connect() as other, other.begin():
-            other.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:name,0))"),
-                          {"name": capture.LOCK})
-            result = inspect()
-            assert result["outcome"] == "pending" and result["database_handoff_committed"] is None
-            assert worker.state == "background" and worker.proof.hashed_bytes == hashed
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import NullPool
+        competitor = create_engine(engine.url, poolclass=NullPool)
+        try:
+            with competitor.connect() as other, other.begin():
+                other.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:name,0))"),
+                              {"name": capture.LOCK})
+                result = inspect()
+                assert result["outcome"] == "pending" and result["database_handoff_committed"] is None
+                assert worker.state == "background" and worker.proof.hashed_bytes == hashed
+        finally:
+            # This actor has its own non-pooling connection. Retire it without
+            # leaving an extra idle session in the migration engine's pool.
+            competitor.dispose()
         assert inspect()["outcome"] == "uncommitted"
         original = Connection._commit_impl
         switching = set()
@@ -705,3 +713,96 @@ def test_controller_rollback_fence_wire_retains_live_lock_and_releases_on_channe
         with capture.migration_step(conn,5):pass
         assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
         assert _frozen_records(conn) == frozen
+
+
+
+def test_controller_idle_sql_peer_refuses_before_switch(storage, tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch, stage=False)
+    other = create_engine(engine.url, poolclass=NullPool)
+    try:
+        with OnlineController(engine, **settings) as worker, other.connect() as peer:
+            # Even a spoofed name and an idle non-transactional connection are
+            # not migration ownership. The actual live connections own that.
+            peer.exec_driver_sql("SET application_name='qt.storage.online.controller.v1'")
+            peer.commit()
+            with pytest.raises(RuntimeError, match="sql_publishers_not_drained"):
+                worker.commit_database(deadline=time.monotonic()+20)
+            assert worker.state == "commit_unknown"
+            assert not worker.reconcile_database()["database_handoff_committed"]
+            with engine.connect() as conn:
+                assert conn.scalar(text("SELECT to_regnamespace('qt_fact_header_retained_v1')")) is None
+                assert capture.inspect_capture(conn)["started_at"] == settings["expected_started_at"]
+    finally:
+        other.dispose()
+
+
+def test_controller_sql_peer_arriving_during_switch_rolls_back(storage, tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    other = create_engine(engine.url, poolclass=NullPool)
+    peer = []
+    with engine.connect() as conn:
+        frozen = _frozen_records(conn)
+    def arriving(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA") and not peer:
+            peer.append(other.connect())
+            peer[0].exec_driver_sql("SELECT 1")
+            peer[0].commit()
+    try:
+        with OnlineController(engine, **settings) as worker:
+            _drain(worker);_reprove(worker)
+            event.listen(engine, "after_cursor_execute", arriving)
+            try:
+                with pytest.raises(RuntimeError, match="sql_publishers_not_drained"):
+                    worker.commit_database(deadline=time.monotonic()+30)
+            finally:
+                event.remove(engine, "after_cursor_execute", arriving)
+            assert peer  # The real rename happened before the second refusal.
+            assert not worker.reconcile_database()["database_handoff_committed"]
+            with engine.connect() as conn:
+                assert conn.scalar(text("SELECT to_regnamespace('qt_fact_header_retained_v1')")) is None
+                assert _frozen_records(conn) == frozen
+                assert capture.inspect_capture(conn)["started_at"] == settings["expected_started_at"]
+    finally:
+        for conn in peer:conn.close()
+        other.dispose()
+
+
+
+def test_controller_prepared_transaction_refuses_without_client(storage, tmp_path, monkeypatch):
+    from uuid import uuid4
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch, stage=False)
+    with engine.begin() as conn:
+        if int(conn.scalar(text("SHOW max_prepared_transactions"))) == 0:
+            pytest.skip("requires disposable max_prepared_transactions > 0")
+        conn.exec_driver_sql("CREATE TABLE public.qt_owned_prepared_probe(id integer PRIMARY KEY)")
+    gid = "qt_storage_"+uuid4().hex
+    other = create_engine(engine.url, poolclass=NullPool)
+    pending = False
+    try:
+        raw = other.raw_connection()
+        try:
+            cursor = raw.cursor()
+            cursor.execute("INSERT INTO public.qt_owned_prepared_probe VALUES(1)")
+            cursor.execute("PREPARE TRANSACTION '"+gid+"'")
+            pending = True
+            cursor.close()
+        finally:
+            raw.close()
+        with OnlineController(engine, **settings) as worker:
+            with pytest.raises(RuntimeError, match="sql_publishers_not_drained"):
+                worker.commit_database(deadline=time.monotonic()+20)
+            assert not worker.reconcile_database()["database_handoff_committed"]
+            with engine.connect() as conn:
+                assert conn.scalar(text("SELECT count(*) FROM pg_prepared_xacts WHERE gid=:gid"), {"gid":gid}) == 1
+                assert conn.scalar(text("SELECT count(*) FROM public.qt_owned_prepared_probe")) == 0
+    finally:
+        if pending:
+            with other.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.exec_driver_sql("ROLLBACK PREPARED '"+gid+"'")
+        other.dispose()

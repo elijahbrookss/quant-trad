@@ -1976,3 +1976,25 @@ starts, host processes, remote SQL clients and filesystem aliases still require
 separate admission. It grants no COMMIT, source-resumption or recovery authority.
 The existing caller deadline and inventory/output bounds are unchanged. The
 read-capability worker's launch confinement remains a separate boundary.
+
+
+The internal online-controller database handoff requires a fresh SQL-session
+refusal check before verification and again on the same switching transaction
+immediately before COMMIT. Only the actual switching connection and the separately
+checked live controller ownership connection are excluded. Other database client sessions,
+including idle sessions, and prepared transactions refuse; application names or
+addresses cannot establish migration ownership. The check uses the handoff's
+already shortened absolute deadline, and the existing transaction/resource fences
+remain through commit. A late refusal rolls back the real rename and preserves
+source/capture/frozen data. No client is terminated or database login setting changed.
+
+These are necessary refusal conditions, not continuous SQL or host publisher
+exclusion. A client can arrive after an observation. The host still must establish
+exact publisher/source-image/spool admission and retain it through handoff. No
+COMMIT pipe command or production final-pause allowance is added by these checks.
+
+PostgreSQL's server-owned `backend_type` identifies client sessions; a supplied
+application name is never used for exclusion. Internal PostgreSQL/TimescaleDB
+workers are outside this client check and still require separate admission.
+An idle TimescaleDB scheduler is not proof that its jobs cannot run. This check
+must not be presented as admission of extension jobs or all SQL publishers.

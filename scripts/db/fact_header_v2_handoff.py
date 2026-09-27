@@ -29,7 +29,7 @@ from scripts.db import archive_reference_v2_placement as reference_move
 from scripts.db import archive_root_v2_copy as archives
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
 from scripts.db import fact_header_v2_references as references, raw_mapping_v2_copy as raw
-from scripts.db.fact_header_v2_capture import LOCK, SCHEMA, migration_step, capture_remaining_seconds
+from scripts.db.fact_header_v2_capture import LOCK, SCHEMA, migration_step, capture_remaining_seconds, _bounded_step
 
 logger = logging.getLogger(__name__)
 RETAINED = "qt_fact_header_retained_v1"
@@ -327,7 +327,7 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
 
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
                    max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None,
-                   deadline=None):
+                   deadline=None, publisher_check=None):
     """Commit one fully verified fixed handoff; sources remain retained.
 
     Rechecks every copied header, identity, lookup and archive object under
@@ -339,6 +339,8 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
     drain or authorize collection to resume.
     """
     limits = _limits(resource_limits, migration=True)
+    if publisher_check is not None and not callable(publisher_check):
+        raise ValueError("fact_header_handoff_publisher_check_invalid")
     if cancelled is not None and not callable(cancelled):
         raise ValueError("fact_header_handoff_cancellation_callback_invalid")
     started = monotonic()
@@ -355,7 +357,9 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous:
                     deadline = min(deadline, started+previous/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"]):
+                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
+                    if publisher_check is not None:
+                        publisher_check(conn, deadline=deadline)
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("fact_header_handoff_storage_busy")
@@ -420,7 +424,17 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                                     raw_mapping=True, evidence={"source_retained": True, "handoff": receipt})
                                 watch.check()
                 # Successful savepoint contexts have ended, but watcher and
-                # transaction locks still protect the actual COMMIT.
+                # transaction locks still protect the actual COMMIT. Recheck
+                # external SQL clients on this SAME transaction immediately
+                # before commit; this still does not prevent future clients or
+                # replace the caller's continuous host publisher exclusion.
+                if publisher_check is not None:
+                    remaining = deadline-monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("fact_header_handoff_deadline_expired")
+                    with _bounded_step(conn, math.ceil(remaining)) as shorten:
+                        shorten(remaining)
+                        publisher_check(conn, deadline=deadline)
             watch.check()
             if file_proof is not None:
                 file_proof.check()

@@ -137,13 +137,19 @@ class OnlineController:
     def _capture_row(conn):
         return dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
 
-    def _ownership(self):
+    def _ownership(self, *, deadline=None):
         if self._owner is None or self._owner.closed or self._owner.invalidated:
             raise RuntimeError("storage_online_controller_ownership_lost")
+        seconds = 5 if deadline is None else min(5, deadline-monotonic())
+        if seconds <= 0:
+            raise RuntimeError("storage_online_sql_drain_deadline_expired")
         with self._owner.begin():
-            self._owner.exec_driver_sql("SET LOCAL statement_timeout='5s'")
+            self._owner.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                                {"value": str(max(1, math.floor(seconds*1000)))})
             if self._owner.scalar(text("SELECT pg_backend_pid()")) != self._pid:
                 raise RuntimeError("storage_online_controller_ownership_lost")
+        if deadline is not None and monotonic() >= deadline:
+            raise RuntimeError("storage_online_sql_drain_deadline_expired")
 
     def check(self):
         if self.state not in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced", "aborted"}:
@@ -436,6 +442,31 @@ class OnlineController:
             self.state = "failed"
             raise
 
+    def _require_external_sql_clients_absent(self, conn, *, deadline):
+        """Necessary refusal only, never host publisher-exclusion authority.
+
+        Exclude only this actual switch connection and the independently checked
+        live owner connection. Idle sessions can publish later; names, addresses
+        and reported application identity do not establish ownership. Prepared
+        transactions can commit without a live backend and also refuse.
+        PostgreSQL/extension workers are not client sessions; their admission
+        remains a separate host requirement, not an inferred exemption to drain.
+        """
+        self._ownership(deadline=deadline)
+        conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+        observed = conn.execute(text("""
+            SELECT
+              (SELECT count(*) FROM pg_stat_activity
+               WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
+                 AND backend_type='client backend'
+                 AND pid NOT IN (pg_backend_pid(), :owner_pid)) AS other_backends,
+              (SELECT count(*) FROM pg_prepared_xacts
+               WHERE database=current_database()) AS prepared_transactions
+        """), {"owner_pid": self._pid}).mappings().one()
+        if observed["other_backends"] or observed["prepared_transactions"]:
+            raise RuntimeError("storage_online_sql_publishers_not_drained")
+        self._ownership(deadline=deadline)
+
     def commit_database(self, *, deadline):
         """Internal host seam, intentionally NOT a pipe command.
 
@@ -466,7 +497,7 @@ class OnlineController:
             resource_limits=limits, source_root=self.source_root,
             destination_root=self.destination_root, max_objects=self.max_objects,
             max_bytes=self.max_bytes, page_rows=self.page_rows, file_proof=self.proof,
-            deadline=deadline)
+            deadline=deadline, publisher_check=self._require_external_sql_clients_absent)
         self.state = "committed"
         return result
 
