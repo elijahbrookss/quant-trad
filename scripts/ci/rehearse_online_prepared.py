@@ -18,7 +18,10 @@ parser.add_argument('--worker-phases',action='store_true',help='drive explicit p
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
 parser.add_argument('--switch-entry',action='store_true',help='persist uncertain switch entry, no COMMIT dispatch')
+parser.add_argument('--real-worker-publication',action='store_true',help='real collector publication during Docker shutdown with scripted transport')
 options=parser.parse_args()
+if options.real_worker_publication and options.worker_shutdown!='clean':
+ parser.error('--real-worker-publication requires --worker-shutdown clean')
 if options.switch_entry and not options.final_delta:
  parser.error('--switch-entry requires --final-delta')
 if options.final_delta and (not options.final_pause or options.worker_shutdown=='fail'):
@@ -115,7 +118,7 @@ try:
    import ast
    fixture_tree=ast.parse((Path(__file__).resolve().parents[2]/"tests/test_market_data/test_collector_shutdown_signal.py").read_text())
    SCRIPT=next(ast.literal_eval(node.value) for node in fixture_tree.body if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="SCRIPT" for t in node.targets))
-   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_DISABLE_DOTENV=1',
+   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_DISABLE_DOTENV=1',
              '--env','QT_LOGGING_LOKI_URL=','--env','QT_LOGGING_LEVEL=INFO']
    run(['run','-d','--name',name,'--pull','never','--network',network,
      '--user','70:70','--read-only','--memory','512m','--cpus','2','--pids-limit','64',
@@ -153,7 +156,7 @@ try:
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=',
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
-   '--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
+   '--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
  log=(state/'fixture.log').open('w')
@@ -164,6 +167,11 @@ try:
    if fixture.poll() is not None or time.monotonic()>until:raise RuntimeError('fixture_wait_failed: '+name+' '+(state/'fixture.log').read_text()[-2500:])
    time.sleep(.1)
  waitfile('ready.json')
+ if options.real_worker_publication:
+  received_deadline=time.monotonic()+30
+  while not (working/'objects'/'real-frame-received').exists():
+   if time.monotonic()>received_deadline:raise RuntimeError('real Docker collector did not receive frame')
+   time.sleep(.05)
  request=json.loads((control/'request.json').read_text())
  inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes())
  udev=control/Path(json.loads((control/'ready.json').read_text())['udev']).relative_to('/qt-control')
@@ -312,6 +320,11 @@ try:
      assert not drained['spool_empty_at_observation'] and not drained['publisher_drain_authorized']
      assert drained['pending_files']>0  # Existing real QT fixture intentionally retains sealed WAL.
      report['fixture_retained_spool_observation']=drained
+     if options.real_worker_publication:
+      result=json.loads((working/'objects'/'real-publication-result.json').read_text())
+      assert result['facts_manifests_mappings']==[1,1,1]
+      assert result['wal_retired_after_canonical_ack'] and result['stop_waited_for_publication']
+      report['real_docker_publication']=result
      if options.worker_shutdown:
       collector=rows['market-data-collector']['id']
       stopped=json.loads(run(['inspect',collector,'--format','{{json .State}}']).stdout)
@@ -514,6 +527,9 @@ except BaseException as exc:
   report.update(passed=False,error_type=type(exc).__name__,error=str(exc))
   raise
 finally:
+ if options.worker_shutdown:
+  diagnostic=run(['logs','--tail','160',project+'-market-data-collector'],check=False)
+  (state/'worker-shutdown.log').write_text(diagnostic.stdout+diagnostic.stderr)
  cleanup_failures=[]
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)

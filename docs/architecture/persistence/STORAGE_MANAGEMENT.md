@@ -1809,3 +1809,22 @@ host receipt unchanged and source held. An uncommitted response is not the live
 rollback fence; a committed response does not permit recovery mounts while the
 read-capability worker survives. COMMIT dispatch, publisher admission, supervised
 source resumption and terminal host reconciliation remain separate requirements.
+
+
+### Real publication during Docker shutdown rehearsal
+
+The explicit `--real-worker-publication` host rehearsal combines Docker SIGTERM
+to the actual worker/supervisor with ContinuousStreamRuntime, the Coinbase parser,
+trade projection, PostgreSQL archive publication and canonical acknowledgement.
+Transport is scripted. The owned v1 fixture binds the frozen v1 ingestion and
+partition/read clauses; it does not run the candidate v2 bootstrap against v1.
+The same admitted migration worker and file proof remain alive during shutdown.
+
+A diagnostic acknowledgement delay checks the intermediate state: a durable raw
+manifest/mapping and sealed WAL exist before the canonical fact commits. Normal
+completion must produce exactly one fact/manifest/mapping, retire only that
+segment and preserve unrelated fixture WAL. The held tail-copy path then catches
+publication that completed during stopping. Discovery, lifecycle and heartbeat
+remain controlled, as do UUID metadata and UID70 fixture directories. This is not
+full deployed-image readiness, all-projector drain, real collector performance,
+production downtime, COMMIT dispatch or source resumption authority.

@@ -100,7 +100,7 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
     atomic = os.getenv("QT_ONLINE_ATOMIC_PREPARE") == "1"
     worker_phases = os.getenv("QT_ONLINE_WORKER_PHASES") == "1"
     assert not worker_phases or atomic
-    engine, options, source, _ = _prepare(storage, control, monkeypatch,
+    engine, options, source, book = _prepare(storage, control, monkeypatch,
         source_directory="/app/logs/market-structure",
         destination_directory="/qt-history/archives/objects",
         recent_root="/var/lib/postgresql/data", prepare_captures=not atomic)
@@ -140,6 +140,9 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
     (control/"request.json").write_text(json.dumps(request))
     (control/"inventory.json").write_text(json.dumps({"schema_version":"qt.storage_inventory.v1",
         "targets":[asdict(storage.copy_plan.recent),asdict(storage.copy_plan.history)]}))
+    if os.getenv("QT_SIGNAL_REAL_PUBLICATION") == "1":
+        from tests.test_market_data.online_signal_publication_fixture import prepare_definition
+        prepare_definition(storage, book, source/"objects")
     (control/"ready.json").write_text(json.dumps({"udev":str(storage.copy_udev)}))
     wait("publish")
     _raw_book_fixture(storage, source, monkeypatch,

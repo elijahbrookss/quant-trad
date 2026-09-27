@@ -25,6 +25,9 @@ class Adapter(_Adapter):
     async def run(self, *, stop_requested, **kwargs):
         (root/"ready").write_text("ready")
         while not stop_requested():
+            if os.environ.get("QT_SIGNAL_REAL_PUBLICATION") == "1" and (root/"real-publication.json").exists():
+                from tests.test_market_data.online_signal_publication_fixture import run_publication
+                return await run_publication(root, stop_requested=stop_requested, **kwargs)
             if host_fixture:
                 with (root/"native-intake").open("ab") as stream:
                     stream.write(b"x")
@@ -56,7 +59,7 @@ worker.storage_maintenance_runners = lambda *args, **kwargs: {}
 worker.MarketStorageLifecycleSupervisor = Lifecycle
 worker._WorkerHeartbeat = Heartbeat
 worker._WORKER_SETTINGS = SimpleNamespace(db_wait_timeout_seconds=1, idle_sleep_seconds=0.01,
-    idle_sleep_max_seconds=0.01, shutdown_drain_timeout_seconds=5)
+    idle_sleep_max_seconds=0.01, shutdown_drain_timeout_seconds=15 if os.environ.get("QT_SIGNAL_REAL_PUBLICATION") == "1" else 5)
 worker.market_data_collector.claim_due = lambda **kwargs: None
 worker.ContinuousCollectorSupervisor = lambda **kwargs: ContinuousCollectorSupervisor(
     owner_id="signal-fixture", repository=_Repository(), operations_repository=_OperationsRepository(),
