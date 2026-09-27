@@ -146,8 +146,10 @@ class OnlineController:
                 raise RuntimeError("storage_online_controller_ownership_lost")
 
     def check(self):
-        if self.state not in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced"}:
+        if self.state not in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced", "aborted"}:
             raise RuntimeError("storage_online_controller_not_active")
+        if self.state == "aborted" and (self._final_deadline is None or monotonic() >= self._final_deadline):
+            raise RuntimeError("storage_online_terminal_deadline_expired")
         if self.state == "resume_fenced":
             self._rollback_check()
         self._ownership()
@@ -266,7 +268,7 @@ class OnlineController:
                 raise RuntimeError("storage_online_observation_fresh_sequence_required" if inspecting
                                    else "storage_online_spool_fresh_sequence_required")
             return deepcopy(self._last_reply)
-        readable = operation in {"inspect_outcome", "close"} and self.state in {"commit_unknown", "committed", "rolled_back"}
+        readable = operation in {"inspect_outcome", "close"} and self.state in {"commit_unknown", "committed", "rolled_back", "aborted"}
         rollback_allowed = (operation == "rollback_fence_begin" and self.state in {"background", "commit_unknown", "rolled_back"}
             or operation in {"rollback_fence_check", "rollback_fence_end", "close"} and self.state == "resume_fenced")
         if request["sequence"] != self._sequence+1 or (self.state != "background" and not readable and not rollback_allowed):
@@ -660,10 +662,10 @@ def serve(controller, *, input_fd, output_fd, channel_seconds=5):
     _write(output_fd, controller.status(), channel_seconds)
     pending = bytearray()
     partial_deadline = None
-    while controller.state in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced"}:
+    while controller.state in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced", "aborted"}:
         controller.check()
         wait = min(channel_seconds, max(0, controller.proof.deadline-monotonic()))
-        if controller.state == "resume_fenced":
+        if controller.state in {"resume_fenced", "aborted"}:
             wait = min(wait, max(0, controller._final_deadline-monotonic()), .1)
         if partial_deadline is not None:
             wait = min(wait, max(0, partial_deadline-monotonic()))

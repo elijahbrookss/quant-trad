@@ -917,3 +917,29 @@ an assertion that the source remains stopped. This controlled reply fault does
 not qualify a daemon start completing after ownership loss or full host death.
 The proxy is confined to the one child CLI environment and removed at fixture
 exit; production Docker configuration and migration behavior are unchanged.
+
+
+### Reconcile a completed resumption on the same live worker
+
+After rollback fence end, the aborted controller now remains available only for
+fresh read-only outcome inspection and close, until the original final deadline.
+It cannot prepare, copy, switch, cancel or begin another rollback fence. Explicit
+close, EOF, proof/ownership loss and expiry still release the read capability.
+The host must reap it before any recovery secret mounts become visible.
+
+The internal reconcile_source_resumed_locked helper can finish the existing
+source_resuming receipt after a lost terminal acknowledgement. It requires every
+originally running client to have a durable completed start entry, no in-flight
+start, the same live worker/controller and exact healthy original source before
+and after fresh authoritative inspection. Only an aborted controller reporting
+an uncommitted database outcome is accepted. The original wall/boot/final deadline
+and a short inspection ceiling bound all work; no start is issued or replayed.
+Success records source_resumed and retains the final marker and all exclusions.
+
+This covers a fully received end reply discarded by the host or an unrecorded
+completion while that exact channel remains usable. Unread/partial framing,
+worker/outer-host death, partial starts, delayed daemon completion, reboot and
+expiry remain unresolved; there is no fence recreation or saved-negative restart
+shortcut. The optional owned --abort-resume-lost-end rehearsal qualifies this
+limited terminal path. It is not COMMIT dispatch, recovery activation, ordinary
+deployment authorization or a production downtime measurement.

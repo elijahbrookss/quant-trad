@@ -601,3 +601,75 @@ def resume_online_source_locked(state_root, *, exchange):
               file=sys.stderr, flush=True)
         return {"original_source_resumed": True, "final_marker_retained": True,
                 "database_switch_authorized": False, "runtime_activation_authorized": False}
+
+
+def reconcile_source_resumed_locked(state_root, *, exchange):
+    """Record completed starts after a lost end reply on the SAME live pipe.
+
+    No Docker starts, fence recreation or saved-negative shortcut. Every start
+    must already have a completed durable journal entry with no in-flight action.
+    A fresh aborted-controller outcome and exact healthy original source are
+    required within the original final window. Worker loss, partial/unread pipe
+    framing, partial starts and expiry remain unresolved. Retain the marker.
+    """
+    if not callable(exchange):
+        raise ValueError("storage_online_resume_exchange_invalid")
+    state_root = launch._canonical(state_root)
+    path = state_root/STATE
+    saved = _load(path)
+    if (saved["phase"] != "source_resuming" or saved["resume"]["inflight"] is not None):
+        raise RuntimeError("storage_online_resume_completed_journal_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    request = held._load(state_root/"storage-online-request.json")
+    seconds = request["command_seconds"]
+    if type(seconds) is not int or not 1 <= seconds <= 60:
+        raise RuntimeError("storage_online_resume_command_budget_invalid")
+    deadline = min(saved["switch"]["deadline_monotonic"],
+                   time.monotonic()+min(5, seconds, _remaining(saved)))
+
+    def admit():
+        _remaining(saved)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_resume_deadline_expired")
+        observed, preparation, rows, limits = _observe(state_root, **args)
+        if (observed != binding or saved["duration_seconds"] > limits["seconds"]
+                or saved["deadline"] > limits["capture_deadline"]):
+            raise RuntimeError("storage_online_resume_source_changed")
+        expected = [n for n in held.STOP if preparation["clients"][n]["was_running"]]
+        if saved["resume"]["completed"] != expected:
+            raise RuntimeError("storage_online_resume_completed_journal_required")
+        if (any(rows[n]["running"] != (n in expected) for n in held.STOP)
+                or not initial._source_healthy(rows)):
+            raise RuntimeError("storage_online_resume_healthy_source_required")
+        _remaining(saved)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_resume_deadline_expired")
+
+    with held._docker_deadline(deadline):
+        admit()
+        reply = exchange("inspect_outcome", deadline=deadline)
+        admit()
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != "inspect_outcome" or reply.get("state") != "aborted"
+                or reply.get("bound_final_deadline") != saved["switch"]["deadline_monotonic"]
+                or type(reply.get("last_sequence")) is not int
+                or reply["last_sequence"] <= saved["switch"]["worker_sequence"]
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False
+                or not isinstance(result, dict) or result.get("outcome") != "uncommitted"
+                or result.get("database_handoff_committed") is not False
+                or result.get("collection_resume_authorized") is not False
+                or result.get("runtime_activation_authorized") is not False):
+            raise RuntimeError("storage_online_resume_terminal_reply_invalid")
+        saved["phase"] = "source_resumed"
+        saved["resume"]["finished_at"] = time.time()
+        held._save(path, saved, initial=False)
+        _remaining(saved)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_resume_deadline_expired")
+        print("event=storage_online_source_resume_reconciled final_marker_retained=true",
+              file=sys.stderr, flush=True)
+        return {"original_source_resumed": True, "final_marker_retained": True,
+                "database_switch_authorized": False, "runtime_activation_authorized": False}

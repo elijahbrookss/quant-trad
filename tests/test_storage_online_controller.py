@@ -181,3 +181,37 @@ def test_idle_fenced_channel_obeys_original_deadline_without_new_requests():
             serve(peer,input_fd=server.fileno(),output_fd=server.fileno(),channel_seconds=5)
     assert monotonic() >= original
     assert peer._final_deadline == original and not peer.calls
+
+
+def test_aborted_controller_only_allows_fresh_outcome_and_close(monkeypatch):
+    from scripts.automation.storage_online_controller import OnlineController
+    from copy import deepcopy
+    controller=OnlineController.__new__(OnlineController)
+    controller.state="aborted";controller.controller_id="c"*32
+    controller._sequence=5;controller._last_request=None
+    controller._final_deadline=monotonic()+10
+    controller._admitted_limits={"movement_timeout_seconds":30}
+    controller.limits={"movement_timeout_seconds":5}
+    controller.proof=SimpleNamespace(deadline=monotonic()+30,hashed_bytes=17)
+    controller._reproved=set();controller._rollback_context=None;controller._rollback_check=None
+    controller._ownership=lambda:None
+    controller.check=lambda:None
+    controller.inspect_outcome=lambda **kwargs:dict(outcome="uncommitted",database_handoff_committed=False,
+        collection_resume_authorized=False,runtime_activation_authorized=False)
+    request=dict(controller_id=controller.controller_id,sequence=6,operation="inspect_outcome",deadline=monotonic()+3)
+    reply=controller.command(request)
+    assert reply["state"]=="aborted" and reply["result"]["outcome"]=="uncommitted"
+    with pytest.raises(RuntimeError,match="fresh_sequence_required"):controller.command(deepcopy(request))
+    for operation in ("sql_copy","archive_copy","reprove","status","cancel"):
+        with pytest.raises(RuntimeError,match="sequence_or_state_invalid"):
+            controller.command(dict(controller_id=controller.controller_id,sequence=7,operation=operation))
+    with pytest.raises(RuntimeError,match="commit_state_invalid"):
+        controller.commit_database(deadline=controller._final_deadline)
+    assert controller.command(dict(controller_id=controller.controller_id,sequence=7,operation="close"))["state"]=="closed"
+
+
+def test_aborted_controller_cannot_outlive_original_final_window(monkeypatch):
+    from scripts.automation.storage_online_controller import OnlineController
+    controller=OnlineController.__new__(OnlineController)
+    controller.state="aborted";controller._final_deadline=monotonic()-1
+    with pytest.raises(RuntimeError,match="terminal_deadline_expired"):controller.check()

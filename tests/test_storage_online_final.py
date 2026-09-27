@@ -423,3 +423,49 @@ def test_resume_terminal_reply_does_not_require_worker_to_stay_alive(resume_setu
         return reply
     assert final.resume_online_source_locked(path, exchange=end_and_exit)["original_source_resumed"]
     assert final._load(path/final.STATE)["phase"] == "source_resumed"
+
+
+@pytest.mark.parametrize("drift", [None, "inflight", "incomplete", "stopped", "initializer",
+    "unhealthy", "worker", "expiry", "reboot", "pending", "committed", "active", "controller", "sequence"])
+def test_terminal_resume_reconciliation_never_replays_starts(resume_setup, monkeypatch, drift):
+    path, rows, clock, state, stop, exchange, calls, starts, deadline = resume_setup
+    final.held._save(path/"storage-online-request.json", {"command_seconds": 5}, initial=True)
+    def lost(operation, **kwargs):
+        reply = exchange(operation, **kwargs)
+        if operation == "rollback_fence_end":raise TimeoutError("received end reply discarded")
+        return reply
+    with pytest.raises(TimeoutError):final.resume_online_source_locked(path, exchange=lost)
+    saved = final._load(path/final.STATE)
+    count = len(starts)
+    if drift == "inflight":
+        saved["resume"]["completed"].remove("backend")
+        saved["resume"]["inflight"] = dict(service="backend",container_id=rows["backend"]["id"],requested_at=1000.)
+    if drift == "incomplete":saved["resume"]["completed"].pop()
+    final.held._save(path/final.STATE, saved, initial=False)
+    before = (path/final.STATE).read_bytes()
+    if drift == "stopped":rows["backend"]["running"] = False
+    if drift == "initializer":rows["initialize"]["running"] = True
+    if drift == "unhealthy":monkeypatch.setattr(final.initial,"_source_healthy",lambda _:False)
+    if drift == "worker":state["binding"]["runtime"] = 2
+    if drift == "expiry":clock["boot"] = 161
+    if drift == "reboot":clock["boot_id"] = "b"*36
+    def inspect(operation, **kwargs):
+        assert operation == "inspect_outcome" and kwargs["deadline"] <= deadline
+        return dict(controller_id="d"*32 if drift=="controller" else CONTROLLER,
+            operation=operation,state="background" if drift=="active" else "aborted",
+            last_sequence=5 if drift=="sequence" else 1000,bound_final_deadline=deadline,
+            final_switch_authorized=False,collection_resume_authorized=False,
+            result=dict(outcome=drift if drift in {"pending","committed"} else "uncommitted",
+                database_handoff_committed=None if drift=="pending" else drift=="committed",
+                collection_resume_authorized=False,runtime_activation_authorized=False))
+    if drift:
+        with pytest.raises(RuntimeError):final.reconcile_source_resumed_locked(path,exchange=inspect)
+        assert (path/final.STATE).read_bytes()==before
+    else:
+        result=final.reconcile_source_resumed_locked(path,exchange=inspect)
+        assert result["original_source_resumed"] and result["final_marker_retained"]
+        after=final._load(path/final.STATE)
+        assert after["phase"]=="source_resumed"
+        assert all(after[k]==v for k,v in saved.items() if k not in {"phase","resume"})
+        with pytest.raises(RuntimeError):final.reconcile_source_resumed_locked(path,exchange=inspect)
+    assert len(starts)==count

@@ -629,7 +629,8 @@ def test_controller_rollback_fence_wire_retains_live_lock_and_releases_on_channe
                         nonlocal seq
                         seq += 1
                         value = dict(controller_id=greeting["controller_id"], sequence=seq,
-                                     operation=operation, deadline=deadline, **fields)
+                                     operation=operation, deadline=deadline)
+                        value.update(fields)
                         channel.write(json.dumps(value).encode()+b"\n")
                         return json.loads(channel.readline(16385))
                     reply = request("rollback_fence_begin")
@@ -659,6 +660,13 @@ def test_controller_rollback_fence_wire_retains_live_lock_and_releases_on_channe
                         reply = request("rollback_fence_end")
                         assert reply["state"] == "aborted"
                         assert not reply["result"]["database_resume_fence_held"]
+                        # End is terminal for mutations but keeps this exact pipe
+                        # readable for lost-acknowledgement reconciliation.
+                        inspected = request("inspect_outcome", deadline=min(deadline, time.monotonic()+3))
+                        assert inspected["state"] == "aborted"
+                        assert inspected["result"]["outcome"] == "uncommitted"
+                        assert not inspected["result"]["collection_resume_authorized"]
+                        assert not inspected["result"]["runtime_activation_authorized"]
                     elif ending == "malformed":
                         channel.write(b'{"sequence":1,"sequence":2}\n')
                     elif ending == "killed_backend":

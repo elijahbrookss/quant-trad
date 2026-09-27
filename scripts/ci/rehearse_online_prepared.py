@@ -21,7 +21,10 @@ parser.add_argument('--switch-entry',action='store_true',help='persist uncertain
 parser.add_argument('--real-worker-publication',action='store_true',help='real collector publication during Docker shutdown with scripted transport')
 parser.add_argument('--abort-resume',action='store_true',help='resume exact original clients under the retained live rollback fence')
 parser.add_argument('--abort-resume-fence-loss',action='store_true',help='kill owned SQL fence while a real Docker start HTTP reply is withheld')
+parser.add_argument('--abort-resume-lost-end',action='store_true',help='discard a fully received terminal fence reply and reconcile without more starts')
 options=parser.parse_args()
+if options.abort_resume_lost_end and (not options.abort_resume or options.abort_resume_fence_loss):
+ parser.error('--abort-resume-lost-end requires --abort-resume and excludes fence-loss fault')
 if options.abort_resume_fence_loss and not options.abort_resume:
  parser.error('--abort-resume-fence-loss requires --abort-resume')
 if options.abort_resume and not options.switch_entry:
@@ -489,7 +492,30 @@ try:
            replay_refused=True,partial_source_running=True,refusal=refusal,
            daemon_late_completion_qualified=False,production_readiness=False)
         else:
-         resumed=final_host.resume_online_source_locked(state,exchange=command)
+         if options.abort_resume_lost_end:
+          def lose_end(operation,**kwargs):
+           reply=command(operation,**kwargs)
+           if operation=='rollback_fence_end':
+            raise TimeoutError('diagnostic fully received end acknowledgement discarded')
+           return reply
+          try:
+           final_host.resume_online_source_locked(state,exchange=lose_end)
+           raise AssertionError('lost end acknowledgement was ignored')
+          except TimeoutError:pass
+          pending=final_host._load(state/final_host.STATE)
+          assert pending['phase']=='source_resuming' and pending['resume']['inflight'] is None
+          assert pending['resume']['completed']==[n for n in launch.held.STOP if preparation['clients'][n]['was_running']]
+          original_start=final_host._supervised_source_start
+          def forbid_start(*args,**kwargs):raise AssertionError('terminal reconciliation replayed a start')
+          final_host._supervised_source_start=forbid_start
+          try:
+           resumed=final_host.reconcile_source_resumed_locked(state,exchange=command)
+          finally:final_host._supervised_source_start=original_start
+          report['source_resume_terminal_reconciliation']=dict(fully_received_end_reply_discarded=True,
+            same_worker=True,no_starts_replayed=True,original_deadline_preserved=True,
+            partial_or_unread_response_qualified=False,outer_worker_loss_qualified=False)
+         else:
+          resumed=final_host.resume_online_source_locked(state,exchange=command)
          terminal=final_host._load(state/final_host.STATE)
          assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
          assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
@@ -510,7 +536,7 @@ try:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
     report['reentry_empty_proof']=True
-   if not options.abort_resume:command('close')
+   if not options.abort_resume_fence_loss:command('close')
   assert worker.returncode != 0 if options.abort_resume_fence_loss else worker.returncode == 0
   assert launch.held._identities(launch.held._inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:
