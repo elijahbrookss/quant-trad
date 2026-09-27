@@ -162,6 +162,12 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
             catalogs.move_reference_catalog(engine, relation=relation,
                 policy=options["policy"], resource_limits=options["resource_limits"])
         (control/"catalogs-moved").write_text("moved")
+    if os.getenv("QT_ONLINE_FINAL_DELTA") == "1":
+        wait("final-publish")
+        _raw_book_fixture(storage, source, monkeypatch,
+            definition_id="host-entrypoint-final", provider_product_id="BTC-USD-HOST-FINAL",
+            event_start=BASE+timedelta(hours=5))
+        (control/"final-published").write_text("published")
     wait("finished")
     with engine.begin() as conn:
         assert _frozen_records(conn)==frozen

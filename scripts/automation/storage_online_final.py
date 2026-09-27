@@ -234,3 +234,65 @@ def observe_source_drain_locked(state_root, *, exchange, max_entries):
                 or type(result.get("spool_empty_at_observation")) is not bool):
             raise RuntimeError("storage_online_spool_reply_invalid")
         return result
+
+
+def copy_final_delta_locked(state_root, *, exchange, deadline, max_rounds):
+    """Bounded tails through the SAME paused worker; never switch/resume authority.
+
+    Caller owns the launcher lock/private pipe and supplies one already admitted
+    absolute monotonic deadline within the persisted original wall/boot window.
+    Keep that exact value for further rounds. A new allowance after interruption
+    is not supported. Pending spool and in-flight publishers still require their
+    independent admission before any future database switch.
+    """
+    if (not callable(exchange) or type(deadline) not in (int, float)
+            or not math.isfinite(deadline) or type(max_rounds) is not int
+            or not 1 <= max_rounds <= 64):
+        raise ValueError("storage_online_final_delta_host_inputs_invalid")
+    state_root = launch._canonical(state_root)
+    saved = _load(state_root/STATE)
+    if saved["phase"] != "paused":
+        raise RuntimeError("storage_online_final_delta_paused_source_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+
+    def admit():
+        remaining = deadline-time.monotonic()
+        if not 0 < remaining <= _remaining(saved):
+            raise RuntimeError("storage_online_final_delta_host_deadline_invalid")
+        observed, _, rows, _ = _observe(state_root, **args)
+        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+            raise RuntimeError("storage_online_final_delta_source_changed")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_final_delta_host_deadline_expired")
+        _remaining(saved)
+
+    with held._docker_deadline(deadline):
+        last = None
+        for index in range(max_rounds):
+            admit()
+            reply = exchange("final_delta", deadline=deadline)
+            admit()
+            if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                    or reply.get("operation") != "final_delta" or reply.get("state") != "background"
+                    or reply.get("final_switch_authorized") is not False
+                    or reply.get("collection_resume_authorized") is not False):
+                raise RuntimeError("storage_online_final_delta_reply_invalid")
+            last = reply.get("result")
+            if (not isinstance(last, dict) or last.get("migration_ready") is not False
+                    or last.get("final_switch_authorized") is not False
+                    or last.get("collection_resume_authorized") is not False
+                    or not isinstance(last.get("sql"), dict)
+                    or not isinstance(last.get("archives"), list)
+                    or len(last["archives"]) != 3
+                    or any(not isinstance(row, dict) for row in last["archives"])
+                    or {row.get("family") for row in last["archives"]} !=
+                        {"fact_archive_manifests", "raw_archive_manifests", "book_checkpoint_manifests"}):
+                raise RuntimeError("storage_online_final_delta_reply_invalid")
+            if (last["sql"].get("outcome") == "both_tails_observed_empty"
+                    and all(isinstance(row, dict) and row.get("captured_tail_empty_at_observation") is True
+                            for row in last["archives"])):
+                break
+        return {"rounds": index+1, "last_observation": last, "migration_ready": False,
+                "publisher_drain_authorized": False, "final_switch_authorized": False,
+                "collection_resume_authorized": False}

@@ -141,3 +141,36 @@ def test_source_drain_rechecks_held_source_and_original_deadline(pause_setup):
     with pytest.raises(RuntimeError, match="deadline_expired"):
         final.observe_source_drain_locked(path, exchange=exchange,max_entries=10)
     assert (path/final.STATE).read_bytes() == before
+
+
+@pytest.mark.parametrize("drift", [None, "source", "worker", "expiry", "reply", "families"])
+def test_final_delta_host_rechecks_original_window_and_exact_worker(pause_setup, drift):
+    path, rows, clock, state, stop = pause_setup
+    stop()
+    before = (path/final.STATE).read_bytes()
+    deadline = final.time.monotonic()+20
+    calls = []
+    def exchange(operation, **kwargs):
+        assert operation == "final_delta" and kwargs == {"deadline": deadline}
+        calls.append(True)
+        if drift == "source": rows["backend"]["running"] = True
+        if drift == "worker": state["binding"]["runtime"] = 2
+        if drift == "expiry": clock.update(wall=1061, boot=161)
+        result = dict(migration_ready=False,final_switch_authorized=False,collection_resume_authorized=False,
+            sql={"outcome":"both_tails_observed_empty"},archives=[
+                {"family":f,"captured_tail_empty_at_observation":True} for f in
+                ("fact_archive_manifests","raw_archive_manifests","book_checkpoint_manifests")])
+        if drift == "families": result["archives"] *= 2
+        return dict(controller_id="f"*32 if drift=="reply" else CONTROLLER,
+            operation=operation,state="background",final_switch_authorized=False,
+            collection_resume_authorized=False,result=result)
+    if drift:
+        with pytest.raises(RuntimeError):
+            final.copy_final_delta_locked(path,exchange=exchange,deadline=deadline,max_rounds=2)
+    else:
+        result=final.copy_final_delta_locked(path,exchange=exchange,deadline=deadline,max_rounds=2)
+        assert result["rounds"]==1 and not result["final_switch_authorized"]
+        with pytest.raises(RuntimeError,match="deadline_invalid"):
+            final.copy_final_delta_locked(path,exchange=exchange,
+                deadline=final.time.monotonic()+80,max_rounds=1)
+    assert len(calls)==1 and (path/final.STATE).read_bytes()==before

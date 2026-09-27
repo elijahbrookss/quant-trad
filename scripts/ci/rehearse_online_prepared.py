@@ -16,7 +16,10 @@ parser.add_argument('--prepare-source',action='store_true',help='qualify retaine
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
+parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
 options=parser.parse_args()
+if options.final_delta and (not options.final_pause or options.worker_shutdown=='fail'):
+ parser.error('--final-delta requires successful --final-pause')
 if options.worker_shutdown and not options.final_pause:
  parser.error('--worker-shutdown requires --final-pause')
 if options.final_pause and not (options.worker_phases and options.prepare_source):
@@ -147,7 +150,7 @@ try:
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=',
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
-   '--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
+   '--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
  log=(state/'fixture.log').open('w')
@@ -222,11 +225,17 @@ try:
      waitfile('catalogs-moved')
      report['explicit_preparation_through_worker']=True
      report['worker_reference_relations']=len(relations)
-    command('archive_copy')
+    baselines=set()
+    def archive_page():
+     page=command('archive_copy')['result']
+     if page.get('baseline_complete') is True:baselines.add(page['family'])
+    archive_page()
     waitfile('published')
     for i in range(30):
-     command('archive_copy');command('reprove');reply=command('sql_copy')
-     if reply['result']['outcome']=='both_tails_observed_empty' and len(reply['reproved_families_at_observation'])==3:break
+     archive_page();command('reprove');reply=command('sql_copy')
+     if (reply['result']['outcome']=='both_tails_observed_empty'
+         and len(reply['reproved_families_at_observation'])==3
+         and (not options.final_delta or len(baselines)==3)):break
     else:raise RuntimeError('tiny_host_tails_did_not_converge')
     final=command('status');assert final['background_hashed_bytes']>0
     first_id=receipt['container_id']
@@ -343,6 +352,33 @@ try:
      report['final_stopped_only_exact_clients']=True
      report['final_worker_and_proof_retained']=True
      report['final_source_resumption_qualified']=False
+     if options.final_delta:
+      # Owned application simulates a late publisher commit. Its private channel
+      # is diagnostic input, not production publisher exclusion or authority.
+      (control/'final-publish').write_text('publish')
+      waitfile('final-published')
+      deadline=time.monotonic()+min(25,final_host._remaining(paused)-1)
+      def lost_reply(operation,**args):
+       command(operation,**args)
+       raise TimeoutError('fixture dropped fully received delta reply')
+      try:
+       final_host.copy_final_delta_locked(state,exchange=lost_reply,deadline=deadline,max_rounds=1)
+       raise AssertionError('lost delta reply ignored')
+      except TimeoutError:
+       pass
+      # The pipe owner consumed that response and keeps its sequence. This is
+      # not blind recovery of an unread/partial reply or a dead worker.
+      delta=final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=8)
+      assert delta['last_observation']['sql']['outcome']=='both_tails_observed_empty'
+      assert all(x['captured_tail_empty_at_observation'] for x in delta['last_observation']['archives'])
+      assert not delta['publisher_drain_authorized'] and not delta['final_switch_authorized']
+      assert (state/final_host.STATE).read_bytes()==before
+      assert command('status')['controller_id']==greeting['controller_id']
+      assert command('status')['background_hashed_bytes']>final['background_hashed_bytes']
+      report['held_final_delta']=dict(rounds_after_lost_reply=delta['rounds'],
+        original_deadline_preserved=True,late_publication_copied=True,
+        fully_received_reply_loss=True,final_switch_authorized=False)
+      final=command('status')
    else:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline

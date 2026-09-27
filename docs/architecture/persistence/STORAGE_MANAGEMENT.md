@@ -1309,8 +1309,10 @@ proof descriptor and invalidates the dedicated session rather than returning a
 session-level lock to a pool.
 
 The fixed pipe protocol permits status, bounded SQL copy, one rotating archive
-page, one rotating background file-reproof page, terminal cancellation and close.
-It admits no paths, limits, arbitrary SQL, shell commands or activation request.
+page, one rotating background file-reproof page, fixed preparation steps, spool
+observation, bounded final tails, terminal cancellation and close. Explicit phase
+and final deadlines can only shorten original admitted ceilings. It admits no
+paths, arbitrary SQL, shell commands or activation request.
 A process-generated controller identity and strictly ordered sequence bind each
 command. Only the identical last command can replay its bounded cached response
 in that process. Requests are limited to 4 KiB, responses to 16 KiB, partial
@@ -1756,7 +1758,16 @@ widen it. Background copy/preparation requests are refused after entry.
 A failed round closes ordinary work. Already committed pages remain durable;
 an interrupted archive transaction retains its queue. Replacement controllers
 start with zero file proof and must reprove while source admission permits it.
-This method is internal, has no pipe command, and provides no publisher-drain,
-host stop/restart, switch-entered receipt or runtime authority. Tail emptiness is
-an observation; the complete exact handoff verifier remains required at COMMIT.
-The host must still persist the original final window and supervise interruption.
+The fixed final_delta pipe command accepts only its caller's absolute deadline.
+The internal host helper admits the exact paused source and same live worker
+before and after each bounded round under the persisted original wall/boot
+window. It validates the controller and all three archive-family replies; it
+never modifies the final receipt or grants a new deadline on retry. Same-process
+sequence replay retains the existing framing rules.
+
+This tail-copy path provides no publisher-drain, host stop/restart,
+switch-entered receipt or runtime authority. Pending spool files remain intact.
+Late publisher commits can be copied, but tail emptiness is only an observation;
+publisher exclusion and the complete exact verifier remain required at COMMIT.
+Database commit is not exposed on the pipe. Full outer-controller loss and safe
+source resumption still require separate host reconciliation.

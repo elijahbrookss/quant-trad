@@ -120,3 +120,34 @@ def test_spool_observation_requires_fresh_sequence_and_preserves_pending(tmp_pat
                     {"source_root": "/arbitrary"}):
         with pytest.raises(ValueError): controller.command(request | changed | {"sequence": 2})
     assert controller.state == "background"
+
+
+def test_final_tail_command_refuses_unbounded_fields_and_replays_without_work():
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller.controller_id = "c"*32;controller.state = "background"
+    controller._sequence = 0;controller._final_deadline = None
+    controller._last_request = controller._last_reply = None
+    controller._reproved = set()
+    controller._admitted_limits = {"movement_timeout_seconds": 60}
+    controller.proof = SimpleNamespace(deadline=monotonic()+90, hashed_bytes=1)
+    calls = []
+    def copy(*, deadline):
+        calls.append(deadline);controller._final_deadline = deadline
+        return {"migration_ready": False}
+    controller.final_delta = copy
+    controller.check = lambda: None
+    request = dict(controller_id=controller.controller_id, sequence=1,
+                   operation="final_delta", deadline=monotonic()+20)
+    for changed in ({"deadline": True}, {"deadline": float("nan")},
+                    {"deadline": monotonic()-1}, {"deadline": monotonic()+80},
+                    {"source_root": "/arbitrary"}, {"max_pages": 1000}):
+        with pytest.raises(ValueError):controller.command(request | changed)
+    assert not calls
+    reply = controller.command(request)
+    assert controller.command(request) == reply
+    assert calls == [request["deadline"]]
+    assert not reply["final_switch_authorized"]
+    with pytest.raises(RuntimeError, match="background_work_refused"):
+        controller.command(dict(controller_id=controller.controller_id, sequence=2,
+                                operation="sql_copy"))

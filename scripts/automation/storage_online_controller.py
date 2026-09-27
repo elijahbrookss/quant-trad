@@ -33,7 +33,7 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
-_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "cancel", "close"}
+_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "cancel", "close"}
 
 
 class OnlineController:
@@ -189,13 +189,19 @@ class OnlineController:
             report = archive_online.copy_page(self.engine, **options)
             self._family += 1
         # No per-file keys, resource internals, DSN or unbounded inventory on wire.
-        return {key: report[key] for key in (
+        result = {key: report[key] for key in (
             "family", "page_objects", "copied_objects", "reused_objects", "verified_bytes")}
+        if not reprove:
+            result["baseline_complete"] = report["baseline_complete"]
+        return result
 
     def command(self, request):
         fields = {"controller_id", "sequence", "operation"}
         preparing = isinstance(request, dict) and request.get("operation") == "prepare_step"
         draining = isinstance(request, dict) and request.get("operation") == "source_drain"
+        finalizing = isinstance(request, dict) and request.get("operation") == "final_delta"
+        if finalizing:
+            fields |= {"deadline"}
         if draining:
             fields |= {"deadline", "max_entries"}
         if preparing:
@@ -209,6 +215,11 @@ class OnlineController:
                 or request["operation"] not in _OPERATIONS):
             raise ValueError("storage_online_command_invalid")
         operation = request["operation"]
+        if finalizing and (type(request["deadline"]) not in (int, float)
+                or not math.isfinite(request["deadline"])
+                or not 0 < request["deadline"]-monotonic() <= self._admitted_limits["movement_timeout_seconds"]
+                or request["deadline"] > self.proof.deadline):
+            raise ValueError("storage_online_final_delta_command_budget_invalid")
         if draining:
             if (type(request["deadline"]) not in (int, float)
                     or not math.isfinite(request["deadline"])
@@ -236,7 +247,7 @@ class OnlineController:
             return deepcopy(self._last_reply)
         if request["sequence"] != self._sequence+1 or self.state != "background":
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
-        if self._final_deadline is not None and operation not in {"status", "source_drain", "close", "cancel"}:
+        if self._final_deadline is not None and operation not in {"status", "source_drain", "final_delta", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
         result = {}
         try:
@@ -254,6 +265,8 @@ class OnlineController:
                         timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
                 self.state = "cancelled"
                 result = {"attempt_cancelled": True, "source_preserved": True}
+            elif finalizing:
+                result = self.final_delta(deadline=request["deadline"])
             elif draining:
                 # Read-only and explicit: the same live host supplies its already
                 # decreasing final deadline. It cannot widen page allowances or
@@ -284,10 +297,14 @@ class OnlineController:
                         expected_started_at=self.expected_started_at, page_rows=self.page_rows,
                         max_duration_seconds=request["max_duration_seconds"])
                 self.check()
-        except BaseException:
+        except BaseException as exc:
             self.state = "failed"
-            logger.error("storage_online_controller_failed | controller_id=%s operation=%s",
-                             self.controller_id, operation)
+            # Static guard codes are safe diagnostics; arbitrary database error
+            # text may contain connection or source data and is never logged.
+            code = str(exc)
+            guard = code if code.startswith("storage_") and all(c.islower() or c == "_" for c in code) else "unclassified"
+            logger.error("storage_online_controller_failed | controller_id=%s operation=%s error_type=%s guard=%s",
+                         self.controller_id, operation, type(exc).__name__, guard)
             raise
         self._sequence = request["sequence"]
         reply = {**self.status(), "operation": operation, "result": result}
@@ -295,7 +312,7 @@ class OnlineController:
         return reply
 
     def final_delta(self, *, deadline):
-        """Internal bounded tail-only round; no pipe or host pause authority.
+        """Bounded tail-only round; no host pause, switch or restart authority.
 
         Caller retains its admitted final intent, publisher exclusion and SAME
         live worker. Bind one absolute final window for this process; no later
