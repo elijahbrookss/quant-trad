@@ -735,3 +735,16 @@ This tests the runtime finalizer boundary; Docker SIGTERM, supervisor lifecycle,
 all production stream projections, complete publisher exclusion and host
 stop/delta/COMMIT/recovery remain separate qualification requirements. A completed
 runtime or a momentarily empty spool does not authorize a storage switch.
+
+The supervisor now preserves finalizer exceptions/cancellation, timed-out drain,
+and unresolved task failure during restart backoff; stop() raises after a failed
+thread or drain instead of reporting clean shutdown. A successful replacement
+collector that drains clears its earlier failure. Actual Linux SIGTERM tests
+exercise the worker's existing exit0/exit5 paths with isolated infrastructure.
+The SSD/HDD fixture additionally runs the real supervisor around the real QT
+collector/repository, with controlled discovery/safety metadata and scripted
+transport. It proves drain error propagation and retained-WAL recovery, not
+production safety registration, Docker stop or a complete held-host switch.
+The legacy source image predates this fix: its exit0 must not be treated as
+proof of publisher drain. Spool preservation and exact source admission remain
+required, and the source image is not changed by these tests.

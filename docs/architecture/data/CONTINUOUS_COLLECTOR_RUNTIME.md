@@ -23,6 +23,9 @@ code_paths:
   - src/core/market_storage_lifecycle.py
   - src/market_data/archive.py
   - portal/backend/service/market/collector_supervisor.py
+  - tests/test_market_data/test_continuous_collector_supervisor.py
+  - tests/test_market_data/test_collector_shutdown_signal.py
+  - tests/test_market_data/test_storage_online_collector_drain_db.py
   - portal/backend/service/market/collector_safety.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/continuous_stream_collector.py
@@ -149,6 +152,17 @@ the receive path never traverses historical spool directories. A low-frequency
 off-thread scan detects drift; its result replaces the ledger only when no
 tracked filesystem mutation overlapped the scan. Corrected drift is logged, and
 uncertain accounting fails closed until a clean reconciliation succeeds.
+
+Supervisor shutdown must propagate an incomplete collector drain. Task exceptions,
+cancellations, drain timeouts and unresolved failures during restart backoff are
+retained by definition and leave the supervisor failed. A later successful run
+that drains normally clears that definition's failure. Unsupported definitions
+remain quarantined independently; their registration errors do not turn healthy
+collector shutdown into a publication failure. A failed supervisor thread also
+causes stop() to raise, including repeated stop calls after the thread has ended.
+The worker still stops lifecycle maintenance and its heartbeat, then reports its
+existing shutdown-failed exit code 5 instead of clean exit 0. It never deletes WAL
+in response to this failure. A process exit is not storage-switch authority.
 
 Reconnect creates a new connection epoch on the same logical session. The
 disconnect budget resets only after a provider message arrives, not after a

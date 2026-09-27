@@ -16,7 +16,13 @@ from portal.backend.service.market.continuous_stream_collector import (
     CoinbaseContinuousTransportAdapter, CoinbaseMarketTradeProjectionAdapter,
     ContinuousStreamRuntime,
 )
+from portal.backend.service.market.collector_supervisor import (
+    ContinuousCollectorSupervisor, CollectorAdapterRegistry,
+)
 from portal.backend.service.storage.repos import market_data
+from tests.test_market_data.test_continuous_collector_supervisor import (
+    _Repository as SupervisorDiscoveryFixture, _OperationsRepository,
+)
 from scripts.automation.storage_online_drain import inspect_spool
 from scripts.db import fact_header_v2_online as online
 from scripts.db import archive_root_v2_online as archives
@@ -30,9 +36,10 @@ pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_STORAGE_DEMO") !=
                 reason="requires owned SSD/HDD storage-demo topology")]
 
 
+@pytest.mark.parametrize("supervised", [False, True], ids=["runtime", "supervisor"])
 @pytest.mark.parametrize("fail_before_canonical_ack", [False, True])
 def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
-        storage, tmp_path, monkeypatch, fail_before_canonical_ack):
+        storage, tmp_path, monkeypatch, fail_before_canonical_ack, supervised):
     engine, options, source, book = _prepare(
         storage, tmp_path, monkeypatch, prepare_captures=False)
     prepare = dict(placement=storage.copy_plan, attempt_seconds=180,
@@ -68,12 +75,14 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
         venue=book.source.venue, provider_product_id="BTC-USD",
         channels=("market_trades", "heartbeats"), auth_mode="public",
         contract_version="market.trade.v1", max_spool_bytes=1024**3,
-        max_segment_bytes=128*1024**2,
+        max_segment_bytes=128*1024**2, enabled=supervised,
         config={"product_definition_version_id": book.claim.config["product_definition_version_id"]})
     stop = Event()
     entered = Event()
     release = Event()
     frames = []
+    supervisor_stop = []
+    runtime_results = []
 
     class Stream:
         def __init__(self, **kwargs):
@@ -96,7 +105,10 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
                         "price": "100", "size": "0.01", "side": "BUY", "time": timestamp}]}]}))
             frames.append(message)
             yield message
-            stop.set()
+            stop.set()  # The fixture has delivered its one frame.
+            if supervised:
+                while not supervisor_stop[0]():
+                    await asyncio.sleep(0.01)
 
         async def close(self):
             pass
@@ -104,6 +116,30 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
     transport = CoinbaseContinuousTransportAdapter(stream_factory=Stream)
     projection = CoinbaseMarketTradeProjectionAdapter()
     original_ingest = structures.ingest_trades
+
+    class Discovery(SupervisorDiscoveryFixture):
+        # Controlled discovery/safety metadata only. The collector's definition,
+        # claim, publication and canonical acknowledgement use actual PostgreSQL.
+        def list_stream_definitions(self):
+            return [dict(super().list_stream_definitions()[0], id=definition_id)]
+
+    class Adapter:
+        adapter_id = "fixture.real_coinbase_runtime"
+        def supports(self, definition):
+            return definition["id"] == definition_id
+        def registration_errors(self, definition):
+            return []
+        async def run(self, *, stop_requested, **kwargs):
+            supervisor_stop.append(stop_requested)
+            result = await ContinuousStreamRuntime(repository=structures).run(
+                **kwargs, stop_requested=stop_requested, storage_root=source,
+                projection=projection, transport=transport)
+            runtime_results.append(result)
+            return result
+
+    supervisor = ContinuousCollectorSupervisor(owner_id="real-drain-supervisor",
+        repository=Discovery(), operations_repository=_OperationsRepository(),
+        registry=CollectorAdapterRegistry((Adapter(),)), poll_seconds=0.25)
 
     def blocked_ingest(*args, **kwargs):
         entered.set()
@@ -124,9 +160,14 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
 
     baseline_pending = observe()["pending_files"]
     async def exercise():
-        task = asyncio.create_task(ContinuousStreamRuntime(repository=structures).run(
-            definition_id=definition_id, owner_id="drain-fixture", stop_requested=stop.is_set,
-            bounded_validation=True, storage_root=source, projection=projection, transport=transport))
+        if supervised:
+            supervisor.start()
+            assert await asyncio.to_thread(stop.wait, 15), "collector did not receive fixture frame"
+            task = asyncio.create_task(asyncio.to_thread(supervisor.stop, timeout_seconds=15))
+        else:
+            task = asyncio.create_task(ContinuousStreamRuntime(repository=structures).run(
+                definition_id=definition_id, owner_id="drain-fixture", stop_requested=stop.is_set,
+                bounded_validation=True, storage_root=source, projection=projection, transport=transport))
         try:
             assert await asyncio.to_thread(entered.wait, 15), "collector never reached canonical finalizer"
             assert stop.is_set() and not task.done()
@@ -136,14 +177,29 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
         finally:
             release.set()
         if fail_before_canonical_ack:
-            with pytest.raises(RuntimeError, match="fixture_before_canonical_ack"):
+            expected = "supervisor_stop_failed" if supervised else "fixture_before_canonical_ack"
+            with pytest.raises(RuntimeError, match=expected):
                 await asyncio.wait_for(task, 20)
+            if supervised:
+                assert supervisor.snapshot()["state"] == "failed"
+                assert "fixture_before_canonical_ack" in supervisor.snapshot()["errors"][definition_id]
             return None
-        return await asyncio.wait_for(task, 20)
+        completed = await asyncio.wait_for(task, 20)
+        if supervised:
+            assert supervisor.snapshot()["state"] == "stopped"
+            assert not supervisor._thread.is_alive()
+            return runtime_results[0]
+        return completed
 
-    with monkeypatch.context() as blocked:
-        blocked.setattr(structures, "ingest_trades", blocked_ingest)
-        result = asyncio.run(exercise())
+    try:
+        with monkeypatch.context() as blocked:
+            blocked.setattr(structures, "ingest_trades", blocked_ingest)
+            result = asyncio.run(exercise())
+    finally:
+        release.set()
+        if supervisor._thread.is_alive():
+            # Cleanup must not leave a fixture collector serving the next DB.
+            supervisor.stop(timeout_seconds=20)
     assert len(frames) == 1
     if fail_before_canonical_ack:
         assert counts() == (0, 1, 1)
@@ -165,6 +221,7 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
         assert _frozen_records(conn) == frozen
         assert conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {archives.QUEUE})"))
     print("QT_COLLECTOR_DRAIN_RESULT="+json.dumps({
+        "supervisor_owned_stop": supervised,
         "failure_before_canonical_ack": fail_before_canonical_ack,
         "real_runtime_waited_for_finalizer": True, "facts_manifests_mappings": counts(),
         "preexisting_pending_spools_preserved": baseline_pending,
