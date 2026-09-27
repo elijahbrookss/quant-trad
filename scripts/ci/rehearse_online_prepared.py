@@ -19,7 +19,10 @@ parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Do
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
 parser.add_argument('--switch-entry',action='store_true',help='persist uncertain switch entry, no COMMIT dispatch')
 parser.add_argument('--real-worker-publication',action='store_true',help='real collector publication during Docker shutdown with scripted transport')
+parser.add_argument('--abort-resume',action='store_true',help='resume exact original clients under the retained live rollback fence')
 options=parser.parse_args()
+if options.abort_resume and not options.switch_entry:
+ parser.error('--abort-resume requires --switch-entry')
 if options.real_worker_publication and options.worker_shutdown!='clean':
  parser.error('--real-worker-publication requires --worker-shutdown clean')
 if options.switch_entry and not options.final_delta:
@@ -438,11 +441,30 @@ try:
        report['switch_entry_checkpoint']=dict(interrupted_after_durable_save=True,
          original_deadline_preserved=True,replay_refused=True,source_held=True,
          database_commit_dispatched=False,collection_resume_authorized=False)
+       if options.abort_resume:
+        resume_started=time.monotonic()
+        resumed=final_host.resume_online_source_locked(state,exchange=command)
+        terminal=final_host._load(state/final_host.STATE)
+        assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
+        assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
+        assert initial._source_healthy(initial._admit_source(state,initial._load(state),
+          require_running=True,operator_id=receipt['container_id']))
+        assert not run(['inspect',source['initialize']['id'],'--format','{{.State.Running}}']).stdout.strip()=='true'
+        terminal_bytes=(state/final_host.STATE).read_bytes()
+        try:
+         final_host.resume_online_source_locked(state,exchange=command)
+         raise AssertionError('terminal source resumption replayed')
+        except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+        assert (state/final_host.STATE).read_bytes()==terminal_bytes
+        report['source_abort_resumption']=dict(exact_original_clients_healthy=True,
+          initializer_stays_stopped=True,original_deadlines_preserved=True,
+          final_marker_retained=True,same_live_controller=True,
+          elapsed_seconds=time.monotonic()-resume_started,production_readiness=False)
    else:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
     report['reentry_empty_proof']=True
-   command('close')
+   if not options.abort_resume:command('close')
   assert worker.returncode==0
   assert launch.held._identities(launch.held._inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:

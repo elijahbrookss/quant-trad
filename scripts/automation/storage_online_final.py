@@ -1,7 +1,7 @@
 """Internal final source-stop boundary under the existing launcher's host lock.
 
-No switch, resumption, recovery activation or production CLI. A completed stop is
-not proof of database/file drain. Intent always survives failure and completion.
+No database switch, recovery activation or production CLI. Internal source abort
+resumption requires the live SQL fence; intent survives failure and completion.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import time
 
 from scripts.automation import storage_handoff_pause as held
@@ -50,9 +51,11 @@ def _remaining(saved):
 
 def _load(path):
     saved = held._load(path)
-    entered = saved.get("phase") == "switch_entered"
-    if (set(saved) != (_FIELDS | {"switch"} if entered else _FIELDS) or saved["schema"] != SCHEMA
-            or saved["phase"] not in ("stopping", "paused", "switch_entered")
+    resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
+    entered = saved.get("phase") == "switch_entered" or resuming
+    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set())
+    if (set(saved) != fields or saved["schema"] != SCHEMA
+            or saved["phase"] not in ("stopping", "paused", "switch_entered", "source_resuming", "source_resumed")
             or type(saved["duration_seconds"]) is not int
             or not 1 <= saved["duration_seconds"] <= 96*3600
             or any(type(saved[k]) not in (int, float) or not math.isfinite(saved[k])
@@ -62,7 +65,7 @@ def _load(path):
             or abs(saved["deadline"]-saved["started_at"]-saved["duration_seconds"]) > .000001
             or abs(saved["deadline_boot"]-saved["started_boot"]-saved["duration_seconds"]) > .000001):
         raise RuntimeError("storage_online_final_receipt_invalid")
-    if saved["phase"] in ("paused", "switch_entered"):
+    if saved["phase"] in ("paused", "switch_entered", "source_resuming", "source_resumed"):
         if (type(saved["paused_at"]) not in (int, float)
                 or not saved["started_at"] <= saved["paused_at"] <= saved["deadline"]):
             raise RuntimeError("storage_online_final_receipt_invalid")
@@ -79,6 +82,33 @@ def _load(path):
                 or switch["deadline_monotonic"] <= 0
                 or type(switch["worker_sequence"]) is not int or switch["worker_sequence"] < 1):
             raise RuntimeError("storage_online_final_switch_receipt_invalid")
+    if resuming:
+        resume = saved["resume"]
+        if (not isinstance(resume, dict)
+                or set(resume) != {"started_at", "completed", "inflight", "finished_at"}
+                or type(resume["started_at"]) not in (int, float)
+                or not saved["switch"]["entered_at"] <= resume["started_at"] <= saved["deadline"]
+                or not isinstance(resume["completed"], list)
+                or any(not isinstance(n, str) or n not in held.STOP for n in resume["completed"])
+                or len(set(resume["completed"])) != len(resume["completed"])
+                or resume["completed"] != [n for n in held.STOP if n in resume["completed"]]):
+            raise RuntimeError("storage_online_resume_receipt_invalid")
+        action = resume["inflight"]
+        if action is not None and (not isinstance(action, dict)
+                or set(action) != {"service", "container_id", "requested_at"}
+                or not isinstance(action["service"], str) or action["service"] not in held.STOP
+                or action["service"] in resume["completed"]
+                or not isinstance(action["container_id"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", action["container_id"])
+                or type(action["requested_at"]) not in (int, float)
+                or not resume["started_at"] <= action["requested_at"] <= saved["deadline"]):
+            raise RuntimeError("storage_online_resume_receipt_invalid")
+        if saved["phase"] == "source_resumed":
+            if (action is not None or type(resume["finished_at"]) not in (int, float)
+                    or not resume["started_at"] <= resume["finished_at"] <= saved["deadline"]):
+                raise RuntimeError("storage_online_resume_receipt_invalid")
+        elif resume["finished_at"] is not None:
+            raise RuntimeError("storage_online_resume_receipt_invalid")
     return saved
 
 
@@ -149,7 +179,7 @@ def stop_online_source_locked(state_root, *, project, source_revision, controlle
             raise RuntimeError("storage_online_final_conflicting_operation")
     path = state_root/STATE
     saved = _load(path) if os.path.lexists(path) else None
-    if saved is not None and saved["phase"] == "switch_entered":
+    if saved is not None and saved["phase"] not in {"stopping", "paused"}:
         raise RuntimeError("storage_online_final_switch_reconciliation_required")
     if saved is None:
         wall, boot = time.time(), _boot_seconds()
@@ -415,3 +445,159 @@ def inspect_switch_outcome_locked(state_root, *, exchange):
         # In particular, an uncommitted observation is not a live rollback fence.
         # Keep switch_entered unchanged, even when no COMMIT was dispatched.
         return result
+
+
+
+def _supervised_source_start(container_id, *, deadline, check):
+    """Supervise one exact daemon request; killing its CLI is NOT cancellation.
+
+    The caller has already persisted the in-flight action. On any loss, leave
+    that action unresolved and issue no further starts. The daemon may complete
+    it later. The launcher lock and durable marker continue to exclude managed
+    switching/deployment. This is not a bound on database/network check latency.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        raise ValueError("storage_online_resume_container_invalid")
+    check()
+    if time.monotonic() >= deadline:
+        raise RuntimeError("storage_online_resume_deadline_expired")
+    process = subprocess.Popen(["docker", "start", container_id],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        while True:
+            check()
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("storage_online_resume_deadline_expired")
+            result = process.poll()
+            if result is not None:
+                if result != 0:
+                    raise RuntimeError("storage_online_resume_start_failed")
+                return
+            time.sleep(min(.1, remaining))
+    finally:
+        # Reap only our local CLI, including cancellation. This grants no more
+        # host-operation time and makes no claim about daemon request outcome.
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=1)  # Cleanup only, never another daemon action.
+
+
+def resume_online_source_locked(state_root, *, exchange):
+    """Internal exact-source abort under the SAME launcher lock and private pipe.
+
+    No reentry or saved-negative shortcut: begin a live authoritative SQL fence,
+    retain it across every supervised start, and terminalize that controller only
+    after exact original clients are healthy. Failure can leave clients partly
+    running or a daemon start in flight. Preserve the journal and refuse every
+    ordinary relaunch/switch/recovery path; explicit reconciliation is required.
+    This helper does not clear the final marker or activate a candidate runtime.
+    """
+    if not callable(exchange):
+        raise ValueError("storage_online_resume_exchange_invalid")
+    state_root = launch._canonical(state_root)
+    path = state_root/STATE
+    saved = _load(path)
+    if saved["phase"] != "switch_entered":
+        raise RuntimeError("storage_online_resume_switch_intent_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    deadline = saved["switch"]["deadline_monotonic"]
+    sequence = saved["switch"]["worker_sequence"]
+
+    def budget():
+        if not 0 < deadline-time.monotonic() <= _remaining(saved):
+            raise RuntimeError("storage_online_resume_deadline_expired")
+
+    def admit():
+        budget()
+        observed, preparation, rows, limits = _observe(state_root, **args)
+        if (observed != binding or saved["duration_seconds"] > limits["seconds"]
+                or saved["deadline"] > limits["capture_deadline"]):
+            raise RuntimeError("storage_online_resume_source_changed")
+        allowed = set(saved.get("resume", {}).get("completed", []))
+        action = saved.get("resume", {}).get("inflight")
+        if action is not None:
+            if rows[action["service"]]["id"] != action["container_id"]:
+                raise RuntimeError("storage_online_resume_source_changed")
+            allowed.add(action["service"])
+        for name in held.STOP:
+            if (rows[name]["running"] and (name not in allowed
+                    or not preparation["clients"][name]["was_running"])):
+                raise RuntimeError("storage_online_resume_unexpected_running_client")
+            if name in saved.get("resume", {}).get("completed", []) and not rows[name]["running"]:
+                raise RuntimeError("storage_online_resume_started_client_stopped")
+        budget()
+        return preparation, rows
+
+    def fence(operation):
+        nonlocal sequence
+        budget()
+        reply = exchange(operation, deadline=deadline)
+        budget()
+        ending = operation == "rollback_fence_end"
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != operation
+                or reply.get("state") != ("aborted" if ending else "resume_fenced")
+                or reply.get("bound_final_deadline") != deadline
+                or type(reply.get("last_sequence")) is not int or reply["last_sequence"] <= sequence
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False
+                or not isinstance(result, dict)
+                or result.get("database_handoff_committed") is not False
+                or result.get("database_resume_fence_held") is not (not ending)
+                or result.get("collection_resume_authorized") is not False
+                or result.get("runtime_activation_authorized") is not False):
+            raise RuntimeError("storage_online_resume_fence_reply_invalid")
+        sequence = reply["last_sequence"]
+
+    def check():
+        admit()
+        fence("rollback_fence_check")
+        admit()
+
+    with held._docker_deadline(deadline):
+        preparation, rows = admit()
+        fence("rollback_fence_begin")
+        admit()
+        saved.update(phase="source_resuming", resume={"started_at": time.time(),
+            "completed": [], "inflight": None, "finished_at": None})
+        held._save(path, saved, initial=False)
+        print("event=storage_online_source_resume_started runtime_activation_authorized=false",
+              file=sys.stderr, flush=True)
+        for name in held.STOP:
+            if not preparation["clients"][name]["was_running"]:
+                continue
+            check()
+            _, rows = admit()
+            saved["resume"]["inflight"] = {"service": name, "container_id": rows[name]["id"],
+                                             "requested_at": time.time()}
+            held._save(path, saved, initial=False)  # BEFORE Docker dispatch.
+            _supervised_source_start(rows[name]["id"], deadline=deadline, check=check)
+            check()
+            _, rows = admit()
+            if not rows[name]["running"]:
+                raise RuntimeError("storage_online_resume_client_not_running")
+            saved["resume"]["completed"].append(name)
+            saved["resume"]["inflight"] = None
+            held._save(path, saved, initial=False)
+        while True:
+            check()
+            _, rows = admit()
+            if initial._source_healthy(rows):
+                break
+            time.sleep(min(.1, deadline-time.monotonic()))
+        fence("rollback_fence_end")
+        # End terminalizes the worker; requiring it to stay running here would
+        # race normal process exit. Exact source health was admitted under the
+        # live fence immediately before end. No more host starts follow.
+        budget()
+        saved["phase"] = "source_resumed"
+        saved["resume"]["finished_at"] = time.time()
+        held._save(path, saved, initial=False)
+        budget()
+        print("event=storage_online_original_source_resumed final_marker_retained=true",
+              file=sys.stderr, flush=True)
+        return {"original_source_resumed": True, "final_marker_retained": True,
+                "database_switch_authorized": False, "runtime_activation_authorized": False}

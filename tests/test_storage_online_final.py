@@ -259,3 +259,167 @@ def test_outcome_observation_never_releases_host_intent(pause_setup, outcome):
         assert not result["runtime_activation_authorized"]
     assert (path/final.STATE).read_bytes() == before
     with pytest.raises(RuntimeError, match="switch_reconciliation_required"):stop()
+
+
+@pytest.fixture
+def resume_setup(pause_setup, monkeypatch):
+    path, rows, clock, state, stop = pause_setup
+    saved = stop()
+    deadline = final.time.monotonic()+30
+    saved.update(phase="switch_entered", switch={"entered_at": 1000.,
+        "deadline_monotonic": deadline, "worker_sequence": 5})
+    final.held._save(path/final.STATE, saved, initial=False)
+    calls = []
+    def exchange(operation, **kwargs):
+        assert kwargs == {"deadline": deadline}
+        calls.append(operation)
+        ending = operation == "rollback_fence_end"
+        return dict(controller_id=CONTROLLER, operation=operation,
+            state="aborted" if ending else "resume_fenced", bound_final_deadline=deadline,
+            last_sequence=5+len(calls), final_switch_authorized=False,
+            collection_resume_authorized=False, result=dict(database_handoff_committed=False,
+                database_resume_fence_held=not ending, collection_resume_authorized=False,
+                runtime_activation_authorized=False))
+    starts = []
+    def start(container_id, *, deadline, check):
+        check()
+        receipt = final._load(path/final.STATE)
+        assert receipt["phase"] == "source_resuming"
+        assert receipt["resume"]["inflight"]["container_id"] == container_id
+        starts.append(container_id)
+        row = next(r for r in rows.values() if r["id"] == container_id)
+        row.update(running=True, status="running")
+        check()
+    monkeypatch.setattr(final, "_supervised_source_start", start)
+    return path, rows, clock, state, stop, exchange, calls, starts, deadline
+
+
+def test_resume_retains_live_fence_original_clocks_and_initializer(resume_setup):
+    path, rows, clock, state, stop, exchange, calls, starts, deadline = resume_setup
+    original = final._load(path/final.STATE)
+    result = final.resume_online_source_locked(path, exchange=exchange)
+    saved = final._load(path/final.STATE)
+    assert result == dict(original_source_resumed=True, final_marker_retained=True,
+                         database_switch_authorized=False, runtime_activation_authorized=False)
+    assert saved["phase"] == "source_resumed"
+    assert all(saved[k] == v for k, v in original.items() if k != "phase")
+    assert calls[0] == "rollback_fence_begin" and calls[-1] == "rollback_fence_end"
+    assert len(starts) == len(final.held.STOP)-1 and not rows["initialize"]["running"]
+    assert saved["resume"]["completed"] == [n for n in final.held.STOP if n != "initialize"]
+    before = (path/final.STATE).read_bytes()
+    with pytest.raises(RuntimeError, match="switch_intent_required"):
+        final.resume_online_source_locked(path, exchange=exchange)
+    with pytest.raises(RuntimeError, match="reconciliation_required"): stop()
+    assert (path/final.STATE).read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ["ownership", "expiry", "source", "lost_end"])
+def test_resume_failure_never_replays_or_claims_all_clients_stopped(resume_setup, failure):
+    path, rows, clock, state, stop, exchange, calls, starts, deadline = resume_setup
+    def fail(operation, **kwargs):
+        reply = exchange(operation, **kwargs)
+        if starts:
+            if failure == "ownership": raise RuntimeError("owned SQL fence lost")
+            if failure == "expiry": clock["boot"] = 161
+            if failure == "source": state["binding"]["runtime"] = 2
+            if failure == "lost_end" and operation == "rollback_fence_end":
+                raise TimeoutError("lost terminal fence reply")
+        return reply
+    with pytest.raises((RuntimeError, TimeoutError)):
+        final.resume_online_source_locked(path, exchange=fail)
+    saved = final._load(path/final.STATE)
+    assert saved["phase"] == "source_resuming" and saved["resume"]["finished_at"] is None
+    assert any(row["running"] for row in rows.values())
+    if failure != "lost_end":
+        assert len(starts) == 1 and saved["resume"]["inflight"]["container_id"] == starts[0]
+    before, count = (path/final.STATE).read_bytes(), len(starts)
+    with pytest.raises(RuntimeError): final.resume_online_source_locked(path, exchange=exchange)
+    with pytest.raises(RuntimeError): stop()
+    assert len(starts) == count and (path/final.STATE).read_bytes() == before
+
+
+@pytest.mark.parametrize("bad", ["committed", "cached", "controller", "deadline", "authority"])
+def test_resume_invalid_live_admission_never_starts(resume_setup, bad):
+    path, rows, clock, state, stop, exchange, calls, starts, deadline = resume_setup
+    before = (path/final.STATE).read_bytes()
+    def invalid(operation, **kwargs):
+        reply = exchange(operation, **kwargs)
+        if bad == "committed": reply["result"]["database_handoff_committed"] = True
+        elif bad == "cached": reply["last_sequence"] = 5
+        elif bad == "controller": reply["controller_id"] = "d"*32
+        elif bad == "deadline": reply["bound_final_deadline"] += 1
+        else: reply["result"]["collection_resume_authorized"] = True
+        return reply
+    with pytest.raises(RuntimeError, match="fence_reply_invalid"):
+        final.resume_online_source_locked(path, exchange=invalid)
+    assert not starts and (path/final.STATE).read_bytes() == before
+
+
+@pytest.mark.parametrize("loss", ["fence", "deadline", "cancel", "exit"])
+def test_supervised_start_checks_during_inflight_action_and_reaps(monkeypatch, loss):
+    clock, checks = [10.], []
+    process = SimpleNamespace(returncode=None, killed=False, reaped=False)
+    process.poll = lambda: process.returncode
+    def kill():
+        process.killed = True
+        process.returncode = -9
+    def wait(**kwargs):
+        assert kwargs == {"timeout": 1}
+        process.reaped = True
+    process.kill, process.wait = kill, wait
+    def popen(args, **kwargs):
+        assert args == ["docker", "start", "b"*64]
+        assert checks == [1]
+        return process
+    monkeypatch.setattr(final.subprocess, "Popen", popen)
+    monkeypatch.setattr(final.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(final.time, "sleep", lambda _: None)
+    def check():
+        checks.append(len(checks)+1)
+        if len(checks) == 3:
+            if loss == "fence": raise RuntimeError("live ownership lost")
+            if loss == "deadline": clock[0] = 20
+            if loss == "cancel": raise KeyboardInterrupt()
+            if loss == "exit": process.returncode = 1
+    with pytest.raises((RuntimeError, KeyboardInterrupt)):
+        final._supervised_source_start("b"*64, deadline=15, check=check)
+    assert len(checks) == 3 and process.reaped
+    assert process.killed is (loss != "exit")
+
+
+
+def test_supervised_start_reaps_real_local_child_when_live_check_fails(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import time
+    original_popen = subprocess.Popen
+    child, checks = [], []
+    ready = tmp_path/"ready"
+    def popen(args, **kwargs):
+        assert args == ["docker", "start", "b"*64]
+        process = original_popen([sys.executable, "-c",
+            "from pathlib import Path; import sys,time; Path(sys.argv[1]).write_text('ready'); time.sleep(30)",
+            str(ready)], **kwargs)
+        child.append(process)
+        return process
+    monkeypatch.setattr(final.subprocess, "Popen", popen)
+    def check():
+        checks.append(True)
+        if ready.exists():
+            assert child[0].poll() is None
+            raise RuntimeError("live fence lost while local action is in flight")
+    with pytest.raises(RuntimeError, match="live fence lost"):
+        final._supervised_source_start("b"*64, deadline=time.monotonic()+5, check=check)
+    assert len(checks) > 1 and child[0].returncode is not None
+
+
+
+def test_resume_terminal_reply_does_not_require_worker_to_stay_alive(resume_setup):
+    path, rows, clock, state, stop, exchange, calls, starts, deadline = resume_setup
+    def end_and_exit(operation, **kwargs):
+        reply = exchange(operation, **kwargs)
+        if operation == "rollback_fence_end":
+            state["binding"]["runtime"] = 2  # Normal terminal process exit.
+        return reply
+    assert final.resume_online_source_locked(path, exchange=end_and_exit)["original_source_resumed"]
+    assert final._load(path/final.STATE)["phase"] == "source_resumed"

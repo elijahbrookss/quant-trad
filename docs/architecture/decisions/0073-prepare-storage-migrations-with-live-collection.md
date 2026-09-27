@@ -874,3 +874,32 @@ persist its intent, supervise in-flight starts when ownership or time is lost,
 and reconcile its terminal state. A lost fence cannot itself stop a Docker action.
 Full host/worker death, recovery mounts and matching runtime remain separate
 requirements; the production final command is still unavailable.
+
+
+### Supervised original-source abort resumption
+
+The internal resume_online_source_locked helper accepts only existing
+switch_entered intent under the same launcher lock, live worker and private
+pipe. It obtains the retained authoritative rollback fence, re-admits exact
+original clients, images/configuration, cluster and roots, and persists
+source_resuming before starting any client. Every exact Docker start has an
+in-flight journal entry saved before dispatch. Only originally running clients
+are started; a completed initializer remains stopped.
+
+The host checks the live fence and source binding while each Docker CLI is in
+flight, sharing the original final wall/boot and already bound monotonic
+deadlines. Loss, expiry, drift or a failed reply stops further dispatch. Killing
+and reaping the local CLI does not cancel the daemon request: a client may still
+start later. The retained journal therefore records unresolved state rather than
+claiming all clients remain stopped. Neither saved negative observations nor
+re-entry can replay starts. The durable final marker continues to block managed
+switching, ordinary launch, deployment and recovery.
+
+After all exact original clients are healthy, the helper ends the live fence,
+terminalizes that controller and records source_resumed. Lost end/save replies
+retain uncertainty. Even successful resumption retains the final marker; it
+cannot authorize marker removal, a replacement controller, candidate runtime or
+recovery mount activation. Terminal reconciliation, full outer-process loss and
+production readiness remain separate qualification requirements. The optional
+owned --abort-resume rehearsal exercises this internal host path; it is not a
+production entrypoint or a production outage measurement.
