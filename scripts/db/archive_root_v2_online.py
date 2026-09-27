@@ -138,7 +138,7 @@ def prepare(conn, *, source_root, destination_root, timeout_seconds=30):
         return {"reused": False, "migration_ready": False}
 
 
-def copy_page(engine, *, family, source_root, destination_root, page_rows=128, **kwargs):
+def copy_page(engine, *, family, source_root, destination_root, page_rows=128, tail_only=False, **kwargs):
     """Copy one finite baseline/tail page and commit queue retirement with it.
 
     Uses the existing capacity/WAL/expiry/deadline/cancellation guards and exact
@@ -148,12 +148,16 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, *
     """
     if family not in archives.FAMILIES:
         raise ValueError("archive_copy_known_family_required")
+    if type(tail_only) is not bool:
+        raise ValueError("archive_online_tail_mode_invalid")
     selection = {}
 
     def select(conn, selected_family, unused_after, limit):
         _inspect(conn, source_root, destination_root)
         state = dict(conn.execute(text(f"SELECT * FROM {PROGRESS} WHERE family=:family"),
                                   {"family": family}).mappings().one())
+        if tail_only and not state["baseline_complete"]:
+            raise RuntimeError("archive_online_tail_requires_completed_baseline")
         if state["baseline_complete"]:
             ids = conn.execute(text(f"SELECT id FROM {QUEUE} WHERE family=:family "
                                     "ORDER BY id LIMIT :limit FOR UPDATE"),

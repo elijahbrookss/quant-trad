@@ -26,14 +26,15 @@ pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_STORAGE_DEMO") !=
                 reason="requires owned SSD/HDD storage-demo topology")]
 
 
-def _setup(storage, tmp_path, monkeypatch):
+def _setup(storage, tmp_path, monkeypatch, *, stage=True):
     engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch)
     with engine.begin() as conn:
         protection.prepare(conn)
         started = capture.inspect_capture(conn)["started_at"]
     # Reuse qualified finite fixture setup; it does not stop any host clients.
-    handoff.stage_handoff(engine, placement=storage.copy_plan,
-                          max_duration_seconds=120, **options)
+    if stage:
+        handoff.stage_handoff(engine, placement=storage.copy_plan,
+                              max_duration_seconds=120, **options)
     settings = dict(placement=storage.copy_plan, expected_started_at=started,
                     max_objects=128, max_bytes=64*1024**2, **options)
     return engine, settings, source
@@ -435,3 +436,102 @@ def test_controller_rollback_fence_loss_expiry_and_committed_refusal(
             with worker.rollback_source_fence(deadline=time.monotonic()+30):
                 pytest.fail("committed database admitted for source restart")
         assert worker.state == "committed"
+
+
+def test_controller_final_delta_refuses_baseline_then_copies_only_new_tail(
+        storage, tmp_path, monkeypatch):
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        frozen = _frozen_records(conn)
+    with OnlineController(engine, **settings) as worker:
+        with pytest.raises(RuntimeError, match="archive_baseline_required"):
+            worker.final_delta(deadline=time.monotonic()+30)
+        assert worker.state == "failed"
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker)
+        _reprove(worker)
+        _raw_book_fixture(storage, source, monkeypatch,
+            definition_id="final-delta-publication", provider_product_id="BTC-USD-FINAL-DELTA",
+            event_start=BASE+timedelta(hours=3))
+        deadline = time.monotonic()+30
+        for invalid in (True, float("inf"), time.monotonic()-1):
+            with pytest.raises(ValueError, match="delta_deadline"):
+                worker.final_delta(deadline=invalid)
+        for _ in range(8):
+            report = worker.final_delta(deadline=deadline)
+            assert not report["final_switch_authorized"]
+            if (report["sql"]["outcome"] == "both_tails_observed_empty"
+                    and all(x["captured_tail_empty_at_observation"] for x in report["archives"])):
+                break
+        else:
+            pytest.fail("tiny final tails did not converge")
+        with pytest.raises(ValueError, match="delta_deadline"):
+            worker.final_delta(deadline=deadline+1)
+        with pytest.raises(ValueError, match="deadline_widened"):
+            worker.commit_database(deadline=deadline+1)
+        with pytest.raises(RuntimeError, match="background_work_refused"):
+            _command(worker, "sql_copy")
+        assert worker.proof.hashed_bytes > 0
+        with engine.begin() as conn:
+            assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+            assert _frozen_records(conn) == frozen
+        # All existing exact switch checks still execute; delta is not a receipt
+        # substitute, and the same absolute window/file leases reach COMMIT.
+        worker.commit_database(deadline=deadline)
+        assert worker.state == "committed"
+
+
+def test_controller_final_delta_timeout_keeps_committed_sql_and_archive_queue(
+        storage, tmp_path, monkeypatch):
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker)
+        _reprove(worker)
+        _raw_book_fixture(storage, source, monkeypatch,
+            definition_id="final-delta-timeout", provider_product_id="BTC-USD-DELTA-TIMEOUT",
+            event_start=BASE+timedelta(hours=3))
+        with engine.begin() as conn:
+            original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+            frozen = _frozen_records(conn)
+            pending = conn.scalar(text(f"SELECT count(*) FROM {online.QUEUE}"))
+            assert pending > 0
+        copy_page = archives._copy_archive_page
+        entered = []
+        deadline = time.monotonic()+8
+        def stall_record(*args, **kwargs):
+            assert kwargs["deadline"] == deadline
+            record = kwargs["record_page"]
+            def blocked(conn, rows):
+                entered.append(True)
+                conn.exec_driver_sql("SELECT pg_sleep(12)")
+                return record(conn, rows)
+            return copy_page(*args, **(kwargs | {"record_page": blocked}))
+        with monkeypatch.context() as stalled:
+            stalled.setattr(archives, "_copy_archive_page", stall_record)
+            with pytest.raises((RuntimeError, DBAPIError)):
+                worker.final_delta(deadline=deadline)
+        assert entered and worker.state == "failed"
+        assert time.monotonic() < deadline+3
+        with engine.begin() as conn:
+            assert conn.scalar(text(f"SELECT count(*) FROM {capture.QUEUE}")) == 0
+            assert conn.scalar(text(f"SELECT count(*) FROM {online.QUEUE}")) == pending
+            assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+            assert _frozen_records(conn) == frozen
+    with OnlineController(engine, **settings) as replacement:
+        assert replacement.proof.hashed_bytes == 0
+        with pytest.raises(RuntimeError, match="background_reproof_required"):
+            replacement.final_delta(deadline=time.monotonic()+20)
+
+
+def test_controller_final_delta_never_starts_sql_baseline(storage, tmp_path, monkeypatch):
+    engine, settings, _ = _setup(storage, tmp_path, monkeypatch, stage=False)
+    with engine.begin() as conn:
+        before = dict(conn.execute(text(f"SELECT * FROM {handoff.headers.STATE}")).mappings().one())
+        assert not before["baseline_complete"]
+    with OnlineController(engine, **settings) as worker:
+        with pytest.raises(RuntimeError, match="sql_baseline_required"):
+            worker.final_delta(deadline=time.monotonic()+20)
+    with engine.begin() as conn:
+        after = dict(conn.execute(text(f"SELECT * FROM {handoff.headers.STATE}")).mappings().one())
+        assert after == before

@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import timedelta
 import logging
+import math
 from time import monotonic
 
 from sqlalchemy import event, inspect, text
@@ -57,9 +58,14 @@ def require_not_cancelled(conn):
 
 
 @contextmanager
-def migration_step(conn, timeout_seconds=30):
+def migration_step(conn, timeout_seconds=30, *, deadline=None):
     """Bound normal work by both the step and original persisted attempt clock."""
+    if deadline is not None and (type(deadline) not in (int, float)
+            or not math.isfinite(deadline) or deadline <= monotonic()):
+        raise ValueError("fact_header_migration_absolute_deadline_invalid")
     with _bounded_step(conn, timeout_seconds) as limit:
+        if deadline is not None:
+            limit(deadline-monotonic())
         require_not_cancelled(conn)
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
             limit(capture_remaining_seconds(conn))

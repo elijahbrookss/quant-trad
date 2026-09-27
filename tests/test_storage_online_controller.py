@@ -104,6 +104,7 @@ def test_spool_observation_requires_fresh_sequence_and_preserves_pending(tmp_pat
     controller = OnlineController.__new__(OnlineController)
     controller.controller_id = "c"*32;controller.state = "background"
     controller.source_root = root;controller._sequence = 0
+    controller._final_deadline = None
     controller._last_request = controller._last_reply = None
     controller._reproved = set();controller.limits = {"movement_timeout_seconds": 30}
     controller.proof = SimpleNamespace(deadline=monotonic()+60, hashed_bytes=0, check=lambda: None)

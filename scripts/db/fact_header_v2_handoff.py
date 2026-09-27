@@ -49,7 +49,7 @@ def _staging_transaction(engine, *, placement, policy, limits, deadline, cancell
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous:
                     deadline = min(deadline, monotonic()+previous/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"]):
+                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("fact_header_staging_storage_busy")

@@ -7,6 +7,7 @@ Preparation/relocation and the eventual short switch have separate admission.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from time import monotonic
 
@@ -190,7 +191,8 @@ def _phase(header, lookup):
 
 
 def copy_pass(engine, *, placement, policy, resource_limits, max_pages=32,
-              page_rows=128, max_duration_seconds=60, cancelled=None):
+              page_rows=128, max_duration_seconds=60, cancelled=None,
+              tail_only=False, deadline=None):
     """Advance existing cursors with live writers and return after bounded work.
 
     Each successful page commits separately under the existing disk/WAL/temp
@@ -215,7 +217,10 @@ def copy_pass(engine, *, placement, policy, resource_limits, max_pages=32,
         raise ValueError("fact_header_online_fixed_automatic_policy_required")
     retained._fixed_inputs(policy, limits, (placement.recent, placement.history))
     started = monotonic()
-    deadline = started + max_duration_seconds
+    if (type(tail_only) is not bool or (deadline is not None and
+            (type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline <= started))):
+        raise ValueError("fact_header_online_tail_deadline_invalid")
+    deadline = min(deadline if deadline is not None else float("inf"), started + max_duration_seconds)
     pages = {"headers": 0, "raw": 0}
     rows = {"headers": 0, "raw": 0}
     # One pass probes both tails. Re-entering always starts with headers, but
@@ -252,6 +257,8 @@ def copy_pass(engine, *, placement, policy, resource_limits, max_pages=32,
                     raise RuntimeError("fact_header_online_retained_relocation_required")
             remaining = capture_remaining_seconds(conn)
             phase = _phase(header, lookup)
+            if tail_only and phase != "catch_up":
+                raise RuntimeError("fact_header_online_tail_requires_completed_preparation")
             if phase.endswith("_required"):
                 outcome = phase
                 break

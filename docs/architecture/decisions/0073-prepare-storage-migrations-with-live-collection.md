@@ -760,3 +760,21 @@ source is not restarted. Even clean paused state supplies no publisher-drain,
 switch or source-resumption authority. Initial
 preparation uses a clean stop and resumes the same source process container before
 the final failure is injected. No production runtime or migration algorithm changes.
+
+Internal final_delta rounds admit completed SQL and archive baselines plus the
+same controller's background file reproof before any tail copying. Each round
+copies at most two alternating SQL tail pages and one page per fixed archive
+family. Per-page tail-only checks refuse bulk fallback. All work shares an
+absolute caller deadline capped by the unchanged short command allowance,
+original admitted resources and original capture lifetime. SQL and archive
+transactions only shorten existing timeout/watch ceilings. A process binds its
+first final deadline; later rounds must retain it and commit/rollback cannot
+widen it. Background copy/preparation requests are refused after entry.
+
+A failed round closes ordinary work. Already committed pages remain durable;
+an interrupted archive transaction retains its queue. Replacement controllers
+start with zero file proof and must reprove while source admission permits it.
+This method is internal, has no pipe command, and provides no publisher-drain,
+host stop/restart, switch-entered receipt or runtime authority. Tail emptiness is
+an observation; the complete exact handoff verifier remains required at COMMIT.
+The host must still persist the original final window and supervise interruption.

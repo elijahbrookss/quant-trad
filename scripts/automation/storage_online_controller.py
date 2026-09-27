@@ -76,6 +76,7 @@ class OnlineController:
         self._reprove_family = 0
         self._cursors = {name: "" for name in archives.FAMILIES}
         self._reproved = set()
+        self._final_deadline = None
         self._sequence = 0
         self._last_request = self._last_reply = None
 
@@ -235,6 +236,8 @@ class OnlineController:
             return deepcopy(self._last_reply)
         if request["sequence"] != self._sequence+1 or self.state != "background":
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
+        if self._final_deadline is not None and operation not in {"status", "source_drain", "close", "cancel"}:
+            raise RuntimeError("storage_online_final_background_work_refused")
         result = {}
         try:
             if operation == "close":
@@ -291,6 +294,67 @@ class OnlineController:
         self._last_request, self._last_reply = deepcopy(request), deepcopy(reply)
         return reply
 
+    def final_delta(self, *, deadline):
+        """Internal bounded tail-only round; no pipe or host pause authority.
+
+        Caller retains its admitted final intent, publisher exclusion and SAME
+        live worker. Bind one absolute final window for this process; no later
+        round, commit or rollback admission may widen it. Original capture and
+        short page ceilings still apply. Empty observations are not readiness.
+        """
+        if self.state != "background":
+            raise RuntimeError("storage_online_final_delta_state_invalid")
+        now = monotonic()
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not 0 < deadline-now <= self._admitted_limits["movement_timeout_seconds"]
+                or deadline > self.proof.deadline
+                or (self._final_deadline is not None and deadline != self._final_deadline)):
+            raise ValueError("storage_online_final_delta_deadline_invalid")
+        self._final_deadline = deadline
+        page_deadline = min(deadline, now+self.limits["movement_timeout_seconds"])
+        try:
+            self.check()
+            # Admit every baseline before any tail mutation. Later per-page
+            # checks repeat this under migration ownership, so no race can
+            # silently fall back to a bulk copy or relocation.
+            with self.engine.begin() as conn:
+                with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
+                                            deadline=page_deadline):
+                    if self._capture_row(conn) != self._capture:
+                        raise RuntimeError("storage_online_attempt_binding_changed")
+                    if online._phase(headers._inspect_progress(conn), handoff.raw._inspect(conn)) != "catch_up":
+                        raise RuntimeError("storage_online_final_delta_sql_baseline_required")
+                    archive_online._inspect(conn, self.source_root, self.destination_root)
+                    progress = conn.execute(text(f"SELECT family,baseline_complete FROM {archive_online.PROGRESS}")).mappings().all()
+                    if ({row["family"] for row in progress} != set(archives.FAMILIES)
+                            or any(not row["baseline_complete"] for row in progress)):
+                        raise RuntimeError("storage_online_final_delta_archive_baseline_required")
+                    if self._reproved != set(archives.FAMILIES):
+                        raise RuntimeError("storage_online_final_delta_background_reproof_required")
+            sql = online.copy_pass(self.engine, placement=self.placement,
+                policy=self.policy, resource_limits=self.limits, page_rows=self.page_rows,
+                max_pages=2, max_duration_seconds=self.limits["movement_timeout_seconds"],
+                tail_only=True, deadline=page_deadline)
+            pages = []
+            for family in archives.FAMILIES:
+                self.check()
+                report = archive_online.copy_page(self.engine, family=family,
+                    source_root=self.source_root, destination_root=self.destination_root,
+                    page_rows=self.page_rows, max_page_bytes=self.max_page_bytes,
+                    policy=self.policy, resource_limits=self.limits, file_proof=self.proof,
+                    tail_only=True, deadline=page_deadline)
+                pages.append({key: report[key] for key in ("family", "page_objects",
+                    "verified_bytes", "captured_tail_empty_at_observation")})
+            self.check()
+            if monotonic() >= page_deadline:
+                raise RuntimeError("storage_online_final_delta_deadline_expired")
+            return {"sql": {key: sql[key] for key in ("outcome", "committed_pages", "verified_page_rows")},
+                "archives": pages, "migration_ready": False,
+                "final_switch_authorized": False, "collection_resume_authorized": False}
+        except BaseException:
+            self.state = "failed"
+            raise
+
     def commit_database(self, *, deadline):
         """Internal host seam, intentionally NOT a pipe command.
 
@@ -303,6 +367,8 @@ class OnlineController:
             raise RuntimeError("storage_online_commit_state_invalid")
         if type(deadline) not in (int, float) or not math.isfinite(deadline):
             raise ValueError("storage_online_final_deadline_invalid")
+        if self._final_deadline is not None and deadline > self._final_deadline:
+            raise ValueError("storage_online_final_deadline_widened")
         self._admit_attempt()
         remaining = deadline-monotonic()
         if (remaining <= 0
@@ -352,6 +418,8 @@ class OnlineController:
             raise RuntimeError("storage_online_rollback_fence_state_invalid")
         if type(deadline) not in (int, float) or not math.isfinite(deadline):
             raise ValueError("storage_online_rollback_deadline_invalid")
+        if self._final_deadline is not None and deadline > self._final_deadline:
+            raise ValueError("storage_online_rollback_deadline_widened")
         remaining = deadline-monotonic()
         if not 0 < remaining <= self._admitted_limits["movement_timeout_seconds"]:
             raise ValueError("storage_online_rollback_deadline_not_admitted")

@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -89,7 +90,7 @@ def _validate_descriptors(rows):
 
 
 def _copy_archive_page(engine, *, select_page, record_page, family, source_root, destination_root, after_id="",
-                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None):
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None, deadline=None):
     """Copy one known catalog page; retry re-verifies and reuses completed files.
 
     Owns the existing storage lock, expiry fence, clock and capacity watcher.
@@ -109,7 +110,11 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
         raise ValueError("archive_copy_cancellation_callback_invalid")
     limits = _limits(resource_limits, migration=True)
     started = monotonic()
-    deadline = started + limits["movement_timeout_seconds"]
+    if deadline is not None and (type(deadline) not in (int, float)
+            or not math.isfinite(deadline) or deadline <= started):
+        raise ValueError("archive_copy_absolute_deadline_invalid")
+    deadline = min(deadline if deadline is not None else float("inf"),
+                   started + limits["movement_timeout_seconds"])
     watch = None
     with engine.connect() as conn:
         try:
@@ -118,7 +123,7 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous:
                     deadline = min(deadline, started + previous/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"]):
+                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("archive_copy_storage_busy")
