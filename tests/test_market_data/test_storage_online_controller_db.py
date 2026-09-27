@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import threading
+import time
 
 import pytest
 from sqlalchemy import event, text
@@ -84,7 +85,7 @@ def test_controller_reentry_rehashes_and_retains_proof_through_lost_commit(
         # Durable cursors/empty tails do not recreate process-local file proof.
         _drain(worker)
         with pytest.raises(RuntimeError, match="object_not_verified"):
-            worker.commit_database()
+            worker.commit_database(deadline=time.monotonic()+30)
         assert worker.state == "commit_unknown"
         assert not worker.reconcile_database()["database_handoff_committed"]
         assert worker.state == "rolled_back"
@@ -124,7 +125,7 @@ def test_controller_reentry_rehashes_and_retains_proof_through_lost_commit(
             with monkeypatch.context() as lost:
                 lost.setattr(Connection, "_commit_impl", lost_reply)
                 with pytest.raises(RuntimeError, match="actual commit reply lost"):
-                    worker.commit_database()
+                    worker.commit_database(deadline=time.monotonic()+30)
         finally:
             event.remove(engine, "after_cursor_execute", observe)
         assert worker.state == "commit_unknown" and switching
@@ -195,3 +196,53 @@ def test_controller_busy_lost_owner_and_changed_original_attempt(storage, tmp_pa
         with pytest.raises(RuntimeError, match="attempt_binding_changed"):
             _command(worker, "sql_copy")
         assert worker.state == "failed"
+
+def test_controller_final_deadline_is_separate_bounded_and_not_renewed(
+        storage, tmp_path, monkeypatch):
+    engine, settings, _ = _setup(storage, tmp_path, monkeypatch)
+    settings["command_seconds"] = 2
+    with engine.begin() as conn:
+        original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        frozen = _frozen_records(conn)
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker)
+        _reprove(worker)
+        for invalid in (True, float("inf"), time.monotonic()-1,
+                        time.monotonic()+settings["resource_limits"]["movement_timeout_seconds"]+10):
+            with pytest.raises(ValueError, match="final_deadline"):
+                worker.commit_database(deadline=invalid)
+            assert worker.state == "background"
+        deadline = time.monotonic()+0.05
+        time.sleep(0.06)
+        with pytest.raises(ValueError, match="final_deadline_not_admitted"):
+            worker.commit_database(deadline=deadline)
+        assert worker.state == "background"
+        stalled = []
+        def stall(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+                stalled.append(time.monotonic())
+                conn.exec_driver_sql("SELECT pg_sleep(2.25)")
+        event.listen(engine, "after_cursor_execute", stall)
+        try:
+            with pytest.raises((RuntimeError, DBAPIError)):
+                worker.commit_database(deadline=time.monotonic()+2)
+        finally:
+            event.remove(engine, "after_cursor_execute", stall)
+        assert worker.state == "commit_unknown" and stalled
+        assert not worker.reconcile_database()["database_handoff_committed"]
+        with engine.begin() as conn:
+            assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+            assert _frozen_records(conn) == frozen
+    with OnlineController(engine, **settings) as worker:
+        _reprove(worker)
+        event.listen(engine, "after_cursor_execute", stall)
+        try:
+            start = time.monotonic()
+            report = worker.commit_database(deadline=start+15)
+            assert time.monotonic()-start > 2
+        finally:
+            event.remove(engine, "after_cursor_execute", stall)
+        assert report["database_handoff_committed"] and worker.state == "committed"
+        assert worker.limits["movement_timeout_seconds"] == 2
+        with engine.begin() as conn:
+            assert _frozen_records(conn) == frozen

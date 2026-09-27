@@ -560,3 +560,27 @@ copy/reproof. These small fixtures do not measure production lock impact or
 collector throughput. Production still requires admitted phase resources,
 complete final stop/drain/switch, safe abort/reconciliation, and recovery activation
 after the read-capability worker exits.
+
+
+### Separately bounded final database transaction
+
+OnlineController.commit_database requires an explicit absolute monotonic deadline
+from the caller that owns final publisher drain and the short host pause. It does
+not inherit the background page-command allowance. The deadline must still be in
+the future and inside both the original admitted resource duration and live
+attempt ceiling. Background commands retain their original short allowance.
+
+The handoff receives the remaining resource duration and the same absolute
+deadline; the latter only shortens its existing transaction/watch ceilings.
+Time already spent stopping or draining clients is not granted again on entry.
+All original capture, resource, source, lease and transaction guards remain.
+An error after entering the switch remains commit_unknown and requires bounded
+read-only reconciliation; an invalid deadline grants no switch authority.
+
+This is an internal caller boundary, not a final wire command or measured
+production pause allowance. The eventual host transition must retain its original
+deadline across interruption and admit the whole stop/drain/delta/switch/runtime
+sequence. The small database qualification uses a deliberate SQL delay to show
+deadline rollback and a successful transaction longer than the page allowance;
+that artificial duration is not a migration estimate. Full catalog cardinality,
+source-drain and runtime/recovery timing still require measurement.

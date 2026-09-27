@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 from time import monotonic
 
@@ -325,20 +326,27 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
 
 
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
-                   max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None):
+                   max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None,
+                   deadline=None):
     """Commit one fully verified fixed handoff; sources remain retained.
 
     Rechecks every copied header, identity, lookup and archive object under
     fences, requires already validated references on HDD, and supervises the
     original attempt deadline and resource budget through commit. On any
     uncertain response, use inspect_handoff; never blindly replay the switch.
-    This does not prove publisher drain or authorize collection to resume.
+    An optional absolute monotonic deadline only shortens these existing ceilings;
+    it is never renewed between final-pause phases. This does not prove publisher
+    drain or authorize collection to resume.
     """
     limits = _limits(resource_limits, migration=True)
     if cancelled is not None and not callable(cancelled):
         raise ValueError("fact_header_handoff_cancellation_callback_invalid")
     started = monotonic()
-    deadline = started + limits["movement_timeout_seconds"]
+    if deadline is not None and (type(deadline) not in (int, float)
+                                or not math.isfinite(deadline) or deadline <= started):
+        raise ValueError("fact_header_handoff_deadline_invalid")
+    deadline = min(deadline if deadline is not None else float("inf"),
+                   started + limits["movement_timeout_seconds"])
     watch = None
     with engine.connect() as conn:
         try:

@@ -57,7 +57,8 @@ class OnlineController:
         if not isinstance(expected_started_at, str) or not expected_started_at:
             raise ValueError("storage_online_original_attempt_required")
         self.engine, self.placement, self.policy = engine, placement, policy
-        self.limits = deepcopy(_limits(resource_limits, migration=True))
+        self._admitted_limits = deepcopy(_limits(resource_limits, migration=True))
+        self.limits = deepcopy(self._admitted_limits)
         self.limits["movement_timeout_seconds"] = min(
             self.limits["movement_timeout_seconds"], command_seconds)
         self.source_root, self.destination_root = Path(source_root), Path(destination_root)
@@ -245,21 +246,35 @@ class OnlineController:
         self._last_request, self._last_reply = deepcopy(request), deepcopy(reply)
         return reply
 
-    def commit_database(self):
+    def commit_database(self, *, deadline):
         """Internal host seam, intentionally NOT a pipe command.
 
         Caller must own separately qualified exact publisher drain/short-pause
-        admission. This method supplies no host authority. Retain the context
+        admission and an absolute monotonic deadline covering that final pause.
+        This method supplies no host authority. Retain the context
         through reconcile_database() on any exception; never replay the switch.
         """
         if self.state != "background":
             raise RuntimeError("storage_online_commit_state_invalid")
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise ValueError("storage_online_final_deadline_invalid")
         self._admit_attempt()
+        remaining = deadline-monotonic()
+        if (remaining <= 0
+                or remaining > self._admitted_limits["movement_timeout_seconds"]
+                or deadline > self.proof.deadline):
+            raise ValueError("storage_online_final_deadline_not_admitted")
+        # A short page allowance is not the host's final-pause allowance. The
+        # latter must already be admitted, remains inside the original resource
+        # and attempt ceilings, and is never renewed after drain or a retry.
+        limits = {**self._admitted_limits,
+                  "movement_timeout_seconds": math.ceil(remaining)}
         self.state = "commit_unknown"
         result = handoff.commit_handoff(self.engine, policy=self.policy,
-            resource_limits=self.limits, source_root=self.source_root,
+            resource_limits=limits, source_root=self.source_root,
             destination_root=self.destination_root, max_objects=self.max_objects,
-            max_bytes=self.max_bytes, page_rows=self.page_rows, file_proof=self.proof)
+            max_bytes=self.max_bytes, page_rows=self.page_rows, file_proof=self.proof,
+            deadline=deadline)
         self.state = "committed"
         return result
 
