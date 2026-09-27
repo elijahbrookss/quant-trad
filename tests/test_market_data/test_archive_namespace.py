@@ -11,6 +11,13 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_namespace import archive_namespace
 
 
+def _peer_environment():
+    # Pytest's checkout sys.path is not inherited by a fresh interpreter in CI.
+    checkout = Path(__file__).resolve().parents[2]
+    return dict(os.environ, PYTHONPATH=os.pathsep.join(
+        (str(checkout/"src"), str(checkout), os.environ.get("PYTHONPATH", ""))))
+
+
 def _peer(root, source, *, blocked):
     script = """
 import hashlib, sys
@@ -33,7 +40,7 @@ for action in (
 assert (root/'retained/item').exists() == blocked
 """
     subprocess.run([sys.executable, '-c', script, str(root), str(source), str(blocked)],
-                   check=True, capture_output=True, text=True, timeout=10)
+                   check=True, capture_output=True, text=True, timeout=10, env=_peer_environment())
 
 
 def test_exclusive_namespace_blocks_late_process_and_releases_on_exit(tmp_path):
@@ -69,7 +76,7 @@ def test_namespace_owner_death_releases_lock_without_receipt(tmp_path):
     script = "from market_data.archive_namespace import archive_namespace; import sys; " \
              "c=archive_namespace(sys.argv[1],exclusive=True); c.__enter__(); print('held',flush=True); sys.stdin.read()"
     process = subprocess.Popen([sys.executable, '-c', script, str(root)],
-                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=_peer_environment())
     try:
         import select
         assert select.select([process.stdout], [], [], 5)[0]
