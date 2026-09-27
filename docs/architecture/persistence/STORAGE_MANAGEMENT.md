@@ -21,6 +21,8 @@ code_paths:
   - tests/test_market_data/test_storage_maintenance_worker.py
   - tests/test_portal/test_storage_management_db.py
   - src/market_data/archive.py
+  - src/market_data/archive_namespace.py
+  - tests/test_market_data/test_archive_namespace.py
   - src/core/settings.py
   - tests/test_market_data/test_archive_shared_ownership.py
   - scripts/automation/storage_host_boundary.py
@@ -136,6 +138,25 @@ in-flight or partially completed Docker start remains unresolved and cannot be
 replayed from a saved negative SQL result. The current final marker continues to
 block ordinary deployment/recovery entry until an explicitly qualified terminal
 transition exists. No refactor grants that missing authority.
+
+## Archive names during the final switch
+
+Every local object-store publication and deletion takes a shared, nonblocking
+Linux flock on the archive-root directory inode. Ordinary publishers remain
+concurrent. After its last copy page, the existing online controller takes the
+exclusive side before internal COMMIT and retains it through uncertain-outcome
+inspection until controller retirement. A late cooperating store refuses before
+creating directories, publishing a name or deleting a file; reads remain available.
+There is no lock file, source permission change, new deadline or saved lock token.
+Root identity checks reject replacement. The existing live file leases still
+protect file contents and exact verification still checks required names.
+
+This is a cooperating-store boundary. Legacy images, arbitrary filesystem tools,
+subdirectory roots and processes bypassing this object store are not restrained
+by flock. Exact image/mount/publisher admission and host lifecycle exclusion remain
+required before the host may dispatch a switch. Kernel release on process death
+is not restart or recovery authority. The original final marker and unresolved
+outcome rules continue to block automatic activation.
 
 ## From a prepared drive to a reviewed change
 

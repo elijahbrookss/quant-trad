@@ -1275,3 +1275,16 @@ live file proof and object-store checks continue to protect copy/reuse. Incompat
 private paths refuse without repair. Other shared groups are unsupported by this
 fixed worker. This connects the migration publisher to the declared runtime
 archive contract; it grants no final switch or runtime activation authority.
+
+### Hold archive namespace ownership through the final transaction
+
+Content leases do not prevent another process from unlinking a verified pathname.
+Use the existing object-store mutation boundary to take a shared Linux directory
+flock for publication/deletion, with an exclusive lock retained by the online
+controller through internal COMMIT and outcome reconciliation. Contention refuses
+immediately, so it cannot renew a pause budget. Ordinary publishers remain
+concurrent. No lock file, receipt, command surface or permissions repair is added.
+
+This supplements content proof and SQL fences. It only excludes cooperating store
+implementations; exact legacy/source/host admission remains necessary. A dead
+worker releasing its lock cannot authorize source restart or recovery activation.

@@ -860,6 +860,13 @@ def test_final_session_switch_and_inspection_with_new_logins_closed(
                             with pytest.raises(RuntimeError, match="final_session_lost"):
                                 worker.commit_database(deadline=deadline)
                     else:
+                        from market_data.archive import FilesystemRawArchiveObjectStore
+                        import hashlib
+                        namespace_source = tmp_path / "namespace-source"
+                        namespace_source.write_bytes(b"fixture namespace object outside catalog")
+                        FilesystemRawArchiveObjectStore(worker.destination_root).put_verified(
+                            object_key="retained/item", source_path=namespace_source,
+                            expected_sha256=hashlib.sha256(namespace_source.read_bytes()).hexdigest())
                         original_commit = Connection._commit_impl
                         switched = set()
                         lost = []
@@ -867,6 +874,11 @@ def test_final_session_switch_and_inspection_with_new_logins_closed(
                             if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
                                 assert conn is connection
                                 new_login_refused()
+                                from tests.test_market_data.test_archive_namespace import _peer
+                                # A process that starts AFTER the real rename cannot
+                                # publish or retire destination names while this SAME
+                                # controller retains its namespace fence.
+                                _peer(worker.destination_root, namespace_source, blocked=True)
                                 switched.add(id(conn))
                         def lose_reply(conn):
                             original_commit(conn)
@@ -887,6 +899,10 @@ def test_final_session_switch_and_inspection_with_new_logins_closed(
                         assert not result["collection_resume_authorized"]
                         assert not result["runtime_activation_authorized"]
                         assert worker._final_connection is connection and worker._final_pid == pid
+                        # Lost COMMIT reply and fresh committed inspection do not
+                        # release archive ownership or authorize another publisher.
+                        from tests.test_market_data.test_archive_namespace import _peer
+                        _peer(worker.destination_root, namespace_source, blocked=True)
                         assert len(denied) == 3
                         worker.proof.verify_all()
                     assert worker._final_deadline == deadline
@@ -902,6 +918,8 @@ def test_final_session_switch_and_inspection_with_new_logins_closed(
             with pytest.raises(RuntimeError, match="final_session_state_invalid"):
                 with worker.final_database_session(deadline=deadline):pytest.fail("session replay")
             assert worker._final_connection is None and connection.closed
+        if fault == "lost_reply":
+            _peer(settings["destination_root"], namespace_source, blocked=False)
         with engine.begin() as conn:
             assert _frozen_records(conn) == frozen
             assert conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))

@@ -21,6 +21,8 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from market_data.archive_namespace import archive_namespace
+
 from portal.backend.service.storage.header_resource_claims import _limits
 from scripts.db import archive_root_v2_copy as archives
 from scripts.db import archive_root_v2_online as archive_online
@@ -85,6 +87,7 @@ class OnlineController:
         self._jobs_stop_requested = False
         self._jobs_stopped = False
         self._jobs_catalog = None
+        self._archive_namespace_check = None
         self._rollback_context = self._rollback_check = None
         self._sequence = 0
         self._last_request = self._last_reply = None
@@ -166,6 +169,8 @@ class OnlineController:
             self._rollback_check()
         self._ownership()
         self.proof.check()
+        if self._archive_namespace_check is not None:
+            self._archive_namespace_check()
         if archives._root(self.source_root, self._source_device)[1] != self._source:
             raise RuntimeError("storage_online_source_changed")
 
@@ -623,6 +628,8 @@ class OnlineController:
         Host/archive/spool exclusion remains separately required.
         """
         self._ownership(deadline=deadline)
+        if self._archive_namespace_check is not None:
+            self._archive_namespace_check()
         if self._jobs_stop_requested:
             if not self._jobs_stopped:
                 raise RuntimeError("storage_online_jobs_stop_unconfirmed")
@@ -657,6 +664,13 @@ class OnlineController:
             raise ValueError("storage_online_final_deadline_invalid")
         if self._final_deadline is not None and deadline > self._final_deadline:
             raise ValueError("storage_online_final_deadline_widened")
+        # All final archive pages must already be published. Keep the SAME
+        # inode lock through COMMIT uncertainty and fresh outcome inspection;
+        # context retirement releases it, never a serialized receipt. This only
+        # excludes cooperating current stores, not unadmitted legacy/host actors.
+        if self._archive_namespace_check is None:
+            self._archive_namespace_check = self._stack.enter_context(
+                archive_namespace(self.destination_root, exclusive=True))
         self._admit_attempt()
         remaining = deadline-monotonic()
         if (remaining <= 0

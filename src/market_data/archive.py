@@ -28,6 +28,7 @@ from core.storage_mounts import (
     require_configured_archive_mount, require_configured_working_mount,
     require_configured_staging_mount,
 )
+from .archive_namespace import archive_namespace
 from .structure import RawStreamRecord, build_spool_segment_id
 
 
@@ -826,6 +827,14 @@ class FilesystemRawArchiveObjectStore:
         self, *, object_key: str, source_path: Path, expected_sha256: str,
         check_budget: Callable[[], None] | None = None
     ) -> ArchiveObjectAcknowledgement:
+        with archive_namespace(self.root):
+            return self._put_verified(object_key=object_key, source_path=source_path,
+                expected_sha256=expected_sha256, check_budget=check_budget)
+
+    def _put_verified(
+        self, *, object_key: str, source_path: Path, expected_sha256: str,
+        check_budget: Callable[[], None] | None = None
+    ) -> ArchiveObjectAcknowledgement:
         if not self.writable:
             raise PermissionError("market_archive_read_only: publication is disabled")
         if check_budget is not None and not callable(check_budget):
@@ -915,6 +924,13 @@ class FilesystemRawArchiveObjectStore:
         )
 
     def delete_verified(
+        self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
+    ) -> ArchiveObjectDeletionAcknowledgement:
+        with archive_namespace(self.root):
+            return self._delete_verified(object_key=object_key,
+                expected_sha256=expected_sha256, allow_missing=allow_missing)
+
+    def _delete_verified(
         self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
     ) -> ArchiveObjectDeletionAcknowledgement:
         if not self.writable:
