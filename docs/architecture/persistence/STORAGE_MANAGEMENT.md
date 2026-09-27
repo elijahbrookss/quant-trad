@@ -2364,3 +2364,24 @@ live file proof and object-store checks continue to protect copy/reuse. Incompat
 private paths refuse without repair. Other shared groups are unsupported by this
 fixed worker. This connects the migration publisher to the declared runtime
 archive contract; it grants no final switch or runtime activation authority.
+
+
+### Preparing a private recovery copy of retained spool data
+
+The existing online spool boundary can prepare a new private SSD working root
+from a separately held, read-only original. It reuses the same bounded metadata
+walk, copies only pending `.open`/`.sealed` WAL, verifies each copy, and assigns
+only newly created destination paths to the candidate UID1000. Original files,
+permissions and acknowledgement projections remain untouched. An old local
+acknowledgement is not a database certificate and is not copied as authority.
+The normal QT runtime must recover and acknowledge the copied WAL through the
+existing database/archive path before retiring its copy.
+
+This is an internal key-free filesystem preparation step, not a second replay
+engine or an operator entrypoint. It requires an empty prepared destination on
+the source device, explicit byte/entry bounds, an original caller deadline and
+continuous caller-owned writer exclusion. Unknown pending files, source changes,
+symlinks, deadline exhaustion and reused destinations refuse. Failed partial
+copies are retained and cannot be silently adopted or repaired. A returned copy
+report never grants switch, rollback, recovery-mount or runtime activation
+authority; the final-state owner must compose those transitions.

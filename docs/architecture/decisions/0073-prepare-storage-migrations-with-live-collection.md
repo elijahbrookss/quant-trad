@@ -1231,7 +1231,11 @@ ownership. A later production observation found root-running collectors and
 root-owned0600 pending WAL beneath a UID1000 working root. The candidate UID1000
 runtime therefore additionally needs a bounded preserving recovery copy; original
 source permissions and bytes must remain intact until normal qualified recovery.
-That ownership transition is not implemented by the group-publication contract. Running every service as70 breaks retained spool
+The internal spool boundary now supports a bounded preserving copy into a new
+candidate-owned SSD root, reusing its guarded traversal and normal QT replay.
+Failed copies remain unactivated; the final operator still must bind this step
+into its original deadline and source-exclusion interval. The group-publication
+contract alone does not implement that ownership transition. Running every service as70 breaks retained spool
 recovery; switching every service to1000 breaks copied-object access and the
 PostgreSQL physical-maintenance boundary.
 

@@ -32,7 +32,8 @@ def test_legacy_private_wal_recovers_and_new_intake_preserves_frozen_reads(stora
     assert os.getuid() == 1000 and 70 in os.getgroups()
     working, archive, control = Path("/legacy-working"), Path("/qt-history/archives"), Path("/legacy-control")
     assert working.stat().st_dev != archive.stat().st_dev
-    assert (working.stat().st_uid, working.stat().st_gid, working.stat().st_mode & 0o777) == (1000, 1000, 0o750)
+    copied_source = os.getenv("QT_LEGACY_SOURCE_COPY") == "1"
+    assert (working.stat().st_uid, working.stat().st_gid, working.stat().st_mode & 0o777) == (1000, 1000, 0o700 if copied_source else 0o750)
     monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(working))
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(archive))
     monkeypatch.setattr(market_structure, "db", storage.database)
@@ -74,6 +75,14 @@ def test_legacy_private_wal_recovers_and_new_intake_preserves_frozen_reads(stora
     assert sealed.stat().st_mode & 0o077 == 0
     assert hashlib.sha256(sealed.read_bytes()).hexdigest() == receipt["sha256"]
     sentinel = working/"retained-private"
+    if copied_source:
+        assert receipt["original_owner"] == [0, 0]
+        assert receipt["preserving_copy"]["source_preserved"] is True
+        assert not receipt["preserving_copy"]["runtime_activation_authorized"]
+        # The original root-private sentinel stays in the read-only source,
+        # which the ordinary app does not mount. The host verifies it separately.
+        sentinel.write_bytes(b"candidate-private-sentinel")
+        sentinel.chmod(0o600)
     before = (sentinel.read_bytes(), sentinel.stat().st_uid, sentinel.stat().st_gid, sentinel.stat().st_mode)
     stop = Event(); stop.set()
     received = []

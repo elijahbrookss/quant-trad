@@ -65,3 +65,100 @@ def test_directory_replacement_during_observation_refuses(tmp_path):
     with pytest.raises(RuntimeError, match="spool_changed"):
         observe(tmp_path, check=change)
     assert (tmp_path/"retained"/"a.ack.json").read_text() == "{}"
+
+
+@pytest.fixture
+def recovery_copy(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    source, target = tmp_path/"original", tmp_path/"candidate"
+    source.mkdir(mode=0o700); target.mkdir(mode=0o700)
+    wal = source/"spool"/"definition"/"session"/"epoch=0"/"segment.open"
+    wal.parent.mkdir(parents=True)
+    wal.write_bytes(b"unaltered complete records\npartial last frame")
+    wal.chmod(0o600)
+    (wal.parent/"segment.ack.json").write_text("old projection is not authority")
+    # A real read-only mount/account transition is qualified by the native
+    # fixture; unit tests exercise copying, preservation and fault boundaries.
+    monkeypatch.setattr(drain.os, "statvfs", lambda _: SimpleNamespace(f_flag=os.ST_RDONLY))
+    changed = []
+    chown = os.fchown
+    def destination_chown(fd, uid, gid):
+        path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        assert path == target or target in path.parents
+        assert (uid, gid) == (1000, 1000)
+        changed.append(path)
+        if os.geteuid() in (0, 1000):
+            chown(fd, uid, gid)
+    monkeypatch.setattr(drain.os, "fchown", destination_chown)
+    def copy(**overrides):
+        return drain.prepare_recovery_spool(source, target, **(dict(
+            deadline=monotonic()+5, max_entries=100, max_bytes=1024**2,
+            check=lambda: None) | overrides))
+    return source, target, wal, changed, copy
+
+
+def test_recovery_copy_preserves_source_and_leaves_replay_to_runtime(recovery_copy):
+    import hashlib
+    source, target, wal, changed, copy = recovery_copy
+    before = wal.read_bytes(), wal.stat()
+    result = copy()
+    copied = target/wal.relative_to(source)
+    assert copied.read_bytes() == before[0]
+    assert copied.stat().st_mode & 0o777 == 0o600
+    assert wal.read_bytes() == before[0] and wal.stat() == before[1]
+    assert not list(target.rglob("*.ack.json"))
+    assert (wal.parent/"segment.ack.json").exists()
+    assert result["copied_bytes"] == len(before[0])
+    assert result["copied_files"][0]["sha256"] == hashlib.sha256(before[0]).hexdigest()
+    assert not result["final_switch_authorized"] and not result["runtime_activation_authorized"]
+    assert changed[-1] == target
+    with pytest.raises(RuntimeError, match="new_private_ssd_root"):
+        copy()
+    assert copied.read_bytes() == before[0]
+
+
+@pytest.mark.parametrize("failure", ["budget", "unknown", "symlink", "deadline", "writable"])
+def test_recovery_copy_refuses_without_changing_original(recovery_copy, monkeypatch, failure):
+    from types import SimpleNamespace
+    source, target, wal, changed, copy = recovery_copy
+    before = wal.read_bytes(), wal.stat()
+    overrides = {}
+    if failure == "budget": overrides["max_bytes"] = 1
+    elif failure == "unknown": (wal.parent/"unfinished.partial").write_text("retain")
+    elif failure == "symlink": (source/"spool"/"alias").symlink_to(wal)
+    elif failure == "deadline": overrides["deadline"] = monotonic()-1
+    else: monkeypatch.setattr(drain.os, "statvfs", lambda _: SimpleNamespace(f_flag=0))
+    fds = len(list(Path("/proc/self/fd").iterdir()))
+    with pytest.raises(RuntimeError): copy(**overrides)
+    assert wal.read_bytes() == before[0] and wal.stat() == before[1]
+    assert len(list(Path("/proc/self/fd").iterdir())) == fds
+
+
+def test_recovery_copy_interruption_preserves_partial_and_refuses_reuse(recovery_copy, monkeypatch):
+    source, target, wal, changed, copy = recovery_copy
+    write = os.write
+    def interrupted(fd, data):
+        write(fd, data[:5])
+        raise RuntimeError("fixture interrupted write")
+    monkeypatch.setattr(drain.os, "write", interrupted)
+    before = wal.read_bytes(), wal.stat()
+    with pytest.raises(RuntimeError, match="interrupted write"): copy()
+    assert (target/wal.relative_to(source)).read_bytes() == before[0][:5]
+    assert wal.read_bytes() == before[0] and wal.stat() == before[1]
+    with pytest.raises(RuntimeError, match="new_private_ssd_root"): copy()
+
+
+def test_recovery_copy_source_mutation_cannot_complete(recovery_copy, monkeypatch):
+    source, target, wal, changed, copy = recovery_copy
+    read = os.read
+    altered = False
+    def concurrent_write(fd, length):
+        nonlocal altered
+        chunk = read(fd, length)
+        if chunk and not altered:
+            altered = True
+            with wal.open("ab") as handle: handle.write(b"late source record")
+        return chunk
+    monkeypatch.setattr(drain.os, "read", concurrent_write)
+    with pytest.raises(RuntimeError, match="spool_changed"): copy()
+    assert wal.read_bytes().endswith(b"late source record")
