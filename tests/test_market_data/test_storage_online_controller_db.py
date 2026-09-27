@@ -254,3 +254,77 @@ def test_controller_final_deadline_is_separate_bounded_and_not_renewed(
         assert worker.limits["movement_timeout_seconds"] == 2
         with engine.begin() as conn:
             assert _frozen_records(conn) == frozen
+
+def test_controller_explicit_preparation_preserves_pages_and_original_attempt(
+        storage, tmp_path, monkeypatch):
+    from scripts.db import fact_header_v2_references as references
+    from scripts.db import archive_reference_v2_placement as catalogs
+    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        protection.prepare(conn)
+        original = capture.inspect_capture(conn)
+        frozen = _frozen_records(conn)
+        retained = conn.scalar(text("SELECT to_regclass(:name)"),
+                               {"name": catalogs.RETAINED_LEGACY}) is not None
+    if retained:
+        catalogs.move_reference_catalog(engine, relation=catalogs.RETAINED_LEGACY,
+            policy=options["policy"], resource_limits=options["resource_limits"])
+    settings = dict(placement=storage.copy_plan, expected_started_at=original["started_at"],
+                    max_objects=128, max_bytes=64*1024**2, command_seconds=10, **options)
+
+    def phase(worker, step, relation=None):
+        request = dict(controller_id=worker.controller_id, sequence=worker._sequence+1,
+                       operation="prepare_step", step=step, relation=relation,
+                       max_duration_seconds=30)
+        result = worker.command(request)
+        assert worker.command(request) == result
+        assert result["result"]["committed"] and not result["final_switch_authorized"]
+        assert worker.limits["movement_timeout_seconds"] == 10
+        return result
+
+    with OnlineController(engine, **settings) as first:
+        invalid = dict(controller_id=first.controller_id, sequence=1,
+                       operation="prepare_step", step="identity_history", relation=None,
+                       max_duration_seconds=first._admitted_limits["movement_timeout_seconds"]+1)
+        with pytest.raises(ValueError, match="preparation_command_invalid"):
+            first.command(invalid)
+        assert first.state == "background" and first._sequence == 0
+        for _ in range(32):
+            result = _command(first, "sql_copy")["result"]
+            if result["outcome"] == "identity_relocation_required":
+                phase(first, "identity_history")
+                break
+        else:
+            pytest.fail("finite header baseline did not converge")
+        first_id = first.controller_id
+
+    # An exited controller loses file proof, not the committed relocation/pages.
+    with OnlineController(engine, **settings) as worker:
+        assert worker.controller_id != first_id and worker.proof.hashed_bytes == 0
+        _raw_book_fixture(storage, source, monkeypatch,
+            definition_id="worker-preparation-publication",
+            provider_product_id="BTC-USD-WORKER-PHASE",
+            event_start=BASE+timedelta(hours=2))
+        for _ in range(64):
+            result = _command(worker, "sql_copy")["result"]
+            if result["outcome"] == "raw_relocation_required":
+                phase(worker, "raw_history")
+            elif result["outcome"] == "both_tails_observed_empty":
+                break
+        else:
+            pytest.fail("finite raw/tail fixture did not converge")
+        phase(worker, "identity_capture")
+        with engine.begin() as conn:
+            slots = references.inspect_references(conn)["references"]
+        for slot in slots:
+            if slot["relation"] != references.PARENT:
+                phase(worker, "reference_prepare", slot["relation"])
+                phase(worker, "reference_validate", slot["relation"])
+        phase(worker, "reference_adopt")
+        _drain(worker)
+        assert worker.proof.hashed_bytes > 0
+        with engine.begin() as conn:
+            assert capture.inspect_capture(conn)["started_at"] == original["started_at"]
+            assert _frozen_records(conn) == frozen
+            assert references.inspect_references(conn)["references_complete"]
+        assert not worker.status()["migration_ready"]

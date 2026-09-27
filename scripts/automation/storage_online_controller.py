@@ -33,7 +33,7 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
-_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "cancel", "close"}
+_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "cancel", "close"}
 
 
 class OnlineController:
@@ -192,8 +192,12 @@ class OnlineController:
             "family", "page_objects", "copied_objects", "reused_objects", "verified_bytes")}
 
     def command(self, request):
+        fields = {"controller_id", "sequence", "operation"}
+        preparing = isinstance(request, dict) and request.get("operation") == "prepare_step"
+        if preparing:
+            fields |= {"step", "relation", "max_duration_seconds"}
         if (not isinstance(request, dict)
-                or set(request) != {"controller_id", "sequence", "operation"}
+                or set(request) != fields
                 or request["controller_id"] != self.controller_id
                 or type(request["sequence"]) is not int
                 or not 1 <= request["sequence"] <= 2**53
@@ -201,6 +205,15 @@ class OnlineController:
                 or request["operation"] not in _OPERATIONS):
             raise ValueError("storage_online_command_invalid")
         operation = request["operation"]
+        if preparing:
+            step, relation = request["step"], request["relation"]
+            relation_step = step in {"reference_prepare", "reference_validate"} if isinstance(step, str) else False
+            if (not isinstance(step, str) or step not in online._PREPARATION_STEPS
+                    or (relation_step and (not isinstance(relation, str) or not 1 <= len(relation) <= 256))
+                    or (not relation_step and relation is not None)
+                    or type(request["max_duration_seconds"]) is not int
+                    or not 1 <= request["max_duration_seconds"] <= self._admitted_limits["movement_timeout_seconds"]):
+                raise ValueError("storage_online_preparation_command_invalid")
         if request["sequence"] == self._sequence and request == self._last_request:
             # Same-process transport retry never executes a mutation twice.
             # It is not a restart/resume token and never revives dead proof.
@@ -235,6 +248,14 @@ class OnlineController:
                               ("outcome", "phase", "committed_pages", "verified_page_rows")}
                 elif operation in {"archive_copy", "reprove"}:
                     result = self._archive_page(operation == "reprove")
+                elif preparing:
+                    # Explicit phase requests use their admitted allowance, never
+                    # silently widen page/status commands or the original attempt.
+                    result = online.preparation_step(self.engine, step=request["step"],
+                        relation=request["relation"], placement=self.placement,
+                        policy=self.policy, resource_limits=self._admitted_limits,
+                        expected_started_at=self.expected_started_at, page_rows=self.page_rows,
+                        max_duration_seconds=request["max_duration_seconds"])
                 self.check()
         except BaseException:
             self.state = "failed"
@@ -340,6 +361,8 @@ def serve(controller, *, input_fd, output_fd, channel_seconds=5):
     """Bounded newline-JSON over host-owned pipes; EOF closes live proofs.
 
     No listeners, files, shell commands, paths or runtime activation commands.
+    Named preparation phases are explicit requests with separate admitted time
+    allowances; existing source/capture/resource guards still own each phase.
     Caller owns the controller context and closes it on every return/exception.
     """
     if (type(channel_seconds) not in (int, float) or not math.isfinite(channel_seconds)

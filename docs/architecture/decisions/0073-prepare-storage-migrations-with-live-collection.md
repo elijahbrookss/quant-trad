@@ -584,3 +584,28 @@ sequence. The small database qualification uses a deliberate SQL delay to show
 deadline rollback and a successful transaction longer than the page allowance;
 that artificial duration is not a migration estimate. Full catalog cardinality,
 source-drain and runtime/recovery timing still require measurement.
+
+
+### Explicit preparation through the persistent worker
+
+The background pipe accepts a named prepare_step with an exact step, optional
+incoming-reference relation, and explicit maximum duration. It delegates to the
+existing fixed preparation_step registry; it does not accept arbitrary SQL,
+paths or relocation targets. The requested duration must fit the original
+admitted resource allowance. Each existing phase still rechecks original capture
+time, protected placement, policy, ordering and resources.
+
+Private identity/raw relocation, mirroring and reference preparation/validation/
+adoption are explicit commands. They do not widen short SQL/archive page or
+status limits. A same-process identical reply can be replayed without another
+mutation. A failed command closes further work; a replacement controller admits
+durable progress and starts with no file proof. Source clients are not paused or
+restarted by these commands. Retained/reference catalog movement remains a
+separate operator boundary, and no final-switch/runtime command is exposed.
+
+Disposable controller qualification traverses the finite header/raw phases,
+restarts after committed identity relocation, publishes additional QT archives,
+then prepares/validates/adopts references and catches archive intake. It checks
+original capture/frozen preservation and refusal of excess phase duration.
+This component qualification is not a complete packaged host phase driver,
+production lock-impact measurement or final outage admission.
