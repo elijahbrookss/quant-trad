@@ -50,8 +50,9 @@ def _remaining(saved):
 
 def _load(path):
     saved = held._load(path)
-    if (set(saved) != _FIELDS or saved["schema"] != SCHEMA
-            or saved["phase"] not in ("stopping", "paused")
+    entered = saved.get("phase") == "switch_entered"
+    if (set(saved) != (_FIELDS | {"switch"} if entered else _FIELDS) or saved["schema"] != SCHEMA
+            or saved["phase"] not in ("stopping", "paused", "switch_entered")
             or type(saved["duration_seconds"]) is not int
             or not 1 <= saved["duration_seconds"] <= 96*3600
             or any(type(saved[k]) not in (int, float) or not math.isfinite(saved[k])
@@ -61,12 +62,23 @@ def _load(path):
             or abs(saved["deadline"]-saved["started_at"]-saved["duration_seconds"]) > .000001
             or abs(saved["deadline_boot"]-saved["started_boot"]-saved["duration_seconds"]) > .000001):
         raise RuntimeError("storage_online_final_receipt_invalid")
-    if saved["phase"] == "paused":
+    if saved["phase"] in ("paused", "switch_entered"):
         if (type(saved["paused_at"]) not in (int, float)
                 or not saved["started_at"] <= saved["paused_at"] <= saved["deadline"]):
             raise RuntimeError("storage_online_final_receipt_invalid")
     elif saved["paused_at"] is not None:
         raise RuntimeError("storage_online_final_receipt_invalid")
+    if entered:
+        switch = saved["switch"]
+        if (not isinstance(switch, dict)
+                or set(switch) != {"entered_at", "deadline_monotonic", "worker_sequence"}
+                or type(switch["entered_at"]) not in (int, float)
+                or not saved["paused_at"] <= switch["entered_at"] <= saved["deadline"]
+                or type(switch["deadline_monotonic"]) not in (int, float)
+                or not math.isfinite(switch["deadline_monotonic"])
+                or switch["deadline_monotonic"] <= 0
+                or type(switch["worker_sequence"]) is not int or switch["worker_sequence"] < 1):
+            raise RuntimeError("storage_online_final_switch_receipt_invalid")
     return saved
 
 
@@ -137,6 +149,8 @@ def stop_online_source_locked(state_root, *, project, source_revision, controlle
             raise RuntimeError("storage_online_final_conflicting_operation")
     path = state_root/STATE
     saved = _load(path) if os.path.lexists(path) else None
+    if saved is not None and saved["phase"] == "switch_entered":
+        raise RuntimeError("storage_online_final_switch_reconciliation_required")
     if saved is None:
         wall, boot = time.time(), _boot_seconds()
         saved = dict(schema=SCHEMA, phase="stopping", binding=None, started_at=wall,
@@ -295,4 +309,60 @@ def copy_final_delta_locked(state_root, *, exchange, deadline, max_rounds):
                 break
         return {"rounds": index+1, "last_observation": last, "migration_ready": False,
                 "publisher_drain_authorized": False, "final_switch_authorized": False,
+                "collection_resume_authorized": False}
+
+
+def record_switch_entry_locked(state_root, *, observe_worker, deadline):
+    """Persist possible dispatch BEFORE a future switch; never dispatch or authorize.
+
+    Caller owns the same launcher lock and private pipe. observe_worker must
+    freshly read that worker's status within the supplied absolute deadline.
+    This conservative checkpoint does not establish publisher exclusion, perform
+    COMMIT or make any saved observation restart authority. Once recorded, even
+    interruption before dispatch requires explicit outcome reconciliation; this
+    function cannot replay or clear it.
+    """
+    if (not callable(observe_worker) or type(deadline) not in (int, float)
+            or not math.isfinite(deadline)):
+        raise ValueError("storage_online_switch_entry_inputs_invalid")
+    state_root = launch._canonical(state_root)
+    saved = _load(state_root/STATE)
+    if saved["phase"] == "switch_entered":
+        raise RuntimeError("storage_online_final_switch_reconciliation_required")
+    if saved["phase"] != "paused":
+        raise RuntimeError("storage_online_switch_entry_paused_source_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+
+    def admit():
+        if not 0 < deadline-time.monotonic() <= _remaining(saved):
+            raise RuntimeError("storage_online_switch_entry_deadline_invalid")
+        observed, _, rows, _ = _observe(state_root, **args)
+        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+            raise RuntimeError("storage_online_switch_entry_source_changed")
+        _remaining(saved)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_switch_entry_deadline_expired")
+
+    with held._docker_deadline(deadline):
+        admit()
+        reply = observe_worker(deadline=deadline)
+        admit()
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != "status" or reply.get("state") != "background"
+                or reply.get("bound_final_deadline") != deadline
+                or type(reply.get("last_sequence")) is not int or reply["last_sequence"] < 1
+                or reply.get("migration_ready") is not False
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False):
+            raise RuntimeError("storage_online_switch_entry_live_worker_required")
+        saved.update(phase="switch_entered", switch={"entered_at": time.time(),
+            "deadline_monotonic": deadline, "worker_sequence": reply["last_sequence"]})
+        # Saving is the only mutation. Any failure after it remains uncertain;
+        # no dispatch, ordinary pause reentry or marker removal follows here.
+        held._save(state_root/STATE, saved, initial=False)
+        admit()
+        print("event=storage_online_switch_entry_recorded database_switch_authorized=false",
+              file=sys.stderr, flush=True)
+        return {"switch_intent_recorded": True, "database_switch_authorized": False,
                 "collection_resume_authorized": False}

@@ -17,7 +17,10 @@ parser.add_argument('--final-pause',action='store_true',help='qualify interrupte
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
+parser.add_argument('--switch-entry',action='store_true',help='persist uncertain switch entry, no COMMIT dispatch')
 options=parser.parse_args()
+if options.switch_entry and not options.final_delta:
+ parser.error('--switch-entry requires --final-delta')
 if options.final_delta and (not options.final_pause or options.worker_shutdown=='fail'):
  parser.error('--final-delta requires successful --final-pause')
 if options.worker_shutdown and not options.final_pause:
@@ -180,9 +183,9 @@ try:
     data+=piece
   return json.loads(data)
  sequence=0
- def command(op,**extra):
+ def command(op,*,response_deadline=None,**extra):
   global sequence
-  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read(extra.get('deadline'))
+  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read(extra.get('deadline',response_deadline))
  first_deadline=None
  for attempt in range(1 if options.final_pause else 2):
   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
@@ -379,6 +382,42 @@ try:
         original_deadline_preserved=True,late_publication_copied=True,
         fully_received_reply_loss=True,final_switch_authorized=False)
       final=command('status')
+      if options.switch_entry:
+       original_save=final_host.held._save
+       def save_then_interrupt(path,value,**args):
+        original_save(path,value,**args)
+        if path==state/final_host.STATE and value['phase']=='switch_entered':
+         raise RuntimeError('fixture interrupted after durable switch intent')
+       final_host.held._save=save_then_interrupt
+       try:
+        try:
+         final_host.record_switch_entry_locked(state,deadline=deadline,
+           observe_worker=lambda **args:command('status',response_deadline=args['deadline']))
+         raise AssertionError('switch intent interruption was lost')
+        except RuntimeError as exc:
+         assert str(exc)=='fixture interrupted after durable switch intent'
+       finally:final_host.held._save=original_save
+       entered=final_host._load(state/final_host.STATE)
+       assert entered['phase']=='switch_entered' and entered['binding']==paused['binding']
+       assert entered['deadline']==paused['deadline'] and entered['deadline_boot']==paused['deadline_boot']
+       assert entered['switch']['deadline_monotonic']==deadline
+       checkpoint=(state/final_host.STATE).read_bytes()
+       def unexpected_observation(**args):raise AssertionError('recorded switch intent was replayed')
+       for action in (
+         lambda:final_host.record_switch_entry_locked(state,deadline=deadline,observe_worker=unexpected_observation),
+         lambda:final_host.stop_online_source_locked(state,**pause_args)):
+        try:action();raise AssertionError('switch-entered pause reentry admitted')
+        except RuntimeError as exc:assert str(exc)=='storage_online_final_switch_reconciliation_required'
+       try:
+        final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=1)
+        raise AssertionError('tail mutation admitted after switch entry')
+       except RuntimeError as exc:assert str(exc)=='storage_online_final_delta_paused_source_required'
+       assert (state/final_host.STATE).read_bytes()==checkpoint
+       final=command('status')
+       assert final['controller_id']==greeting['controller_id'] and final['background_hashed_bytes']>0
+       report['switch_entry_checkpoint']=dict(interrupted_after_durable_save=True,
+         original_deadline_preserved=True,replay_refused=True,source_held=True,
+         database_commit_dispatched=False,collection_resume_authorized=False)
    else:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline

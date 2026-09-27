@@ -167,6 +167,7 @@ class OnlineController:
                 "last_sequence": self._sequence,
                 "reproved_families_at_observation": sorted(self._reproved),
                 "background_hashed_bytes": self.proof.hashed_bytes,
+                "bound_final_deadline": self._final_deadline,
                 "migration_ready": False, "final_switch_authorized": False,
                 "collection_resume_authorized": False}
 

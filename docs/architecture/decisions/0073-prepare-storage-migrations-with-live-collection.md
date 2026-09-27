@@ -789,3 +789,20 @@ Late publisher commits can be copied, but tail emptiness is only an observation;
 publisher exclusion and the complete exact verifier remain required at COMMIT.
 Database commit is not exposed on the pipe. Full outer-controller loss and safe
 source resumption still require separate host reconciliation.
+
+
+### Durable entry before possible database switching
+
+The internal record_switch_entry_locked checkpoint validates the exact paused
+source and same live worker, including the controller's already bound final
+deadline and fresh ordered status. It durably changes the existing final receipt
+to switch_entered before any future dispatch. The initial preparation, capture
+and final wall/boot clocks remain unchanged. An acknowledgement lost after save
+leaves that phase intact; ordinary stop, spool and tail-copy reentry refuse.
+
+This checkpoint records uncertainty conservatively. It dispatches no database
+command and returns database_switch_authorized=False. It does not establish
+publisher exclusion or turn saved worker status into proof. Reentry cannot replay
+or remove it, even when no COMMIT was actually sent. Qualified outcome inspection,
+supervised source resumption, worker reaping and recovery/runtime activation
+remain required; no COMMIT pipe command or production entrypoint is enabled.

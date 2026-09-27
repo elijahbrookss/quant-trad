@@ -174,3 +174,59 @@ def test_final_delta_host_rechecks_original_window_and_exact_worker(pause_setup,
             final.copy_final_delta_locked(path,exchange=exchange,
                 deadline=final.time.monotonic()+80,max_rounds=1)
     assert len(calls)==1 and (path/final.STATE).read_bytes()==before
+
+
+@pytest.mark.parametrize("drift", [None, "deadline", "controller", "source", "sequence", "unbound"])
+def test_switch_entry_requires_exact_live_final_window(pause_setup, drift):
+    import time
+    path, rows, clock, state, stop = pause_setup
+    paused = stop();before = (path/final.STATE).read_bytes()
+    deadline = time.monotonic()+20
+    def observe_worker(**args):
+        assert args == {"deadline": deadline}
+        reply = dict(controller_id=CONTROLLER, operation="status", state="background",
+            bound_final_deadline=deadline, last_sequence=5, migration_ready=False,
+            final_switch_authorized=False, collection_resume_authorized=False)
+        if drift == "deadline":clock.update(wall=1061, boot=161)
+        elif drift == "controller":reply["controller_id"] = "d"*32
+        elif drift == "source":rows["backend"]["running"] = True
+        elif drift == "sequence":reply["last_sequence"] = True
+        elif drift == "unbound":reply["bound_final_deadline"] = None
+        return reply
+    if drift:
+        with pytest.raises(RuntimeError):
+            final.record_switch_entry_locked(path, observe_worker=observe_worker, deadline=deadline)
+        assert (path/final.STATE).read_bytes() == before
+    else:
+        result = final.record_switch_entry_locked(path, observe_worker=observe_worker, deadline=deadline)
+        assert not result["database_switch_authorized"] and not result["collection_resume_authorized"]
+        entered = final._load(path/final.STATE)
+        assert entered["phase"] == "switch_entered"
+        assert entered["deadline"] == paused["deadline"] and entered["deadline_boot"] == paused["deadline_boot"]
+        assert entered["binding"] == paused["binding"]
+        with pytest.raises(RuntimeError, match="switch_reconciliation_required"):stop()
+
+
+def test_switch_intent_survives_lost_save_reply_without_reentry(pause_setup, monkeypatch):
+    import time
+    path, rows, clock, state, stop = pause_setup
+    paused = stop();deadline = time.monotonic()+20
+    original = final.held._save
+    def save_then_lose(*args, **kwargs):
+        original(*args, **kwargs)
+        raise TimeoutError("lost durable write response")
+    monkeypatch.setattr(final.held, "_save", save_then_lose)
+    def live(**args):
+        return dict(controller_id=CONTROLLER, operation="status", state="background",
+            bound_final_deadline=deadline, last_sequence=3, migration_ready=False,
+            final_switch_authorized=False, collection_resume_authorized=False)
+    with pytest.raises(TimeoutError):
+        final.record_switch_entry_locked(path, observe_worker=live, deadline=deadline)
+    entered = final._load(path/final.STATE);checkpoint = (path/final.STATE).read_bytes()
+    assert entered["phase"] == "switch_entered" and entered["deadline"] == paused["deadline"]
+    def forbidden(**args):raise AssertionError("reentered worker")
+    with pytest.raises(RuntimeError, match="switch_reconciliation_required"):
+        final.record_switch_entry_locked(path, observe_worker=forbidden, deadline=deadline)
+    assert (path/final.STATE).read_bytes() == checkpoint
+    with pytest.raises(RuntimeError, match="paused_source_required"):
+        final.copy_final_delta_locked(path, exchange=forbidden, deadline=deadline, max_rounds=1)
