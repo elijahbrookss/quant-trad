@@ -20,7 +20,10 @@ parser.add_argument('--final-delta',action='store_true',help='bounded held worke
 parser.add_argument('--switch-entry',action='store_true',help='persist uncertain switch entry, no COMMIT dispatch')
 parser.add_argument('--real-worker-publication',action='store_true',help='real collector publication during Docker shutdown with scripted transport')
 parser.add_argument('--abort-resume',action='store_true',help='resume exact original clients under the retained live rollback fence')
+parser.add_argument('--abort-resume-fence-loss',action='store_true',help='kill owned SQL fence while a real Docker start HTTP reply is withheld')
 options=parser.parse_args()
+if options.abort_resume_fence_loss and not options.abort_resume:
+ parser.error('--abort-resume-fence-loss requires --abort-resume')
 if options.abort_resume and not options.switch_entry:
  parser.error('--abort-resume requires --switch-entry')
 if options.real_worker_publication and options.worker_shutdown!='clean':
@@ -443,29 +446,72 @@ try:
          database_commit_dispatched=False,collection_resume_authorized=False)
        if options.abort_resume:
         resume_started=time.monotonic()
-        resumed=final_host.resume_online_source_locked(state,exchange=command)
-        terminal=final_host._load(state/final_host.STATE)
-        assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
-        assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
-        assert initial._source_healthy(initial._admit_source(state,initial._load(state),
-          require_running=True,operator_id=receipt['container_id']))
-        assert not run(['inspect',source['initialize']['id'],'--format','{{.State.Running}}']).stdout.strip()=='true'
-        terminal_bytes=(state/final_host.STATE).read_bytes()
-        try:
-         final_host.resume_online_source_locked(state,exchange=command)
-         raise AssertionError('terminal source resumption replayed')
-        except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
-        assert (state/final_host.STATE).read_bytes()==terminal_bytes
-        report['source_abort_resumption']=dict(exact_original_clients_healthy=True,
-          initializer_stays_stopped=True,original_deadlines_preserved=True,
-          final_marker_retained=True,same_live_controller=True,
-          elapsed_seconds=time.monotonic()-resume_started,production_readiness=False)
+        if options.abort_resume_fence_loss:
+         from scripts.ci.online_start_reply_fixture import held_start_reply
+         first_service=next(n for n in launch.held.STOP if preparation['clients'][n]['was_running'])
+         first_source=source[first_service]['id']
+         killed=[]
+         def kill_owned_fence():
+          with launch.held._docker_deadline(deadline):
+           pending=final_host._load(state/final_host.STATE)
+           assert pending['phase']=='source_resuming'
+           assert pending['resume']['inflight']['container_id']==first_source
+           sql="SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid() AND classid=((hashtextextended('quant-trad:fact-header-cutover:v2',0)>>32)&4294967295)::oid AND objid=(hashtextextended('quant-trad:fact-header-cutover:v2',0)&4294967295)::oid"
+           pid=launch.held._database_query(pgid,sql).strip()
+           assert pid.isdigit()
+           assert launch.held._database_query(pgid,'SELECT pg_terminate_backend('+pid+',5000)').strip()=='t'
+           killed.append(int(pid))
+         with held_start_reply(first_source,deadline=deadline,on_started=kill_owned_fence) as fault:
+          try:
+           final_host.resume_online_source_locked(state,exchange=command)
+           raise AssertionError('source resume ignored lost SQL ownership')
+          except (RuntimeError,EOFError,BrokenPipeError) as exc:
+           refusal=type(exc).__name__
+         assert killed and fault.get('cli_pending_after_daemon_start')
+         assert fault['cli'] is not None and fault['cli'].poll() is not None
+         assert fault['start_count']==1 and fault.get('fault_completed')
+         pending=final_host._load(state/final_host.STATE)
+         assert pending['phase']=='source_resuming' and pending['resume']['completed']==[]
+         assert pending['resume']['inflight']['container_id']==first_source
+         assert pending['deadline']==entered['deadline'] and pending['deadline_boot']==entered['deadline_boot']
+         assert pending['switch']==entered['switch'] and pending['binding']==entered['binding']
+         exact=launch.held._inventory(project,operator_id=receipt['container_id'])
+         assert [n for n in launch.held.STOP if exact[n]['running']]==[first_service]
+         unresolved=(state/final_host.STATE).read_bytes()
+         try:
+          final_host.resume_online_source_locked(state,exchange=command)
+          raise AssertionError('unresolved start replayed')
+         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+         assert (state/final_host.STATE).read_bytes()==unresolved
+         report['source_abort_resumption_fault']=dict(real_daemon_start_status=fault['daemon_start_status'],
+           actual_cli_pending_at_fence_loss=True,local_cli_reaped=True,started_services=[first_service],
+           no_further_start=True,original_deadlines_preserved=True,inflight_intent_retained=True,
+           replay_refused=True,partial_source_running=True,refusal=refusal,
+           daemon_late_completion_qualified=False,production_readiness=False)
+        else:
+         resumed=final_host.resume_online_source_locked(state,exchange=command)
+         terminal=final_host._load(state/final_host.STATE)
+         assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
+         assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
+         assert initial._source_healthy(initial._admit_source(state,initial._load(state),
+           require_running=True,operator_id=receipt['container_id']))
+         assert not run(['inspect',source['initialize']['id'],'--format','{{.State.Running}}']).stdout.strip()=='true'
+         terminal_bytes=(state/final_host.STATE).read_bytes()
+         try:
+          final_host.resume_online_source_locked(state,exchange=command)
+          raise AssertionError('terminal source resumption replayed')
+         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+         assert (state/final_host.STATE).read_bytes()==terminal_bytes
+         report['source_abort_resumption']=dict(exact_original_clients_healthy=True,
+           initializer_stays_stopped=True,original_deadlines_preserved=True,
+           final_marker_retained=True,same_live_controller=True,
+           elapsed_seconds=time.monotonic()-resume_started,production_readiness=False)
    else:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
     report['reentry_empty_proof']=True
    if not options.abort_resume:command('close')
-  assert worker.returncode==0
+  assert worker.returncode != 0 if options.abort_resume_fence_loss else worker.returncode == 0
   assert launch.held._identities(launch.held._inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:
   # A host exception must close only its background worker; source keeps serving.

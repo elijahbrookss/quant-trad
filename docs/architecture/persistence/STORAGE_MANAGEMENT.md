@@ -23,6 +23,7 @@ code_paths:
   - scripts/automation/storage_online_launch.py
   - scripts/ci/rehearse_online_launch.py
   - scripts/ci/rehearse_online_prepared.py
+  - scripts/ci/online_start_reply_fixture.py
   - tests/test_storage_online_launch.py
   - tests/test_storage_online_controller.py
   - tests/test_market_data/test_storage_online_controller_db.py
@@ -1885,3 +1886,16 @@ recovery mount activation. Terminal reconciliation, full outer-process loss and
 production readiness remain separate qualification requirements. The optional
 owned --abort-resume rehearsal exercises this internal host path; it is not a
 production entrypoint or a production outage measurement.
+
+
+The optional --abort-resume-fence-loss disposable rehearsal uses a private Unix
+HTTP proxy limited to ping and one exact owned container start. The real Docker
+engine completes that start while its reply to the actual CLI is withheld. The
+fixture then terminates only the owned database migration-fence backend. It
+checks that host supervision refuses further starts, reaps the local CLI and
+preserves source_resuming with the exact in-flight action and original clocks.
+One source client is already running: the result is explicitly unresolved, not
+an assertion that the source remains stopped. This controlled reply fault does
+not qualify a daemon start completing after ownership loss or full host death.
+The proxy is confined to the one child CLI environment and removed at fixture
+exit; production Docker configuration and migration behavior are unchanged.
