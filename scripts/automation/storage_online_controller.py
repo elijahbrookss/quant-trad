@@ -33,7 +33,7 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
-_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "cancel", "close"}
+_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
 
 
 class OnlineController:
@@ -201,7 +201,8 @@ class OnlineController:
         preparing = isinstance(request, dict) and request.get("operation") == "prepare_step"
         draining = isinstance(request, dict) and request.get("operation") == "source_drain"
         finalizing = isinstance(request, dict) and request.get("operation") == "final_delta"
-        if finalizing:
+        inspecting = isinstance(request, dict) and request.get("operation") == "inspect_outcome"
+        if finalizing or inspecting:
             fields |= {"deadline"}
         if draining:
             fields |= {"deadline", "max_entries"}
@@ -221,6 +222,11 @@ class OnlineController:
                 or not 0 < request["deadline"]-monotonic() <= self._admitted_limits["movement_timeout_seconds"]
                 or request["deadline"] > self.proof.deadline):
             raise ValueError("storage_online_final_delta_command_budget_invalid")
+        if inspecting and (type(request["deadline"]) not in (int, float)
+                or not math.isfinite(request["deadline"])
+                or not 0 < request["deadline"]-monotonic() <= min(5, self.limits["movement_timeout_seconds"])
+                or (self._final_deadline is not None and request["deadline"] > self._final_deadline)):
+            raise ValueError("storage_online_outcome_command_budget_invalid")
         if draining:
             if (type(request["deadline"]) not in (int, float)
                     or not math.isfinite(request["deadline"])
@@ -243,12 +249,14 @@ class OnlineController:
             # It is not a restart/resume token and never revives dead proof.
             if self.state not in {"closed", "cancelled"}:
                 self.check()
-            if draining:
-                raise RuntimeError("storage_online_spool_fresh_sequence_required")
+            if draining or inspecting:
+                raise RuntimeError("storage_online_observation_fresh_sequence_required" if inspecting
+                                   else "storage_online_spool_fresh_sequence_required")
             return deepcopy(self._last_reply)
-        if request["sequence"] != self._sequence+1 or self.state != "background":
+        readable = operation in {"inspect_outcome", "close"} and self.state in {"commit_unknown", "committed", "rolled_back"}
+        if request["sequence"] != self._sequence+1 or (self.state != "background" and not readable):
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
-        if self._final_deadline is not None and operation not in {"status", "source_drain", "final_delta", "close", "cancel"}:
+        if self._final_deadline is not None and operation not in {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
         result = {}
         try:
@@ -266,6 +274,8 @@ class OnlineController:
                         timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
                 self.state = "cancelled"
                 result = {"attempt_cancelled": True, "source_preserved": True}
+            elif inspecting:
+                result = self.inspect_outcome(deadline=request["deadline"])
             elif finalizing:
                 result = self.final_delta(deadline=request["deadline"])
             elif draining:
@@ -406,6 +416,42 @@ class OnlineController:
             deadline=deadline)
         self.state = "committed"
         return result
+
+    def inspect_outcome(self, *, deadline):
+        """Fresh bounded outcome only; keep live proof and grant no host authority."""
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise ValueError("storage_online_outcome_deadline_invalid")
+        remaining = deadline-monotonic()
+        if (not 0 < remaining <= min(5, self.limits["movement_timeout_seconds"])
+                or (self._final_deadline is not None and deadline > self._final_deadline)):
+            raise ValueError("storage_online_outcome_deadline_invalid")
+        self._ownership()
+        try:
+            with self.engine.connect() as conn, conn.begin():
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                with capture._bounded_step(conn, math.ceil(remaining)) as shorten:
+                    shorten(deadline-monotonic())
+                    if self._capture_row(conn) != self._capture:
+                        raise RuntimeError("storage_online_attempt_binding_changed")
+                    observed = handoff.inspect_handoff(conn, policy=self.policy,
+                        source_root=self.source_root, destination_root=self.destination_root)
+            self._ownership()
+            if monotonic() >= deadline:
+                raise RuntimeError("storage_online_outcome_deadline_expired")
+            committed = observed["database_handoff_committed"]
+            return {"outcome": "committed" if committed else "uncommitted",
+                    "database_handoff_committed": committed,
+                    "collection_resume_authorized": False, "runtime_activation_authorized": False}
+        except RuntimeError as exc:
+            if str(exc) not in {"fact_header_copy_migration_busy", "fact_header_handoff_outcome_pending"}:
+                raise
+            self._ownership()
+            if monotonic() >= deadline:
+                raise RuntimeError("storage_online_outcome_deadline_expired") from exc
+            logger.warning("storage_online_outcome_pending | controller_id=%s reason=migration_ownership_busy",
+                           self.controller_id)
+            return {"outcome": "pending", "database_handoff_committed": None,
+                    "collection_resume_authorized": False, "runtime_activation_authorized": False}
 
     def reconcile_database(self):
         if self.state != "commit_unknown":
@@ -559,7 +605,7 @@ def serve(controller, *, input_fd, output_fd, channel_seconds=5):
     _write(output_fd, controller.status(), channel_seconds)
     pending = bytearray()
     partial_deadline = None
-    while controller.state == "background":
+    while controller.state in {"background", "commit_unknown", "committed", "rolled_back"}:
         controller.check()
         wait = min(channel_seconds, max(0, controller.proof.deadline-monotonic()))
         if partial_deadline is not None:

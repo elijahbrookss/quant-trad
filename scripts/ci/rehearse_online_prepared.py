@@ -415,6 +415,13 @@ try:
        assert (state/final_host.STATE).read_bytes()==checkpoint
        final=command('status')
        assert final['controller_id']==greeting['controller_id'] and final['background_hashed_bytes']>0
+       outcome=final_host.inspect_switch_outcome_locked(state,exchange=command)
+       assert outcome['outcome']=='uncommitted' and not outcome['collection_resume_authorized']
+       assert not outcome['runtime_activation_authorized']
+       assert (state/final_host.STATE).read_bytes()==checkpoint
+       report['fresh_outcome_observation']=dict(outcome='uncommitted',intent_preserved=True,
+         collection_resume_authorized=False,runtime_activation_authorized=False)
+       final=command('status')
        report['switch_entry_checkpoint']=dict(interrupted_after_durable_save=True,
          original_deadline_preserved=True,replay_refused=True,source_held=True,
          database_commit_dispatched=False,collection_resume_authorized=False)

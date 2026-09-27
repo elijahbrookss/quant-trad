@@ -535,3 +535,72 @@ def test_controller_final_delta_never_starts_sql_baseline(storage, tmp_path, mon
     with engine.begin() as conn:
         after = dict(conn.execute(text(f"SELECT * FROM {handoff.headers.STATE}")).mappings().one())
         assert after == before
+
+
+def test_controller_outcome_wire_pending_negative_and_lost_real_commit(storage, tmp_path, monkeypatch):
+    engine, settings, _ = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        frozen = _frozen_records(conn)
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker);_reprove(worker)
+        hashed = worker.proof.hashed_bytes
+        def inspect():
+            request = dict(controller_id=worker.controller_id, sequence=worker._sequence+1,
+                           operation="inspect_outcome", deadline=time.monotonic()+4)
+            reply = worker.command(request)
+            with pytest.raises(RuntimeError, match="fresh_sequence_required"):
+                worker.command(request)
+            return reply["result"]
+        assert inspect()["outcome"] == "uncommitted"
+        with engine.connect() as other, other.begin():
+            other.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:name,0))"),
+                          {"name": capture.LOCK})
+            result = inspect()
+            assert result["outcome"] == "pending" and result["database_handoff_committed"] is None
+            assert worker.state == "background" and worker.proof.hashed_bytes == hashed
+        assert inspect()["outcome"] == "uncommitted"
+        original = Connection._commit_impl
+        switching = set()
+        def observe(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+                switching.add(id(conn))
+        def lost(conn):
+            original(conn)
+            if id(conn) in switching:
+                raise RuntimeError("outcome fixture actual commit reply lost")
+        event.listen(engine, "after_cursor_execute", observe)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(Connection, "_commit_impl", lost)
+                with pytest.raises(RuntimeError, match="actual commit reply lost"):
+                    worker.commit_database(deadline=time.monotonic()+30)
+        finally:event.remove(engine, "after_cursor_execute", observe)
+        assert worker.state == "commit_unknown" and switching
+        errors = []
+        client, server = socket.socketpair();client.settimeout(10)
+        def host():
+            try:
+                with client, client.makefile("rwb", buffering=0) as channel:
+                    greeting = json.loads(channel.readline(16385))
+                    assert greeting["state"] == "commit_unknown"
+                    seq = greeting["last_sequence"]
+                    for operation in ("inspect_outcome", "close"):
+                        seq += 1
+                        request = dict(controller_id=greeting["controller_id"], sequence=seq, operation=operation)
+                        if operation == "inspect_outcome":request["deadline"] = time.monotonic()+4
+                        channel.write(json.dumps(request).encode()+b"\n")
+                        reply = json.loads(channel.readline(16385))
+                        if operation == "inspect_outcome":
+                            assert reply["state"] == "commit_unknown"
+                            assert reply["result"]["outcome"] == "committed"
+                            assert not reply["result"]["collection_resume_authorized"]
+                            assert not reply["result"]["runtime_activation_authorized"]
+            except BaseException as exc:errors.append(exc)
+        thread = threading.Thread(target=host);thread.start()
+        try:
+            with server:serve(worker, input_fd=server.fileno(), output_fd=server.fileno())
+        finally:thread.join(timeout=15)
+        assert not thread.is_alive() and not errors
+        assert worker.state == "closed" and worker.proof.hashed_bytes == hashed
+        worker.proof.verify_all()
+    with engine.begin() as conn:assert _frozen_records(conn) == frozen

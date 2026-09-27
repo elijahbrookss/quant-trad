@@ -230,3 +230,32 @@ def test_switch_intent_survives_lost_save_reply_without_reentry(pause_setup, mon
     assert (path/final.STATE).read_bytes() == checkpoint
     with pytest.raises(RuntimeError, match="paused_source_required"):
         final.copy_final_delta_locked(path, exchange=forbidden, deadline=deadline, max_rounds=1)
+
+
+@pytest.mark.parametrize("outcome", ["pending", "uncommitted", "committed", "invalid", "source_drift", "expired"])
+def test_outcome_observation_never_releases_host_intent(pause_setup, outcome):
+    import time
+    path, rows, clock, state, stop = pause_setup
+    stop();deadline = time.monotonic()+20
+    status = dict(controller_id=CONTROLLER, operation="status", state="background",
+        bound_final_deadline=deadline, last_sequence=3, migration_ready=False,
+        final_switch_authorized=False, collection_resume_authorized=False)
+    final.record_switch_entry_locked(path, observe_worker=lambda **_:status, deadline=deadline)
+    before = (path/final.STATE).read_bytes()
+    final.held._save(path/"storage-online-request.json", {"command_seconds": 1}, initial=True)
+    def exchange(operation, **args):
+        assert operation == "inspect_outcome" and 0 < args["deadline"]-time.monotonic() <= 1
+        if outcome == "source_drift":rows["backend"]["running"] = True
+        elif outcome == "expired":clock.update(wall=1061, boot=161)
+        value = {"pending": None, "uncommitted": False, "committed": True}.get(outcome)
+        return status | dict(operation=operation, result=dict(outcome=outcome,
+            database_handoff_committed=value, collection_resume_authorized=False,
+            runtime_activation_authorized=False))
+    if outcome in {"invalid", "source_drift", "expired"}:
+        with pytest.raises(RuntimeError):final.inspect_switch_outcome_locked(path, exchange=exchange)
+    else:
+        result = final.inspect_switch_outcome_locked(path, exchange=exchange)
+        assert result["outcome"] == outcome and not result["collection_resume_authorized"]
+        assert not result["runtime_activation_authorized"]
+    assert (path/final.STATE).read_bytes() == before
+    with pytest.raises(RuntimeError, match="switch_reconciliation_required"):stop()

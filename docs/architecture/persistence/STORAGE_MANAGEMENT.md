@@ -1310,7 +1310,8 @@ session-level lock to a pool.
 
 The fixed pipe protocol permits status, bounded SQL copy, one rotating archive
 page, one rotating background file-reproof page, fixed preparation steps, spool
-observation, bounded final tails, terminal cancellation and close. Explicit phase
+observation, bounded final tails, read-only outcome inspection, terminal cancellation
+and close. Explicit phase
 and final deadlines can only shorten original admitted ceilings. It admits no
 paths, arbitrary SQL, shell commands or activation request.
 A process-generated controller identity and strictly ordered sequence bind each
@@ -1788,3 +1789,23 @@ publisher exclusion or turn saved worker status into proof. Reentry cannot repla
 or remove it, even when no COMMIT was actually sent. Qualified outcome inspection,
 supervised source resumption, worker reaping and recovery/runtime activation
 remain required; no COMMIT pipe command or production entrypoint is enabled.
+
+
+### Fresh outcome inspection through the held worker
+
+The inspect_outcome command reads the existing authoritative SQL handoff result
+under a read-only transaction and migration ownership. A busy migration returns
+pending explicitly, never an absent-certificate rollback conclusion. The bounded
+response distinguishes committed, uncommitted and pending; it exposes neither
+the full database receipt nor restart/runtime authority. Every observation needs
+a new sequence; cached replies cannot stand in for a fresh inspection. The pipe
+can remain open for inspection/close in an uncertain or terminal database state,
+retaining the same live file proof until explicit close or channel failure.
+
+The host admits the existing switch_entered receipt, exact paused source and
+same worker before and after inspection. Its at-most-five-second call only
+shortens the original final deadline and page ceiling. Every outcome leaves the
+host receipt unchanged and source held. An uncommitted response is not the live
+rollback fence; a committed response does not permit recovery mounts while the
+read-capability worker survives. COMMIT dispatch, publisher admission, supervised
+source resumption and terminal host reconciliation remain separate requirements.

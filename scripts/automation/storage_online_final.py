@@ -366,3 +366,52 @@ def record_switch_entry_locked(state_root, *, observe_worker, deadline):
               file=sys.stderr, flush=True)
         return {"switch_intent_recorded": True, "database_switch_authorized": False,
                 "collection_resume_authorized": False}
+
+
+def inspect_switch_outcome_locked(state_root, *, exchange):
+    """Fresh read-only same-worker outcome; leave durable intent and source held."""
+    if not callable(exchange):
+        raise ValueError("storage_online_outcome_exchange_invalid")
+    state_root = launch._canonical(state_root)
+    saved = _load(state_root/STATE)
+    if saved["phase"] != "switch_entered":
+        raise RuntimeError("storage_online_outcome_switch_intent_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    request = held._load(state_root/"storage-online-request.json")
+    seconds = request["command_seconds"]
+    if type(seconds) is not int or not 1 <= seconds <= 60:
+        raise RuntimeError("storage_online_outcome_command_budget_invalid")
+    deadline = min(saved["switch"]["deadline_monotonic"], time.monotonic()+min(5, seconds, _remaining(saved)))
+    def admit():
+        _remaining(saved)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_outcome_host_deadline_expired")
+        observed, _, rows, _ = _observe(state_root, **args)
+        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+            raise RuntimeError("storage_online_outcome_source_changed")
+        _remaining(saved)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("storage_online_outcome_host_deadline_expired")
+    with held._docker_deadline(deadline):
+        admit()
+        reply = exchange("inspect_outcome", deadline=deadline)
+        admit()
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != "inspect_outcome"
+                or reply.get("state") not in {"background", "commit_unknown", "committed", "rolled_back"}
+                or reply.get("bound_final_deadline") != saved["switch"]["deadline_monotonic"]
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False):
+            raise RuntimeError("storage_online_outcome_reply_invalid")
+        result = reply.get("result")
+        expected = {"pending": None, "uncommitted": False, "committed": True}
+        if (not isinstance(result, dict) or not isinstance(result.get("outcome"), str)
+                or result["outcome"] not in expected
+                or result.get("database_handoff_committed") is not expected[result["outcome"]]
+                or result.get("collection_resume_authorized") is not False
+                or result.get("runtime_activation_authorized") is not False):
+            raise RuntimeError("storage_online_outcome_reply_invalid")
+        # In particular, an uncommitted observation is not a live rollback fence.
+        # Keep switch_entered unchanged, even when no COMMIT was dispatched.
+        return result
