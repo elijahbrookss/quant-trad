@@ -90,7 +90,10 @@ def main():
                 QT_MARKET_DATA_WORKING_EXPECTED_UUID='fixture-ssd',
                 QT_STORAGE_INVENTORY_HOST_PATH=str(inventory),
                 QT_STORAGE_RECOVERY_SECRETS_ROOT=str(recovery_secrets),
-                QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH=str(limits), QT_DOCKER_SOCKET_GID='70', QT_ARCHIVE_SHARED_GROUP_ID='70')
+                QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH=str(limits),
+                # No Docker socket is mounted in this rehearsal. Keep its
+                # synthetic group distinct from the actual archive group.
+                QT_DOCKER_SOCKET_GID='65534', QT_ARCHIVE_SHARED_GROUP_ID='70')
             base += ['--file', 'docker/docker-compose.storage-server.yml']
         config = json.loads(run(base + ['config', '--format', 'json'], env=env).stdout)
         services = (*SERVICES, 'storage-maintenance') if args.storage_layout else SERVICES
