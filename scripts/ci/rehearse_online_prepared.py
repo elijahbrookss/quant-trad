@@ -21,11 +21,14 @@ parser.add_argument('--switch-entry',action='store_true',help='persist uncertain
 parser.add_argument('--real-worker-publication',action='store_true',help='real collector publication during Docker shutdown with scripted transport')
 parser.add_argument('--abort-resume',action='store_true',help='resume exact original clients under the retained live rollback fence')
 parser.add_argument('--abort-resume-fence-loss',action='store_true',help='kill owned SQL fence while a real Docker start HTTP reply is withheld')
+parser.add_argument('--abort-resume-late-start',action='store_true',help='forward one proxy-queued owned start after SQL fence loss and real CLI reaping')
 parser.add_argument('--abort-resume-lost-end',action='store_true',help='discard a fully received terminal fence reply and reconcile without more starts')
 parser.add_argument('--worker-attach-loss',action='store_true',help='stop the owned worker Python process and kill its attach CLI before bounded retirement')
 options=parser.parse_args()
 if options.worker_attach_loss and (options.final_pause or not options.worker_phases):
  parser.error('--worker-attach-loss requires --worker-phases and excludes final pause')
+if options.abort_resume_late_start and not options.abort_resume_fence_loss:
+ parser.error('--abort-resume-late-start requires --abort-resume-fence-loss')
 if options.abort_resume_lost_end and (not options.abort_resume or options.abort_resume_fence_loss):
  parser.error('--abort-resume-lost-end requires --abort-resume and excludes fence-loss fault')
 if options.abort_resume_fence_loss and not options.abort_resume:
@@ -484,6 +487,9 @@ try:
          killed=[]
          def kill_owned_fence():
           with launch.held._docker_deadline(deadline):
+           if options.abort_resume_late_start:
+            before=launch.held._inventory(project,operator_id=receipt['container_id'])
+            assert not any(before[n]['running'] for n in launch.held.STOP)
            pending=final_host._load(state/final_host.STATE)
            assert pending['phase']=='source_resuming'
            assert pending['resume']['inflight']['container_id']==first_source
@@ -492,13 +498,20 @@ try:
            assert pid.isdigit()
            assert launch.held._database_query(pgid,'SELECT pg_terminate_backend('+pid+',5000)').strip()=='t'
            killed.append(int(pid))
-         with held_start_reply(first_source,deadline=deadline,on_started=kill_owned_fence) as fault:
+         fault_arguments={'on_queued' if options.abort_resume_late_start else 'on_started':kill_owned_fence}
+         with held_start_reply(first_source,deadline=deadline,**fault_arguments) as fault:
           try:
            final_host.resume_online_source_locked(state,exchange=command)
            raise AssertionError('source resume ignored lost SQL ownership')
           except (RuntimeError,EOFError,BrokenPipeError) as exc:
            refusal=type(exc).__name__
-         assert killed and fault.get('cli_pending_after_daemon_start')
+          if options.abort_resume_late_start:
+           assert fault['completed'].wait(max(0,deadline-time.monotonic()))
+         assert killed
+         if options.abort_resume_late_start:
+          assert fault['request_queued_at'] < fault['fence_loss_completed_at'] < fault['cli_reaped_before_forward_at'] < fault['daemon_started_after_cli_reaped_at']
+         else:
+          assert fault.get('cli_pending_after_daemon_start')
          assert fault['cli'] is not None and fault['cli'].poll() is not None
          assert fault['start_count']==1 and fault.get('fault_completed')
          pending=final_host._load(state/final_host.STATE)
@@ -516,6 +529,8 @@ try:
          assert (state/final_host.STATE).read_bytes()==unresolved
          report['source_abort_resumption_fault']=dict(real_daemon_start_status=fault['daemon_start_status'],
            actual_cli_pending_at_fence_loss=True,local_cli_reaped=True,started_services=[first_service],
+           intermediary_queued_start_after_reap=options.abort_resume_late_start,
+           ordering={k:v for k,v in fault.items() if k.endswith("_at")},
            no_further_start=True,original_deadlines_preserved=True,inflight_intent_retained=True,
            replay_refused=True,partial_source_running=True,refusal=refusal,
            daemon_late_completion_qualified=False,production_readiness=False)

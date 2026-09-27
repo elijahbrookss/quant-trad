@@ -919,6 +919,22 @@ The proxy is confined to the one child CLI environment and removed at fixture
 exit; production Docker configuration and migration behavior are unchanged.
 
 
+The optional --abort-resume-late-start mode accepts that one exact start at the
+private proxy but does not forward it yet. With all source clients stopped, it
+terminates the owned SQL fence and waits for the real local Docker CLI to be
+reaped. Only then does the proxy forward the already accepted request to Docker.
+The actual engine starts the client and returns 204. Monotonic observations
+record this ordering; no deadline is renewed and no extra start is permitted.
+
+The retained source_resuming journal still has the exact in-flight container and
+an empty completed list. Replay and ordinary relaunch refuse, while one original
+client is running. Normal launcher cleanup retires the read-capability worker.
+This demonstrates a queued intermediary request surviving local cancellation.
+It does not prove Docker-internal queue behavior, full outer-host death, or a
+safe terminal reconciliation of incomplete starts. No production transition or
+additional resumption authority is introduced by this fixture.
+
+
 ### Reconcile a completed resumption on the same live worker
 
 After rollback fence end, the aborted controller now remains available only for

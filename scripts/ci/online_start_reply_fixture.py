@@ -1,8 +1,9 @@
 """Owned Docker start reply fault; never imported by production operation paths.
 
 A private Unix proxy permits only ping and one exact container start. The real
-engine completes the start before its HTTP reply is withheld. This tests an
-in-flight CLI reply, not a daemon operation completing after ownership loss.
+engine normally completes the start before its HTTP reply is withheld. An optional
+queue fault instead forwards the accepted request only after ownership loss and
+local CLI reaping. This is an intermediary queue, not Docker-internal queue proof.
 """
 from contextlib import closing, contextmanager
 import http.client
@@ -19,12 +20,15 @@ import time
 
 
 @contextmanager
-def held_start_reply(container_id, *, deadline, on_started):
+def held_start_reply(container_id, *, deadline, on_started=None, on_queued=None):
     if not re.fullmatch(r"[0-9a-f]{64}", container_id):
         raise ValueError("fixture_exact_container_required")
+    if (on_started is None) == (on_queued is None):
+        raise ValueError("fixture_exactly_one_fault_required")
     original_popen = subprocess.Popen
     release = threading.Event()
-    outcome = {"requests": [], "start_count": 0, "errors": [], "cli": None}
+    outcome = {"requests": [], "start_count": 0, "errors": [], "cli": None,
+               "completed": threading.Event()}
 
     class Connection(http.client.HTTPConnection):
         def connect(self):
@@ -59,6 +63,20 @@ def held_start_reply(container_id, *, deadline, on_started):
                 if start:
                     outcome["start_count"] += 1
                     assert outcome["start_count"] == 1
+                if start and on_queued is not None:
+                    # The proxy accepted the one exact request, but the real
+                    # engine has not received it. Retiring the local CLI cannot
+                    # recall this accepted request from an intermediary.
+                    while outcome["cli"] is None and time.monotonic() < deadline:
+                        time.sleep(.001)
+                    assert outcome["cli"] is not None and outcome["cli"].poll() is None
+                    outcome["request_queued_at"] = time.monotonic()
+                    on_queued()
+                    outcome["fence_loss_completed_at"] = time.monotonic()
+                    while outcome["cli"].poll() is None and time.monotonic() < deadline:
+                        time.sleep(.005)
+                    assert outcome["cli"].poll() is not None
+                    outcome["cli_reaped_before_forward_at"] = time.monotonic()
                 remaining = deadline-time.monotonic()
                 assert remaining > 0
                 with closing(Connection("localhost", timeout=min(5, remaining))) as connection:
@@ -71,10 +89,16 @@ def held_start_reply(container_id, *, deadline, on_started):
                     # Popen can still be returning while the HTTP thread runs.
                     while outcome["cli"] is None and time.monotonic() < deadline:
                         time.sleep(.001)
-                    assert outcome["cli"] is not None and outcome["cli"].poll() is None
-                    outcome["cli_pending_after_daemon_start"] = True
-                    on_started()
+                    assert outcome["cli"] is not None
+                    if on_queued is None:
+                        assert outcome["cli"].poll() is None
+                        outcome["cli_pending_after_daemon_start"] = True
+                        on_started()
+                    else:
+                        assert outcome["cli"].poll() is not None
+                        outcome["daemon_started_after_cli_reaped_at"] = time.monotonic()
                     outcome["fault_completed"] = True
+                    outcome["completed"].set()
                     if not release.wait(max(0, deadline-time.monotonic())):
                         raise AssertionError("fixture_reply_hold_deadline_expired")
                 self.send_response(status)
