@@ -328,3 +328,110 @@ def test_controller_explicit_preparation_preserves_pages_and_original_attempt(
             assert _frozen_records(conn) == frozen
             assert references.inspect_references(conn)["references_complete"]
         assert not worker.status()["migration_ready"]
+
+
+def test_controller_rollback_fence_retains_ownership_during_source_publication(
+        storage, tmp_path, monkeypatch):
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        frozen = _frozen_records(conn)
+    with OnlineController(engine, **settings) as worker:
+        # Interrupt after the actual SQL rename. A saved negative outcome
+        # alone must not authorize host restart; the live fence is separate.
+        _drain(worker)
+        renamed = []
+        def fail_after_rename(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+                renamed.append(True)
+                raise RuntimeError("rollback fence deliberate switch interruption")
+        event.listen(engine, "after_cursor_execute", fail_after_rename)
+        try:
+            with pytest.raises(RuntimeError, match="deliberate switch interruption"):
+                worker.commit_database(deadline=time.monotonic()+30)
+        finally:
+            event.remove(engine, "after_cursor_execute", fail_after_rename)
+        assert renamed
+        assert not worker.reconcile_database()["database_handoff_committed"]
+        with worker.rollback_source_fence(deadline=time.monotonic()+30) as check:
+            assert check() == {"database_handoff_committed": False,
+                               "database_resume_fence_held": True,
+                               "collection_resume_authorized": False}
+            with engine.begin() as competing:
+                with pytest.raises(RuntimeError, match="migration_busy"):
+                    with capture.migration_step(competing, 5):
+                        pytest.fail("another migration acquired the resume fence")
+            with engine.begin() as ddl:
+                ddl.exec_driver_sql("SET LOCAL lock_timeout='100ms'")
+                with pytest.raises(DBAPIError), ddl.begin_nested():
+                    ddl.exec_driver_sql("LOCK TABLE market.fact_versions IN ACCESS EXCLUSIVE MODE NOWAIT")
+            # Actual QT archive/header/raw publication commits under the fence;
+            # the fence owns no writer lock and requires no destination rehash.
+            _raw_book_fixture(storage, source, monkeypatch,
+                definition_id="rollback-fence-publication",
+                provider_product_id="BTC-USD-ROLLBACK-FENCE",
+                event_start=BASE+timedelta(hours=3))
+            assert check()["database_resume_fence_held"]
+            with pytest.raises(RuntimeError, match="commit_state_invalid"):
+                worker.commit_database(deadline=time.monotonic()+30)
+        assert worker.state == "aborted"
+        with pytest.raises(RuntimeError, match="fence_lost"):
+            check()
+        with pytest.raises(RuntimeError, match="sequence_or_state_invalid"):
+            _command(worker, "sql_copy")
+    with engine.begin() as conn:
+        assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+        assert _frozen_records(conn) == frozen
+        with capture.migration_step(conn, 5):
+            pass
+
+
+def test_controller_rollback_fence_loss_expiry_and_committed_refusal(
+        storage, tmp_path, monkeypatch):
+    engine, settings, _ = _setup(storage, tmp_path, monkeypatch)
+    with OnlineController(engine, **settings) as worker:
+        for invalid in (True, float("inf"), time.monotonic()-1,
+                        time.monotonic()+settings["resource_limits"]["movement_timeout_seconds"]+10):
+            with pytest.raises(ValueError, match="rollback_deadline"):
+                with worker.rollback_source_fence(deadline=invalid):
+                    pytest.fail("invalid rollback allowance admitted")
+        with pytest.raises(DBAPIError):
+            with worker.rollback_source_fence(deadline=time.monotonic()+30) as check:
+                with engine.begin() as killer:
+                    pid = killer.scalar(text("""SELECT pid FROM pg_locks
+                        WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid()
+                          AND classid=((hashtextextended(:key,0)>>32)&4294967295)::oid
+                          AND objid=(hashtextextended(:key,0)&4294967295)::oid"""),
+                                        {"key": capture.LOCK})
+                    assert pid
+                    assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"), {"pid": pid})
+                check()
+        assert worker.state == "failed"
+    with OnlineController(engine, **settings) as worker:
+        deadline = time.monotonic()+10
+        with pytest.raises(RuntimeError, match="rollback_deadline_expired|step_timeout"):
+            with worker.rollback_source_fence(deadline=deadline) as check:
+                # Expire the same absolute deadline after admission, without
+                # waiting ten seconds or widening any production allowance.
+                with monkeypatch.context() as clock:
+                    clock.setattr("scripts.automation.storage_online_controller.monotonic",
+                                  lambda: deadline+1)
+                    check()
+        assert worker.state == "failed"
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker)
+        _reprove(worker)
+        # Lost successful COMMIT reply cannot lead to old-source admission.
+        original_commit = handoff.commit_handoff
+        def lost_reply(*args, **kwargs):
+            original_commit(*args, **kwargs)
+            raise RuntimeError("rollback fence lost successful reply")
+        with monkeypatch.context() as lost:
+            lost.setattr(handoff, "commit_handoff", lost_reply)
+            with pytest.raises(RuntimeError, match="lost successful reply"):
+                worker.commit_database(deadline=time.monotonic()+30)
+        assert worker.state == "commit_unknown"
+        with pytest.raises(RuntimeError, match="rollback_committed_refused"):
+            with worker.rollback_source_fence(deadline=time.monotonic()+30):
+                pytest.fail("committed database admitted for source restart")
+        assert worker.state == "committed"

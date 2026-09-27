@@ -1604,3 +1604,29 @@ fixture phases. Existing source receipts, empty-proof reentry and worker-only
 exception cleanup are still checked. Synthetic services/UUID metadata/UID70
 directories and small data do not establish production collector performance or
 the final pause/recovery sequence.
+
+
+### Rollback ownership across source-resumption admission
+
+The internal OnlineController.rollback_source_fence keeps the existing migration
+advisory lock and ACCESS SHARE locks on the original header/raw relations while
+the host admits and resumes its exact old clients. A fresh negative handoff
+inspection, unchanged original capture, protected SQL/raw layout, archive capture
+and source root are required. A pending or committed switch refuses the fence.
+Native source inserts can continue; another cooperating migration and relation
+renames cannot race the enclosing transaction.
+
+The caller supplies its original absolute final deadline inside the admitted
+resource duration and calls the yielded live check before and after each bounded
+host action. Connection loss, expiry, root drift and context exit invalidate that
+check. The controller becomes terminal after abort, so it cannot later switch
+under already resumed source clients. No serialized reply can recreate this
+ownership. Abort inspection may outlive copy expiry but neither renews the
+capture clock nor permits preparation, copying or switching.
+
+This database seam does not authorize collection resumption by itself. Exact
+host client/image/configuration/cluster admission, durable final intent/deadline,
+interrupted stop/resume and supervision of an in-flight host action remain
+necessary. There is no wire restart/switch command or production entrypoint.
+Loss of the fence while a host action is running must be handled by that
+qualified host transition; the database check alone cannot stop Docker actions.

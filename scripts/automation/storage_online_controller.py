@@ -7,7 +7,7 @@ commit/reconciliation. Never reconstruct authority from a serialized reply.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import json
 import logging
@@ -312,6 +312,84 @@ class OnlineController:
                 source_root=self.source_root, destination_root=self.destination_root)
         self.state = "committed" if result["database_handoff_committed"] else "rolled_back"
         return result
+
+    @contextmanager
+    def rollback_source_fence(self, *, deadline):
+        """Retain database migration ownership while the host admits old clients.
+
+        Internal seam only; not a restart certificate or pipe operation. The host
+        must already own its durable final intent, exact client/recipe admission
+        and original final deadline. Call the yielded check before and after each
+        bounded host action. Losing this connection invalidates the fence; saved
+        negative outcomes never replace it. No copy or switch can follow this
+        terminal abort on the same controller.
+        """
+        if self.state not in {"background", "commit_unknown", "rolled_back"}:
+            raise RuntimeError("storage_online_rollback_fence_state_invalid")
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise ValueError("storage_online_rollback_deadline_invalid")
+        remaining = deadline-monotonic()
+        if not 0 < remaining <= self._admitted_limits["movement_timeout_seconds"]:
+            raise ValueError("storage_online_rollback_deadline_not_admitted")
+        self._ownership()
+        self.state = "resume_fencing"
+        try:
+            with self.engine.connect() as conn, conn.begin():
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                # Outcome/abort inspection may outlive the copy attempt. This
+                # does not renew its deadline or call any preparation/mover.
+                with capture._bounded_step(conn, math.ceil(remaining)) as shorten:
+                    shorten(deadline-monotonic())
+                    observed = handoff.inspect_handoff(conn, policy=self.policy,
+                        source_root=self.source_root, destination_root=self.destination_root)
+                    if observed["database_handoff_committed"]:
+                        self.state = "committed"
+                        raise RuntimeError("storage_online_rollback_committed_refused")
+                    # Protect the original relation names/OIDs against DDL while
+                    # permitting the native source inserts needed on resumption.
+                    conn.exec_driver_sql("LOCK TABLE market.fact_versions, "
+                        "market.raw_archive_record_mappings IN ACCESS SHARE MODE NOWAIT")
+                    if self._capture_row(conn) != self._capture:
+                        raise RuntimeError("storage_online_attempt_binding_changed")
+                    capture.inspect_capture(conn)
+                    protection.inspect_protection(conn)
+                    handoff.raw._inspect(conn)
+                    archive_online._inspect(conn, self.source_root, self.destination_root)
+                    pid = conn.scalar(text("SELECT pg_backend_pid()"))
+                    self.state = "resume_fenced"
+
+                    def check():
+                        try:
+                            if (self.state != "resume_fenced" or conn.closed
+                                    or conn.invalidated or not conn.in_transaction()):
+                                raise RuntimeError("storage_online_rollback_fence_lost")
+                            if monotonic() >= deadline:
+                                raise RuntimeError("storage_online_rollback_deadline_expired")
+                            # SAME connection owns advisory/relation locks;
+                            # invalidation never transparently reconnects.
+                            if conn.scalar(text("SELECT pg_backend_pid()")) != pid:
+                                raise RuntimeError("storage_online_rollback_fence_lost")
+                            if archives._root(self.source_root, self._source_device)[1] != self._source:
+                                raise RuntimeError("storage_online_source_changed")
+                            return {"database_handoff_committed": False,
+                                    "database_resume_fence_held": True,
+                                    "collection_resume_authorized": False}
+                        except BaseException:
+                            # Even a caller that catches a failed check cannot
+                            # later resurrect this process-local fence.
+                            self.state = "failed"
+                            raise
+
+                    check()
+                    yield check
+                    check()
+            self.state = "aborted"
+        except BaseException:
+            if self.state != "committed":
+                self.state = "failed"
+            logger.error("storage_online_rollback_fence_failed | controller_id=%s",
+                         self.controller_id)
+            raise
 
     def __exit__(self, *exc):
         try:
