@@ -396,17 +396,25 @@ def test_controller_rollback_fence_loss_expiry_and_committed_refusal(
             with pytest.raises(ValueError, match="rollback_deadline"):
                 with worker.rollback_source_fence(deadline=invalid):
                     pytest.fail("invalid rollback allowance admitted")
-        with pytest.raises(DBAPIError):
-            with worker.rollback_source_fence(deadline=time.monotonic()+30) as check:
-                with engine.begin() as killer:
-                    pid = killer.scalar(text("""SELECT pid FROM pg_locks
-                        WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid()
-                          AND classid=((hashtextextended(:key,0)>>32)&4294967295)::oid
-                          AND objid=(hashtextextended(:key,0)&4294967295)::oid"""),
-                                        {"key": capture.LOCK})
-                    assert pid
-                    assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"), {"pid": pid})
-                check()
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import NullPool
+        fault_actor = create_engine(engine.url, poolclass=NullPool)
+        try:
+            with pytest.raises(DBAPIError):
+                with worker.rollback_source_fence(deadline=time.monotonic()+30) as check:
+                    with fault_actor.begin() as killer:
+                        pid = killer.scalar(text("""SELECT pid FROM pg_locks
+                            WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid()
+                              AND classid=((hashtextextended(:key,0)>>32)&4294967295)::oid
+                              AND objid=(hashtextextended(:key,0)&4294967295)::oid"""),
+                                            {"key": capture.LOCK})
+                        assert pid
+                        assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"), {"pid": pid})
+                    check()
+        finally:
+            # A retired diagnostic actor must close its physical connection,
+            # not leave an idle third client in the migration engine's pool.
+            fault_actor.dispose()
         assert worker.state == "failed"
     with OnlineController(engine, **settings) as worker:
         deadline = time.monotonic()+10
