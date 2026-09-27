@@ -278,7 +278,7 @@ class OnlineController:
         return count, fingerprint
 
     @staticmethod
-    def _require_job_environment(conn):
+    def _require_job_environment(conn, *, allow_connections=False):
         extensions = dict(conn.execute(text("SELECT extname, extversion FROM pg_extension")).all())
         if (extensions.get("timescaledb") != "2.14.2" or extensions.get("plpgsql") != "1.0"
                 or set(extensions)-{"timescaledb", "plpgsql", "pg_stat_statements", "pgcrypto", "pg_buffercache"}
@@ -289,11 +289,11 @@ class OnlineController:
                     not in ({"timescaledb"}, {"timescaledb", "pg_stat_statements"})):
             raise RuntimeError("storage_online_database_job_environment_unqualified")
         if conn.scalar(text("""SELECT pg_is_in_recovery()
-            OR (SELECT datallowconn FROM pg_database WHERE datname=current_database())
+            OR (SELECT datallowconn FROM pg_database WHERE datname=current_database()) IS DISTINCT FROM :allow_connections
             OR EXISTS(SELECT 1 FROM pg_subscription WHERE subdbid=(
                 SELECT oid FROM pg_database WHERE datname=current_database()))
             OR EXISTS(SELECT 1 FROM pg_replication_slots)
-            OR EXISTS(SELECT 1 FROM pg_stat_replication)""")):
+            OR EXISTS(SELECT 1 FROM pg_stat_replication)"""), {"allow_connections": allow_connections}):
             raise RuntimeError("storage_online_database_job_gate_or_replication_unqualified")
 
     @contextmanager
@@ -430,7 +430,7 @@ class OnlineController:
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
         if self._final_deadline is not None and operation not in _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
-        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce", "final_delta"}:
+        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce", "final_delta"} | _ROLLBACK_OPERATIONS:
             raise RuntimeError("storage_online_final_session_background_work_refused")
         result = {}
         try:
@@ -757,6 +757,10 @@ class OnlineController:
                 # does not renew its deadline or call any preparation/mover.
                 with capture._bounded_step(conn, math.ceil(remaining)) as shorten:
                     shorten(deadline-monotonic())
+                    if self._final_connection_entered:
+                        if not self._jobs_stopped:
+                            raise RuntimeError("storage_online_rollback_jobs_unconfirmed")
+                        self._require_job_environment(conn)
                     observed = handoff.inspect_handoff(conn, policy=self.policy,
                         source_root=self.source_root, destination_root=self.destination_root)
                     if observed["database_handoff_committed"]:
@@ -788,7 +792,21 @@ class OnlineController:
                                 raise RuntimeError("storage_online_rollback_fence_lost")
                             if archives._root(self.source_root, self._source_device)[1] != self._source:
                                 raise RuntimeError("storage_online_source_changed")
-                            return {"database_handoff_committed": False,
+                            session = {}
+                            if self._final_connection_entered:
+                                database = conn.scalar(text("SELECT json_build_object("
+                                    "'cluster',(SELECT system_identifier::text FROM pg_control_system()),"
+                                    "'oid',oid::bigint,'name',datname,'allow_connections',datallowconn) "
+                                    "FROM pg_database WHERE datname=current_database()"))
+                                self._require_job_environment(conn,
+                                    allow_connections=database["allow_connections"])
+                                if self._job_catalog(conn) != self._jobs_catalog:
+                                    raise RuntimeError("storage_online_job_definitions_changed")
+                                session = {"database": database,
+                                    "capture": conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1")),
+                                    "backend_pid": pid, "owner_pid": self._pid,
+                                    "database_switch_authorized": False}
+                            return {**session, "database_handoff_committed": False,
                                     "database_resume_fence_held": True,
                                     "collection_resume_authorized": False}
                         except BaseException:

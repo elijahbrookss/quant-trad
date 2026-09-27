@@ -26,9 +26,12 @@ parser.add_argument('--abort-resume-late-start',action='store_true',help='forwar
 parser.add_argument('--abort-resume-lost-end',action='store_true',help='discard a fully received terminal fence reply and reconcile without more starts')
 parser.add_argument('--worker-attach-loss',action='store_true',help='stop the owned worker Python process and kill its attach CLI before bounded retirement')
 parser.add_argument('--close-logins',choices=('success','lost-reply'),help='close owned target logins under durable final intent; no COMMIT or production reopen')
+parser.add_argument('--abort-restore-lost-reply',action='store_true',help='discard completed owned login restoration reply; preserve unresolved journal')
 options=parser.parse_args()
-if options.close_logins and (not options.switch_entry or options.abort_resume):
- parser.error('--close-logins requires switch entry and excludes source resumption')
+if options.abort_restore_lost_reply and (not options.abort_resume or options.close_logins!='success' or options.abort_resume_fence_loss or options.abort_resume_lost_end):
+ parser.error('--abort-restore-lost-reply requires confirmed gated abort without other faults')
+if options.close_logins and (not options.switch_entry or options.abort_resume and options.close_logins!='success'):
+ parser.error('--close-logins requires switch entry; gated abort requires confirmed success')
 if options.worker_attach_loss and (options.final_pause or not options.worker_phases):
  parser.error('--worker-attach-loss requires --worker-phases and excludes final pause')
 if options.abort_resume_late_start and not options.abort_resume_fence_loss:
@@ -532,16 +535,44 @@ try:
            limitation='Host route with already-converged fixture tail; nonempty late QT tail qualified separately.')
         try:final_host.close_database_logins_locked(state,exchange=command);raise AssertionError('gate replay')
         except RuntimeError as exc:assert str(exc)=='storage_online_login_switch_intent_required'
-        try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('gate source resume')
-        except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+        if options.close_logins=='lost-reply':
+         try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('uncertain gate source resume')
+         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
         assert (state/final_host.STATE).read_bytes()==held_bytes
         report['login_gate']=dict(mode=options.close_logins,phase=gated['phase'],same_worker=True,
           new_logins_refused=True,fresh_negative_without_authority=True,original_clocks_preserved=True,
-          replay_refused=True,source_resumption_refused=True,elapsed_seconds=time.monotonic()-gate_started)
+          replay_refused=True,uncertain_gate_resumption_refused=options.close_logins=='lost-reply',elapsed_seconds=time.monotonic()-gate_started)
         (state/'login-gate-intent.json').write_text(json.dumps(gated,indent=2))
        if options.abort_resume:
         resume_started=time.monotonic()
-        if options.abort_resume_fence_loss:
+        if options.abort_restore_lost_reply:
+         action=host_boundary.supervised_source_action
+         actions=[]
+         def lose_restore_reply(*args,**kwargs):
+          action(*args,**kwargs)
+          actions.append(True)
+          assert len(actions)==1
+          raise TimeoutError('fixture discarded fully received login restoration reply')
+         host_boundary.supervised_source_action=lose_restore_reply
+         try:
+          try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('lost restoration reply accepted')
+          except TimeoutError as exc:assert str(exc)=='fixture discarded fully received login restoration reply'
+         finally:host_boundary.supervised_source_action=action
+         pending=final_host._load(state/final_host.STATE)
+         assert pending['phase']=='source_resuming'
+         assert pending['resume']['gate_restore']=={'completed':[],'inflight':'logins'}
+         assert pending['resume']['completed']==[] and pending['resume']['inflight'] is None
+         assert pending['login_gate']==gated['login_gate'] and pending['switch']==entered['switch']
+         with host_boundary.docker_deadline(deadline):
+          assert host_boundary.database_query(pgid,"SELECT datallowconn FROM pg_database WHERE datname=current_database()").strip()=='t'
+          assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
+         try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('unresolved restoration replayed')
+         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+         report['gated_abort_restore_lost_reply']=dict(actual_login_reopened=True,
+           fully_received_reply_discarded=True,restoration_unresolved=True,jobs_restart_dispatched=False,
+           source_starts_dispatched=False,original_clocks_preserved=True,replay_refused=True,
+           elapsed_seconds=time.monotonic()-resume_started,outer_loss_qualified=False)
+        elif options.abort_resume_fence_loss:
          from scripts.ci.online_start_reply_fixture import held_start_reply
          first_service=next(n for n in host_boundary.STOP if preparation['clients'][n]['was_running'])
          first_source=source[first_service]['id']
@@ -622,6 +653,15 @@ try:
           resumed=final_host.resume_online_source_locked(state,exchange=command)
          terminal=final_host._load(state/final_host.STATE)
          assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
+         if options.close_logins:
+          assert resumed['original_login_gate_restored'] and resumed['database_jobs_restart_requested']
+          assert terminal['login_gate']==gated['login_gate']
+          assert terminal['resume']['gate_restore']=={'completed':['logins','jobs'],'inflight':None}
+          with host_boundary.docker_deadline(deadline):
+           assert host_boundary.database_query(pgid,"SELECT datallowconn FROM pg_database WHERE datname=current_database()").strip()=='t'
+          report['gated_abort_restore']=dict(original_access_restored=True,
+            jobs_restart_request_accepted=True,all_jobs_recovery_qualified=False,original_gate_evidence_retained=True)
+
          assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
          assert initial._source_healthy(initial._admit_source(state,initial._load(state),
            require_running=True,operator_id=receipt['container_id']))
@@ -656,7 +696,7 @@ try:
    assert not observed['Running'] and not observed['Restarting'] and observed['Pid']==0
    report['worker_attach_loss']['daemon_worker_retired']=True
   assert worker.returncode != 0 if (options.abort_resume_fence_loss or options.worker_attach_loss and attempt==0) else worker.returncode == 0
-  if options.close_logins:
+  if options.close_logins and not options.abort_resume:
    retired=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
    assert not retired['Running'] and retired['Pid']==0
    # Fixture teardown only, AFTER verified worker retirement. This does not

@@ -51,7 +51,8 @@ def _remaining(saved):
 
 def _load(path):
     saved = host_boundary.load_receipt(path)
-    gated = saved.get("phase") in {"login_closing", "login_closed"}
+    gated = saved.get("phase") in {"login_closing", "login_closed"} or (
+        saved.get("phase") in {"source_resuming", "source_resumed"} and "login_gate" in saved)
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming or gated
     fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set())
@@ -86,7 +87,7 @@ def _load(path):
     if resuming:
         resume = saved["resume"]
         if (not isinstance(resume, dict)
-                or set(resume) != {"started_at", "completed", "inflight", "finished_at"}
+                or set(resume) != {"started_at", "completed", "inflight", "finished_at"} | ({"gate_restore"} if gated else set())
                 or type(resume["started_at"]) not in (int, float)
                 or not saved["switch"]["entered_at"] <= resume["started_at"] <= saved["deadline"]
                 or not isinstance(resume["completed"], list)
@@ -94,6 +95,16 @@ def _load(path):
                 or len(set(resume["completed"])) != len(resume["completed"])
                 or resume["completed"] != [n for n in host_boundary.STOP if n in resume["completed"]]):
             raise RuntimeError("storage_online_resume_receipt_invalid")
+        if gated:
+            restore = resume["gate_restore"]
+            if (not isinstance(restore, dict) or set(restore) != {"inflight", "completed"}
+                    or restore["inflight"] not in (None, "logins", "jobs")
+                    or restore["completed"] not in ([], ["logins"], ["logins", "jobs"])
+                    or (restore["inflight"] == "logins" and restore["completed"] != [])
+                    or (restore["inflight"] == "jobs" and restore["completed"] != ["logins"])
+                    or (resume["completed"] or resume["inflight"] or saved["phase"] == "source_resumed")
+                        and restore != {"inflight": None, "completed": ["logins", "jobs"]}):
+                raise RuntimeError("storage_online_gate_restore_receipt_invalid")
         action = resume["inflight"]
         if action is not None and (not isinstance(action, dict)
                 or set(action) != {"service", "container_id", "requested_at"}
@@ -118,9 +129,9 @@ def _load(path):
                 or gate["database"]["allow_connections"] is not True
                 or type(gate["requested_at"]) not in (int, float)
                 or not saved["switch"]["entered_at"] <= gate["requested_at"] <= saved["deadline"]
-                or gate["database_jobs_stopped"] is not (saved["phase"] == "login_closed")
+                or gate["database_jobs_stopped"] is not (saved["phase"] != "login_closing")
                 or (saved["phase"] == "login_closing" and gate["closed_at"] is not None)
-                or (saved["phase"] == "login_closed" and (type(gate["closed_at"]) not in (int, float)
+                or (saved["phase"] != "login_closing" and (type(gate["closed_at"]) not in (int, float)
                     or not gate["requested_at"] <= gate["closed_at"] <= saved["deadline"]))):
             raise RuntimeError("storage_online_login_receipt_invalid")
     return saved
@@ -616,38 +627,10 @@ def inspect_switch_outcome_locked(state_root, *, exchange):
 
 
 def _supervised_source_start(container_id, *, deadline, check):
-    """Supervise one exact daemon request; killing its CLI is NOT cancellation.
-
-    The caller has already persisted the in-flight action. On any loss, leave
-    that action unresolved and issue no further starts. The daemon may complete
-    it later. The launcher lock and durable marker continue to exclude managed
-    switching/deployment. This is not a bound on database/network check latency.
-    """
     if not re.fullmatch(r"[0-9a-f]{64}", container_id):
         raise ValueError("storage_online_resume_container_invalid")
-    check()
-    if time.monotonic() >= deadline:
-        raise RuntimeError("storage_online_resume_deadline_expired")
-    process = subprocess.Popen(["docker", "start", container_id],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        while True:
-            check()
-            remaining = deadline-time.monotonic()
-            if remaining <= 0:
-                raise RuntimeError("storage_online_resume_deadline_expired")
-            result = process.poll()
-            if result is not None:
-                if result != 0:
-                    raise RuntimeError("storage_online_resume_start_failed")
-                return
-            time.sleep(min(.1, remaining))
-    finally:
-        # Reap only our local CLI, including cancellation. This grants no more
-        # host-operation time and makes no claim about daemon request outcome.
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=1)  # Cleanup only, never another daemon action.
+    host_boundary.supervised_source_action(["start", container_id], deadline=deadline, check=check)
+
 
 
 def resume_online_source_locked(state_root, *, exchange):
@@ -665,20 +648,31 @@ def resume_online_source_locked(state_root, *, exchange):
     state_root = launch._canonical(state_root)
     path = state_root/STATE
     saved = _load(path)
-    if saved["phase"] != "switch_entered":
+    if saved["phase"] not in {"switch_entered", "login_closed"}:
         raise RuntimeError("storage_online_resume_switch_intent_required")
     binding = saved["binding"]
     args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
     deadline = saved["switch"]["deadline_monotonic"]
     sequence = saved["switch"]["worker_sequence"]
+    gated = saved["phase"] == "login_closed"
+    session = None
+    fenced = False
 
     def budget():
         if not 0 < deadline-time.monotonic() <= _remaining(saved):
             raise RuntimeError("storage_online_resume_deadline_expired")
 
     def admit():
+        nonlocal sequence, session
         budget()
-        observed, preparation, rows, limits = _observe(state_root, **args)
+        if gated and not fenced:
+            reply = exchange("final_session_check", deadline=deadline)
+            session, sequence = _final_session_reply(reply, operation="final_session_check",
+                binding=binding, deadline=deadline, sequence=sequence)
+            if session["database"] != {**saved["login_gate"]["database"], "allow_connections": False}:
+                raise RuntimeError("storage_online_resume_gate_changed")
+        observed, preparation, rows, limits = _observe(state_root, **args,
+            **({"session": session} if gated else {}))
         if (observed != binding or saved["duration_seconds"] > limits["seconds"]
                 or saved["deadline"] > limits["capture_deadline"]):
             raise RuntimeError("storage_online_resume_source_changed")
@@ -698,7 +692,7 @@ def resume_online_source_locked(state_root, *, exchange):
         return preparation, rows
 
     def fence(operation):
-        nonlocal sequence
+        nonlocal sequence, session, fenced
         budget()
         reply = exchange(operation, deadline=deadline)
         budget()
@@ -717,10 +711,25 @@ def resume_online_source_locked(state_root, *, exchange):
                 or result.get("collection_resume_authorized") is not False
                 or result.get("runtime_activation_authorized") is not False):
             raise RuntimeError("storage_online_resume_fence_reply_invalid")
+        if gated:
+            current, _ = _final_session_reply(reply, operation=operation, binding=binding,
+                deadline=deadline, sequence=sequence, state="aborted" if ending else "resume_fenced")
+            if (current["database"] != {**saved["login_gate"]["database"],
+                                      "allow_connections": current["database"]["allow_connections"]}
+                    or current["backend_pid"] != session["backend_pid"]
+                    or current["owner_pid"] != session["owner_pid"]):
+                raise RuntimeError("storage_online_resume_gate_session_changed")
+            restore = saved.get("resume", {}).get("gate_restore")
+            if restore is None or restore["inflight"] != "logins":
+                expected_open = restore is not None and "logins" in restore["completed"]
+                if current["database"]["allow_connections"] is not expected_open:
+                    raise RuntimeError("storage_online_resume_gate_changed")
+            session = current
         sequence = reply["last_sequence"]
+        fenced = True
 
     def check():
-        admit()
+        if not gated:admit()
         fence("rollback_fence_check")
         admit()
 
@@ -730,7 +739,46 @@ def resume_online_source_locked(state_root, *, exchange):
         admit()
         saved.update(phase="source_resuming", resume={"started_at": time.time(),
             "completed": [], "inflight": None, "finished_at": None})
+        if gated:
+            saved["resume"]["gate_restore"] = {"inflight": None, "completed": []}
         host_boundary.save_receipt(path, saved, initial=False)
+        if gated:
+            # Gate and job requests are journaled before dispatch, under the SAME
+            # negative-outcome fence. Local cancellation never undoes a SQL action.
+            for action in ("logins", "jobs"):
+                check()
+                _, current_rows = admit()
+                saved["resume"]["gate_restore"]["inflight"] = action
+                host_boundary.save_receipt(path, saved, initial=False)
+                database = saved["login_gate"]["database"]
+                if action == "logins":
+                    sql = ("SELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) "
+                        "FROM pg_database WHERE datname=:'target' AND oid="+str(database["oid"])+
+                        " AND NOT datallowconn AND (SELECT system_identifier FROM pg_control_system())="+
+                        database["cluster"]+"\n\\gexec\n")
+                    target = 'postgres'
+                else:
+                    sql = ("DO $qt$ BEGIN IF NOT _timescaledb_functions.start_background_workers() "
+                           "THEN RAISE EXCEPTION 'storage_online_jobs_restart_not_accepted'; END IF; END $qt$;")
+                    target = '"$POSTGRES_DB"'
+                arguments = ["exec", "-i", current_rows["tsdb"]["id"], "sh", "-ec",
+                    'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d '+target+
+                    ' -v ON_ERROR_STOP=1 -v target="$POSTGRES_DB" -qAtf -']
+                print("event=storage_online_gate_restore_started action="+action+
+                      " controller_id="+binding["controller_id"], file=sys.stderr, flush=True)
+                try:
+                    host_boundary.supervised_source_action(arguments, deadline=deadline, check=check,
+                        input="SET statement_timeout='5s';\n"+sql)
+                    check()
+                    if session["database"]["allow_connections"] is not True:
+                        raise RuntimeError("storage_online_resume_gate_not_open")
+                except BaseException:
+                    print("event=storage_online_gate_restore_failed action="+action+
+                          " outcome=unresolved", file=sys.stderr, flush=True)
+                    raise
+                saved["resume"]["gate_restore"]["completed"].append(action)
+                saved["resume"]["gate_restore"]["inflight"] = None
+                host_boundary.save_receipt(path, saved, initial=False)
         print("event=storage_online_source_resume_started runtime_activation_authorized=false",
               file=sys.stderr, flush=True)
         for name in host_boundary.STOP:
@@ -767,7 +815,8 @@ def resume_online_source_locked(state_root, *, exchange):
         print("event=storage_online_original_source_resumed final_marker_retained=true",
               file=sys.stderr, flush=True)
         return {"original_source_resumed": True, "final_marker_retained": True,
-                "database_switch_authorized": False, "runtime_activation_authorized": False}
+                "database_switch_authorized": False, "runtime_activation_authorized": False,
+                **({"original_login_gate_restored": True, "database_jobs_restart_requested": True} if gated else {})}
 
 
 def reconcile_source_resumed_locked(state_root, *, exchange):
@@ -849,11 +898,11 @@ _GATE_OBSERVE = """SELECT json_build_object(
 """
 
 
-def _final_session_reply(reply, *, operation, binding, deadline, sequence):
+def _final_session_reply(reply, *, operation, binding, deadline, sequence, state="background"):
     """Validate a fresh same-worker session observation, without granting authority."""
     result = reply.get("result") if isinstance(reply, dict) else None
     if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
-            or reply.get("operation") != operation or reply.get("state") != "background"
+            or reply.get("operation") != operation or reply.get("state") != state
             or reply.get("bound_final_deadline") != deadline
             or type(reply.get("last_sequence")) is not int or reply["last_sequence"] <= sequence
             or reply.get("final_switch_authorized") is not False

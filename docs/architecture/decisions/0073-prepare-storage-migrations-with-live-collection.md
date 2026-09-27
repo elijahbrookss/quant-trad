@@ -1198,3 +1198,23 @@ route with an already-converged tail. These combined component results are not
 a production outage measurement, scheduled QT job semantics or complete host
 publisher exclusion. Exact verification, host COMMIT and preserving recovery
 remain release requirements.
+
+
+### Preserve a known original source when abandoning confirmed gating
+
+Reuse the existing host resumption owner and live negative-outcome fence for a
+confirmed `login_closed` abort. Retain gate evidence in the final receipt and
+journal access restoration, job restart request and each exact client start
+before dispatch. The same retained SQL connection protects original relation
+identity while a bounded host maintenance action reopens the original database;
+a separate target transaction requests the existing Timescale scheduler restart.
+No job definition or schedule is changed. A restart request is not proof of job
+completion or generic exactly-once execution.
+
+Shared bounded Docker supervision retains fresh fence/source checks while each
+local CLI runs. Loss leaves an unresolved action that may already have completed;
+it cannot authorize a retry, more starts, marker removal or candidate activation.
+Confirmed restoration followed by exact healthy source admission terminalizes
+the controller under its original deadline. Uncertain gate closure, committed
+outcomes and dead/lost owners refuse this route. Full outer-loss reconciliation
+and successful migration recovery remain unfinished release obligations.

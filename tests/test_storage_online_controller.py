@@ -320,9 +320,10 @@ def test_gated_job_stop_refuses_unqualified_database_environment(fault):
         def execute(self, statement):
             assert str(statement) == "SELECT extname, extversion FROM pg_extension"
             return SimpleNamespace(all=lambda:list(extensions.items()))
-        def scalar(self, statement):
+        def scalar(self, statement, parameters=None):
             if str(statement).startswith("SHOW"):
                 return "timescaledb,unknown_worker" if fault == "preload" else "timescaledb, pg_stat_statements"
+            assert parameters == {"allow_connections": False}
             return fault == "gate_or_replication"
     if fault:
         with pytest.raises(RuntimeError, match="unqualified"):

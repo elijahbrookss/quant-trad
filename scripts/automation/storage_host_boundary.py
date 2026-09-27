@@ -298,3 +298,41 @@ def deployment_lock(state_root: Path):
 def current_docker_deadline():
     """Observe the enclosing command ceiling without changing it."""
     return _DOCKER_DEADLINE.get()
+
+
+def supervised_source_action(arguments, *, deadline, check, input=None):
+    """Bound one journaled Docker request under live source-fence supervision.
+
+    Caller owns the exact arguments, intent and original deadline. Local CLI
+    kill/reap never cancels a daemon action; any failed check leaves its outcome
+    unresolved. No stdout/stderr or environment contents are returned.
+    """
+    if input is not None and (not isinstance(input, str) or len(input.encode()) > 4096):
+        raise ValueError("storage_online_source_action_input_bound_exceeded")
+    check()
+    if time.monotonic() >= deadline:
+        raise RuntimeError("storage_online_resume_deadline_expired")
+    process = subprocess.Popen(["docker", *arguments],
+        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if input is not None:
+            process.stdin.write(input.encode())
+            process.stdin.close()
+        while True:
+            check()
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("storage_online_resume_deadline_expired")
+            result = process.poll()
+            if result is not None:
+                if result != 0:
+                    raise RuntimeError("storage_online_resume_start_failed")
+                return
+            time.sleep(min(.1, remaining))
+    finally:
+        # Reap only our local CLI, including cancellation. This grants no more
+        # host-operation time and makes no claim about daemon request outcome.
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=1)  # Cleanup only, never another daemon action.

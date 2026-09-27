@@ -703,7 +703,7 @@ def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup,
         before = (path/final.STATE).read_bytes()
         with pytest.raises(RuntimeError,match="login_switch_intent_required"):
             final.close_database_logins_locked(path, exchange=exchange)
-        with pytest.raises(RuntimeError,match="resume_switch_intent_required"):
+        with pytest.raises(RuntimeError,match="resume_fence_reply_invalid" if fault is None else "resume_switch_intent_required"):
             final.resume_online_source_locked(path, exchange=exchange)
         assert (path/final.STATE).read_bytes() == before
     assert all("ALLOW_CONNECTIONS true" not in call for call in calls)
@@ -760,3 +760,64 @@ def test_gated_residual_host_retains_intent_and_refuses_drift(pause_setup, monke
         assert calls == ["final_session_check","final_delta","final_session_check"]
     assert (path/final.STATE).read_bytes() == before
     assert all(not row["running"] for row in rows.values())
+
+
+@pytest.mark.parametrize("fault", [None, "logins_reply", "jobs_reply", "fence_loss", "expiry", "gate_reclose"])
+def test_gated_abort_journals_restoration_under_same_live_fence(resume_setup, monkeypatch, fault):
+    path, rows, clock, state, stop, old_exchange, calls, starts, deadline = resume_setup
+    saved = final._load(path/final.STATE)
+    capture = {"original":"capture"}
+    state["binding"]["capture"] = capture
+    saved["binding"]["capture"] = capture
+    database = dict(cluster="1234",oid=123,name="owned",allow_connections=True)
+    saved.update(phase="login_closed",login_gate=dict(database=database,requested_at=1000.,
+        closed_at=1001.,database_jobs_stopped=True))
+    host_boundary.save_receipt(path/final.STATE,saved,initial=False)
+    opened = [False]
+    observed = final._observe
+    def observe(root, **args):
+        session = args.pop("session")
+        assert session["capture"] == capture
+        binding,prep,clients,limits = observed(root,**args)
+        return binding,prep,{**clients,"tsdb":{"id":"d"*64}},limits
+    monkeypatch.setattr(final,"_observe",observe)
+    lost = [False]
+    def exchange(operation, **kwargs):
+        if lost[0]:raise EOFError("owned fence lost")
+        reply = old_exchange(operation,**kwargs)
+        if operation == "final_session_check":reply["state"] = "background"
+        reply["result"].update(database={**database,"allow_connections":opened[0]},
+            capture=capture,backend_pid=2,owner_pid=1,database_switch_authorized=False)
+        return reply
+    actions = []
+    def action(arguments, *, deadline, check, input):
+        check()
+        record = final._load(path/final.STATE)
+        pending = record["resume"]["gate_restore"]["inflight"]
+        assert pending == ("logins" if not actions else "jobs")
+        assert record["switch"] == saved["switch"] and record["login_gate"] == saved["login_gate"]
+        assert not starts
+        actions.append(pending)
+        if pending == "logins":opened[0] = True
+        if fault == pending+"_reply":raise TimeoutError("lost action reply")
+        if fault == "gate_reclose" and pending == "jobs":opened[0] = False
+        if fault == "fence_loss":lost[0] = True
+        if fault == "expiry":clock.update(wall=1061,boot=161)
+        check()
+    monkeypatch.setattr(host_boundary,"supervised_source_action",action)
+    if fault:
+        with pytest.raises((RuntimeError,EOFError,TimeoutError)):
+            final.resume_online_source_locked(path,exchange=exchange)
+        result=final._load(path/final.STATE)
+        assert result["phase"] == "source_resuming" and not starts
+        assert result["resume"]["gate_restore"]["inflight"] == actions[-1]
+        with pytest.raises(RuntimeError,match="resume_switch_intent_required"):
+            final.resume_online_source_locked(path,exchange=exchange)
+    else:
+        result=final.resume_online_source_locked(path,exchange=exchange)
+        assert result["original_source_resumed"] and result["original_login_gate_restored"]
+        assert result["database_jobs_restart_requested"]
+        record=final._load(path/final.STATE)
+        assert record["phase"] == "source_resumed" and record["login_gate"] == saved["login_gate"]
+        assert record["resume"]["gate_restore"] == {"completed":["logins","jobs"],"inflight":None}
+        assert actions == ["logins","jobs"] and len(starts)==len(host_boundary.STOP)-1

@@ -2091,7 +2091,8 @@ initial preparation and final wall/boot/monotonic deadlines are unchanged.
 
 An interrupted request can already have closed access. Both gate phases block
 ordinary stop/restart/relaunch and gate replay, retain the marker and grant no
-COMMIT or automatic reopen. Prepared transactions still refuse the switch;
+COMMIT or automatic reopen. Confirmed `login_closed` has the separately guarded
+internal abort path described below; `login_closing` remains unresolved. Prepared transactions still refuse the switch;
 archive/spool publishers and terminal recovery still require admission.
 The preserving production gate-restoration transition is unfinished. Disposable
 rehearsal cleanup restores access only after verified read-worker retirement;
@@ -2149,4 +2150,45 @@ terminalizes this controller; it is not permission to reconnect or resume it.
 Background bulk work remains forbidden in this window. Empty tail observations
 still do not authorize COMMIT; exact final verification and host/archive/spool
 publisher admission remain mandatory. Actual scheduled QT job semantics,
-preserving gate/job restoration and the complete host switch are unfinished.
+restoration after uncertain/outer loss and the complete host switch are unfinished.
+
+
+### Returning to the original source after confirmed gating
+
+The existing `resume_online_source_locked` also accepts confirmed `login_closed`.
+It freshly admits the same retained worker/session, then acquires the original
+negative-outcome migration fence and source relation locks. A committed outcome,
+missing job-stop confirmation, changed definitions/environment or lost session
+refuses. The fence stays live through access restoration and every source start;
+its observations preserve original capture/database identity. No saved negative
+outcome or stopped-client observation supplies this authority.
+
+The existing `source_resuming` journal retains `login_gate` evidence and records
+`resume.gate_restore` with ordered `logins` then `jobs` actions. Each is persisted
+as in flight before dispatch. The first restores the exact original open-login
+setting through the existing cluster maintenance path. The second requests the
+pinned Timescale background workers to restart using a separate, bounded target
+transaction; the migration fence remains on the retained worker connection.
+Definitions, schedules and enabled flags are unchanged. Acceptance of this
+request does not prove every job has run or provide exactly-once job semantics.
+
+The shared host boundary supervises these bounded Docker/SQL requests using the
+same loop already used for exact source starts, with bounded SQL input and
+original deadlines. It checks live ownership while the local CLI is pending.
+Killing/reaping that CLI does not cancel a daemon or SQL operation. A lost reply,
+identity/ownership loss or expiry leaves the action unresolved and prevents
+further actions. Access or a background job may already be active; uncertainty
+must never be described as all writers stopped. No automatic retry or reversal.
+
+Only after both restoration actions complete does the existing procedure start
+originally running source clients, admit their exact healthy state and end the
+fence. It records `source_resumed`, retaining the final marker and gate history.
+The completed initializer stays stopped. Ordinary deployment/relaunch/recovery
+still refuses that marker. This is an internal preserving abort, not candidate
+runtime activation, successful migration or recovery-mount authority.
+
+Disposable qualification covers this full controlled-source abort and a fully
+received restoration reply discarded after actual access reopening. Outer host
+loss, unread framing, late SQL completion and production job/source/spool
+admission remain separate limits. The original preparation, capture and final
+windows are never renewed. The complete production operator remains unfinished.
