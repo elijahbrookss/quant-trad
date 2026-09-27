@@ -1112,7 +1112,8 @@ login gate. The handoff accepts this caller-owned connection without closing it;
 the same session supplies commit and fresh uncertain-outcome inspection. Closing
 or invalidating it never falls back to another connection. Entry pins the
 original final deadline before admission SQL; capture-clock shrink can refuse
-entry. Background/tail work and reentry are forbidden after this boundary.
+entry. Background work and reentry are forbidden after this boundary; confirmed job
+retirement admits only residual tails on the retained session.
 Context exit discards the session. This adds no public command or gate authority.
 
 A disposable fixture uses its existing cluster's maintenance database to close
@@ -1177,3 +1178,23 @@ need source admission. Pinned extension identity alone does not establish that
 an arbitrary custom job is safe to interrupt or replay after partial commits.
 The disposable job demonstrates preserved committed work, not exactly-once
 semantics for every scheduled procedure.
+
+
+### Residual catch-up after job retirement
+
+The existing final-delta operation also runs on the retained connection after
+confirmed job retirement behind the closed login gate. It reuses the existing
+header/raw/archive page machinery, separate page commits and live resource/file
+checks. It cannot start a baseline, relocate data, open another connection or
+extend the final/capture window. The host accepts this route only from its
+existing `login_closed` intent with fresh same-worker and source admission.
+No new receipt, command surface or state owner is introduced.
+
+A disposable late QT publication proof covers nonempty residual queues, the
+same-backend internal switch and preserved frozen/capture state. Interrupted
+archive transactions preserve earlier SQL pages and leave archive progress
+pending; a reopened gate refuses catch-up. The host rehearsal covers the same
+route with an already-converged tail. These combined component results are not
+a production outage measurement, scheduled QT job semantics or complete host
+publisher exclusion. Exact verification, host COMMIT and preserving recovery
+remain release requirements.

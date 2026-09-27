@@ -520,6 +520,16 @@ try:
         fresh=command('inspect_outcome',deadline=min(deadline,time.monotonic()+4))
         assert fresh['result']['outcome']=='uncommitted' and not fresh['result']['collection_resume_authorized']
         held_bytes=(state/final_host.STATE).read_bytes()
+        if options.close_logins=='success':
+         residual_started=time.monotonic()
+         residual=final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=2)
+         assert residual['last_observation']['sql']['outcome']=='both_tails_observed_empty'
+         assert all(p['captured_tail_empty_at_observation'] for p in residual['last_observation']['archives'])
+         assert not residual['publisher_drain_authorized'] and not residual['final_switch_authorized']
+         assert (state/final_host.STATE).read_bytes()==held_bytes
+         report['gated_residual']=dict(rounds=residual['rounds'],same_worker=True,
+           final_intent_unchanged=True,elapsed_seconds=time.monotonic()-residual_started,
+           limitation='Host route with already-converged fixture tail; nonempty late QT tail qualified separately.')
         try:final_host.close_database_logins_locked(state,exchange=command);raise AssertionError('gate replay')
         except RuntimeError as exc:assert str(exc)=='storage_online_login_switch_intent_required'
         try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('gate source resume')

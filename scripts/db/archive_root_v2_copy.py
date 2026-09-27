@@ -6,7 +6,7 @@ concurrent publication requires a final fenced reconciliation before cutover.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import logging
@@ -90,7 +90,7 @@ def _validate_descriptors(rows):
 
 
 def _copy_archive_page(engine, *, select_page, record_page, family, source_root, destination_root, after_id="",
-                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None, deadline=None):
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None, deadline=None, connection=None):
     """Copy one known catalog page; retry re-verifies and reuses completed files.
 
     Owns the existing storage lock, expiry fence, clock and capacity watcher.
@@ -115,8 +115,11 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
         raise ValueError("archive_copy_absolute_deadline_invalid")
     deadline = min(deadline if deadline is not None else float("inf"),
                    started + limits["movement_timeout_seconds"])
+    if connection is not None and (connection.engine is not engine or connection.closed
+            or connection.invalidated or connection.in_transaction()):
+        raise RuntimeError("archive_copy_connection_invalid")
     watch = None
-    with engine.connect() as conn:
+    with (nullcontext(connection) if connection is not None else engine.connect()) as conn:
         try:
             with conn.begin():
                 previous = conn.scalar(text(

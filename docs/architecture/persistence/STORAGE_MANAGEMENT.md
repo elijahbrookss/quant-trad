@@ -2043,7 +2043,8 @@ commit, fresh outcome inspection and direct rollback admission can use that same
 session without opening a new login. Its backend identity is fixed; closure,
 invalidation, identity drift or an unexpected transaction refuses replacement.
 Context exit discards the connection, and the controller cannot reenter this
-session or return to copy work. The original final and capture deadlines remain.
+session or return to baseline work. Confirmed job retirement permits only bounded
+residual tails on this same session. The original final and capture deadlines remain.
 
 This retained session alone is not login-gate authority. It changes no database login setting, host receipt, pipe command
 or restart authority. Durable host gating, existing/background publisher
@@ -2128,9 +2129,24 @@ an arbitrary custom job is safe to interrupt or replay after partial commits.
 The disposable job demonstrates preserved committed work, not exactly-once
 semantics for every scheduled procedure.
 
-Jobs can publish changes between the last tail pass and their retirement. Those
-changes still require bounded catch-up and exact verification before COMMIT.
-The retained final session currently forbids returning to tail work; connecting
-that residual catch-up to the closed-login window remains unfinished. Empty
-observations before job stop cannot replace this step. The existing handoff must
-refuse any remaining captured delta rather than bypass its proof.
+Jobs can publish changes between the last tail pass and their retirement. The
+existing `copy_final_delta_locked` now also accepts confirmed `login_closed` and
+keeps its exact original switch deadline. Fresh same-worker session observations
+admit the closed database identity and original capture before and after each
+bounded round; source bindings, stopped clients and receipt clocks are rechecked.
+The final receipt remains unchanged and the report grants no switch authority.
+
+On this route, `OnlineController.final_delta` requires confirmed job retirement,
+checks the closed gate, pinned environment, job definitions and absence of other
+SQL publishers, and reuses the retained backend for existing header/raw/archive
+page transactions. Each completed page commits separately with the same resource
+watch, cancellation, file proof and original capture deadline. Caller-owned page
+connections must be idle, live and belong to the same engine; page helpers never
+close or replace them. An interrupted page rolls back its SQL progress while
+preserving earlier committed pages and reusable verified files. A failed round
+terminalizes this controller; it is not permission to reconnect or resume it.
+
+Background bulk work remains forbidden in this window. Empty tail observations
+still do not authorize COMMIT; exact final verification and host/archive/spool
+publisher admission remain mandatory. Actual scheduled QT job semantics,
+preserving gate/job restoration and the complete host switch are unfinished.

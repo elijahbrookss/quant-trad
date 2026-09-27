@@ -707,3 +707,56 @@ def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup,
             final.resume_online_source_locked(path, exchange=exchange)
         assert (path/final.STATE).read_bytes() == before
     assert all("ALLOW_CONNECTIONS true" not in call for call in calls)
+
+
+@pytest.mark.parametrize("fault", [None, "gate", "source", "sequence", "session", "deadline"])
+def test_gated_residual_host_retains_intent_and_refuses_drift(pause_setup, monkeypatch, fault):
+    path, rows, clock, state, stop = pause_setup
+    state["binding"]["capture"] = {"original": "capture"}
+    stop()
+    deadline = final.time.monotonic()+30
+    final.record_switch_entry_locked(path, deadline=deadline, observe_worker=lambda **kw: dict(
+        controller_id=CONTROLLER, operation="status", state="background", bound_final_deadline=deadline,
+        last_sequence=1, migration_ready=False, final_switch_authorized=False, collection_resume_authorized=False))
+    saved = final._load(path/final.STATE)
+    database = dict(cluster="1234", oid=123, name="owned", allow_connections=True)
+    saved.update(phase="login_closed",login_gate=dict(database=database,requested_at=1000.,
+        closed_at=1001.,database_jobs_stopped=True))
+    host_boundary.save_receipt(path/final.STATE,saved,initial=False)
+    before = (path/final.STATE).read_bytes()
+    observe = final._observe
+    def current(root, **args):
+        assert args.pop("session")["database"]["allow_connections"] is False
+        if fault == "source":state["binding"]["runtime"] = 2
+        return observe(root, **args)
+    monkeypatch.setattr(final,"_observe",current)
+    calls = []
+    def exchange(operation, **kw):
+        calls.append(operation)
+        assert kw["deadline"] == deadline
+        reply = dict(controller_id=CONTROLLER, operation=operation, state="background",
+            bound_final_deadline=deadline,last_sequence=len(calls)+1,
+            final_switch_authorized=False,collection_resume_authorized=False)
+        if operation == "final_session_check":
+            reply["result"] = dict(database={**database,"allow_connections":fault == "gate"},
+                capture=state["binding"]["capture"],backend_pid=3 if fault == "session" and len(calls)>1 else 2,
+                owner_pid=1,database_switch_authorized=False,collection_resume_authorized=False,
+                runtime_activation_authorized=False)
+        else:
+            assert operation == "final_delta"
+            if fault == "sequence":reply["last_sequence"] = 1
+            if fault == "deadline":clock.update(wall=1061,boot=161)
+            reply["result"] = dict(sql={"outcome":"both_tails_observed_empty"},archives=[
+                dict(family=f,captured_tail_empty_at_observation=True) for f in
+                ("fact_archive_manifests","raw_archive_manifests","book_checkpoint_manifests")],
+                migration_ready=False,final_switch_authorized=False,collection_resume_authorized=False)
+        return reply
+    if fault:
+        with pytest.raises(RuntimeError):
+            final.copy_final_delta_locked(path,exchange=exchange,deadline=deadline,max_rounds=2)
+    else:
+        result = final.copy_final_delta_locked(path,exchange=exchange,deadline=deadline,max_rounds=2)
+        assert result["rounds"] == 1 and not result["publisher_drain_authorized"]
+        assert calls == ["final_session_check","final_delta","final_session_check"]
+    assert (path/final.STATE).read_bytes() == before
+    assert all(not row["running"] for row in rows.values())

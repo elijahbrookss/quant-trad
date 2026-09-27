@@ -279,11 +279,12 @@ def test_final_session_admission_keeps_original_deadline_when_capture_shrinks():
             pytest.fail("deadline renewed")
 
 
-def test_final_session_refuses_return_to_tail_work():
+def test_final_session_refuses_tail_before_confirmed_job_retirement():
     from scripts.automation.storage_online_controller import OnlineController
     controller = OnlineController.__new__(OnlineController)
     controller.state = "background"
     controller._final_connection_entered = True
+    controller._jobs_stopped = False
     with pytest.raises(RuntimeError, match="final_delta_state_invalid"):
         controller.final_delta(deadline=monotonic()+10)
 

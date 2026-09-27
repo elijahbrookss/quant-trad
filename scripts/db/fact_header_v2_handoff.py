@@ -38,11 +38,14 @@ RECEIPT_VERSION = "qt.fact_header_preserving_handoff.v1"
 
 
 @contextmanager
-def _staging_transaction(engine, *, placement, policy, limits, deadline, cancelled):
+def _staging_transaction(engine, *, placement, policy, limits, deadline, cancelled, connection=None):
     """Own a fixed staging transaction and its resource watch through commit."""
     deadline = min(deadline, monotonic()+limits["movement_timeout_seconds"])
+    if connection is not None and (connection.engine is not engine or connection.closed
+            or connection.invalidated or connection.in_transaction()):
+        raise RuntimeError("fact_header_staging_connection_invalid")
     watch = None
-    with engine.connect() as conn:
+    with (nullcontext(connection) if connection is not None else engine.connect()) as conn:
         try:
             with conn.begin():
                 previous = conn.scalar(text(

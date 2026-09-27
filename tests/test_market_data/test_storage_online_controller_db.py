@@ -1011,3 +1011,87 @@ def test_gated_timescale_job_stop_preserves_schedule_and_committed_work(storage,
         print("GATED_JOB=started_before_gate,stopped_with_committed_work_preserved,same_session_commit,fixture_scheduler_resumed")
     finally:
         control.dispose()
+
+
+@pytest.mark.parametrize("fault", [None, "archive_failure", "gate_drift"])
+def test_gated_residual_catchup_reuses_session_and_preserves_pages(storage, tmp_path, monkeypatch, fault):
+    """Real late QT publication, closed logins, same-backend residual pages."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        frozen = _frozen_records(conn)
+        original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        database = conn.scalar(text("SELECT current_database()"))
+    quoted = engine.dialect.identifier_preparer.quote_identifier(database)
+    control = create_engine(engine.url.set(database="postgres"), poolclass=NullPool,
+                            isolation_level="AUTOCOMMIT", connect_args={"connect_timeout":2})
+    try:
+        with OnlineController(engine, **settings) as worker:
+            _drain(worker); _reprove(worker)
+            deadline = time.monotonic()+30
+            worker.final_delta(deadline=deadline)
+            # Publication after the previous tail observation must survive job
+            # retirement. This real QT publisher is not a scheduled-job fixture.
+            _raw_book_fixture(storage, source, monkeypatch,
+                definition_id="gated-residual", provider_product_id="BTC-USD-RESIDUAL",
+                event_start=BASE+timedelta(hours=3))
+            with engine.begin() as conn:
+                pending = conn.scalar(text(f"SELECT count(*) FROM {online.QUEUE}"))
+                assert pending > 0
+            with worker.final_database_session(deadline=deadline):
+                connection, pid = worker._final_connection, worker._final_pid
+                engine.dispose()  # Only fixture-idle pool sessions; live owners remain.
+                with control.connect() as admin:
+                    admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS false")
+                worker.quiesce_final_database_jobs(deadline=deadline)
+                copy_page = archives._copy_archive_page
+                entered = []
+                def interrupted(*args, **kwargs):
+                    record = kwargs["record_page"]
+                    def fail(conn, rows):
+                        entered.append(True)
+                        assert conn is connection
+                        record(conn, rows)
+                        raise RuntimeError("fixture residual archive transaction interrupted")
+                    return copy_page(*args, **(kwargs | {"record_page": fail}))
+                if fault == "gate_drift":
+                    with control.connect() as admin:
+                        admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+                with monkeypatch.context() as patch:
+                    patch.setattr(engine, "connect", lambda: pytest.fail("residual work opened a new session"))
+                    if fault == "archive_failure":patch.setattr(archives, "_copy_archive_page", interrupted)
+                    if fault:
+                        with pytest.raises(RuntimeError):worker.final_delta(deadline=deadline)
+                        assert worker.state == "failed"
+                    else:
+                        for _ in range(8):
+                            reply = worker.command(dict(controller_id=worker.controller_id,
+                                sequence=worker._sequence+1,operation="final_delta",deadline=deadline))
+                            result = reply["result"]
+                            assert not result["final_switch_authorized"]
+                            if (result["sql"]["outcome"] == "both_tails_observed_empty" and
+                                    all(x["captured_tail_empty_at_observation"] for x in result["archives"])):break
+                        else:pytest.fail("tiny gated residual did not converge")
+                        worker.commit_database(deadline=deadline)
+                        assert worker.inspect_outcome(deadline=min(deadline,time.monotonic()+4))["outcome"] == "committed"
+                    assert worker._final_connection is connection and worker._final_pid == pid
+                    assert worker._final_deadline == deadline
+                    assert not connection.closed
+                with worker._owner.begin():
+                    assert dict(worker._owner.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+                    if fault == "archive_failure":
+                        assert entered
+                        assert worker._owner.scalar(text(f"SELECT count(*) FROM {capture.QUEUE}")) == 0
+                        assert worker._owner.scalar(text(f"SELECT count(*) FROM {online.QUEUE}")) == pending
+                    if fault == "gate_drift":
+                        assert worker._owner.scalar(text(f"SELECT count(*) FROM {online.QUEUE}")) == pending
+            assert connection.closed
+        # Only disposable cleanup after both controller connections retire.
+        with control.connect() as admin:
+            admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+        with engine.begin() as conn:assert _frozen_records(conn) == frozen
+    finally:
+        with control.connect() as admin:
+            admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+        control.dispose()

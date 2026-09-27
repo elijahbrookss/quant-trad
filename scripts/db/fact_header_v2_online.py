@@ -192,7 +192,7 @@ def _phase(header, lookup):
 
 def copy_pass(engine, *, placement, policy, resource_limits, max_pages=32,
               page_rows=128, max_duration_seconds=60, cancelled=None,
-              tail_only=False, deadline=None):
+              tail_only=False, deadline=None, connection=None):
     """Advance existing cursors with live writers and return after bounded work.
 
     Each successful page commits separately under the existing disk/WAL/temp
@@ -239,7 +239,7 @@ def copy_pass(engine, *, placement, policy, resource_limits, max_pages=32,
             break
         with _staging_transaction(engine, placement=placement, policy=policy,
                 limits={**limits, "movement_timeout_seconds": seconds},
-                deadline=deadline, cancelled=cancelled) as (conn, saved):
+                deadline=deadline, cancelled=cancelled, connection=connection) as (conn, saved):
             cutoff = conn.scalar(text(
                 "SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date - :days"),
                 {"days": policy.recent_days})

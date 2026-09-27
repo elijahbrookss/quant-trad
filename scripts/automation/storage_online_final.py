@@ -426,7 +426,9 @@ def copy_final_delta_locked(state_root, *, exchange, deadline, max_rounds):
     Caller owns the launcher lock/private pipe and supplies one already admitted
     absolute monotonic deadline within the persisted original wall/boot window.
     Keep that exact value for further rounds. A new allowance after interruption
-    is not supported. Pending spool and in-flight publishers still require their
+    is not supported. Confirmed login_closed also admits residual pages on the
+    retained session after job retirement, with fresh source checks each round.
+    Pending spool and in-flight publishers still require their
     independent admission before any future database switch.
     """
     if (not callable(exchange) or type(deadline) not in (int, float)
@@ -435,16 +437,35 @@ def copy_final_delta_locked(state_root, *, exchange, deadline, max_rounds):
         raise ValueError("storage_online_final_delta_host_inputs_invalid")
     state_root = launch._canonical(state_root)
     saved = _load(state_root/STATE)
-    if saved["phase"] != "paused":
+    if saved["phase"] not in {"paused", "login_closed"}:
         raise RuntimeError("storage_online_final_delta_paused_source_required")
     binding = saved["binding"]
     args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
 
+    gated = saved["phase"] == "login_closed"
+    if gated and deadline != saved["switch"]["deadline_monotonic"]:
+        raise RuntimeError("storage_online_final_delta_host_deadline_invalid")
+    sequence = saved["switch"]["worker_sequence"] if gated else 0
+    session_pids = None
+
     def admit():
+        nonlocal sequence, session_pids
         remaining = deadline-time.monotonic()
         if not 0 < remaining <= _remaining(saved):
             raise RuntimeError("storage_online_final_delta_host_deadline_invalid")
-        observed, _, rows, _ = _observe(state_root, **args)
+        session = None
+        if gated:
+            reply = exchange("final_session_check", deadline=deadline)
+            session, sequence = _final_session_reply(reply, operation="final_session_check",
+                binding=binding, deadline=deadline, sequence=sequence)
+            if session["database"] != {**saved["login_gate"]["database"], "allow_connections": False}:
+                raise RuntimeError("storage_online_final_delta_gate_changed")
+            pids = (session["backend_pid"], session["owner_pid"])
+            if session_pids is not None and pids != session_pids:
+                raise RuntimeError("storage_online_final_delta_session_changed")
+            session_pids = pids
+        observed, _, rows, _ = _observe(state_root, **args,
+            **({"session": session} if session is not None else {}))
         if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
             raise RuntimeError("storage_online_final_delta_source_changed")
         if time.monotonic() >= deadline:
@@ -456,6 +477,12 @@ def copy_final_delta_locked(state_root, *, exchange, deadline, max_rounds):
         for index in range(max_rounds):
             admit()
             reply = exchange("final_delta", deadline=deadline)
+            if gated:
+                if (not isinstance(reply, dict) or type(reply.get("last_sequence")) is not int
+                        or reply["last_sequence"] <= sequence
+                        or reply.get("bound_final_deadline") != deadline):
+                    raise RuntimeError("storage_online_final_delta_reply_invalid")
+                sequence = reply["last_sequence"]
             admit()
             if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
                     or reply.get("operation") != "final_delta" or reply.get("state") != "background"
@@ -822,6 +849,26 @@ _GATE_OBSERVE = """SELECT json_build_object(
 """
 
 
+def _final_session_reply(reply, *, operation, binding, deadline, sequence):
+    """Validate a fresh same-worker session observation, without granting authority."""
+    result = reply.get("result") if isinstance(reply, dict) else None
+    if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+            or reply.get("operation") != operation or reply.get("state") != "background"
+            or reply.get("bound_final_deadline") != deadline
+            or type(reply.get("last_sequence")) is not int or reply["last_sequence"] <= sequence
+            or reply.get("final_switch_authorized") is not False
+            or reply.get("collection_resume_authorized") is not False
+            or not isinstance(result, dict) or not isinstance(result.get("database"), dict)
+            or not _valid_database_gate(result["database"])
+            or result.get("capture") != binding["capture"]
+            or any(type(result.get(k)) is not int or result[k] <= 0 for k in ("backend_pid", "owner_pid"))
+            or result["backend_pid"] == result["owner_pid"]
+            or any(result.get(k) is not False for k in ("database_switch_authorized",
+                "collection_resume_authorized", "runtime_activation_authorized"))):
+        raise RuntimeError("storage_online_login_worker_reply_invalid")
+    return result, reply["last_sequence"]
+
+
 def close_database_logins_locked(state_root, *, exchange):
     """Persist and close only the exact target's new logins. Never reopen here.
 
@@ -862,22 +909,8 @@ def close_database_logins_locked(state_root, *, exchange):
         budget()
         reply = exchange(operation, deadline=deadline)
         budget()
-        result = reply.get("result") if isinstance(reply, dict) else None
-        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
-                or reply.get("operation") != operation or reply.get("state") != "background"
-                or reply.get("bound_final_deadline") != deadline
-                or type(reply.get("last_sequence")) is not int or reply["last_sequence"] <= sequence
-                or reply.get("final_switch_authorized") is not False
-                or reply.get("collection_resume_authorized") is not False
-                or not isinstance(result, dict) or not isinstance(result.get("database"), dict)
-                or not _valid_database_gate(result["database"])
-                or result.get("capture") != binding["capture"]
-                or any(type(result.get(k)) is not int or result[k] <= 0 for k in ("backend_pid", "owner_pid"))
-                or result["backend_pid"] == result["owner_pid"]
-                or any(result.get(k) is not False for k in ("database_switch_authorized",
-                    "collection_resume_authorized", "runtime_activation_authorized"))):
-            raise RuntimeError("storage_online_login_worker_reply_invalid")
-        sequence = reply["last_sequence"]
+        result, sequence = _final_session_reply(reply, operation=operation,
+            binding=binding, deadline=deadline, sequence=sequence)
         return result
 
     with host_boundary.docker_deadline(deadline):

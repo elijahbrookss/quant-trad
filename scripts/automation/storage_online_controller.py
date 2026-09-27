@@ -430,7 +430,7 @@ class OnlineController:
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
         if self._final_deadline is not None and operation not in _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
-        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce"}:
+        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce", "final_delta"}:
             raise RuntimeError("storage_online_final_session_background_work_refused")
         result = {}
         try:
@@ -544,9 +544,11 @@ class OnlineController:
         Caller retains its admitted final intent, publisher exclusion and SAME
         live worker. Bind one absolute final window for this process; no later
         round, commit or rollback admission may widen it. Original capture and
-        short page ceilings still apply. Empty observations are not readiness.
+        short page ceilings still apply. After login closure and confirmed job
+        retirement, reuse the retained backend for independently committed pages;
+        never reconnect or return to baseline work. Empty observations are not readiness.
         """
-        if self.state != "background" or self._final_connection_entered:
+        if self.state != "background" or (self._final_connection_entered and not self._jobs_stopped):
             raise RuntimeError("storage_online_final_delta_state_invalid")
         now = monotonic()
         if (type(deadline) not in (int, float) or not math.isfinite(deadline)
@@ -561,9 +563,11 @@ class OnlineController:
             # Admit every baseline before any tail mutation. Later per-page
             # checks repeat this under migration ownership, so no race can
             # silently fall back to a bulk copy or relocation.
-            with self.engine.begin() as conn:
+            with self._database_connection() as conn, conn.begin():
                 with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
                                             deadline=page_deadline):
+                    if self._final_connection_entered:
+                        self._require_external_sql_clients_absent(conn, deadline=page_deadline)
                     if self._capture_row(conn) != self._capture:
                         raise RuntimeError("storage_online_attempt_binding_changed")
                     if online._phase(headers._inspect_progress(conn), handoff.raw._inspect(conn)) != "catch_up":
@@ -578,7 +582,8 @@ class OnlineController:
             sql = online.copy_pass(self.engine, placement=self.placement,
                 policy=self.policy, resource_limits=self.limits, page_rows=self.page_rows,
                 max_pages=2, max_duration_seconds=self.limits["movement_timeout_seconds"],
-                tail_only=True, deadline=page_deadline)
+                tail_only=True, deadline=page_deadline,
+                **({"connection": self._final_connection} if self._final_connection_entered else {}))
             pages = []
             for family in archives.FAMILIES:
                 self.check()
@@ -586,9 +591,15 @@ class OnlineController:
                     source_root=self.source_root, destination_root=self.destination_root,
                     page_rows=self.page_rows, max_page_bytes=self.max_page_bytes,
                     policy=self.policy, resource_limits=self.limits, file_proof=self.proof,
-                    tail_only=True, deadline=page_deadline)
+                    tail_only=True, deadline=page_deadline,
+                    **({"connection": self._final_connection} if self._final_connection_entered else {}))
                 pages.append({key: report[key] for key in ("family", "page_objects",
                     "verified_bytes", "captured_tail_empty_at_observation")})
+            if self._final_connection_entered:
+                with self._database_connection() as conn, conn.begin():
+                    with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
+                                                deadline=page_deadline):
+                        self._require_external_sql_clients_absent(conn, deadline=page_deadline)
             self.check()
             if monotonic() >= page_deadline:
                 raise RuntimeError("storage_online_final_delta_deadline_expired")
