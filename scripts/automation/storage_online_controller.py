@@ -1,7 +1,8 @@
 """Process-local online migration controller; no production launch authority.
 
 An admitted host owns preparation, publisher drain and runtime activation.
-The bounded pipe channel deliberately exposes background work only. One context
+The bounded pipe channel exposes background work and a retained rollback fence,
+never host restart or database COMMIT authority. One context
 owns destination leases until close, including an internal final database
 commit/reconciliation. Never reconstruct authority from a serialized reply.
 """
@@ -33,7 +34,8 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
-_OPERATIONS = {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
+_ROLLBACK_OPERATIONS = {"rollback_fence_begin", "rollback_fence_check", "rollback_fence_end"}
+_OPERATIONS = _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
 
 
 class OnlineController:
@@ -77,6 +79,7 @@ class OnlineController:
         self._cursors = {name: "" for name in archives.FAMILIES}
         self._reproved = set()
         self._final_deadline = None
+        self._rollback_context = self._rollback_check = None
         self._sequence = 0
         self._last_request = self._last_reply = None
 
@@ -143,8 +146,10 @@ class OnlineController:
                 raise RuntimeError("storage_online_controller_ownership_lost")
 
     def check(self):
-        if self.state not in {"background", "commit_unknown", "committed", "rolled_back"}:
+        if self.state not in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced"}:
             raise RuntimeError("storage_online_controller_not_active")
+        if self.state == "resume_fenced":
+            self._rollback_check()
         self._ownership()
         self.proof.check()
         if archives._root(self.source_root, self._source_device)[1] != self._source:
@@ -202,7 +207,8 @@ class OnlineController:
         draining = isinstance(request, dict) and request.get("operation") == "source_drain"
         finalizing = isinstance(request, dict) and request.get("operation") == "final_delta"
         inspecting = isinstance(request, dict) and request.get("operation") == "inspect_outcome"
-        if finalizing or inspecting:
+        fencing = isinstance(request, dict) and request.get("operation") in _ROLLBACK_OPERATIONS
+        if finalizing or inspecting or fencing:
             fields |= {"deadline"}
         if draining:
             fields |= {"deadline", "max_entries"}
@@ -227,6 +233,11 @@ class OnlineController:
                 or not 0 < request["deadline"]-monotonic() <= min(5, self.limits["movement_timeout_seconds"])
                 or (self._final_deadline is not None and request["deadline"] > self._final_deadline)):
             raise ValueError("storage_online_outcome_command_budget_invalid")
+        if fencing and (type(request["deadline"]) not in (int, float)
+                or not math.isfinite(request["deadline"])
+                or self._final_deadline is None or request["deadline"] != self._final_deadline
+                or not 0 < request["deadline"]-monotonic() <= self._admitted_limits["movement_timeout_seconds"]):
+            raise ValueError("storage_online_rollback_command_deadline_invalid")
         if draining:
             if (type(request["deadline"]) not in (int, float)
                     or not math.isfinite(request["deadline"])
@@ -249,19 +260,24 @@ class OnlineController:
             # It is not a restart/resume token and never revives dead proof.
             if self.state not in {"closed", "cancelled"}:
                 self.check()
+            if fencing:
+                raise RuntimeError("storage_online_rollback_fresh_sequence_required")
             if draining or inspecting:
                 raise RuntimeError("storage_online_observation_fresh_sequence_required" if inspecting
                                    else "storage_online_spool_fresh_sequence_required")
             return deepcopy(self._last_reply)
         readable = operation in {"inspect_outcome", "close"} and self.state in {"commit_unknown", "committed", "rolled_back"}
-        if request["sequence"] != self._sequence+1 or (self.state != "background" and not readable):
+        rollback_allowed = (operation == "rollback_fence_begin" and self.state in {"background", "commit_unknown", "rolled_back"}
+            or operation in {"rollback_fence_check", "rollback_fence_end", "close"} and self.state == "resume_fenced")
+        if request["sequence"] != self._sequence+1 or (self.state != "background" and not readable and not rollback_allowed):
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
-        if self._final_deadline is not None and operation not in {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
+        if self._final_deadline is not None and operation not in _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
         result = {}
         try:
             if operation == "close":
                 self._ownership()
+                self._abandon_rollback_channel()
                 self.state = "closed"
             elif operation == "cancel":
                 # Explicit terminal cleanup may be needed after proof/attempt
@@ -274,6 +290,8 @@ class OnlineController:
                         timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
                 self.state = "cancelled"
                 result = {"attempt_cancelled": True, "source_preserved": True}
+            elif fencing:
+                result = self._rollback_channel(operation, deadline=request["deadline"])
             elif inspecting:
                 result = self.inspect_outcome(deadline=request["deadline"])
             elif finalizing:
@@ -309,7 +327,9 @@ class OnlineController:
                         max_duration_seconds=request["max_duration_seconds"])
                 self.check()
         except BaseException as exc:
-            self.state = "failed"
+            self._abandon_rollback_channel()
+            if self.state != "committed":
+                self.state = "failed"
             # Static guard codes are safe diagnostics; arbitrary database error
             # text may contain connection or source data and is never logged.
             code = str(exc)
@@ -321,6 +341,37 @@ class OnlineController:
         reply = {**self.status(), "operation": operation, "result": result}
         self._last_request, self._last_reply = deepcopy(request), deepcopy(reply)
         return reply
+
+    def _abandon_rollback_channel(self):
+        context = self._rollback_context
+        self._rollback_context = self._rollback_check = None
+        if context is not None:
+            failure = RuntimeError("storage_online_rollback_channel_closed")
+            context.__exit__(type(failure), failure, failure.__traceback__)
+
+    def _rollback_channel(self, operation, *, deadline):
+        """Retain the existing live fence across ordered private-pipe requests.
+
+        Replies are observations only. No command starts a host client. EOF,
+        malformed framing, failed checks and controller exit release ownership;
+        a host must remain held unless its separately qualified transition can
+        supervise every in-flight action. This channel cannot recreate a fence.
+        """
+        if operation == "rollback_fence_begin":
+            if self._rollback_context is not None:
+                raise RuntimeError("storage_online_rollback_channel_already_entered")
+            context = self.rollback_source_fence(deadline=deadline)
+            check = context.__enter__()
+            self._rollback_context, self._rollback_check = context, check
+        elif self.state != "resume_fenced" or self._rollback_context is None:
+            raise RuntimeError("storage_online_rollback_channel_not_entered")
+        result = self._rollback_check()
+        if operation == "rollback_fence_end":
+            context = self._rollback_context
+            self._rollback_context = self._rollback_check = None
+            context.__exit__(None, None, None)
+            result = {**result, "database_resume_fence_held": False}
+        return {**result, "runtime_activation_authorized": False}
 
     def final_delta(self, *, deadline):
         """Bounded tail-only round; no host pause, switch or restart authority.
@@ -549,9 +600,13 @@ class OnlineController:
 
     def __exit__(self, *exc):
         try:
-            return self._stack.__exit__(*exc)
+            self._abandon_rollback_channel()
         finally:
-            self.state = "closed"
+            try:
+                self._stack.__exit__(*exc)
+            finally:
+                self.state = "closed"
+        return False
 
 
 def _unique(pairs):
@@ -605,15 +660,17 @@ def serve(controller, *, input_fd, output_fd, channel_seconds=5):
     _write(output_fd, controller.status(), channel_seconds)
     pending = bytearray()
     partial_deadline = None
-    while controller.state in {"background", "commit_unknown", "committed", "rolled_back"}:
+    while controller.state in {"background", "commit_unknown", "committed", "rolled_back", "resume_fenced"}:
         controller.check()
         wait = min(channel_seconds, max(0, controller.proof.deadline-monotonic()))
+        if controller.state == "resume_fenced":
+            wait = min(wait, max(0, controller._final_deadline-monotonic()), .1)
         if partial_deadline is not None:
             wait = min(wait, max(0, partial_deadline-monotonic()))
         if wait <= 0:
             raise RuntimeError("storage_online_command_timeout")
         if not _wait(input_fd, select.POLLIN, wait):
-            if pending:
+            if pending and monotonic() >= partial_deadline:
                 raise RuntimeError("storage_online_command_timeout")
             continue
         data = os.read(input_fd, 4097-len(pending))

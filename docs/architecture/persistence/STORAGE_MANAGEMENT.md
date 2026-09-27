@@ -1828,3 +1828,31 @@ publication that completed during stopping. Discovery, lifecycle and heartbeat
 remain controlled, as do UUID metadata and UID70 fixture directories. This is not
 full deployed-image readiness, all-projector drain, real collector performance,
 production downtime, COMMIT dispatch or source resumption authority.
+
+
+### Retained rollback fence on the private worker channel
+
+The fixed rollback_fence_begin/check/end commands retain the existing read-only
+SQL rollback fence across ordered requests to the same live controller. They
+require its already bound absolute final deadline without shortening/replacing
+that binding or renewing the original capture. Begin performs authoritative
+negative inspection and retains migration ownership plus original relation locks;
+check verifies the same connection. Source publication remains possible while a
+competing migration or destructive DDL is refused. End releases the fence and
+terminalizes the controller; it does not enable copying or switching again.
+
+Each observation requires a fresh sequence. A cached reply cannot represent
+current ownership, including a retry of begin. While fenced, ordinary work and
+outcome inspection are refused; only fresh fence checks, end or close are
+accepted. The idle pipe loop checks the fence at most every 100ms between bounded
+operations. EOF, malformed framing, lost connection and context exit unwind the
+live transaction. No serialized field can re-create it, and all replies continue
+to deny collection resumption and runtime activation.
+
+This supplies the live database half of a future supervised host abort. It starts
+no Docker client, edits no final receipt and supplies no host restart authority.
+The host still must bind original source images/configuration/cluster/roots,
+persist its intent, supervise in-flight starts when ownership or time is lost,
+and reconcile its terminal state. A lost fence cannot itself stop a Docker action.
+Full host/worker death, recovery mounts and matching runtime remain separate
+requirements; the production final command is still unavailable.

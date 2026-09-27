@@ -151,3 +151,33 @@ def test_final_tail_command_refuses_unbounded_fields_and_replays_without_work():
     with pytest.raises(RuntimeError, match="background_work_refused"):
         controller.command(dict(controller_id=controller.controller_id, sequence=2,
                                 operation="sql_copy"))
+
+
+def test_rollback_wire_requires_the_already_bound_absolute_final_window():
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller.controller_id = "c"*32
+    controller._final_deadline = monotonic()+20
+    controller._admitted_limits = {"movement_timeout_seconds":30}
+    request = dict(controller_id=controller.controller_id, sequence=1,
+                   operation="rollback_fence_begin",deadline=controller._final_deadline)
+    for changed in ({"deadline":True},{"deadline":float("nan")},
+                    {"deadline":controller._final_deadline+1},
+                    {"deadline":controller._final_deadline-1},{"restart":True}):
+        with pytest.raises(ValueError):controller.command(request|changed)
+    controller._final_deadline = None
+    with pytest.raises(ValueError,match="rollback_command_deadline"):
+        controller.command(request)
+
+
+def test_idle_fenced_channel_obeys_original_deadline_without_new_requests():
+    peer = ChannelPeer()
+    peer.state = "resume_fenced"
+    peer._final_deadline = monotonic()+.05
+    original = peer._final_deadline
+    client, server = socket.socketpair()
+    with client, server:
+        with pytest.raises(RuntimeError, match="command_timeout"):
+            serve(peer,input_fd=server.fileno(),output_fd=server.fileno(),channel_seconds=5)
+    assert monotonic() >= original
+    assert peer._final_deadline == original and not peer.calls

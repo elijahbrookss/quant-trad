@@ -604,3 +604,96 @@ def test_controller_outcome_wire_pending_negative_and_lost_real_commit(storage, 
         assert worker.state == "closed" and worker.proof.hashed_bytes == hashed
         worker.proof.verify_all()
     with engine.begin() as conn:assert _frozen_records(conn) == frozen
+
+
+@pytest.mark.parametrize("ending", ["end", "eof", "malformed", "killed_backend", "replay"])
+def test_controller_rollback_fence_wire_retains_live_lock_and_releases_on_channel_loss(
+        storage, tmp_path, monkeypatch, ending):
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        frozen = _frozen_records(conn)
+    errors = []
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker);_reprove(worker)
+        deadline = time.monotonic()+30
+        worker.final_delta(deadline=deadline)
+        hashed = worker.proof.hashed_bytes
+        client, server = socket.socketpair();client.settimeout(10)
+        def host():
+            try:
+                with client, client.makefile("rwb", buffering=0) as channel:
+                    greeting = json.loads(channel.readline(16385))
+                    seq = greeting["last_sequence"]
+                    def request(operation, **fields):
+                        nonlocal seq
+                        seq += 1
+                        value = dict(controller_id=greeting["controller_id"], sequence=seq,
+                                     operation=operation, deadline=deadline, **fields)
+                        channel.write(json.dumps(value).encode()+b"\n")
+                        return json.loads(channel.readline(16385))
+                    reply = request("rollback_fence_begin")
+                    assert reply["state"] == "resume_fenced"
+                    assert reply["result"]["database_resume_fence_held"]
+                    assert not reply["collection_resume_authorized"]
+                    assert not reply["result"]["runtime_activation_authorized"]
+                    with engine.begin() as competing:
+                        with pytest.raises(RuntimeError, match="migration_busy"):
+                            with capture.migration_step(competing, 5):pass
+                    with engine.begin() as ddl:
+                        with pytest.raises(DBAPIError), ddl.begin_nested():
+                            ddl.exec_driver_sql("LOCK TABLE market.fact_versions IN ACCESS EXCLUSIVE MODE NOWAIT")
+                    # Real source writes remain legal while this same SQL fence
+                    # spans separate wire exchanges; no Docker restart occurs.
+                    _raw_book_fixture(storage, source, monkeypatch,
+                        definition_id="wire-rollback-"+ending,
+                        provider_product_id="BTC-USD-WIRE-"+ending,
+                        event_start=BASE+timedelta(hours=3))
+                    assert request("rollback_fence_check")["result"]["database_resume_fence_held"]
+                    if ending == "replay":
+                        # Even a fully received prior reply is not fresh live
+                        # ownership. Replaying its sequence closes the channel.
+                        channel.write(json.dumps(dict(controller_id=greeting["controller_id"],
+                            sequence=seq,operation="rollback_fence_check",deadline=deadline)).encode()+b"\n")
+                    elif ending == "end":
+                        reply = request("rollback_fence_end")
+                        assert reply["state"] == "aborted"
+                        assert not reply["result"]["database_resume_fence_held"]
+                    elif ending == "malformed":
+                        channel.write(b'{"sequence":1,"sequence":2}\n')
+                    elif ending == "killed_backend":
+                        with engine.begin() as killer:
+                            pid = killer.scalar(text("""SELECT pid FROM pg_locks
+                                WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid()
+                                  AND classid=((hashtextextended(:key,0)>>32)&4294967295)::oid
+                                  AND objid=(hashtextextended(:key,0)&4294967295)::oid"""),
+                                                {"key": capture.LOCK})
+                            assert pid and killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"), {"pid":pid})
+                        # No request: the idle serve loop must detect lost SQL
+                        # ownership instead of keeping a stale fence alive.
+                        assert channel.readline(16385) == b""
+            except BaseException as exc:errors.append(exc)
+        thread = threading.Thread(target=host);thread.start()
+        try:
+            with server:
+                if ending == "replay":
+                    with pytest.raises(RuntimeError, match="fresh_sequence_required"):
+                        serve(worker,input_fd=server.fileno(),output_fd=server.fileno(),channel_seconds=.5)
+                elif ending == "malformed":
+                    with pytest.raises(ValueError, match="duplicate_command_field"):
+                        serve(worker,input_fd=server.fileno(),output_fd=server.fileno(),channel_seconds=.5)
+                elif ending == "killed_backend":
+                    with pytest.raises(DBAPIError):
+                        serve(worker,input_fd=server.fileno(),output_fd=server.fileno(),channel_seconds=.5)
+                else:
+                    serve(worker,input_fd=server.fileno(),output_fd=server.fileno(),channel_seconds=.5)
+            assert worker.proof.hashed_bytes == hashed
+            if ending == "end":assert worker.state == "aborted"
+        finally:
+            thread.join(timeout=15)
+        assert not thread.is_alive() and not errors
+    # Context cleanup releases every SQL fence after EOF/malformed input/loss.
+    with engine.begin() as conn:
+        with capture.migration_step(conn,5):pass
+        assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+        assert _frozen_records(conn) == frozen
