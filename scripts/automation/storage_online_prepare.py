@@ -12,6 +12,7 @@ import re
 import stat
 import time
 
+from scripts.automation import storage_host_boundary as host_boundary
 from scripts.automation import storage_handoff_pause as held
 
 STATE = "storage-online-preparation.json"
@@ -24,11 +25,11 @@ _FIELDS = {"schema", "project", "source_revision", "history_uuid", "phase",
 def _mount_digest(mounts):
     if len({mount["Destination"] for mount in mounts}) != len(mounts):
         raise RuntimeError("storage_online_preparation_duplicate_mount")
-    return held._digest(sorted(mounts, key=lambda mount: mount["Destination"]))
+    return host_boundary.digest(sorted(mounts, key=lambda mount: mount["Destination"]))
 
 
 def _client_contract(details):
-    return held._digest({"contract": held._database_contract(details),
+    return host_boundary.digest({"contract": host_boundary.database_contract(details),
                          "mounts": _mount_digest(details["mounts"])})
 
 
@@ -52,8 +53,8 @@ def _source_roots(details):
 
 def _before_capture(database_id):
     # Only catalog/settings lookups: no source history or archive content scan.
-    held._source_storage(database_id)
-    value = json.loads(held._database_query(database_id,
+    host_boundary.source_storage(database_id)
+    value = json.loads(host_boundary.database_query(database_id,
         "SELECT json_build_object('archive_mode',current_setting('archive_mode'),"
         "'archive_command_disabled',current_setting('archive_command') IN ('','(disabled)'),"
         "'archive_configuration',(SELECT count(*) FROM pg_file_settings "
@@ -70,11 +71,11 @@ def _recipe(state_root, project):
     if (set(model["volumes"]) != {"postgres-data"}
             or len(model["services"]["tsdb"]["volumes"]) != 2):
         raise RuntimeError("storage_online_preparation_key_free_recipe_required")
-    return held._digest(model)
+    return host_boundary.digest(model)
 
 
 def _load(state_root):
-    saved = held._load(state_root/STATE)
+    saved = host_boundary.load_receipt(state_root/STATE)
     if (set(saved) != _FIELDS or saved["schema"] != SCHEMA
             or saved["phase"] not in ("preparing", "resuming", "serving")
             or type(saved["started_at"]) not in (int, float)
@@ -103,10 +104,10 @@ def _clients(rows):
     for name in rows:
         if name == "tsdb":
             continue
-        details = held._database_details(rows[name]["id"])
-        result[name] = dict(identity=held._identities(rows)[name], was_running=rows[name]["running"],
+        details = host_boundary.database_details(rows[name]["id"])
+        result[name] = dict(identity=host_boundary.identities(rows)[name], was_running=rows[name]["running"],
                             contract=_client_contract(details),
-                            networks=held._database_networks(details))
+                            networks=host_boundary.database_networks(details))
     return result
 
 
@@ -117,10 +118,10 @@ def _admit_clients(rows, expected):
         if (name == "initialize" and not saved["was_running"]
                 and (rows[name]["running"] or rows[name]["status"] != "exited" or rows[name]["exit_code"] != 0)):
             raise RuntimeError("storage_online_preparation_completed_initializer_changed")
-        details = held._database_details(rows[name]["id"])
-        if (held._identities(rows)[name] != saved["identity"]
+        details = host_boundary.database_details(rows[name]["id"])
+        if (host_boundary.identities(rows)[name] != saved["identity"]
                 or _client_contract(details) != saved["contract"]
-                or not held._same_database_networks(details, saved["networks"])):
+                or not host_boundary.same_database_networks(details, saved["networks"])):
             raise RuntimeError("storage_online_preparation_clients_changed")
 
 
@@ -130,39 +131,39 @@ def _admit_source(state_root, saved, *, require_running, operator_id=None):
     release = (state_root/"release.env").read_text()
     if re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [saved["source_revision"]]:
         raise RuntimeError("storage_online_preparation_release_changed")
-    receipt = held._load(state_root/held.HOLD)
-    if held._digest(receipt) != saved["hold_sha256"]:
+    receipt = host_boundary.load_receipt(state_root/host_boundary.HOLD)
+    if host_boundary.digest(receipt) != saved["hold_sha256"]:
         raise RuntimeError("storage_online_preparation_hold_changed")
     preparation = receipt["database_preparation"]
     held._history_filesystem(preparation["history_root"], saved["history_uuid"])
-    rows = held._inventory(saved["project"], operator_id=operator_id)
-    if held._identities(rows) != receipt["containers"]:
+    rows = host_boundary.inventory(saved["project"], operator_id=operator_id)
+    if host_boundary.identities(rows) != receipt["containers"]:
         raise RuntimeError("storage_online_preparation_clients_changed")
     _admit_clients(rows, saved["clients"])
-    database = held._database_details(rows["tsdb"]["id"])
+    database = host_boundary.database_details(rows["tsdb"]["id"])
     checks = dict(mounts=_mount_digest(database["mounts"]) == saved["database"]["mounts"],
-                  contract=held._database_contract(database) == saved["database"]["contract"],
-                  networks=held._same_database_networks(database, saved["database"]["networks"]),
-                  cluster=held._cluster_identifier(rows["tsdb"]["id"]) == saved["cluster"])
+                  contract=host_boundary.database_contract(database) == saved["database"]["contract"],
+                  networks=host_boundary.same_database_networks(database, saved["database"]["networks"]),
+                  cluster=host_boundary.cluster_identifier(rows["tsdb"]["id"]) == saved["cluster"])
     if not all(checks.values()):
         raise RuntimeError("storage_online_preparation_database_changed: checks="+
                            ",".join(name for name, valid in checks.items() if not valid))
-    if _source_roots(held._database_details(rows["market-data-collector"]["id"])) != saved["source_roots"]:
+    if _source_roots(host_boundary.database_details(rows["market-data-collector"]["id"])) != saved["source_roots"]:
         raise RuntimeError("storage_online_preparation_source_metadata_changed")
-    if (require_running and (not held._source_clients_serving(rows)
-            or any(rows[name]["running"] != saved["clients"][name]["was_running"] for name in held.STOP))):
+    if (require_running and (not host_boundary.source_clients_serving(rows)
+            or any(rows[name]["running"] != saved["clients"][name]["was_running"] for name in host_boundary.STOP))):
         raise RuntimeError("storage_online_preparation_source_not_running")
     return rows
 
 
 
 def _source_healthy(rows):
-    for name in held.STOP + ("tsdb",):
+    for name in host_boundary.STOP + ("tsdb",):
         if name == "initialize" and not rows[name]["running"]:
             if rows[name]["status"] != "exited" or rows[name]["exit_code"] != 0:
                 return False
             continue
-        state = json.loads(held._docker("inspect", "--format", "{{json .State}}", rows[name]["id"]))
+        state = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", rows[name]["id"]))
         if (not state.get("Running") or state.get("OOMKilled") or state.get("Paused")
                 or state.get("Restarting")
                 or state.get("Health", {}).get("Status", "healthy") != "healthy"):
@@ -196,21 +197,21 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
             or not re.fullmatch(r"[0-9a-f]{40}", source_revision)
             or not re.fullmatch(r"[A-Za-z0-9-]{4,128}", history_uuid)):
         raise ValueError("storage_online_preparation_invalid_binding")
-    with held._deployment_lock(state_root):
+    with host_boundary.deployment_lock(state_root):
         for name in ("promotion.env", "alert-preview.env",
                      "storage-online-worker.json", "storage-online-request.json", "storage-online-final.json"):
             if os.path.lexists(state_root/name):
                 raise RuntimeError("storage_online_preparation_conflicting_operation")
         saved = _load(state_root) if os.path.lexists(state_root/STATE) else None
         if saved is None:
-            if os.path.lexists(state_root/held.HOLD):
+            if os.path.lexists(state_root/host_boundary.HOLD):
                 raise RuntimeError("storage_online_preparation_unowned_hold")
             release = (state_root/"release.env").read_text()
             if (re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [source_revision]
                     or re.search(r"^storage_layout=.", release, flags=re.MULTILINE)):
                 raise RuntimeError("storage_online_preparation_source_release_required")
-            rows = held._inventory(project)
-            if not held._source_clients_serving(rows):
+            rows = host_boundary.inventory(project)
+            if not host_boundary.source_clients_serving(rows):
                 raise RuntimeError("storage_online_preparation_source_not_running")
             _before_capture(rows["tsdb"]["id"])
             recipe = _recipe(state_root, project)
@@ -218,11 +219,11 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
             saved = dict(schema=SCHEMA, project=project, source_revision=source_revision,
                 history_uuid=history_uuid, phase="preparing", started_at=started,
                 deadline=started+600, clients=_clients(rows),
-                source_roots=_source_roots(held._database_details(rows["market-data-collector"]["id"])),
-                recipe_sha256=recipe, cluster=held._cluster_identifier(rows["tsdb"]["id"]),
+                source_roots=_source_roots(host_boundary.database_details(rows["market-data-collector"]["id"])),
+                recipe_sha256=recipe, cluster=host_boundary.cluster_identifier(rows["tsdb"]["id"]),
                 hold_sha256=None, database=None, completed_at=None)
             # Intent is durable BEFORE the first source stop/database mutation.
-            held._save(state_root/STATE, saved, initial=True)
+            host_boundary.save_receipt(state_root/STATE, saved, initial=True)
         if (saved["project"], saved["source_revision"], saved["history_uuid"]) != (project, source_revision, history_uuid):
             raise RuntimeError("storage_online_preparation_binding_changed")
         if saved["phase"] == "serving":
@@ -231,19 +232,19 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
         if _recipe(state_root, project) != saved["recipe_sha256"]:
             raise RuntimeError("storage_online_preparation_recipe_changed")
         if saved["phase"] == "preparing":
-            rows = held._inventory(project, database_preparing=True)
+            rows = host_boundary.inventory(project, database_preparing=True)
             _admit_clients(rows, saved["clients"])
             with held._paused_storage_clients_locked(state_root, project=project,
                     source_revision=source_revision, prepare_database=True,
                     history_uuid=history_uuid, _preparation_deadline=saved["deadline"]) as receipt:
                 _remaining(saved)
                 _before_capture(receipt["containers"]["tsdb"]["id"])
-                database = held._database_details(receipt["containers"]["tsdb"]["id"])
-                saved.update(phase="resuming", hold_sha256=held._digest(receipt),
-                    database=dict(contract=held._database_contract(database),
-                        mounts=_mount_digest(database["mounts"]), networks=held._database_networks(database)))
-                held._save(state_root/STATE, saved, initial=False)
-        for name in held.STOP:
+                database = host_boundary.database_details(receipt["containers"]["tsdb"]["id"])
+                saved.update(phase="resuming", hold_sha256=host_boundary.digest(receipt),
+                    database=dict(contract=host_boundary.database_contract(database),
+                        mounts=_mount_digest(database["mounts"]), networks=host_boundary.database_networks(database)))
+                host_boundary.save_receipt(state_root/STATE, saved, initial=False)
+        for name in host_boundary.STOP:
             _remaining(saved)
             rows = _admit_source(state_root, saved, require_running=False)
             _before_capture(rows["tsdb"]["id"])
@@ -251,7 +252,7 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
                 if rows[name]["running"] or rows[name]["exit_code"] != 0:
                     raise RuntimeError("storage_online_preparation_completed_initializer_changed")
             elif not rows[name]["running"]:
-                held._docker("start", rows[name]["id"], timeout=min(60, _remaining(saved)))
+                host_boundary.docker("start", rows[name]["id"], timeout=min(60, _remaining(saved)))
         while True:
             _remaining(saved)
             rows = _admit_source(state_root, saved, require_running=True)
@@ -260,5 +261,5 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
             time.sleep(min(1, _remaining(saved)))
         _remaining(saved)
         saved.update(phase="serving", completed_at=time.time())
-        held._save(state_root/STATE, saved, initial=False)
+        host_boundary.save_receipt(state_root/STATE, saved, initial=False)
         return saved

@@ -9,6 +9,7 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_host_boundary.py
   - scripts/automation/storage_online_drain.py
   - tests/test_storage_online_drain.py
   - tests/test_market_data/test_storage_online_collector_drain_db.py
@@ -109,6 +110,18 @@ and initial/replacement encrypted baselines. The previous held-writer growth
 sensitivity is not an online capacity approval. Preserve the saved reserve and
 retention. Slow or nonconverging catch-up prevents switch eligibility rather than
 stopping collection indefinitely.
+
+## Host boundary ownership
+
+Shared host admission, bounded Docker calls, the deployment flock and durable
+receipt I/O live in `storage_host_boundary.py`. Online launch and final transition
+no longer depend on private functions in the historical held-copy orchestration.
+Initial preparation still reuses its preserving database preparation procedure.
+Phase owners retain their existing receipt schemas, transitions and original
+clocks; the shared module supplies no command or new switch/recovery authority.
+The [storage component workflow map](../persistence/STORAGE_MANAGEMENT.md#one-online-migration-workflow-and-its-owners)
+records the owners and the unfinished integration. This is a bounded dependency
+refactor, not a new workflow framework or a second operator path.
 
 ## Implemented slice
 

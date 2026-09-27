@@ -1,4 +1,5 @@
 """Initial source resumption, fixed clocks and drift refusal."""
+from scripts.automation import storage_host_boundary as host_boundary
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -27,8 +28,8 @@ def source_setup(database_setup, monkeypatch):
             details["mounts"] = [{"Type":"bind", "Source":str(working),
                 "Destination":"/app/logs/market-structure", "RW":True}]
         docker.details[row["id"]] = details
-    query = online.held._database_query
-    monkeypatch.setattr(online.held, "_database_query", lambda container, sql:
+    query = host_boundary.database_query
+    monkeypatch.setattr(host_boundary, "database_query", lambda container, sql:
         json.dumps({"archive_mode":"off","archive_command_disabled":True,"archive_configuration":0,"captures":0})
         if "'archive_mode'" in sql else query(container, sql))
     actual = docker.__call__
@@ -51,7 +52,7 @@ def source_setup(database_setup, monkeypatch):
                 raise TimeoutError("lost source start reply")
             return args[0]
         return actual(action, *args, **kwargs)
-    monkeypatch.setattr(online.held, "_docker", call)
+    monkeypatch.setattr(host_boundary, "docker", call)
     return state, docker, working, starts, interrupt
 
 
@@ -64,15 +65,15 @@ def test_success_and_read_only_reentry_keep_hold_and_original_deadlines(source_s
     state, docker, working, starts, _ = source_setup
     result = prepare(state)
     assert result["phase"] == "serving"
-    assert len(starts) == (len(online.held.STOP)-1)
-    hold = online.held._load(state/online.held.HOLD)
+    assert len(starts) == (len(host_boundary.STOP)-1)
+    hold = host_boundary.load_receipt(state/host_boundary.HOLD)
     assert hold["database_preparation"]["deadline"] == result["deadline"]
-    assert state.joinpath(online.held.HOLD).exists()
+    assert state.joinpath(host_boundary.HOLD).exists()
     before = (state/online.STATE).read_bytes()
     monkeypatch.setattr(online.time, "time", lambda: result["deadline"]+1000)
     assert prepare(state) == result
     assert (state/online.STATE).read_bytes() == before
-    assert len(starts) == (len(online.held.STOP)-1)
+    assert len(starts) == (len(host_boundary.STOP)-1)
     # Completed preparation is read-only admission, never permission to restart.
     docker.rows["backend"].update(running=False, status="exited", pid=0)
     with pytest.raises(RuntimeError, match="source_not_running"):
@@ -92,7 +93,7 @@ def test_interrupted_preparation_and_partial_resumption_retain_bindings(source_s
     result = prepare(state)
     assert result["deadline"] == first["deadline"]
     assert result["started_at"] == first["started_at"]
-    assert len(starts) == len(set(starts)) == (len(online.held.STOP)-1)
+    assert len(starts) == len(set(starts)) == (len(host_boundary.STOP)-1)
     assert docker.operations.count("create") == 1
 
 
@@ -115,7 +116,7 @@ def test_partial_resumption_refuses_drift_without_starting_another_client(source
         model["services"]["tsdb"]["environment"]["CHANGED"] = "true"
         path.write_text(json.dumps(model))
     elif drift == "hold":
-        path = state/online.held.HOLD
+        path = state/host_boundary.HOLD
         model = json.loads(path.read_text()); model["phase"] = "paused"
         path.write_text(json.dumps(model))
     else:
@@ -125,7 +126,7 @@ def test_partial_resumption_refuses_drift_without_starting_another_client(source
         prepare(state)
     assert len(starts) == 1
     assert online._load(state)["deadline"] == saved["deadline"]
-    assert (state/online.held.HOLD).exists()
+    assert (state/host_boundary.HOLD).exists()
 
 
 def test_existing_recovery_or_capture_is_refused_before_any_stop(source_setup, monkeypatch):
@@ -140,10 +141,10 @@ def test_existing_recovery_or_capture_is_refused_before_any_stop(source_setup, m
 @pytest.mark.parametrize("change", [{"archive_mode":"on"}, {"archive_configuration":1}, {"captures":1}])
 def test_real_initial_admission_refuses_existing_archive_or_capture(source_setup, monkeypatch, change):
     state, docker, _, starts, _ = source_setup
-    original = online.held._database_query
+    original = host_boundary.database_query
     value = dict(archive_mode="off", archive_command_disabled=True, archive_configuration=0, captures=0)
     value.update(change)
-    monkeypatch.setattr(online.held, "_database_query", lambda container, sql:
+    monkeypatch.setattr(host_boundary, "database_query", lambda container, sql:
         json.dumps(value) if "'archive_mode'" in sql else original(container,sql))
     with pytest.raises(RuntimeError, match="uncaptured_key_free_source"):
         prepare(state)
@@ -163,7 +164,7 @@ def test_health_wait_cannot_extend_preparation_or_mark_it_completed(source_setup
     assert saved["phase"] == "resuming" and saved["completed_at"] is None
     with pytest.raises(RuntimeError, match="deadline_expired"):
         prepare(state)
-    assert len(starts) == (len(online.held.STOP)-1)
+    assert len(starts) == (len(host_boundary.STOP)-1)
 
 
 def test_mount_order_is_not_identity_but_duplicate_or_changed_mount_is():

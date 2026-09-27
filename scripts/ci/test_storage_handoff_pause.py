@@ -16,6 +16,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from scripts.automation import storage_host_boundary as host_boundary
 from scripts.automation import storage_handoff_pause as pause
 
 
@@ -35,14 +36,14 @@ def main():
     image = run(["docker", "image", "inspect", "python:3.12.3-slim", "--format", "{{.Id}}"], env=env)
     containers = []
     network_created = False
-    actual_docker = pause._docker
+    actual_docker = host_boundary.docker
     with tempfile.TemporaryDirectory(prefix="qt-storage-pause-") as directory:
         state = Path(directory)
         (state / "release.env").write_text(f"current_revision={revision}\n")
         try:
             run(["docker", "network", "create", "--internal", network], env=env)
             network_created = True
-            for service in pause.STOP + pause.PASSIVE:
+            for service in host_boundary.STOP + host_boundary.PASSIVE:
                 command = ["docker", "run", "--detach", "--pull=never", "--init", "--network", network,
                     "--name", project + "-" + service, "--read-only", "--user", "65534:65534",
                     "--memory", "32m", "--cpus", "0.1", "--pids-limit", "32", "--restart", "unless-stopped",
@@ -64,21 +65,21 @@ def main():
                     lost = True
                     raise TimeoutError("injected lost stop reply")
                 return result
-            pause._docker = boundary
+            host_boundary.docker = boundary
             try:
                 with pause.paused_storage_clients(state, project=project, source_revision=revision):
                     raise AssertionError("lost reply was not injected")
             except TimeoutError:
                 if not lost:
                     raise
-            if json.loads((state / pause.HOLD).read_text())["phase"] != "pausing":
+            if json.loads((state / host_boundary.HOLD).read_text())["phase"] != "pausing":
                 raise AssertionError("interrupted pause lost its hold")
-            pause._docker = actual_docker
+            host_boundary.docker = actual_docker
             with pause.paused_storage_clients(state, project=project, source_revision=revision):
-                rows = pause._inventory(project)
-                if any(rows[x]["running"] for x in pause.STOP) or not all(rows[x]["running"] for x in pause.PASSIVE):
+                rows = host_boundary.inventory(project)
+                if any(rows[x]["running"] for x in host_boundary.STOP) or not all(rows[x]["running"] for x in host_boundary.PASSIVE):
                     raise AssertionError("fixed client/passive placement did not hold")
-            for service in pause.STOP:
+            for service in host_boundary.STOP:
                 if "stopped" not in run(["docker", "logs", "--tail", "2", rows[service]["id"]], env=env):
                     raise AssertionError("disposable signal drain was not observed")
             dispatch_env = {**env, "QT_SINGLE_NODE_STATE_ROOT": str(state),
@@ -94,7 +95,7 @@ def main():
                 held_deployment_refused=True, real_database_tested=False,
                 live_server_accessed=False)), flush=True)
         finally:
-            pause._docker = actual_docker
+            host_boundary.docker = actual_docker
             # Exact IDs created in this run only; never prune shared resources.
             errors = []
             for container in containers:
@@ -139,15 +140,15 @@ def runtime_recipe_rehearsal():
         path.write_text(json.dumps(model));path.chmod(0o600)
         normalized=render(path);model.clear();model.update(normalized)
         result=check()
-        assert result["recipe_sha256"]==pause._digest(normalized)
+        assert result["recipe_sha256"]==host_boundary.digest(normalized)
         assert model["services"]["market-data-collector"]["environment"]["PG_DSN"]==synthetic.replace("$","$$")
         again=render(path);assert again==normalized
         hashes=run(["docker","compose","--file",str(path),"config","--hash","*"],env=env)
         values=dict(line.split() for line in hashes.splitlines())
         assert set(values)==set(model["services"])
         assert all(len(value)==64 and int(value,16)>=0 for value in values.values())
-        assert (state/pause.HOLD).exists()
-        assert not any(database.rows[name]["running"] for name in pause.STOP)
+        assert (state/host_boundary.HOLD).exists()
+        assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
         print("PASS: actual Compose rendering preserves the fixed candidate recipe, existing database topology and literal-dollar synthetic credentials; admission retains the client hold; no containers were created")
 
 

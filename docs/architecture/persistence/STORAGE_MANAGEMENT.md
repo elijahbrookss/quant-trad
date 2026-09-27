@@ -9,6 +9,9 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_host_boundary.py
+  - scripts/automation/storage_handoff_pause.py
+  - tests/test_storage_handoff_pause.py
   - scripts/automation/storage_online_drain.py
   - tests/test_storage_online_drain.py
   - tests/test_market_data/test_storage_online_collector_drain_db.py
@@ -79,6 +82,46 @@ blocked: a UI confirmation cannot prepare a database or prove a migration.
 The existing collector loop performs history movement and local recovery copies
 under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
+
+## One online migration workflow and its owners
+
+The release workflow is: prepare the fixed SSD/HDD destination, copy and catch up
+while the original source serves, admit a short final pause, switch once, then
+activate the matching runtime and publish a complete encrypted recovery pair.
+This is the workflow required by [ADR 0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md).
+**Its complete operator is not implemented or qualified yet.** Internal phase
+helpers and disposable rehearsals are not alternative supported release commands.
+The historical operator that holds clients throughout copying is not this
+release's production path.
+
+Each boundary owns a different kind of truth:
+
+| Boundary | Owns | Cannot establish by itself |
+| --- | --- | --- |
+| `storage_host_boundary` | Bounded Docker I/O and observations, fixed service inventory, deployment flock, private durable receipt I/O. | Receipt meaning, publisher exclusion, phase completion or permission to resume/switch. |
+| `storage_online_prepare` | Initial preparation receipt, original 600-second window, original source identity and preserving initial resumption. | Final switch or a later recovery-mount transition. It still reuses the existing database preparation procedure. |
+| `storage_online_launch` | Exact migration-worker configuration, launcher lock lifetime, verified worker retirement and original capture binding. | Completion of a SQL switch or permission to expose recovery keys to a live read-capability worker. |
+| `storage_online_final` | Final wall/boot window, durable switch intent, source-stop/start journal and same-worker host coordination. | SQL commit truth from an exit code, stale receipt, or observed empty queue. |
+| `storage_online_controller` and bounded copy/proof components | Live controller ownership, current proof, original attempt/command deadlines and bounded preparation progress. | Host publisher exclusion or runtime activation. Process-local proof cannot be restored from a saved status reply. |
+| `fact_header_v2_handoff` | Verified SQL transaction and authoritative outcome inspection; separately admitted policy/runtime checks. | A safe host pause or source restart. The complete online host-to-worker COMMIT path remains unfinished. |
+| Recovery preparation and maintenance | Repository identity, native WAL delivery and publication/retention of complete encrypted database/archive pairs. | Permission to add secret mounts before exact committed reconciliation and verified read-worker retirement. |
+
+The shared host boundary has no CLI or migration state machine. Both historical
+and online phase modules call its named functions directly; there are no parallel
+copies or private compatibility forwarding functions in the historical module.
+Its single nested Docker deadline can only shorten the caller's existing window.
+Receipt serialization, file permissions, error codes, service admission and
+locking retain their prior behavior. Schema validation and transition decisions
+stay with the phase that owns each receipt.
+
+The remaining release integration must connect these owners into one operation,
+including continuous publisher exclusion and the post-switch recovery transition.
+It must not accumulate another set of competing receipt meanings or public phase
+commands. An uncertain switch requires fresh authoritative inspection; an
+in-flight or partially completed Docker start remains unresolved and cannot be
+replayed from a saved negative SQL result. The current final marker continues to
+block ordinary deployment/recovery entry until an explicitly qualified terminal
+transition exists. No refactor grants that missing authority.
 
 ## From a prepared drive to a reviewed change
 

@@ -6,6 +6,7 @@ All created containers, volume, network and scratch files are owned by this run.
 import argparse,json,os,select,subprocess,sys,time,uuid
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from scripts.automation import storage_host_boundary as host_boundary
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image',required=True)
 parser.add_argument('--database-image',required=True)
@@ -99,7 +100,7 @@ try:
     command=['postgres','-c','shared_buffers=32MB','-c','timescaledb.telemetry_level=off'],
     environment=dict(POSTGRES_USER='fixture',POSTGRES_DB=dbname,POSTGRES_PASSWORD=password,PGDATA='/var/lib/postgresql/data'),
     init=True,restart='no',shm_size=134217728,labels={'qt.disposable':project},
-    healthcheck=dict(test=launch.held._TCP_PROBE,interval='1s',timeout='2s',retries=90,start_period='10s'),
+    healthcheck=dict(test=initial.held._TCP_PROBE,interval='1s',timeout='2s',retries=90,start_period='10s'),
     volumes=[dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data')],
     networks={'quanttrad':{'aliases':['tsdb.quanttrad']}})
   model=dict(name=project,services={'tsdb':service},
@@ -108,7 +109,7 @@ try:
   source_recipe=state/'source.compose.json';source_recipe.write_text(json.dumps(model));source_recipe.chmod(0o600)
   recipe=json.loads(json.dumps(model))
   recipe['services']['tsdb']['volumes'].append(dict(type='bind',source=str(history),target='/qt-history',bind=dict(create_host_path=False)))
-  target_recipe=state/launch.held.DATABASE_RECIPE;target_recipe.write_text(json.dumps(recipe));target_recipe.chmod(0o600)
+  target_recipe=state/initial.held.DATABASE_RECIPE;target_recipe.write_text(json.dumps(recipe));target_recipe.chmod(0o600)
   run(['compose','--project-name',project,'--file',str(source_recipe),'up','-d','--no-build','--pull','never','--wait','--wait-timeout','90'])
  else:
   run(['run','-d','--name',pgname,'--network',network,'--network-alias','tsdb','--hostname','tsdb.quanttrad',*labels('tsdb'),'--memory','256m','--cpus','2',
@@ -121,7 +122,7 @@ try:
  while run(['exec',pgid,'pg_isready','-h','127.0.0.1','-U','fixture'],check=False).returncode:
   if time.monotonic()>until:raise RuntimeError('fixture_db_timeout')
   time.sleep(.2)
- for service in launch.held.STOP+launch.held.PASSIVE:
+ for service in host_boundary.STOP+host_boundary.PASSIVE:
   if service=='tsdb' or (service=='market-data-collector' and not options.prepare_source):continue
   name=project+'-'+service;owned.append(name)
   extra=[]
@@ -152,14 +153,14 @@ try:
   device=history.stat().st_dev
   (udev/f'b{os.major(device)}:{os.minor(device)}').write_text('E:ID_FS_UUID=uuid-copy-hdd\n')
   os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
-  original_cluster=launch.held._cluster_identifier(pgid)
+  original_cluster=host_boundary.cluster_identifier(pgid)
   preparation=initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')
   prepared_bytes=(state/initial.STATE).read_bytes()
   assert preparation['phase']=='serving' and preparation['deadline']-preparation['started_at']==600
   assert initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')==preparation
-  pgid=launch.held._inventory(project)['tsdb']['id']
-  assert launch.held._cluster_identifier(pgid)==original_cluster
-  assert not launch.held._inventory(project)['initialize']['running']
+  pgid=host_boundary.inventory(project)['tsdb']['id']
+  assert host_boundary.cluster_identifier(pgid)==original_cluster
+  assert not host_boundary.inventory(project)['initialize']['running']
   intake_before=(working/'objects'/'native-intake').stat().st_size
   report['initial_preparation_seconds']=preparation['completed_at']-preparation['started_at']
   report['initial_preparation_receipt_retained']=True
@@ -191,7 +192,7 @@ try:
  inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes())
  udev=control/Path(json.loads((control/'ready.json').read_text())['udev']).relative_to('/qt-control')
  os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
- source=launch.held._identities(launch.held._inventory(project))
+ source=host_boundary.identities(host_boundary.inventory(project))
  original_source_metadata=[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
  kwargs=dict(project=project,source_revision=revision,image=image,request=request,
              inventory_path=inventory,descriptor_limit=1024,memory_bytes=1024**3)
@@ -273,9 +274,9 @@ try:
      # The independent diagnostic publisher shares source mounts but is outside
      # the admitted project/network. Prove refusal, then let it finish while the
      # real source peers still serve. Never exempt it from production admission.
-     with launch.held._docker_deadline(time.monotonic()+5):
+     with host_boundary.docker_deadline(time.monotonic()+5):
       try:
-       final_host._admit_mount_writers(launch.held._inventory(project,operator_id=first_id),operator_id=first_id)
+       final_host._admit_mount_writers(host_boundary.inventory(project,operator_id=first_id),operator_id=first_id)
        raise AssertionError('independent fixture publisher admitted')
       except RuntimeError as exc:
        assert str(exc)=='storage_online_unadmitted_mount_writer'
@@ -289,7 +290,7 @@ try:
      publisher_state=json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)
      assert not publisher_state['Running'] and publisher_state['Pid']==0
      frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t),'capture',(SELECT to_jsonb(c) FROM qt_fact_header_cutover_v2.capture c WHERE id=1))::text"
-     before_final_frozen=launch.held._database_query(pgid,frozen_sql)
+     before_final_frozen=host_boundary.database_query(pgid,frozen_sql)
      report['independent_publisher_retired_before_final']=dict(unadmitted_writer_refused=True,
        original_clients_still_serving=True,fixture_exited=True,source_pause_started=False,
        publisher_exclusion_authorized=False)
@@ -301,14 +302,14 @@ try:
         "from pathlib import Path;p=Path('/s/objects');[(p/n).unlink(missing_ok=True) for n in ('lifecycle-stopped','heartbeat-stopped')];"+
         ("(p/'fail-final-drain').write_text('fail')" if options.worker_shutdown=='fail' else "None")])
      def interrupt_first_stop():
-      original=launch.held._docker
+      original=host_boundary.docker
       def stop_then_die(*args,**kwargs):
        value=original(*args,**kwargs)
        if args[0]=='stop':
         assert final_host._load(state/final_host.STATE)['phase']=='stopping'
         os.kill(os.getpid(),signal.SIGKILL)
        return value
-      launch.held._docker=stop_then_die
+      host_boundary.docker=stop_then_die
       final_host.stop_online_source_locked(state,**pause_args)
      child=multiprocessing.get_context('fork').Process(target=interrupt_first_stop)
      child.start();child.join(timeout=30)
@@ -318,8 +319,8 @@ try:
      assert child.exitcode == -signal.SIGKILL
      first=final_host._load(state/final_host.STATE)
      assert first['phase']=='stopping'
-     rows=launch.held._inventory(project,operator_id=first_id)
-     assert sum(not rows[n]['running'] for n in launch.held.STOP)==2
+     rows=host_boundary.inventory(project,operator_id=first_id)
+     assert sum(not rows[n]['running'] for n in host_boundary.STOP)==2
      try:
       paused=final_host.stop_online_source_locked(state,**pause_args)
      except RuntimeError as exc:
@@ -350,9 +351,9 @@ try:
      finally:
       inventory.write_bytes(inventory_before)
      assert (state/final_host.STATE).read_bytes()==before
-     rows=launch.held._inventory(project,operator_id=first_id)
-     assert not any(rows[n]['running'] for n in launch.held.STOP)
-     assert all(rows[n]['running'] for n in launch.held.PASSIVE)
+     rows=host_boundary.inventory(project,operator_id=first_id)
+     assert not any(rows[n]['running'] for n in host_boundary.STOP)
+     assert all(rows[n]['running'] for n in host_boundary.PASSIVE)
      assert command('status')['controller_id']==greeting['controller_id']
      drained=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
      assert not drained['spool_empty_at_observation'] and not drained['publisher_drain_authorized']
@@ -436,12 +437,12 @@ try:
         fully_received_reply_loss=True,final_switch_authorized=False)
       final=command('status')
       if options.switch_entry:
-       original_save=final_host.held._save
+       original_save=host_boundary.save_receipt
        def save_then_interrupt(path,value,**args):
         original_save(path,value,**args)
         if path==state/final_host.STATE and value['phase']=='switch_entered':
          raise RuntimeError('fixture interrupted after durable switch intent')
-       final_host.held._save=save_then_interrupt
+       host_boundary.save_receipt=save_then_interrupt
        try:
         try:
          final_host.record_switch_entry_locked(state,deadline=deadline,
@@ -449,7 +450,7 @@ try:
          raise AssertionError('switch intent interruption was lost')
         except RuntimeError as exc:
          assert str(exc)=='fixture interrupted after durable switch intent'
-       finally:final_host.held._save=original_save
+       finally:host_boundary.save_receipt=original_save
        entered=final_host._load(state/final_host.STATE)
        assert entered['phase']=='switch_entered' and entered['binding']==paused['binding']
        assert entered['deadline']==paused['deadline'] and entered['deadline_boot']==paused['deadline_boot']
@@ -482,21 +483,21 @@ try:
         resume_started=time.monotonic()
         if options.abort_resume_fence_loss:
          from scripts.ci.online_start_reply_fixture import held_start_reply
-         first_service=next(n for n in launch.held.STOP if preparation['clients'][n]['was_running'])
+         first_service=next(n for n in host_boundary.STOP if preparation['clients'][n]['was_running'])
          first_source=source[first_service]['id']
          killed=[]
          def kill_owned_fence():
-          with launch.held._docker_deadline(deadline):
+          with host_boundary.docker_deadline(deadline):
            if options.abort_resume_late_start:
-            before=launch.held._inventory(project,operator_id=receipt['container_id'])
-            assert not any(before[n]['running'] for n in launch.held.STOP)
+            before=host_boundary.inventory(project,operator_id=receipt['container_id'])
+            assert not any(before[n]['running'] for n in host_boundary.STOP)
            pending=final_host._load(state/final_host.STATE)
            assert pending['phase']=='source_resuming'
            assert pending['resume']['inflight']['container_id']==first_source
            sql="SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid() AND classid=((hashtextextended('quant-trad:fact-header-cutover:v2',0)>>32)&4294967295)::oid AND objid=(hashtextextended('quant-trad:fact-header-cutover:v2',0)&4294967295)::oid"
-           pid=launch.held._database_query(pgid,sql).strip()
+           pid=host_boundary.database_query(pgid,sql).strip()
            assert pid.isdigit()
-           assert launch.held._database_query(pgid,'SELECT pg_terminate_backend('+pid+',5000)').strip()=='t'
+           assert host_boundary.database_query(pgid,'SELECT pg_terminate_backend('+pid+',5000)').strip()=='t'
            killed.append(int(pid))
          fault_arguments={'on_queued' if options.abort_resume_late_start else 'on_started':kill_owned_fence}
          with held_start_reply(first_source,deadline=deadline,**fault_arguments) as fault:
@@ -519,8 +520,8 @@ try:
          assert pending['resume']['inflight']['container_id']==first_source
          assert pending['deadline']==entered['deadline'] and pending['deadline_boot']==entered['deadline_boot']
          assert pending['switch']==entered['switch'] and pending['binding']==entered['binding']
-         exact=launch.held._inventory(project,operator_id=receipt['container_id'])
-         assert [n for n in launch.held.STOP if exact[n]['running']]==[first_service]
+         exact=host_boundary.inventory(project,operator_id=receipt['container_id'])
+         assert [n for n in host_boundary.STOP if exact[n]['running']]==[first_service]
          unresolved=(state/final_host.STATE).read_bytes()
          try:
           final_host.resume_online_source_locked(state,exchange=command)
@@ -547,7 +548,7 @@ try:
           except TimeoutError:pass
           pending=final_host._load(state/final_host.STATE)
           assert pending['phase']=='source_resuming' and pending['resume']['inflight'] is None
-          assert pending['resume']['completed']==[n for n in launch.held.STOP if preparation['clients'][n]['was_running']]
+          assert pending['resume']['completed']==[n for n in host_boundary.STOP if preparation['clients'][n]['was_running']]
           original_start=final_host._supervised_source_start
           def forbid_start(*args,**kwargs):raise AssertionError('terminal reconciliation replayed a start')
           final_host._supervised_source_start=forbid_start
@@ -595,7 +596,7 @@ try:
    assert not observed['Running'] and not observed['Restarting'] and observed['Pid']==0
    report['worker_attach_loss']['daemon_worker_retired']=True
   assert worker.returncode != 0 if (options.abort_resume_fence_loss or options.worker_attach_loss and attempt==0) else worker.returncode == 0
-  assert launch.held._identities(launch.held._inventory(project,operator_id=receipt['container_id']))==source
+  assert host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:
   # A host exception must close only its background worker; source keeps serving.
   class HostInterrupted(RuntimeError):
@@ -609,7 +610,7 @@ try:
   except HostInterrupted:
    pass
   assert worker.returncode==0
-  assert launch.held._identities(launch.held._inventory(project,operator_id=first_id))==source
+  assert host_boundary.identities(host_boundary.inventory(project,operator_id=first_id))==source
   assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
   report['host_exception_stopped_only_worker']=True
   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
@@ -640,11 +641,11 @@ try:
   else:
    assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
   assert (working/'objects'/'native-intake').stat().st_size>intake_before
-  assert not launch.held._inventory(project,operator_id=first_id)['initialize']['running']
+  assert not host_boundary.inventory(project,operator_id=first_id)['initialize']['running']
   report['initial_to_worker_receipt_admission']=True
   report['synthetic_intake_continued']=True
  if options.final_pause:
-  assert launch.held._database_query(pgid,frozen_sql)==before_final_frozen
+  assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
   report['frozen_and_original_capture_retained_after_final']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0

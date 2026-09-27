@@ -16,7 +16,7 @@ import sys
 import subprocess
 import time
 
-from scripts.automation import storage_handoff_pause as held
+from scripts.automation import storage_host_boundary as host_boundary
 from scripts.automation import storage_online_launch as launch
 from scripts.automation import storage_online_prepare as initial
 
@@ -50,7 +50,7 @@ def _remaining(saved):
 
 
 def _load(path):
-    saved = held._load(path)
+    saved = host_boundary.load_receipt(path)
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming
     fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set())
@@ -89,14 +89,14 @@ def _load(path):
                 or type(resume["started_at"]) not in (int, float)
                 or not saved["switch"]["entered_at"] <= resume["started_at"] <= saved["deadline"]
                 or not isinstance(resume["completed"], list)
-                or any(not isinstance(n, str) or n not in held.STOP for n in resume["completed"])
+                or any(not isinstance(n, str) or n not in host_boundary.STOP for n in resume["completed"])
                 or len(set(resume["completed"])) != len(resume["completed"])
-                or resume["completed"] != [n for n in held.STOP if n in resume["completed"]]):
+                or resume["completed"] != [n for n in host_boundary.STOP if n in resume["completed"]]):
             raise RuntimeError("storage_online_resume_receipt_invalid")
         action = resume["inflight"]
         if action is not None and (not isinstance(action, dict)
                 or set(action) != {"service", "container_id", "requested_at"}
-                or not isinstance(action["service"], str) or action["service"] not in held.STOP
+                or not isinstance(action["service"], str) or action["service"] not in host_boundary.STOP
                 or action["service"] in resume["completed"]
                 or not isinstance(action["container_id"], str)
                 or not re.fullmatch(r"[0-9a-f]{64}", action["container_id"])
@@ -121,7 +121,7 @@ def _admit_mount_writers(rows, *, operator_id):
     and never grants switch authority. The caller retains its original deadline.
     No environment, mount path or namespace name is logged or persisted.
     """
-    if held._DOCKER_DEADLINE.get() is None:
+    if host_boundary.current_docker_deadline() is None:
         raise RuntimeError("storage_online_writer_deadline_required")
     allowed = {row["id"] for row in rows.values()} | {operator_id}
     if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
@@ -134,12 +134,12 @@ def _admit_mount_writers(rows, *, operator_id):
         '"network_mode":{{json .HostConfig.NetworkMode}},"pid_mode":{{json .HostConfig.PidMode}}}')
 
     def snapshot():
-        ids = held._docker("ps", "--all", "--quiet", "--no-trunc").split()
+        ids = host_boundary.docker("ps", "--all", "--quiet", "--no-trunc").split()
         if (not ids or len(ids) > 256 or len(ids) != len(set(ids))
                 or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in ids)
                 or not allowed <= set(ids)):
             raise RuntimeError("storage_online_writer_inventory_invalid")
-        result = [json.loads(line) for line in held._docker(
+        result = [json.loads(line) for line in host_boundary.docker(
             "inspect", "--format", expression, *sorted(ids)).splitlines()]
         if (len(result) != len(ids) or {row.get("id") for row in result} != set(ids)):
             raise RuntimeError("storage_online_writer_inventory_invalid")
@@ -232,7 +232,7 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id):
     if (preparation["phase"] != "serving" or preparation["project"] != project
             or preparation["source_revision"] != source_revision):
         raise RuntimeError("storage_online_final_completed_preparation_required")
-    worker = held._load(state_root/launch._STATE)
+    worker = host_boundary.load_receipt(state_root/launch._STATE)
     if (worker["container_id"] != worker_id
             or worker["binding"]["project"] != project
             or worker["binding"]["source_revision"] != source_revision):
@@ -242,18 +242,18 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id):
     if (inventory.stat().st_size > 65536
             or hashlib.sha256(inventory.read_bytes()).hexdigest() != worker["binding"]["inventory_sha256"]):
         raise RuntimeError("storage_online_final_inventory_changed")
-    runtime = json.loads(held._docker("inspect", "--format", "{{json .State}}", worker_id))
+    runtime = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", worker_id))
     if (not runtime["Running"] or runtime["Paused"] or runtime["Restarting"]
             or runtime["OOMKilled"] or runtime["Pid"] <= 0):
         raise RuntimeError("storage_online_final_live_worker_required")
     request_path = state_root/"storage-online-request.json"
-    request = held._load(request_path)
+    request = host_boundary.load_receipt(request_path)
     digest = hashlib.sha256(request_path.read_bytes()).hexdigest()
     if digest != worker["binding"]["request_sha256"]:
         raise RuntimeError("storage_online_final_request_changed")
     rows = initial._admit_source(state_root, preparation, require_running=False, operator_id=worker_id)
     _admit_mount_writers(rows, operator_id=worker_id)
-    capture = json.loads(held._database_query(rows["tsdb"]["id"],
+    capture = json.loads(host_boundary.database_query(rows["tsdb"]["id"],
         "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
     seconds = capture.get("attempt_seconds", 86400)
     started = datetime.fromisoformat(capture["prepared_at"])
@@ -266,7 +266,7 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id):
         raise RuntimeError("storage_online_final_resource_bound_invalid")
     binding = dict(project=project, source_revision=source_revision, controller_id=controller_id,
         worker_id=worker_id, worker_started_at=runtime["StartedAt"], worker_pid=runtime["Pid"],
-        preparation_sha256=held._digest(preparation), worker_sha256=held._digest(worker),
+        preparation_sha256=host_boundary.digest(preparation), worker_sha256=host_boundary.digest(worker),
         request_sha256=digest, capture=capture)
     return binding, preparation, rows, {"seconds": allowance, "capture_deadline": worker["deadline"]}
 
@@ -305,7 +305,7 @@ def stop_online_source_locked(state_root, *, project, source_revision, controlle
             duration_seconds=max_duration_seconds, paused_at=None)
     elif saved["duration_seconds"] != max_duration_seconds:
         raise RuntimeError("storage_online_final_duration_changed")
-    with held._docker_deadline(time.monotonic()+_remaining(saved)):
+    with host_boundary.docker_deadline(time.monotonic()+_remaining(saved)):
         def observe():
             _remaining(saved)
             result = _observe(state_root, project=project, source_revision=source_revision,
@@ -319,32 +319,32 @@ def stop_online_source_locked(state_root, *, project, source_revision, controlle
             return result
         binding, preparation, rows, _ = observe()
         if saved["binding"] is None:
-            if (not held._source_clients_serving(rows)
+            if (not host_boundary.source_clients_serving(rows)
                     or any(rows[name]["running"] != preparation["clients"][name]["was_running"]
-                           for name in held.STOP) or not initial._source_healthy(rows)):
+                           for name in host_boundary.STOP) or not initial._source_healthy(rows)):
                 raise RuntimeError("storage_online_final_serving_source_required")
             saved["binding"] = binding
-            held._save(path, saved, initial=True)  # BEFORE first source mutation.
+            host_boundary.save_receipt(path, saved, initial=True)  # BEFORE first source mutation.
             print("event=storage_online_final_stop_started resume_authorized=false",
                   file=sys.stderr, flush=True)
         if saved["phase"] == "paused":
-            if any(rows[name]["running"] for name in held.STOP):
+            if any(rows[name]["running"] for name in host_boundary.STOP):
                 raise RuntimeError("storage_online_final_stopped_client_restarted")
             return saved
-        for name in held.STOP:
+        for name in host_boundary.STOP:
             _, _, rows, _ = observe()
             if rows[name]["running"]:
                 # Infinite daemon grace avoids forced SIGKILL. The host call is
                 # still capped by its original deadline. Lost reply/timeout may
                 # leave a stop in flight: retain intent, never claim drained.
-                held._docker("stop", "--signal", "SIGTERM", "--timeout", "-1", rows[name]["id"],
+                host_boundary.docker("stop", "--signal", "SIGTERM", "--timeout", "-1", rows[name]["id"],
                              timeout=_remaining(saved))
         _, _, rows, _ = observe()
-        if any(rows[name]["running"] for name in held.STOP):
+        if any(rows[name]["running"] for name in host_boundary.STOP):
             raise RuntimeError("storage_online_final_clients_not_stopped")
         saved.update(phase="paused", paused_at=time.time())
         _remaining(saved)
-        held._save(path, saved, initial=False)
+        host_boundary.save_receipt(path, saved, initial=False)
         _remaining(saved)
         print("event=storage_online_final_clients_stopped database_switch_authorized=false",
               file=sys.stderr, flush=True)
@@ -369,12 +369,12 @@ def observe_source_drain_locked(state_root, *, exchange, max_entries):
     def admit():
         _remaining(saved)
         observed, _, rows, _ = _observe(state_root, **args)
-        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
             raise RuntimeError("storage_online_spool_source_changed")
         _remaining(saved)
-    with held._docker_deadline(time.monotonic()+_remaining(saved)):
+    with host_boundary.docker_deadline(time.monotonic()+_remaining(saved)):
         admit()
-        request = held._load(state_root/"storage-online-request.json")
+        request = host_boundary.load_receipt(state_root/"storage-online-request.json")
         seconds = min(request["command_seconds"], _remaining(saved))
         deadline = time.monotonic()+seconds
         reply = exchange("source_drain", deadline=deadline, max_entries=max_entries)
@@ -421,13 +421,13 @@ def copy_final_delta_locked(state_root, *, exchange, deadline, max_rounds):
         if not 0 < remaining <= _remaining(saved):
             raise RuntimeError("storage_online_final_delta_host_deadline_invalid")
         observed, _, rows, _ = _observe(state_root, **args)
-        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
             raise RuntimeError("storage_online_final_delta_source_changed")
         if time.monotonic() >= deadline:
             raise RuntimeError("storage_online_final_delta_host_deadline_expired")
         _remaining(saved)
 
-    with held._docker_deadline(deadline):
+    with host_boundary.docker_deadline(deadline):
         last = None
         for index in range(max_rounds):
             admit()
@@ -484,13 +484,13 @@ def record_switch_entry_locked(state_root, *, observe_worker, deadline):
         if not 0 < deadline-time.monotonic() <= _remaining(saved):
             raise RuntimeError("storage_online_switch_entry_deadline_invalid")
         observed, _, rows, _ = _observe(state_root, **args)
-        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
             raise RuntimeError("storage_online_switch_entry_source_changed")
         _remaining(saved)
         if time.monotonic() >= deadline:
             raise RuntimeError("storage_online_switch_entry_deadline_expired")
 
-    with held._docker_deadline(deadline):
+    with host_boundary.docker_deadline(deadline):
         admit()
         reply = observe_worker(deadline=deadline)
         admit()
@@ -506,7 +506,7 @@ def record_switch_entry_locked(state_root, *, observe_worker, deadline):
             "deadline_monotonic": deadline, "worker_sequence": reply["last_sequence"]})
         # Saving is the only mutation. Any failure after it remains uncertain;
         # no dispatch, ordinary pause reentry or marker removal follows here.
-        held._save(state_root/STATE, saved, initial=False)
+        host_boundary.save_receipt(state_root/STATE, saved, initial=False)
         admit()
         print("event=storage_online_switch_entry_recorded database_switch_authorized=false",
               file=sys.stderr, flush=True)
@@ -524,7 +524,7 @@ def inspect_switch_outcome_locked(state_root, *, exchange):
         raise RuntimeError("storage_online_outcome_switch_intent_required")
     binding = saved["binding"]
     args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
-    request = held._load(state_root/"storage-online-request.json")
+    request = host_boundary.load_receipt(state_root/"storage-online-request.json")
     seconds = request["command_seconds"]
     if type(seconds) is not int or not 1 <= seconds <= 60:
         raise RuntimeError("storage_online_outcome_command_budget_invalid")
@@ -534,12 +534,12 @@ def inspect_switch_outcome_locked(state_root, *, exchange):
         if time.monotonic() >= deadline:
             raise RuntimeError("storage_online_outcome_host_deadline_expired")
         observed, _, rows, _ = _observe(state_root, **args)
-        if observed != binding or any(rows[n]["running"] for n in held.STOP):
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
             raise RuntimeError("storage_online_outcome_source_changed")
         _remaining(saved)
         if time.monotonic() >= deadline:
             raise RuntimeError("storage_online_outcome_host_deadline_expired")
-    with held._docker_deadline(deadline):
+    with host_boundary.docker_deadline(deadline):
         admit()
         reply = exchange("inspect_outcome", deadline=deadline)
         admit()
@@ -637,7 +637,7 @@ def resume_online_source_locked(state_root, *, exchange):
             if rows[action["service"]]["id"] != action["container_id"]:
                 raise RuntimeError("storage_online_resume_source_changed")
             allowed.add(action["service"])
-        for name in held.STOP:
+        for name in host_boundary.STOP:
             if (rows[name]["running"] and (name not in allowed
                     or not preparation["clients"][name]["was_running"])):
                 raise RuntimeError("storage_online_resume_unexpected_running_client")
@@ -673,23 +673,23 @@ def resume_online_source_locked(state_root, *, exchange):
         fence("rollback_fence_check")
         admit()
 
-    with held._docker_deadline(deadline):
+    with host_boundary.docker_deadline(deadline):
         preparation, rows = admit()
         fence("rollback_fence_begin")
         admit()
         saved.update(phase="source_resuming", resume={"started_at": time.time(),
             "completed": [], "inflight": None, "finished_at": None})
-        held._save(path, saved, initial=False)
+        host_boundary.save_receipt(path, saved, initial=False)
         print("event=storage_online_source_resume_started runtime_activation_authorized=false",
               file=sys.stderr, flush=True)
-        for name in held.STOP:
+        for name in host_boundary.STOP:
             if not preparation["clients"][name]["was_running"]:
                 continue
             check()
             _, rows = admit()
             saved["resume"]["inflight"] = {"service": name, "container_id": rows[name]["id"],
                                              "requested_at": time.time()}
-            held._save(path, saved, initial=False)  # BEFORE Docker dispatch.
+            host_boundary.save_receipt(path, saved, initial=False)  # BEFORE Docker dispatch.
             _supervised_source_start(rows[name]["id"], deadline=deadline, check=check)
             check()
             _, rows = admit()
@@ -697,7 +697,7 @@ def resume_online_source_locked(state_root, *, exchange):
                 raise RuntimeError("storage_online_resume_client_not_running")
             saved["resume"]["completed"].append(name)
             saved["resume"]["inflight"] = None
-            held._save(path, saved, initial=False)
+            host_boundary.save_receipt(path, saved, initial=False)
         while True:
             check()
             _, rows = admit()
@@ -711,7 +711,7 @@ def resume_online_source_locked(state_root, *, exchange):
         budget()
         saved["phase"] = "source_resumed"
         saved["resume"]["finished_at"] = time.time()
-        held._save(path, saved, initial=False)
+        host_boundary.save_receipt(path, saved, initial=False)
         budget()
         print("event=storage_online_original_source_resumed final_marker_retained=true",
               file=sys.stderr, flush=True)
@@ -737,7 +737,7 @@ def reconcile_source_resumed_locked(state_root, *, exchange):
         raise RuntimeError("storage_online_resume_completed_journal_required")
     binding = saved["binding"]
     args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
-    request = held._load(state_root/"storage-online-request.json")
+    request = host_boundary.load_receipt(state_root/"storage-online-request.json")
     seconds = request["command_seconds"]
     if type(seconds) is not int or not 1 <= seconds <= 60:
         raise RuntimeError("storage_online_resume_command_budget_invalid")
@@ -752,17 +752,17 @@ def reconcile_source_resumed_locked(state_root, *, exchange):
         if (observed != binding or saved["duration_seconds"] > limits["seconds"]
                 or saved["deadline"] > limits["capture_deadline"]):
             raise RuntimeError("storage_online_resume_source_changed")
-        expected = [n for n in held.STOP if preparation["clients"][n]["was_running"]]
+        expected = [n for n in host_boundary.STOP if preparation["clients"][n]["was_running"]]
         if saved["resume"]["completed"] != expected:
             raise RuntimeError("storage_online_resume_completed_journal_required")
-        if (any(rows[n]["running"] != (n in expected) for n in held.STOP)
+        if (any(rows[n]["running"] != (n in expected) for n in host_boundary.STOP)
                 or not initial._source_healthy(rows)):
             raise RuntimeError("storage_online_resume_healthy_source_required")
         _remaining(saved)
         if time.monotonic() >= deadline:
             raise RuntimeError("storage_online_resume_deadline_expired")
 
-    with held._docker_deadline(deadline):
+    with host_boundary.docker_deadline(deadline):
         admit()
         reply = exchange("inspect_outcome", deadline=deadline)
         admit()
@@ -781,7 +781,7 @@ def reconcile_source_resumed_locked(state_root, *, exchange):
             raise RuntimeError("storage_online_resume_terminal_reply_invalid")
         saved["phase"] = "source_resumed"
         saved["resume"]["finished_at"] = time.time()
-        held._save(path, saved, initial=False)
+        host_boundary.save_receipt(path, saved, initial=False)
         _remaining(saved)
         if time.monotonic() >= deadline:
             raise RuntimeError("storage_online_resume_deadline_expired")

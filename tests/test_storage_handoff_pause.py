@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from scripts.automation import storage_host_boundary as host_boundary
 import fcntl
 import json
 import os
@@ -21,7 +22,7 @@ class Docker:
         self.fail_after_stop = None
         self.forced = None
         self.rows = {}
-        for i, service in enumerate(pause.STOP + pause.PASSIVE, 1):
+        for i, service in enumerate(host_boundary.STOP + host_boundary.PASSIVE, 1):
             self.rows[service] = dict(id=f"{i:064x}", image="sha256:" + f"{i:064x}",
                 project=PROJECT, service=service, oneoff="False", restart="unless-stopped",
                 running=True, restarting=False, paused=False, pid=i, status="running", exit_code=0, oom=False)
@@ -33,7 +34,7 @@ class Docker:
         if action == "inspect":
             return "\n".join(json.dumps(x) for x in self.rows.values())
         assert action == "stop"
-        assert (self.state / pause.HOLD).exists(), "hold must precede the first stop"
+        assert (self.state / host_boundary.HOLD).exists(), "hold must precede the first stop"
         assert kwargs["timeout"] <= 330
         row = next(x for x in self.rows.values() if x["id"] == args[-1])
         self.stops.append(row["service"])
@@ -50,7 +51,7 @@ def setup(tmp_path, monkeypatch):
     state.mkdir()
     (state / "release.env").write_text(f"current_revision={REVISION}\n")
     docker = Docker(state)
-    monkeypatch.setattr(pause, "_docker", docker)
+    monkeypatch.setattr(host_boundary, "docker", docker)
     return state, docker
 
 
@@ -62,17 +63,17 @@ def test_pause_holds_existing_lock_and_keeps_database_and_telemetry_running(setu
     state, docker = setup
     with enter(state) as receipt:
         assert receipt["phase"] == "paused"
-        assert not any(docker.rows[x]["running"] for x in pause.STOP)
-        assert all(docker.rows[x]["running"] for x in pause.PASSIVE)
+        assert not any(docker.rows[x]["running"] for x in host_boundary.STOP)
+        assert all(docker.rows[x]["running"] for x in host_boundary.PASSIVE)
         with (state / "deployment.lock").open("w") as other:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    assert (state / pause.HOLD).stat().st_mode & 0o777 == 0o600
+    assert (state / host_boundary.HOLD).stat().st_mode & 0o777 == 0o600
     prior = docker.stops[:]
     with enter(state):
         pass
     assert docker.stops == prior
-    assert (state / pause.HOLD).exists()  # success is not permission to restart
+    assert (state / host_boundary.HOLD).exists()  # success is not permission to restart
 
 
 def test_lost_stop_reply_can_resume_without_restarting_already_stopped_services(setup):
@@ -81,7 +82,7 @@ def test_lost_stop_reply_can_resume_without_restarting_already_stopped_services(
     with pytest.raises(TimeoutError):
         with enter(state):
             pytest.fail("pause must not authorize a cutover")
-    assert json.loads((state / pause.HOLD).read_text())["phase"] == "pausing"
+    assert json.loads((state / host_boundary.HOLD).read_text())["phase"] == "pausing"
     with enter(state):
         pass
     assert docker.stops.count("backend") == docker.stops.count("market-data-collector") == 1
@@ -92,8 +93,8 @@ def test_caller_failure_keeps_clients_stopped_and_hold_present(setup):
     with pytest.raises(RuntimeError, match="cutover interrupted"):
         with enter(state):
             raise RuntimeError("cutover interrupted")
-    assert (state / pause.HOLD).exists()
-    assert not any(docker.rows[x]["running"] for x in pause.STOP)
+    assert (state / host_boundary.HOLD).exists()
+    assert not any(docker.rows[x]["running"] for x in host_boundary.STOP)
 
 
 @pytest.mark.parametrize("change", ["unexpected", "restarting", "always", "database_down", "oneoff", "missing", "oom"])
@@ -117,7 +118,7 @@ def test_unsafe_initial_state_never_stops_anything(setup, change):
         with enter(state):
             pytest.fail("unsafe source accepted")
     assert not docker.stops
-    assert not (state / pause.HOLD).exists()
+    assert not (state / host_boundary.HOLD).exists()
 
 
 def test_forced_kill_is_not_accepted_as_clean_pause(setup):
@@ -126,7 +127,7 @@ def test_forced_kill_is_not_accepted_as_clean_pause(setup):
     with pytest.raises(RuntimeError, match="unclean_stop"):
         with enter(state):
             pytest.fail("SIGKILL incorrectly qualified")
-    assert (state / pause.HOLD).exists()
+    assert (state / host_boundary.HOLD).exists()
 
 
 @pytest.mark.parametrize("change", ["id", "image", "project", "source_revision", "corrupt", "duplicate", "symlink"])
@@ -134,7 +135,7 @@ def test_changed_or_corrupt_hold_cannot_resume(setup, change):
     state, docker = setup
     with enter(state):
         pass
-    path = state / pause.HOLD
+    path = state / host_boundary.HOLD
     receipt = json.loads(path.read_text())
     if change in ("id", "image"):
         docker.rows["backend"][change] = "e" * 64
@@ -163,12 +164,12 @@ def test_container_created_after_backend_stops_blocks_cutover(setup, monkeypatch
         if action == "stop":
             docker.rows["runtime"] = {**docker.rows["backend"], "service": "runtime", "id": "f" * 64}
         return result
-    monkeypatch.setattr(pause, "_docker", boundary)
+    monkeypatch.setattr(host_boundary, "docker", boundary)
     with pytest.raises(RuntimeError, match="unexpected_client"):
         with enter(state):
             pytest.fail("late runtime accepted")
     assert docker.stops == ["backend"]
-    assert (state / pause.HOLD).exists()
+    assert (state / host_boundary.HOLD).exists()
 
 
 def test_failure_to_persist_hold_never_stops_anything(setup, monkeypatch):
@@ -180,7 +181,7 @@ def test_failure_to_persist_hold_never_stops_anything(setup, monkeypatch):
         with enter(state):
             pytest.fail("unpersisted hold accepted")
     assert not docker.stops
-    assert (state / pause.HOLD).exists()
+    assert (state / host_boundary.HOLD).exists()
 
 
 def test_process_death_keeps_hold_and_releases_only_transient_lock(setup):
@@ -190,11 +191,12 @@ def test_process_death_keeps_hold_and_releases_only_transient_lock(setup):
         "import importlib.util, signal, sys",
         "from pathlib import Path",
         "from scripts.automation import storage_handoff_pause as pause",
+        "from scripts.automation import storage_host_boundary as host_boundary",
         "spec = importlib.util.spec_from_file_location('pause_fixture', sys.argv[1])",
         "fixture = importlib.util.module_from_spec(spec)",
         "spec.loader.exec_module(fixture)",
         "state = Path(sys.argv[2])",
-        "pause._docker = fixture.Docker(state)",
+        "host_boundary.docker = fixture.Docker(state)",
         "with fixture.enter(state):",
         "    print('READY', flush=True)",
         "    signal.pause()",
@@ -208,7 +210,7 @@ def test_process_death_keeps_hold_and_releases_only_transient_lock(setup):
     finally:
         child.kill()
         child.communicate(timeout=10)
-    assert json.loads((state / pause.HOLD).read_text())["phase"] == "paused"
+    assert json.loads((state / host_boundary.HOLD).read_text())["phase"] == "paused"
     with (state / "deployment.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -251,7 +253,7 @@ class DatabaseDocker(Docker):
             "config": {"Image": "postgres-fixture", "Env": ["POSTGRES_USER=fixture", "POSTGRES_PASSWORD=fixture-secret"],
                        "Cmd": ["postgres"], "Entrypoint": ["entrypoint"], "Hostname": "tsdb.quanttrad",
                        "Labels": {"com.docker.compose.project": PROJECT, "com.docker.compose.service": "tsdb"},
-                       "Healthcheck": {"Test": pause._SOCKET_INSPECT, "Interval": 5000000000}},
+                       "Healthcheck": {"Test": host_boundary.SOCKET_INSPECT, "Interval": 5000000000}},
             "host": {"Init": True, "NetworkMode": PROJECT+"_quanttrad", "ShmSize": 1073741824,
                      "Binds": None, "Mounts": []},
             "mounts": [{"Type": "volume", "Name": "fixture-postgres", "Source": "/fixture/postgres",
@@ -278,13 +280,13 @@ class DatabaseDocker(Docker):
             return json.dumps({"Id": self.original["image"], "Config": {"Env": [], "Cmd": ["postgres"], "Entrypoint": ["entrypoint"]}})
         if action == "network":
             return self.network_id
-        if action == "inspect" and args[1] != pause.INSPECT:
+        if action == "inspect" and args[1] != host_boundary.INSPECT:
             return json.dumps(self.details[args[-1]])
         if action == "exec":
             assert args[1:3] == ("readlink", "-f")
             return "/var/lib/postgresql/data/pgdata"
         if action == "rm":
-            receipt = json.loads((self.state / pause.HOLD).read_text())
+            receipt = json.loads((self.state / host_boundary.HOLD).read_text())
             assert receipt["database_preparation"]["source_stopped"]
             assert not self.rows["tsdb"]["running"] and args == (self.original["id"],)
             self.operations.append("remove")
@@ -294,9 +296,9 @@ class DatabaseDocker(Docker):
                 raise TimeoutError("reply lost after removing stopped container")
             return self.original["id"]
         if action == "compose":
-            receipt = json.loads((self.state / pause.HOLD).read_text())
+            receipt = json.loads((self.state / host_boundary.HOLD).read_text())
             assert receipt["phase"] == "preparing_database" and receipt["database_preparation"]["source_stopped"]
-            assert not any(self.rows[name]["running"] for name in pause.STOP)
+            assert not any(self.rows[name]["running"] for name in host_boundary.STOP)
             self.operations.append("create")
             assert "tsdb" not in self.rows
             identity = f"{900:064x}"
@@ -304,7 +306,7 @@ class DatabaseDocker(Docker):
             self.rows["tsdb"] = row
             details = copy.deepcopy(self.details[self.original["id"]])
             details["id"] = identity
-            details["config"]["Healthcheck"]["Test"] = pause._TCP_INSPECT
+            details["config"]["Healthcheck"]["Test"] = host_boundary.TCP_INSPECT
             details["mounts"].append({"Type": "bind", "Source": str(self.history), "Destination": "/qt-history",
                                       "Mode": "rw", "RW": True, "Propagation": "rprivate"})
             details["networks"][PROJECT+"_quanttrad"]["NetworkID"] = ""  # created, not attached yet
@@ -317,9 +319,9 @@ class DatabaseDocker(Docker):
             return identity
         if action == "start":
             identity = args[0]
-            receipt = json.loads((self.state / pause.HOLD).read_text())
+            receipt = json.loads((self.state / host_boundary.HOLD).read_text())
             assert receipt["database_preparation"]["replacement_id"] == identity
-            assert not any(self.rows[name]["running"] for name in pause.STOP)
+            assert not any(self.rows[name]["running"] for name in host_boundary.STOP)
             self.operations.append("start")
             self.rows["tsdb"].update(running=True, pid=900, status="running")
             self.details[identity]["networks"][PROJECT+"_quanttrad"]["NetworkID"] = self.network_id
@@ -340,9 +342,9 @@ def database_setup(tmp_path, monkeypatch):
     (udev / f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID=fixture-hdd\n")
     monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
     docker = DatabaseDocker(state, history)
-    monkeypatch.setattr(pause, "_docker", docker)
-    monkeypatch.setattr(pause, "_cluster_identifier", lambda container: "123456789")
-    monkeypatch.setattr(pause, "_database_query", lambda container, sql: json.dumps({"directory": "/var/lib/postgresql/data/pgdata", "tablespaces": 0}))
+    monkeypatch.setattr(host_boundary, "docker", docker)
+    monkeypatch.setattr(host_boundary, "cluster_identifier", lambda container: "123456789")
+    monkeypatch.setattr(host_boundary, "database_query", lambda container, sql: json.dumps({"directory": "/var/lib/postgresql/data/pgdata", "tablespaces": 0}))
     return state, docker
 
 
@@ -358,12 +360,12 @@ def test_database_preparation_preserves_hold_and_never_resumes_clients(database_
         assert receipt["database_preparation"]["cluster_identifier"] == "123456789"
         assert receipt["containers"]["tsdb"]["id"] != docker.original["id"]
         assert docker.rows["tsdb"]["running"]
-        assert not any(docker.rows[name]["running"] for name in pause.STOP)
-    assert "fixture-secret" not in (state / pause.HOLD).read_text()
+        assert not any(docker.rows[name]["running"] for name in host_boundary.STOP)
+    assert "fixture-secret" not in (state / host_boundary.HOLD).read_text()
     with enter_database(state):
         pass
     assert docker.operations == ["remove", "create", "start"]
-    assert (state / pause.HOLD).exists()
+    assert (state / host_boundary.HOLD).exists()
     with pytest.raises(RuntimeError, match="database_binding_mismatch"):
         with enter(state):
             pytest.fail("database transition must not become an ordinary pause")
@@ -379,8 +381,8 @@ def test_database_preparation_reconciles_lost_replies_without_duplicate_start(da
     with pytest.raises(TimeoutError):
         with enter_database(state):
             pytest.fail("injected uncertain action should escape")
-    assert json.loads((state / pause.HOLD).read_text())["phase"] == "preparing_database"
-    assert not any(docker.rows[name]["running"] for name in pause.STOP)
+    assert json.loads((state / host_boundary.HOLD).read_text())["phase"] == "preparing_database"
+    assert not any(docker.rows[name]["running"] for name in host_boundary.STOP)
     with enter_database(state) as receipt:
         assert receipt["phase"] == "database_prepared"
     assert docker.stops.count("tsdb") == 1
@@ -410,7 +412,7 @@ def test_changed_database_replacement_never_starts(database_setup, fault):
         with enter_database(state):
             pytest.fail("changed replacement accepted")
     assert "start" not in docker.operations
-    assert (state / pause.HOLD).exists()
+    assert (state / host_boundary.HOLD).exists()
 
 
 def test_changed_private_recipe_is_refused_on_reentry(database_setup):
@@ -435,7 +437,7 @@ def test_expired_preparation_never_starts_created_database(database_setup):
     with pytest.raises(TimeoutError):
         with enter_database(state):
             pass
-    path = state / pause.HOLD
+    path = state / host_boundary.HOLD
     receipt = json.loads(path.read_text()); receipt["database_preparation"]["deadline"] = 1
     path.write_text(json.dumps(receipt))
     with pytest.raises(RuntimeError, match="deadline_expired"):
@@ -446,12 +448,12 @@ def test_expired_preparation_never_starts_created_database(database_setup):
 
 def test_cluster_mismatch_keeps_all_application_clients_paused(database_setup, monkeypatch):
     state, docker = database_setup
-    monkeypatch.setattr(pause, "_cluster_identifier", lambda container: "123456789" if container == docker.original["id"] else "999999999")
+    monkeypatch.setattr(host_boundary, "cluster_identifier", lambda container: "123456789" if container == docker.original["id"] else "999999999")
     with pytest.raises(RuntimeError, match="cluster_identity_changed"):
         with enter_database(state):
             pytest.fail("different database admitted")
-    assert json.loads((state / pause.HOLD).read_text())["phase"] == "preparing_database"
-    assert not any(docker.rows[name]["running"] for name in pause.STOP)
+    assert json.loads((state / host_boundary.HOLD).read_text())["phase"] == "preparing_database"
+    assert not any(docker.rows[name]["running"] for name in host_boundary.STOP)
 
 
 def test_changed_environment_refuses_before_database_stop(database_setup):
@@ -478,13 +480,13 @@ def test_wrong_hdd_uuid_refuses_before_database_stop(database_setup):
 @pytest.mark.parametrize("fault", ["directory", "tablespace"])
 def test_source_storage_outside_retained_volume_is_refused_before_stop(database_setup, monkeypatch, fault):
     state, docker = database_setup
-    monkeypatch.setattr(pause, "_database_query", lambda container, sql: json.dumps({"directory": "/outside", "tablespaces": 1 if fault == "tablespace" else 0}))
-    actual = pause._docker
+    monkeypatch.setattr(host_boundary, "database_query", lambda container, sql: json.dumps({"directory": "/outside", "tablespaces": 1 if fault == "tablespace" else 0}))
+    actual = host_boundary.docker
     def boundary(action, *args, **kwargs):
         if action == "exec" and args[1:3] == ("readlink", "-f"):
             return "/outside"
         return actual(action, *args, **kwargs)
-    monkeypatch.setattr(pause, "_docker", boundary)
+    monkeypatch.setattr(host_boundary, "docker", boundary)
     with pytest.raises(RuntimeError, match="source_tablespaces|data_directory_outside"):
         with enter_database(state):
             pytest.fail("unpreserved database files admitted")
@@ -507,8 +509,8 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
     collector_id=database.rows["market-data-collector"]["id"]
     database.details[collector_id]={"config":{"Env":["PG_DSN=postgresql+psycopg2://fixture:fixture-secret@tsdb:5432/fixture"]},
         "mounts":[dict(Type="bind",Source=str(working),Destination="/app/logs/market-structure",RW=True)]}
-    source_query=pause._database_query
-    monkeypatch.setattr(pause,"_database_query",lambda container,sql:
+    source_query=host_boundary.database_query
+    monkeypatch.setattr(host_boundary, "database_query",lambda container,sql:
         "123456789/16384" if "system_identifier::text" in sql else source_query(container,sql))
     request=dict(schema_version="qt.storage_database_operator.v1",source_revision="b"*40,
         source_tree_hash="c"*64,database_identity="123456789/16384",
@@ -532,14 +534,14 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
                 return result+("\n"+self.identity if self.detail else "")
             if action=="image" and image in args:
                 return json.dumps({"Id":image,"Config":{"Env":image_env}})
-            if action=="inspect" and args[1]==pause.INSPECT:
+            if action=="inspect" and args[1]==host_boundary.INSPECT:
                 return "\n".join(json.dumps(row) for row in database.rows.values() if row["id"] in args[2:])
             if action=="inspect" and args[-1]==self.identity:
                 if args[1]=="{{json .State}}":
                     return json.dumps(dict(Running=self.running,OOMKilled=False,Paused=False,Restarting=False))
                 return json.dumps(self.detail)
             if action=="create":
-                assert not any(database.rows[name]["running"] for name in pause.STOP)
+                assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
                 saved=json.loads((state/pause._OPERATOR_STATE).read_text())
                 assert saved["container_id"] is None
                 assert all("fixture-secret" not in a for a in args)
@@ -550,7 +552,7 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
                         overrides.append("PG_DSN="+kwargs["env"]["PG_DSN"] if value=="PG_DSN" else value)
                 assert "@127.0.0.1:5432/fixture" in kwargs["env"]["PG_DSN"]
                 self.detail=dict(id=self.identity,image=image,config=dict(Hostname=self.identity[:12],User="0:0",Entrypoint=["python"],Cmd=pause._OPERATOR_COMMAND,
-                    Labels={"qt.storage.handoff":pause._digest(request)},Env=image_env+overrides),
+                    Labels={"qt.storage.handoff":host_boundary.digest(request)},Env=image_env+overrides),
                     host=dict(NetworkMode="container:"+database.rows["tsdb"]["id"],PidMode="container:"+database.rows["tsdb"]["id"],
                     ReadonlyRootfs=True,Privileged=False,RestartPolicy={"Name":"no"},Init=True,CapDrop=["ALL"],CapAdd=list(pause._OPERATOR_CAPS),
                     SecurityOpt=["no-new-privileges"],Memory=2*1024**3,NanoCpus=2*10**9,PidsLimit=128,
@@ -575,12 +577,12 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
                 return "0"
             if action=="logs":
                 return json.dumps(dict(schema_version="qt.storage_database_operator_result.v1",
-                    request_sha256=pause._digest(request),database_identity=request["database_identity"],
+                    request_sha256=host_boundary.digest(request),database_identity=request["database_identity"],
                     database_sequence_complete=True,source_preserved=True,policy_current=True,
                     plan_id="fixture",collection_resume_authorized=False,runtime_activation_required=True))
             return database(action,*args,**kwargs)
     operator=Operator()
-    monkeypatch.setattr(pause,"_docker",operator)
+    monkeypatch.setattr(host_boundary, "docker",operator)
     options=dict(project=PROJECT,source_revision=REVISION,history_uuid="fixture-hdd",image=image,
                  request=request,inventory_path=inventory)
     return state,database,operator,options
@@ -592,15 +594,15 @@ def test_held_database_operator_recovers_its_exact_process_without_resuming_clie
     operator.fault=fault
     with pytest.raises(TimeoutError):
         pause.run_held_database_handoff(state,**options)
-    assert (state/pause.HOLD).exists()
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state/host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
     assert "fixture-secret" not in (state/pause._OPERATOR_STATE).read_text()
     result=pause.run_held_database_handoff(state,**options)
     assert result["database_sequence_complete"] and not result["collection_resume_authorized"]
     assert operator.creates==1
     assert operator.starts==(2 if fault=="wait" else 1)
-    assert (state/pause.HOLD).exists()
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state/host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
 
 
 @pytest.mark.parametrize("receipt", ["valid", "empty", "malformed", "non_object"])
@@ -619,14 +621,14 @@ def test_operator_receipt_survives_later_stderr_but_missing_receipt_retains_hold
             return {"empty": "", "malformed": "incomplete {", "non_object": "[]"}[receipt]
         return actual(action, *args, **kwargs)
 
-    monkeypatch.setattr(pause, "_docker", logs_with_shutdown_stderr)
+    monkeypatch.setattr(host_boundary, "docker", logs_with_shutdown_stderr)
     if receipt == "valid":
         assert pause.run_held_database_handoff(state, **options)["database_sequence_complete"]
     else:
         with pytest.raises(RuntimeError, match="operator_outcome_invalid"):
             pause.run_held_database_handoff(state, **options)
-    assert (state / pause.HOLD).exists()
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state / host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
 
 
 def test_held_database_operator_refuses_changed_mount_before_reentry(operator_setup):
@@ -637,7 +639,7 @@ def test_held_database_operator_refuses_changed_mount_before_reentry(operator_se
     operator.detail["mounts"][0]["Source"]="/wrong-source"
     with pytest.raises(RuntimeError,match="operator_container_changed"):
         pause.run_held_database_handoff(state,**options)
-    assert operator.starts==0 and (state/pause.HOLD).exists()
+    assert operator.starts==0 and (state/host_boundary.HOLD).exists()
 
 
 def test_held_database_operator_refuses_changed_request_after_commit(operator_setup):
@@ -646,14 +648,14 @@ def test_held_database_operator_refuses_changed_request_after_commit(operator_se
     changed={**options,"request":{**options["request"],"max_duration_seconds":601}}
     with pytest.raises(RuntimeError,match="saved_binding_changed"):
         pause.run_held_database_handoff(state,**changed)
-    assert operator.starts==1 and (state/pause.HOLD).exists()
+    assert operator.starts==1 and (state/host_boundary.HOLD).exists()
 
 
 def test_database_networks_ignore_only_own_generated_container_aliases():
     identity="123456789abc"+"d"*52
     details={"id":identity,"networks":{"fixed":{"NetworkID":"network",
         "Aliases":["tsdb",identity,identity[:12],"fedcba987654","f"*64],"IPAMConfig":None}}}
-    assert pause._database_networks(details)["fixed"]["aliases"]==sorted(["tsdb","fedcba987654","f"*64])
+    assert host_boundary.database_networks(details)["fixed"]["aliases"]==sorted(["tsdb","fedcba987654","f"*64])
 
 
 def test_held_database_operator_accepts_created_tmpfs_configuration_without_mount_entries(operator_setup):
@@ -685,7 +687,7 @@ def test_held_database_operator_refuses_foreign_hostname(operator_setup):
     operator.detail["config"]["Hostname"]="unrelated-host"
     with pytest.raises(RuntimeError,match="operator_container_changed"):
         pause.run_held_database_handoff(state,**options)
-    assert operator.starts==0 and (state/pause.HOLD).exists()
+    assert operator.starts==0 and (state/host_boundary.HOLD).exists()
 
 
 def test_held_database_operator_refuses_additional_ownership_capability(operator_setup):
@@ -696,7 +698,7 @@ def test_held_database_operator_refuses_additional_ownership_capability(operator
     operator.detail["host"]["CapAdd"].append("CAP_SYS_ADMIN")
     with pytest.raises(RuntimeError,match="operator_container_changed"):
         pause.run_held_database_handoff(state,**options)
-    assert operator.starts==0 and (state/pause.HOLD).exists()
+    assert operator.starts==0 and (state/host_boundary.HOLD).exists()
 
 
 @pytest.fixture
@@ -716,9 +718,9 @@ def runtime_recipe_setup(operator_setup, monkeypatch):
             exec(pause._RUNTIME_MAINTENANCE_PROBE,{})
     monkeypatch.setattr(pause,"_validate_runtime_maintenance",validate)
     pause.run_held_database_handoff(state,**options)
-    receipt=pause._load(state/pause.HOLD)
-    binding=pause._load(state/pause._OPERATOR_STATE)["binding"]
-    source=pause._load(state/pause.DATABASE_RECIPE)
+    receipt=host_boundary.load_receipt(state/host_boundary.HOLD)
+    binding=host_boundary.load_receipt(state/pause._OPERATOR_STATE)["binding"]
+    source=host_boundary.load_receipt(state/pause.DATABASE_RECIPE)
     model=copy.deepcopy(source)
     secret=state/"old-secrets.env";secret.write_text("synthetic-only")
     limits=state/"limits.json";limits.write_text(json.dumps({
@@ -765,13 +767,13 @@ def runtime_recipe_setup(operator_setup, monkeypatch):
 def test_runtime_recipe_keeps_clients_held_and_binds_fixed_images_and_files(runtime_recipe_setup):
     state,database,operator,model,check=runtime_recipe_setup
     result=check()
-    assert result["recipe_sha256"]==pause._digest(model)
+    assert result["recipe_sha256"]==host_boundary.digest(model)
     assert len(result["files"])==2
     assert json.loads((state/pause._OPERATOR_REQUEST).read_text())["resource_limits"]["movement_timeout_seconds"]==345600
     assert json.loads((state/"limits.json").read_text())["history"]["movement_timeout_seconds"]==3600
-    assert set(result["images"])==set(pause.STOP+pause.PASSIVE)
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
-    assert (state/pause.HOLD).exists()
+    assert set(result["images"])==set(host_boundary.STOP+host_boundary.PASSIVE)
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
+    assert (state/host_boundary.HOLD).exists()
 
 
 @pytest.mark.parametrize("change",["multi-day","unknown-target","bad-recovery","drift"])
@@ -793,8 +795,8 @@ def test_runtime_recipe_refuses_invalid_routine_limits(runtime_recipe_setup,monk
     path.write_text(json.dumps(values))
     with pytest.raises((ValueError,RuntimeError),match="storage_|recovery_"):
         check()
-    assert (state/pause.HOLD).exists()
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state/host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
 
 
 def test_runtime_maintenance_validation_uses_only_pinned_image_and_readonly_config(tmp_path,monkeypatch):
@@ -802,7 +804,7 @@ def test_runtime_maintenance_validation_uses_only_pinned_image_and_readonly_conf
     def docker(*args,**kwargs):
         calls.append(args)
         return '{"validated":true}'
-    monkeypatch.setattr(pause,"_docker",docker)
+    monkeypatch.setattr(host_boundary, "docker",docker)
     path=tmp_path/"limits.json"
     pause._validate_runtime_maintenance("sha256:"+"a"*64,path,["ssd","hdd"])
     args=calls[0]
@@ -833,8 +835,8 @@ def test_runtime_recipe_refuses_configuration_drift_before_activation(runtime_re
     elif change=="shared-memory":model["services"]["tsdb"]["shm_size"]="1073741825"
     with pytest.raises(RuntimeError,match="storage_runtime"):
         check()
-    assert (state/pause.HOLD).exists()
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state/host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
 
 
 def test_fixed_network_recipe_accepts_only_empty_compose_ipam_default():
@@ -852,8 +854,8 @@ def test_database_handoff_context_holds_lock_across_runtime_admission(operator_s
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
             raise RuntimeError("later_runtime_step_failed")
-    assert (state/pause.HOLD).exists()
-    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state/host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
     with (state/"deployment.lock").open("w") as other:
         fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
 
@@ -878,12 +880,12 @@ def runtime_activation_setup(runtime_recipe_setup,operator_setup,monkeypatch):
                 assert args[args.index("--file")+1] == "-"
                 resolved=json.loads(kwargs["input"])
                 assert resolved["services"]["market-data-collector"]["pid"] == "container:"+database.rows["tsdb"]["id"]
-                assert pause._load(state/pause.RUNTIME_RECIPE,max_bytes=524288)["services"]["market-data-collector"]["pid"] == "service:tsdb"
-                return "\n".join(name+" "+pause._digest(service) for name,service in resolved["services"].items())
+                assert host_boundary.load_receipt(state/pause.RUNTIME_RECIPE,max_bytes=524288)["services"]["market-data-collector"]["pid"] == "service:tsdb"
+                return "\n".join(name+" "+host_boundary.digest(service) for name,service in resolved["services"].items())
             if action=="compose" and "up" in args:
                 self.ups+=1
-                saved=pause._load(state/pause._RUNTIME_STATE)
-                assert saved["phase"]=="starting" and (state/pause.HOLD).exists()
+                saved=host_boundary.load_receipt(state/pause._RUNTIME_STATE)
+                assert saved["phase"]=="starting" and (state/host_boundary.HOLD).exists()
                 assert database.rows["tsdb"]["id"]==saved["binding"]["database_id"]
                 assert "--no-deps" in args and "--no-build" in args and args[-1]!="tsdb"
                 with (state/"deployment.lock").open("w") as other:
@@ -905,7 +907,7 @@ def runtime_activation_setup(runtime_recipe_setup,operator_setup,monkeypatch):
                         mounts.append(mount)
                     database.details[identity]=dict(id=identity,image=service["image"],
                         config=dict(Env=[key+"="+value for key,value in environment.items()],Cmd=service.get("command"),Entrypoint=None,
-                            User=service.get("user",""),Labels={"com.docker.compose.config-hash":pause._digest(service|({"pid":"container:"+saved["binding"]["database_id"]} if name=="market-data-collector" else {}))},
+                            User=service.get("user",""),Labels={"com.docker.compose.config-hash":host_boundary.digest(service|({"pid":"container:"+saved["binding"]["database_id"]} if name=="market-data-collector" else {}))},
                             Healthcheck={"Test":service.get("healthcheck",{}).get("test")}),
                         host=dict(PidMode="container:"+saved["binding"]["database_id"] if name=="market-data-collector" else ""),
                         mounts=mounts,networks={PROJECT+"_quanttrad":{"NetworkID":database.network_id}})
@@ -933,7 +935,7 @@ def runtime_activation_setup(runtime_recipe_setup,operator_setup,monkeypatch):
                     storage_layout={"layout_version":"market.fact_storage_tiers.v2","certificate_sha256":"9"*64}))
             return operator(action,*args,**kwargs)
     runtime=Runtime()
-    monkeypatch.setattr(pause,"_docker",runtime)
+    monkeypatch.setattr(host_boundary, "docker",runtime)
     return state,database,options,runtime,model
 
 
@@ -941,12 +943,12 @@ def test_runtime_activation_records_fixed_layout_only_after_candidate_and_recove
     state,database,options,runtime,model=runtime_activation_setup
     result=pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
     assert result["ready"] and runtime.ups==1 and runtime.probes==1
-    assert not (state/pause.HOLD).exists()
+    assert not (state/host_boundary.HOLD).exists()
     release=(state/"release.env").read_text()
     assert "storage_layout=ssd-hdd-v1\n" in release
     assert "previous_revision=\n" in release
     assert "current_revision="+options["request"]["source_revision"]+"\n" in release
-    assert pause._load(state/pause._RUNTIME_STATE)["phase"]=="complete"
+    assert host_boundary.load_receipt(state/pause._RUNTIME_STATE)["phase"]=="complete"
     assert pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)==result
     assert runtime.ups==1 and runtime.probes==1
 
@@ -966,17 +968,17 @@ def test_runtime_activation_recovers_same_candidate_across_completion_boundaries
     def unlink(path,*args,**kwargs):
         nonlocal armed
         original_unlink(path,*args,**kwargs)
-        if armed and fault=="hold" and path.name==pause.HOLD:
+        if armed and fault=="hold" and path.name==host_boundary.HOLD:
             armed=False;raise TimeoutError("lost hold retirement reply")
     monkeypatch.setattr(pause.os,"replace",replace)
     monkeypatch.setattr(pause.Path,"unlink",unlink)
     with pytest.raises(TimeoutError):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    identities=pause._identities(database.rows)
-    assert (state/pause.HOLD).exists() or fault=="hold"
+    identities=host_boundary.identities(database.rows)
+    assert (state/host_boundary.HOLD).exists() or fault=="hold"
     result=pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    assert result["ready"] and pause._identities(database.rows)==identities and runtime.ups==1
-    assert not (state/pause.HOLD).exists()
+    assert result["ready"] and host_boundary.identities(database.rows)==identities and runtime.ups==1
+    assert not (state/host_boundary.HOLD).exists()
 
 
 def test_runtime_activation_pending_backup_never_retires_hold(runtime_activation_setup):
@@ -984,7 +986,7 @@ def test_runtime_activation_pending_backup_never_retires_hold(runtime_activation
     runtime.wait=True
     with pytest.raises(RuntimeError,match="activation_deadline_expired"):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    assert (state/pause.HOLD).exists()
+    assert (state/host_boundary.HOLD).exists()
     assert (state/"release.env").read_text()=="current_revision="+REVISION+"\n"
 
 
@@ -1003,7 +1005,7 @@ def test_runtime_activation_changed_candidate_cannot_resume(runtime_activation_s
     elif change=="release":(state/"release.env").write_text("current_revision="+"f"*40+"\n")
     with pytest.raises(RuntimeError,match="storage_runtime"):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    assert (state/pause.HOLD).exists() and runtime.ups==1
+    assert (state/host_boundary.HOLD).exists() and runtime.ups==1
 
 
 
@@ -1012,12 +1014,12 @@ def test_runtime_activation_recovers_when_compose_died_between_remove_and_create
     runtime.fault="partial"
     with pytest.raises(TimeoutError,match="removing old initializer"):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    assert "initialize" not in database.rows and (state/pause.HOLD).exists()
+    assert "initialize" not in database.rows and (state/host_boundary.HOLD).exists()
     database_id=database.rows["tsdb"]["id"]
     result=pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
     assert result["ready"] and set(database.rows)==set(model["services"])
     assert database.rows["tsdb"]["id"]==database_id and runtime.ups==2
-    assert not (state/pause.HOLD).exists()
+    assert not (state/host_boundary.HOLD).exists()
 
 
 @pytest.mark.parametrize("key,value",[("history_uuid","another-disk"),("inventory_path","/another-inventory.json")])
@@ -1027,28 +1029,28 @@ def test_runtime_activation_retry_retains_original_host_inputs(runtime_activatio
     with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
     with pytest.raises(RuntimeError,match="saved_binding_changed"):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**(options|{key:value}))
-    assert (state/pause.HOLD).exists() and runtime.ups==1
+    assert (state/host_boundary.HOLD).exists() and runtime.ups==1
 
 
 def test_completed_candidate_can_be_verified_after_attempt_deadline_without_restart(runtime_activation_setup,monkeypatch):
     state,database,options,runtime,model=runtime_activation_setup
     runtime.fault="start"
     with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    deadline=pause._load(state/pause._RUNTIME_STATE)["deadline"]
+    deadline=host_boundary.load_receipt(state/pause._RUNTIME_STATE)["deadline"]
     monkeypatch.setattr(pause.time,"time",lambda:deadline+1)
     assert pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)["ready"]
-    assert runtime.ups==1 and not (state/pause.HOLD).exists()
+    assert runtime.ups==1 and not (state/host_boundary.HOLD).exists()
 
 
 def test_incomplete_candidate_cannot_restart_after_original_deadline(runtime_activation_setup,monkeypatch):
     state,database,options,runtime,model=runtime_activation_setup
     runtime.fault="partial"
     with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    deadline=pause._load(state/pause._RUNTIME_STATE)["deadline"]
+    deadline=host_boundary.load_receipt(state/pause._RUNTIME_STATE)["deadline"]
     monkeypatch.setattr(pause.time,"time",lambda:deadline+1)
     with pytest.raises(RuntimeError,match="activation_deadline_expired"):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=86400,**options)
-    assert runtime.ups==1 and (state/pause.HOLD).exists()
+    assert runtime.ups==1 and (state/host_boundary.HOLD).exists()
 
 
 def test_fixed_recovery_mounts_require_private_external_keys_and_exact_socket(tmp_path):
@@ -1083,14 +1085,14 @@ def test_bound_runtime_revalidates_admitted_database_recovery_pair(runtime_activ
     runtime.fault="start"
     with pytest.raises(TimeoutError):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
-    saved=pause._load(state/pause._RUNTIME_STATE)
+    saved=host_boundary.load_receipt(state/pause._RUNTIME_STATE)
     keys=state/"recovery-keys";keys.mkdir(mode=0o700)
     model["volumes"]["storage-recovery-socket"]=dict(name="fixed-recovery-socket",external=True)
     model["services"]["tsdb"]["volumes"] += [
         dict(type="bind",source=str(keys),target="/run/quanttrad/recovery",
              read_only=True,bind=dict(create_host_path=False)),
         dict(type="volume",source="storage-recovery-socket",target="/var/run/postgresql")]
-    saved["admission"]["recipe_sha256"]=pause._digest(model)
+    saved["admission"]["recipe_sha256"]=host_boundary.digest(model)
     (state/pause.RUNTIME_RECIPE).write_text(json.dumps(model))
     observed=database.details[saved["binding"]["database_id"]]
     key_mount=dict(Type="bind",Source=str(keys),Destination="/run/quanttrad/recovery",
@@ -1112,4 +1114,4 @@ def test_bound_runtime_revalidates_admitted_database_recovery_pair(runtime_activ
     else:
         with pytest.raises(RuntimeError,match="prepared_database_changed"):
             pause._runtime_bound_model(state,saved,options["request"])
-    assert (state/pause.HOLD).exists() and runtime.ups==1
+    assert (state/host_boundary.HOLD).exists() and runtime.ups==1

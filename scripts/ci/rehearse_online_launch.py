@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from uuid import uuid4
 
+from scripts.automation import storage_host_boundary as host_boundary
 from scripts.automation import storage_online_launch as launch
 
 
@@ -83,7 +84,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
              "--mount","type=bind,source="+str(root/"private")+",target=/run/recovery-secrets,readonly",
              "--entrypoint","python",image_id,"-c","import time; time.sleep(180)"])
         peer_id=run(["inspect",peer,"--format","{{.Id}}"]).stdout.strip()
-        database=launch.held._database_details(peer_id)
+        database=host_boundary.database_details(peer_id)
         collector={"mounts":[{"Type":"bind","Source":str(root/"working"),
                              "Destination":"/app/logs/market-structure","RW":True}]}
         try:
@@ -101,7 +102,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
              "--entrypoint","python",image_id,"-c","import time; time.sleep(180)"])
         owned.append(peer)
         peer_id=run(["inspect",peer,"--format","{{.Id}}"]).stdout.strip()
-        database=launch.held._database_details(peer_id)
+        database=host_boundary.database_details(peer_id)
         mounts,_=launch._explicit_mounts(database,collector,inventory,request_path,root/"udev")
         digest=hashlib.sha256(data).hexdigest()
         overrides={"PG_DSN":"postgresql+psycopg2://fixture:disposable@127.0.0.1:1/fixture",
@@ -110,7 +111,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
         binding={"image":image_id,"database_id":peer_id,
                  "database_hostname":database["config"]["Hostname"],"request_sha256":digest,
                  "mounts":mounts,"descriptor_limit":1024,"memory_bytes":512*1024**2,
-                 "environment_sha256":launch.held._digest(sorted(
+                 "environment_sha256":host_boundary.digest(sorted(
                      k+"="+v for k,v in {**image_env,**overrides}.items()))}
         worker=project+"-worker";owned.append(worker)
         import os
@@ -119,7 +120,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
         try:
             contract=launch._admit(identity,binding)
         except RuntimeError:
-            details=launch.held._database_details(identity)
+            details=host_boundary.database_details(identity)
             details['config']['Env']=['<redacted>']
             report['admission_diagnostic']=details
             raise
@@ -130,7 +131,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
         assert not any(secret in result.stdout+result.stderr for secret in
                        ("DISPOSABLE SECRET","postgresql+psycopg2://","disposable@"))
         assert (root/"working").stat().st_uid == 1000
-        details=launch.held._database_details(identity)
+        details=host_boundary.database_details(identity)
         assert not any("recovery-secrets" in m["Destination"] for m in details["mounts"])
         report.update(passed=True,image=image_id,container_contract_sha256=contract,
                       original_source_owner_preserved=True,database_unavailable_refused=True,

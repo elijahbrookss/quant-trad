@@ -7,8 +7,6 @@ may retire it. A stopped container is not proof of spool or database durability.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from contextvars import ContextVar
-import fcntl
 import hashlib
 import json
 import os
@@ -20,157 +18,9 @@ import sys
 import tempfile
 import time
 
-HOLD = "storage-handoff.json"
-STOP = ("backend", "initialize", "market-data-collector", "frontend", "frontend-v2", "grafana", "pgadmin")
-PASSIVE = ("tsdb", "loki", "alloy", "docker-events", "docker-stats")
+from scripts.automation import storage_host_boundary as host_boundary
+
 SCHEMA = "qt.storage_handoff_pause.v1"
-FIELDS = {
-    "id": ".Id", "image": ".Image",
-    "project": 'index .Config.Labels "com.docker.compose.project"',
-    "service": 'index .Config.Labels "com.docker.compose.service"',
-    "oneoff": 'index .Config.Labels "com.docker.compose.oneoff"',
-    "restart": ".HostConfig.RestartPolicy.Name",
-    "running": ".State.Running", "restarting": ".State.Restarting",
-    "paused": ".State.Paused", "pid": ".State.Pid", "status": ".State.Status",
-    "exit_code": ".State.ExitCode", "oom": ".State.OOMKilled",
-}
-INSPECT = "{" + ",".join(json.dumps(k) + ":{{json (" + v + ")}}" for k, v in FIELDS.items()) + "}"
-
-
-_DOCKER_DEADLINE = ContextVar("storage_pause_docker_deadline", default=None)
-
-
-@contextmanager
-def _docker_deadline(deadline):
-    """Shorten every nested Docker call under one caller-owned host deadline."""
-    previous = _DOCKER_DEADLINE.get()
-    token = _DOCKER_DEADLINE.set(min(deadline, previous) if previous is not None else deadline)
-    try:
-        yield
-    finally:
-        _DOCKER_DEADLINE.reset(token)
-
-
-def _docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
-    deadline = _DOCKER_DEADLINE.get()
-    if deadline is not None:
-        remaining = deadline-time.monotonic()
-        if remaining <= 0:
-            raise RuntimeError("storage_pause_host_deadline_expired")
-        timeout = min(timeout, remaining)
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, env=env, input=input)
-    if deadline is not None and time.monotonic() >= deadline:
-        raise RuntimeError("storage_pause_host_deadline_expired")
-    # Do not expose Docker diagnostics or inspected configuration: these may
-    # include credentials. Private database settings are hashed by the caller.
-    if result.returncode:
-        raise RuntimeError(f"storage_pause_docker_failed: operation={args[0]} exit={result.returncode}")
-    if len(result.stdout) > 524288:
-        raise RuntimeError("storage_pause_inventory_too_large")
-    return result.stdout
-
-
-def _inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None, activating: bool = False) -> dict[str, dict]:
-    ids = set()
-    for selector in (f"label=com.docker.compose.project={project}", f"network={project}_quanttrad"):
-        ids.update(_docker("ps", "--all", "--quiet", "--no-trunc", "--filter", selector).split())
-    if not ids or len(ids) > 64 or any(not re.fullmatch(r"[0-9a-f]{64}", x) for x in ids):
-        raise RuntimeError("storage_pause_invalid_container_inventory")
-    if operator_id is not None:
-        if not re.fullmatch(r"[0-9a-f]{64}", operator_id):
-            raise ValueError("storage_pause_invalid_operator_identity")
-        ids.discard(operator_id)
-    rows = [json.loads(line) for line in _docker("inspect", "--format", INSPECT, *sorted(ids)).splitlines()]
-    if {x["id"] for x in rows} != ids or len(rows) != len(ids):
-        raise RuntimeError("storage_pause_incomplete_inspection")
-    result = {}
-    for row in rows:
-        service = row["service"]
-        if (row["project"] != project or service not in STOP + PASSIVE
-                or row["oneoff"] != "False" or service in result):
-            raise RuntimeError("storage_pause_unexpected_client: resolve active bots, one-off or unrecognized containers first")
-        if row["restart"] not in ("no", "unless-stopped"):
-            raise RuntimeError(f"storage_pause_unsafe_restart_policy: service={service}")
-        if activating and service != "tsdb":
-            if row["paused"] or row["status"] not in ("created", "running", "restarting", "exited"):
-                raise RuntimeError(f"storage_runtime_unexpected_container_state: service={service}")
-            result[service] = row
-            continue
-        if row["paused"] or row["restarting"] or row["oom"]:
-            raise RuntimeError(f"storage_pause_unstable_container: service={service}")
-        if row["running"]:
-            if row["status"] != "running" or row["pid"] <= 0:
-                raise RuntimeError(f"storage_pause_unstable_container: service={service}")
-        elif row["status"] not in ("exited", "created") or row["pid"] != 0 or row["exit_code"] not in (0, 143):
-            raise RuntimeError(f"storage_pause_unclean_stop: service={service}")
-        result[service] = row
-    required = ("tsdb",) if activating else (STOP if database_preparing else STOP + ("tsdb",))
-    if not set(required) <= result.keys() or (not database_preparing and not result["tsdb"]["running"]):
-        raise RuntimeError("storage_pause_required_service_missing_or_database_stopped")
-    return result
-
-
-
-def _source_clients_serving(rows):
-    """The initializer may have completed; never rerun it to resume collection."""
-    return all(row["running"] or (name == "initialize" and row["status"] == "exited"
-                                  and row["exit_code"] == 0)
-               for name in STOP for row in (rows[name],))
-
-
-def _identities(rows: dict[str, dict]) -> dict[str, dict]:
-    return {service: {key: row[key] for key in ("id", "image", "restart")}
-            for service, row in rows.items()}
-
-
-def _sync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _save(path: Path, receipt: dict, *, initial: bool) -> None:
-    data = (json.dumps(receipt, sort_keys=True) + "\n").encode()
-    if initial:
-        # An incomplete write is intentionally still a blocking hold.
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-    else:
-        descriptor, name = tempfile.mkstemp(prefix=".storage-handoff-", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(name, path)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
-    _sync_directory(path.parent)
-
-
-def _load(path: Path, *, max_bytes: int = 65536) -> dict:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(descriptor, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > max_bytes:
-            raise RuntimeError("storage_pause_invalid_hold_file")
-        data = stream.read(max_bytes+1)
-        if len(data)>max_bytes:
-            raise RuntimeError("storage_pause_invalid_hold_file")
-    def fields(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise RuntimeError("storage_pause_duplicate_hold_field")
-            result[key] = value
-        return result
-    return json.loads(data, object_pairs_hook=fields)
 
 
 DATABASE_RECIPE = "storage-database.compose.json"
@@ -178,89 +28,6 @@ _DATABASE_FIELDS = {"recipe_sha256", "history_root", "history_uuid", "original_i
                     "source_contract", "target_contract", "source_mount", "networks",
                     "cluster_identifier", "source_stopped", "replacement_id", "deadline"}
 _TCP_PROBE = ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
-# Docker inspection sees the container shell variables after Compose escaping.
-_TCP_INSPECT = ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"']
-_SOCKET_INSPECT = ['CMD-SHELL', 'pg_isready -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"']
-
-
-def _digest(value) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def _database_details(container: str) -> dict:
-    # Resolved environment is inspected privately and hashed, never persisted
-    # into the hold or exposed in diagnostics.
-    expression = '{"id":{{json .Id}},"config":{{json .Config}},"host":{{json .HostConfig}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"image":{{json .Image}}}'
-    return json.loads(_docker("inspect", "--format", expression, container))
-
-
-def _database_contract(details: dict, *, tcp_upgrade: bool = False) -> str:
-    config = json.loads(json.dumps(details["config"]))
-    config.pop("Image", None)  # resolved image ID is verified separately
-    config.pop("Volumes", None)  # exact mounted devices are verified separately
-    config["Env"] = sorted(config.get("Env") or [])
-    labels = config.get("Labels") or {}
-    for name in ("config-hash", "project.config_files", "project.working_dir", "image", "version", "replace"):
-        labels.pop("com.docker.compose."+name, None)
-    config["Labels"] = labels
-    if tcp_upgrade:
-        probe = config.get("Healthcheck", {}).get("Test")
-        if probe not in (_TCP_INSPECT, _SOCKET_INSPECT):
-            raise RuntimeError("storage_database_unsupported_readiness_probe")
-        config["Healthcheck"]["Test"] = _TCP_INSPECT
-    host = {key: value for key, value in details["host"].items() if key not in ("Binds", "Mounts")}
-    # Docker changes this default between null and false across startup. A real
-    # true value remains distinct and must not be silently altered.
-    if host.get("OomKillDisable") is None:
-        host["OomKillDisable"] = False
-    return _digest({"config": config, "host": host})
-
-
-def _database_networks(details: dict) -> dict:
-    return {name: {"network_id": value["NetworkID"],
-                   "aliases": sorted(alias for alias in value.get("Aliases") or []
-                                     if alias not in (details["id"], details["id"][:12])),
-                   "ipam": value.get("IPAMConfig")}
-            for name, value in details["networks"].items()}
-
-
-def _same_database_networks(details: dict, expected: dict) -> bool:
-    actual = _database_networks(details)
-    if set(actual) != set(expected):
-        return False
-    for name, original in expected.items():
-        current = actual[name]
-        # A created/stopped endpoint can lack its runtime network ID. The
-        # existing external network itself must still be exactly the saved one.
-        if (current["network_id"] not in ("", original["network_id"])
-                or current["aliases"] != original["aliases"] or current["ipam"] != original["ipam"]
-                or _docker("network", "inspect", "--format", "{{.Id}}", name).strip() != original["network_id"]):
-            return False
-    return True
-
-
-def _database_query(container: str, sql: str) -> str:
-    return _docker("exec", container, "sh", "-ec",
-        'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
-        '-v ON_ERROR_STOP=1 -Atc "$1"', "storage-preparation", sql).strip()
-
-
-def _cluster_identifier(container: str) -> str:
-    value = _database_query(container, "SELECT system_identifier FROM pg_control_system()")
-    if not re.fullmatch(r"[0-9]{1,20}", value):
-        raise ValueError("storage_database_cluster_identity_unavailable")
-    return value
-
-
-def _source_storage(container: str) -> None:
-    source = json.loads(_database_query(container,
-        "SELECT json_build_object('directory',current_setting('data_directory'),"
-        "'tablespaces',(SELECT count(*) FROM pg_tablespace WHERE pg_tablespace_location(oid)<>''))"))
-    if source["tablespaces"] != 0:
-        raise RuntimeError("storage_database_source_tablespaces_require_review")
-    actual = _docker("exec", container, "readlink", "-f", source["directory"]).strip()
-    if not Path(actual).is_absolute() or not Path(actual).is_relative_to(Path("/var/lib/postgresql/data")):
-        raise RuntimeError("storage_database_data_directory_outside_retained_volume")
 
 
 def _history_filesystem(root: str, uuid: str) -> None:
@@ -316,7 +83,7 @@ def _database_recovery_mounts(service, volumes, history_root):
 
 
 def _database_recipe(state_root: Path, project: str) -> tuple[dict, str]:
-    model = _load(state_root / DATABASE_RECIPE)
+    model = host_boundary.load_receipt(state_root / DATABASE_RECIPE)
     if (set(model) != {"name", "services", "networks", "volumes"} or model["name"] != project
             or set(model["services"]) != {"tsdb"}
             or not _existing_network_recipe(model["networks"],project)):
@@ -350,7 +117,7 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
     model, history_root = _database_recipe(state_root, receipt["project"])
     _history_filesystem(history_root, history_uuid)
     row = rows["tsdb"]
-    details = _database_details(row["id"])
+    details = host_boundary.database_details(row["id"])
     if len(details["mounts"]) != 1:
         raise RuntimeError("storage_database_source_mounts_unexpected")
     source_mount = details["mounts"][0]
@@ -363,10 +130,10 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
     recovery = _database_recovery_mounts(service,model["volumes"],history_root)
     if recovery:
         # The socket volume must be explicitly provisioned before pausing.
-        _docker("volume","inspect",model["volumes"]["storage-recovery-socket"]["name"])
+        host_boundary.docker("volume","inspect",model["volumes"]["storage-recovery-socket"]["name"])
     elif set(model["volumes"])!={"postgres-data"}:
         raise RuntimeError("storage_database_unexpected_volume")
-    image = json.loads(_docker("image", "inspect", "--format", '{{json .}}', service["image"]))
+    image = json.loads(host_boundary.docker("image", "inspect", "--format", '{{json .}}', service["image"]))
     image_config = image["Config"]
     proposed_env = dict(value.split("=", 1) for value in image_config.get("Env") or [])
     proposed_env.update(service.get("environment", {}))
@@ -377,11 +144,11 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
             or service.get("hostname") != details["config"]["Hostname"]
             or service.get("restart") != row["restart"]):
         raise RuntimeError("storage_database_image_or_settings_changed")
-    _source_storage(row["id"])
-    preparation = dict(recipe_sha256=_digest(model), history_root=history_root, history_uuid=history_uuid,
-        original_id=row["id"], image=row["image"], source_contract=_database_contract(details),
-        target_contract=_database_contract(details, tcp_upgrade=True), source_mount=source_mount,
-        networks=_database_networks(details), cluster_identifier=_cluster_identifier(row["id"]),
+    host_boundary.source_storage(row["id"])
+    preparation = dict(recipe_sha256=host_boundary.digest(model), history_root=history_root, history_uuid=history_uuid,
+        original_id=row["id"], image=row["image"], source_contract=host_boundary.database_contract(details),
+        target_contract=host_boundary.database_contract(details, tcp_upgrade=True), source_mount=source_mount,
+        networks=host_boundary.database_networks(details), cluster_identifier=host_boundary.cluster_identifier(row["id"]),
         source_stopped=False, replacement_id=None, deadline=time.time()+600)
     return {**receipt, "phase": "preparing_database", "database_preparation": preparation}
 
@@ -389,16 +156,16 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
 def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> dict:
     preparation = receipt["database_preparation"]
     project = receipt["project"]
-    path = state_root / HOLD
+    path = state_root / host_boundary.HOLD
     def check():
         model, root = _database_recipe(state_root, project)
-        if _digest(model) != preparation["recipe_sha256"] or root != preparation["history_root"]:
+        if host_boundary.digest(model) != preparation["recipe_sha256"] or root != preparation["history_root"]:
             raise RuntimeError("storage_database_preparation_recipe_changed")
         _history_filesystem(root, preparation["history_uuid"])
-        rows = _inventory(project, database_preparing=True, operator_id=operator_id)
-        if ({key: value for key, value in _identities(rows).items() if key != "tsdb"}
+        rows = host_boundary.inventory(project, database_preparing=True, operator_id=operator_id)
+        if ({key: value for key, value in host_boundary.identities(rows).items() if key != "tsdb"}
                 != {key: value for key, value in receipt["containers"].items() if key != "tsdb"}
-                or any(rows[name]["running"] for name in STOP)):
+                or any(rows[name]["running"] for name in host_boundary.STOP)):
             raise RuntimeError("storage_database_preparation_clients_changed")
         return rows
     def mutate(*args, timeout):
@@ -406,15 +173,15 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
         remaining = int(preparation["deadline"]-time.time())
         if remaining < 1:
             raise RuntimeError("storage_database_preparation_deadline_expired")
-        return _docker(*args, timeout=min(timeout, remaining))
+        return host_boundary.docker(*args, timeout=min(timeout, remaining))
     rows = check()
     row = rows.get("tsdb")
     if row and row["id"] == preparation["original_id"]:
-        details = _database_details(row["id"])
+        details = host_boundary.database_details(row["id"])
         if (preparation["replacement_id"] or details["image"] != preparation["image"]
-                or _database_contract(details) != preparation["source_contract"]
+                or host_boundary.database_contract(details) != preparation["source_contract"]
                 or details["mounts"] != [preparation["source_mount"]]
-                or not _same_database_networks(details, preparation["networks"])):
+                or not host_boundary.same_database_networks(details, preparation["networks"])):
             raise RuntimeError("storage_database_original_changed")
         if row["running"]:
             mutate("stop", "--time", "120", row["id"], timeout=150)
@@ -423,7 +190,7 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
         if row["id"] != preparation["original_id"] or row["running"] or row["exit_code"] != 0:
             raise RuntimeError("storage_database_source_not_cleanly_stopped")
         preparation["source_stopped"] = True
-        _save(path, receipt, initial=False)
+        host_boundary.save_receipt(path, receipt, initial=False)
         # Remove only the verified stopped container, never its named volume.
         # Explicit sequencing avoids a half-finished Compose replacement leaving
         # both old and new tsdb containers behind after process death.
@@ -437,7 +204,7 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
                "create", "--no-build", "--pull", "never", "tsdb", timeout=120)
     rows = check()
     row = rows["tsdb"]
-    details = _database_details(row["id"])
+    details = host_boundary.database_details(row["id"])
     mounts = {value["Destination"]: value for value in details["mounts"]}
     history = mounts.get("/qt-history", {})
     model,_ = _database_recipe(state_root,project)
@@ -455,8 +222,8 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
         "source_stop": preparation["source_stopped"],
         "replacement_id": row["id"] != preparation["original_id"] and preparation["replacement_id"] in (None, row["id"]),
         "image": details["image"] == preparation["image"],
-        "settings": _database_contract(details) == preparation["target_contract"],
-        "network": _same_database_networks(details, preparation["networks"]),
+        "settings": host_boundary.database_contract(details) == preparation["target_contract"],
+        "network": host_boundary.same_database_networks(details, preparation["networks"]),
         "mount_count": len(details["mounts"]) == 2+len(recovery),
         "pgdata": mounts.get("/var/lib/postgresql/data") == preparation["source_mount"],
         "history": history.get("Type") == "bind" and history.get("Source") == preparation["history_root"]
@@ -467,7 +234,7 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
         raise RuntimeError("storage_database_replacement_not_admitted: checks="+",".join(failed))
     if preparation["replacement_id"] is None:
         preparation["replacement_id"] = row["id"]
-        _save(path, receipt, initial=False)
+        host_boundary.save_receipt(path, receipt, initial=False)
     if not row["running"]:
         if row["status"] not in ("created", "exited") or row["exit_code"] != 0:
             raise RuntimeError("storage_database_replacement_unclean")
@@ -478,7 +245,7 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
     while True:
         check()
         try:
-            identifier = _cluster_identifier(row["id"])
+            identifier = host_boundary.cluster_identifier(row["id"])
             break
         except RuntimeError:
             if not waiting_reported:
@@ -493,27 +260,10 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
     rows = check()
     if rows.get("tsdb", {}).get("id") != row["id"] or not rows["tsdb"]["running"]:
         raise RuntimeError("storage_database_replacement_changed_after_start")
-    receipt = {**receipt, "phase": "database_prepared", "containers": _identities(rows)}
-    _save(path, receipt, initial=False)
+    receipt = {**receipt, "phase": "database_prepared", "containers": host_boundary.identities(rows)}
+    host_boundary.save_receipt(path, receipt, initial=False)
     print("event=storage_handoff_database_prepared resume_authorized=false", file=sys.stderr, flush=True)
     return receipt
-
-
-
-@contextmanager
-def _deployment_lock(state_root: Path):
-    if not state_root.is_absolute() or state_root == Path("/"):
-        raise ValueError("storage_pause_invalid_state_root")
-    info = state_root.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-        raise RuntimeError("storage_pause_unsafe_state_directory")
-    descriptor = os.open(state_root / "deployment.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("storage_pause_deployment_lock_busy") from exc
-        yield
 
 
 @contextmanager
@@ -532,7 +282,7 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
             or bool(history_uuid) != prepare_database
             or (prepare_database and not re.fullmatch(r"[A-Za-z0-9-]{4,128}", history_uuid))):
         raise ValueError("storage_pause_invalid_binding")
-    with _deployment_lock(state_root):
+    with host_boundary.deployment_lock(state_root):
         with _paused_storage_clients_locked(state_root, project=project,
                 source_revision=source_revision, prepare_database=prepare_database,
                 history_uuid=history_uuid, _operator_id=_operator_id) as receipt:
@@ -550,11 +300,11 @@ def _paused_storage_clients_locked(state_root, *, project, source_revision,
     release = (state_root / "release.env").read_text()
     if re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [source_revision]:
         raise RuntimeError("storage_pause_recorded_release_mismatch")
-    path = state_root / HOLD
-    receipt = _load(path) if os.path.lexists(path) else None
+    path = state_root / host_boundary.HOLD
+    receipt = host_boundary.load_receipt(path) if os.path.lexists(path) else None
     preparing = bool(receipt and receipt.get("phase") == "preparing_database")
-    rows = _inventory(project, database_preparing=preparing, operator_id=_operator_id)
-    identities = _identities(rows)
+    rows = host_boundary.inventory(project, database_preparing=preparing, operator_id=_operator_id)
+    identities = host_boundary.identities(rows)
     if receipt:
         has_database = "database_preparation" in receipt
         expected_fields = {"schema_version", "project", "source_revision", "containers", "phase"}
@@ -589,11 +339,11 @@ def _paused_storage_clients_locked(state_root, *, project, source_revision,
     else:
         receipt = dict(schema_version=SCHEMA, project=project, source_revision=source_revision,
                        containers=identities, phase="pausing")
-        _save(path, receipt, initial=True)
+        host_boundary.save_receipt(path, receipt, initial=True)
     print("event=storage_handoff_pause_started", file=sys.stderr, flush=True)
-    for service in STOP:
-        rows = _inventory(project)
-        if _identities(rows) != identities:
+    for service in host_boundary.STOP:
+        rows = host_boundary.inventory(project)
+        if host_boundary.identities(rows) != identities:
             raise RuntimeError("storage_pause_container_changed")
         if rows[service]["running"]:
             grace = 300 if service == "market-data-collector" else 60
@@ -603,18 +353,18 @@ def _paused_storage_clients_locked(state_root, *, project, source_revision,
                 if remaining < 1:
                     raise RuntimeError("storage_online_preparation_deadline_expired")
                 grace, timeout = min(grace, remaining), min(timeout, remaining)
-            _docker("stop", "--time", str(grace), rows[service]["id"], timeout=timeout)
-    rows = _inventory(project)
-    if _identities(rows) != identities or any(rows[x]["running"] for x in STOP):
+            host_boundary.docker("stop", "--time", str(grace), rows[service]["id"], timeout=timeout)
+    rows = host_boundary.inventory(project)
+    if host_boundary.identities(rows) != identities or any(rows[x]["running"] for x in host_boundary.STOP):
         raise RuntimeError("storage_pause_clients_not_stopped")
     receipt = {**receipt, "phase": "paused"}
-    _save(path, receipt, initial=False)
+    host_boundary.save_receipt(path, receipt, initial=False)
     if prepare_database:
         receipt = _begin_database_preparation(state_root, receipt, rows, history_uuid)
         if _preparation_deadline is not None:
             receipt["database_preparation"]["deadline"] = min(
                 receipt["database_preparation"]["deadline"], _preparation_deadline)
-        _save(path, receipt, initial=False)  # intent precedes every DB mutation
+        host_boundary.save_receipt(path, receipt, initial=False)  # intent precedes every DB mutation
         receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
     print("event=storage_handoff_clients_stopped resume_authorized=false", file=sys.stderr, flush=True)
     yield receipt
@@ -631,11 +381,11 @@ def _operator_contract(details, binding):
     # Docker inherits the peer hostname only when the shared network starts.
     # Admission separately permits only the worker's default or that exact peer.
     normalized = {**details, "config": {**details["config"], "Hostname": binding["database_hostname"]}}
-    return _database_contract(normalized)
+    return host_boundary.database_contract(normalized)
 
 
 def _operator_admit(identity, saved):
-    details = _database_details(identity)
+    details = host_boundary.database_details(identity)
     config, host = details["config"], details["host"]
     expected = saved["binding"]
     mounted = [m for m in details["mounts"] if m["Type"] != "tmpfs"]
@@ -645,7 +395,7 @@ def _operator_admit(identity, saved):
         and config["Entrypoint"] == ["python"] and config["Cmd"] == _OPERATOR_COMMAND
         and config["Hostname"] in (identity[:12], expected["database_hostname"])
         and config["Labels"].get("qt.storage.handoff") == expected["request_sha256"]
-        and _digest(sorted(config["Env"])) == expected["environment_sha256"]
+        and host_boundary.digest(sorted(config["Env"])) == expected["environment_sha256"]
         and host["NetworkMode"] == "container:"+expected["database_id"]
         and host["PidMode"] == "container:"+expected["database_id"]
         and host["ReadonlyRootfs"] and not host["Privileged"]
@@ -689,11 +439,11 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
             or not inventory_path.is_absolute() or inventory_path.resolve(strict=True) != inventory_path
             or len(json.dumps(request)) > 65536):
         raise ValueError("storage_database_operator_invalid_inputs")
-    request_hash = _digest(request)
+    request_hash = host_boundary.digest(request)
     state_path = state_root/_OPERATOR_STATE
-    saved = _load(state_path) if os.path.lexists(state_path) else None
+    saved = host_boundary.load_receipt(state_path) if os.path.lexists(state_path) else None
     name = project+"-storage-handoff"
-    found = _docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
+    found = host_boundary.docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
     if len(found) > 1 or (found and (saved is None or saved.get("container_id") not in (None,found[0]))):
         raise RuntimeError("storage_database_operator_unexpected_container")
     if saved is not None:
@@ -710,8 +460,8 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
             prepare_database=True,history_uuid=history_uuid,
             _operator_id=found[0] if found else None) as receipt:
         database_id = receipt["containers"]["tsdb"]["id"]
-        database = _database_details(database_id)
-        collector = _database_details(receipt["containers"]["market-data-collector"]["id"])
+        database = host_boundary.database_details(database_id)
+        collector = host_boundary.database_details(receipt["containers"]["market-data-collector"]["id"])
         mounts = [m for m in collector["mounts"] if m["Destination"] == "/app/logs/market-structure"]
         if len(mounts) != 1 or mounts[0]["Type"] != "bind" or not mounts[0]["RW"]:
             raise RuntimeError("storage_database_operator_existing_working_bind_required")
@@ -721,7 +471,7 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
         udev = Path(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data"))
         if not udev.is_absolute() or udev.resolve(strict=True) != udev:
             raise RuntimeError("storage_database_operator_udev_path_invalid")
-        image_details = json.loads(_docker("image", "inspect", "--format", '{{json .}}', image))
+        image_details = json.loads(host_boundary.docker("image", "inspect", "--format", '{{json .}}', image))
         image_env = dict(v.split("=",1) for v in image_details["Config"].get("Env") or [])
         if (image_details["Id"] != image
                 or image_env.get("QT_IMAGE_SOURCE_REVISION") != request.get("source_revision")
@@ -731,7 +481,7 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
                 or request.get("destination_root") != "/qt-history/archives/objects"
                 or request.get("inventory_path") != "/run/quanttrad/storage-inventory.json"):
             raise RuntimeError("storage_database_operator_fixed_paths_required")
-        identity = _database_query(database_id,
+        identity = host_boundary.database_query(database_id,
             "SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c "
             "CROSS JOIN pg_database d WHERE d.datname=current_database()")
         if identity != request.get("database_identity"):
@@ -768,10 +518,10 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
             descriptor = os.open(request_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o444)
             with os.fdopen(descriptor,"w") as handle:
                 handle.write(json.dumps(request,sort_keys=True));handle.flush();os.fsync(handle.fileno())
-            _sync_directory(state_root)
+            host_boundary.sync_directory(state_root)
         if (request_path.is_symlink() or request_path.stat().st_uid != os.getuid()
                 or stat.S_IMODE(request_path.stat().st_mode)!=0o444
-                or _digest(json.loads(request_path.read_text()))!=request_hash):
+                or host_boundary.digest(json.loads(request_path.read_text()))!=request_hash):
             raise RuntimeError("storage_database_operator_request_file_changed")
         expected_mounts = {m["Destination"]:[m["Type"],m["Source"],m["RW"]] for m in database["mounts"]}
         binds = {"/app/logs/market-structure":working,
@@ -784,17 +534,17 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
             request_sha256=request_hash,database_id=database_id,database_hostname=database["config"]["Hostname"],
             mounts=expected_mounts,
             inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
-            environment_sha256=_digest(sorted(k+"="+v for k,v in expected_env.items())))
+            environment_sha256=host_boundary.digest(sorted(k+"="+v for k,v in expected_env.items())))
         if saved is None:
             saved = dict(binding=binding,container_id=None,contract=None,
                          deadline=time.time()+request["max_duration_seconds"]+60)
-            _save(state_path,saved,initial=True)
+            host_boundary.save_receipt(state_path,saved,initial=True)
         elif saved["binding"] != binding:
             raise RuntimeError("storage_database_operator_saved_binding_changed")
         remaining = int(saved["deadline"]-time.time())
         if remaining < 1:
             if found:
-                _docker("stop","--time","30",found[0],timeout=45)
+                host_boundary.docker("stop","--time","30",found[0],timeout=45)
             raise RuntimeError("storage_database_operator_deadline_expired")
         if not found:
             args = ["create","--name",name,"--pull","never","--user","0:0","--init",
@@ -814,27 +564,27 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
                          + ("" if target=="/app/logs/market-structure" else ",readonly")]
             for key,value in overrides.items():
                 args += ["--env",key if key=="PG_DSN" else key+"="+value]
-            found = [_docker(*args,image,*_OPERATOR_COMMAND,env={**os.environ,"PG_DSN":dsn}).strip()]
+            found = [host_boundary.docker(*args,image,*_OPERATOR_COMMAND,env={**os.environ,"PG_DSN":dsn}).strip()]
         details = _operator_admit(found[0],saved)
         saved.update(container_id=found[0],contract=_operator_contract(details, binding))
-        _save(state_path,saved,initial=False)
-        state = json.loads(_docker("inspect","--format","{{json .State}}",found[0]))
+        host_boundary.save_receipt(state_path,saved,initial=False)
+        state = json.loads(host_boundary.docker("inspect","--format","{{json .State}}",found[0]))
         if state["OOMKilled"] or state["Paused"] or state["Restarting"]:
             raise RuntimeError("storage_database_operator_unstable")
         if not state["Running"]:
-            _docker("start",found[0])
+            host_boundary.docker("start",found[0])
         print("event=storage_database_operator_waiting clients_held=true",file=sys.stderr,flush=True)
         try:
-            status = _docker("wait",found[0],timeout=remaining).strip()
+            status = host_boundary.docker("wait",found[0],timeout=remaining).strip()
         except subprocess.TimeoutExpired:
-            _docker("stop","--time","30",found[0],timeout=45)
+            host_boundary.docker("stop","--time","30",found[0],timeout=45)
             raise RuntimeError("storage_database_operator_deadline_expired") from None
         _operator_admit(found[0],saved)
         if status != "0":
             raise RuntimeError("storage_database_operator_failed_hold_retained")
         # Docker applies --tail across stdout and stderr together. A final
         # stderr shutdown message can otherwise hide the stdout receipt.
-        lines = _docker("logs", "--tail", "100", found[0]).strip().splitlines()
+        lines = host_boundary.docker("logs", "--tail", "100", found[0]).strip().splitlines()
         try:
             result = json.loads(lines[-1]) if lines else None
         except (json.JSONDecodeError, TypeError):
@@ -846,8 +596,8 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
                 or any(result.get(key) is not True for key in ("database_sequence_complete","source_preserved","policy_current","runtime_activation_required"))
                 or result.get("collection_resume_authorized") is not False):
             raise RuntimeError("storage_database_operator_outcome_invalid")
-        rows = _inventory(project,operator_id=found[0])
-        if _identities(rows)!=receipt["containers"] or any(rows[s]["running"] for s in STOP):
+        rows = host_boundary.inventory(project,operator_id=found[0])
+        if host_boundary.identities(rows)!=receipt["containers"] or any(rows[s]["running"] for s in host_boundary.STOP):
             raise RuntimeError("storage_database_operator_clients_changed")
         print("event=storage_database_operator_completed clients_held=true",file=sys.stderr,flush=True)
         yield result,receipt,binding
@@ -906,7 +656,7 @@ def _validate_runtime_maintenance(image: str, path: Path, target_ids: list[str])
     """
     if "," in str(path):
         raise RuntimeError("storage_runtime_maintenance_path_invalid")
-    output = _docker("run", "--rm", "--pull", "never", "--network", "none",
+    output = host_boundary.docker("run", "--rm", "--pull", "never", "--network", "none",
         "--read-only", "--user", "70:70", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--memory", "512m", "--cpus", "1",
         "--pids-limit", "64", "--env", "QT_DISABLE_DOTENV=1",
@@ -926,8 +676,8 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
     comparing with the actual environment of the stopped collector.
     """
     path = state_root/RUNTIME_RECIPE
-    model = _load(path,max_bytes=524288)
-    recipe_hash = _digest(model)
+    model = host_boundary.load_receipt(path,max_bytes=524288)
+    recipe_hash = host_boundary.digest(model)
     project = receipt["project"]
     if (set(model)!={"name","services","networks","volumes"} or model["name"]!=project
             or set(model["services"])!=set(receipt["containers"])
@@ -945,11 +695,11 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
     for mount in candidate_database.get("volumes",[]):
         if mount.get("volume")=={}:
             mount.pop("volume")
-    if (_digest(database_model)!=receipt["database_preparation"]["recipe_sha256"]
+    if (host_boundary.digest(database_model)!=receipt["database_preparation"]["recipe_sha256"]
             or candidate_database!=database_model["services"]["tsdb"]
             or model["volumes"].get("postgres-data")!=database_model["volumes"]["postgres-data"]):
         raise RuntimeError("storage_runtime_database_recipe_changed")
-    old = {name:_database_details(row["id"]) for name,row in receipt["containers"].items()}
+    old = {name:host_boundary.database_details(row["id"]) for name,row in receipt["containers"].items()}
     volume_names = {m["Name"] for details in old.values() for m in details["mounts"] if m["Type"]=="volume"}
     if any(set(value)!={"name","external"} or value["external"] is not True
            or value["name"] not in volume_names for value in model["volumes"].values()):
@@ -983,7 +733,7 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
                     or (name!="backend" and service.get("group_add"))):
                 raise RuntimeError("storage_runtime_writer_identity_or_command_changed")
         if name in (*_RUNTIME_WRITERS,"docker-stats","frontend","frontend-v2"):
-            details=json.loads(_docker("image","inspect","--format",'{{json .}}',image))
+            details=json.loads(host_boundary.docker("image","inspect","--format",'{{json .}}',image))
             environment=dict(value.split("=",1) for value in details["Config"].get("Env") or [])
             if (details["Id"]!=image
                     or environment.get("QT_IMAGE_SOURCE_REVISION")!=request["source_revision"]
@@ -1066,7 +816,7 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
             if _runtime_configuration_bytes(limits_path) != raw:
                 raise RuntimeError("storage_runtime_maintenance_changed_during_validation")
             file_bindings[str(limits_path)]=hashlib.sha256(raw).hexdigest()
-    if _digest(_load(path,max_bytes=524288))!=recipe_hash:
+    if host_boundary.digest(host_boundary.load_receipt(path,max_bytes=524288))!=recipe_hash:
         raise RuntimeError("storage_runtime_recipe_changed_during_admission")
     return dict(recipe_sha256=recipe_hash,images=pinned,files=file_bindings)
 
@@ -1093,7 +843,7 @@ finally:
 
 
 def _runtime_observation(container: str, request: dict, database_result: dict):
-    value=json.loads(_docker("exec","-i",container,"python","-c",_RUNTIME_PROBE,
+    value=json.loads(host_boundary.docker("exec","-i",container,"python","-c",_RUNTIME_PROBE,
         input=json.dumps(request,sort_keys=True),timeout=45).strip().splitlines()[-1])
     if value.get("ready") is False and set(value)=={"ready","reason"} and value["reason"] in (
             "maintenance_starting","maintenance_degraded","current_layout_recovery_pending",
@@ -1114,9 +864,9 @@ _RUNTIME_STATE = "storage-runtime-state.json"
 
 def _runtime_candidate_details(name, row, model, saved):
     """Inspect created or running candidate containers against the fixed recipe."""
-    details = _database_details(row["id"])
+    details = host_boundary.database_details(row["id"])
     service = model["services"][name]
-    image = json.loads(_docker("image", "inspect", "--format", '{{json .}}', service["image"]))
+    image = json.loads(host_boundary.docker("image", "inspect", "--format", '{{json .}}', service["image"]))
     config, host = details["config"], details["host"]
     literal = lambda value: value.replace("$$", "$") if isinstance(value, str) else value
     expected_env = dict(value.split("=", 1) for value in image["Config"].get("Env") or [])
@@ -1168,21 +918,21 @@ def _runtime_candidate_details(name, row, model, saved):
 
 def _runtime_bound_model(state_root, saved, request):
     if (saved.get("schema_version") != "qt.storage_runtime_activation.v1"
-            or saved.get("request_sha256") != _digest(request)
+            or saved.get("request_sha256") != host_boundary.digest(request)
             or saved.get("probe_sha256") != hashlib.sha256(_RUNTIME_PROBE.encode()).hexdigest()
             or saved.get("phase") not in ("starting", "verified", "complete")):
         raise RuntimeError("storage_runtime_saved_binding_changed")
     if any(os.path.lexists(state_root/name) for name in ("promotion.env", "alert-preview.env")):
         raise RuntimeError("storage_runtime_unfinished_server_operation")
-    model = _load(state_root/RUNTIME_RECIPE, max_bytes=524288)
-    if _digest(model) != saved["admission"]["recipe_sha256"]:
+    model = host_boundary.load_receipt(state_root/RUNTIME_RECIPE, max_bytes=524288)
+    if host_boundary.digest(model) != saved["admission"]["recipe_sha256"]:
         raise RuntimeError("storage_runtime_recipe_changed")
     for name, expected in saved["admission"]["files"].items():
         if hashlib.sha256(_runtime_configuration_bytes(Path(name))).hexdigest() != expected:
             raise RuntimeError("storage_runtime_configuration_file_changed")
     preparation = saved["receipt"]["database_preparation"]
     _history_filesystem(preparation["history_root"], preparation["history_uuid"])
-    database = _database_details(saved["binding"]["database_id"])
+    database = host_boundary.database_details(saved["binding"]["database_id"])
     actual_mounts = {m["Destination"]: (m["Type"], m["Source"], m["RW"]) for m in database["mounts"]}
     recovery = _database_recovery_mounts(model["services"]["tsdb"], model["volumes"], preparation["history_root"])
     expected_mounts = {target: tuple(saved["binding"]["mounts"][target])
@@ -1199,17 +949,17 @@ def _runtime_bound_model(state_root, saved, request):
             and socket.get("Type") == "volume" and socket.get("RW") is True
             and socket.get("Name") == model["volumes"]["storage-recovery-socket"]["name"])
     if (database["image"] != preparation["image"]
-            or _database_contract(database) != preparation["target_contract"]
+            or host_boundary.database_contract(database) != preparation["target_contract"]
             or actual_mounts != expected_mounts or len(database["mounts"]) != len(expected_mounts)
             or not recovery_unchanged
-            or not _same_database_networks(database, preparation["networks"])
-            or _cluster_identifier(database["id"]) != preparation["cluster_identifier"]):
+            or not host_boundary.same_database_networks(database, preparation["networks"])
+            or host_boundary.cluster_identifier(database["id"]) != preparation["cluster_identifier"]):
         raise RuntimeError("storage_runtime_prepared_database_changed")
     return model
 
 
 def _runtime_rows(saved):
-    rows = _inventory(saved["receipt"]["project"], operator_id=saved["operator_id"], activating=True)
+    rows = host_boundary.inventory(saved["receipt"]["project"], operator_id=saved["operator_id"], activating=True)
     if not set(rows) <= set(saved["receipt"]["containers"]) or rows["tsdb"]["id"] != saved["binding"]["database_id"]:
         raise RuntimeError("storage_runtime_service_inventory_changed")
     return rows
@@ -1222,7 +972,7 @@ def _runtime_healthy(rows, model, saved):
         if name == "tsdb":
             continue
         _runtime_candidate_details(name, row, model, saved)
-        state = json.loads(_docker("inspect", "--format", "{{json .State}}", row["id"]))
+        state = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", row["id"]))
         if state["OOMKilled"] or state["Paused"] or state["Restarting"]:
             return False
         if name == "initialize":
@@ -1249,7 +999,7 @@ def _record_storage_release(state_root, saved, request):
             "previous_revision=\n"
             "deployed_at="+datetime.now(timezone.utc).isoformat()+"\n"
             "storage_layout=ssd-hdd-v1\n")
-        _save(state_root/_RUNTIME_STATE, saved, initial=False)
+        host_boundary.save_receipt(state_root/_RUNTIME_STATE, saved, initial=False)
     current = (state_root/"release.env").read_text()
     if current not in (saved["prior_release"], saved["release_text"]):
         raise RuntimeError("storage_runtime_recorded_release_changed")
@@ -1259,7 +1009,7 @@ def _record_storage_release(state_root, saved, request):
             with os.fdopen(descriptor, "w") as handle:
                 handle.write(saved["release_text"]); handle.flush(); os.fsync(handle.fileno())
             os.replace(name, state_root/"release.env")
-            _sync_directory(state_root)
+            host_boundary.sync_directory(state_root)
         finally:
             if os.path.exists(name):
                 os.unlink(name)
@@ -1267,7 +1017,7 @@ def _record_storage_release(state_root, saved, request):
 
 def _finish_runtime_activation(state_root, saved, request):
     path = state_root/_RUNTIME_STATE
-    hold = state_root/HOLD
+    hold = state_root/host_boundary.HOLD
     # The host hold is retained through every app mutation and verification.
     # Completion reentry only observes the already recorded exact release.
     if saved["phase"] == "complete":
@@ -1275,7 +1025,7 @@ def _finish_runtime_activation(state_root, saved, request):
             raise RuntimeError("storage_runtime_completed_release_changed")
         return saved["outcome"]
     if os.path.lexists(hold):
-        if _load(hold) != saved["receipt"]:
+        if host_boundary.load_receipt(hold) != saved["receipt"]:
             raise RuntimeError("storage_runtime_hold_changed")
     elif saved["phase"] != "verified" or (state_root/"release.env").read_text() != saved.get("release_text"):
         raise RuntimeError("storage_runtime_hold_missing_before_completion")
@@ -1296,7 +1046,7 @@ def _finish_runtime_activation(state_root, saved, request):
             if remaining < 1:
                 raise RuntimeError("storage_runtime_activation_deadline_expired")
             print("event=storage_runtime_candidate_starting hold_retained=true", file=sys.stderr, flush=True)
-            _docker("compose", "--project-name", saved["receipt"]["project"], "--file", str(state_root/RUNTIME_RECIPE),
+            host_boundary.docker("compose", "--project-name", saved["receipt"]["project"], "--file", str(state_root/RUNTIME_RECIPE),
                 "up", "--detach", "--no-deps", "--no-build", "--pull", "never", "--wait",
                 "--wait-timeout", str(min(360, remaining)), *sorted(set(model["services"])-{"tsdb"}), timeout=min(360, remaining)+30)
     last_reason = None
@@ -1318,13 +1068,13 @@ def _finish_runtime_activation(state_root, saved, request):
             last_reason = reason
         time.sleep(min(2, remaining))
     saved.update(phase="verified", outcome=outcome)
-    _save(path, saved, initial=False)
+    host_boundary.save_receipt(path, saved, initial=False)
     _record_storage_release(state_root, saved, request)
     if os.path.lexists(hold):
         hold.unlink()
-        _sync_directory(state_root)
+        host_boundary.sync_directory(state_root)
     saved["phase"] = "complete"
-    _save(path, saved, initial=False)
+    host_boundary.save_receipt(path, saved, initial=False)
     print("event=storage_runtime_activation_completed storage_layout=ssd-hdd-v1", file=sys.stderr, flush=True)
     return outcome
 
@@ -1337,9 +1087,9 @@ def run_held_runtime_handoff(state_root: Path, *, activation_timeout_seconds: in
     path = state_root/_RUNTIME_STATE
     request = options["request"]
     if os.path.lexists(path):
-        with _deployment_lock(state_root):
-            saved = _load(path, max_bytes=131072)
-            if (saved.get("request_sha256") != _digest(request)
+        with host_boundary.deployment_lock(state_root):
+            saved = host_boundary.load_receipt(path, max_bytes=131072)
+            if (saved.get("request_sha256") != host_boundary.digest(request)
                     or saved.get("binding", {}).get("image") != options["image"]
                     or saved.get("receipt", {}).get("project") != options["project"]
                     or saved.get("receipt", {}).get("source_revision") != options["source_revision"]
@@ -1349,23 +1099,23 @@ def run_held_runtime_handoff(state_root: Path, *, activation_timeout_seconds: in
             return _finish_runtime_activation(state_root, saved, request)
     with _held_database_handoff(state_root, **options) as (database_result, receipt, binding):
         admission = _runtime_recipe(state_root, receipt, binding, request)
-        model = _load(state_root/RUNTIME_RECIPE, max_bytes=524288)
+        model = host_boundary.load_receipt(state_root/RUNTIME_RECIPE, max_bytes=524288)
         # Compose hashes the collector after resolving its shared PID namespace.
         # Bind that resolution to the already prepared database; keep the admitted
         # on-disk recipe unchanged for startup and retry comparisons.
         hash_model = json.loads(json.dumps(model))
         hash_model["services"]["market-data-collector"]["pid"] = "container:" + binding["database_id"]
-        hashes = _docker("compose", "--project-name", receipt["project"], "--file", "-",
+        hashes = host_boundary.docker("compose", "--project-name", receipt["project"], "--file", "-",
             "config", "--hash", "*", input=json.dumps(hash_model))
         compose_hashes = dict(line.split() for line in hashes.splitlines())
         if set(compose_hashes) != set(model["services"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in compose_hashes.values()):
             raise RuntimeError("storage_runtime_compose_hashes_invalid")
-        operator = _load(state_root/_OPERATOR_STATE)
+        operator = host_boundary.load_receipt(state_root/_OPERATOR_STATE)
         saved = dict(schema_version="qt.storage_runtime_activation.v1", phase="starting",
-            request_sha256=_digest(request), probe_sha256=hashlib.sha256(_RUNTIME_PROBE.encode()).hexdigest(),
+            request_sha256=host_boundary.digest(request), probe_sha256=hashlib.sha256(_RUNTIME_PROBE.encode()).hexdigest(),
             database_result=database_result, receipt=receipt, binding=binding,
             admission=admission, compose_hashes=compose_hashes, operator_id=operator["container_id"],
             prior_release=(state_root/"release.env").read_text(),
             deadline=min(operator["deadline"], time.time()+activation_timeout_seconds))
-        _save(path, saved, initial=True)
+        host_boundary.save_receipt(path, saved, initial=True)
         return _finish_runtime_activation(state_root, saved, request)

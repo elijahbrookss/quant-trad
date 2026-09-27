@@ -16,6 +16,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from scripts.automation import storage_host_boundary as host_boundary
 from scripts.automation import storage_handoff_pause as pause
 
 
@@ -81,10 +82,10 @@ def main(*, online_source=False):
             run(["docker", "volume", "create", volume], env=env); created_volume = True
             run(compose+["up", "--detach", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "180"], env=env)
             original = cid()
-            original_details = pause._database_details(original)
+            original_details = host_boundary.database_details(original)
             cluster = query("SELECT system_identifier FROM pg_control_system()")
             query("CREATE TABLE public.qt_host_hold_proof(value text PRIMARY KEY); INSERT INTO public.qt_host_hold_proof VALUES ('retained')")
-            for name in pause.STOP+tuple(value for value in pause.PASSIVE if value != "tsdb"):
+            for name in host_boundary.STOP+tuple(value for value in host_boundary.PASSIVE if value != "tsdb"):
                 extra = (["--mount", "type=bind,source="+str(working)+",target=/app/logs/market-structure"]
                          if online_source and name == "market-data-collector" else [])
                 command = ("trap 'exit 0' TERM; while :; do printf x >> /app/logs/market-structure/objects/intake; sleep 1 & wait $!; done"
@@ -104,15 +105,15 @@ def main(*, online_source=False):
             child_code = "\n".join([
                 "import os,signal,sys",
                 "from pathlib import Path",
-                "from scripts.automation import storage_handoff_pause as pause",
-                "actual=pause._docker",
+                "from scripts.automation import storage_handoff_pause as pause; from scripts.automation import storage_host_boundary as host_boundary",
+                "actual=host_boundary.docker",
                 "def die_after_create(*args,**kwargs):",
                 "    result=actual(*args,**kwargs)",
                 "    if args[0]=='compose' and 'create' in args:",
                 "        print('CREATED_BEFORE_PROCESS_DEATH',flush=True)",
                 "        os.kill(os.getpid(),signal.SIGKILL)",
                 "    return result",
-                "pause._docker=die_after_create",
+                "host_boundary.docker=die_after_create",
                 "with pause.paused_storage_clients(Path(sys.argv[1]),project=sys.argv[2],source_revision='a'*40,prepare_database=True,history_uuid='fixture-history'):",
                 "    raise AssertionError('interruption was not injected')",
             ])
@@ -120,7 +121,7 @@ def main(*, online_source=False):
             child = run([sys.executable, "-c", child_code, str(state), project], env=env, timeout=500, ok=False)
             if child.returncode != -9 or "CREATED_BEFORE_PROCESS_DEATH" not in child.stdout:
                 raise RuntimeError("disposable_host_interruption_failed: "+child.stderr[-6000:])
-            held = json.loads((state/pause.HOLD).read_text())
+            held = json.loads((state/host_boundary.HOLD).read_text())
             assert held["phase"] == "preparing_database" and held["database_preparation"]["source_stopped"]
             replacement = cid(); assert replacement != original
             assert run(["docker", "inspect", "--format", "{{.State.Status}}", replacement], env=env).stdout.strip() == "created"
@@ -130,9 +131,9 @@ def main(*, online_source=False):
                 assert receipt["phase"] == "database_prepared" and cid() == replacement
                 assert receipt["database_preparation"]["cluster_identifier"] == cluster
                 assert query("SELECT value FROM public.qt_host_hold_proof") == "retained"
-                rows = pause._inventory(project)
-                assert not any(rows[name]["running"] for name in pause.STOP)
-                assert all(rows[name]["running"] for name in pause.PASSIVE)
+                rows = host_boundary.inventory(project)
+                assert not any(rows[name]["running"] for name in host_boundary.STOP)
+                assert all(rows[name]["running"] for name in host_boundary.PASSIVE)
                 assert run(["docker", "exec", replacement, "cat", "/qt-history/preparation-proof"], env=env).stdout.strip() == "retained-history-path"
             with pause.paused_storage_clients(state, project=project, source_revision=revision,
                                                prepare_database=True, history_uuid="fixture-history"):
@@ -141,20 +142,20 @@ def main(*, online_source=False):
                 result = run(["bash", "scripts/automation/server_deploy.sh", action],
                     env={**env, "QT_SINGLE_NODE_STATE_ROOT": str(state), "QT_SINGLE_NODE_ENV_FILE": str(root/"absent.env")}, ok=False)
                 assert result.returncode and "storage handoff hold" in result.stderr
-            assert (state/pause.HOLD).exists()
+            assert (state/host_boundary.HOLD).exists()
             print("PASS: durable database replacement intent survives owning-process death; exact replacement resumes with original cluster/data and history bind; clients stay paused and ordinary deployment stays blocked", flush=True)
         except BaseException:
             target = cid()
             if target:
                 if "original_details" in locals():
-                    current = pause._database_details(target)
+                    current = host_boundary.database_details(target)
                     # Diagnostic keys only: never print the resolved environment.
                     changes = {group: [key for key in set(original_details[group]) | set(current[group])
                                if original_details[group].get(key) != current[group].get(key)]
                                for group in ("config", "host")}
                     print("Fixture changed Docker fields: "+json.dumps(changes), flush=True)
-                    print("Fixture networks: "+json.dumps({"source": pause._database_networks(original_details),
-                                                           "replacement": pause._database_networks(current)}), flush=True)
+                    print("Fixture networks: "+json.dumps({"source": host_boundary.database_networks(original_details),
+                                                           "replacement": host_boundary.database_networks(current)}), flush=True)
                     print("Fixture mounts: "+json.dumps({"source": original_details["mounts"], "replacement": current["mounts"]}), flush=True)
                 print(run(["docker", "logs", "--tail", "35", target], env=env, ok=False).stdout[-7000:], flush=True)
             raise
@@ -183,21 +184,21 @@ def online_source_rehearsal(state, project, env, working, query, cid, cluster):
         if time.monotonic() > wait_until:
             raise RuntimeError("online_source_fixture_initial_intake_absent")
         time.sleep(0.2)
-    source = pause._identities(pause._inventory(project))
-    metadata = online._source_roots(pause._database_details(source["market-data-collector"]["id"]))
+    source = host_boundary.identities(host_boundary.inventory(project))
+    metadata = online._source_roots(host_boundary.database_details(source["market-data-collector"]["id"]))
     code = "\n".join([
         "import os,signal,sys",
         "from pathlib import Path",
-        "from scripts.automation import storage_handoff_pause as pause",
+        "from scripts.automation import storage_handoff_pause as pause; from scripts.automation import storage_host_boundary as host_boundary",
         "from scripts.automation import storage_online_prepare as online",
-        "actual=pause._docker",
+        "actual=host_boundary.docker",
         "def interrupt(*args,**kwargs):",
         "    value=actual(*args,**kwargs)",
         "    if args[0]=='start' and online._load(Path(sys.argv[1]))['phase']=='resuming':",
         "        print('SOURCE_STARTED_BEFORE_PROCESS_DEATH',flush=True)",
         "        os.kill(os.getpid(),signal.SIGKILL)",
         "    return value",
-        "pause._docker=interrupt",
+        "host_boundary.docker=interrupt",
         "online.prepare_online_source(Path(sys.argv[1]),project=sys.argv[2],source_revision='a'*40,history_uuid='fixture-history')",
     ])
     started = time.monotonic()
@@ -206,7 +207,7 @@ def online_source_rehearsal(state, project, env, working, query, cid, cluster):
         raise RuntimeError("online_source_interruption_failed: "+child.stderr[-5000:])
     saved = online._load(state)
     assert saved["phase"] == "resuming"
-    assert (state/pause.HOLD).exists()
+    assert (state/host_boundary.HOLD).exists()
     # No owning process remains: ordinary old-recipe recovery still refuses.
     for action in ("deploy","recover","rollback"):
         blocked = run(["bash","scripts/automation/server_deploy.sh",action],
@@ -216,12 +217,12 @@ def online_source_rehearsal(state, project, env, working, query, cid, cluster):
         result = online.prepare_online_source(state,project=project,source_revision="a"*40,history_uuid="fixture-history")
         assert result["started_at"] == saved["started_at"] and result["deadline"] == saved["deadline"]
         assert result["phase"] == "serving"
-        assert pause._load(state/pause.HOLD)["database_preparation"]["deadline"] == result["deadline"]
-        rows = pause._inventory(project)
-        assert pause._source_clients_serving(rows)
+        assert host_boundary.load_receipt(state/host_boundary.HOLD)["database_preparation"]["deadline"] == result["deadline"]
+        rows = host_boundary.inventory(project)
+        assert host_boundary.source_clients_serving(rows)
         assert not rows["initialize"]["running"] and rows["initialize"]["exit_code"] == 0
-        assert {k:v for k,v in pause._identities(rows).items() if k!="tsdb"} == {k:v for k,v in source.items() if k!="tsdb"}
-        assert metadata == online._source_roots(pause._database_details(rows["market-data-collector"]["id"]))
+        assert {k:v for k,v in host_boundary.identities(rows).items() if k!="tsdb"} == {k:v for k,v in source.items() if k!="tsdb"}
+        assert metadata == online._source_roots(host_boundary.database_details(rows["market-data-collector"]["id"]))
         assert query("SELECT value FROM public.qt_host_hold_proof") == "retained"
         assert query("SELECT system_identifier FROM pg_control_system()") == cluster
         assert query("SHOW archive_mode") == "off"
@@ -408,7 +409,7 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         private.write_text(''.join(key+'='+value+'\n' for key,value in values.items()))
     # Start old clients through Compose: manually labelled docker-run clients
     # survive alongside replacements instead of following Compose ownership.
-    client_names=pause.STOP+tuple(v for v in pause.PASSIVE if v!='tsdb')
+    client_names=host_boundary.STOP+tuple(v for v in host_boundary.PASSIVE if v!='tsdb')
     clients=json.loads(json.dumps(model))
     for name in client_names:
         client=dict(image=client_image,pull_policy='never',read_only=True,user='65534:65534',
@@ -429,7 +430,7 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         'up','--detach','--no-deps','--no-build','--pull','never',*client_names],env=env)
     image_env=dict(v.split('=',1) for v in json.loads(run(['docker','image','inspect',image,'--format','{{json .Config.Env}}'],env=env).stdout))
     proof=json.loads((working/'held-proof.json').read_text())
-    identity=pause._database_query(dbid,"SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()")
+    identity=host_boundary.database_query(dbid,"SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()")
     request=dict(schema_version='qt.storage_database_operator.v1',source_revision=image_env['QT_IMAGE_SOURCE_REVISION'],
         source_tree_hash=image_env['QT_IMAGE_SOURCE_TREE_HASH'],database_identity=identity,inventory_path='/run/quanttrad/storage-inventory.json',
         policy=dict(recent=['ssd'],history=['hdd'],archives=['hdd'],backups=['hdd'],movement_enabled=True,backup_enabled=True),
@@ -440,20 +441,20 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     options=dict(project=project,source_revision=revision,history_uuid='fixture-hdd',image=image,request=request,inventory_path=str(inventory))
     input_file=control_root/'invocation.json';input_file.write_text(json.dumps(options));input_file.chmod(0o600)
     child_code="\n".join([
-        'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause',
-        'actual=pause._docker','def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
+        'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause; from scripts.automation import storage_host_boundary as host_boundary',
+        'actual=host_boundary.docker','def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
         "    if args[0]=='create':",'        os.kill(os.getpid(),signal.SIGKILL)','    return result',
-        'pause._docker=interrupted','pause.run_held_database_handoff(Path(sys.argv[1]),**json.loads(Path(sys.argv[2]).read_text()))'])
+        'host_boundary.docker=interrupted','pause.run_held_database_handoff(Path(sys.argv[1]),**json.loads(Path(sys.argv[2]).read_text()))'])
     print('Interrupting host controller after creating its actual migration container',flush=True)
     child=run([sys.executable,'-c',child_code,str(state),str(input_file)],env={**env,'QT_STORAGE_UDEV_ROOT':str(udev)},timeout=800,ok=False)
     if child.returncode!=-9:
-        held=pause._load(state/pause.HOLD)
+        held=host_boundary.load_receipt(state/host_boundary.HOLD)
         current=run(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+project,
                      '--filter','label=com.docker.compose.service=tsdb'],env=env).stdout.strip()
         if current:
-            observed=pause._database_details(current)
+            observed=host_boundary.database_details(current)
             print('Prepared database mount/network evidence: '+json.dumps(dict(
-                mounts=observed['mounts'],networks=pause._database_networks(observed),
+                mounts=observed['mounts'],networks=host_boundary.database_networks(observed),
                 expected_networks=held.get('database_preparation',{}).get('networks'),
                 expected_history=held.get('database_preparation',{}).get('history_root'))),flush=True)
     assert child.returncode==-9,child.stderr[-4000:]
@@ -474,9 +475,9 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         assert (now.st_dev,now.st_ino,now.st_mode,now.st_gid,now.st_mtime_ns)==(old.st_dev,old.st_ino,old.st_mode,old.st_gid,old.st_mtime_ns)
     print('Legacy root-owned private files now readable by UID70 with bytes and file identity preserved',flush=True)
     assert run(['docker','ps','-aq','--no-trunc','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()==operator_id
-    print(application(_VERIFY,pause._load(state/pause.HOLD)['containers']['tsdb']['id']).stdout[-400:],flush=True)
-    assert (state/pause.HOLD).exists()
-    assert not any(pause._inventory(project,operator_id=operator_id)[name]['running'] for name in pause.STOP)
+    print(application(_VERIFY,host_boundary.load_receipt(state/host_boundary.HOLD)['containers']['tsdb']['id']).stdout[-400:],flush=True)
+    assert (state/host_boundary.HOLD).exists()
+    assert not any(host_boundary.inventory(project,operator_id=operator_id)[name]['running'] for name in host_boundary.STOP)
     assert pause.run_held_database_handoff(state,**options)==result
     print('PASS: held host procedure recovered the same actual operator, preserved frozen archived reads and recent records, placed old headers/identities on HDD, and kept application clients paused',flush=True)
     if runtime_images:
@@ -520,7 +521,7 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         for mount in service.get('volumes',[]):
             if mount['target']=='/run/qt-host-udev':mount['source']=str(udev.parent)
         model['services'][name]=service
-    for name in (*pause.STOP,*pause.PASSIVE):
+    for name in (*host_boundary.STOP,*host_boundary.PASSIVE):
         if name in model['services']:continue
         model['services'][name]=dict(image=image if name=='docker-stats' else client_image,
             pull_policy='never',restart='no',user='65534:65534',
@@ -555,8 +556,8 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
     # Kill the actual host controller after Compose changed the real services,
     # before it can record readiness or remove the durable hold.
     code="\n".join([
-        'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause',
-        'actual=pause._docker',
+        'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause; from scripts.automation import storage_host_boundary as host_boundary',
+        'actual=host_boundary.docker',
         'actual_run=pause.subprocess.run',
         'def diagnosed_run(command,*args,**kwargs):',
         '    result=actual_run(command,*args,**kwargs)',
@@ -566,19 +567,19 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         'pause.subprocess.run=diagnosed_run',
         'def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
         "    if args[0]=='compose' and 'up' in args:",
-        '        os.kill(os.getpid(),signal.SIGKILL)','    return result','pause._docker=interrupted',
+        '        os.kill(os.getpid(),signal.SIGKILL)','    return result','host_boundary.docker=interrupted',
         'pause.run_held_runtime_handoff(Path(sys.argv[1]),activation_timeout_seconds=600,**json.loads(Path(sys.argv[2]).read_text()))'])
     print('Starting real candidate services and interrupting the owning activation controller',flush=True)
     child=run([sys.executable,'-c',code,str(state),str(invocation)],
         env={**env,'QT_STORAGE_UDEV_ROOT':str(udev)},timeout=800,ok=False)
     try:
         assert child.returncode==-9,child.stderr[-4000:]
-        saved=pause._load(state/pause._RUNTIME_STATE)
-        before=pause._identities(pause._inventory(project,operator_id=saved['operator_id'],activating=True))
-        assert (state/pause.HOLD).exists() and 'storage_layout=' not in (state/'release.env').read_text()
+        saved=host_boundary.load_receipt(state/pause._RUNTIME_STATE)
+        before=host_boundary.identities(host_boundary.inventory(project,operator_id=saved['operator_id'],activating=True))
+        assert (state/host_boundary.HOLD).exists() and 'storage_layout=' not in (state/'release.env').read_text()
         outcome=pause.run_held_runtime_handoff(state,activation_timeout_seconds=600,**options)
-        assert outcome['ready'] and not (state/pause.HOLD).exists()
-        after=pause._identities(pause._inventory(project,operator_id=saved['operator_id'],activating=True))
+        assert outcome['ready'] and not (state/host_boundary.HOLD).exists()
+        after=host_boundary.identities(host_boundary.inventory(project,operator_id=saved['operator_id'],activating=True))
         assert after==before,'recovery must retain the same actual candidate containers'
         assert 'storage_layout=ssd-hdd-v1\n' in (state/'release.env').read_text()
         assert 'previous_revision=\n' in (state/'release.env').read_text()

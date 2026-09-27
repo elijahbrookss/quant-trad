@@ -19,7 +19,7 @@ import sys
 import time
 from urllib.parse import quote, unquote, urlsplit
 
-from scripts.automation import storage_handoff_pause as held
+from scripts.automation import storage_host_boundary as host_boundary
 
 _COMMAND = ["-m", "scripts.automation.storage_online_worker"]
 _CAPS = ["DAC_READ_SEARCH", "SETGID", "SETUID"]
@@ -44,7 +44,7 @@ def _retire_worker(process, identity, binding, contract):
         return value
     def observe():
         _admit(identity, binding, contract)
-        return json.loads(held._docker("inspect", "--format", "{{json .State}}", identity))
+        return json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", identity))
     try:
         if process.stdin:
             try:
@@ -52,7 +52,7 @@ def _retire_worker(process, identity, binding, contract):
             except BrokenPipeError:
                 print("event=storage_online_worker_input_closed reason=broken_pipe",
                       file=sys.stderr, flush=True)
-        with held._docker_deadline(deadline):
+        with host_boundary.docker_deadline(deadline):
             try:
                 process.wait(timeout=remaining(10))
             except subprocess.TimeoutExpired:
@@ -61,7 +61,7 @@ def _retire_worker(process, identity, binding, contract):
             if current.get("Running") is True:
                 # Only the exact admitted migration worker. Its source peers
                 # remain serving/held according to their unchanged final intent.
-                held._docker("stop", "--time", "5", identity, timeout=remaining(15))
+                host_boundary.docker("stop", "--time", "5", identity, timeout=remaining(15))
             if process.poll() is None:
                 process.wait(timeout=remaining(10))
             current = observe()
@@ -165,7 +165,7 @@ def _arguments(name, image, database_id, mounts, overrides, descriptor_limit, me
 
 
 def _admit(identity, binding, previous=None):
-    details = held._database_details(identity)
+    details = host_boundary.database_details(identity)
     config, host = details["config"], details["host"]
     mounts = [m for m in details["mounts"] if m["Type"] != "tmpfs"]
     observed = {m["Destination"]: [m["Type"], m["Source"], m["RW"]] for m in mounts}
@@ -178,7 +178,7 @@ def _admit(identity, binding, previous=None):
         and config.get("OpenStdin") is True and not config.get("Tty")
         and config["Hostname"] in (identity[:12], binding["database_hostname"])
         and config["Labels"].get("qt.storage.online") == binding["request_sha256"]
-        and held._digest(sorted(config["Env"])) == binding["environment_sha256"]
+        and host_boundary.digest(sorted(config["Env"])) == binding["environment_sha256"]
         and host["NetworkMode"] == "container:"+binding["database_id"]
         and host["PidMode"] == "container:"+binding["database_id"]
         and host["ReadonlyRootfs"] and not host["Privileged"]
@@ -196,7 +196,7 @@ def _admit(identity, binding, previous=None):
         and len(mounts) == len(observed) == len(expected) and observed == expected
         and {m["Destination"] for m in details["mounts"] if m["Type"] == "tmpfs"} <= set(_TMPFS))
     normalized = {**details, "config": {**config, "Hostname": binding["database_hostname"]}}
-    contract = held._database_contract(normalized)
+    contract = host_boundary.database_contract(normalized)
     if not valid or (previous is not None and previous != contract):
         raise RuntimeError("storage_online_container_binding_changed")
     return contract
@@ -241,7 +241,7 @@ def launched_online_worker(state_root, *, project, source_revision, image,
     if len(data) > 65536:
         raise ValueError("storage_online_request_budget_exceeded")
     digest = hashlib.sha256(data).hexdigest()
-    with held._deployment_lock(state_root):
+    with host_boundary.deployment_lock(state_root):
         if os.path.lexists(state_root/"storage-online-final.json"):
             raise RuntimeError("storage_online_final_requires_reconciliation")
         for name in ("promotion.env", "alert-preview.env"):
@@ -251,28 +251,28 @@ def launched_online_worker(state_root, *, project, source_revision, image,
                       flags=re.MULTILINE) != [source_revision]:
             raise RuntimeError("storage_online_source_release_changed")
         state_path = state_root/_STATE
-        saved = held._load(state_path) if os.path.lexists(state_path) else None
+        saved = host_boundary.load_receipt(state_path) if os.path.lexists(state_path) else None
         name = project+"-storage-online"
-        found = held._docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
+        found = host_boundary.docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
         if len(found) > 1 or (found and (not saved or saved.get("container_id") not in (None, found[0]))):
             raise RuntimeError("storage_online_unowned_container")
-        if (os.path.lexists(state_root/held.HOLD)
+        if (os.path.lexists(state_root/host_boundary.HOLD)
                 or os.path.lexists(state_root/"storage-online-preparation.json")):
             from scripts.automation.storage_online_prepare import admit_serving_source
             admit_serving_source(state_root, project=project, source_revision=source_revision,
                                  operator_id=found[0] if found else None)
-        rows = held._inventory(project, operator_id=found[0] if found else None)
-        if not held._source_clients_serving(rows):
+        rows = host_boundary.inventory(project, operator_id=found[0] if found else None)
+        if not host_boundary.source_clients_serving(rows):
             raise RuntimeError("storage_online_serving_source_required")
-        identities = held._identities(rows)
+        identities = host_boundary.identities(rows)
         database_id = rows["tsdb"]["id"]
-        database = held._database_details(database_id)
-        collector = held._database_details(rows["market-data-collector"]["id"])
+        database = host_boundary.database_details(database_id)
+        collector = host_boundary.database_details(rows["market-data-collector"]["id"])
         dsn = _dsn(database, collector)
         source_env = dict(v.split("=", 1) for v in collector["config"].get("Env") or [])
         if source_env.get("QT_IMAGE_SOURCE_REVISION") != source_revision:
             raise RuntimeError("storage_online_serving_image_revision_changed")
-        image_info = json.loads(held._docker("image", "inspect", "--format", "{{json .}}", image))
+        image_info = json.loads(host_boundary.docker("image", "inspect", "--format", "{{json .}}", image))
         image_env = dict(v.split("=", 1) for v in image_info["Config"].get("Env") or [])
         if (image_info["Id"] != image
                 or image_env.get("QT_IMAGE_SOURCE_REVISION") != request.get("source_revision")
@@ -283,7 +283,7 @@ def launched_online_worker(state_root, *, project, source_revision, image,
             descriptor = os.open(request_path, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(data); stream.flush(); os.fsync(stream.fileno())
-            held._sync_directory(state_root)
+            host_boundary.sync_directory(state_root)
         if (request_path.is_symlink() or request_path.read_bytes() != data
                 or request_path.stat().st_uid != os.getuid()
                 or stat.S_IMODE(request_path.stat().st_mode) != 0o600):
@@ -294,7 +294,7 @@ def launched_online_worker(state_root, *, project, source_revision, image,
         if (source.st_dev, source.st_ino) != (request.get("source_device"), request.get("source_inode")):
             raise RuntimeError("storage_online_source_root_changed")
         # Derive the host ceiling from the SAME original persisted attempt.
-        observed = json.loads(held._database_query(database_id,
+        observed = json.loads(host_boundary.database_query(database_id,
             "SELECT json_build_object('started_at',prepared_at,'seconds',"
             "COALESCE((to_jsonb(c)->>'attempt_seconds')::int,86400))::text "
             "FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
@@ -310,11 +310,11 @@ def launched_online_worker(state_root, *, project, source_revision, image,
                      "QT_ONLINE_REQUEST_SHA256": digest, "QT_STORAGE_UDEV_ROOT": "/run/qt-online/udev"}
         binding = dict(project=project, source_revision=source_revision, clients=identities,
             image=image, database_id=database_id, database_hostname=database["config"]["Hostname"],
-            database_contract=held._database_contract(database),
-            collector_contract=held._database_contract(collector),
+            database_contract=host_boundary.database_contract(database),
+            collector_contract=host_boundary.database_contract(collector),
             request_sha256=digest, inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
             mounts=mounts, descriptor_limit=descriptor_limit, memory_bytes=memory_bytes,
-            environment_sha256=held._digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
+            environment_sha256=host_boundary.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
         if saved:
             if (set(saved) != {"binding", "container_id", "contract", "deadline"}
                     or saved["binding"] != binding or saved["deadline"] != deadline
@@ -322,17 +322,17 @@ def launched_online_worker(state_root, *, project, source_revision, image,
                 raise RuntimeError("storage_online_saved_launch_changed")
         else:
             saved = dict(binding=binding, container_id=None, contract=None, deadline=deadline)
-            held._save(state_path, saved, initial=True)
+            host_boundary.save_receipt(state_path, saved, initial=True)
         if not found:
-            found = [held._docker(*_arguments(name, image, database_id, mounts, overrides,
+            found = [host_boundary.docker(*_arguments(name, image, database_id, mounts, overrides,
                      descriptor_limit, memory_bytes, digest), env={**os.environ,"PG_DSN":dsn}).strip()]
         contract = _admit(found[0], binding, saved["contract"])
         saved.update(container_id=found[0], contract=contract)
-        held._save(state_path, saved, initial=False)
-        current = json.loads(held._docker("inspect", "--format", "{{json .State}}", found[0]))
+        host_boundary.save_receipt(state_path, saved, initial=False)
+        current = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", found[0]))
         if current["Running"] or current["Paused"] or current["Restarting"] or current["OOMKilled"]:
             raise RuntimeError("storage_online_existing_worker_requires_reconciliation")
-        if (held._identities(held._inventory(project, operator_id=found[0])) != identities
+        if (host_boundary.identities(host_boundary.inventory(project, operator_id=found[0])) != identities
                 or hashlib.sha256(inventory_path.read_bytes()).hexdigest() != binding["inventory_sha256"]):
             raise RuntimeError("storage_online_source_changed_before_start")
         # The private DSN exists only in Docker's environment; command arguments
@@ -346,5 +346,5 @@ def launched_online_worker(state_root, *, project, source_revision, image,
                             "final_switch_authorized": False}
         finally:
             _retire_worker(process, found[0], binding, contract)
-            if held._identities(held._inventory(project, operator_id=found[0])) != identities:
+            if host_boundary.identities(host_boundary.inventory(project, operator_id=found[0])) != identities:
                 raise RuntimeError("storage_online_source_changed_during_worker")

@@ -1,4 +1,5 @@
 """Host launch admission and interruption tests with disposable inputs."""
+from scripts.automation import storage_host_boundary as host_boundary
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 import io
@@ -37,7 +38,7 @@ def _contract_fixture(tmp_path):
     identity, peer, image = "a"*64, "b"*64, "sha256:"+"c"*64
     binding = dict(image=image, database_id=peer, database_hostname="original-db",
         request_sha256="d"*64, mounts=mounts, descriptor_limit=2048,
-        memory_bytes=2*1024**3, environment_sha256=launch.held._digest(["BOUND=1"]))
+        memory_bytes=2*1024**3, environment_sha256=host_boundary.digest(["BOUND=1"]))
     config = dict(User="0:0", Entrypoint=["python"], Cmd=launch._COMMAND,
                   OpenStdin=True, Tty=False, Hostname=identity[:12],
                   Labels={"qt.storage.online": binding["request_sha256"]}, Env=["BOUND=1"])
@@ -86,7 +87,7 @@ def test_explicit_mounts_exclude_keys_and_refuse_writable_source_alias(tmp_path)
 ], ids=["inheritance","capability","swap","fd-limit","environment","command","keys","writable-source"])
 def test_live_container_contract_refuses_extra_authority(tmp_path, monkeypatch, mutation):
     identity, binding, details = _contract_fixture(tmp_path)
-    monkeypatch.setattr(launch.held, "_database_details", lambda _: details)
+    monkeypatch.setattr(host_boundary, "database_details", lambda _: details)
     original = launch._admit(identity, binding)
     assert launch._admit(identity, binding, original) == original
     mutation(details)
@@ -113,18 +114,18 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
     (state_root/"release.env").write_text("current_revision="+revision+"\n")
     monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(tmp_path/"udev"))
     rows = {service: {"id": str(i+1)*64, "image":"fixed", "restart":"no","running":True}
-            for i,service in enumerate((*launch.held.STOP,"tsdb"))}
+            for i,service in enumerate((*host_boundary.STOP,"tsdb"))}
     database.update(config={"Env":["POSTGRES_USER=fixture","POSTGRES_PASSWORD=disposable",
                                    "POSTGRES_DB=fixture","PGDATA=/var/lib/postgresql/data"],
                             "Hostname":"db"}, host={}, image="db-image", networks={})
     collector.update(config={"Env":["PG_DSN=postgresql+psycopg2://fixture:disposable@tsdb/fixture",
                                     "QT_IMAGE_SOURCE_REVISION="+revision]},
                      host={}, image="collector-image", networks={})
-    monkeypatch.setattr(launch.held,"_inventory",lambda *a,**k: deepcopy(rows))
-    monkeypatch.setattr(launch.held,"_database_details",
+    monkeypatch.setattr(host_boundary, "inventory",lambda *a,**k: deepcopy(rows))
+    monkeypatch.setattr(host_boundary, "database_details",
                         lambda identity: database if identity==rows["tsdb"]["id"] else collector)
     started = datetime.now(timezone.utc)-timedelta(seconds=3)
-    monkeypatch.setattr(launch.held,"_database_query",lambda *a: json.dumps(
+    monkeypatch.setattr(host_boundary, "database_query",lambda *a: json.dumps(
         {"started_at":started.isoformat(),"seconds":60}))
     monkeypatch.setattr(launch, "_admit", lambda *a: "fixed-contract")
     objects=(tmp_path/"working"/"objects").stat()
@@ -143,15 +144,15 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
         if args[0]=="inspect":
             return json.dumps({"Running":False,"Paused":False,"Restarting":False,"OOMKilled":False,"Dead":False,"Pid":0,"Status":"exited"})
         raise AssertionError(args)
-    monkeypatch.setattr(launch.held,"_docker",docker)
-    save=launch.held._save
+    monkeypatch.setattr(host_boundary, "docker",docker)
+    save=host_boundary.save_receipt
     fail=[True]
     def interrupted(path, receipt, *, initial):
         if not initial and fail[0]:
             fail[0]=False
             raise RuntimeError("lost after create")
         save(path, receipt, initial=initial)
-    monkeypatch.setattr(launch.held,"_save",interrupted)
+    monkeypatch.setattr(host_boundary, "save_receipt",interrupted)
     kwargs=dict(project="fixture",source_revision=revision,image=image,request=request,
                 inventory_path=inventory,descriptor_limit=1024,memory_bytes=2*1024**3)
     with pytest.raises(RuntimeError,match="lost after create"):
@@ -190,7 +191,7 @@ def test_retirement_does_not_confuse_exited_cli_with_stopped_worker(monkeypatch,
         if fault=="pid":current["Pid"]=123
         if fault=="expiry":clock[0]=136.
         return ""
-    monkeypatch.setattr(launch.held,"_docker",docker)
+    monkeypatch.setattr(host_boundary, "docker",docker)
     if fault:
         with pytest.raises((RuntimeError,TimeoutError)):
             launch._retire_worker(process,"a"*64,"binding","contract")
@@ -211,6 +212,6 @@ def test_retirement_failure_reaps_only_local_cli(monkeypatch):
     def docker(*args,**kwargs):
         if args[0]=="inspect":return json.dumps(dict(Running=True))
         raise TimeoutError("stop unresolved")
-    monkeypatch.setattr(launch.held,"_docker",docker)
+    monkeypatch.setattr(host_boundary, "docker",docker)
     with pytest.raises(TimeoutError):launch._retire_worker(process,"a"*64,"binding","contract")
     assert process.killed and process.stdout.closed

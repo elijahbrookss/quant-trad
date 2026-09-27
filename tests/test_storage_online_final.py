@@ -1,4 +1,5 @@
 """Durable final stop clocks, interruption and independent deployment exclusion."""
+from scripts.automation import storage_host_boundary as host_boundary
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ PROJECT, REVISION, WORKER, CONTROLLER = "qt-owned", "a"*40, "b"*64, "c"*32
 def pause_setup(tmp_path, monkeypatch):
     rows = {name: dict(id=str(i+1)*64, running=name != "initialize",
                       status="exited" if name == "initialize" else "running", exit_code=0)
-            for i, name in enumerate(final.held.STOP)}
+            for i, name in enumerate(host_boundary.STOP)}
     preparation = {"clients": {k: {"was_running": v["running"]} for k, v in rows.items()}}
     clock = {"wall": 1000., "boot": 100., "boot_id": "a"*36}
     state = {"binding": {"runtime": 1}, "limit": 90, "capture_deadline": 1200.,
@@ -36,7 +37,7 @@ def pause_setup(tmp_path, monkeypatch):
             state["interrupt"] = False
             raise TimeoutError("lost graceful stop reply")
         return ""
-    monkeypatch.setattr(final.held, "_docker", docker)
+    monkeypatch.setattr(host_boundary, "docker", docker)
     def stop(**changed):
         return final.stop_online_source_locked(tmp_path, **{
             "project": PROJECT, "source_revision": REVISION, "worker_id": WORKER,
@@ -48,7 +49,7 @@ def test_final_stop_persists_intent_and_never_restarts_initializer(pause_setup):
     path, rows, clock, state, stop = pause_setup
     receipt = stop()
     assert receipt["phase"] == "paused"
-    assert len(state["stops"]) == len(final.held.STOP)-1
+    assert len(state["stops"]) == len(host_boundary.STOP)-1
     assert receipt["deadline"] == 1060 and receipt["deadline_boot"] == 160
     before = (path/final.STATE).read_bytes()
     assert stop() == receipt and (path/final.STATE).read_bytes() == before
@@ -67,7 +68,7 @@ def test_lost_stop_reply_reentry_retains_original_window_and_skips_stopped(pause
     result = stop()
     assert result["deadline"] == original["deadline"]
     assert result["deadline_boot"] == original["deadline_boot"]
-    assert len(state["stops"]) == len(set(state["stops"])) == len(final.held.STOP)-1
+    assert len(state["stops"]) == len(set(state["stops"])) == len(host_boundary.STOP)-1
 
 
 @pytest.mark.parametrize("drift", ["boot", "wall", "expiry", "runtime", "controller", "duration", "resource", "capture"])
@@ -97,29 +98,28 @@ def test_final_resource_refusal_precedes_intent_and_stop(pause_setup):
 
 
 def test_nested_docker_calls_share_one_absolute_budget(monkeypatch):
-    held = final.held
     clock = [10.]
     timeouts = []
-    monkeypatch.setattr(held.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(host_boundary.time, "monotonic", lambda: clock[0])
     def run(args, **kwargs):
         timeouts.append(kwargs["timeout"])
         clock[0] += 2
         return SimpleNamespace(returncode=0, stdout="ok")
-    monkeypatch.setattr(held.subprocess, "run", run)
-    with held._docker_deadline(15):
-        assert held._docker("inspect", "owned", timeout=30) == "ok"
-        with held._docker_deadline(99):
-            assert held._docker("inspect", "owned", timeout=30) == "ok"
+    monkeypatch.setattr(host_boundary.subprocess, "run", run)
+    with host_boundary.docker_deadline(15):
+        assert host_boundary.docker("inspect", "owned", timeout=30) == "ok"
+        with host_boundary.docker_deadline(99):
+            assert host_boundary.docker("inspect", "owned", timeout=30) == "ok"
         with pytest.raises(RuntimeError, match="host_deadline_expired"):
-            held._docker("stop", "--timeout", "-1", "owned", timeout=30)
+            host_boundary.docker("stop", "--timeout", "-1", "owned", timeout=30)
     assert timeouts == [5,3,1]
-    assert held._DOCKER_DEADLINE.get() is None
+    assert host_boundary.current_docker_deadline() is None
 
 
 def test_source_drain_rechecks_held_source_and_original_deadline(pause_setup):
     path, rows, clock, state, stop = pause_setup
     saved = stop()
-    final.held._save(path/"storage-online-request.json", {"command_seconds": 30}, initial=True)
+    host_boundary.save_receipt(path/"storage-online-request.json", {"command_seconds": 30}, initial=True)
     before = (path/final.STATE).read_bytes()
     calls = []
     def exchange(operation, **kwargs):
@@ -211,11 +211,11 @@ def test_switch_intent_survives_lost_save_reply_without_reentry(pause_setup, mon
     import time
     path, rows, clock, state, stop = pause_setup
     paused = stop();deadline = time.monotonic()+20
-    original = final.held._save
+    original = host_boundary.save_receipt
     def save_then_lose(*args, **kwargs):
         original(*args, **kwargs)
         raise TimeoutError("lost durable write response")
-    monkeypatch.setattr(final.held, "_save", save_then_lose)
+    monkeypatch.setattr(host_boundary, "save_receipt", save_then_lose)
     def live(**args):
         return dict(controller_id=CONTROLLER, operation="status", state="background",
             bound_final_deadline=deadline, last_sequence=3, migration_ready=False,
@@ -242,7 +242,7 @@ def test_outcome_observation_never_releases_host_intent(pause_setup, outcome):
         final_switch_authorized=False, collection_resume_authorized=False)
     final.record_switch_entry_locked(path, observe_worker=lambda **_:status, deadline=deadline)
     before = (path/final.STATE).read_bytes()
-    final.held._save(path/"storage-online-request.json", {"command_seconds": 1}, initial=True)
+    host_boundary.save_receipt(path/"storage-online-request.json", {"command_seconds": 1}, initial=True)
     def exchange(operation, **args):
         assert operation == "inspect_outcome" and 0 < args["deadline"]-time.monotonic() <= 1
         if outcome == "source_drift":rows["backend"]["running"] = True
@@ -268,7 +268,7 @@ def resume_setup(pause_setup, monkeypatch):
     deadline = final.time.monotonic()+30
     saved.update(phase="switch_entered", switch={"entered_at": 1000.,
         "deadline_monotonic": deadline, "worker_sequence": 5})
-    final.held._save(path/final.STATE, saved, initial=False)
+    host_boundary.save_receipt(path/final.STATE, saved, initial=False)
     calls = []
     def exchange(operation, **kwargs):
         assert kwargs == {"deadline": deadline}
@@ -304,8 +304,8 @@ def test_resume_retains_live_fence_original_clocks_and_initializer(resume_setup)
     assert saved["phase"] == "source_resumed"
     assert all(saved[k] == v for k, v in original.items() if k != "phase")
     assert calls[0] == "rollback_fence_begin" and calls[-1] == "rollback_fence_end"
-    assert len(starts) == len(final.held.STOP)-1 and not rows["initialize"]["running"]
-    assert saved["resume"]["completed"] == [n for n in final.held.STOP if n != "initialize"]
+    assert len(starts) == len(host_boundary.STOP)-1 and not rows["initialize"]["running"]
+    assert saved["resume"]["completed"] == [n for n in host_boundary.STOP if n != "initialize"]
     before = (path/final.STATE).read_bytes()
     with pytest.raises(RuntimeError, match="switch_intent_required"):
         final.resume_online_source_locked(path, exchange=exchange)
@@ -429,7 +429,7 @@ def test_resume_terminal_reply_does_not_require_worker_to_stay_alive(resume_setu
     "unhealthy", "worker", "expiry", "reboot", "pending", "committed", "active", "controller", "sequence"])
 def test_terminal_resume_reconciliation_never_replays_starts(resume_setup, monkeypatch, drift):
     path, rows, clock, state, stop, exchange, calls, starts, deadline = resume_setup
-    final.held._save(path/"storage-online-request.json", {"command_seconds": 5}, initial=True)
+    host_boundary.save_receipt(path/"storage-online-request.json", {"command_seconds": 5}, initial=True)
     def lost(operation, **kwargs):
         reply = exchange(operation, **kwargs)
         if operation == "rollback_fence_end":raise TimeoutError("received end reply discarded")
@@ -441,7 +441,7 @@ def test_terminal_resume_reconciliation_never_replays_starts(resume_setup, monke
         saved["resume"]["completed"].remove("backend")
         saved["resume"]["inflight"] = dict(service="backend",container_id=rows["backend"]["id"],requested_at=1000.)
     if drift == "incomplete":saved["resume"]["completed"].pop()
-    final.held._save(path/final.STATE, saved, initial=False)
+    host_boundary.save_receipt(path/final.STATE, saved, initial=False)
     before = (path/final.STATE).read_bytes()
     if drift == "stopped":rows["backend"]["running"] = False
     if drift == "initializer":rows["initialize"]["running"] = True
@@ -498,9 +498,9 @@ def mount_writer_setup(monkeypatch):
         if controls["inspections"] == 2 and controls["drift"]:
             controls["drift"](data)
         return "\n".join(json.dumps(data[i]) for i in sorted(data))
-    monkeypatch.setattr(final.held, "_docker", docker)
+    monkeypatch.setattr(host_boundary, "docker", docker)
     def admit():
-        with final.held._docker_deadline(final.time.monotonic()+5):
+        with host_boundary.docker_deadline(final.time.monotonic()+5):
             return final._admit_mount_writers(rows, operator_id=identities[2])
     return peers[identities[3]], controls, admit
 
@@ -614,7 +614,7 @@ def test_source_namespace_binding_drift_refuses(mount_writer_setup, field):
 def test_transitive_namespace_alias_through_worker_refuses(mount_writer_setup):
     peer, controls, admit = mount_writer_setup
     # Populate the real first snapshot rather than injecting second-read drift.
-    original = final.held._docker
+    original = host_boundary.docker
     def docker(action, *args, **kwargs):
         import json
         value = original(action, *args, **kwargs)
@@ -626,7 +626,7 @@ def test_transitive_namespace_alias_through_worker_refuses(mount_writer_setup):
         return value
     from unittest.mock import patch
     peer["network_mode"] = "container:"+"3"*64
-    with patch.object(final.held, "_docker", docker):
+    with patch.object(host_boundary, "docker", docker):
         with pytest.raises(RuntimeError, match="unadmitted_namespace_peer"): admit()
 
 
