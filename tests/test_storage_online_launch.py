@@ -141,7 +141,7 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
             assert "disposable" not in " ".join(args)
             return worker_id
         if args[0]=="inspect":
-            return json.dumps({"Running":False,"Paused":False,"Restarting":False,"OOMKilled":False})
+            return json.dumps({"Running":False,"Paused":False,"Restarting":False,"OOMKilled":False,"Dead":False,"Pid":0,"Status":"exited"})
         raise AssertionError(args)
     monkeypatch.setattr(launch.held,"_docker",docker)
     save=launch.held._save
@@ -159,10 +159,58 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
     original=json.loads((state_root/launch._STATE).read_text())
     assert original["container_id"] is None and len(created)==1
     monkeypatch.setattr(launch.subprocess,"Popen",lambda *a,**k:
-        SimpleNamespace(stdin=io.BytesIO(),stdout=io.BytesIO(),wait=lambda **kw:0))
+        SimpleNamespace(stdin=io.BytesIO(),stdout=io.BytesIO(),wait=lambda **kw:0,poll=lambda:0))
     with launch.launched_online_worker(state_root,**kwargs) as (_,receipt):
         assert receipt["deadline"] == original["deadline"]
         assert not receipt["final_switch_authorized"]
     assert len(created)==1
     with pytest.raises(RuntimeError,match="saved_launch_changed"):
         with launch.launched_online_worker(state_root,**(kwargs|{"descriptor_limit":2048})): pass
+
+
+@pytest.mark.parametrize("fault", [None, "lost_stop", "running", "pid", "drift", "expiry"])
+def test_retirement_does_not_confuse_exited_cli_with_stopped_worker(monkeypatch, fault):
+    clock=[100.];actions=[]
+    current=dict(Running=True,Paused=False,Restarting=False,Dead=False,Pid=123,Status="running")
+    process=SimpleNamespace(stdin=io.BytesIO(),stdout=io.BytesIO(),wait=lambda **kw:0,poll=lambda:0)
+    monkeypatch.setattr(launch.time,"monotonic",lambda:clock[0])
+    def admit(*args):
+        assert args==("a"*64,"binding","contract")
+        if fault=="drift":raise RuntimeError("binding changed")
+    monkeypatch.setattr(launch,"_admit",admit)
+    def docker(*args,**kwargs):
+        actions.append(args[0])
+        assert args[-1]=="a"*64
+        if args[0]=="inspect":return json.dumps(current)
+        assert args==("stop","--time","5","a"*64)
+        assert kwargs["timeout"]<=15
+        if fault=="lost_stop":raise TimeoutError("daemon reply lost")
+        current.update(Running=False,Pid=0,Status="exited")
+        if fault=="running":current["Running"]=True
+        if fault=="pid":current["Pid"]=123
+        if fault=="expiry":clock[0]=136.
+        return ""
+    monkeypatch.setattr(launch.held,"_docker",docker)
+    if fault:
+        with pytest.raises((RuntimeError,TimeoutError)):
+            launch._retire_worker(process,"a"*64,"binding","contract")
+    else:
+        launch._retire_worker(process,"a"*64,"binding","contract")
+    assert actions==([] if fault=="drift" else ["inspect","stop"] if fault=="lost_stop" else ["inspect","stop","inspect"])
+    assert process.stdin.closed and process.stdout.closed
+
+
+def test_retirement_failure_reaps_only_local_cli(monkeypatch):
+    process=SimpleNamespace(stdin=io.BytesIO(),stdout=io.BytesIO(),returncode=None,killed=False)
+    def wait(**kwargs):
+        if process.returncode is None:raise launch.subprocess.TimeoutExpired("owned",kwargs["timeout"])
+        return process.returncode
+    def kill():process.returncode=-9;process.killed=True
+    process.wait=wait;process.kill=kill;process.poll=lambda:process.returncode
+    monkeypatch.setattr(launch,"_admit",lambda *args:None)
+    def docker(*args,**kwargs):
+        if args[0]=="inspect":return json.dumps(dict(Running=True))
+        raise TimeoutError("stop unresolved")
+    monkeypatch.setattr(launch.held,"_docker",docker)
+    with pytest.raises(TimeoutError):launch._retire_worker(process,"a"*64,"binding","contract")
+    assert process.killed and process.stdout.closed

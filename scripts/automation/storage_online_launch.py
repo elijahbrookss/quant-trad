@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import time
 from urllib.parse import quote, unquote, urlsplit
 
@@ -25,6 +26,61 @@ _CAPS = ["DAC_READ_SEARCH", "SETGID", "SETUID"]
 _TMPFS = {"/tmp": "rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
           "/app/logs": "rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"}
 _STATE = "storage-online-worker.json"
+
+
+def _retire_worker(process, identity, binding, contract):
+    """Reap the attach CLI AND verify the exact read-capability worker stopped.
+
+    A detached/failed CLI is not daemon completion. Keep the launcher's existing
+    lock throughout this cleanup. The old 10+15+10 second cleanup ceiling is one
+    absolute bound, never a new source-stop, copy, switch or recovery allowance.
+    Failure leaves retirement unproven; no recovery mount authority is returned.
+    """
+    deadline = time.monotonic()+35
+    def remaining(limit):
+        value = min(limit, deadline-time.monotonic())
+        if value <= 0:
+            raise RuntimeError("storage_online_worker_retirement_expired")
+        return value
+    def observe():
+        _admit(identity, binding, contract)
+        return json.loads(held._docker("inspect", "--format", "{{json .State}}", identity))
+    try:
+        if process.stdin:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                print("event=storage_online_worker_input_closed reason=broken_pipe",
+                      file=sys.stderr, flush=True)
+        with held._docker_deadline(deadline):
+            try:
+                process.wait(timeout=remaining(10))
+            except subprocess.TimeoutExpired:
+                pass  # Inspect the daemon; CLI lifetime does not prove retirement.
+            current = observe()
+            if current.get("Running") is True:
+                # Only the exact admitted migration worker. Its source peers
+                # remain serving/held according to their unchanged final intent.
+                held._docker("stop", "--time", "5", identity, timeout=remaining(15))
+            if process.poll() is None:
+                process.wait(timeout=remaining(10))
+            current = observe()
+            if (current.get("Running") is not False or current.get("Paused") is not False
+                    or current.get("Restarting") is not False or current.get("Dead") is not False
+                    or type(current.get("Pid")) is not int or current["Pid"] != 0
+                    or current.get("Status") not in {"created", "exited"}):
+                raise RuntimeError("storage_online_worker_retirement_unproven")
+            remaining(1)
+            print("event=storage_online_worker_retired recovery_activation_authorized=false",
+                  file=sys.stderr, flush=True)
+    finally:
+        # This only reaps the owned local CLI, including failed daemon cleanup.
+        # It never claims that killing the CLI cancels a daemon operation.
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=1)
+        if process.stdout:
+            process.stdout.close()
 
 
 def _canonical(path):
@@ -289,18 +345,6 @@ def launched_online_worker(state_root, *, project, source_revision, image,
                             "deadline": deadline, "source_clients_unchanged": True,
                             "final_switch_authorized": False}
         finally:
-            if process.stdin:
-                process.stdin.close()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                # This wire cannot switch. Stopping this exact background worker
-                # closes proof and leaves source clients/data intact.
-                held._docker("stop", "--time", "5", found[0], timeout=15)
-                process.wait(timeout=10)
-            finally:
-                if process.stdout:
-                    process.stdout.close()
-            _admit(found[0], binding, contract)
+            _retire_worker(process, found[0], binding, contract)
             if held._identities(held._inventory(project, operator_id=found[0])) != identities:
                 raise RuntimeError("storage_online_source_changed_during_worker")

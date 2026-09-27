@@ -943,3 +943,28 @@ expiry remain unresolved; there is no fence recreation or saved-negative restart
 shortcut. The optional owned --abort-resume-lost-end rehearsal qualifies this
 limited terminal path. It is not COMMIT dispatch, recovery activation, ordinary
 deployment authorization or a production downtime measurement.
+
+
+### Verify worker retirement independently of its attach CLI
+
+Launcher teardown now inspects the exact admitted container after reaping the
+local Docker attachment. CLI exit alone cannot prove that the worker holding
+DAC_READ_SEARCH has exited. If that same admitted worker is still running,
+teardown stops only it, then requires a non-running, non-paused, non-restarting,
+non-dead container with PID zero and exited/created status. Contract drift,
+lost stop replies, remaining processes or expiry fail retirement explicitly.
+The launcher lock remains held throughout and source clients are not changed.
+
+The existing 10+15+10 second cleanup allowances now share one absolute35-second
+ceiling; final local CLI reaping has its own bounded one-second cleanup wait.
+These are worker cleanup bounds, not a renewed copy, source stop, COMMIT, runtime
+or recovery activation allowance. A cleanup failure remains unresolved and
+must prevent any later recovery mount transition. No receipt/marker is removed.
+
+The optional --worker-attach-loss owned rehearsal SIGSTOPs only the admitted
+migration Python process, then kills/reaps its actual Docker attach CLI. It
+checks that Docker still reports the worker running before normal launcher
+cleanup retires it. It then exercises a fresh controller with zero proof under
+the original capture deadline while source clients keep serving. This proves
+cleanup of a live outer launcher; full outer-process death and recovery-mount
+activation remain separate requirements.

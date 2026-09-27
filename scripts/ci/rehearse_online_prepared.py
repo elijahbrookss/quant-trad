@@ -22,7 +22,10 @@ parser.add_argument('--real-worker-publication',action='store_true',help='real c
 parser.add_argument('--abort-resume',action='store_true',help='resume exact original clients under the retained live rollback fence')
 parser.add_argument('--abort-resume-fence-loss',action='store_true',help='kill owned SQL fence while a real Docker start HTTP reply is withheld')
 parser.add_argument('--abort-resume-lost-end',action='store_true',help='discard a fully received terminal fence reply and reconcile without more starts')
+parser.add_argument('--worker-attach-loss',action='store_true',help='stop the owned worker Python process and kill its attach CLI before bounded retirement')
 options=parser.parse_args()
+if options.worker_attach_loss and (options.final_pause or not options.worker_phases):
+ parser.error('--worker-attach-loss requires --worker-phases and excludes final pause')
 if options.abort_resume_lost_end and (not options.abort_resume or options.abort_resume_fence_loss):
  parser.error('--abort-resume-lost-end requires --abort-resume and excludes fence-loss fault')
 if options.abort_resume_fence_loss and not options.abort_resume:
@@ -536,8 +539,22 @@ try:
     assert greeting['controller_id']!=previous_id
     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
     report['reentry_empty_proof']=True
-   if not options.abort_resume_fence_loss:command('close')
-  assert worker.returncode != 0 if options.abort_resume_fence_loss else worker.returncode == 0
+   if options.worker_attach_loss and attempt==0:
+    # Only the owned migration Python process in its admitted shared PG PID
+    # namespace; no PG/source peer receives a signal. Stop it so EOF cannot
+    # accidentally make a detached CLI look like a successful retirement.
+    stop_code="from pathlib import Path;import os,signal;ids=[int(p.name) for p in Path('/proc').iterdir() if p.name.isdigit() and (p/'cmdline').is_file() and (p/'cmdline').read_bytes().split(bytes([0]))[:3]==[b'python',b'-m',b'scripts.automation.storage_online_worker']];assert len(ids)==1;os.kill(ids[0],signal.SIGSTOP);print('owned_worker_stopped')"
+    assert run(['exec','--user','70:70',receipt['container_id'],'python','-c',stop_code]).stdout.strip()=='owned_worker_stopped'
+    worker.kill();worker.wait(timeout=5)
+    observed=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
+    assert observed['Running'] and observed['Pid']>0
+    report['worker_attach_loss']=dict(cli_reaped_before_retirement=True,daemon_worker_still_running=True)
+   elif not options.abort_resume_fence_loss:command('close')
+  if options.worker_attach_loss and attempt==0:
+   observed=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
+   assert not observed['Running'] and not observed['Restarting'] and observed['Pid']==0
+   report['worker_attach_loss']['daemon_worker_retired']=True
+  assert worker.returncode != 0 if (options.abort_resume_fence_loss or options.worker_attach_loss and attempt==0) else worker.returncode == 0
   assert launch.held._identities(launch.held._inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:
   # A host exception must close only its background worker; source keeps serving.
@@ -588,7 +605,7 @@ try:
   report['synthetic_intake_continued']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
- report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+1,final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
+ report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
 except BaseException as exc:
  if (options.worker_shutdown=='fail' and str(exc)=='storage_pause_unclean_stop: service=market-data-collector'
      and report.get('failed_drain_live_proof_retained_before_exit')):
