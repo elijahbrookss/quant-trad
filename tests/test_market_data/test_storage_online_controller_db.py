@@ -218,14 +218,21 @@ def test_controller_final_deadline_is_separate_bounded_and_not_renewed(
             worker.commit_database(deadline=deadline)
         assert worker.state == "background"
         stalled = []
+        expiry_deadline = None
         def stall(conn, cursor, statement, parameters, context, executemany):
             if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
                 stalled.append(time.monotonic())
-                conn.exec_driver_sql("SELECT pg_sleep(2.25)")
+                # CI admission can take longer than a two-second page. Reach
+                # the actual rename, then spend only the original final window;
+                # do not reset a clock or depend on the runner's setup speed.
+                delay = (max(0.25, expiry_deadline-time.monotonic()+0.25)
+                         if expiry_deadline is not None else 2.25)
+                conn.execute(text("SELECT pg_sleep(:seconds)"), {"seconds": delay})
         event.listen(engine, "after_cursor_execute", stall)
         try:
+            expiry_deadline = time.monotonic()+30
             with pytest.raises((RuntimeError, DBAPIError)):
-                worker.commit_database(deadline=time.monotonic()+2)
+                worker.commit_database(deadline=expiry_deadline)
         finally:
             event.remove(engine, "after_cursor_execute", stall)
         assert worker.state == "commit_unknown" and stalled
@@ -235,6 +242,7 @@ def test_controller_final_deadline_is_separate_bounded_and_not_renewed(
             assert _frozen_records(conn) == frozen
     with OnlineController(engine, **settings) as worker:
         _reprove(worker)
+        expiry_deadline = None
         event.listen(engine, "after_cursor_execute", stall)
         try:
             start = time.monotonic()
