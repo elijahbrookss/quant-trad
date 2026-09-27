@@ -1239,9 +1239,18 @@ atomic link; existing private paths refuse rather than being repaired. Private
 publication remains the default. The exact directory/object contract is owned by
 [Storage Management](../persistence/STORAGE_MANAGEMENT.md#application-and-database-file-ownership).
 
-The remaining composition must move the existing maintenance supervisor to the
+The opt-in internal maintenance process now hosts the existing supervisor at the
 database-owned process boundary, retaining one lifecycle scheduler and its
 status/recovery guarantees. No separate policy or generic workflow framework is
 introduced. This ownership seam is tested, but deployment wiring, actual
 retained-WAL database recovery, complete encrypted pairing and the final operator
 remain unqualified. Existing server/runtime guards and production stay unchanged.
+
+
+The explicit owner setting omits the collector's supervisor in dedicated mode;
+its compatibility default remains unchanged. Storage status consumes the dedicated
+worker's existing heartbeat contract, while collector health excludes that worker.
+This preserves one maintenance schedule and makes a missing or competing owner
+visible. Deployment recipes, mounts and all-publisher group membership still need
+preserving integration; the process seam alone does not complete the ownership
+transition or authorize a production switch.

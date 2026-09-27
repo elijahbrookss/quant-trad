@@ -9,6 +9,11 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - portal/backend/workers/storage_maintenance.py
+  - portal/backend/workers/market_data_collector.py
+  - portal/backend/service/market/collector_operations_service.py
+  - tests/test_market_data/test_storage_maintenance_worker.py
+  - tests/test_portal/test_storage_management_db.py
   - src/market_data/archive.py
   - src/core/settings.py
   - tests/test_market_data/test_archive_shared_ownership.py
@@ -82,8 +87,8 @@ The Storage settings page enrolls host-prepared drives and reviews configuration
 After an explicit operator cutover has installed an applied policy, Apply can
 save settings for that same layout. Initial setup and role changes remain
 blocked: a UI confirmation cannot prepare a database or prove a migration.
-The existing collector loop performs history movement and local recovery copies
-under its deployment gates, saved policy and explicit operating limits. The
+The existing storage lifecycle supervisor performs history movement and local recovery
+copies under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
 
 ## One online migration workflow and its owners
@@ -2234,3 +2239,41 @@ refuse the incomplete transition. Operator preparation, read-worker retirement,
 complete encrypted pairing, retained-WAL DB recovery and measured final pause
 remain release requirements. Existing prepared production directories are not
 silently converted to the new group contract.
+
+
+### Database-owned maintenance composition
+
+`storage.maintenance_owner` selects exactly one composition: `collector` remains
+its compatibility default; `dedicated` makes the collector omit construction of
+the lifecycle supervisor. The internal `portal.backend.workers.storage_maintenance`
+process then hosts that same supervisor and its existing history/recovery runners.
+It requires the pinned PostgreSQL OS user70, an explicit shared archive group,
+an already prepared archive root, and encrypted incremental maintenance limits.
+It has no acquisition adapters or provider intake, alternate policy, scheduling
+loop for individual phases, or additional application DSN. Existing phase
+cancellation, storage fences, retention ordering and paired recovery stay with
+the existing supervisor/runners. A missing dedicated process is unavailable
+maintenance; the collector does not silently take it over.
+
+The worker uses the existing worker-state repository with role
+`market_storage_maintenance`. Its heartbeat carries the actual supervisor snapshot;
+Storage status reads that role and the compatibility collector role through the
+same freshness, policy and outcome checks. Two live configured owners remain
+ambiguous; expired or failed work cannot appear healthy. Collection health
+excludes maintenance-role rows so a live maintenance process cannot impersonate
+a collector. Shutdown joins the existing supervisor; failed start, heartbeat,
+drain or retirement exits nonzero. No worker table, status engine or user-facing
+operator is added.
+
+Normal Storage status reads database evidence and filesystem capacity; it does
+not require backend access to PostgreSQL private files. Physical inspection stays
+inside the database-owned maintenance boundary. Its existing temporary archive
+work is on the configured archive root; the private application SSD spool is not
+a maintenance input. Application access to legacy private SSD files is preserved.
+
+This is an opt-in process seam, not an activated server recipe. The current
+server runtime/mount validator still describes the older common-UID composition.
+Wiring all publishers/readers (including bot containers), installing one dedicated
+owner, exact legacy-WAL recovery and fresh intake, physical maintenance and a
+complete encrypted recovery pair remain integration requirements. Unit shutdown
+and real database registry/status tests do not establish those outcomes.

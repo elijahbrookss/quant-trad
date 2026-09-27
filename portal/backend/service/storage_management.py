@@ -106,7 +106,8 @@ class StorageManagementService:
                 model = MarketCollectorWorkerStateRecord
                 workers = session.execute(select(
                     model.worker_id, model.state, model.heartbeat_at, model.expires_at, model.context
-                ).where(model.worker_role == "scheduled_market_fact_collector",
+                ).where(model.worker_role.in_(("scheduled_market_fact_collector",
+                                              "market_storage_maintenance")),
                          model.expires_at > text("now() - interval '24 hours'"))
                   .order_by(model.expires_at.desc()).limit(101)).mappings().all()
             observed_at = session.scalar(text("SELECT clock_timestamp()"))

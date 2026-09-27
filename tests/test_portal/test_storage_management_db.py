@@ -180,3 +180,48 @@ def test_settings_waits_for_existing_move_ownership(service):
         service.queue_plan(plan["id"], policy_hash=plan["policy_hash"])
     with service.database.session() as session:
         assert session.get(StoragePolicyRecord, 1).revision == 1
+
+
+def test_dedicated_maintenance_registry_preserves_status_and_conflict_visibility(service, monkeypatch):
+    """Real registry/constraints/status SQL; no filesystem or backup success claim."""
+    from importlib import import_module
+    from sqlalchemy import text
+    from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
+
+    repository_module = import_module("portal.backend.service.storage.repos.market_collection")
+    monkeypatch.setattr(repository_module, "db", service.database)
+    repository = repository_module.market_collection_repo
+    with service.database.session() as session:
+        session.execute(text("CREATE SCHEMA IF NOT EXISTS market"))
+        session.execute(text("CREATE TABLE market.collection_definitions (id varchar(64) PRIMARY KEY)"))
+        MarketCollectorWorkerStateRecord.__table__.create(session.connection())
+    enroll(service)
+    configured = {**policy(), "movement_enabled": True, "backup_enabled": True}
+    with service.database.session() as session:
+        session.add(StoragePolicyRecord(id=1, revision=1, policy=configured))
+    now = datetime.now(UTC)
+    context = {"storage_lifecycle": {"state": "degraded",
+        "policy": {"interval_seconds": 3600}, "maintenance": {
+            phase: {"configured": True, "state": "blocked", "checked_at": now.isoformat(),
+                    "outcome": {"state": "blocked", "reason": "fixture_preserved_failure"}}
+            for phase in ("history_movement", "local_recovery")}}}
+    def register(identity, role, report):
+        repository.register_worker(worker_id=identity, worker_role=role,
+            worker_version="fixture.v1", ttl_seconds=30, state="starting",
+            capabilities={}, context=report)
+        repository.heartbeat_worker(worker_id=identity, ttl_seconds=30,
+            state="idle", context=report)
+    register("maintenance", "market_storage_maintenance", context)
+    register("collector", "scheduled_market_fact_collector",
+             {"storage_lifecycle": {"state": "external", "maintenance": {}}})
+    snapshot = service.snapshot()
+    assert snapshot["health"] == "needs_attention"
+    assert snapshot["backup"]["state"] == snapshot["movement"]["state"] == "blocked"
+    assert snapshot["backup"]["worker_id"] == "maintenance"
+    assert snapshot["backup"]["reason"] == "fixture_preserved_failure"
+    register("competing-collector", "scheduled_market_fact_collector", context)
+    assert service.snapshot()["backup"]["reason"] == "multiple_maintenance_workers"
+    repository.stop_worker(worker_id="competing-collector", state="stopped")
+    assert service.snapshot()["backup"]["state"] == "blocked"
+    repository.stop_worker(worker_id="maintenance", state="degraded")
+    assert service.snapshot()["backup"]["state"] == "stale"

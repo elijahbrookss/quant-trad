@@ -55,11 +55,15 @@ def read_storage_maintenance_limits(limits_path):
     return history, recovery, incremental
 
 
-def storage_maintenance_runners(database, *, storage_root, limits_path=None):
+def storage_maintenance_runners(database, *, storage_root, limits_path=None, require_incremental=False):
     """Return the existing two runners only when operating limits are explicit."""
     if limits_path is None:
+        if require_incremental:
+            raise ValueError("storage_maintenance_incremental_configuration_required")
         return {}
     history, recovery, incremental = read_storage_maintenance_limits(limits_path)
+    if require_incremental and incremental is None:
+        raise ValueError("storage_maintenance_incremental_configuration_required")
     # The existing lifecycle service owns payload archival; bind it to the
     # same saved policy as header movement without adding a second scheduler.
     from ..market.market_storage_lifecycle import MarketStorageLifecycleService

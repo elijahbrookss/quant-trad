@@ -31,6 +31,7 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_STORAGE_INVENTORY_PATH", ("storage", "inventory_path")),
     ("QT_STORAGE_MAINTENANCE_LIMITS_PATH", ("storage", "maintenance_limits_path")),
     ("QT_ARCHIVE_SHARED_GROUP_ID", ("storage", "archive_shared_group_id")),
+    ("QT_STORAGE_MAINTENANCE_OWNER", ("storage", "maintenance_owner")),
     ("QT_LOGGING_LEVEL", ("logging", "level")),
     ("QT_LOGGING_DEBUG", ("logging", "debug")),
     ("QT_LOGGING_ENV_NAME", ("logging", "env_name")),
@@ -772,8 +773,11 @@ class StorageSettings:
     inventory_path: str = "/run/quanttrad/storage-inventory.json"
     maintenance_limits_path: str | None = None
     archive_shared_group_id: int | None = None
+    maintenance_owner: str = "collector"
 
     def __post_init__(self):
+        if self.maintenance_owner not in ("collector", "dedicated"):
+            raise ValueError("storage_maintenance_owner_invalid")
         value = self.archive_shared_group_id
         if value is not None and (type(value) is not int or not 0 < value < 2**32 - 1):
             raise ValueError("storage_archive_shared_group_invalid")
@@ -978,6 +982,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
         ),
         storage=StorageSettings(
+            maintenance_owner=_coerce_mapping(payload.get("storage")).get(
+                "maintenance_owner", "collector"),
             archive_shared_group_id=_archive_shared_group(
                 _coerce_mapping(payload.get("storage")).get("archive_shared_group_id")),
             inventory_path=_coerce_str(_coerce_mapping(payload.get("storage")).get("inventory_path"),

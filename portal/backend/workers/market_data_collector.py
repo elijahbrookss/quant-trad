@@ -177,18 +177,23 @@ def main() -> int:
         return 2
 
     supervisor = ContinuousCollectorSupervisor(owner_id=worker_id)
-    lifecycle_supervisor = MarketStorageLifecycleSupervisor(
-        policy=_SETTINGS.market_data_lifecycle,
-        owner_id=f"{worker_id}:storage-lifecycle",
-        storage_root=DEFAULT_STORAGE_ROOT,
-        **storage_maintenance_runners(db, storage_root=DEFAULT_STORAGE_ROOT,
-            limits_path=_SETTINGS.storage.maintenance_limits_path),
-    )
+    # A dedicated database-owned worker runs this same supervisor in the
+    # separated topology. Never create a second loop in the application process.
+    lifecycle_supervisor = None
+    if _SETTINGS.storage.maintenance_owner == "collector":
+        lifecycle_supervisor = MarketStorageLifecycleSupervisor(
+            policy=_SETTINGS.market_data_lifecycle,
+            owner_id=f"{worker_id}:storage-lifecycle",
+            storage_root=DEFAULT_STORAGE_ROOT,
+            **storage_maintenance_runners(db, storage_root=DEFAULT_STORAGE_ROOT,
+                limits_path=_SETTINGS.storage.maintenance_limits_path),
+        )
     heartbeat = _WorkerHeartbeat(
         worker_id,
         context_provider=lambda: {
             "continuous_collectors": supervisor.snapshot(),
-            "storage_lifecycle": lifecycle_supervisor.snapshot(),
+            "storage_lifecycle": (lifecycle_supervisor.snapshot() if lifecycle_supervisor else
+                {"state": "external", "owner": "storage-maintenance", "maintenance": {}}),
         },
     )
     try:
@@ -202,7 +207,8 @@ def main() -> int:
         return 3
     try:
         supervisor.start()
-        lifecycle_supervisor.start()
+        if lifecycle_supervisor is not None:
+            lifecycle_supervisor.start()
     except Exception as exc:
         logger.error(
             "market_data_supervisor_start_failed | worker_id=%s error=%s",
@@ -286,7 +292,8 @@ def main() -> int:
 
     shutdown_errors: list[str] = []
     try:
-        lifecycle_supervisor.stop()
+        if lifecycle_supervisor is not None:
+            lifecycle_supervisor.stop()
     except Exception as exc:
         shutdown_errors.append(f"storage_lifecycle:{type(exc).__name__}:{exc}")
         logger.warning(

@@ -173,3 +173,18 @@ remains governed by paired receipts. Every maintenance visit, including not-due
 visits, rejects disabled archiving or a failure newer than the last archive success.
 Existing filesystem reserve checks still apply; WAL is never acknowledged and
 dropped to conceal a full or unavailable backup destination.
+
+
+### Maintenance process ownership
+
+The online transition preserves the original application's private spool owner.
+The existing lifecycle supervisor can therefore run in the database-owned
+`storage_maintenance` process instead of inside the collector, selected by the
+explicit `storage.maintenance_owner=dedicated` composition. This keeps physical
+PostgreSQL inspection and encrypted incremental recovery with user70 while
+application writers retain their original identity. It reuses the same runners,
+policy, cancellation, database fencing and worker-state status projection; it
+introduces neither another schedule nor another recovery implementation. Dedicated
+startup requires encrypted incremental limits and prepared shared archive access.
+Server activation and the complete legacy-to-candidate paired recovery proof are
+still pending. This process seam does not weaken any recovery release requirement.

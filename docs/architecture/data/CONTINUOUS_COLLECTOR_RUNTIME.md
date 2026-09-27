@@ -279,7 +279,8 @@ capture-to-canonicalization lag and bounded spool growth, not merely free disk.
 
 ## Storage Lifecycle
 
-The collector worker also owns a provider-independent storage-lifecycle
+With the default `storage.maintenance_owner=collector`, the collector worker
+also owns a provider-independent storage-lifecycle
 supervisor. It plans bounded work on an hourly default cadence and never blocks
 the acquisition loop. Planning and execution share one typed policy; the safe
 default is `execution_enabled: false`, so deployment produces plans without
@@ -522,3 +523,17 @@ root and uses the HDD object root, then accepts a new frame through candidate
 v2 ingestion. This fixture checks preservation and idempotent recovery, not host
 switch authorization or recovery compatibility for every projection. See
 [ADR0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md).
+
+
+### Explicit maintenance process ownership
+
+For the preserving SSD/HDD transition, `storage.maintenance_owner=dedicated`
+omits the storage supervisor from the collector. The internal database-owned
+`storage_maintenance` worker hosts that same supervisor, runners and cancellation
+path. Collection retains its original private SSD owner and publishes an explicit
+external-maintenance context instead of a second maintenance schedule. Storage
+reads the dedicated worker heartbeat through its existing status projection;
+collector health excludes maintenance-role heartbeats. The default composition
+and provider/stream shutdown contracts are unchanged. See
+[Storage Management](../persistence/STORAGE_MANAGEMENT.md#database-owned-maintenance-composition)
+for the ownership requirements and unfinished deployment/recovery qualification.

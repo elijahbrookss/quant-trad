@@ -41,7 +41,9 @@ class Adapter(_Adapter):
         return {"status": "stopped"}
 
 class Lifecycle:
-    def __init__(self, **kwargs): pass
+    def __init__(self, **kwargs):
+        if os.environ.get("QT_STORAGE_MAINTENANCE_OWNER") == "dedicated":
+            raise AssertionError("collector started competing storage loop")
     def start(self): pass
     def snapshot(self): return {}
     def stop(self): (root/"lifecycle-stopped").write_text("stopped")
@@ -70,9 +72,11 @@ raise SystemExit(worker.main())
 
 @pytest.mark.skipif(sys.platform != "linux", reason="native Linux SIGTERM contract")
 @pytest.mark.parametrize("failed", [False, True])
-def test_worker_sigterm_exit_reports_supervisor_drain_failure(tmp_path, failed):
+@pytest.mark.parametrize("maintenance_owner", ["collector", "dedicated"])
+def test_worker_sigterm_exit_reports_supervisor_drain_failure(tmp_path, failed, maintenance_owner):
     root = Path(__file__).resolve().parents[2]
     env = dict(os.environ, QT_DISABLE_DOTENV="1", QT_LOGGING_LOKI_URL="", QT_LOGGING_LEVEL="INFO",
+               QT_STORAGE_MAINTENANCE_OWNER=maintenance_owner,
                PG_DSN="postgresql+psycopg2://disposable:disposable@127.0.0.1:1/disposable",
                PYTHONPATH=os.pathsep.join((str(root), str(root/"src"))))
     process = subprocess.Popen([sys.executable, "-c", SCRIPT, str(tmp_path),
@@ -87,7 +91,7 @@ def test_worker_sigterm_exit_reports_supervisor_drain_failure(tmp_path, failed):
         output, _ = process.communicate(timeout=10)
         assert process.returncode == (5 if failed else 0), output
         assert "market_data_collector_shutdown_signal" in output
-        assert (tmp_path/"lifecycle-stopped").exists()
+        assert (tmp_path/"lifecycle-stopped").exists() == (maintenance_owner == "collector")
         assert (tmp_path/"heartbeat-stopped").exists()
         if failed:
             assert "market_data_collector_shutdown_failed" in output
