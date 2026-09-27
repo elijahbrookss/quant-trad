@@ -54,7 +54,7 @@ services:
   backend:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    # Preserve the deployed application owner; share only archive access.
+    # Candidate application account; activation must separately admit source ownership.
     user: "1000:1000"
     group_add:
       - ${QT_ARCHIVE_SHARED_GROUP_ID:?Prepared archive shared group is required}

@@ -2230,9 +2230,14 @@ windows are never renewed. The complete production operator remains unfinished.
 
 ## Application and database file ownership
 
-The deployed application owns its SSD working/spool files as UID1000; private
-legacy files remain0600. The database and physical maintenance own PostgreSQL
-files as UID70. The online reader can copy those archives without changing the
+The candidate application runs as UID1000, while PostgreSQL and physical
+maintenance run as UID70. Source ownership must be observed independently:
+the September27 production check found root-running application processes and
+root-owned0600 pending WAL beneath the UID1000 working root. The earlier legacy
+recovery fixture explicitly ran its producer as UID1000 and does not qualify
+access to those actual root-private files. Preserve original source bytes and
+metadata; a separately bounded preserving recovery-copy transition is required
+before candidate activation. Do not infer child ownership from the mount root. The online reader can copy those archives without changing the
 source, but its UID70 private copies are not readable by UID1000. The former
 all-UID70 runtime recipe therefore cannot be reused for the preserving online
 transition. Ordinary application processes must not gain root or DAC_READ_SEARCH
@@ -2257,14 +2262,14 @@ change the spool, temporary encoders, PGDATA, keys, repositories or backup files
 This publication seam is implemented and tested with the actual legacy image
 and ordinary UID1000:70 / UID70:70 processes on disposable SSD/HDD. It is NOT an
 activated deployment or complete collector/recovery qualification. The next
-integration must move the existing maintenance supervisor to the database-owned
-process boundary while retaining one lifecycle scheduler, its status and all
-recovery guarantees; application collection retains its original UID. No second
-policy/scheduler or general workflow framework is warranted. The existing server
-overlay and strict runtime admission have not been changed and must continue to
-refuse the incomplete transition. Operator preparation, read-worker retirement,
-complete encrypted pairing, retained-WAL DB recovery and measured final pause
-remain release requirements. Existing prepared production directories are not
+composition hosts the existing maintenance supervisor at the database-owned
+process boundary, retaining one lifecycle scheduler, status and recovery engine.
+The public overlay expresses this composition; it does not authorize activation.
+Disposable UID1000 legacy-WAL recovery, new intake and a complete encrypted pair
+have passed together. Actual source ownership admission, preserving recovery-copy
+preparation, host switch, read-worker retirement and post-switch activation still
+need integration and measured final-pause qualification. The legacy runtime
+validator continues to refuse the new topology. Existing prepared production directories are not
 silently converted to the new group contract.
 
 

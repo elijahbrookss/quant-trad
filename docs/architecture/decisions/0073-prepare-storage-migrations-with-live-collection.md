@@ -1225,12 +1225,17 @@ and successful migration recovery remain unfinished release obligations.
 ## Preserve application ownership across the online transition
 
 Disposable use of the exact legacy collector exposed incompatible private file
-owners: the deployed SSD spool belongs to UID1000, while the online reader
-creates HDD objects as UID70. Running every service as70 breaks retained spool
+owners: the disposable legacy producer ran as UID1000, while the online reader
+creates HDD objects as UID70. This was not an attestation of production child
+ownership. A later production observation found root-running collectors and
+root-owned0600 pending WAL beneath a UID1000 working root. The candidate UID1000
+runtime therefore additionally needs a bounded preserving recovery copy; original
+source permissions and bytes must remain intact until normal qualified recovery.
+That ownership transition is not implemented by the group-publication contract. Running every service as70 breaks retained spool
 recovery; switching every service to1000 breaks copied-object access and the
 PostgreSQL physical-maintenance boundary.
 
-Retain application ownership and give application/database maintenance an
+Preserve original source ownership and give candidate application/database maintenance an
 explicit shared group for immutable HDD objects. Keep PostgreSQL files, recovery
 keys and repositories private to their existing owners. Do not recursively
 change source permissions or give ordinary runtimes filesystem-bypass capability.
