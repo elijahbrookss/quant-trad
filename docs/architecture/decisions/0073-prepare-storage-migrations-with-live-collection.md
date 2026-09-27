@@ -1037,3 +1037,19 @@ persisted original 60-second wall/boot window, leaving one second of margin.
 Neither the total fixture ceiling nor any production allowance increases. This
 fixture budget change is explicit and cannot be interpreted as production
 pause admission or renewal of an expired final attempt.
+
+
+Final source admission also resolves Docker network/PID namespace aliases within
+those same bounded global snapshots. A live, paused, restarting or nonzero-PID
+unadmitted peer sharing either namespace with the database or collector refuses,
+even when it has no writable mounts and is absent from the project's normal
+network inventory. IDs, unique ID prefixes and container names resolve against
+the observed inventory; missing, ambiguous or cyclic aliases fail closed.
+Source namespace/name changes between observations also refuse. Fully stopped
+peers remain preserved. No unexpected peer is stopped or changed.
+
+This is an additional refusal check, not continuous exclusion: future Docker
+starts, host processes, remote SQL clients and filesystem aliases still require
+separate admission. It grants no COMMIT, source-resumption or recovery authority.
+The existing caller deadline and inventory/output bounds are unchanged. The
+read-capability worker's launch confinement remains a separate boundary.

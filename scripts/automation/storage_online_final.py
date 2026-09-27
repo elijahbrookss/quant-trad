@@ -114,12 +114,12 @@ def _load(path):
 
 
 def _admit_mount_writers(rows, *, operator_id):
-    """Reject unadmitted live Docker peers sharing source storage mounts.
+    """Reject unadmitted live Docker peers sharing source mounts or namespaces.
 
     This bounded observation supplements project/network admission. It does not
     exclude host processes, future daemon starts, SQL publishers or path aliases,
     and never grants switch authority. The caller retains its original deadline.
-    No container configuration/environment or mount path is logged or persisted.
+    No environment, mount path or namespace name is logged or persisted.
     """
     if held._DOCKER_DEADLINE.get() is None:
         raise RuntimeError("storage_online_writer_deadline_required")
@@ -130,7 +130,8 @@ def _admit_mount_writers(rows, *, operator_id):
     expression = ('{"id":{{json .Id}},"running":{{json .State.Running}},'
         '"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},'
         '"pid":{{json .State.Pid}},"started":{{json .State.StartedAt}},'
-        '"mounts":{{json .Mounts}}}')
+        '"mounts":{{json .Mounts}},"name":{{json .Name}},'
+        '"network_mode":{{json .HostConfig.NetworkMode}},"pid_mode":{{json .HostConfig.PidMode}}}')
 
     def snapshot():
         ids = held._docker("ps", "--all", "--quiet", "--no-trunc").split()
@@ -143,11 +144,16 @@ def _admit_mount_writers(rows, *, operator_id):
         if (len(result) != len(ids) or {row.get("id") for row in result} != set(ids)):
             raise RuntimeError("storage_online_writer_inventory_invalid")
         for row in result:
-            if (set(row) != {"id", "running", "paused", "restarting", "pid", "started", "mounts"}
+            if (set(row) != {"id", "running", "paused", "restarting", "pid", "started", "mounts",
+                                     "name", "network_mode", "pid_mode"}
                     or any(type(row[k]) is not bool for k in ("running", "paused", "restarting"))
                     or type(row["pid"]) is not int or row["pid"] < 0
                     or not isinstance(row["started"], str) or not isinstance(row["mounts"], list)
-                    or len(row["mounts"]) > 64):
+                    or len(row["mounts"]) > 64
+                    or not isinstance(row["name"], str)
+                    or not re.fullmatch(r"/[a-zA-Z0-9][a-zA-Z0-9_.-]*", row["name"])
+                    or any(not isinstance(row[k], str) or len(row[k]) > 256
+                           for k in ("network_mode", "pid_mode"))):
                 raise RuntimeError("storage_online_writer_inventory_invalid")
             # Docker's Mounts array is unordered across inspect calls. Preserve
             # every descriptor but compare a canonical order, not daemon order.
@@ -170,6 +176,31 @@ def _admit_mount_writers(rows, *, operator_id):
         return result
 
     first = snapshot()
+    names = {row["name"].removeprefix("/"): identity for identity, row in first.items()}
+    if len(names) != len(first):
+        raise RuntimeError("storage_online_namespace_inventory_invalid")
+
+    def namespace(identity, field):
+        # Docker supports container IDs and names. Resolve chains against this
+        # SAME bounded snapshot; a missing, ambiguous or cyclic alias refuses.
+        seen = set()
+        while identity not in seen:
+            seen.add(identity)
+            mode = first[identity][field]
+            if not mode.startswith("container:"):
+                return (field, "host" if mode == "host" else identity)
+            alias = mode.removeprefix("container:")
+            candidates = {key for key in first if alias and key.startswith(alias)}
+            if alias.removeprefix("/") in names:
+                candidates.add(names[alias.removeprefix("/")])
+            if len(candidates) != 1:
+                raise RuntimeError("storage_online_namespace_alias_invalid")
+            identity = candidates.pop()
+        raise RuntimeError("storage_online_namespace_alias_invalid")
+
+    protected_namespaces = {namespace(rows[name]["id"], field)
+                            for name in ("tsdb", "market-data-collector")
+                            for field in ("network_mode", "pid_mode")}
     protected = [path for name in ("tsdb", "market-data-collector")
                  for path, _ in sources(first[rows[name]["id"]])]
     if not protected:
@@ -181,12 +212,15 @@ def _admit_mount_writers(rows, *, operator_id):
         if any(writable and (path == root or path.is_relative_to(root) or root.is_relative_to(path))
                for path, writable in mounts for root in protected):
             raise RuntimeError("storage_online_unadmitted_mount_writer")
+        if any(namespace(identity, field) in protected_namespaces
+               for field in ("network_mode", "pid_mode")):
+            raise RuntimeError("storage_online_unadmitted_namespace_peer")
     def comparable(snapshot_rows):
         # Exact source clients may be in a caller-journaled stop/start while
         # this check supervises the CLI. Their lifecycle remains owned by the
         # existing source admission; their immutable mount descriptors must not
         # change. Worker and unadmitted peer runtime changes still refuse.
-        return {identity: ({"id": identity, "mounts": row["mounts"]}
+        return {identity: ({key: row[key] for key in ("id", "mounts", "name", "network_mode", "pid_mode")}
                            if identity in allowed and identity != operator_id else row)
                 for identity, row in snapshot_rows.items()}
     if comparable(snapshot()) != comparable(first):

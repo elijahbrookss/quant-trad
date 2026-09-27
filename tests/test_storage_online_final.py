@@ -481,7 +481,8 @@ def mount_writer_setup(monkeypatch):
         return {"Type": "bind", "Source": source, "Destination": "/data", "RW": rw}
     def peer(identity, mounts):
         return dict(id=identity, running=True, paused=False, restarting=False,
-                    pid=100, started="original-start", mounts=mounts)
+                    pid=100, started="original-start", mounts=mounts,
+                    name="/peer-"+identity[:12], network_mode="none", pid_mode="")
     peers = {identities[0]: peer(identities[0], [mount("/ssd/database")]),
              identities[1]: peer(identities[1], [mount("/ssd/archives")]),
              identities[2]: peer(identities[2], [mount("/ssd/archives", False)]),
@@ -578,3 +579,59 @@ def test_worker_runtime_change_still_refuses(mount_writer_setup):
     _, controls, admit = mount_writer_setup
     controls["drift"] = lambda rows: rows["3"*64].update(started="changed")
     with pytest.raises(RuntimeError, match="writer_inventory_changed"): admit()
+
+
+@pytest.mark.parametrize("field", ["network_mode", "pid_mode"])
+@pytest.mark.parametrize("alias", ["1"*64, "1"*12, "peer-"+"1"*12, "/peer-"+"1"*12])
+def test_mountless_namespace_alias_peer_refuses(mount_writer_setup, field, alias):
+    peer, controls, admit = mount_writer_setup
+    peer["mounts"] = []
+    peer[field] = "container:"+alias
+    with pytest.raises(RuntimeError, match="unadmitted_namespace_peer"): admit()
+    assert controls["calls"] == ["ps", "inspect"]
+
+
+@pytest.mark.parametrize("alias", ["", "missing", "4"*64])
+def test_live_missing_or_cyclic_namespace_alias_refuses(mount_writer_setup, alias):
+    peer, _, admit = mount_writer_setup
+    peer["network_mode"] = "container:"+alias
+    with pytest.raises(RuntimeError, match="namespace_alias_invalid"): admit()
+
+
+def test_stopped_namespace_peer_is_preserved(mount_writer_setup):
+    peer, _, admit = mount_writer_setup
+    peer.update(running=False, pid=0, network_mode="container:"+"1"*64)
+    assert admit() is None
+
+
+@pytest.mark.parametrize("field", ["network_mode", "pid_mode", "name"])
+def test_source_namespace_binding_drift_refuses(mount_writer_setup, field):
+    _, controls, admit = mount_writer_setup
+    controls["drift"] = lambda rows: rows["2"*64].update({field: "changed"})
+    with pytest.raises(RuntimeError, match="writer_inventory_changed|writer_inventory_invalid"): admit()
+
+
+def test_transitive_namespace_alias_through_worker_refuses(mount_writer_setup):
+    peer, controls, admit = mount_writer_setup
+    # Populate the real first snapshot rather than injecting second-read drift.
+    original = final.held._docker
+    def docker(action, *args, **kwargs):
+        import json
+        value = original(action, *args, **kwargs)
+        if action == "inspect":
+            rows = [json.loads(line) for line in value.splitlines()]
+            for row in rows:
+                if row["id"] == "3"*64: row["network_mode"] = "container:"+"1"*64
+            return "\n".join(json.dumps(row) for row in rows)
+        return value
+    from unittest.mock import patch
+    peer["network_mode"] = "container:"+"3"*64
+    with patch.object(final.held, "_docker", docker):
+        with pytest.raises(RuntimeError, match="unadmitted_namespace_peer"): admit()
+
+
+def test_ambiguous_namespace_name_and_id_prefix_refuses(mount_writer_setup):
+    peer, _, admit = mount_writer_setup
+    # A container name can resemble another container's hexadecimal ID prefix.
+    peer.update(name="/"+"1"*12, network_mode="container:"+"1"*12)
+    with pytest.raises(RuntimeError, match="namespace_alias_invalid"): admit()
