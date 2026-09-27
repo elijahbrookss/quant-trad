@@ -908,3 +908,106 @@ def test_final_session_switch_and_inspection_with_new_logins_closed(
     finally:
         outsider.dispose()
         control.dispose()
+
+
+def test_gated_timescale_job_stop_preserves_schedule_and_committed_work(storage, tmp_path, monkeypatch):
+    """Actual scheduled publisher, retained switch session and fixture-only restart."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    control = create_engine(engine.url.set(database="postgres"), poolclass=NullPool,
+                            isolation_level="AUTOCOMMIT", connect_args={"connect_timeout":2})
+    with engine.begin() as conn:
+        frozen = _frozen_records(conn)
+        original = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        database = conn.scalar(text("SELECT current_database()"))
+        conn.exec_driver_sql("CREATE TABLE public.qt_job_progress(kind text)")
+        conn.exec_driver_sql("CREATE TABLE public.qt_job_release(released boolean)")
+        conn.exec_driver_sql("INSERT INTO public.qt_job_release VALUES(false)")
+        conn.exec_driver_sql("""CREATE PROCEDURE public.qt_owned_storage_job(job_id int, config jsonb)
+            LANGUAGE plpgsql AS $$ BEGIN
+            INSERT INTO public.qt_job_progress VALUES('started'); COMMIT;
+            IF NOT (SELECT released FROM public.qt_job_release) THEN
+                PERFORM pg_sleep(60);
+            END IF;
+            INSERT INTO public.qt_job_progress VALUES('finished');
+            END $$""")
+        job = conn.scalar(text("SELECT add_job('public.qt_owned_storage_job','1 hour',initial_start=>now())"))
+    quoted = engine.dialect.identifier_preparer.quote_identifier(database)
+    def wait_for(conn, sql, seconds=15):
+        until = time.monotonic()+seconds
+        while time.monotonic() < until:
+            with conn.begin():
+                conn.exec_driver_sql("SET LOCAL statement_timeout='2s'")
+                conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+                if conn.scalar(text(sql)):return
+            time.sleep(.05)
+        with conn.begin():
+            for label, diagnostic in {
+                "stats":"SELECT to_jsonb(s) FROM timescaledb_information.job_stats s",
+                "errors":"SELECT to_jsonb(s) FROM timescaledb_information.job_errors s LIMIT 10",
+                "activity":"SELECT json_build_object('type',backend_type,'state',state,'wait',wait_event) FROM pg_stat_activity WHERE datname=current_database()",
+                "progress":"SELECT to_jsonb(s) FROM public.qt_job_progress s"}.items():
+                print("JOB_DIAGNOSTIC="+label+":"+json.dumps(conn.scalars(text(diagnostic)).all(),default=str))
+        pytest.fail("owned scheduled job did not reach expected lifecycle")
+    try:
+        with OnlineController(engine, **settings) as worker:
+            _drain(worker);_reprove(worker)
+            deadline = time.monotonic()+30
+            with worker.final_database_session(deadline=deadline):
+                conn = worker._final_connection
+                wait_for(conn, "SELECT EXISTS(SELECT 1 FROM public.qt_job_progress WHERE kind='started')")
+                with conn.begin():
+                    before = worker._job_catalog(conn)
+                    assert conn.scalar(text("SELECT count(*) FROM public.qt_job_progress WHERE kind='finished'")) == 0
+                with control.connect() as admin:
+                    admin.exec_driver_sql("SET statement_timeout='5s'")
+                    admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS false")
+                try:
+                    # The already connected scheduled job remains inside the
+                    # closed database. No application-name exemption is used.
+                    with conn.begin():
+                        assert conn.scalar(text("""SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                            WHERE datname=current_database() AND backend_type<>'client backend')"""))
+                    result = worker.quiesce_final_database_jobs(deadline=deadline)
+                    assert result["database_jobs_stopped"] and result["job_definitions_preserved"]
+                    assert not result["database_switch_authorized"]
+                    with conn.begin():
+                        assert worker._job_catalog(conn) == before
+                        assert conn.scalar(text("SELECT count(*) FROM public.qt_job_progress WHERE kind='started'")) == 1
+                        assert conn.scalar(text("SELECT count(*) FROM public.qt_job_progress WHERE kind='finished'")) == 0
+                    with pytest.raises(RuntimeError, match="closed_gate_required"):
+                        worker.quiesce_final_database_jobs(deadline=deadline)
+                    worker.commit_database(deadline=deadline)
+                    assert worker.inspect_outcome(deadline=min(deadline,time.monotonic()+4))["outcome"] == "committed"
+                    with conn.begin():
+                        assert worker._job_catalog(conn) == before
+                        assert _frozen_records(conn) == frozen
+                        assert dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original
+                finally:
+                    # Fixture-owned restoration only; never production authority.
+                    with control.connect() as admin:
+                        admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+        with engine.begin() as conn:
+            conn.exec_driver_sql("UPDATE public.qt_job_release SET released=true")
+            assert conn.scalar(text("SELECT _timescaledb_functions.start_background_workers()"))
+        with engine.connect() as conn:
+            wait_for(conn, "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND backend_type<>'client backend')")
+            with conn.begin():
+                conn.execute(text("SELECT alter_job(:id,next_start=>now())"), {"id":job})
+                print("JOB_RESTART="+json.dumps([dict(r) for r in conn.execute(text(
+                    "SELECT * FROM timescaledb_information.job_stats WHERE job_id=:id"), {"id":job}).mappings()],default=str))
+            # Timescale 2.14.2 intentionally backs off a terminated job for at
+            # least five minutes, with positive retry jitter up to about 13%.
+            # A prior 325-second observation expired; this new fixture allows
+            # 360 seconds for this separate recovery measurement. This is AFTER the original final context has
+            # closed, solely fixture scheduler recovery, never a pause renewal.
+            restarted_at = time.monotonic()
+            wait_for(conn,"SELECT EXISTS(SELECT 1 FROM public.qt_job_progress WHERE kind='finished')", seconds=360)
+            print("JOB_RESTART_SECONDS="+str(time.monotonic()-restarted_at))
+            with conn.begin():
+                assert worker._job_catalog(conn) == before
+                assert conn.scalar(text("SELECT count(*) FROM public.qt_job_progress WHERE kind='started'")) >= 2
+        print("GATED_JOB=started_before_gate,stopped_with_committed_work_preserved,same_session_commit,fixture_scheduler_resumed")
+    finally:
+        control.dispose()

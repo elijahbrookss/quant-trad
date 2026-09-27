@@ -112,12 +112,13 @@ def _load(path):
             raise RuntimeError("storage_online_resume_receipt_invalid")
     if gated:
         gate = saved["login_gate"]
-        if (not isinstance(gate, dict) or set(gate) != {"database", "requested_at", "closed_at"}
+        if (not isinstance(gate, dict) or set(gate) != {"database", "requested_at", "closed_at", "database_jobs_stopped"}
                 or not isinstance(gate["database"], dict)
                 or not _valid_database_gate(gate["database"])
                 or gate["database"]["allow_connections"] is not True
                 or type(gate["requested_at"]) not in (int, float)
                 or not saved["switch"]["entered_at"] <= gate["requested_at"] <= saved["deadline"]
+                or gate["database_jobs_stopped"] is not (saved["phase"] == "login_closed")
                 or (saved["phase"] == "login_closing" and gate["closed_at"] is not None)
                 or (saved["phase"] == "login_closed" and (type(gate["closed_at"]) not in (int, float)
                     or not gate["requested_at"] <= gate["closed_at"] <= saved["deadline"]))):
@@ -825,8 +826,9 @@ def close_database_logins_locked(state_root, *, exchange):
     """Persist and close only the exact target's new logins. Never reopen here.
 
     Caller retains the launcher flock and SAME live worker. This is a necessary
-    exclusion boundary, not COMMIT authority: existing clients, background jobs,
-    archive/spool publishers and host source admission still require integration.
+    exclusion boundary, not COMMIT authority. After closure, the same worker
+    stops pinned Timescale jobs and requires other target sessions to leave.
+    Archive/spool publishers and host source admission still require integration.
     Lost replies leave login_closing and may already have closed access. No retry,
     source resumption or gate restoration follows an uncertain result.
     """
@@ -888,7 +890,7 @@ def close_database_logins_locked(state_root, *, exchange):
             raise RuntimeError("storage_online_login_database_changed")
         budget()
         saved.update(phase="login_closing", login_gate={"database": database,
-            "requested_at": time.time(), "closed_at": None})
+            "requested_at": time.time(), "closed_at": None, "database_jobs_stopped": False})
         host_boundary.save_receipt(path, saved, initial=False)  # BEFORE ALTER DATABASE.
         budget()
         # Identifiers come from the current catalog; numeric identities are
@@ -907,8 +909,16 @@ def close_database_logins_locked(state_root, *, exchange):
                 or current["owner_pid"] != session["owner_pid"]):
             raise RuntimeError("storage_online_login_session_changed")
         admit(current)
+        quiesced = observe_worker("final_session_quiesce")
+        if (quiesced["database"] != expected or quiesced["backend_pid"] != session["backend_pid"]
+                or quiesced["owner_pid"] != session["owner_pid"]
+                or quiesced.get("database_jobs_stopped") is not True
+                or quiesced.get("job_definitions_preserved") is not True):
+            raise RuntimeError("storage_online_login_jobs_unconfirmed")
+        admit(quiesced)
         saved["phase"] = "login_closed"
         saved["login_gate"]["closed_at"] = time.time()
+        saved["login_gate"]["database_jobs_stopped"] = True
         host_boundary.save_receipt(path, saved, initial=False)
         budget()
         print("event=storage_online_database_logins_closed database_switch_authorized=false",

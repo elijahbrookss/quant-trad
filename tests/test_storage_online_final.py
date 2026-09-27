@@ -637,7 +637,7 @@ def test_ambiguous_namespace_name_and_id_prefix_refuses(mount_writer_setup):
     with pytest.raises(RuntimeError, match="namespace_alias_invalid"): admit()
 
 
-@pytest.mark.parametrize("fault", [None, "save_reply", "sql_reply", "worker_reply", "identity", "expiry"])
+@pytest.mark.parametrize("fault", [None, "save_reply", "sql_reply", "worker_reply", "jobs_reply", "jobs_unconfirmed", "identity", "expiry"])
 def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup, monkeypatch, fault):
     path, rows, clock, state, stop = pause_setup
     state["binding"]["capture"] = {"original": "capture"}
@@ -673,11 +673,16 @@ def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup,
         assert kw["deadline"] == deadline
         sequence[0] += 1
         if operation == "final_session_check" and fault == "worker_reply":raise EOFError("worker lost")
+        if operation == "final_session_quiesce":
+            assert final._load(path/final.STATE)["phase"] == "login_closing"
+            assert not database["allow_connections"]
+            if fault == "jobs_reply":raise EOFError("job stop reply lost")
         observed = dict(database)
         if fault == "identity":observed["oid"] += 1
         return dict(controller_id=CONTROLLER, operation=operation, state="background", bound_final_deadline=deadline,
             last_sequence=sequence[0], final_switch_authorized=False, collection_resume_authorized=False,
             result=dict(database=observed,capture=state["binding"]["capture"],backend_pid=2,owner_pid=1,
+                database_jobs_stopped=fault != "jobs_unconfirmed",job_definitions_preserved=True,
                 database_switch_authorized=False,collection_resume_authorized=False,runtime_activation_authorized=False))
     save = host_boundary.save_receipt
     def save_reply(*args, **kwargs):

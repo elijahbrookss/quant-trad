@@ -16,7 +16,7 @@ import math
 import os
 from pathlib import Path
 import select
-from time import monotonic
+from time import monotonic, sleep
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -35,7 +35,7 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
 _ROLLBACK_OPERATIONS = {"rollback_fence_begin", "rollback_fence_check", "rollback_fence_end"}
-_SESSION_OPERATIONS = {"final_session_begin", "final_session_check"}
+_SESSION_OPERATIONS = {"final_session_begin", "final_session_check", "final_session_quiesce"}
 _OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
 
 
@@ -82,6 +82,9 @@ class OnlineController:
         self._final_deadline = None
         self._final_connection = None
         self._final_connection_entered = False
+        self._jobs_stop_requested = False
+        self._jobs_stopped = False
+        self._jobs_catalog = None
         self._rollback_context = self._rollback_check = None
         self._sequence = 0
         self._last_request = self._last_reply = None
@@ -223,6 +226,76 @@ class OnlineController:
                 "owner_pid": self._pid, "database_switch_authorized": False,
                 "collection_resume_authorized": False, "runtime_activation_authorized": False}
 
+    def quiesce_final_database_jobs(self, *, deadline):
+        """Stop pinned Timescale jobs only behind the host's durable login gate.
+
+        Host must have recorded login_closing before this internal operation.
+        The stop request is not transactional; loss remains unresolved, never
+        retried or automatically reversed. Job definitions are preserved. This
+        does not exclude host/archive publishers or authorize COMMIT/restart.
+        """
+        observed = self.final_session_observation(deadline=deadline)
+        if observed["database"]["allow_connections"] or self._jobs_stop_requested:
+            raise RuntimeError("storage_online_jobs_closed_gate_required")
+        with self._database_connection() as conn, conn.begin():
+            with capture._bounded_step(conn, math.ceil(deadline-monotonic())) as shorten:
+                shorten(deadline-monotonic())
+                self._require_job_environment(conn)
+                self._jobs_catalog = self._job_catalog(conn)
+                self._jobs_stop_requested = True  # Before a nontransactional request.
+                if conn.scalar(text("SELECT _timescaledb_functions.stop_background_workers()")) is not True:
+                    raise RuntimeError("storage_online_jobs_stop_unconfirmed")
+        while True:
+            self._ownership(deadline=deadline)
+            with self._database_connection() as conn, conn.begin():
+                with capture._bounded_step(conn, math.ceil(deadline-monotonic())) as shorten:
+                    shorten(deadline-monotonic())
+                    self._require_job_environment(conn)
+                    if self._job_catalog(conn) != self._jobs_catalog:
+                        raise RuntimeError("storage_online_job_definitions_changed")
+                    conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+                    remaining = conn.scalar(text("""SELECT count(*) FROM pg_stat_activity
+                        WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
+                          AND pid NOT IN (pg_backend_pid(), :owner_pid)"""), {"owner_pid": self._pid})
+                    if not remaining:
+                        self._jobs_stopped = True
+                        break
+            sleep(min(.1, max(0, deadline-monotonic())))
+        result = self.final_session_observation(deadline=deadline)
+        return {**result, "database_jobs_stopped": True, "job_definitions_preserved": True}
+
+    @staticmethod
+    def _job_catalog(conn):
+        # Keep job arguments/private configuration inside PostgreSQL. This is a
+        # definition-drift check, not a cryptographic provenance certificate.
+        count, size = conn.execute(text("""SELECT count(*),
+            coalesce(sum(octet_length(to_jsonb(j)::text)),0) FROM _timescaledb_config.bgw_job j""")).one()
+        if count > 256 or size > 1024*1024:
+            raise RuntimeError("storage_online_job_inventory_bound_exceeded")
+        fingerprint = conn.scalar(text("""SELECT
+            md5(coalesce(jsonb_agg(to_jsonb(j) ORDER BY id)::text, '[]'))
+            FROM _timescaledb_config.bgw_job j"""))
+        return count, fingerprint
+
+    @staticmethod
+    def _require_job_environment(conn):
+        extensions = dict(conn.execute(text("SELECT extname, extversion FROM pg_extension")).all())
+        if (extensions.get("timescaledb") != "2.14.2" or extensions.get("plpgsql") != "1.0"
+                or set(extensions)-{"timescaledb", "plpgsql", "pg_stat_statements", "pgcrypto", "pg_buffercache"}
+                or ("pg_buffercache" in extensions and extensions["pg_buffercache"] != "1.3")
+                or ("pgcrypto" in extensions and extensions["pgcrypto"] != "1.3")
+                or ("pg_stat_statements" in extensions and extensions["pg_stat_statements"] != "1.10")
+                or set(conn.scalar(text("SHOW shared_preload_libraries")).replace(" ", "").split(","))
+                    not in ({"timescaledb"}, {"timescaledb", "pg_stat_statements"})):
+            raise RuntimeError("storage_online_database_job_environment_unqualified")
+        if conn.scalar(text("""SELECT pg_is_in_recovery()
+            OR (SELECT datallowconn FROM pg_database WHERE datname=current_database())
+            OR EXISTS(SELECT 1 FROM pg_subscription WHERE subdbid=(
+                SELECT oid FROM pg_database WHERE datname=current_database()))
+            OR EXISTS(SELECT 1 FROM pg_replication_slots)
+            OR EXISTS(SELECT 1 FROM pg_stat_replication)""")):
+            raise RuntimeError("storage_online_database_job_gate_or_replication_unqualified")
+
     @contextmanager
     def _database_connection(self):
         if not self._final_connection_entered:
@@ -357,7 +430,7 @@ class OnlineController:
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
         if self._final_deadline is not None and operation not in _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
-        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check"}:
+        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce"}:
             raise RuntimeError("storage_online_final_session_background_work_refused")
         result = {}
         try:
@@ -379,7 +452,9 @@ class OnlineController:
             elif session:
                 if operation == "final_session_begin":
                     self._stack.enter_context(self.final_database_session(deadline=request["deadline"]))
-                result = self.final_session_observation(deadline=request["deadline"])
+                result = (self.quiesce_final_database_jobs(deadline=request["deadline"])
+                          if operation == "final_session_quiesce"
+                          else self.final_session_observation(deadline=request["deadline"]))
             elif fencing:
                 result = self._rollback_channel(operation, deadline=request["deadline"])
             elif inspecting:
@@ -531,20 +606,28 @@ class OnlineController:
         live owner connection. Idle sessions can publish later; names, addresses
         and reported application identity do not establish ownership. Prepared
         transactions can commit without a live backend and also refuse.
-        PostgreSQL/extension workers are not client sessions; their admission
-        remains a separate host requirement, not an inferred exemption to drain.
+        Before gated job stop, this does not admit PostgreSQL/extension workers.
+        After stop is requested, every other target backend must be absent and
+        the closed gate, pinned environment and job definitions must still match.
+        Host/archive/spool exclusion remains separately required.
         """
         self._ownership(deadline=deadline)
+        if self._jobs_stop_requested:
+            if not self._jobs_stopped:
+                raise RuntimeError("storage_online_jobs_stop_unconfirmed")
+            self._require_job_environment(conn)
+            if self._job_catalog(conn) != self._jobs_catalog:
+                raise RuntimeError("storage_online_job_definitions_changed")
         conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
         observed = conn.execute(text("""
             SELECT
               (SELECT count(*) FROM pg_stat_activity
                WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
-                 AND backend_type='client backend'
+                 AND (:all_backends OR backend_type='client backend')
                  AND pid NOT IN (pg_backend_pid(), :owner_pid)) AS other_backends,
               (SELECT count(*) FROM pg_prepared_xacts
                WHERE database=current_database()) AS prepared_transactions
-        """), {"owner_pid": self._pid}).mappings().one()
+        """), {"owner_pid": self._pid, "all_backends": self._jobs_stop_requested}).mappings().one()
         if observed["other_backends"] or observed["prepared_transactions"]:
             raise RuntimeError("storage_online_sql_publishers_not_drained")
         self._ownership(deadline=deadline)

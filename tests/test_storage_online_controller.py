@@ -288,7 +288,7 @@ def test_final_session_refuses_return_to_tail_work():
         controller.final_delta(deadline=monotonic()+10)
 
 
-@pytest.mark.parametrize("operation", ["final_session_begin", "final_session_check"])
+@pytest.mark.parametrize("operation", ["final_session_begin", "final_session_check", "final_session_quiesce"])
 def test_final_session_wire_requires_original_deadline_and_fresh_sequence(operation):
     from scripts.automation.storage_online_controller import OnlineController
     controller = OnlineController.__new__(OnlineController)
@@ -306,3 +306,37 @@ def test_final_session_wire_requires_original_deadline_and_fresh_sequence(operat
             controller.command(request | {"deadline":deadline})
     with pytest.raises(RuntimeError, match="final_session_fresh_sequence_required"):
         controller.command(request)
+
+
+@pytest.mark.parametrize("fault", [None, "extension", "version", "preload", "gate_or_replication"])
+def test_gated_job_stop_refuses_unqualified_database_environment(fault):
+    from scripts.automation.storage_online_controller import OnlineController
+    extensions = {"plpgsql":"1.0", "timescaledb":"2.14.2", "pgcrypto":"1.3",
+                  "pg_buffercache":"1.3", "pg_stat_statements":"1.10"}
+    if fault == "extension":extensions["unknown_worker"] = "1.0"
+    if fault == "version":extensions["timescaledb"] = "future"
+    class Database:
+        def execute(self, statement):
+            assert str(statement) == "SELECT extname, extversion FROM pg_extension"
+            return SimpleNamespace(all=lambda:list(extensions.items()))
+        def scalar(self, statement):
+            if str(statement).startswith("SHOW"):
+                return "timescaledb,unknown_worker" if fault == "preload" else "timescaledb, pg_stat_statements"
+            return fault == "gate_or_replication"
+    if fault:
+        with pytest.raises(RuntimeError, match="unqualified"):
+            OnlineController._require_job_environment(Database())
+    else:OnlineController._require_job_environment(Database())
+
+
+def test_job_stop_lost_ack_cannot_be_retried_or_admitted_as_completed():
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller._jobs_stop_requested = True
+    controller._jobs_stopped = False
+    controller.final_session_observation = lambda **kw:{"database":{"allow_connections":False}}
+    controller._ownership = lambda **kw:None
+    with pytest.raises(RuntimeError,match="closed_gate_required"):
+        controller.quiesce_final_database_jobs(deadline=monotonic()+1)
+    with pytest.raises(RuntimeError,match="jobs_stop_unconfirmed"):
+        controller._require_external_sql_clients_absent(None,deadline=monotonic()+1)

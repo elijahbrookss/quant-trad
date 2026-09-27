@@ -1149,3 +1149,31 @@ Closing new logins does not drain existing sessions or prove background/archive
 publisher exclusion. Gate restoration after interruption and complete switch /
 recovery integration remain required. There is deliberately no automatic reopen
 or source restart after a negative observation or failed gate acknowledgement.
+
+### Stop scheduled database publishers under the existing gate intent
+
+Use the already retained target session and host `login_closing` intent to stop
+pinned Timescale 2.14.2 background workers. Do not infer authority from a mutable
+scheduler/job name or introduce a second operator. The same original deadline
+bounds the nontransactional stop and fresh all-target-backend drain; uncertain
+replies cannot be replayed. The completed receipt explicitly records job stop.
+The original job definitions remain unchanged and fingerprinted with fixed
+metadata bounds. Unknown extension/preload or replication environments refuse.
+
+Once this stop has been requested, internal COMMIT requires confirmed stop, the
+closed gate, the same admitted extension/replication environment, unchanged job
+definitions, no other target backends and no prepared transactions. Existing file
+proof, source/capture clocks, SQL locks and outcome reconciliation remain owners
+of their existing boundaries. Host/archive/spool exclusion remains separate.
+
+Stopping a running job can interrupt its current transaction while preserving
+work it committed earlier. Timescale's normal crash retry can delay the next
+execution; this is an operational consequence to measure, not a reason to alter
+job schedules or extend the final switch budget. Disposable scheduler restoration
+is separate from production gate/job recovery authority, which remains unfinished.
+
+Actual production job definitions and their interruption/retry semantics still
+need source admission. Pinned extension identity alone does not establish that
+an arbitrary custom job is safe to interrupt or replay after partial commits.
+The disposable job demonstrates preserved committed work, not exactly-once
+semantics for every scheduled procedure.

@@ -485,6 +485,9 @@ try:
          original_deadline_preserved=True,replay_refused=True,source_held=True,
          database_commit_dispatched=False,collection_resume_authorized=False)
        if options.close_logins:
+        report['database_job_environment']=json.loads(host_boundary.database_query(pgid,
+          "SELECT json_build_object('extensions',(SELECT jsonb_object_agg(extname,extversion) FROM pg_extension),"
+          "'preload',current_setting('shared_preload_libraries'))"))
         real_maintenance=host_boundary.maintenance_query
         def lost_gate_reply(container,sql):
          result=real_maintenance(container,sql)

@@ -2084,14 +2084,53 @@ The host compares worker and maintenance-session cluster/database identity,
 records `login_closing` with the original open-login setting BEFORE dispatch,
 and closes only that target database's new logins. It records `login_closed`
 only after the same worker and source are freshly admitted through the closed
-gate. SQL control uses the existing database recipe via the cluster-local
+gate and the worker confirms the bounded database-job stop below. SQL control uses the existing database recipe via the cluster-local
 maintenance database; there is no second application DSN. Original capture,
 initial preparation and final wall/boot/monotonic deadlines are unchanged.
 
 An interrupted request can already have closed access. Both gate phases block
 ordinary stop/restart/relaunch and gate replay, retain the marker and grant no
-COMMIT or automatic reopen. Existing sessions, prepared transactions, background
-jobs, archive/spool publishers and terminal recovery still require admission.
+COMMIT or automatic reopen. Prepared transactions still refuse the switch;
+archive/spool publishers and terminal recovery still require admission.
 The preserving production gate-restoration transition is unfinished. Disposable
 rehearsal cleanup restores access only after verified read-worker retirement;
 that fixture action supplies no production recovery authority.
+
+The same host intent now covers `final_session_quiesce`: the retained worker calls
+Timescale's existing stop-background-workers function after proving the target
+login gate is closed. This operation is pinned to Timescale 2.14.2, plpgsql 1.0,
+optional pgcrypto 1.3 / pg_buffercache 1.3 / pg_stat_statements 1.10, and Timescale with optional
+pg_stat_statements preload. Other extensions/preloads, standby mode, subscriptions,
+replication slots or connected replicas refuse. This narrow admitted environment
+is not a configurable job framework or a general extension compatibility claim.
+
+The request is marked in memory before the nontransactional stop; it cannot be
+replayed. Under the same original final deadline, the worker waits for every
+other target backend to leave, excluding only its actual retained session and
+live owner. It preserves a bounded definition fingerprint (at most 256 jobs /
+1 MiB of catalog metadata); job configuration stays inside PostgreSQL. It changes
+no job definitions, schedules, enabled flags or restoring settings. Interrupted
+jobs can retain already committed work and enter Timescale's normal crash retry
+backoff. No automatic job restart is provided by this transition.
+
+`login_closed` now explicitly records `database_jobs_stopped=true`; uncertainty
+retains `login_closing` with false. Older receipts lacking this field refuse
+reentry and remain evidence. Subsequent internal COMMIT checks require the gate
+and pinned environment to remain admitted, definitions unchanged and ALL other
+target backends absent, as well as the existing prepared-transaction check. No
+scheduler name or application name is accepted as an exemption. These controls
+do not establish host/archive/spool exclusion or expose a COMMIT wire command.
+A qualified preserving job/gate restoration is still required before production.
+
+Actual production job definitions and their interruption/retry semantics still
+need source admission. Pinned extension identity alone does not establish that
+an arbitrary custom job is safe to interrupt or replay after partial commits.
+The disposable job demonstrates preserved committed work, not exactly-once
+semantics for every scheduled procedure.
+
+Jobs can publish changes between the last tail pass and their retirement. Those
+changes still require bounded catch-up and exact verification before COMMIT.
+The retained final session currently forbids returning to tail work; connecting
+that residual catch-up to the closed-login window remains unfinished. Empty
+observations before job stop cannot replace this step. The existing handoff must
+refuse any remaining captured delta rather than bypass its proof.
