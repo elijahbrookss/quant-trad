@@ -46,6 +46,8 @@ import os,json
 root=Path('/fixture')
 for name in ('pg','history'):
  os.chown(root/name,70,70);os.chmod(root/name,0o700)
+for name in ('history/archives','history/archives/objects'):
+ (root/name).mkdir();os.chown(root/name,70,70);os.chmod(root/name,0o2770)
 for name in ('working','working/objects'):
  os.chown(root/name,1000,1000);os.chmod(root/name,0o750)
 p=root/'working/objects/private';p.write_bytes(b'preserved fixture');p.chmod(0o600)
@@ -58,6 +60,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
         # its root preparation container, without relaxing legacy permissions.
         info=json.loads(prepared.stdout)
         request={"schema_version":"qt.storage_online_worker.v1",
+            "archive_shared_group_id":70,
             "source_revision":image_env["QT_IMAGE_SOURCE_REVISION"],
             "source_tree_hash":image_env["QT_IMAGE_SOURCE_TREE_HASH"],
             "database_identity":"1/1","source_device":info["device"],"source_inode":info["inode"],
@@ -107,6 +110,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
         digest=hashlib.sha256(data).hexdigest()
         overrides={"PG_DSN":"postgresql+psycopg2://fixture:disposable@127.0.0.1:1/fixture",
                    "QT_DISABLE_DOTENV":"1","QT_LOGGING_LOKI_URL":"",
+                   "QT_ARCHIVE_SHARED_GROUP_ID":launch.archive_group_override(request),
                    "QT_ONLINE_REQUEST_SHA256":digest,"QT_STORAGE_UDEV_ROOT":"/run/qt-online/udev"}
         binding={"image":image_id,"database_id":peer_id,
                  "database_hostname":database["config"]["Hostname"],"request_sha256":digest,
@@ -135,6 +139,7 @@ s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.
         assert not any("recovery-secrets" in m["Destination"] for m in details["mounts"])
         report.update(passed=True,image=image_id,container_contract_sha256=contract,
                       original_source_owner_preserved=True,database_unavailable_refused=True,
+                      shared_archive_group_bound=70,
                       protocol_stdout_empty=True)
     finally:
         failures=[]

@@ -20,6 +20,7 @@ import time
 from urllib.parse import quote, unquote, urlsplit
 
 from scripts.automation import storage_host_boundary as host_boundary
+from scripts.automation.storage_online_worker import archive_group_override
 
 _COMMAND = ["-m", "scripts.automation.storage_online_worker"]
 _CAPS = ["DAC_READ_SEARCH", "SETGID", "SETUID"]
@@ -237,6 +238,7 @@ def launched_online_worker(state_root, *, project, source_revision, image,
             or not request["max_objects"]+512 <= descriptor_limit <= 1_001_024
             or type(memory_bytes) is not int or not 512*1024**2 <= memory_bytes <= 8*1024**3):
         raise ValueError("storage_online_launch_inputs_invalid")
+    archive_group = archive_group_override(request)
     data = (json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)+"\n").encode()
     if len(data) > 65536:
         raise ValueError("storage_online_request_budget_exceeded")
@@ -306,7 +308,8 @@ def launched_online_worker(state_root, *, project, source_revision, image,
         deadline = started.timestamp()+observed["seconds"]
         if deadline <= time.time():
             raise RuntimeError("storage_online_original_attempt_expired")
-        overrides = {"PG_DSN": dsn, "QT_DISABLE_DOTENV": "1", "QT_LOGGING_LOKI_URL": "",
+        overrides = {"PG_DSN": dsn, "QT_DISABLE_DOTENV": "1",
+                     "QT_ARCHIVE_SHARED_GROUP_ID": archive_group, "QT_LOGGING_LOKI_URL": "",
                      "QT_ONLINE_REQUEST_SHA256": digest, "QT_STORAGE_UDEV_ROOT": "/run/qt-online/udev"}
         binding = dict(project=project, source_revision=source_revision, clients=identities,
             image=image, database_id=database_id, database_hostname=database["config"]["Hostname"],

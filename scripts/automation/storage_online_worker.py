@@ -110,6 +110,38 @@ def enter_source_read_identity(source_root, *, expected_device, expected_inode):
             "source_ownership_changed": False, "migration_ready": False}
 
 
+def archive_group_override(request):
+    """Bind the optional archive group to this worker's existing fixed GID.
+
+    No supplementary groups or new capabilities are admitted. Omitted requests
+    retain private publication and explicitly override image/YAML defaults.
+    """
+    if "archive_shared_group_id" not in request:
+        return ""
+    value = request["archive_shared_group_id"]
+    if type(value) is not int or value != 70:
+        raise ValueError("storage_online_archive_group_requires_worker_gid")
+    return str(value)
+
+
+def admit_archive_configuration(request, destination):
+    """Check explicit settings and the already prepared root before opening SQL.
+
+    The existing archive capture and live file proof bind the destination inode.
+    The object store owns group membership, path and permission checks; it never
+    repairs an existing private root. Source archive access remains read-only.
+    """
+    from core.settings import get_settings
+    from market_data.archive import FilesystemRawArchiveObjectStore
+
+    configured = get_settings().storage.archive_shared_group_id
+    expected = int(archive_group_override(request)) if "archive_shared_group_id" in request else None
+    if configured != expected:
+        raise RuntimeError("storage_online_archive_configuration_changed")
+    if expected is not None:
+        FilesystemRawArchiveObjectStore(destination)
+
+
 def prepared_controller_main():
     """Private prepared-attempt entrypoint; never bootstrap, pause or activate."""
     import contextlib
@@ -134,13 +166,14 @@ def prepared_controller_main():
             or hashlib.sha256(data).hexdigest() != os.environ.get("QT_ONLINE_REQUEST_SHA256")):
         raise RuntimeError("storage_online_request_binding_changed")
     request = json.loads(data, object_pairs_hook=unique)
-    if (not isinstance(request, dict) or set(request) != {
+    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id"} != {
             "schema_version", "source_revision", "source_tree_hash", "database_identity",
             "source_device", "source_inode", "expected_started_at", "policy",
             "resource_limits", "max_page_bytes", "max_objects", "max_bytes",
             "page_rows", "command_seconds"}
             or request["schema_version"] != "qt.storage_online_worker.v1"):
         raise ValueError("storage_online_request_invalid")
+    archive_group_override(request)
     for key, variable in (("source_revision", "QT_IMAGE_SOURCE_REVISION"),
                           ("source_tree_hash", "QT_IMAGE_SOURCE_TREE_HASH")):
         value = request[key]
@@ -169,6 +202,7 @@ def prepared_controller_main():
             from scripts.automation.storage_online_controller import OnlineController, serve
             from portal.backend.service.storage.header_resource_claims import _limits
 
+            admit_archive_configuration(request, Path("/qt-history/archives/objects"))
             policy = StoragePolicy.from_dict(request["policy"])
             limits = _limits(request["resource_limits"], migration=True)
             targets = read_storage_inventory(Path("/run/qt-online/inventory.json"))

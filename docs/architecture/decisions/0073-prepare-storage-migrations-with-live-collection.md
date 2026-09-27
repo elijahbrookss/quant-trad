@@ -1263,3 +1263,15 @@ observation but has no permission to read private PostgreSQL files. The existing
 legacy runtime validator still rejects this new service topology. Qualifying and
 binding the new composition belongs to the unfinished online final operator;
 changing the declarative recipe grants no activation or recovery authority.
+
+
+The confined online worker's existing private request may explicitly bind
+`archive_shared_group_id=70`. The launcher pins that setting in its existing
+request/environment hashes; omission explicitly selects private publication.
+The worker admits only its unchanged primary GID70, with no supplemental group,
+new capability or identity transition. It checks central settings and the already
+prepared group2770 archive root before opening SQL. Existing capture/root identity,
+live file proof and object-store checks continue to protect copy/reuse. Incompatible
+private paths refuse without repair. Other shared groups are unsupported by this
+fixed worker. This connects the migration publisher to the declared runtime
+archive contract; it grants no final switch or runtime activation authority.

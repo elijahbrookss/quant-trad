@@ -2326,3 +2326,15 @@ common-UID private-file composition from the rendered mounts. This keeps that
 existing interruption/recovery regression intact without broadening its production
 validator to accept the new service. Its result is historical-path evidence only;
 the changed core recreation rehearsal owns the new split-runtime checks.
+
+
+The confined online worker's existing private request may explicitly bind
+`archive_shared_group_id=70`. The launcher pins that setting in its existing
+request/environment hashes; omission explicitly selects private publication.
+The worker admits only its unchanged primary GID70, with no supplemental group,
+new capability or identity transition. It checks central settings and the already
+prepared group2770 archive root before opening SQL. Existing capture/root identity,
+live file proof and object-store checks continue to protect copy/reuse. Incompatible
+private paths refuse without repair. Other shared groups are unsupported by this
+fixed worker. This connects the migration publisher to the declared runtime
+archive contract; it grants no final switch or runtime activation authority.

@@ -106,7 +106,8 @@ def test_nested_database_mount_and_control_alias_refused(tmp_path):
         launch._explicit_mounts(database, collector, tmp_path/"working"/"objects", request, tmp_path/"udev")
 
 
-def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("archive_group", [None, 70])
+def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, monkeypatch, archive_group):
     database, collector, inventory, request_path = _inputs(tmp_path)
     request_path.unlink()
     state_root = tmp_path/"state"
@@ -132,6 +133,8 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
     request=dict(source_revision=revision,source_tree_hash="f"*64,max_objects=128,
                  source_device=objects.st_dev,source_inode=objects.st_ino,
                  expected_started_at=started.isoformat())
+    if archive_group is not None:
+        request["archive_shared_group_id"] = archive_group
     created=[]
     def docker(*args,**kwargs):
         if args[0]=="ps": return worker_id if created else ""
@@ -140,6 +143,7 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
         if args[0]=="create":
             created.append(args)
             assert "disposable" not in " ".join(args)
+            assert "QT_ARCHIVE_SHARED_GROUP_ID="+("" if archive_group is None else "70") in args
             return worker_id
         if args[0]=="inspect":
             return json.dumps({"Running":False,"Paused":False,"Restarting":False,"OOMKilled":False,"Dead":False,"Pid":0,"Status":"exited"})
@@ -215,3 +219,26 @@ def test_retirement_failure_reaps_only_local_cli(monkeypatch):
     monkeypatch.setattr(host_boundary, "docker",docker)
     with pytest.raises(TimeoutError):launch._retire_worker(process,"a"*64,"binding","contract")
     assert process.killed and process.stdout.closed
+
+
+@pytest.mark.parametrize("value", [None, True, "70", 0, 1000, -1])
+def test_online_archive_group_refuses_unsupported_identity(value):
+    with pytest.raises(ValueError, match="archive_group_requires_worker_gid"):
+        launch.archive_group_override({"archive_shared_group_id": value})
+
+
+def test_worker_archive_settings_and_prepared_root_are_required(tmp_path, monkeypatch):
+    from core.settings import clear_settings_cache
+    from scripts.automation.storage_online_worker import admit_archive_configuration
+    root = tmp_path/"objects"
+    root.mkdir(mode=0o700)
+    monkeypatch.setenv("QT_ARCHIVE_SHARED_GROUP_ID", "70")
+    clear_settings_cache()
+    try:
+        with pytest.raises(RuntimeError, match="archive_configuration_changed"):
+            admit_archive_configuration({}, root)
+        with pytest.raises(PermissionError, match="shared_directory_invalid"):
+            admit_archive_configuration({"archive_shared_group_id": 70}, root)
+        assert root.stat().st_mode & 0o7777 == 0o700
+    finally:
+        clear_settings_cache()
