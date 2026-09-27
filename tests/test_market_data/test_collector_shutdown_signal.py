@@ -10,6 +10,7 @@ import pytest
 
 
 SCRIPT = r'''import asyncio
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -19,12 +20,20 @@ from tests.test_market_data.test_continuous_collector_supervisor import _Reposit
 
 root = Path(sys.argv[1])
 fail = sys.argv[2] == "fail"
+host_fixture = os.environ.get("QT_SIGNAL_HOST_FIXTURE") == "1"
 class Adapter(_Adapter):
     async def run(self, *, stop_requested, **kwargs):
         (root/"ready").write_text("ready")
         while not stop_requested():
-            await asyncio.sleep(0.01)
-        if fail:
+            if host_fixture:
+                with (root/"native-intake").open("ab") as stream:
+                    stream.write(b"x")
+            await asyncio.sleep(0.05)
+        if fail or (host_fixture and (root/"fail-final-drain").exists()):
+            if host_fixture:
+                spool = root.parent/"spool"/"qt-signal-owned-fixture"
+                spool.mkdir(parents=True, exist_ok=True)
+                (spool/"pending.sealed").write_bytes(b"owned failed-finalizer WAL fixture")
             raise RuntimeError("fixture signal-time publication failure")
         return {"status": "stopped"}
 

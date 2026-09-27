@@ -748,3 +748,15 @@ production safety registration, Docker stop or a complete held-host switch.
 The legacy source image predates this fix: its exit0 must not be treated as
 proof of publisher drain. Spool preservation and exact source admission remain
 required, and the source image is not changed by these tests.
+
+The optional prepared-host rehearsal --worker-shutdown path replaces the synthetic
+collector shell with the actual worker and supervisor process. Docker delivers
+SIGTERM through the bound final-stop helper while the same migration worker stays
+alive. Discovery, adapter, lifecycle and heartbeat effects are controlled fixture
+inputs; separate database tests qualify real publication and WAL recovery. The
+failure case retains an owned pending segment and reports exit5. The existing
+strict inventory guard refuses paused admission and retains stopping intent; the
+source is not restarted. Even clean paused state supplies no publisher-drain,
+switch or source-resumption authority. Initial
+preparation uses a clean stop and resumes the same source process container before
+the final failure is injected. No production runtime or migration algorithm changes.

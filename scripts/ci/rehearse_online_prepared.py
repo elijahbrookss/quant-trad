@@ -15,7 +15,10 @@ parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
+parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 options=parser.parse_args()
+if options.worker_shutdown and not options.final_pause:
+ parser.error('--worker-shutdown requires --final-pause')
 if options.final_pause and not (options.worker_phases and options.prepare_source):
  parser.error('--final-pause requires --prepare-source --worker-phases')
 if options.worker_phases and not options.prepare_source:
@@ -102,9 +105,24 @@ try:
   if service=='market-data-collector':
    extra=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN=postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname]
    command_text="trap 'exit 0' TERM; while :; do printf x >> /app/logs/market-structure/objects/native-intake; sleep 1 & wait $!; done"
-  run(['run','-d','--name',name,'--pull','never','--network',network,
-    '--user','70:70','--read-only','--memory','32m','--cpus','0.1',
-    '--pids-limit','32',*labels(service),*extra,'--entrypoint','sh',image,'-c',command_text])
+  if service=='market-data-collector' and options.worker_shutdown:
+   import ast
+   fixture_tree=ast.parse((Path(__file__).resolve().parents[2]/"tests/test_market_data/test_collector_shutdown_signal.py").read_text())
+   SCRIPT=next(ast.literal_eval(node.value) for node in fixture_tree.body if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="SCRIPT" for t in node.targets))
+   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_DISABLE_DOTENV=1',
+             '--env','QT_LOGGING_LOKI_URL=','--env','QT_LOGGING_LEVEL=INFO']
+   run(['run','-d','--name',name,'--pull','never','--network',network,
+     '--user','70:70','--read-only','--memory','512m','--cpus','2','--pids-limit','64',
+     *labels(service),*extra,'--entrypoint','python',image,'-c',SCRIPT,
+     '/app/logs/market-structure/objects','clean'])
+   ready_deadline=time.monotonic()+30
+   while not (working/'objects'/'ready').exists():
+    if time.monotonic()>ready_deadline:raise RuntimeError('owned worker readiness timeout')
+    time.sleep(.05)
+  else:
+   run(['run','-d','--name',name,'--pull','never','--network',network,
+     '--user','70:70','--read-only','--memory','32m','--cpus','0.1',
+     '--pids-limit','32',*labels(service),*extra,'--entrypoint','sh',image,'-c',command_text])
  if options.prepare_source:
   udev=state/'initial-udev';udev.mkdir()
   device=history.stat().st_dev
@@ -217,6 +235,13 @@ try:
      import multiprocessing,signal
      pause_args=dict(project=project,source_revision=revision,worker_id=first_id,
                      controller_id=greeting['controller_id'],max_duration_seconds=60)
+     if options.worker_shutdown:
+      # Fail only the final drain, after original initial preparation/resumption.
+      marker=project+'-finalizer-marker';owned.append(marker)
+      run(['run','--name',marker,'--user','70:70','--network','none','--memory','64m',
+        '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
+        "from pathlib import Path;p=Path('/s/objects');[(p/n).unlink(missing_ok=True) for n in ('lifecycle-stopped','heartbeat-stopped')];"+
+        ("(p/'fail-final-drain').write_text('fail')" if options.worker_shutdown=='fail' else "None")])
      def interrupt_first_stop():
       original=launch.held._docker
       def stop_then_die(*args,**kwargs):
@@ -237,7 +262,15 @@ try:
      assert first['phase']=='stopping'
      rows=launch.held._inventory(project,operator_id=first_id)
      assert sum(not rows[n]['running'] for n in launch.held.STOP)==2
-     paused=final_host.stop_online_source_locked(state,**pause_args)
+     try:
+      paused=final_host.stop_online_source_locked(state,**pause_args)
+     except RuntimeError as exc:
+      if options.worker_shutdown!='fail' or str(exc)!='storage_pause_unclean_stop: service=market-data-collector':raise
+      observed=command('status')
+      assert observed['controller_id']==greeting['controller_id']
+      assert observed['background_hashed_bytes']==final['background_hashed_bytes']
+      report['failed_drain_live_proof_retained_before_exit']=True
+      raise
      assert paused['phase']=='paused'
      assert paused['deadline']==first['deadline'] and paused['deadline_boot']==first['deadline_boot']
      before=(state/final_host.STATE).read_bytes()
@@ -267,6 +300,23 @@ try:
      assert not drained['spool_empty_at_observation'] and not drained['publisher_drain_authorized']
      assert drained['pending_files']>0  # Existing real QT fixture intentionally retains sealed WAL.
      report['fixture_retained_spool_observation']=drained
+     if options.worker_shutdown:
+      collector=rows['market-data-collector']['id']
+      stopped=json.loads(run(['inspect',collector,'--format','{{json .State}}']).stdout)
+      assert not stopped['Running'] and not stopped['OOMKilled']
+      assert stopped['ExitCode']==(5 if options.worker_shutdown=='fail' else 0)
+      assert (working/'objects'/'lifecycle-stopped').exists()
+      assert (working/'objects'/'heartbeat-stopped').exists()
+      logs=run(['logs','--tail','120',collector]).stdout+run(['logs','--tail','120',collector]).stderr
+      (state/'worker-shutdown.log').write_text(logs)
+      assert 'market_data_collector_shutdown_signal' in logs
+      if options.worker_shutdown=='fail':
+       assert 'market_data_collector_shutdown_failed' in logs
+       assert (working/'spool'/'qt-signal-owned-fixture'/'pending.sealed').read_bytes()==b'owned failed-finalizer WAL fixture'
+      report['docker_worker_shutdown']=dict(exit_code=stopped['ExitCode'],
+        supervisor_failure_propagated=options.worker_shutdown=='fail',
+        lifecycle_and_heartbeat_stopped=True, controlled_adapter=True,
+        publisher_drain_authorized=False, same_migration_controller=True)
      # Inject ONLY this owned diagnostic WAL after the synthetic source stops.
      # The observer must retain it even beside a misleading acknowledgement.
      probe=project+'-spool-probe';owned.append(probe)
@@ -351,8 +401,36 @@ try:
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
  report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+1,final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
 except BaseException as exc:
- report.update(passed=False,error_type=type(exc).__name__,error=str(exc))
- raise
+ if (options.worker_shutdown=='fail' and str(exc)=='storage_pause_unclean_stop: service=market-data-collector'
+     and report.get('failed_drain_live_proof_retained_before_exit')):
+  # Expected refusal from both final admission and launcher exit. Never restart
+  # failed source, suppress the guard, or turn stopped status into drain authority.
+  saved=final_host._load(state/final_host.STATE)
+  assert saved['phase']=='stopping' and saved['deadline']==first['deadline']
+  assert saved['deadline_boot']==first['deadline_boot']
+  assert (state/initial.STATE).read_bytes()==prepared_bytes
+  collector=project+'-market-data-collector'
+  stopped=json.loads(run(['inspect',collector,'--format','{{json .State}}']).stdout)
+  assert stopped['ExitCode']==5 and not stopped['Running'] and not stopped['OOMKilled']
+  assert (working/'objects'/'lifecycle-stopped').exists() and (working/'objects'/'heartbeat-stopped').exists()
+  assert (working/'spool'/'qt-signal-owned-fixture'/'pending.sealed').read_bytes()==b'owned failed-finalizer WAL fixture'
+  logs=run(['logs','--tail','120',collector]);(state/'worker-shutdown.log').write_text(logs.stdout+logs.stderr)
+  assert 'market_data_collector_shutdown_failed' in logs.stdout+logs.stderr
+  assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
+  try:
+   with launch.launched_online_worker(state,**kwargs):
+    raise AssertionError('failed final drain permitted ordinary relaunch')
+  except RuntimeError as refusal:
+   assert str(refusal)=='storage_online_final_requires_reconciliation'
+  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
+  report.update(passed=True,expected_unclean_stop_refusal=True,final_intent_blocks_relaunch=True,
+    failed_source_not_restarted=True,pending_spool_preserved=True,final_original_deadline_preserved=True,
+    docker_worker_shutdown=dict(exit_code=5,lifecycle_and_heartbeat_stopped=True,controlled_adapter=True),
+    image=image,fixture_seconds=time.monotonic()-started,final_switch_authorized=False,
+    collection_resume_authorized=False)
+ else:
+  report.update(passed=False,error_type=type(exc).__name__,error=str(exc))
+  raise
 finally:
  cleanup_failures=[]
  for name in reversed(owned):
