@@ -469,3 +469,112 @@ def test_terminal_resume_reconciliation_never_replays_starts(resume_setup, monke
         assert all(after[k]==v for k,v in saved.items() if k not in {"phase","resume"})
         with pytest.raises(RuntimeError):final.reconcile_source_resumed_locked(path,exchange=inspect)
     assert len(starts)==count
+
+
+@pytest.fixture
+def mount_writer_setup(monkeypatch):
+    import copy
+    import json
+    identities = [str(i)*64 for i in range(1, 5)]
+    rows = {"tsdb": {"id": identities[0]}, "market-data-collector": {"id": identities[1]}}
+    def mount(source, rw=True):
+        return {"Type": "bind", "Source": source, "Destination": "/data", "RW": rw}
+    def peer(identity, mounts):
+        return dict(id=identity, running=True, paused=False, restarting=False,
+                    pid=100, started="original-start", mounts=mounts)
+    peers = {identities[0]: peer(identities[0], [mount("/ssd/database")]),
+             identities[1]: peer(identities[1], [mount("/ssd/archives")]),
+             identities[2]: peer(identities[2], [mount("/ssd/archives", False)]),
+             identities[3]: peer(identities[3], [mount("/unrelated")])}
+    controls = {"inspections": 0, "drift": None, "calls": []}
+    def docker(action, *args, **kwargs):
+        assert action in {"ps", "inspect"}  # Observation must never stop peers.
+        controls["calls"].append(action)
+        if action == "ps":
+            return "\n".join(peers)
+        controls["inspections"] += 1
+        data = copy.deepcopy(peers)
+        if controls["inspections"] == 2 and controls["drift"]:
+            controls["drift"](data)
+        return "\n".join(json.dumps(data[i]) for i in sorted(data))
+    monkeypatch.setattr(final.held, "_docker", docker)
+    def admit():
+        with final.held._docker_deadline(final.time.monotonic()+5):
+            return final._admit_mount_writers(rows, operator_id=identities[2])
+    return peers[identities[3]], controls, admit
+
+
+@pytest.mark.parametrize("path", ["/ssd/archives", "/ssd/archives/spool", "/ssd", "/", "/ssd/database"])
+def test_outside_inventory_writable_storage_peer_refuses(mount_writer_setup, path):
+    peer, controls, admit = mount_writer_setup
+    peer["mounts"][0]["Source"] = path
+    with pytest.raises(RuntimeError, match="unadmitted_mount_writer"):
+        admit()
+    assert controls["calls"] == ["ps", "inspect"]
+
+
+@pytest.mark.parametrize("disposition", ["unrelated", "readonly", "stopped", "prefix-sibling"])
+def test_mount_writer_observation_preserves_nonwriters(mount_writer_setup, disposition):
+    peer, controls, admit = mount_writer_setup
+    if disposition == "readonly":
+        peer["mounts"][0].update(Source="/ssd/archives", RW=False)
+    elif disposition == "stopped":
+        peer["mounts"][0]["Source"] = "/ssd/archives"
+        peer.update(running=False, pid=0)
+    elif disposition == "prefix-sibling":
+        peer["mounts"][0]["Source"] = "/ssd/archives-other"
+    assert admit() is None  # No receipt or switch authority is created.
+    assert controls["calls"] == ["ps", "inspect", "ps", "inspect"]
+
+
+@pytest.mark.parametrize("field,value", [("paused", True), ("restarting", True), ("pid", 41)])
+def test_transitional_peer_with_source_write_mount_refuses(mount_writer_setup, field, value):
+    peer, _, admit = mount_writer_setup
+    peer.update(running=False, pid=0)
+    peer[field] = value
+    peer["mounts"][0]["Source"] = "/ssd/archives"
+    with pytest.raises(RuntimeError, match="unadmitted_mount_writer"): admit()
+
+
+def test_mount_writer_inventory_change_between_observations_refuses(mount_writer_setup):
+    _, controls, admit = mount_writer_setup
+    controls["drift"] = lambda rows: rows["4"*64].update(started="replacement-start")
+    with pytest.raises(RuntimeError, match="writer_inventory_changed"): admit()
+
+
+@pytest.mark.parametrize("source", ["relative", "/ssd/archives/../archives", "/ssd//archives", "/ssd/archives/"])
+def test_noncanonical_mount_source_refuses(mount_writer_setup, source):
+    peer, _, admit = mount_writer_setup
+    peer["mounts"][0]["Source"] = source
+    with pytest.raises(RuntimeError, match="writer_mount_invalid"): admit()
+
+
+def test_mount_writer_observation_requires_original_caller_deadline():
+    with pytest.raises(RuntimeError, match="writer_deadline_required"):
+        final._admit_mount_writers({}, operator_id=WORKER)
+
+
+def test_docker_mount_array_order_is_not_source_drift(mount_writer_setup):
+    peer, controls, admit = mount_writer_setup
+    peer["mounts"].append({"Type": "bind", "Source": "/another-unrelated",
+                           "Destination": "/other", "RW": True})
+    controls["drift"] = lambda rows: rows["4"*64]["mounts"].reverse()
+    assert admit() is None
+
+
+def test_admitted_source_lifecycle_remains_owned_by_supervised_transition(mount_writer_setup):
+    _, controls, admit = mount_writer_setup
+    controls["drift"] = lambda rows: rows["2"*64].update(running=False, pid=0)
+    assert admit() is None
+
+
+def test_admitted_source_mount_change_still_refuses(mount_writer_setup):
+    _, controls, admit = mount_writer_setup
+    controls["drift"] = lambda rows: rows["2"*64]["mounts"][0].update(Source="/different")
+    with pytest.raises(RuntimeError, match="writer_inventory_changed"): admit()
+
+
+def test_worker_runtime_change_still_refuses(mount_writer_setup):
+    _, controls, admit = mount_writer_setup
+    controls["drift"] = lambda rows: rows["3"*64].update(started="changed")
+    with pytest.raises(RuntimeError, match="writer_inventory_changed"): admit()

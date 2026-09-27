@@ -1950,3 +1950,13 @@ cleanup retires it. It then exercises a fresh controller with zero proof under
 the original capture deadline while source clients keep serving. This proves
 cleanup of a live outer launcher; full outer-process death and recovery-mount
 activation remain separate requirements.
+
+
+Final online source admission also checks bounded Docker-wide mount/state
+snapshots. An unadmitted live peer with a writable mount overlapping database or
+collector storage refuses before further host work; no unexpected peer is stopped
+or edited. Read-only/stopped peers remain preserved. The original deadline bounds
+the observation and drift refuses. This supplements strict project/network
+inventory; it is not host-process, future-start, SQL-publisher or filesystem-alias
+exclusion and does not create COMMIT authority. See ADR0073 for the owned publisher
+retirement fixture and remaining final-handoff requirements.

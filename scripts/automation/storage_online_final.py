@@ -10,7 +10,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import sys
 import subprocess
@@ -112,6 +112,87 @@ def _load(path):
     return saved
 
 
+
+def _admit_mount_writers(rows, *, operator_id):
+    """Reject unadmitted live Docker peers sharing source storage mounts.
+
+    This bounded observation supplements project/network admission. It does not
+    exclude host processes, future daemon starts, SQL publishers or path aliases,
+    and never grants switch authority. The caller retains its original deadline.
+    No container configuration/environment or mount path is logged or persisted.
+    """
+    if held._DOCKER_DEADLINE.get() is None:
+        raise RuntimeError("storage_online_writer_deadline_required")
+    allowed = {row["id"] for row in rows.values()} | {operator_id}
+    if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+           for value in allowed):
+        raise RuntimeError("storage_online_writer_binding_invalid")
+    expression = ('{"id":{{json .Id}},"running":{{json .State.Running}},'
+        '"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},'
+        '"pid":{{json .State.Pid}},"started":{{json .State.StartedAt}},'
+        '"mounts":{{json .Mounts}}}')
+
+    def snapshot():
+        ids = held._docker("ps", "--all", "--quiet", "--no-trunc").split()
+        if (not ids or len(ids) > 256 or len(ids) != len(set(ids))
+                or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in ids)
+                or not allowed <= set(ids)):
+            raise RuntimeError("storage_online_writer_inventory_invalid")
+        result = [json.loads(line) for line in held._docker(
+            "inspect", "--format", expression, *sorted(ids)).splitlines()]
+        if (len(result) != len(ids) or {row.get("id") for row in result} != set(ids)):
+            raise RuntimeError("storage_online_writer_inventory_invalid")
+        for row in result:
+            if (set(row) != {"id", "running", "paused", "restarting", "pid", "started", "mounts"}
+                    or any(type(row[k]) is not bool for k in ("running", "paused", "restarting"))
+                    or type(row["pid"]) is not int or row["pid"] < 0
+                    or not isinstance(row["started"], str) or not isinstance(row["mounts"], list)
+                    or len(row["mounts"]) > 64):
+                raise RuntimeError("storage_online_writer_inventory_invalid")
+            # Docker's Mounts array is unordered across inspect calls. Preserve
+            # every descriptor but compare a canonical order, not daemon order.
+            row["mounts"] = sorted(row["mounts"], key=lambda value: json.dumps(value, sort_keys=True))
+        return {row["id"]: row for row in result}
+
+    def sources(row):
+        result = []
+        for mount in row["mounts"]:
+            if (not isinstance(mount, dict) or type(mount.get("RW")) is not bool
+                    or mount.get("Type") not in {"bind", "volume", "tmpfs"}):
+                raise RuntimeError("storage_online_writer_mount_invalid")
+            if mount["Type"] == "tmpfs":
+                continue
+            source = mount.get("Source")
+            if (not isinstance(source, str) or not source.startswith("/")
+                    or str(PurePosixPath(source)) != source or ".." in PurePosixPath(source).parts):
+                raise RuntimeError("storage_online_writer_mount_invalid")
+            result.append((PurePosixPath(source), mount["RW"]))
+        return result
+
+    first = snapshot()
+    protected = [path for name in ("tsdb", "market-data-collector")
+                 for path, _ in sources(first[rows[name]["id"]])]
+    if not protected:
+        raise RuntimeError("storage_online_writer_source_mounts_required")
+    for identity, row in first.items():
+        mounts = sources(row)
+        if identity in allowed or not (row["running"] or row["paused"] or row["restarting"] or row["pid"]):
+            continue
+        if any(writable and (path == root or path.is_relative_to(root) or root.is_relative_to(path))
+               for path, writable in mounts for root in protected):
+            raise RuntimeError("storage_online_unadmitted_mount_writer")
+    def comparable(snapshot_rows):
+        # Exact source clients may be in a caller-journaled stop/start while
+        # this check supervises the CLI. Their lifecycle remains owned by the
+        # existing source admission; their immutable mount descriptors must not
+        # change. Worker and unadmitted peer runtime changes still refuse.
+        return {identity: ({"id": identity, "mounts": row["mounts"]}
+                           if identity in allowed and identity != operator_id else row)
+                for identity, row in snapshot_rows.items()}
+    if comparable(snapshot()) != comparable(first):
+        raise RuntimeError("storage_online_writer_inventory_changed")
+
+
 def _observe(state_root, *, project, source_revision, controller_id, worker_id):
     preparation = initial._load(state_root)
     if (preparation["phase"] != "serving" or preparation["project"] != project
@@ -137,6 +218,7 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id):
     if digest != worker["binding"]["request_sha256"]:
         raise RuntimeError("storage_online_final_request_changed")
     rows = initial._admit_source(state_root, preparation, require_running=False, operator_id=worker_id)
+    _admit_mount_writers(rows, operator_id=worker_id)
     capture = json.loads(held._database_query(rows["tsdb"]["id"],
         "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
     seconds = capture.get("attempt_seconds", 86400)

@@ -267,6 +267,29 @@ try:
      import multiprocessing,signal
      pause_args=dict(project=project,source_revision=revision,worker_id=first_id,
                      controller_id=greeting['controller_id'],max_duration_seconds=60)
+     # The independent diagnostic publisher shares source mounts but is outside
+     # the admitted project/network. Prove refusal, then let it finish while the
+     # real source peers still serve. Never exempt it from production admission.
+     with launch.held._docker_deadline(time.monotonic()+5):
+      try:
+       final_host._admit_mount_writers(launch.held._inventory(project,operator_id=first_id),operator_id=first_id)
+       raise AssertionError('independent fixture publisher admitted')
+      except RuntimeError as exc:
+       assert str(exc)=='storage_online_unadmitted_mount_writer'
+     assert not (state/final_host.STATE).exists()
+     assert initial._source_healthy(initial._admit_source(state,preparation,require_running=True,operator_id=first_id))
+     if options.final_delta:
+      (control/'final-publish').write_text('publish')
+      waitfile('final-published')
+     (control/'finished').write_text('finished');fixture.wait(timeout=30)
+     assert fixture.returncode==0
+     publisher_state=json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)
+     assert not publisher_state['Running'] and publisher_state['Pid']==0
+     frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t),'capture',(SELECT to_jsonb(c) FROM qt_fact_header_cutover_v2.capture c WHERE id=1))::text"
+     before_final_frozen=launch.held._database_query(pgid,frozen_sql)
+     report['independent_publisher_retired_before_final']=dict(unadmitted_writer_refused=True,
+       original_clients_still_serving=True,fixture_exited=True,source_pause_started=False,
+       publisher_exclusion_authorized=False)
      if options.worker_shutdown:
       # Fail only the final drain, after original initial preparation/resumption.
       marker=project+'-finalizer-marker';owned.append(marker)
@@ -381,11 +404,13 @@ try:
      report['final_worker_and_proof_retained']=True
      report['final_source_resumption_qualified']=False
      if options.final_delta:
-      # Owned application simulates a late publisher commit. Its private channel
-      # is diagnostic input, not production publisher exclusion or authority.
-      (control/'final-publish').write_text('publish')
-      waitfile('final-published')
-      deadline=time.monotonic()+min(25,final_host._remaining(paused)-1)
+      # The independent fixture published its late tail before source pause,
+      # then exited. Its writable mounts cannot remain live during admission.
+      # Bind the already persisted final window once. The older diagnostic's
+      # extra 25-second subwindow is insufficient for repeated global admission
+      # plus terminal reconciliation; the original 60-second fixture ceiling is
+      # unchanged and no later phase may renew or extend this absolute deadline.
+      deadline=time.monotonic()+final_host._remaining(paused)-1
       def lost_reply(operation,**args):
        command(operation,**args)
        raise TimeoutError('fixture dropped fully received delta reply')
@@ -404,7 +429,7 @@ try:
       assert command('status')['controller_id']==greeting['controller_id']
       assert command('status')['background_hashed_bytes']>final['background_hashed_bytes']
       report['held_final_delta']=dict(rounds_after_lost_reply=delta['rounds'],
-        original_deadline_preserved=True,late_publication_copied=True,
+        original_deadline_preserved=True,pre_pause_publication_copied=True,
         fully_received_reply_loss=True,final_switch_authorized=False)
       final=command('status')
       if options.switch_entry:
@@ -603,6 +628,9 @@ try:
   assert not launch.held._inventory(project,operator_id=first_id)['initialize']['running']
   report['initial_to_worker_receipt_admission']=True
   report['synthetic_intake_continued']=True
+ if options.final_pause:
+  assert launch.held._database_query(pgid,frozen_sql)==before_final_frozen
+  report['frozen_and_original_capture_retained_after_final']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
  report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)

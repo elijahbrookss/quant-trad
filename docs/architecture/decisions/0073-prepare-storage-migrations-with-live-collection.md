@@ -991,3 +991,49 @@ exclusion, source-image admission, all-projector recovery, legacy UID1000 spool
 permissions, encrypted pairing, production performance or COMMIT dispatch
 permission. Pending WAL remains a recovery obligation; its presence cannot be
 ignored on the strength of this fixture alone.
+
+
+### Refuse unadmitted Docker mount writers during final source admission
+
+The internal final host observation now supplements the exact project/network
+inventory with two bounded Docker-wide mount/state snapshots under the existing
+absolute deadline. A live, paused, restarting or nonzero-PID peer outside the
+admitted source/worker set refuses admission when a writable reported source
+mount equals, contains or is contained by a database/collector source mount.
+Read-only and fully stopped peers are observed without mutation. Changed peer
+inventory/start identity/mounts, malformed paths, missing admitted identities or
+bounds exceeded fail closed. Docker mount ordering is normalized. Exact source
+client lifecycle changes during journaled stops/starts remain governed by existing
+source admission; their mount descriptors still must remain unchanged. Worker and
+unadmitted peer runtime changes refuse. The fixed observation caps are 256 containers and
+64 mounts each, within the existing Docker output and caller time limits.
+
+This check neither stops nor alters an unexpected container. It reads no mount
+contents or container environment, persists no new receipt, and does not log
+source paths. Existing final intent/deadline and source identities remain the
+only host transition bindings. The check runs on final stop, held tail/outcome
+observation and supervised resumption through their shared source admission.
+
+The optional host rehearsal previously left its independent diagnostic publisher
+alive with writable source mounts outside the project's admitted service set.
+The new check refuses that configuration. The fixture now publishes its late
+tail while source peers serve, completes its assertions and exits before final
+entry; there is no diagnostic allowlist exception. The same migration worker
+then catches that residual tail. Post-transition SQL observation still compares
+frozen datasets and the original capture. Earlier late-publication-after-stop
+proof remains historical evidence, not publisher-exclusion authority.
+
+Docker mount/state snapshots do not exclude future daemon starts, host processes,
+SQL-only publishers or filesystem aliases outside the reported path hierarchy.
+They are an additional refusal boundary, not complete publisher exclusion or
+COMMIT dispatch permission. Stopped peers remain preserved, including retained
+backup/restore objects; this check grants no permission to restart them.
+
+
+The added admission work exceeded the older rehearsal's extra 25-second
+subwindow during terminal reconciliation; that attempt remains failed and is not
+resumed. A new fixture binds its final monotonic deadline once from the already
+persisted original 60-second wall/boot window, leaving one second of margin.
+Neither the total fixture ceiling nor any production allowance increases. This
+fixture budget change is explicit and cannot be interpreted as production
+pause admission or renewal of an expired final attempt.
