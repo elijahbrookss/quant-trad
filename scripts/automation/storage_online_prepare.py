@@ -125,7 +125,7 @@ def _admit_clients(rows, expected):
             raise RuntimeError("storage_online_preparation_clients_changed")
 
 
-def _admit_source(state_root, saved, *, require_running, operator_id=None):
+def _admit_source(state_root, saved, *, require_running, operator_id=None, maintenance=False):
     if _recipe(state_root, saved["project"]) != saved["recipe_sha256"]:
         raise RuntimeError("storage_online_preparation_recipe_changed")
     release = (state_root/"release.env").read_text()
@@ -144,7 +144,7 @@ def _admit_source(state_root, saved, *, require_running, operator_id=None):
     checks = dict(mounts=_mount_digest(database["mounts"]) == saved["database"]["mounts"],
                   contract=host_boundary.database_contract(database) == saved["database"]["contract"],
                   networks=host_boundary.same_database_networks(database, saved["database"]["networks"]),
-                  cluster=host_boundary.cluster_identifier(rows["tsdb"]["id"]) == saved["cluster"])
+                  cluster=host_boundary.cluster_identifier(rows["tsdb"]["id"], **({"maintenance": True} if maintenance else {})) == saved["cluster"])
     if not all(checks.values()):
         raise RuntimeError("storage_online_preparation_database_changed: checks="+
                            ",".join(name for name, valid in checks.items() if not valid))

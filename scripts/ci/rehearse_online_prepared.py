@@ -25,7 +25,10 @@ parser.add_argument('--abort-resume-fence-loss',action='store_true',help='kill o
 parser.add_argument('--abort-resume-late-start',action='store_true',help='forward one proxy-queued owned start after SQL fence loss and real CLI reaping')
 parser.add_argument('--abort-resume-lost-end',action='store_true',help='discard a fully received terminal fence reply and reconcile without more starts')
 parser.add_argument('--worker-attach-loss',action='store_true',help='stop the owned worker Python process and kill its attach CLI before bounded retirement')
+parser.add_argument('--close-logins',choices=('success','lost-reply'),help='close owned target logins under durable final intent; no COMMIT or production reopen')
 options=parser.parse_args()
+if options.close_logins and (not options.switch_entry or options.abort_resume):
+ parser.error('--close-logins requires switch entry and excludes source resumption')
 if options.worker_attach_loss and (options.final_pause or not options.worker_phases):
  parser.error('--worker-attach-loss requires --worker-phases and excludes final pause')
 if options.abort_resume_late_start and not options.abort_resume_fence_loss:
@@ -209,7 +212,9 @@ try:
  sequence=0
  def command(op,*,response_deadline=None,**extra):
   global sequence
-  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode());return read(extra.get('deadline',response_deadline))
+  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode())
+  reply=read(extra.get('deadline',response_deadline))
+  return reply
  first_deadline=None
  for attempt in range(1 if options.final_pause else 2):
   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
@@ -479,6 +484,48 @@ try:
        report['switch_entry_checkpoint']=dict(interrupted_after_durable_save=True,
          original_deadline_preserved=True,replay_refused=True,source_held=True,
          database_commit_dispatched=False,collection_resume_authorized=False)
+       if options.close_logins:
+        real_maintenance=host_boundary.maintenance_query
+        def lost_gate_reply(container,sql):
+         result=real_maintenance(container,sql)
+         if "ALTER DATABASE" in sql:
+          raise TimeoutError('fixture lost fully received login-close reply')
+         return result
+        if options.close_logins=='lost-reply':host_boundary.maintenance_query=lost_gate_reply
+        gate_started=time.monotonic()
+        try:
+         if options.close_logins=='lost-reply':
+          try:
+           final_host.close_database_logins_locked(state,exchange=command)
+           raise AssertionError('lost gate reply accepted')
+          except TimeoutError as exc:assert str(exc)=='fixture lost fully received login-close reply'
+         else:
+          gate_result=final_host.close_database_logins_locked(state,exchange=command)
+          assert gate_result['new_logins_closed'] and not gate_result['database_switch_authorized']
+        finally:host_boundary.maintenance_query=real_maintenance
+        gated=final_host._load(state/final_host.STATE)
+        assert gated['phase']==('login_closing' if options.close_logins=='lost-reply' else 'login_closed')
+        assert gated['binding']==entered['binding'] and gated['switch']==entered['switch']
+        assert gated['deadline']==entered['deadline'] and gated['deadline_boot']==entered['deadline_boot']
+        with host_boundary.docker_deadline(deadline):
+         database=json.loads(real_maintenance(pgid,final_host._GATE_OBSERVE))
+         assert database=={**gated['login_gate']['database'],'allow_connections':False}
+         try:host_boundary.database_query(pgid,'SELECT 1');raise AssertionError('new target login accepted')
+         except RuntimeError as exc:assert str(exc).startswith('storage_pause_docker_failed')
+        current=command('final_session_check',deadline=deadline)
+        assert current['result']['database']==database and current['controller_id']==greeting['controller_id']
+        fresh=command('inspect_outcome',deadline=min(deadline,time.monotonic()+4))
+        assert fresh['result']['outcome']=='uncommitted' and not fresh['result']['collection_resume_authorized']
+        held_bytes=(state/final_host.STATE).read_bytes()
+        try:final_host.close_database_logins_locked(state,exchange=command);raise AssertionError('gate replay')
+        except RuntimeError as exc:assert str(exc)=='storage_online_login_switch_intent_required'
+        try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('gate source resume')
+        except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+        assert (state/final_host.STATE).read_bytes()==held_bytes
+        report['login_gate']=dict(mode=options.close_logins,phase=gated['phase'],same_worker=True,
+          new_logins_refused=True,fresh_negative_without_authority=True,original_clocks_preserved=True,
+          replay_refused=True,source_resumption_refused=True,elapsed_seconds=time.monotonic()-gate_started)
+        (state/'login-gate-intent.json').write_text(json.dumps(gated,indent=2))
        if options.abort_resume:
         resume_started=time.monotonic()
         if options.abort_resume_fence_loss:
@@ -596,6 +643,14 @@ try:
    assert not observed['Running'] and not observed['Restarting'] and observed['Pid']==0
    report['worker_attach_loss']['daemon_worker_retired']=True
   assert worker.returncode != 0 if (options.abort_resume_fence_loss or options.worker_attach_loss and attempt==0) else worker.returncode == 0
+  if options.close_logins:
+   retired=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
+   assert not retired['Running'] and retired['Pid']==0
+   # Fixture teardown only, AFTER verified worker retirement. This does not
+   # authorize production gate restoration or remove its retained final marker.
+   with host_boundary.docker_deadline(time.monotonic()+5):
+    host_boundary.maintenance_query(pgid,"SELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
+   report['login_gate']['worker_retired_before_fixture_restore']=True
   assert host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:
   # A host exception must close only its background worker; source keeps serving.

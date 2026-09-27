@@ -1127,3 +1127,25 @@ This resolves connection continuity, not continuous exclusion of all publishers.
 Existing sessions, extension/replication jobs, archive writers, durable host
 intent, gate restoration after outer loss and the recovery transition remain
 separate integration requirements. No production login configuration changes.
+
+### Record the host login-gate mutation in the existing final receipt
+
+The final host boundary now records `login_closing` before asking PostgreSQL to
+close new target-database logins, and `login_closed` after fresh same-worker and
+source admission. Both phases retain original intent/clocks and reject retry or
+source resumption. The host owns the setting mutation; the worker owns its live
+retained SQL session and capture/file proof. Session begin/check pipe operations
+add no COMMIT or host-start authority. No independent gate CLI or second receipt
+is introduced.
+
+The fixed maintenance query uses the database container's existing credentials
+and target name, with the caller's bounded Docker deadline. Exact cluster and
+database OID/name must agree with the retained worker before mutation. Catalog
+quoting selects only that target; drift or uncertain replies retain the hold.
+Source admission can inspect cluster identity through maintenance while the
+worker freshly inspects the target capture through its retained session.
+
+Closing new logins does not drain existing sessions or prove background/archive
+publisher exclusion. Gate restoration after interruption and complete switch /
+recovery integration remain required. There is deliberately no automatic reopen
+or source restart after a negative observation or failed gate acknowledgement.

@@ -635,3 +635,70 @@ def test_ambiguous_namespace_name_and_id_prefix_refuses(mount_writer_setup):
     # A container name can resemble another container's hexadecimal ID prefix.
     peer.update(name="/"+"1"*12, network_mode="container:"+"1"*12)
     with pytest.raises(RuntimeError, match="namespace_alias_invalid"): admit()
+
+
+@pytest.mark.parametrize("fault", [None, "save_reply", "sql_reply", "worker_reply", "identity", "expiry"])
+def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup, monkeypatch, fault):
+    path, rows, clock, state, stop = pause_setup
+    state["binding"]["capture"] = {"original": "capture"}
+    saved = stop()
+    deadline = final.time.monotonic()+30
+    original_observe = final._observe
+    def observe(root, **args):
+        args.pop("session", None)
+        binding, prep, observed, limits = original_observe(root, **args)
+        return binding, {**prep, "cluster": "1234"}, {**observed, "tsdb": {"id": "d"*64}}, limits
+    monkeypatch.setattr(final, "_observe", observe)
+    final.record_switch_entry_locked(path, deadline=deadline, observe_worker=lambda **kw: dict(
+        controller_id=CONTROLLER, operation="status", state="background", bound_final_deadline=deadline,
+        last_sequence=1, migration_ready=False, final_switch_authorized=False, collection_resume_authorized=False))
+    original = final._load(path/final.STATE)
+    database = dict(cluster="1234", oid=123, name="owned", allow_connections=True)
+    calls = []
+    def control(container, sql):
+        assert container == "d"*64
+        if "ALTER DATABASE" in sql:
+            receipt = final._load(path/final.STATE)
+            assert receipt["phase"] == "login_closing"
+            assert receipt["login_gate"]["database"]["allow_connections"] is True
+            assert receipt["deadline"] == original["deadline"] and receipt["switch"] == original["switch"]
+            calls.append(sql)
+            database["allow_connections"] = False
+            if fault == "sql_reply":raise TimeoutError("lost gate reply")
+            if fault == "expiry":clock.update(wall=1061, boot=161)
+        return final.json.dumps(database)
+    monkeypatch.setattr(host_boundary, "maintenance_query", control)
+    sequence = [1]
+    def exchange(operation, **kw):
+        assert kw["deadline"] == deadline
+        sequence[0] += 1
+        if operation == "final_session_check" and fault == "worker_reply":raise EOFError("worker lost")
+        observed = dict(database)
+        if fault == "identity":observed["oid"] += 1
+        return dict(controller_id=CONTROLLER, operation=operation, state="background", bound_final_deadline=deadline,
+            last_sequence=sequence[0], final_switch_authorized=False, collection_resume_authorized=False,
+            result=dict(database=observed,capture=state["binding"]["capture"],backend_pid=2,owner_pid=1,
+                database_switch_authorized=False,collection_resume_authorized=False,runtime_activation_authorized=False))
+    save = host_boundary.save_receipt
+    def save_reply(*args, **kwargs):
+        save(*args, **kwargs)
+        if args[1]["phase"] == "login_closing":raise OSError("lost saved intent reply")
+    if fault == "save_reply":monkeypatch.setattr(host_boundary,"save_receipt",save_reply)
+    if fault:
+        with pytest.raises((RuntimeError, TimeoutError, EOFError, OSError)):
+            final.close_database_logins_locked(path, exchange=exchange)
+    else:
+        result = final.close_database_logins_locked(path, exchange=exchange)
+        assert result["new_logins_closed"] and not result["database_switch_authorized"]
+    receipt = final._load(path/final.STATE)
+    assert receipt["deadline"] == original["deadline"] and receipt["switch"] == original["switch"]
+    assert len(calls) == (0 if fault in {"save_reply","identity"} else 1)
+    if fault != "identity":
+        assert receipt["phase"] == ("login_closed" if fault is None else "login_closing")
+        before = (path/final.STATE).read_bytes()
+        with pytest.raises(RuntimeError,match="login_switch_intent_required"):
+            final.close_database_logins_locked(path, exchange=exchange)
+        with pytest.raises(RuntimeError,match="resume_switch_intent_required"):
+            final.resume_online_source_locked(path, exchange=exchange)
+        assert (path/final.STATE).read_bytes() == before
+    assert all("ALLOW_CONNECTIONS true" not in call for call in calls)

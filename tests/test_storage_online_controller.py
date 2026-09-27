@@ -286,3 +286,23 @@ def test_final_session_refuses_return_to_tail_work():
     controller._final_connection_entered = True
     with pytest.raises(RuntimeError, match="final_delta_state_invalid"):
         controller.final_delta(deadline=monotonic()+10)
+
+
+@pytest.mark.parametrize("operation", ["final_session_begin", "final_session_check"])
+def test_final_session_wire_requires_original_deadline_and_fresh_sequence(operation):
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller.controller_id = "c"*32
+    controller._final_deadline = monotonic()+20
+    controller._admitted_limits = {"movement_timeout_seconds": 30}
+    controller.state = "background"
+    controller._sequence = 4
+    controller.check = lambda: None
+    request = dict(controller_id=controller.controller_id,sequence=4,operation=operation,
+                   deadline=controller._final_deadline)
+    controller._last_request = request.copy()
+    for deadline in (True, float("nan"), controller._final_deadline+1, controller._final_deadline-1):
+        with pytest.raises(ValueError, match="final_session_command_deadline_invalid"):
+            controller.command(request | {"deadline":deadline})
+    with pytest.raises(RuntimeError, match="final_session_fresh_sequence_required"):
+        controller.command(request)

@@ -2045,8 +2045,7 @@ invalidation, identity drift or an unexpected transaction refuses replacement.
 Context exit discards the connection, and the controller cannot reenter this
 session or return to copy work. The original final and capture deadlines remain.
 
-This is a prerequisite for a separately owned closed-login transition, not its
-implementation. It changes no database login setting, host receipt, pipe command
+This retained session alone is not login-gate authority. It changes no database login setting, host receipt, pipe command
 or restart authority. Durable host gating, existing/background publisher
 admission and post-switch recovery still require qualified integration.
 
@@ -2070,3 +2069,29 @@ application name is never used for exclusion. Internal PostgreSQL/TimescaleDB
 workers are outside this client check and still require separate admission.
 An idle TimescaleDB scheduler is not proof that its jobs cannot run. This check
 must not be presented as admission of extension jobs or all SQL publishers.
+
+
+### Host-owned final login gate
+
+`storage_online_final.close_database_logins_locked` now owns the internal gate
+transition in the existing final receipt. It requires switch intent, exact held
+source and the same live worker. The worker opens its retained final session
+through ordered `final_session_begin` and fresh `final_session_check` operations;
+these report identity/capture and deny switch, restart and runtime authority.
+No new operator entrypoint or COMMIT command is exposed.
+
+The host compares worker and maintenance-session cluster/database identity,
+records `login_closing` with the original open-login setting BEFORE dispatch,
+and closes only that target database's new logins. It records `login_closed`
+only after the same worker and source are freshly admitted through the closed
+gate. SQL control uses the existing database recipe via the cluster-local
+maintenance database; there is no second application DSN. Original capture,
+initial preparation and final wall/boot/monotonic deadlines are unchanged.
+
+An interrupted request can already have closed access. Both gate phases block
+ordinary stop/restart/relaunch and gate replay, retain the marker and grant no
+COMMIT or automatic reopen. Existing sessions, prepared transactions, background
+jobs, archive/spool publishers and terminal recovery still require admission.
+The preserving production gate-restoration transition is unfinished. Disposable
+rehearsal cleanup restores access only after verified read-worker retirement;
+that fixture action supplies no production recovery authority.

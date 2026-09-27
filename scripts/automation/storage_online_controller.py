@@ -35,7 +35,8 @@ from scripts.db.archive_file_v2_proof import ArchiveFileProof
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
 _ROLLBACK_OPERATIONS = {"rollback_fence_begin", "rollback_fence_check", "rollback_fence_end"}
-_OPERATIONS = _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
+_SESSION_OPERATIONS = {"final_session_begin", "final_session_check"}
+_OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
 
 
 class OnlineController:
@@ -202,6 +203,26 @@ class OnlineController:
                 finally:
                     self._final_connection = None
 
+    def final_session_observation(self, *, deadline):
+        """Fresh retained-session identity/capture only; no gate or COMMIT authority."""
+        if (not self._final_connection_entered or deadline != self._final_deadline
+                or monotonic() >= deadline):
+            raise RuntimeError("storage_online_final_session_deadline_invalid")
+        self._ownership(deadline=deadline)
+        self._admit_attempt()
+        with self._database_connection() as conn, conn.begin():
+            with capture._bounded_step(conn, math.ceil(deadline-monotonic())) as shorten:
+                shorten(deadline-monotonic())
+                observed = conn.scalar(text("SELECT json_build_object("
+                    "'cluster',(SELECT system_identifier::text FROM pg_control_system()),"
+                    "'oid',d.oid::bigint,'name',d.datname,'allow_connections',d.datallowconn) "
+                    "FROM pg_database d WHERE datname=current_database()"))
+                captured = conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1"))
+        self._ownership(deadline=deadline)
+        return {"database": observed, "capture": captured, "backend_pid": self._final_pid,
+                "owner_pid": self._pid, "database_switch_authorized": False,
+                "collection_resume_authorized": False, "runtime_activation_authorized": False}
+
     @contextmanager
     def _database_connection(self):
         if not self._final_connection_entered:
@@ -267,7 +288,8 @@ class OnlineController:
         finalizing = isinstance(request, dict) and request.get("operation") == "final_delta"
         inspecting = isinstance(request, dict) and request.get("operation") == "inspect_outcome"
         fencing = isinstance(request, dict) and request.get("operation") in _ROLLBACK_OPERATIONS
-        if finalizing or inspecting or fencing:
+        session = isinstance(request, dict) and request.get("operation") in _SESSION_OPERATIONS
+        if finalizing or inspecting or fencing or session:
             fields |= {"deadline"}
         if draining:
             fields |= {"deadline", "max_entries"}
@@ -292,11 +314,12 @@ class OnlineController:
                 or not 0 < request["deadline"]-monotonic() <= min(5, self.limits["movement_timeout_seconds"])
                 or (self._final_deadline is not None and request["deadline"] > self._final_deadline)):
             raise ValueError("storage_online_outcome_command_budget_invalid")
-        if fencing and (type(request["deadline"]) not in (int, float)
+        if (fencing or session) and (type(request["deadline"]) not in (int, float)
                 or not math.isfinite(request["deadline"])
                 or self._final_deadline is None or request["deadline"] != self._final_deadline
                 or not 0 < request["deadline"]-monotonic() <= self._admitted_limits["movement_timeout_seconds"]):
-            raise ValueError("storage_online_rollback_command_deadline_invalid")
+            raise ValueError("storage_online_final_session_command_deadline_invalid" if session
+                             else "storage_online_rollback_command_deadline_invalid")
         if draining:
             if (type(request["deadline"]) not in (int, float)
                     or not math.isfinite(request["deadline"])
@@ -319,6 +342,8 @@ class OnlineController:
             # It is not a restart/resume token and never revives dead proof.
             if self.state not in {"closed", "cancelled"}:
                 self.check()
+            if session:
+                raise RuntimeError("storage_online_final_session_fresh_sequence_required")
             if fencing:
                 raise RuntimeError("storage_online_rollback_fresh_sequence_required")
             if draining or inspecting:
@@ -330,9 +355,9 @@ class OnlineController:
             or operation in {"rollback_fence_check", "rollback_fence_end", "close"} and self.state == "resume_fenced")
         if request["sequence"] != self._sequence+1 or (self.state != "background" and not readable and not rollback_allowed):
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
-        if self._final_deadline is not None and operation not in _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
+        if self._final_deadline is not None and operation not in _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
-        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close"}:
+        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check"}:
             raise RuntimeError("storage_online_final_session_background_work_refused")
         result = {}
         try:
@@ -351,6 +376,10 @@ class OnlineController:
                         timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
                 self.state = "cancelled"
                 result = {"attempt_cancelled": True, "source_preserved": True}
+            elif session:
+                if operation == "final_session_begin":
+                    self._stack.enter_context(self.final_database_session(deadline=request["deadline"]))
+                result = self.final_session_observation(deadline=request["deadline"])
             elif fencing:
                 result = self._rollback_channel(operation, deadline=request["deadline"])
             elif inspecting:

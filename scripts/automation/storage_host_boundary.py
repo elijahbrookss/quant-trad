@@ -247,8 +247,22 @@ def database_query(container: str, sql: str) -> str:
         '-v ON_ERROR_STOP=1 -Atc "$1"', "storage-preparation", sql).strip()
 
 
-def cluster_identifier(container: str) -> str:
-    value = database_query(container, "SELECT system_identifier FROM pg_control_system()")
+def maintenance_query(container: str, sql: str) -> str:
+    """Fixed cluster-local control path, using the database's existing identity.
+
+    The caller owns SQL meaning and an absolute Docker deadline. Target is passed
+    privately by psql variable from the existing recipe, never a second DSN.
+    """
+    if current_docker_deadline() is None:
+        raise RuntimeError("storage_maintenance_deadline_required")
+    return docker("exec", "-i", container, "sh", "-ec",
+        'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d postgres '
+        '-v ON_ERROR_STOP=1 -v target="$POSTGRES_DB" -qAtf -',
+        input="SET statement_timeout='5s';\n"+sql).strip()
+
+
+def cluster_identifier(container: str, *, maintenance: bool = False) -> str:
+    value = (maintenance_query if maintenance else database_query)(container, "SELECT system_identifier FROM pg_control_system()")
     if not re.fullmatch(r"[0-9]{1,20}", value):
         raise ValueError("storage_database_cluster_identity_unavailable")
     return value

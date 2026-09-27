@@ -51,11 +51,12 @@ def _remaining(saved):
 
 def _load(path):
     saved = host_boundary.load_receipt(path)
+    gated = saved.get("phase") in {"login_closing", "login_closed"}
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
-    entered = saved.get("phase") == "switch_entered" or resuming
-    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set())
+    entered = saved.get("phase") == "switch_entered" or resuming or gated
+    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set())
     if (set(saved) != fields or saved["schema"] != SCHEMA
-            or saved["phase"] not in ("stopping", "paused", "switch_entered", "source_resuming", "source_resumed")
+            or saved["phase"] not in ("stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed")
             or type(saved["duration_seconds"]) is not int
             or not 1 <= saved["duration_seconds"] <= 96*3600
             or any(type(saved[k]) not in (int, float) or not math.isfinite(saved[k])
@@ -65,7 +66,7 @@ def _load(path):
             or abs(saved["deadline"]-saved["started_at"]-saved["duration_seconds"]) > .000001
             or abs(saved["deadline_boot"]-saved["started_boot"]-saved["duration_seconds"]) > .000001):
         raise RuntimeError("storage_online_final_receipt_invalid")
-    if saved["phase"] in ("paused", "switch_entered", "source_resuming", "source_resumed"):
+    if saved["phase"] in ("paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"):
         if (type(saved["paused_at"]) not in (int, float)
                 or not saved["started_at"] <= saved["paused_at"] <= saved["deadline"]):
             raise RuntimeError("storage_online_final_receipt_invalid")
@@ -109,7 +110,28 @@ def _load(path):
                 raise RuntimeError("storage_online_resume_receipt_invalid")
         elif resume["finished_at"] is not None:
             raise RuntimeError("storage_online_resume_receipt_invalid")
+    if gated:
+        gate = saved["login_gate"]
+        if (not isinstance(gate, dict) or set(gate) != {"database", "requested_at", "closed_at"}
+                or not isinstance(gate["database"], dict)
+                or not _valid_database_gate(gate["database"])
+                or gate["database"]["allow_connections"] is not True
+                or type(gate["requested_at"]) not in (int, float)
+                or not saved["switch"]["entered_at"] <= gate["requested_at"] <= saved["deadline"]
+                or (saved["phase"] == "login_closing" and gate["closed_at"] is not None)
+                or (saved["phase"] == "login_closed" and (type(gate["closed_at"]) not in (int, float)
+                    or not gate["requested_at"] <= gate["closed_at"] <= saved["deadline"]))):
+            raise RuntimeError("storage_online_login_receipt_invalid")
     return saved
+
+
+def _valid_database_gate(value):
+    return (set(value) == {"cluster", "oid", "name", "allow_connections"}
+        and isinstance(value["cluster"], str) and bool(re.fullmatch(r"[0-9]{1,20}", value["cluster"]))
+        and type(value["oid"]) is int and value["oid"] > 0
+        and isinstance(value["name"], str) and 1 <= len(value["name"].encode()) <= 63
+        and "\x00" not in value["name"] and value["name"] not in {"postgres", "template0", "template1"}
+        and type(value["allow_connections"]) is bool)
 
 
 
@@ -227,7 +249,7 @@ def _admit_mount_writers(rows, *, operator_id):
         raise RuntimeError("storage_online_writer_inventory_changed")
 
 
-def _observe(state_root, *, project, source_revision, controller_id, worker_id):
+def _observe(state_root, *, project, source_revision, controller_id, worker_id, session=None):
     preparation = initial._load(state_root)
     if (preparation["phase"] != "serving" or preparation["project"] != project
             or preparation["source_revision"] != source_revision):
@@ -251,10 +273,11 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id):
     digest = hashlib.sha256(request_path.read_bytes()).hexdigest()
     if digest != worker["binding"]["request_sha256"]:
         raise RuntimeError("storage_online_final_request_changed")
-    rows = initial._admit_source(state_root, preparation, require_running=False, operator_id=worker_id)
+    rows = initial._admit_source(state_root, preparation, require_running=False, operator_id=worker_id,
+        **({"maintenance": True} if session is not None else {}))
     _admit_mount_writers(rows, operator_id=worker_id)
-    capture = json.loads(host_boundary.database_query(rows["tsdb"]["id"],
-        "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
+    capture = (session["capture"] if session is not None else json.loads(host_boundary.database_query(rows["tsdb"]["id"],
+        "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1")))
     seconds = capture.get("attempt_seconds", 86400)
     started = datetime.fromisoformat(capture["prepared_at"])
     if (started.tzinfo is None or type(seconds) is not int or not 1 <= seconds <= 96*3600
@@ -789,3 +812,106 @@ def reconcile_source_resumed_locked(state_root, *, exchange):
               file=sys.stderr, flush=True)
         return {"original_source_resumed": True, "final_marker_retained": True,
                 "database_switch_authorized": False, "runtime_activation_authorized": False}
+
+
+_GATE_OBSERVE = """SELECT json_build_object(
+ 'cluster',(SELECT system_identifier::text FROM pg_control_system()),
+ 'oid',oid::bigint,'name',datname,'allow_connections',datallowconn)
+ FROM pg_database WHERE datname=:'target';
+"""
+
+
+def close_database_logins_locked(state_root, *, exchange):
+    """Persist and close only the exact target's new logins. Never reopen here.
+
+    Caller retains the launcher flock and SAME live worker. This is a necessary
+    exclusion boundary, not COMMIT authority: existing clients, background jobs,
+    archive/spool publishers and host source admission still require integration.
+    Lost replies leave login_closing and may already have closed access. No retry,
+    source resumption or gate restoration follows an uncertain result.
+    """
+    if not callable(exchange):
+        raise ValueError("storage_online_login_exchange_invalid")
+    state_root = launch._canonical(state_root)
+    path = state_root/STATE
+    saved = _load(path)
+    if saved["phase"] != "switch_entered":
+        raise RuntimeError("storage_online_login_switch_intent_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    deadline = saved["switch"]["deadline_monotonic"]
+    sequence = saved["switch"]["worker_sequence"]
+
+    def budget():
+        if not 0 < deadline-time.monotonic() <= _remaining(saved):
+            raise RuntimeError("storage_online_login_deadline_expired")
+
+    def admit(session=None):
+        budget()
+        observed, preparation, rows, _ = _observe(state_root, **args,
+            **({"session": session} if session is not None else {}))
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
+            raise RuntimeError("storage_online_login_source_changed")
+        budget()
+        return preparation, rows
+
+    def observe_worker(operation):
+        nonlocal sequence
+        budget()
+        reply = exchange(operation, deadline=deadline)
+        budget()
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != operation or reply.get("state") != "background"
+                or reply.get("bound_final_deadline") != deadline
+                or type(reply.get("last_sequence")) is not int or reply["last_sequence"] <= sequence
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False
+                or not isinstance(result, dict) or not isinstance(result.get("database"), dict)
+                or not _valid_database_gate(result["database"])
+                or result.get("capture") != binding["capture"]
+                or any(type(result.get(k)) is not int or result[k] <= 0 for k in ("backend_pid", "owner_pid"))
+                or result["backend_pid"] == result["owner_pid"]
+                or any(result.get(k) is not False for k in ("database_switch_authorized",
+                    "collection_resume_authorized", "runtime_activation_authorized"))):
+            raise RuntimeError("storage_online_login_worker_reply_invalid")
+        sequence = reply["last_sequence"]
+        return result
+
+    with host_boundary.docker_deadline(deadline):
+        preparation, rows = admit()
+        session = observe_worker("final_session_begin")
+        admit()
+        database = session["database"]
+        control = json.loads(host_boundary.maintenance_query(rows["tsdb"]["id"], _GATE_OBSERVE))
+        if database != control or database["cluster"] != preparation["cluster"] or not database["allow_connections"]:
+            raise RuntimeError("storage_online_login_database_changed")
+        budget()
+        saved.update(phase="login_closing", login_gate={"database": database,
+            "requested_at": time.time(), "closed_at": None})
+        host_boundary.save_receipt(path, saved, initial=False)  # BEFORE ALTER DATABASE.
+        budget()
+        # Identifiers come from the current catalog; numeric identities are
+        # validated above. A changed target produces no ALTER and refuses below.
+        sql = ("SELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS false',datname) "
+            "FROM pg_database WHERE datname=:'target' AND oid="+str(database["oid"])+
+            " AND datallowconn AND (SELECT system_identifier FROM pg_control_system())="+
+            database["cluster"]+"\n\\gexec\n"+_GATE_OBSERVE)
+        observed = json.loads(host_boundary.maintenance_query(rows["tsdb"]["id"], sql))
+        budget()
+        expected = {**database, "allow_connections": False}
+        if observed != expected:
+            raise RuntimeError("storage_online_login_not_closed")
+        current = observe_worker("final_session_check")
+        if (current["database"] != expected or current["backend_pid"] != session["backend_pid"]
+                or current["owner_pid"] != session["owner_pid"]):
+            raise RuntimeError("storage_online_login_session_changed")
+        admit(current)
+        saved["phase"] = "login_closed"
+        saved["login_gate"]["closed_at"] = time.time()
+        host_boundary.save_receipt(path, saved, initial=False)
+        budget()
+        print("event=storage_online_database_logins_closed database_switch_authorized=false",
+              file=sys.stderr, flush=True)
+        return {"new_logins_closed": True, "database_switch_authorized": False,
+                "collection_resume_authorized": False, "runtime_activation_authorized": False}
