@@ -11,32 +11,36 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_fixed_overlay_preserves_spool_and_database_paths_without_fallback_mounts():
     overlay = yaml.safe_load((ROOT / "docker/docker-compose.storage-server.yml").read_text())
     services = overlay["services"]
-    assert set(services) == {"tsdb", "backend", "initialize", "market-data-collector"}
-    assert services["market-data-collector"]["pid"] == "service:tsdb"
+    assert set(services) == {"tsdb", "backend", "initialize", "market-data-collector", "storage-maintenance"}
+    assert services["storage-maintenance"]["pid"] == "service:tsdb"
     for name, service in services.items():
-        assert not service.get("privileged")
-        assert not service.get("devices")
+        assert not service.get("privileged") and not service.get("devices")
         for volume in service["volumes"]:
             if isinstance(volume, dict):
                 assert volume["bind"]["create_host_path"] is False
         if name == "tsdb":
-            assert "environment" not in service  # never changes existing PGDATA
+            assert "environment" not in service
             continue
-        assert service["user"] == "70:70"
-        assert "postgres-data:/var/lib/postgresql/data" in service["volumes"]
+        maintenance = name == "storage-maintenance"
+        assert service["user"] == ("70:70" if maintenance else "1000:1000")
+        assert ("postgres-data:/var/lib/postgresql/data" in service["volumes"]) == (maintenance or name == "backend")
         mounts = {x["target"]: x for x in service["volumes"] if isinstance(x, dict)}
-        assert "WORKING_ROOT:?" in mounts["/app/logs/market-structure"]["source"]
+        assert ("/run/quanttrad/recovery" in mounts) == maintenance
+        assert ("/app/logs/market-structure" in mounts) != maintenance
+        if not maintenance:
+            assert "pid" not in service
         assert "HDD_ROOT:?" in mounts["/qt-history"]["source"]
         assert mounts["/run/quanttrad/storage-inventory.json"]["read_only"]
         environment = service["environment"]
-        assert environment["MARKET_STRUCTURE_WORKING_ROOT"] == "/app/logs/market-structure"
         assert environment["MARKET_STRUCTURE_STORAGE_ROOT"] == "/qt-history/archives"
         assert environment["QT_DISABLE_DOTENV"] == "1"
-    worker = services["market-data-collector"]
+        assert environment["QT_STORAGE_MAINTENANCE_OWNER"] == "dedicated"
+        assert environment["QT_ARCHIVE_SHARED_GROUP_ID"] in service["group_add"]
+        assert service["cap_drop"] == ["ALL"]
+    worker = services["storage-maintenance"]
     assert worker["environment"]["QT_STORAGE_MAINTENANCE_LIMITS_PATH"] == "/run/quanttrad/storage-maintenance.json"
     assert worker["environment"]["QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED"] == "true"
-    assert worker["environment"]["QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED"] == "true"
-    assert "group_add" not in worker and "group_add" not in services["initialize"]
+    assert "QT_STORAGE_MAINTENANCE_LIMITS_PATH" not in services["market-data-collector"]["environment"]
 
 
 def test_packaged_preserving_operator_is_part_of_runtime_attestation(tmp_path):

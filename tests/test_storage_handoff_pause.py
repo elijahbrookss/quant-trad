@@ -1115,3 +1115,13 @@ def test_bound_runtime_revalidates_admitted_database_recovery_pair(runtime_activ
         with pytest.raises(RuntimeError,match="prepared_database_changed"):
             pause._runtime_bound_model(state,saved,options["request"])
     assert (state/host_boundary.HOLD).exists() and runtime.ups==1
+
+
+def test_legacy_runtime_operator_refuses_unqualified_dedicated_topology(runtime_recipe_setup):
+    state, database, operator, model, check = runtime_recipe_setup
+    model["services"]["storage-maintenance"] = {
+        "image": model["services"]["market-data-collector"]["image"]}
+    with pytest.raises(RuntimeError, match="storage_runtime_fixed_topology_required"):
+        check()
+    assert (state / host_boundary.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in host_boundary.STOP)

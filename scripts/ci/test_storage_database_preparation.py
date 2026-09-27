@@ -506,12 +506,35 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         'QT_MARKET_DATA_WORKING_EXPECTED_UUID':'fixture-ssd','QT_STORAGE_INVENTORY_HOST_PATH':str(inventory),
         'QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH':str(limits),
         'QT_STORAGE_RECOVERY_SECRETS_ROOT':str(recovery_secrets),
+        'QT_ARCHIVE_SHARED_GROUP_ID':'70',
         'QT_DOCKER_SOCKET_GID':str(Path('/var/run/docker.sock').stat().st_gid)}
     for flag in ('BOOTSTRAP_MARKET_DATA','ENABLE_SCHEDULED_FACTS','ENABLE_STRUCTURED_FACTS','ENABLE_TRADE_STREAMS','ENABLE_L2_STREAMS'):
         configured['QT_SINGLE_NODE_'+flag]='false'
     rendered=json.loads(run(['docker','compose','--env-file',str(private),
         '--file','docker/docker-compose.server.yml','--file','docker/docker-compose.storage-server.yml',
         'config','--format','json'],env=configured).stdout)
+    # Historical held-operator regression ONLY: preserve the former private
+    # UID70 composition that this procedure actually admits. The new dedicated
+    # topology is exercised by test_server_core_recreation, and intentionally
+    # remains refused by this legacy operator. This is not a release recipe.
+    maintenance=rendered['services']['storage-maintenance']
+    for name in ('backend','initialize','market-data-collector'):
+        service=rendered['services'][name]
+        service['user']='70:70'
+        environment=service['environment']
+        environment.pop('QT_ARCHIVE_SHARED_GROUP_ID',None)
+        environment['QT_STORAGE_MAINTENANCE_OWNER']='collector'
+        service['group_add']=[configured['QT_DOCKER_SOCKET_GID']] if name=='backend' else []
+        if not any(m['target']=='/var/lib/postgresql/data' for m in service['volumes']):
+            service['volumes'].append(dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data'))
+        if name=='market-data-collector':
+            service['pid']='service:tsdb'
+            for key in ('QT_MARKET_DATA_LIFECYCLE_ENABLED','QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED',
+                        'QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED','QT_STORAGE_MAINTENANCE_LIMITS_PATH'):
+                environment[key]=maintenance['environment'][key]
+            for mount in maintenance['volumes']:
+                if mount['target'] in ('/run/quanttrad/recovery','/var/run/postgresql','/run/quanttrad/storage-maintenance.json'):
+                    service['volumes'].append(dict(mount))
     model=json.loads(json.dumps(recipe))
     for name in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
         service=rendered['services'][name]

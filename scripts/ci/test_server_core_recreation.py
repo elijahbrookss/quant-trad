@@ -73,23 +73,28 @@ def main():
                      root='/qt-history', medium='hdd')]}))
             inventory.chmod(0o644)
             limits = root / 'maintenance.json'
-            limits.write_text(json.dumps({'schema_version': 'qt.storage_maintenance_limits.v1',
+            limits.write_text(json.dumps({'schema_version': 'qt.storage_maintenance_limits.v2',
                 'history': {'wal_bytes': 16*1024**2, 'temporary_bytes': {'ssd': 1024**2, 'hdd': 0},
                     'growth_bytes_per_second': {'ssd': 0, 'hdd': 0},
                     'maintenance_bytes': {'ssd': 1024**2, 'hdd': 1024**2},
                     'movement_timeout_seconds': 60, 'cancellation_grace_seconds': 5},
                 'recovery': {'max_bytes': 64*1024**2, 'timeout_seconds': 60,
-                             'headroom_bytes': {'ssd': 1024**2, 'hdd': 1024**2}, 'max_objects': 100}}))
+                             'headroom_bytes': {'ssd': 1024**2, 'hdd': 1024**2}, 'max_objects': 100,
+                             'incremental': dict(pgbackrest='/usr/local/bin/pgbackrest', restic='/usr/local/bin/restic',
+                                 pg_path='/var/lib/postgresql/data/pgdata', pg_socket_path='/var/run/postgresql',
+                                 database_key_path='/run/quanttrad/recovery/database.key',
+                                 archive_key_path='/run/quanttrad/recovery/archive.key', max_chain_backups=7)}}))
             limits.chmod(0o644)
             env.update(QT_STORAGE_HDD_ROOT=str(hdd), QT_MARKET_DATA_ROOT=str(hdd / 'archives'),
                 QT_MARKET_DATA_EXPECTED_UUID='fixture-hdd', QT_MARKET_DATA_WORKING_ROOT=str(archive),
                 QT_MARKET_DATA_WORKING_EXPECTED_UUID='fixture-ssd',
                 QT_STORAGE_INVENTORY_HOST_PATH=str(inventory),
                 QT_STORAGE_RECOVERY_SECRETS_ROOT=str(recovery_secrets),
-                QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH=str(limits), QT_DOCKER_SOCKET_GID='70')
+                QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH=str(limits), QT_DOCKER_SOCKET_GID='70', QT_ARCHIVE_SHARED_GROUP_ID='70')
             base += ['--file', 'docker/docker-compose.storage-server.yml']
         config = json.loads(run(base + ['config', '--format', 'json'], env=env).stdout)
-        config['services'] = {name: config['services'][name] for name in SERVICES}
+        services = (*SERVICES, 'storage-maintenance') if args.storage_layout else SERVICES
+        config['services'] = {name: config['services'][name] for name in services}
         config['networks'] = {'quanttrad': {'name': project + '-network', 'internal': True}}
         config['volumes'] = {'postgres-data': {'name': project + '-postgres'}}
         if args.storage_layout:
@@ -133,16 +138,17 @@ def main():
         def storage_probe():
             if not args.storage_layout:
                 return
-            # Both real application services publish private immutable archive
-            # objects, then read the other writer's file with the actual store.
+            # Application services retain the original private SSD identity, then
+            # share only new immutable HDD objects with database maintenance.
             for service in ('backend', 'market-data-collector'):
                 code = (
                     "import os, hashlib; from pathlib import Path; "
                     "from market_data.archive import FilesystemRawArchiveObjectStore; "
                     "from scripts.db.fact_header_v2_handoff import commit_handoff, activate_handoff_policy; "
-                    "assert os.getuid()==70; "
+                    "assert os.getuid()==1000; "
                     "root=Path('/app/logs/market-structure'); "
                     "assert (root/'legacy-spool-proof').read_text()=='retained-spool'; "
+                    "info=(root/'legacy-spool-proof').stat(); assert (info.st_uid,info.st_gid,info.st_mode & 0o777)==(1000,1000,0o600); "
                     "stage=root/'publication-probe'; stage.write_bytes(b'preserved-history'); "
                     "store=FilesystemRawArchiveObjectStore(Path('/qt-history/archives/objects')); "
                     f"store.put_verified(object_key='rehearsal/{service}',source_path=stage,"
@@ -152,7 +158,13 @@ def main():
                     "print('storage_writer_and_legacy_spool_verified')")
                 assert 'storage_writer_and_legacy_spool_verified' in run(
                     compose + ['exec', '-T', service, 'python', '-c', code], env=env).stdout
-            for service, other in (('backend', 'market-data-collector'), ('market-data-collector', 'backend')):
+            code = ("import hashlib; from pathlib import Path; from market_data.archive import FilesystemRawArchiveObjectStore; "
+                    "stage=Path('/qt-history/archives/maintenance-probe'); stage.write_bytes(b'preserved-history'); "
+                    "store=FilesystemRawArchiveObjectStore(Path('/qt-history/archives/objects')); "
+                    "store.put_verified(object_key='rehearsal/storage-maintenance',source_path=stage,expected_sha256=hashlib.sha256(stage.read_bytes()).hexdigest())")
+            run(compose + ['exec', '-T', 'storage-maintenance', 'python', '-c', code], env=env)
+            for service, other in (('backend', 'market-data-collector'), ('market-data-collector', 'backend'),
+                                   ('storage-maintenance', 'backend'), ('backend', 'storage-maintenance')):
                 code = ("from pathlib import Path; from market_data.archive import FilesystemRawArchiveObjectStore; "
                         "store=FilesystemRawArchiveObjectStore(Path('/qt-history/archives/objects'),writable=False); "
                         f"assert store.local_path('rehearsal/{other}').read_bytes()==b'preserved-history'")
@@ -172,7 +184,27 @@ def main():
                 "print('postgres_namespace_and_maintenance_wiring_verified')",
             ])
             assert 'postgres_namespace_and_maintenance_wiring_verified' in run(
-                compose + ['exec', '-T', 'market-data-collector', 'python', '-c', code], env=env).stdout
+                compose + ['exec', '-T', 'storage-maintenance', 'python', '-c', code], env=env).stdout
+            # Backend retains only its capacity observation mount; DAC keeps PG files private.
+            code = "from pathlib import Path; p=Path('/var/lib/postgresql/data/pgdata/PG_VERSION'); p.read_text()"
+            denied = run(compose + ['exec', '-T', 'backend', 'python', '-c', code], env=env, ok=False)
+            assert denied.returncode and 'PermissionError' in denied.stderr
+            code = "from portal.backend.service.storage_management import StorageManagementService; s=StorageManagementService().snapshot(); assert len(s['candidates'])==2 and all(t['status']=='available' for t in s['candidates']), s['candidates']"
+            run(compose + ['exec', '-T', 'backend', 'python', '-c', code], env=env)
+            # Only maintenance has the database PID namespace and recovery keys.
+            for service in ('backend', 'initialize', 'market-data-collector', 'storage-maintenance'):
+                observed = json.loads(run(['docker', 'inspect', cid(service)], env=env).stdout)[0]
+                destinations = {m['Destination'] for m in observed['Mounts']}
+                privileged = service == 'storage-maintenance'
+                assert ('/var/lib/postgresql/data' in destinations) == (privileged or service == 'backend')
+                assert ('/run/quanttrad/recovery' in destinations) == privileged
+                assert ('/app/logs/market-structure' in destinations) != privileged
+                assert bool(observed['HostConfig']['PidMode']) == privileged
+                assert observed['Config']['User'] == ('70:70' if privileged else '1000:1000')
+            code = "from portal.backend.workers.market_data_collector_health import live_worker_for_host; assert live_worker_for_host(storage_maintenance=True)['context']['storage_lifecycle']['maintenance']['local_recovery']['configured']"
+            run(compose + ['exec', '-T', 'storage-maintenance', 'python', '-c', code], env=env)
+            code = "from portal.backend.workers.market_data_collector_health import live_worker_for_host; assert live_worker_for_host()['context']['storage_lifecycle']['state']=='external'"
+            run(compose + ['exec', '-T', 'market-data-collector', 'python', '-c', code], env=env)
         def prepare_database_mount():
             if not args.storage_layout:
                 return
@@ -260,9 +292,13 @@ def main():
                 preparation = '\n'.join([
                     'import os,json; from pathlib import Path',
                     "source=Path('/source'); history=Path('/history')",
-                    "for path in (source, source/'pgdata', source/'working', history, history/'archives'):",
+                    "for path in (source, source/'pgdata', history):",
                     '    path.mkdir(exist_ok=True); os.chown(path,70,70); path.chmod(0o700)',
-                    "proof=source/'working/legacy-spool-proof'; proof.write_text('retained-spool'); os.chown(proof,70,70)",
+                    "history.chmod(0o2770)",
+                    "working=source/'working'; working.mkdir(); os.chown(working,1000,1000); working.chmod(0o750)",
+                    "proof=working/'legacy-spool-proof'; proof.write_text('retained-spool'); os.chown(proof,1000,1000); proof.chmod(0o600)",
+                    "for path in (history/'archives', history/'archives/objects'):",
+                    '    path.mkdir(); os.chown(path,70,70); path.chmod(0o2770)',
                     "print(json.dumps({name:[os.major(path.stat().st_dev),os.minor(path.stat().st_dev)] for name,path in [('ssd',source),('hdd',history)]}))",
                 ])
                 devices = json.loads(run(['docker','run','--rm','--pull','never','--network','none',
@@ -301,12 +337,12 @@ def main():
                 assert actual == revision, (service, actual, revision)
             run(compose + ['exec', '-T', 'backend', '/app/scripts/qt', 'data', 'collectors', 'fleet'], env=env)
             if args.storage_layout:
-                print('PASS: fixed SSD/HDD UID70 layout, preserved legacy spool bytes, shared archive ownership, packaged operator, PostgreSQL namespace and maintenance configuration before/after recreation; synthetic filesystems and no provider enrollment', flush=True)
+                print('PASS: split UID1000 application/UID70 maintenance layout, private source ownership, shared archives, maintenance heartbeat/namespace before and after recreation; synthetic filesystems/no intake or encrypted-pair activation proof', flush=True)
             print('PASS: actual QT clean bootstrap, API/frontends, initializer, collector heartbeat, clean worker stop, recreation, exact image revision, and PostgreSQL data retention; provider enrollment and network egress disabled', flush=True)
         except BaseException:
             # Keep each service's tail: a busy backend must not displace the
             # failing collector's error from a combined output budget.
-            for service in SERVICES:
+            for service in services:
                 diagnostics = run(compose + ['logs', '--tail', '60', '--no-color', service], env=env, ok=False)
                 print(diagnostics.stdout[-10000:] + diagnostics.stderr[-2000:], flush=True)
             raise

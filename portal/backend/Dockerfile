@@ -25,7 +25,8 @@ RUN apt-get update \
 
 COPY --from=backup-tools /opt/qt-backup-tools/ /usr/local/bin/
 # pgBackRest resolves its operating-system identity; fixed storage runs as UID70.
-RUN groupadd --gid 70 qtstorage && useradd --uid 70 --gid 70 --no-create-home qtstorage
+RUN groupadd --gid 70 qtstorage && useradd --uid 70 --gid 70 --no-create-home qtstorage \
+    && groupadd --gid 1000 qtapp && useradd --uid 1000 --gid 1000 --no-create-home qtapp
 
 COPY requirements.txt requirements.lock /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -55,9 +56,9 @@ COPY scripts/automation/storage_recovery_prepare.py \
      scripts/automation/storage_host_prepare.py \
      scripts/automation/storage_device_audit.py /app/scripts/automation/
 
-# The opt-in fixed storage layout uses the database UID. Application scratch
-# paths remain usable without changing ownership of source code or host data.
-RUN install -d -o 70 -g 70 -m 0750 /app/logs /app/reports
+# Image-local scratch supports application and database maintenance identities.
+# This never changes ownership or permissions of mounted host data.
+RUN install -d -o 1000 -g 70 -m 2770 /app/logs /app/reports
 
 RUN chmod +x /app/scripts/qt
 

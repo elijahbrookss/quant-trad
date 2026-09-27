@@ -235,6 +235,9 @@ class DockerBotRunner:
                 "Set it on the backend service environment before starting bots."
             )
         archive_mount_args = self._runtime_archive_mount_args()
+        shared_group = get_settings().storage.archive_shared_group_id
+        if shared_group is not None and not archive_mount_args:
+            raise RuntimeError("runtime_shared_archive_mount_required")
         name = self._container_name(bot_id, run_id=normalized_run_id)
         existing = self.inspect_bot_container(
             bot_id,
@@ -259,6 +262,8 @@ class DockerBotRunner:
             run_lease_token=str(bot.get("_runtime_run_lease_token") or "").strip() or None,
             run_lease_runner_id=str(bot.get("_runtime_runner_id") or "").strip() or None,
         )
+        if shared_group is not None:
+            runtime_env["QT_ARCHIVE_SHARED_GROUP_ID"] = str(shared_group)
         runtime_labels = {
             "loki.job": "quanttrad",
             "loki.service": "bot-runtime",
@@ -277,6 +282,9 @@ class DockerBotRunner:
             "--network",
             network,
         ]
+        if shared_group is not None:
+            cmd.extend(["--user", "1000:1000", "--group-add", str(shared_group),
+                        "--cap-drop", "ALL", "--security-opt", "no-new-privileges"])
         cmd.extend(archive_mount_args)
         for key, value in sorted(runtime_labels.items()):
             cmd.extend(["--label", f"{key}={value}"])

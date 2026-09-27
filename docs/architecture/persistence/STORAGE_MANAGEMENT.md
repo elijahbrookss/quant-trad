@@ -9,6 +9,12 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - docker/docker-compose.storage-server.yml
+  - portal/backend/workers/market_data_collector_health.py
+  - portal/backend/service/bots/runner.py
+  - tests/test_server_storage_config.py
+  - tests/test_portal/test_bot_archive_mounts.py
+  - scripts/ci/test_server_core_recreation.py
   - portal/backend/workers/storage_maintenance.py
   - portal/backend/workers/market_data_collector.py
   - portal/backend/service/market/collector_operations_service.py
@@ -2271,9 +2277,52 @@ inside the database-owned maintenance boundary. Its existing temporary archive
 work is on the configured archive root; the private application SSD spool is not
 a maintenance input. Application access to legacy private SSD files is preserved.
 
-This is an opt-in process seam, not an activated server recipe. The current
-server runtime/mount validator still describes the older common-UID composition.
-Wiring all publishers/readers (including bot containers), installing one dedicated
-owner, exact legacy-WAL recovery and fresh intake, physical maintenance and a
-complete encrypted recovery pair remain integration requirements. Unit shutdown
+This is an opt-in process seam, not an activated server recipe. The fixed overlay
+and bot reader now express it as described below; the old runtime/mount validator
+still refuses that topology. Installing and admitting one dedicated owner, exact
+legacy-WAL recovery and fresh intake, physical maintenance and a complete encrypted
+recovery pair remain integration requirements. Unit shutdown
 and real database registry/status tests do not establish those outcomes.
+
+
+### Preserving runtime recipe
+
+The existing fixed storage overlay now selects UID1000:1000 for backend,
+initializer and collection, preserving the deployed private SSD spool owner.
+Each joins the explicitly configured archive group. The dedicated maintenance
+service alone shares the PostgreSQL PID namespace and receives recovery-key,
+socket and limits mounts; it runs as UID70 and has no collector-spool mount.
+Its temporary archive work stays on the HDD. All four processes drop Linux
+capabilities and set no-new-privileges; backend retains its existing Docker socket
+role. Image-local logs/reports are prepared for the two accounts at build time;
+no host files are repaired, chowned or widened by startup.
+
+Backend retains the registered SSD/PGDATA mount for filesystem capacity reporting.
+Its UID1000 cannot traverse private UID70 PostgreSQL directories. This is capacity
+observation, not physical inspection: the rehearsal explicitly checks PG_VERSION
+read denial. The initializer and collector do not mount PostgreSQL data.
+Bot containers receive the same explicit archive-group setting, run as UID1000
+with that supplemental group, drop capabilities, and retain only the existing
+read-only archive/udev mounts. Unconfigured bot launches keep their prior behavior.
+
+The existing bounded read-only heartbeat probe also recognizes maintenance's
+host-scoped worker prefix and running/degraded lifecycle. It does not bootstrap
+schema or turn liveness into proof of a completed backup. Storage continues to
+show actual phase outcomes through its existing projection.
+
+The disposable core recreation rehearsal now targets this split composition,
+private UID1000 source metadata, archive publication/read access in both
+application/maintenance directions, confined PG files, one maintenance owner and
+service recreation. Its synthetic filesystems and unconfigured saved policy do
+not qualify actual legacy-WAL recovery or encrypted-pair publication. The old held
+runtime validator deliberately refuses the additional maintenance service; its
+activation contract has not been broadened. The final online operator must bind
+and qualify this composition under the existing outcome/retirement/recovery
+requirements before deployment. A rendered overlay alone is not release authority.
+
+
+The held-operator regression fixture explicitly reconstructs its historical
+common-UID private-file composition from the rendered mounts. This keeps that
+existing interruption/recovery regression intact without broadening its production
+validator to accept the new service. Its result is historical-path evidence only;
+the changed core recreation rehearsal owns the new split-runtime checks.

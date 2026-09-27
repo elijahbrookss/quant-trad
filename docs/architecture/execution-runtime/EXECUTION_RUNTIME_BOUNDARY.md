@@ -444,3 +444,16 @@ This is the existing single-node server bind layout. Unconfigured development
 launch behavior is preserved. Readers receive no working-spool, PostgreSQL data
 or Docker socket mount. They still use PG_DSN for database queries. Server
 writer ownership and the complete preserving cutover require separate rehearsal.
+
+
+### Fixed storage archive group
+
+When central storage settings explicitly configure `archive_shared_group_id`,
+Docker bot runners require the existing archive mount mapping and pass that group
+to the container. The fixed application identity is UID1000:1000; the group is
+supplemental, all Linux capabilities are dropped, and no-new-privileges is set.
+Only the existing read-only archive/udev mounts are passed. No PostgreSQL files,
+recovery keys or collector spool are mounted into bots. The explicit group setting
+is propagated even when it originated in central YAML rather than an environment
+variable. Unconfigured launches retain their previous contract. This reader
+composition does not authorize the unfinished online storage cutover.

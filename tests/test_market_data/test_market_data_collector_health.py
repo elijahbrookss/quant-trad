@@ -124,3 +124,18 @@ def test_health_database_read_is_bounded_readonly_and_disposes_engine(monkeypatc
     assert observed["connect_args"]["connect_timeout"] == 2
     assert "default_transaction_read_only=on" in observed["connect_args"]["options"]
     assert "statement_timeout=1500" in observed["connect_args"]["options"]
+
+
+@pytest.mark.parametrize("state", ["running", "degraded", "starting", "stopped"])
+def test_maintenance_probe_requires_its_own_live_lifecycle(state):
+    now = datetime.now(UTC)
+    repository = _Repository([
+        {"worker_id": "market-data:fixture:1", "alive": True, "heartbeat_at": now},
+        {"worker_id": "storage-maintenance:fixture:2", "alive": True, "heartbeat_at": now,
+         "context": {"storage_lifecycle": {"state": state}}},
+    ])
+    if state in {"running", "degraded"}:
+        assert live_worker_for_host(repository=repository, hostname="fixture", storage_maintenance=True)["worker_id"] == "storage-maintenance:fixture:2"
+    else:
+        with pytest.raises(RuntimeError, match="lifecycle is not running"):
+            live_worker_for_host(repository=repository, hostname="fixture", storage_maintenance=True)

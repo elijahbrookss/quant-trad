@@ -6,12 +6,13 @@ import os
 import pytest
 
 from portal.backend.service.bots.runner import DockerBotRunner
+from core.settings import clear_settings_cache
 
 
 @pytest.fixture
 def launch(monkeypatch):
     for key in ("QT_MARKET_DATA_ROOT", "QT_MARKET_DATA_EXPECTED_UUID",
-                "MARKET_STRUCTURE_STORAGE_ROOT", "QT_STORAGE_UDEV_ROOT"):
+                "MARKET_STRUCTURE_STORAGE_ROOT", "QT_STORAGE_UDEV_ROOT", "QT_ARCHIVE_SHARED_GROUP_ID"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr("portal.backend.service.bots.runner._SECURITY_SETTINGS",
                         SimpleNamespace(provider_credential_key="disposable-not-a-credential"))
@@ -24,9 +25,11 @@ def launch(monkeypatch):
         return SimpleNamespace(returncode=0, stdout="disposable-container", stderr="")
     monkeypatch.setattr(DockerBotRunner, "_run_docker", staticmethod(run))
     def start():
+        clear_settings_cache()
         return DockerBotRunner(image="disposable-image", network="disposable-internal").start_bot(
             bot={"id":"disposable-bot", "snapshot_interval_ms":250}, run_id="disposable-run")
-    return start, commands
+    yield start, commands
+    clear_settings_cache()
 
 
 def values(command, flag):
@@ -90,3 +93,25 @@ def test_unconfigured_runtime_keeps_existing_launch_contract(launch):
     start, commands = launch
     start()
     assert values(commands[-1], "--mount") == []
+
+
+def test_shared_archive_bot_runs_as_application_with_only_archive_group(launch, tmp_path, monkeypatch):
+    start, commands = launch
+    monkeypatch.setenv("QT_ARCHIVE_SHARED_GROUP_ID", "70")
+    monkeypatch.setenv("QT_MARKET_DATA_ROOT", "/host/history/archive")
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    start()
+    command = commands[-1]
+    assert values(command, "--user") == ["1000:1000"]
+    assert values(command, "--group-add") == ["70"]
+    assert values(command, "--cap-drop") == ["ALL"]
+    assert values(command, "--security-opt") == ["no-new-privileges"]
+    assert values(command, "--mount") == [f"type=bind,src=/host/history/archive,dst={tmp_path},readonly"]
+
+
+def test_shared_group_cannot_start_bot_without_archive_mount(launch, monkeypatch):
+    start, commands = launch
+    monkeypatch.setenv("QT_ARCHIVE_SHARED_GROUP_ID", "70")
+    with pytest.raises(RuntimeError, match="runtime_shared_archive_mount_required"):
+        start()
+    assert not commands

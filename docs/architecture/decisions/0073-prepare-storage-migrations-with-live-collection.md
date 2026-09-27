@@ -1254,3 +1254,12 @@ This preserves one maintenance schedule and makes a missing or competing owner
 visible. Deployment recipes, mounts and all-publisher group membership still need
 preserving integration; the process seam alone does not complete the ownership
 transition or authorize a production switch.
+
+
+The fixed overlay now expresses the split accounts and explicit group membership,
+including bot readers. Maintenance alone receives the PostgreSQL process namespace
+and recovery-key mounts. Backend retains the registered SSD mount for capacity
+observation but has no permission to read private PostgreSQL files. The existing
+legacy runtime validator still rejects this new service topology. Qualifying and
+binding the new composition belongs to the unfinished online final operator;
+changing the declarative recipe grants no activation or recovery authority.

@@ -43,13 +43,14 @@ def live_worker_for_host(
     *,
     repository: PostgresMarketCollectionRepository | None = None,
     hostname: str | None = None,
+    storage_maintenance: bool = False,
 ) -> dict[str, Any]:
     """Return this container's live worker row or fail the health probe."""
 
     normalized_host = str(hostname or socket.gethostname()).strip()
     if not normalized_host:
         raise RuntimeError("market_data_collector_health_invalid: hostname is empty")
-    worker_prefix = f"market-data:{normalized_host}:"
+    worker_prefix = f"{'storage-maintenance' if storage_maintenance else 'market-data'}:{normalized_host}:"
     rows = repository.list_worker_states(limit=1000) if repository is not None else _read_live_heartbeat(worker_prefix)
     matches = [
         dict(row)
@@ -65,6 +66,11 @@ def live_worker_for_host(
         )
     latest = max(matches, key=lambda row: row.get("heartbeat_at"))
     context = dict(latest.get("context") or {})
+    if storage_maintenance:
+        lifecycle = dict(context.get("storage_lifecycle") or {})
+        if lifecycle.get("state") not in {"running", "degraded"}:
+            raise RuntimeError("storage_maintenance_health_failed: lifecycle is not running")
+        return latest
     continuous = dict(context.get("continuous_collectors") or {})
     if str(continuous.get("state") or "").lower() == "failed":
         raise RuntimeError(
@@ -76,7 +82,9 @@ def live_worker_for_host(
 
 def main() -> int:
     try:
-        row = live_worker_for_host()
+        if sys.argv[1:] not in ([], ["--storage-maintenance"]):
+            raise ValueError("worker_health_arguments_invalid")
+        row = live_worker_for_host(storage_maintenance=sys.argv[1:] == ["--storage-maintenance"])
     except Exception as exc:  # noqa: BLE001 - health probes fail closed
         print(str(exc), file=sys.stderr)
         return 1
