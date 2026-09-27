@@ -102,6 +102,7 @@ def test_spool_observation_requires_fresh_sequence_and_preserves_pending(tmp_pat
     root = tmp_path/"objects";root.mkdir()
     spool = tmp_path/"spool";spool.mkdir();(spool/"pending.sealed").write_bytes(b"WAL")
     controller = OnlineController.__new__(OnlineController)
+    controller._final_connection = None; controller._final_connection_entered = False
     controller.controller_id = "c"*32;controller.state = "background"
     controller.source_root = root;controller._sequence = 0
     controller._final_deadline = None
@@ -125,6 +126,7 @@ def test_spool_observation_requires_fresh_sequence_and_preserves_pending(tmp_pat
 def test_final_tail_command_refuses_unbounded_fields_and_replays_without_work():
     from scripts.automation.storage_online_controller import OnlineController
     controller = OnlineController.__new__(OnlineController)
+    controller._final_connection = None; controller._final_connection_entered = False
     controller.controller_id = "c"*32;controller.state = "background"
     controller._sequence = 0;controller._final_deadline = None
     controller._last_request = controller._last_reply = None
@@ -156,6 +158,7 @@ def test_final_tail_command_refuses_unbounded_fields_and_replays_without_work():
 def test_rollback_wire_requires_the_already_bound_absolute_final_window():
     from scripts.automation.storage_online_controller import OnlineController
     controller = OnlineController.__new__(OnlineController)
+    controller._final_connection = None; controller._final_connection_entered = False
     controller.controller_id = "c"*32
     controller._final_deadline = monotonic()+20
     controller._admitted_limits = {"movement_timeout_seconds":30}
@@ -187,6 +190,7 @@ def test_aborted_controller_only_allows_fresh_outcome_and_close(monkeypatch):
     from scripts.automation.storage_online_controller import OnlineController
     from copy import deepcopy
     controller=OnlineController.__new__(OnlineController)
+    controller._final_connection = None; controller._final_connection_entered = False
     controller.state="aborted";controller.controller_id="c"*32
     controller._sequence=5;controller._last_request=None
     controller._final_deadline=monotonic()+10
@@ -213,6 +217,7 @@ def test_aborted_controller_only_allows_fresh_outcome_and_close(monkeypatch):
 def test_aborted_controller_cannot_outlive_original_final_window(monkeypatch):
     from scripts.automation.storage_online_controller import OnlineController
     controller=OnlineController.__new__(OnlineController)
+    controller._final_connection = None; controller._final_connection_entered = False
     controller.state="aborted";controller._final_deadline=monotonic()-1
     with pytest.raises(RuntimeError,match="terminal_deadline_expired"):controller.check()
 
@@ -225,6 +230,59 @@ def test_sql_drain_expired_owner_deadline_never_touches_database():
         def begin(self):
             pytest.fail("expired SQL ownership check touched database")
     controller = OnlineController.__new__(OnlineController)
+    controller._final_connection = None; controller._final_connection_entered = False
     controller._owner = Untouched()
     with pytest.raises(RuntimeError, match="sql_drain_deadline_expired"):
         controller._ownership(deadline=monotonic()-1)
+
+
+@pytest.mark.parametrize("fault", ["closed", "invalidated", "transaction", "identity", "absent"])
+def test_retained_final_session_loss_never_reconnects(fault):
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller._final_connection_entered = True
+    controller._final_pid = 17
+    controller.engine = SimpleNamespace(connect=lambda: pytest.fail("reconnected lost final session"))
+    controller._final_connection = SimpleNamespace(
+        closed=fault == "closed", invalidated=fault == "invalidated",
+        in_transaction=lambda: fault == "transaction",
+        connection=SimpleNamespace(driver_connection=SimpleNamespace(
+            get_backend_pid=lambda: 18 if fault == "identity" else 17)))
+    if fault == "absent":
+        controller._final_connection = None
+    with pytest.raises(RuntimeError, match="final_session_lost"):
+        with controller._database_connection():
+            pytest.fail("lost final session admitted")
+
+
+def test_final_session_admission_keeps_original_deadline_when_capture_shrinks():
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller.state = "background"
+    controller._final_connection_entered = False
+    controller._final_deadline = None
+    controller._admitted_limits = {"movement_timeout_seconds": 30}
+    controller.proof = SimpleNamespace(deadline=monotonic()+60)
+    controller.engine = SimpleNamespace(connect=lambda: pytest.fail("opened session after capture shrink"))
+    deadline = monotonic()+20
+    def admission():
+        assert controller._final_deadline == deadline
+        controller.proof.deadline = deadline-1
+    controller._admit_attempt = admission
+    with pytest.raises(ValueError, match="final_session_deadline_invalid"):
+        with controller.final_database_session(deadline=deadline):
+            pytest.fail("capture ceiling exceeded")
+    assert controller._final_deadline == deadline
+    assert not controller._final_connection_entered
+    with pytest.raises(ValueError, match="final_session_deadline_invalid"):
+        with controller.final_database_session(deadline=deadline+1):
+            pytest.fail("deadline renewed")
+
+
+def test_final_session_refuses_return_to_tail_work():
+    from scripts.automation.storage_online_controller import OnlineController
+    controller = OnlineController.__new__(OnlineController)
+    controller.state = "background"
+    controller._final_connection_entered = True
+    with pytest.raises(RuntimeError, match="final_delta_state_invalid"):
+        controller.final_delta(deadline=monotonic()+10)

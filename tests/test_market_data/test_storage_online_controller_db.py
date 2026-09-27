@@ -814,3 +814,97 @@ def test_controller_prepared_transaction_refuses_without_client(storage, tmp_pat
             with other.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.exec_driver_sql("ROLLBACK PREPARED '"+gid+"'")
         other.dispose()
+
+
+@pytest.mark.parametrize("fault", ["lost_reply", "session_loss"])
+def test_final_session_switch_and_inspection_with_new_logins_closed(
+        storage, tmp_path, monkeypatch, fault):
+    """Fixture-owned login gate only; no host gate/restart authority implied."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        frozen = _frozen_records(conn)
+        original_capture = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        database = conn.scalar(text("SELECT current_database()"))
+        assert conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+    quoted = engine.dialect.identifier_preparer.quote_identifier(database)
+    outsider = create_engine(engine.url, poolclass=NullPool, connect_args={"connect_timeout":2})
+    control = create_engine(engine.url.set(database="postgres"), poolclass=NullPool,
+                            isolation_level="AUTOCOMMIT", connect_args={"connect_timeout":2})
+    try:
+        with OnlineController(engine, **settings) as worker:
+            _drain(worker);_reprove(worker)
+            deadline = time.monotonic()+30
+            with worker.final_database_session(deadline=deadline):
+                connection = worker._final_connection
+                pid = worker._final_pid
+                with control.connect() as admin:
+                    admin.exec_driver_sql("SET statement_timeout = '5s'")
+                    admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS false")
+                denied = []
+                def new_login_refused():
+                    with pytest.raises(DBAPIError, match="not currently accepting connections"):
+                        with outsider.connect():pytest.fail("new login bypassed fixture gate")
+                    denied.append(True)
+                try:
+                    new_login_refused()
+                    assert worker.inspect_outcome(deadline=time.monotonic()+4)["outcome"] == "uncommitted"
+                    assert worker._final_connection is connection
+                    if fault == "session_loss":
+                        connection.invalidate()
+                        with monkeypatch.context() as patch:
+                            patch.setattr(engine, "connect", lambda: pytest.fail("lost final session reconnected"))
+                            with pytest.raises(RuntimeError, match="final_session_lost"):
+                                worker.inspect_outcome(deadline=time.monotonic()+4)
+                            with pytest.raises(RuntimeError, match="final_session_lost"):
+                                worker.commit_database(deadline=deadline)
+                    else:
+                        original_commit = Connection._commit_impl
+                        switched = set()
+                        lost = []
+                        def after_statement(conn, cursor, statement, parameters, context, executemany):
+                            if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+                                assert conn is connection
+                                new_login_refused()
+                                switched.add(id(conn))
+                        def lose_reply(conn):
+                            original_commit(conn)
+                            if id(conn) in switched and not lost:
+                                lost.append(True)
+                                raise RuntimeError("closed-login actual COMMIT reply lost")
+                        event.listen(engine, "after_cursor_execute", after_statement)
+                        try:
+                            with monkeypatch.context() as patch:
+                                patch.setattr(Connection, "_commit_impl", lose_reply)
+                                with pytest.raises(RuntimeError, match="actual COMMIT reply lost"):
+                                    worker.commit_database(deadline=deadline)
+                        finally:event.remove(engine, "after_cursor_execute", after_statement)
+                        assert lost and worker.state == "commit_unknown"
+                        new_login_refused()
+                        result = worker.inspect_outcome(deadline=time.monotonic()+4)
+                        assert result["outcome"] == "committed"
+                        assert not result["collection_resume_authorized"]
+                        assert not result["runtime_activation_authorized"]
+                        assert worker._final_connection is connection and worker._final_pid == pid
+                        assert len(denied) == 3
+                        worker.proof.verify_all()
+                    assert worker._final_deadline == deadline
+                    with worker._owner.begin():
+                        assert not worker._owner.scalar(text(
+                            "SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+                        assert dict(worker._owner.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one()) == original_capture
+                finally:
+                    # Disposable fixture cleanup, not production gate reconciliation.
+                    with control.connect() as admin:
+                        admin.exec_driver_sql("SET statement_timeout = '5s'")
+                        admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+            with pytest.raises(RuntimeError, match="final_session_state_invalid"):
+                with worker.final_database_session(deadline=deadline):pytest.fail("session replay")
+            assert worker._final_connection is None and connection.closed
+        with engine.begin() as conn:
+            assert _frozen_records(conn) == frozen
+            assert conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+    finally:
+        outsider.dispose()
+        control.dispose()

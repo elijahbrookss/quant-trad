@@ -2037,6 +2037,19 @@ The existing caller deadline and inventory/output bounds are unchanged. The
 read-capability worker's launch confinement remains a separate boundary.
 
 
+The internal `OnlineController.final_database_session` retains one database
+connection for the already bounded final window. After background/tail work,
+commit, fresh outcome inspection and direct rollback admission can use that same
+session without opening a new login. Its backend identity is fixed; closure,
+invalidation, identity drift or an unexpected transaction refuses replacement.
+Context exit discards the connection, and the controller cannot reenter this
+session or return to copy work. The original final and capture deadlines remain.
+
+This is a prerequisite for a separately owned closed-login transition, not its
+implementation. It changes no database login setting, host receipt, pipe command
+or restart authority. Durable host gating, existing/background publisher
+admission and post-switch recovery still require qualified integration.
+
 The internal online-controller database handoff requires a fresh SQL-session
 refusal check before verification and again on the same switching transaction
 immediately before COMMIT. Only the actual switching connection and the separately

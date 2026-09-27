@@ -79,6 +79,8 @@ class OnlineController:
         self._cursors = {name: "" for name in archives.FAMILIES}
         self._reproved = set()
         self._final_deadline = None
+        self._final_connection = None
+        self._final_connection_entered = False
         self._rollback_context = self._rollback_check = None
         self._sequence = 0
         self._last_request = self._last_reply = None
@@ -163,10 +165,59 @@ class OnlineController:
         if archives._root(self.source_root, self._source_device)[1] != self._source:
             raise RuntimeError("storage_online_source_changed")
 
+    @contextmanager
+    def final_database_session(self, *, deadline):
+        """Retain one SQL session for a separately admitted final window.
+
+        Internal only. This opens no pipe command, changes no login setting and
+        grants no publisher exclusion. The host retains its original intent,
+        proof and deadline. Once entered, a lost session never reconnects.
+        Finish background and tail work before this context.
+        """
+        if self.state != "background" or self._final_connection_entered:
+            raise RuntimeError("storage_online_final_session_state_invalid")
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not 0 < deadline-monotonic() <= self._admitted_limits["movement_timeout_seconds"]
+                or deadline > self.proof.deadline
+                or (self._final_deadline is not None and deadline != self._final_deadline)):
+            raise ValueError("storage_online_final_session_deadline_invalid")
+        self._final_deadline = deadline
+        self._admit_attempt()
+        if not monotonic() < deadline <= self.proof.deadline:
+            raise ValueError("storage_online_final_session_deadline_invalid")
+        self._final_connection_entered = True
+        with self.engine.connect() as conn:
+            self._final_connection = conn
+            try:
+                with conn.begin():
+                    with capture._bounded_step(conn, math.ceil(deadline-monotonic())) as shorten:
+                        shorten(deadline-monotonic())
+                        self._final_pid = conn.scalar(text("SELECT pg_backend_pid()"))
+                yield
+            finally:
+                # Discard even after normal completion; never pool a session
+                # that supplied final-window identity or uncertain outcome.
+                try:
+                    conn.invalidate()
+                finally:
+                    self._final_connection = None
+
+    @contextmanager
+    def _database_connection(self):
+        if not self._final_connection_entered:
+            with self.engine.connect() as conn:
+                yield conn
+            return
+        conn = self._final_connection
+        if (conn is None or conn.closed or conn.invalidated or conn.in_transaction()
+                or conn.connection.driver_connection.get_backend_pid() != self._final_pid):
+            raise RuntimeError("storage_online_final_session_lost")
+        yield conn
+
     def _admit_attempt(self):
         self.check()
-        with self.engine.begin() as conn:
-            with capture.migration_step(conn, 30):
+        with self._database_connection() as conn, conn.begin():
+            with capture.migration_step(conn, 30, deadline=self._final_deadline):
                 if self._capture_row(conn) != self._capture:
                     raise RuntimeError("storage_online_attempt_binding_changed")
                 # A later wall-clock adjustment can shrink but never extend the
@@ -281,6 +332,8 @@ class OnlineController:
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
         if self._final_deadline is not None and operation not in _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
+        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close"}:
+            raise RuntimeError("storage_online_final_session_background_work_refused")
         result = {}
         try:
             if operation == "close":
@@ -389,7 +442,7 @@ class OnlineController:
         round, commit or rollback admission may widen it. Original capture and
         short page ceilings still apply. Empty observations are not readiness.
         """
-        if self.state != "background":
+        if self.state != "background" or self._final_connection_entered:
             raise RuntimeError("storage_online_final_delta_state_invalid")
         now = monotonic()
         if (type(deadline) not in (int, float) or not math.isfinite(deadline)
@@ -497,7 +550,8 @@ class OnlineController:
             resource_limits=limits, source_root=self.source_root,
             destination_root=self.destination_root, max_objects=self.max_objects,
             max_bytes=self.max_bytes, page_rows=self.page_rows, file_proof=self.proof,
-            deadline=deadline, publisher_check=self._require_external_sql_clients_absent)
+            deadline=deadline, publisher_check=self._require_external_sql_clients_absent,
+            connection=self._final_connection if self._final_connection_entered else None)
         self.state = "committed"
         return result
 
@@ -511,7 +565,7 @@ class OnlineController:
             raise ValueError("storage_online_outcome_deadline_invalid")
         self._ownership()
         try:
-            with self.engine.connect() as conn, conn.begin():
+            with self._database_connection() as conn, conn.begin():
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
                 with capture._bounded_step(conn, math.ceil(remaining)) as shorten:
                     shorten(deadline-monotonic())
@@ -543,7 +597,7 @@ class OnlineController:
         # Reconciliation remains possible after proof expiry. It is outcome
         # inspection only, not a replacement file proof or restart permission.
         self._ownership()
-        with self.engine.begin() as conn:
+        with self._database_connection() as conn, conn.begin():
             conn.exec_driver_sql("SET TRANSACTION READ ONLY")
             conn.exec_driver_sql("SET LOCAL statement_timeout='5s'")
             result = handoff.inspect_handoff(conn, policy=self.policy,
@@ -574,7 +628,7 @@ class OnlineController:
         self._ownership()
         self.state = "resume_fencing"
         try:
-            with self.engine.connect() as conn, conn.begin():
+            with self._database_connection() as conn, conn.begin():
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
                 # Outcome/abort inspection may outlive the copy attempt. This
                 # does not renew its deadline or call any preparation/mover.

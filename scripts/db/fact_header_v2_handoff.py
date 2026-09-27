@@ -7,7 +7,7 @@ is changed by these internal database/policy operations.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import hashlib
 import json
@@ -327,7 +327,7 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
 
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
                    max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None,
-                   deadline=None, publisher_check=None):
+                   deadline=None, publisher_check=None, connection=None):
     """Commit one fully verified fixed handoff; sources remain retained.
 
     Rechecks every copied header, identity, lookup and archive object under
@@ -349,8 +349,13 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
         raise ValueError("fact_header_handoff_deadline_invalid")
     deadline = min(deadline if deadline is not None else float("inf"),
                    started + limits["movement_timeout_seconds"])
+    if connection is not None and (connection.engine is not engine or connection.closed
+            or connection.invalidated or connection.in_transaction()):
+        raise ValueError("fact_header_handoff_connection_not_available")
     watch = None
-    with engine.connect() as conn:
+    # Retain the caller's session through outcome inspection while new logins
+    # may be closed. An uncertain switch must never replace that session.
+    with (nullcontext(connection) if connection is not None else engine.connect()) as conn:
         try:
             with conn.begin():
                 previous = conn.scalar(text(

@@ -1104,3 +1104,26 @@ application name is never used for exclusion. Internal PostgreSQL/TimescaleDB
 workers are outside this client check and still require separate admission.
 An idle TimescaleDB scheduler is not proof that its jobs cannot run. This check
 must not be presented as admission of extension jobs or all SQL publishers.
+
+### Retain the final SQL session across a separately owned login gate
+
+The controller may bind one internal final SQL session before a host-managed
+login gate. The handoff accepts this caller-owned connection without closing it;
+the same session supplies commit and fresh uncertain-outcome inspection. Closing
+or invalidating it never falls back to another connection. Entry pins the
+original final deadline before admission SQL; capture-clock shrink can refuse
+entry. Background/tail work and reentry are forbidden after this boundary.
+Context exit discards the session. This adds no public command or gate authority.
+
+A disposable fixture uses its existing cluster's maintenance database to close
+new logins to only the owned test database. PostgreSQL refuses closing logins
+from inside that target database. While closed, the real switch commits, a
+received commit result is deliberately lost, and the retained session observes
+committed state without granting runtime or source-resumption permission. A
+separate lost-session case refuses reconnection. Fixture cleanup restores the
+original open-login setting; this is not production gate reconciliation.
+
+This resolves connection continuity, not continuous exclusion of all publishers.
+Existing sessions, extension/replication jobs, archive writers, durable host
+intent, gate restoration after outer loss and the recovery transition remain
+separate integration requirements. No production login configuration changes.
