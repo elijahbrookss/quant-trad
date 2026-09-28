@@ -178,3 +178,30 @@ def test_recovery_copy_source_mutation_cannot_complete(recovery_copy, monkeypatc
     monkeypatch.setattr(drain.os, "read", concurrent_write)
     with pytest.raises(RuntimeError, match="spool_changed"): copy()
     assert wal.read_bytes().endswith(b"late source record")
+
+
+def test_many_acknowledgements_do_not_consume_pending_copy_budget(recovery_copy):
+    source, target, wal, changed, copy = recovery_copy
+    for index in range(5000):
+        (wal.parent/f"old-{index}.ack.json").write_bytes(b"retained projection")
+    before = wal.read_bytes(), wal.stat()
+    result = copy(max_entries=6000, deadline=monotonic()+15)
+    assert result["original_observation"]["acknowledgement_files"] == 5001
+    assert result["original_observation"]["pending_files"] == 1
+    assert len(result["copied_files"]) == 1
+    assert (target/wal.relative_to(source)).read_bytes() == before[0]
+    assert wal.read_bytes() == before[0] and wal.stat() == before[1]
+    assert len(list(source.rglob("*.ack.json"))) == 5001
+    assert not list(target.rglob("*.ack.json"))
+
+
+def test_larger_scan_budget_does_not_relax_pending_copy_file_limit(recovery_copy):
+    source, target, wal, changed, copy = recovery_copy
+    for index in range(4096):
+        (wal.parent/f"pending-{index}.sealed").write_bytes(b"retained WAL")
+    before = wal.read_bytes(), wal.stat()
+    with pytest.raises(RuntimeError, match="copy_budget_exceeded"):
+        copy(max_entries=6000, deadline=monotonic()+30)
+    assert len(list(target.rglob("*.sealed"))) + len(list(target.rglob("*.open"))) == 4096
+    assert len(list(source.rglob("*.sealed"))) == 4096
+    assert wal.read_bytes() == before[0] and wal.stat() == before[1]

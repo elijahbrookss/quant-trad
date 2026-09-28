@@ -449,3 +449,16 @@ def test_preserved_batch_still_checks_original_contract_and_state(monkeypatch):
     with pytest.raises(RuntimeError,match="clients_changed"):
         runtime.admit_preserved_runtime_service("frontend",row,original,journal,
             details=details,network_ids={"owned":"network-one"})
+
+
+@pytest.mark.parametrize("entries", [600_000, 1_000_001])
+def test_spool_scan_bound_is_distinct_from_copied_file_bound(tmp_path, monkeypatch, entries):
+    def reached_binding(*args):
+        raise RuntimeError("fixture_binding_admission")
+    monkeypatch.setattr(runtime.host, "load_receipt", reached_binding)
+    error = RuntimeError if entries == 600_000 else ValueError
+    message = "fixture_binding_admission" if entries == 600_000 else "spool_budget_invalid"
+    with pytest.raises(error, match=message):
+        runtime.prepare_spool(tmp_path, saved={"switch": {"deadline_monotonic": time.monotonic()+30}},
+            worker_process=object(), source_check=lambda: None, destination=tmp_path/"new",
+            max_bytes=1024, max_entries=entries, reserve_bytes=0, max_duration_seconds=30)

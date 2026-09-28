@@ -2611,6 +2611,12 @@ The existing final receipt journals create/copy intent before dispatch. A privat
 bounded `.qt-recovery-copy.json` in the new working root contains copied-file hashes;
 the final receipt stores its digest and compact counts, avoiding an unbounded
 control receipt. Original files, acknowledgements and permissions stay untouched.
+The explicit spool scan budget counts directories, acknowledgements and pending
+files, up to the existing one-million-entry traversal bound. It is independent
+of the unchanged 4,096 pending-file copy limit and byte, reserve and deadline
+bounds. A large acknowledgement history is scanned and retained, never copied
+or removed to make a migration fit. Production scan time must fit the original
+final pause; accepting a larger declared inventory is not performance admission.
 Any failed or uncertain copy retains the unactivated destination and unresolved
 intent, with no reuse or replay. `recovery_spool_ready` certifies only preserving
 copy preparation. The matching application must still recover and acknowledge WAL

@@ -52,7 +52,7 @@ class OperationLimits:
                 or not 1 <= self.recovery_seconds <= 600
                 or not 1 <= self.runtime_seconds <= 600
                 or not 0 < self.spool_max_bytes <= 64*1024**3
-                or not 1 <= self.spool_max_entries <= 4096
+                or not 1 <= self.spool_max_entries <= 1_000_000
                 or min(self.spool_reserve_bytes, self.repository_reserve_bytes, self.recent_free_bytes) < 0
                 or self.repository_max_bytes <= 0
                 or max(self.preparation_seconds, self.final_seconds) > request["resource_limits"]["movement_timeout_seconds"]):

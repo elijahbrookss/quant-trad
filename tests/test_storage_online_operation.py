@@ -104,7 +104,7 @@ def test_invalid_limits_refuse_before_host_dispatch(monkeypatch,tmp_path):
     with pytest.raises(ValueError,match='limits_invalid'):
         operation.run_prepared_operation(tmp_path,project='x',source_revision='x',source_image='x',image='x',
             request={'resource_limits':{'movement_timeout_seconds':120}},inventory_path=tmp_path,
-            descriptor_limit=1024,memory_bytes=1024**3,limits=replace(limits(),spool_max_entries=4097),
+            descriptor_limit=1024,memory_bytes=1024**3,limits=replace(limits(),spool_max_entries=1_000_001),
             keys_root=tmp_path,socket_volume='x',spool_destination=tmp_path)
 
 
@@ -279,3 +279,10 @@ def test_cli_migrate_uses_local_owner_without_api_client(monkeypatch,operation_f
         assert args.func(args)==0
     assert calls==[(str(path),{"execute":False}),(str(path),{"execute":True})]
     assert 'inspected' in capsys.readouterr().out
+
+
+def test_operation_accepts_measured_spool_scan_without_changing_copy_budget():
+    measured = replace(limits(), spool_max_entries=600_000)
+    measured.validate({'resource_limits': {'movement_timeout_seconds': 180}})
+    assert measured.spool_max_bytes == limits().spool_max_bytes
+    assert measured.final_seconds == limits().final_seconds

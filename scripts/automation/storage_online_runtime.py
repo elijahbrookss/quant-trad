@@ -124,7 +124,7 @@ def prepare_spool(state_root, *, saved, worker_process, source_check,
                   destination, max_bytes, max_entries, reserve_bytes, max_duration_seconds):
     if (type(max_duration_seconds) is not int or not 1<=max_duration_seconds<=600
             or type(max_bytes) is not int or not 0<max_bytes<=64*1024**3
-            or type(max_entries) is not int or not 1<=max_entries<=4096
+            or type(max_entries) is not int or not 1<=max_entries<=1_000_000
             or type(reserve_bytes) is not int or reserve_bytes<0):
         raise ValueError("storage_online_runtime_spool_budget_invalid")
     deadline=min(time.monotonic()+max_duration_seconds,saved["switch"]["deadline_monotonic"])
