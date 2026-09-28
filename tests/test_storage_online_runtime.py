@@ -339,3 +339,110 @@ def test_published_runtime_certificate_cannot_be_substituted(monkeypatch,change)
     monkeypatch.setattr(handoff,"assert_fact_storage_contract",lambda *_:pytest.fail("substituted certificate admitted"))
     with pytest.raises(RuntimeError,match="certificate_changed"):
         handoff._inspect_published_runtime_policy(Connection(),policy=SimpleNamespace(fingerprint="original"),plan_id=expected)
+
+
+@pytest.mark.parametrize("was_running,completed,inflight,running,healthy,allowed",[
+    (True,False,False,False,False,True),
+    (True,False,False,True,True,False),
+    (True,False,True,True,False,True),
+    (True,True,False,True,True,True),
+    (True,True,False,False,False,False),
+    (True,True,False,True,False,False),
+    (False,True,False,False,False,True),
+    (False,False,True,True,True,False),
+])
+def test_preserved_services_restore_only_the_original_running_disposition(
+        monkeypatch,was_running,completed,inflight,running,healthy,allowed):
+    admitted=[]
+    monkeypatch.setattr(runtime.initial,"admit_preserved_client",lambda *a:admitted.append(a))
+    state=dict(Running=running,Pid=100 if running else 0,Status="running" if running else "exited",
+               ExitCode=0,OOMKilled=False,Paused=False,Restarting=False,
+               Health=dict(Status="healthy" if healthy else "starting"))
+    monkeypatch.setattr(runtime.host,"docker",lambda *a,**kw:json.dumps(state))
+    journal=dict(completed=["restore:frontend"] if completed else [],
+                 inflight="restore:frontend" if inflight else None)
+    def observe():runtime.admit_preserved_runtime_service("frontend",dict(id="original"),
+        dict(was_running=was_running),journal)
+    if allowed:observe()
+    else:
+        with pytest.raises(RuntimeError,match="started_early|lost_health"):observe()
+    assert len(admitted)==1
+
+
+def test_preserved_service_identity_failure_never_becomes_readiness(monkeypatch):
+    def changed(*a):raise RuntimeError("original_container_changed")
+    monkeypatch.setattr(runtime.initial,"admit_preserved_client",changed)
+    monkeypatch.setattr(runtime.host,"docker",lambda *a,**kw:pytest.fail("identity failure ignored"))
+    with pytest.raises(RuntimeError,match="original_container_changed"):
+        runtime.admit_preserved_runtime_service("grafana",{},dict(was_running=True),
+            dict(completed=["restore:grafana"],inflight=None))
+
+
+def test_runtime_readiness_requires_all_preserved_service_actions():
+    now=time.time();deadline=time.monotonic()+30
+    completed=[a for a in runtime._RUNTIME_ACTIONS if not a.startswith("restore:")]
+    saved=dict(phase="recovery_runtime_ready",deadline=now+30,switch=dict(deadline_monotonic=deadline),
+        runtime_spool=dict(finished_at=now-1),runtime=dict(started_at=now,deadline_monotonic=deadline,
+        completed=completed,inflight=None,finished_at=now+1,admission={},compose_hashes={},
+        candidate_ids={n:str(i)*64 for i,n in enumerate(runtime._APPLICATIONS,1)}))
+    with pytest.raises(RuntimeError,match="completion_invalid"):
+        runtime.validate_runtime_journal(saved)
+    saved['runtime']['completed']=list(runtime._RUNTIME_ACTIONS)
+    runtime.validate_runtime_journal(saved)
+    saved['runtime']['inflight']='restore:pgadmin'
+    with pytest.raises(RuntimeError,match="journal_invalid"):
+        runtime.validate_runtime_journal(saved)
+
+
+@pytest.mark.parametrize("fault", [None,"duplicate_container","wrong_container","missing_network","replaced_network","changed_alias"])
+def test_preserved_batch_is_fresh_bounded_and_rejects_drift(monkeypatch,fault):
+    host=runtime.host
+    details=dict(id="a"*64,networks={"owned":dict(NetworkID="network-one",Aliases=["frontend"],IPAMConfig=None)})
+    expected=host.database_networks(details)
+    calls=[]
+    def docker(*args,**kwargs):
+        calls.append(args)
+        if args[0]=="inspect":
+            value=deepcopy(details)
+            if fault=="wrong_container":value["id"]="b"*64
+            if fault=="changed_alias":value["networks"]["owned"]["Aliases"]=["foreign"]
+            return "\n".join([json.dumps(value)]*(2 if fault=="duplicate_container" else 1))
+        if fault=="missing_network":return ""
+        return json.dumps(dict(name="owned",id="changed" if fault=="replaced_network" else "network-one"))
+    monkeypatch.setattr(host,"docker",docker)
+    if fault in {"duplicate_container","wrong_container","missing_network"}:
+        with pytest.raises(RuntimeError,match="observation_.*_changed"):
+            host.preserved_client_observations([details["id"]],["owned"])
+        return
+    for _ in range(2):
+        observed,networks=host.preserved_client_observations([details["id"]],["owned","owned"])
+        assert host.same_database_networks(observed[details["id"]],expected,network_ids=networks)==(fault is None)
+    assert [c[0] for c in calls]==["inspect","network","inspect","network"]
+    # A missing batch identity cannot fall back to an unbound additional read.
+    assert not host.same_database_networks(details,expected,network_ids={})
+    assert len(calls)==4
+
+
+def test_preserved_observation_refuses_unbounded_batch_before_docker(monkeypatch):
+    monkeypatch.setattr(runtime.host,"docker",lambda *a,**kw:pytest.fail("unbounded observation"))
+    with pytest.raises(ValueError,match="bound_invalid"):
+        runtime.host.preserved_client_observations([str(i) for i in range(17)],["owned"])
+
+
+def test_preserved_batch_still_checks_original_contract_and_state(monkeypatch):
+    host=runtime.host
+    row=dict(id="a"*64,image="image",restart="no")
+    details=dict(id=row["id"],config={},host={},mounts=[],networks={"owned":dict(
+        NetworkID="network-one",Aliases=["frontend"],IPAMConfig=None)},state=dict(
+        Running=True,Pid=100,Status="running",ExitCode=0,OOMKilled=False,Paused=False,Restarting=False,
+        Health=dict(Status="healthy")))
+    original=dict(was_running=True,identity=host.identities({"frontend":row})["frontend"],
+        contract=runtime.initial._client_contract(details),networks=host.database_networks(details))
+    journal=dict(completed=["restore:frontend"],inflight=None)
+    monkeypatch.setattr(host,"docker",lambda *a,**kw:pytest.fail("duplicate Docker read"))
+    runtime.admit_preserved_runtime_service("frontend",row,original,journal,
+        details=details,network_ids={"owned":"network-one"})
+    details["config"]["User"]="0"
+    with pytest.raises(RuntimeError,match="clients_changed"):
+        runtime.admit_preserved_runtime_service("frontend",row,original,journal,
+            details=details,network_ids={"owned":"network-one"})

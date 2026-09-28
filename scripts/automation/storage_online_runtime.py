@@ -439,8 +439,10 @@ def inspect_runtime_configuration(state_root, *, database_model, image_id, reque
         images={n:image_id for n in _APPLICATIONS},archive_identity=[info.st_dev,info.st_ino,info.st_gid,stat.S_IMODE(info.st_mode)])
 
 
+_PRESERVED_SERVICES = ("frontend", "frontend-v2", "grafana", "pgadmin")
 _RUNTIME_ACTIONS = tuple(["remove:"+n for n in _APPLICATIONS if n!="storage-maintenance"]+
-    ["create:"+n for n in _APPLICATIONS]+["start:"+n for n in _APPLICATIONS])
+    ["create:"+n for n in _APPLICATIONS]+["start:"+n for n in _APPLICATIONS]+
+    ["restore:"+n for n in _PRESERVED_SERVICES])
 
 
 def validate_runtime_journal(saved):
@@ -556,6 +558,7 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
             removing=inflight.removeprefix("remove:") if inflight.startswith("remove:") else None
             current=host.inventory(project,operator_id=worker["container_id"],activating=True,runtime_maintenance=True,
                 removing_client_id=rows[removing]["id"] if removing else None)
+            preserved, preserved_networks = observe_preserved_services(current, preparation)
             for name,row in current.items():
                 if name=="tsdb":
                     if row["id"]!=database_id:raise RuntimeError("storage_online_runtime_database_changed")
@@ -587,12 +590,16 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
                                 or any(row[k] for k in ("paused","restarting","oom"))):
                             raise RuntimeError("storage_online_runtime_removing_client_changed")
                         continue
-                    d=host.database_details(row["id"])
-                    if (host.database_contract(d)!=original_contracts[name]
-                            or sorted(d["mounts"],key=lambda m:m["Destination"])!=sorted(original[name]["mounts"],key=lambda m:m["Destination"])):
-                        raise RuntimeError("storage_online_runtime_original_client_changed")
-                    if name in host.STOP and row["running"]:
-                        raise RuntimeError("storage_online_runtime_source_restarted")
+                    if name in _PRESERVED_SERVICES:
+                        admit_preserved_runtime_service(name, row, preparation["clients"][name], journal,
+                            details=preserved[row["id"]], network_ids=preserved_networks)
+                    else:
+                        d=host.database_details(row["id"])
+                        if (host.database_contract(d)!=original_contracts[name]
+                                or sorted(d["mounts"],key=lambda m:m["Destination"])!=sorted(original[name]["mounts"],key=lambda m:m["Destination"])):
+                            raise RuntimeError("storage_online_runtime_original_client_changed")
+                        if name in host.STOP and row["running"]:
+                            raise RuntimeError("storage_online_runtime_source_restarted")
             required={"tsdb"}|(set(rows)-set(_APPLICATIONS))|set(journal["candidate_ids"])
             required|={n for n in _APPLICATIONS if n in rows and "remove:"+n not in journal["completed"] and n!=removing}
             if not required<=set(current):raise RuntimeError("storage_online_runtime_client_missing")
@@ -602,7 +609,12 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
         for action in _RUNTIME_ACTIONS:
             kind,name=action.split(":")
             check();journal["inflight"]=action;host.save_receipt(path,saved,initial=False)
-            if kind=="remove":arguments=["rm",rows[name]["id"]]
+            if kind=="restore" and not preparation["clients"][name]["was_running"]:
+                journal["completed"].append(action);journal["inflight"]=None
+                host.save_receipt(path,saved,initial=False);check()
+                continue  # Preserve the originally stopped service; no daemon request.
+            if kind=="restore":arguments=["start",rows[name]["id"]]
+            elif kind=="remove":arguments=["rm",rows[name]["id"]]
             elif kind=="create":arguments=["compose","--project-name",project,"--file",str(recipe_path),"up","--no-start","--no-deps","--no-recreate","--no-build","--pull","never",name]
             else:arguments=["start",*(["--attach"] if name=="initialize" else []),journal["candidate_ids"][name]]
             print("event=storage_online_runtime_dispatch action="+action+" intent_retained=true",file=sys.stderr,flush=True)
@@ -612,7 +624,7 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
             if kind=="create":
                 if name not in current:raise RuntimeError("storage_online_runtime_candidate_missing")
                 journal["candidate_ids"][name]=current[name]["id"]
-            if kind=="start":
+            if kind in {"start", "restore"}:
                 while True:
                     row=check()[name]
                     status=json.loads(host.docker("inspect","--format","{{json .State}}",row["id"]))
@@ -624,8 +636,9 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
                             raise RuntimeError("storage_online_runtime_initializer_failed")
                         break
                     if not status["Running"]:raise RuntimeError("storage_online_runtime_candidate_exited")
-                    if status.get("Health",{}).get("Status")=="healthy":break
-                    if status.get("Health",{}).get("Status")!="starting":
+                    health=status.get("Health",{}).get("Status", "healthy" if kind=="restore" else None)
+                    if health=="healthy":break
+                    if health!="starting":
                         raise RuntimeError("storage_online_runtime_candidate_unhealthy")
                     time.sleep(min(.2,max(0,deadline-time.monotonic())))
             journal["completed"].append(action);journal["inflight"]=None;host.save_receipt(path,saved,initial=False);check()
@@ -634,7 +647,7 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
         saved["phase"]="recovery_runtime_ready";journal["finished_at"]=time.time()
         host.save_receipt(path,saved,initial=False);check()
         return dict(application_containers=dict(journal["candidate_ids"]),collector_process_healthy=True,
-                    complete_backup_confirmed=False,ordinary_relaunch_authorized=False)
+                    original_ui_admin_restored=True,complete_backup_confirmed=False,ordinary_relaunch_authorized=False)
 
 
 def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
@@ -714,6 +727,10 @@ def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
                         or (name == "initialize" and (state["Running"] or state["ExitCode"] != 0 or state["Status"] != "exited"))
                         or (name != "initialize" and (not state["Running"] or state.get("Health",{}).get("Status") != "healthy"))):
                     raise RuntimeError("storage_online_completion_unhealthy")
+            preserved, preserved_networks = observe_preserved_services(current, preparation)
+            for name in _PRESERVED_SERVICES:
+                admit_preserved_runtime_service(name,current[name],preparation["clients"][name],journal,
+                    details=preserved[current[name]["id"]], network_ids=preserved_networks)
             if host.cluster_identifier(database_id, maintenance=True) != preparation["cluster"]:
                 raise RuntimeError("storage_online_completion_cluster_changed")
             if admit_runtime_recipe(state_root,saved,worker,preparation,current)[1] != admission:
@@ -740,3 +757,33 @@ def admit_candidate_privileges(details, service):
             or h.get("Init") is not True or h.get("VolumesFrom") or h.get("Sysctls")
             or h.get("IpcMode") not in ("private", "") or h.get("UsernsMode") or h.get("UTSMode")):
         raise RuntimeError("storage_online_runtime_candidate_privileges_changed")
+
+
+def observe_preserved_services(rows, preparation):
+    """Share fresh observations only within this check, never across dispatches."""
+    if not set(_PRESERVED_SERVICES) <= set(rows):
+        raise RuntimeError("storage_online_runtime_preserved_client_missing")
+    return host.preserved_client_observations(
+        [rows[name]["id"] for name in _PRESERVED_SERVICES],
+        [network for name in _PRESERVED_SERVICES for network in preparation["clients"][name]["networks"]])
+
+
+def admit_preserved_runtime_service(name, row, original, journal, *, details=None, network_ids=None):
+    """Keep original UI/admin identity and running disposition under one journal."""
+    if name not in _PRESERVED_SERVICES:
+        raise ValueError("storage_online_runtime_unrecognized_preserved_service")
+    if details is None:
+        initial.admit_preserved_client(name,row,original)
+    else:
+        initial.admit_preserved_client(name,row,original,details=details,network_ids=network_ids)
+    action = "restore:"+name
+    completed = action in journal["completed"]
+    inflight = journal["inflight"] == action
+    state = details["state"] if details is not None else json.loads(host.docker("inspect","--format","{{json .State}}",row["id"]))
+    if state["OOMKilled"] or state["Paused"] or state["Restarting"]:
+        raise RuntimeError("storage_online_runtime_preserved_client_unstable")
+    if not original["was_running"] or not (completed or inflight):
+        if state["Running"] or state["Pid"] != 0 or state["Status"] != "exited" or state["ExitCode"] not in (0,143):
+            raise RuntimeError("storage_online_runtime_preserved_client_started_early")
+    elif completed and (not state["Running"] or state.get("Health",{}).get("Status","healthy") != "healthy"):
+        raise RuntimeError("storage_online_runtime_preserved_client_lost_health")

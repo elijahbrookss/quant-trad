@@ -1725,3 +1725,26 @@ journal state or deployment authority. The original final marker remains, and
 ordinary deployment/relaunch continues to refuse until release bookkeeping and
 its preserving deployment path are separately qualified. The observation's
 bounded I/O timeout never extends initial, capture or final mutation deadlines.
+
+### Restoring the original UI and administration services
+
+The final runtime journal also restores `frontend`, `frontend-v2`, `grafana` and
+`pgadmin` after the recovered backend, collector and maintenance process are
+ready. It starts only an exact original container recorded as previously running;
+an originally stopped service stays stopped. The original identity, image,
+configuration, mounts and networks are checked through the same initial-source
+client contract. Every requested start is journaled before dispatch and uses the
+original final deadline. A lost reply remains inflight and cannot be replayed.
+
+Runtime readiness requires these actions to finish and each restored service to
+be running with its existing health check healthy. Completion observation checks
+them again. Older runtime-ready receipts lacking these journal actions remain
+preserved but cannot claim the stronger readiness condition. This restoration
+preserves the original UI/admin versions; it is not a full-fleet image upgrade or
+ordinary deployment release. The final marker and remaining deployment checks
+still apply.
+
+Restoration observations for the four preserved services are batched within each
+check. Container configuration, state and network identities remain fresh for
+every check before and after dispatch; no observation is cached across actions.
+This removes repeated Docker reads without extending the runtime deadline.

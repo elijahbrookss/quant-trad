@@ -115,14 +115,22 @@ def _admit_clients(rows, expected):
     if set(rows)-{"tsdb"} != set(expected):
         raise RuntimeError("storage_online_preparation_clients_changed")
     for name, saved in expected.items():
-        if (name == "initialize" and not saved["was_running"]
-                and (rows[name]["running"] or rows[name]["status"] != "exited" or rows[name]["exit_code"] != 0)):
-            raise RuntimeError("storage_online_preparation_completed_initializer_changed")
-        details = host_boundary.database_details(rows[name]["id"])
-        if (host_boundary.identities(rows)[name] != saved["identity"]
-                or _client_contract(details) != saved["contract"]
-                or not host_boundary.same_database_networks(details, saved["networks"])):
-            raise RuntimeError("storage_online_preparation_clients_changed")
+        admit_preserved_client(name, rows[name], saved)
+
+
+def admit_preserved_client(name, row, saved, *, details=None, network_ids=None):
+    """One exact original-client identity/configuration check across both resumes."""
+    if (name == "initialize" and not saved["was_running"]
+            and (row["running"] or row["status"] != "exited" or row["exit_code"] != 0)):
+        raise RuntimeError("storage_online_preparation_completed_initializer_changed")
+    if details is None:
+        details = host_boundary.database_details(row["id"])
+    if (details["id"] != row["id"] or host_boundary.identities({name:row})[name] != saved["identity"]
+            or _client_contract(details) != saved["contract"]
+            or not (host_boundary.same_database_networks(details, saved["networks"]) if network_ids is None else
+                    host_boundary.same_database_networks(details, saved["networks"], network_ids=network_ids))):
+        raise RuntimeError("storage_online_preparation_clients_changed")
+    return details
 
 
 def _admit_source(state_root, saved, *, require_running, operator_id=None, maintenance=False):

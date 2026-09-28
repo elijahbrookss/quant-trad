@@ -222,6 +222,29 @@ def database_details(container: str) -> dict:
     return json.loads(docker("inspect", "--format", expression, container))
 
 
+def preserved_client_observations(containers, network_names):
+    """One fresh, bounded observation for clients sharing a restoration check.
+
+    Private config and state stay in memory. Callers must discard this result at
+    the end of the check; it is never a receipt or authority for a later action.
+    """
+    containers = tuple(containers)
+    network_names = tuple(sorted(set(network_names)))
+    if not 1 <= len(containers) <= 16 or len(set(containers)) != len(containers) or not 1 <= len(network_names) <= 32:
+        raise ValueError("storage_preserved_observation_bound_invalid")
+    expression = '{"id":{{json .Id}},"config":{{json .Config}},"host":{{json .HostConfig}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"image":{{json .Image}},"state":{{json .State}}}'
+    values = [json.loads(line) for line in docker("inspect", "--format", expression, *containers).splitlines()]
+    details = {value["id"]:value for value in values}
+    if len(values) != len(containers) or set(details) != set(containers):
+        raise RuntimeError("storage_preserved_observation_container_changed")
+    networks = [json.loads(line) for line in docker("network", "inspect", "--format",
+        '{"name":{{json .Name}},"id":{{json .Id}}}', *network_names).splitlines()]
+    identities = {value["name"]:value["id"] for value in networks}
+    if len(networks) != len(network_names) or set(identities) != set(network_names):
+        raise RuntimeError("storage_preserved_observation_network_changed")
+    return details, identities
+
+
 def database_contract(details: dict, *, tcp_upgrade: bool = False) -> str:
     config = json.loads(json.dumps(details["config"]))
     config.pop("Image", None)  # resolved image ID is verified separately
@@ -252,7 +275,7 @@ def database_networks(details: dict) -> dict:
             for name, value in details["networks"].items()}
 
 
-def same_database_networks(details: dict, expected: dict) -> bool:
+def same_database_networks(details: dict, expected: dict, *, network_ids=None) -> bool:
     actual = database_networks(details)
     if set(actual) != set(expected):
         return False
@@ -262,7 +285,8 @@ def same_database_networks(details: dict, expected: dict) -> bool:
         # existing external network itself must still be exactly the saved one.
         if (current["network_id"] not in ("", original["network_id"])
                 or current["aliases"] != original["aliases"] or current["ipam"] != original["ipam"]
-                or docker("network", "inspect", "--format", "{{.Id}}", name).strip() != original["network_id"]):
+                or (network_ids.get(name) if network_ids is not None else
+                    docker("network", "inspect", "--format", "{{.Id}}", name).strip()) != original["network_id"]):
             return False
     return True
 

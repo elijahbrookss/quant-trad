@@ -380,6 +380,14 @@ os.chown(root,70,70)
   saved=final_host._load(state/final_host.STATE)
   assert saved['phase']=='recovery_runtime_ready'
   assert result['runtime']['collector_process_healthy'] and not result['ordinary_relaunch_authorized']
+  assert result['runtime']['original_ui_admin_restored']
+  with host_boundary.docker_deadline(time.monotonic()+10):
+   restored_rows=host_boundary.inventory(project,operator_id=saved['binding']['worker_id'],activating=True,runtime_maintenance=True)
+   for service in ('frontend','frontend-v2','grafana','pgadmin'):
+    expected=preparation['clients'][service]
+    assert restored_rows[service]['id']==expected['identity']['id']
+    assert restored_rows[service]['running']==expected['was_running']
+  report['original_ui_admin_restored']=True
   pgid=saved['recovery']['replacement_id'];owned.append(pgid)
   worker_receipt=host_boundary.load_receipt(state/launch._STATE)
   if not options.full_operation:
