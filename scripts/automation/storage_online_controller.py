@@ -43,6 +43,15 @@ _SESSION_OPERATIONS = {"final_session_begin", "final_session_check", "final_sess
 _OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "inspect_references", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "commit_database", "cancel", "close"}
 
 
+def validate_copy_budget(*, command_seconds, page_rows, max_page_bytes):
+    if type(command_seconds) is not int or not 1 <= command_seconds <= 60:
+        raise ValueError("storage_online_command_budget_invalid")
+    if type(page_rows) is not int or not 1 <= page_rows <= 256:
+        raise ValueError("storage_online_page_rows_invalid")
+    if type(max_page_bytes) is not int or max_page_bytes <= 0:
+        raise ValueError("storage_online_page_bytes_invalid")
+
+
 class OnlineController:
     """One prepared attempt, fixed inputs, main-thread leases and DB ownership.
 
@@ -55,12 +64,7 @@ class OnlineController:
     def __init__(self, engine, *, placement, policy, resource_limits, source_root,
                  destination_root, expected_started_at, max_objects, max_bytes,
                  max_page_bytes, page_rows=128, command_seconds=30):
-        if type(command_seconds) is not int or not 1 <= command_seconds <= 60:
-            raise ValueError("storage_online_command_budget_invalid")
-        if type(page_rows) is not int or not 1 <= page_rows <= 256:
-            raise ValueError("storage_online_page_rows_invalid")
-        if type(max_page_bytes) is not int or max_page_bytes <= 0:
-            raise ValueError("storage_online_page_bytes_invalid")
+        validate_copy_budget(command_seconds=command_seconds,page_rows=page_rows,max_page_bytes=max_page_bytes)
         if not isinstance(expected_started_at, str) or not expected_started_at:
             raise ValueError("storage_online_original_attempt_required")
         self.engine, self.placement, self.policy = engine, placement, policy

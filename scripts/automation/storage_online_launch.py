@@ -229,6 +229,29 @@ def _capture_observation(database_id):
         "FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
 
 
+def inspect_candidate_image(image, request):
+    """Bind the immutable candidate to its requested source before either pause."""
+    image_info = json.loads(host_boundary.docker("image", "inspect", "--format", "{{json .}}", image))
+    image_env = dict(v.split("=", 1) for v in image_info["Config"].get("Env") or [])
+    if (image_info["Id"] != image
+            or image_env.get("QT_IMAGE_SOURCE_REVISION") != request.get("source_revision")
+            or image_env.get("QT_IMAGE_SOURCE_TREE_HASH") != request.get("source_tree_hash")):
+        raise RuntimeError("storage_online_candidate_image_changed")
+    return image_env
+
+
+def validate_launch_inputs(*, project, source_revision, image, request, descriptor_limit, memory_bytes):
+    if (not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project)
+            or not re.fullmatch(r"[0-9a-f]{40}", source_revision)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image)
+            or not isinstance(request, dict)
+            or type(request.get("max_objects")) is not int
+            or type(descriptor_limit) is not int
+            or not request["max_objects"]+512 <= descriptor_limit <= 1_001_024
+            or type(memory_bytes) is not int or not 512*1024**2 <= memory_bytes <= 8*1024**3):
+        raise ValueError("storage_online_launch_inputs_invalid")
+
+
 def observe_owned_worker(state_root, project):
     """Resolve only the existing named worker journal; no launch/reentry authority."""
     state_path = state_root/_STATE
@@ -251,15 +274,8 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
     not measured production admission. The ordinary wrapper below owns its lock.
     """
     state_root, inventory_path = _canonical(state_root), _canonical(inventory_path)
-    if (not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project)
-            or not re.fullmatch(r"[0-9a-f]{40}", source_revision)
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image)
-            or not isinstance(request, dict)
-            or type(request.get("max_objects")) is not int
-            or type(descriptor_limit) is not int
-            or not request["max_objects"]+512 <= descriptor_limit <= 1_001_024
-            or type(memory_bytes) is not int or not 512*1024**2 <= memory_bytes <= 8*1024**3):
-        raise ValueError("storage_online_launch_inputs_invalid")
+    validate_launch_inputs(project=project,source_revision=source_revision,image=image,
+        request=request,descriptor_limit=descriptor_limit,memory_bytes=memory_bytes)
     archive_group = archive_group_override(request)
     capture_plan = capture_preparation(request)
     data = (json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)+"\n").encode()
@@ -292,12 +308,7 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
     source_env = dict(v.split("=", 1) for v in collector["config"].get("Env") or [])
     if source_env.get("QT_IMAGE_SOURCE_REVISION") != source_revision:
         raise RuntimeError("storage_online_serving_image_revision_changed")
-    image_info = json.loads(host_boundary.docker("image", "inspect", "--format", "{{json .}}", image))
-    image_env = dict(v.split("=", 1) for v in image_info["Config"].get("Env") or [])
-    if (image_info["Id"] != image
-            or image_env.get("QT_IMAGE_SOURCE_REVISION") != request.get("source_revision")
-            or image_env.get("QT_IMAGE_SOURCE_TREE_HASH") != request.get("source_tree_hash")):
-        raise RuntimeError("storage_online_candidate_image_changed")
+    image_env = inspect_candidate_image(image, request)
     request_path = state_root/"storage-online-request.json"
     if not os.path.lexists(request_path):
         descriptor = os.open(request_path, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)

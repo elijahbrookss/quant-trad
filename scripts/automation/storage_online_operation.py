@@ -9,6 +9,9 @@ from __future__ import annotations
 from contextlib import ExitStack
 from dataclasses import dataclass
 import logging
+import json
+from copy import deepcopy
+from datetime import date
 import os
 from pathlib import Path
 import re
@@ -140,41 +143,63 @@ def inspect_prepared_operation(state_root, *, project, source_revision, source_i
         preparation = initial.admit_serving_source(state_root, project=project,
             source_revision=source_revision, operator_id=operator_id)
         rows = host.inventory(project, operator_id=operator_id)
-        roots = preparation["source_roots"]
-        candidates = [Path(p) for p in roots if str(Path(p)/"objects") in roots]
-        if len(roots) != 2 or len(candidates) != 1:
-            raise RuntimeError("storage_online_operation_source_roots_invalid")
-        source = candidates[0]
-        for name in final._SOURCE_WRITERS:
-            final._source_writer_contract(host.database_details(rows[name]["id"]),
-                service=name, source_image=source_image, source_revision=source_revision, root=source)
-        destination,_,info = runtime_owner.inspect_spool_destination(source, spool_destination)
-        base, history = recovery.preserving._database_recipe(state_root, project)
-        if host.digest(base) != preparation["recipe_sha256"]:
-            raise RuntimeError("storage_online_recovery_original_recipe_changed")
-        model = recovery.database_recipe(base, keys_root=keys_root,
-            socket_volume=socket_volume, history=history)
-        socket = recovery.inspect_socket_volume(socket_volume, base["volumes"]["postgres-data"]["name"])
-        udev = launch._canonical(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data"))
-        runtime, admission = runtime_owner.inspect_runtime_configuration(state_root,
-            database_model=model, image_id=image, request=request,
-            inventory=launch._canonical(inventory_path), udev_root=udev,
-            destination=str(destination), rows=rows, database_id=rows["tsdb"]["id"])
-        # The replacement does not exist yet: pin its service, never the source PID.
-        if runtime["services"]["storage-maintenance"].get("pid") != "service:tsdb":
-            raise RuntimeError("storage_online_operation_future_database_service_required")
-        key = Path(keys_root).stat()
-        observed = dict(preparation_sha256=host.digest(preparation), runtime=admission,
-            socket_sha256=host.digest(socket), source_image=source_image,
-            destination=[str(destination),info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode],
-            keys=[str(keys_root),key.st_dev,key.st_ino,key.st_uid,key.st_gid,key.st_mode])
-        # Inspectors can take time; do not proceed after their shared bound expires.
-        if time.monotonic() >= deadline:
-            raise RuntimeError("storage_online_operation_preflight_expired")
-        return observed
+        observed=inspect_operation_configuration(state_root,project=project,
+            source_revision=source_revision,source_image=source_image,image=image,request=request,
+            inventory_path=inventory_path,keys_root=keys_root,socket_volume=socket_volume,
+            spool_destination=spool_destination,roots=preparation["source_roots"],rows=rows,
+            recipe_sha256=preparation["recipe_sha256"],deadline=deadline)
+        return dict(preparation_sha256=host.digest(preparation),**observed)
 
 
-def run_prepared_operation(state_root, *, project, source_revision, source_image,
+def inspect_operation_configuration(state_root, *, project, source_revision, source_image,
+        image, request, inventory_path, keys_root, socket_volume, spool_destination,
+        roots, rows, recipe_sha256, deadline):
+    """Shared planned runtime checks for both initial and final preparation."""
+    candidates = [Path(p) for p in roots if str(Path(p)/"objects") in roots]
+    if len(roots) != 2 or len(candidates) != 1:
+        raise RuntimeError("storage_online_operation_source_roots_invalid")
+    source = candidates[0]
+    launch.inspect_candidate_image(image, request)
+    for name in final._SOURCE_WRITERS:
+        final._source_writer_contract(host.database_details(rows[name]["id"]),
+            service=name, source_image=source_image, source_revision=source_revision, root=source)
+    destination,_,info = runtime_owner.inspect_spool_destination(source, spool_destination)
+    base, history = recovery.preserving._database_recipe(state_root, project)
+    if host.digest(base) != recipe_sha256:
+        raise RuntimeError("storage_online_recovery_original_recipe_changed")
+    model = recovery.database_recipe(base, keys_root=keys_root,
+        socket_volume=socket_volume, history=history)
+    socket = recovery.inspect_socket_volume(socket_volume, base["volumes"]["postgres-data"]["name"])
+    udev = launch._canonical(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data"))
+    runtime, admission = runtime_owner.inspect_runtime_configuration(state_root,
+        database_model=model, image_id=image, request=request,
+        inventory=launch._canonical(inventory_path), udev_root=udev,
+        destination=str(destination), rows=rows, database_id=rows["tsdb"]["id"])
+    # The replacement does not exist yet: pin its service, never the source PID.
+    if runtime["services"]["storage-maintenance"].get("pid") != "service:tsdb":
+        raise RuntimeError("storage_online_operation_future_database_service_required")
+    key = Path(keys_root).stat()
+    observed = dict(runtime=admission,
+        socket_sha256=host.digest(socket), source_image=source_image,
+        destination=[str(destination),info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode],
+        keys=[str(keys_root),key.st_dev,key.st_ino,key.st_uid,key.st_gid,key.st_mode])
+    # Inspectors can take time; do not proceed after their shared bound expires.
+    if time.monotonic() >= deadline:
+        raise RuntimeError("storage_online_operation_preflight_expired")
+    return observed
+
+
+def validate_operation_arguments(state_root, *, limits, request, source_image):
+    if not isinstance(limits, OperationLimits):
+        raise ValueError("storage_online_operation_limits_invalid")
+    limits.validate(request)
+    if not isinstance(source_image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_image):
+        raise ValueError("storage_online_operation_source_image_invalid")
+    state_root = launch._canonical(state_root)
+    return state_root
+
+
+def run_prepared_operation_locked(state_root, *, project, source_revision, source_image,
         image, request, inventory_path, descriptor_limit, memory_bytes,
         limits, keys_root, socket_volume, spool_destination):
     """One continuous live operation from prepared source through runtime readiness.
@@ -184,15 +209,10 @@ def run_prepared_operation(state_root, *, project, source_revision, source_image
     reopen, reconnect, replay, marker deletion or repeated COMMIT occurs here.
     Runtime readiness is not encrypted-pair completion or ordinary relaunch authority.
     """
-    if not isinstance(limits, OperationLimits):
-        raise ValueError("storage_online_operation_limits_invalid")
-    limits.validate(request)
-    if not isinstance(source_image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_image):
-        raise ValueError("storage_online_operation_source_image_invalid")
-    state_root = launch._canonical(state_root)
+    state_root=validate_operation_arguments(state_root,limits=limits,request=request,source_image=source_image)
     started = time.monotonic()
     try:
-        with host.deployment_lock(state_root), ExitStack() as holds:
+        with ExitStack() as holds:
             plan = dict(project=project, source_revision=source_revision, source_image=source_image,
                 image=image, request=request, inventory_path=inventory_path, keys_root=keys_root,
                 socket_volume=socket_volume, spool_destination=spool_destination)
@@ -249,3 +269,141 @@ def run_prepared_operation(state_root, *, project, source_revision, source_image
         logger.error("storage_online_operation_stopped | project=%s error_type=%s intent_retained=true replay_authorized=false",
                      project, type(exc).__name__)
         raise
+
+
+def run_prepared_operation(state_root, **arguments):
+    """Internal prepared-source adapter; full operation retains this lock earlier."""
+    state_root=validate_operation_arguments(state_root,**{k:arguments[k] for k in ("limits","request","source_image")})
+    with host.deployment_lock(state_root):
+        return run_prepared_operation_locked(state_root, **arguments)
+
+
+_PLAN_FIELDS={"schema_version","state_root","project","source_revision","source_image","image",
+    "history_uuid","history_before","attempt_seconds","request","inventory_path",
+    "descriptor_limit","memory_bytes","limits","keys_root","socket_volume","spool_destination"}
+
+
+def load_operation_plan(path):
+    """One private declarative plan, never a receipt or persisted execution authority."""
+    from scripts.automation.storage_online_worker import validate_request_shape
+
+    plan=host.load_receipt(launch._canonical(path))
+    if (not isinstance(plan,dict) or set(plan)!=_PLAN_FIELDS
+            or plan["schema_version"]!="qt.storage_online_operation.v1"
+            or not isinstance(plan["limits"],dict)
+            or set(plan["limits"])!=set(OperationLimits.__dataclass_fields__)
+            or not isinstance(plan["history_uuid"],str)
+            or not re.fullmatch(r"[A-Za-z0-9-]{4,128}",plan["history_uuid"])
+            or type(plan["attempt_seconds"]) is not int or not 1<=plan["attempt_seconds"]<=96*3600
+            or not isinstance(plan["history_before"],str)
+            or date.fromisoformat(plan["history_before"]).isoformat()!=plan["history_before"]):
+        raise ValueError("storage_online_operation_plan_invalid")
+    request=plan["request"]
+    validate_request_shape(request)
+    if request["expected_started_at"] is not None or "capture_preparation" in request:
+        raise ValueError("storage_online_operation_plan_must_not_invent_capture_clock")
+    launch.validate_launch_inputs(**{k:plan[k] for k in
+        ("project","source_revision","image","request","descriptor_limit","memory_bytes")})
+    validate_operation_arguments(plan["state_root"],limits=OperationLimits(**plan["limits"]),
+        request=request,source_image=plan["source_image"])
+    for field in ("state_root","inventory_path","keys_root","spool_destination"):
+        if not isinstance(plan[field],str) or str(launch._canonical(plan[field]))!=plan[field]:
+            raise ValueError("storage_online_operation_plan_path_invalid")
+    return plan
+
+
+_REQUEST_PROBE="""
+import contextlib,json,sys
+from pathlib import Path
+plan=json.loads(sys.stdin.read(65537))
+with contextlib.redirect_stdout(sys.stderr):
+    from scripts.automation.storage_online_worker import inspect_request_configuration
+    result=inspect_request_configuration(plan['request'],Path('/run/qt-online/inventory.json'),history_uuid=plan['history_uuid'])
+print(json.dumps(result),flush=True)
+"""
+
+
+def inspect_initial_operation(state_root, *, plan, deadline):
+    """Validate the actual initial source and complete proposed configuration before pause."""
+    for name in (initial.STATE,host.HOLD,launch._STATE,"storage-online-request.json","storage-online-final.json",
+                 "promotion.env","alert-preview.env"):
+        if os.path.lexists(state_root/name):
+            raise RuntimeError("storage_online_initial_operation_requires_reconciliation")
+    with host.docker_deadline(deadline):
+        rows,database_plan=initial.inspect_unprepared_source(state_root,project=plan["project"],
+            source_revision=plan["source_revision"],history_uuid=plan["history_uuid"])
+        if not initial._source_healthy(rows):
+            raise RuntimeError("storage_online_preparation_source_not_healthy")
+        collector=host.database_details(rows["market-data-collector"]["id"])
+        roots=initial._source_roots(collector)
+        source=next(Path(p)/"objects" for p in roots if str(Path(p)/"objects") in roots)
+        info=source.stat();request=plan["request"]
+        if (info.st_dev,info.st_ino)!=(request["source_device"],request["source_inode"]):
+            raise RuntimeError("storage_online_source_root_changed")
+        arguments={k:plan[k] for k in ("project","source_revision","source_image","image","request",
+            "inventory_path","keys_root","socket_volume","spool_destination")}
+        observed=inspect_operation_configuration(state_root,**arguments,roots=roots,rows=rows,
+            recipe_sha256=database_plan["recipe_sha256"],deadline=deadline)
+        # The pinned candidate runs its SAME policy/limit/job checks with read-only
+        # SQL. No source/archive/PGDATA/key mount, PID sharing or capabilities.
+        database=host.database_details(rows["tsdb"]["id"])
+        raw=json.dumps(dict(request=request,history_uuid=plan["history_uuid"]),sort_keys=True,separators=(",",":"),allow_nan=False)
+        if len(raw.encode())>65536:
+            raise ValueError("storage_online_request_budget_exceeded")
+        output=host.docker("run","--rm","--pull","never","--interactive",
+            "--network","container:"+rows["tsdb"]["id"],"--read-only","--user","1000:1000",
+            "--cap-drop","ALL","--security-opt","no-new-privileges","--memory","512m",
+            "--cpus","1","--pids-limit","64","--env","QT_DISABLE_DOTENV=1","--env","PG_DSN",
+            "--mount","type=bind,source="+plan["inventory_path"]+",target=/run/qt-online/inventory.json,readonly",
+            "--entrypoint","python",plan["image"],"-c",_REQUEST_PROBE,
+            env={**os.environ,"PG_DSN":launch._dsn(database,collector)},input=raw)
+        if json.loads(output)!={"validated":True} or time.monotonic()>=deadline:
+            raise RuntimeError("storage_online_operation_initial_probe_unconfirmed")
+        return observed
+
+
+def run_operation_plan(path, *, execute=False):
+    """Single local operator: inspect by default, execute the existing fixed owners.
+
+    The plan supplies measured limits and prepared paths. Initial preparation's
+    original 600-second receipt supplies capture-preparation timing; user input
+    cannot manufacture or renew it. Partial initial/final intents require explicit
+    reconciliation. Successful return means runtime readiness, not release closure.
+    """
+    if type(execute) is not bool:
+        raise ValueError("storage_online_operation_execute_invalid")
+    plan=load_operation_plan(path)
+    state_root=launch._canonical(plan["state_root"])
+    limits=OperationLimits(**plan["limits"])
+    with host.deployment_lock(state_root):
+        if os.path.lexists(state_root/"storage-online-final.json"):
+            raise RuntimeError("storage_online_final_requires_reconciliation")
+        prepared=initial._load(state_root) if os.path.lexists(state_root/initial.STATE) else None
+        if prepared is None:
+            observation=inspect_initial_operation(state_root,plan=plan,
+                deadline=time.monotonic()+limits.preparation_seconds)
+        else:
+            if prepared["phase"]!="serving":
+                raise RuntimeError("storage_online_initial_operation_requires_reconciliation")
+            arguments={k:plan[k] for k in ("project","source_revision","source_image","image","request",
+                "inventory_path","keys_root","socket_volume","spool_destination")}
+            observation=inspect_prepared_operation(state_root,**arguments,
+                deadline=time.monotonic()+limits.preparation_seconds)
+        if load_operation_plan(path)!=plan:
+            raise RuntimeError("storage_online_operation_plan_changed")
+        if not execute:
+            return dict(phase="inspected",configuration_sha256=host.digest(observation),
+                storage_mutations_performed=False,final_switch_authorized=False)
+        if prepared is None:
+            prepared=initial.prepare_online_source_locked(state_root,project=plan["project"],
+                source_revision=plan["source_revision"],history_uuid=plan["history_uuid"])
+        if prepared["history_uuid"]!=plan["history_uuid"]:
+            raise RuntimeError("storage_online_preparation_binding_changed")
+        request=deepcopy(plan["request"])
+        request["capture_preparation"]=dict(requested_at=prepared["completed_at"],
+            deadline=prepared["deadline"],history_before=plan["history_before"],attempt_seconds=plan["attempt_seconds"])
+        # On reentry the launcher requires byte-identical request and actual capture.
+        arguments={k:plan[k] for k in ("project","source_revision","source_image","image",
+            "inventory_path","descriptor_limit","memory_bytes","keys_root","socket_volume","spool_destination")}
+        result=run_prepared_operation_locked(state_root,**arguments,request=request,limits=limits)
+        return dict(phase="runtime_ready",initial_preparation_seconds=prepared["completed_at"]-prepared["started_at"],**result)

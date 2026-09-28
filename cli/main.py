@@ -3262,6 +3262,11 @@ def _add_global_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _cmd_storage(args: argparse.Namespace) -> int:
+    if args.storage_command == "migrate":
+        from scripts.automation.storage_online_operation import run_operation_plan
+
+        _print_json(run_operation_plan(args.operation_file, execute=args.execute))
+        return 0
     client = _client(args)
     if args.storage_command == "status":
         result = client.request_json("GET", "/api/storage")
@@ -4864,6 +4869,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     storage = subparsers.add_parser("storage", help="Inspect drives and review server-owned storage policy.")
     storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    migration = storage_sub.add_parser("migrate", help="Inspect or execute a prepared local host migration plan; final release checks remain separate.")
+    migration.add_argument("--operation-file", required=True, help="Private fixed SSD/HDD operation JSON on this Linux host.")
+    migration.add_argument("--execute", action="store_true", help="Perform the admitted preserving migration; default is read-only inspection.")
+    migration.set_defaults(func=_cmd_storage)
     storage_status = storage_sub.add_parser("status")
     storage_status.set_defaults(func=_cmd_storage)
     storage_enroll = storage_sub.add_parser("enroll", help="Enroll a host-prepared target by ID.")

@@ -20,6 +20,7 @@ parser.add_argument('--prepare-source',action='store_true',help='qualify retaine
 parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
+parser.add_argument('--full-operation',action='store_true',help='run the public operator before initial preparation with a retired seed fixture')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
@@ -42,6 +43,8 @@ parser.add_argument('--recovery-spool',action='store_true',help='prepare preserv
 parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
 parser.add_argument("--recovery-runtime",action="store_true",help="start actual split application composition after committed recovery preparation")
 options=parser.parse_args()
+if options.full_operation and not options.operation_driver:
+ parser.error('--full-operation requires --operation-driver')
 if options.operation_driver and not (options.recovery_runtime and options.initial_capture):
  parser.error('--operation-driver requires --recovery-runtime --initial-capture')
 if options.initial_capture and not (options.prepare_source and options.worker_phases):
@@ -244,16 +247,17 @@ os.chown(root,70,70)
   (udev/f'b{os.major(device)}:{os.minor(device)}').write_text('E:ID_FS_UUID=uuid-copy-hdd\n')
   os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
   original_cluster=host_boundary.cluster_identifier(pgid)
-  preparation=initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')
-  prepared_bytes=(state/initial.STATE).read_bytes()
-  assert preparation['phase']=='serving' and preparation['deadline']-preparation['started_at']==600
-  assert initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')==preparation
-  pgid=host_boundary.inventory(project)['tsdb']['id']
-  assert host_boundary.cluster_identifier(pgid)==original_cluster
-  assert not host_boundary.inventory(project)['initialize']['running']
-  intake_before=(working/'objects'/'native-intake').stat().st_size
-  report['initial_preparation_seconds']=preparation['completed_at']-preparation['started_at']
-  report['initial_preparation_receipt_retained']=True
+  if not options.full_operation:
+   preparation=initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')
+   prepared_bytes=(state/initial.STATE).read_bytes()
+   assert preparation['phase']=='serving' and preparation['deadline']-preparation['started_at']==600
+   assert initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')==preparation
+   pgid=host_boundary.inventory(project)['tsdb']['id']
+   assert host_boundary.cluster_identifier(pgid)==original_cluster
+   assert not host_boundary.inventory(project)['initialize']['running']
+   intake_before=(working/'objects'/'native-intake').stat().st_size
+   report['initial_preparation_seconds']=preparation['completed_at']-preparation['started_at']
+   report['initial_preparation_receipt_retained']=True
  test=project+'-collector';owned.append(test)
  args=['docker','run','--name',test,'--label','qt.disposable='+project,'--user','70:70','--network','container:'+pgid,'--pid','container:'+pgid,
    *(['--label','com.docker.compose.project='+project+'-application','--label','com.docker.compose.service=fixture'] if options.prepare_source else labels('market-data-collector')),'--memory','2g','--cpus','2','--mount','type=volume,source='+volume+',target=/var/lib/postgresql/data',
@@ -262,6 +266,7 @@ os.chown(root,70,70)
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
+   '--env','QT_ONLINE_FULL_OPERATION='+str(int(options.full_operation)),
    '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
@@ -280,7 +285,8 @@ os.chown(root,70,70)
    time.sleep(.05)
  request=json.loads((control/'request.json').read_text())
  if options.initial_capture:
-  request['capture_preparation'].update(requested_at=time.time(),deadline=preparation['deadline'])
+  if not options.full_operation:
+   request['capture_preparation'].update(requested_at=time.time(),deadline=preparation['deadline'])
   assert launch._capture_observation(pgid) is None
   report['capture_absent_before_owned_worker']=True
  inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes());inventory.chmod(0o644)
@@ -304,12 +310,13 @@ os.chown(root,70,70)
     candidate_working=candidate_working,owned=owned)
   # Exercise prepared-operation preflight with an actual retired owned worker.
   # Capture is created once and keeps its original clock across driver reentry.
-  with launch.launched_online_worker(state,**kwargs) as (first_worker,first_receipt):
-   first_channel=host_boundary.OnlineWorkerChannel(first_worker,
-     deadline=time.monotonic()+first_receipt['deadline']-time.time())
-   assert first_channel.greeting['state']=='background'
-   original_capture=host_boundary.load_receipt(state/launch._STATE)['capture']
-   original_capture_deadline=first_receipt['deadline']
+  if not options.full_operation:
+   with launch.launched_online_worker(state,**kwargs) as (first_worker,first_receipt):
+    first_channel=host_boundary.OnlineWorkerChannel(first_worker,
+      deadline=time.monotonic()+first_receipt['deadline']-time.time())
+    assert first_channel.greeting['state']=='background'
+    original_capture=host_boundary.load_receipt(state/launch._STATE)['capture']
+    original_capture_deadline=first_receipt['deadline']
   background=operation.prepare_background
   frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t))::text"
   before_final_frozen=host_boundary.database_query(pgid,frozen_sql)
@@ -322,7 +329,12 @@ os.chown(root,70,70)
    assert fixture.returncode==0
    assert not json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)['Running']
    return result
-  operation.prepare_background=publish_during_background
+  if options.full_operation:
+   fixture.wait(timeout=30)
+   assert fixture.returncode==0
+   assert not json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)['Running']
+  else:
+   operation.prepare_background=publish_during_background
   actual_action=host_boundary.supervised_source_action
   def recover_before_maintenance(args,**kw):
    saved=final_host._load(state/final_host.STATE)
@@ -338,11 +350,28 @@ os.chown(root,70,70)
    return actual_action(args,**kw)
   host_boundary.supervised_source_action=recover_before_maintenance
   try:
-   result=operation.run_prepared_operation(state,**kwargs,source_image=source_image,
-    limits=operation.OperationLimits(preparation_seconds=30,final_seconds=120,recovery_seconds=30,runtime_seconds=60,
-      spool_max_bytes=64*1024**2,spool_max_entries=4096,spool_reserve_bytes=8*1024**2,
-      repository_max_bytes=256*1024**2,repository_reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2),
-    keys_root=recovery_keys,socket_volume=recovery_socket,spool_destination=candidate_working)
+   limits=operation.OperationLimits(preparation_seconds=30,final_seconds=120,recovery_seconds=30,runtime_seconds=60,
+     spool_max_bytes=64*1024**2,spool_max_entries=4096,spool_reserve_bytes=8*1024**2,
+     repository_max_bytes=256*1024**2,repository_reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2)
+   if options.full_operation:
+    capture_plan=request.pop('capture_preparation')
+    plan=dict(schema_version='qt.storage_online_operation.v1',state_root=str(state),**kwargs,
+      source_image=source_image,history_uuid='uuid-copy-hdd',history_before=capture_plan['history_before'],
+      attempt_seconds=capture_plan['attempt_seconds'],limits=vars(limits),keys_root=str(recovery_keys),
+      socket_volume=recovery_socket,spool_destination=str(candidate_working))
+    plan['inventory_path']=str(inventory)
+    operation_file=state/'operation.json'
+    host_boundary.save_receipt(operation_file,plan,initial=True)
+    inspected=operation.run_operation_plan(operation_file)
+    assert inspected['phase']=='inspected' and not (state/initial.STATE).exists()
+    result=operation.run_operation_plan(operation_file,execute=True)
+    preparation=initial._load(state)
+    prepared_bytes=(state/initial.STATE).read_bytes()
+    report['initial_preparation_seconds']=result['initial_preparation_seconds']
+    report['single_operation_from_before_initial_preparation']=True
+   else:
+    result=operation.run_prepared_operation(state,**kwargs,source_image=source_image,limits=limits,
+      keys_root=recovery_keys,socket_volume=recovery_socket,spool_destination=candidate_working)
   finally:
    operation.prepare_background=background;host_boundary.supervised_source_action=actual_action
   saved=final_host._load(state/final_host.STATE)
@@ -350,8 +379,12 @@ os.chown(root,70,70)
   assert result['runtime']['collector_process_healthy'] and not result['ordinary_relaunch_authorized']
   pgid=saved['recovery']['replacement_id'];owned.append(pgid)
   worker_receipt=host_boundary.load_receipt(state/launch._STATE)
-  assert worker_receipt['capture']==original_capture and worker_receipt['deadline']==original_capture_deadline
-  report['operation_preflight_retired_worker_reentry']=True
+  if not options.full_operation:
+   assert worker_receipt['capture']==original_capture and worker_receipt['deadline']==original_capture_deadline
+   report['operation_preflight_retired_worker_reentry']=True
+  else:
+   from datetime import datetime
+   assert worker_receipt['deadline']-datetime.fromisoformat(worker_receipt['capture']['started_at']).timestamp() <= 180
   retired=json.loads(run(['inspect',worker_receipt['container_id'],'--format','{{json .State}}']).stdout)
   assert not retired['Running'] and retired['Pid']==0
   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]

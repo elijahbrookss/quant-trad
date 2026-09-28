@@ -113,8 +113,9 @@ def _database_recipe(state_root: Path, project: str) -> tuple[dict, str]:
     return model, history["source"]
 
 
-def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, history_uuid: str) -> dict:
-    model, history_root = _database_recipe(state_root, receipt["project"])
+def inspect_database_preparation(state_root: Path, project: str, rows: dict, history_uuid: str) -> dict:
+    """Inspect the fixed initial database plan without mutation or a new deadline."""
+    model, history_root = _database_recipe(state_root, project)
     _history_filesystem(history_root, history_uuid)
     row = rows["tsdb"]
     details = host_boundary.database_details(row["id"])
@@ -122,7 +123,7 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
         raise RuntimeError("storage_database_source_mounts_unexpected")
     source_mount = details["mounts"][0]
     if (source_mount.get("Type") != "volume" or source_mount.get("Destination") != "/var/lib/postgresql/data"
-            or not source_mount.get("RW") or set(details["networks"]) != {receipt["project"]+"_quanttrad"}
+            or not source_mount.get("RW") or set(details["networks"]) != {project+"_quanttrad"}
             or model["volumes"].get("postgres-data") != {"name": source_mount["Name"], "external": True}
             or set(model["volumes"])-{"postgres-data","storage-recovery-socket"}):
         raise RuntimeError("storage_database_source_binding_mismatch")
@@ -149,8 +150,14 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
         original_id=row["id"], image=row["image"], source_contract=host_boundary.database_contract(details),
         target_contract=host_boundary.database_contract(details, tcp_upgrade=True), source_mount=source_mount,
         networks=host_boundary.database_networks(details), cluster_identifier=host_boundary.cluster_identifier(row["id"]),
-        source_stopped=False, replacement_id=None, deadline=time.time()+600)
-    return {**receipt, "phase": "preparing_database", "database_preparation": preparation}
+        )
+    return preparation
+
+
+def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, history_uuid: str) -> dict:
+    preparation=inspect_database_preparation(state_root,receipt["project"],rows,history_uuid)
+    preparation.update(source_stopped=False,replacement_id=None,deadline=time.time()+600)
+    return {**receipt,"phase":"preparing_database","database_preparation":preparation}
 
 
 def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> dict:

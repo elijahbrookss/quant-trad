@@ -184,7 +184,24 @@ def admit_serving_source(state_root, *, project, source_revision, operator_id=No
     return saved
 
 
-def prepare_online_source(state_root, *, project, source_revision, history_uuid):
+def inspect_unprepared_source(state_root, *, project, source_revision, history_uuid):
+    """Read-only admission before the initial pause; no journal or new clock."""
+    release = (state_root/"release.env").read_text()
+    if (re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [source_revision]
+            or re.search(r"^storage_layout=.", release, flags=re.MULTILINE)):
+        raise RuntimeError("storage_online_preparation_source_release_required")
+    rows = host_boundary.inventory(project)
+    if not host_boundary.source_clients_serving(rows):
+        raise RuntimeError("storage_online_preparation_source_not_running")
+    _before_capture(rows["tsdb"]["id"])
+    recipe = _recipe(state_root, project)
+    database_plan=held.inspect_database_preparation(state_root,project,rows,history_uuid)
+    if database_plan["recipe_sha256"]!=recipe:
+        raise RuntimeError("storage_online_preparation_recipe_changed")
+    return rows,database_plan
+
+
+def prepare_online_source_locked(state_root, *, project, source_revision, history_uuid):
     """Internal bounded initial transition; caller must qualify host admission.
 
     Reuses the original database preparation and resumes only its exact stopped
@@ -197,69 +214,67 @@ def prepare_online_source(state_root, *, project, source_revision, history_uuid)
             or not re.fullmatch(r"[0-9a-f]{40}", source_revision)
             or not re.fullmatch(r"[A-Za-z0-9-]{4,128}", history_uuid)):
         raise ValueError("storage_online_preparation_invalid_binding")
-    with host_boundary.deployment_lock(state_root):
-        for name in ("promotion.env", "alert-preview.env",
-                     "storage-online-worker.json", "storage-online-request.json", "storage-online-final.json"):
-            if os.path.lexists(state_root/name):
-                raise RuntimeError("storage_online_preparation_conflicting_operation")
-        saved = _load(state_root) if os.path.lexists(state_root/STATE) else None
-        if saved is None:
-            if os.path.lexists(state_root/host_boundary.HOLD):
-                raise RuntimeError("storage_online_preparation_unowned_hold")
-            release = (state_root/"release.env").read_text()
-            if (re.findall(r"^current_revision=(.*)$", release, flags=re.MULTILINE) != [source_revision]
-                    or re.search(r"^storage_layout=.", release, flags=re.MULTILINE)):
-                raise RuntimeError("storage_online_preparation_source_release_required")
-            rows = host_boundary.inventory(project)
-            if not host_boundary.source_clients_serving(rows):
-                raise RuntimeError("storage_online_preparation_source_not_running")
-            _before_capture(rows["tsdb"]["id"])
-            recipe = _recipe(state_root, project)
-            started = time.time()
-            saved = dict(schema=SCHEMA, project=project, source_revision=source_revision,
-                history_uuid=history_uuid, phase="preparing", started_at=started,
-                deadline=started+600, clients=_clients(rows),
-                source_roots=_source_roots(host_boundary.database_details(rows["market-data-collector"]["id"])),
-                recipe_sha256=recipe, cluster=host_boundary.cluster_identifier(rows["tsdb"]["id"]),
-                hold_sha256=None, database=None, completed_at=None)
-            # Intent is durable BEFORE the first source stop/database mutation.
-            host_boundary.save_receipt(state_root/STATE, saved, initial=True)
-        if (saved["project"], saved["source_revision"], saved["history_uuid"]) != (project, source_revision, history_uuid):
-            raise RuntimeError("storage_online_preparation_binding_changed")
-        if saved["phase"] == "serving":
-            return admit_serving_source(state_root, project=project, source_revision=source_revision)
-        _remaining(saved)
-        if _recipe(state_root, project) != saved["recipe_sha256"]:
-            raise RuntimeError("storage_online_preparation_recipe_changed")
-        if saved["phase"] == "preparing":
-            rows = host_boundary.inventory(project, database_preparing=True)
-            _admit_clients(rows, saved["clients"])
-            with held._paused_storage_clients_locked(state_root, project=project,
-                    source_revision=source_revision, prepare_database=True,
-                    history_uuid=history_uuid, _preparation_deadline=saved["deadline"]) as receipt:
-                _remaining(saved)
-                _before_capture(receipt["containers"]["tsdb"]["id"])
-                database = host_boundary.database_details(receipt["containers"]["tsdb"]["id"])
-                saved.update(phase="resuming", hold_sha256=host_boundary.digest(receipt),
-                    database=dict(contract=host_boundary.database_contract(database),
-                        mounts=_mount_digest(database["mounts"]), networks=host_boundary.database_networks(database)))
-                host_boundary.save_receipt(state_root/STATE, saved, initial=False)
-        for name in host_boundary.STOP:
+    for name in ("promotion.env", "alert-preview.env",
+                 "storage-online-worker.json", "storage-online-request.json", "storage-online-final.json"):
+        if os.path.lexists(state_root/name):
+            raise RuntimeError("storage_online_preparation_conflicting_operation")
+    saved = _load(state_root) if os.path.lexists(state_root/STATE) else None
+    if saved is None:
+        if os.path.lexists(state_root/host_boundary.HOLD):
+            raise RuntimeError("storage_online_preparation_unowned_hold")
+        rows,database_plan=inspect_unprepared_source(state_root,project=project,
+            source_revision=source_revision,history_uuid=history_uuid)
+        recipe=database_plan["recipe_sha256"]
+        started = time.time()
+        saved = dict(schema=SCHEMA, project=project, source_revision=source_revision,
+            history_uuid=history_uuid, phase="preparing", started_at=started,
+            deadline=started+600, clients=_clients(rows),
+            source_roots=_source_roots(host_boundary.database_details(rows["market-data-collector"]["id"])),
+            recipe_sha256=recipe, cluster=host_boundary.cluster_identifier(rows["tsdb"]["id"]),
+            hold_sha256=None, database=None, completed_at=None)
+        # Intent is durable BEFORE the first source stop/database mutation.
+        host_boundary.save_receipt(state_root/STATE, saved, initial=True)
+    if (saved["project"], saved["source_revision"], saved["history_uuid"]) != (project, source_revision, history_uuid):
+        raise RuntimeError("storage_online_preparation_binding_changed")
+    if saved["phase"] == "serving":
+        return admit_serving_source(state_root, project=project, source_revision=source_revision)
+    _remaining(saved)
+    if _recipe(state_root, project) != saved["recipe_sha256"]:
+        raise RuntimeError("storage_online_preparation_recipe_changed")
+    if saved["phase"] == "preparing":
+        rows = host_boundary.inventory(project, database_preparing=True)
+        _admit_clients(rows, saved["clients"])
+        with held._paused_storage_clients_locked(state_root, project=project,
+                source_revision=source_revision, prepare_database=True,
+                history_uuid=history_uuid, _preparation_deadline=saved["deadline"]) as receipt:
             _remaining(saved)
-            rows = _admit_source(state_root, saved, require_running=False)
-            _before_capture(rows["tsdb"]["id"])
-            if not saved["clients"][name]["was_running"]:
-                if rows[name]["running"] or rows[name]["exit_code"] != 0:
-                    raise RuntimeError("storage_online_preparation_completed_initializer_changed")
-            elif not rows[name]["running"]:
-                host_boundary.docker("start", rows[name]["id"], timeout=min(60, _remaining(saved)))
-        while True:
-            _remaining(saved)
-            rows = _admit_source(state_root, saved, require_running=True)
-            if _source_healthy(rows):
-                break
-            time.sleep(min(1, _remaining(saved)))
+            _before_capture(receipt["containers"]["tsdb"]["id"])
+            database = host_boundary.database_details(receipt["containers"]["tsdb"]["id"])
+            saved.update(phase="resuming", hold_sha256=host_boundary.digest(receipt),
+                database=dict(contract=host_boundary.database_contract(database),
+                    mounts=_mount_digest(database["mounts"]), networks=host_boundary.database_networks(database)))
+            host_boundary.save_receipt(state_root/STATE, saved, initial=False)
+    for name in host_boundary.STOP:
         _remaining(saved)
-        saved.update(phase="serving", completed_at=time.time())
-        host_boundary.save_receipt(state_root/STATE, saved, initial=False)
-        return saved
+        rows = _admit_source(state_root, saved, require_running=False)
+        _before_capture(rows["tsdb"]["id"])
+        if not saved["clients"][name]["was_running"]:
+            if rows[name]["running"] or rows[name]["exit_code"] != 0:
+                raise RuntimeError("storage_online_preparation_completed_initializer_changed")
+        elif not rows[name]["running"]:
+            host_boundary.docker("start", rows[name]["id"], timeout=min(60, _remaining(saved)))
+    while True:
+        _remaining(saved)
+        rows = _admit_source(state_root, saved, require_running=True)
+        if _source_healthy(rows):
+            break
+        time.sleep(min(1, _remaining(saved)))
+    _remaining(saved)
+    saved.update(phase="serving", completed_at=time.time())
+    host_boundary.save_receipt(state_root/STATE, saved, initial=False)
+    return saved
+def prepare_online_source(state_root, *, project, source_revision, history_uuid):
+    """Standalone internal preparation retains the same deployment lock."""
+    with host_boundary.deployment_lock(Path(state_root)):
+        return prepare_online_source_locked(state_root, project=project,
+            source_revision=source_revision, history_uuid=history_uuid)

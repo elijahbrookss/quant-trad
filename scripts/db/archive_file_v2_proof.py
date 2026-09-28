@@ -23,6 +23,13 @@ from time import monotonic
 _ACTIVE = None
 
 
+def validate_inventory_budget(*, max_files, max_bytes):
+    if type(max_files) is not int or not 1 <= max_files <= 1_000_000:
+        raise ValueError("archive_file_proof_file_budget_invalid")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("archive_file_proof_byte_budget_invalid")
+
+
 class ArchiveFileProof:
     """One main-thread, bounded, live proof context in a dedicated operator.
 
@@ -35,10 +42,7 @@ class ArchiveFileProof:
     """
 
     def __init__(self, root, *, max_files, max_bytes, deadline):
-        if type(max_files) is not int or not 1 <= max_files <= 1_000_000:
-            raise ValueError("archive_file_proof_file_budget_invalid")
-        if type(max_bytes) is not int or max_bytes <= 0:
-            raise ValueError("archive_file_proof_byte_budget_invalid")
+        validate_inventory_budget(max_files=max_files,max_bytes=max_bytes)
         if (type(deadline) not in (int, float) or not math.isfinite(deadline)
                 or not 0 < deadline-monotonic() <= 96*3600):
             raise ValueError("archive_file_proof_deadline_invalid")

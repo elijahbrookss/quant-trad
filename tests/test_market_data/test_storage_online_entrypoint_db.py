@@ -1,6 +1,6 @@
 """Owned host-driven positive entrypoint fixture, no production inputs."""
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 import json
 import os
@@ -89,6 +89,32 @@ def _stage_online_fixture(engine, placement, options, started):
             policy=options["policy"], resource_limits=options["resource_limits"])
     # Archive baseline copying belongs to the live controller, not this setup.
 
+@dataclass(frozen=True)
+class _UnpreparedTargets:
+    """Fixture configuration only; deliberately has no tablespace OID/authority."""
+    recent: object
+    history: object
+    history_before: object
+
+
+def _declare_targets(storage, control, monkeypatch, *, recent_root):
+    from core.storage_targets import StorageTarget
+    assert os.getenv("QT_DB_TEST_ISOLATED") == "1" and os.getuid() == 70
+    recent, history = Path(recent_root), Path("/qt-history")
+    assert recent.stat().st_dev != history.stat().st_dev
+    udev = control/"udev-placement"
+    udev.mkdir()
+    targets = (StorageTarget("ssd", "Recent", "uuid-copy-ssd", str(recent), "ssd"),
+               StorageTarget("hdd", "History", "uuid-copy-hdd", str(history), "hdd"))
+    for target in targets:
+        dev = Path(target.root).stat().st_dev
+        (udev/f"b{os.major(dev)}:{os.minor(dev)}").write_text("E:ID_FS_UUID="+target.filesystem_uuid+"\n")
+    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
+    storage.copy_plan = _UnpreparedTargets(*targets, storage.today)
+    storage.copy_udev = udev
+    return storage
+
+
 def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, monkeypatch):
     control = Path("/qt-control")
     deadline = time.monotonic()+180
@@ -101,6 +127,11 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
     atomic = os.getenv("QT_ONLINE_ATOMIC_PREPARE") == "1"
     worker_phases = os.getenv("QT_ONLINE_WORKER_PHASES") == "1"
     assert not worker_phases or atomic
+    full_operation = os.getenv("QT_ONLINE_FULL_OPERATION") == "1"
+    if full_operation:
+        assert initial_capture and worker_phases
+        from tests.test_market_data import test_archive_online_copy_db as archive_fixture
+        monkeypatch.setattr(archive_fixture, "_configure_placement", _declare_targets)
     runtime_recovery = None
     if os.getenv("QT_ONLINE_RUNTIME_FIXTURE")=="1":
         from tests.test_market_data.online_runtime_recovery_fixture import configure_source
@@ -133,7 +164,7 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         frozen = _frozen_records(conn)
         assert conn.scalar(text("SHOW archive_mode")) == "off"
     retained_before = None
-    if worker_phases:
+    if worker_phases and not full_operation:
         # Create an actual immutable retained rollback source in this owned
         # database. The fixture never moves it; the retained worker must do so.
         from tests.test_market_data.test_archive_reference_placement_db import _seed_retained_source, _rows
@@ -145,9 +176,9 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         else:
             with engine.begin() as conn:
                 retained_before = _rows(conn, catalogs.RETAINED_LEGACY)
-    elif atomic:
+    elif not worker_phases and atomic:
         _stage_online_fixture(engine, storage.copy_plan, options, started)
-    else:
+    elif not worker_phases:
         handoff.stage_handoff(engine, placement=storage.copy_plan, max_duration_seconds=120, **options)
     info=(source/"objects").stat()
     request=dict(schema_version="qt.storage_online_worker.v1",
@@ -171,6 +202,21 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         from tests.test_market_data.online_signal_publication_fixture import prepare_definition
         prepare_definition(storage, book, source/"objects")
     (control/"ready.json").write_text(json.dumps({"udev":str(storage.copy_udev)}))
+    if full_operation:
+        # Seed then retire BEFORE the operator replaces the source DB. No capture,
+        # placement, migration, or publication is performed by this fixture later.
+        assert runtime_recovery is not None
+        for label, hour in (("live", 4), ("final", 5)):
+            _raw_book_fixture(storage, source, monkeypatch,
+                definition_id="host-entrypoint-"+label,
+                provider_product_id="BTC-USD-HOST-"+label.upper(),
+                event_start=BASE+timedelta(hours=hour), replay_features=True)
+        from tests.test_market_data.online_runtime_recovery_fixture import finish_source
+        finish_source(storage, runtime_recovery, control, options["policy"])
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'qt%cutover%'")) == 0
+            assert _frozen_records(conn) == frozen
+        return
     wait("publish")
     if initial_capture:
         with engine.begin() as conn:

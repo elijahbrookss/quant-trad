@@ -247,6 +247,70 @@ def prepare_capture(engine, request, *, targets, policy, limits, source):
     return placement, result["started_at"]
 
 
+def validate_request_shape(request):
+    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id", "capture_preparation"} != {
+            "schema_version", "source_revision", "source_tree_hash", "database_identity",
+            "source_device", "source_inode", "expected_started_at", "policy",
+            "resource_limits", "max_page_bytes", "max_objects", "max_bytes",
+            "page_rows", "command_seconds"}
+            or request["schema_version"] != "qt.storage_online_worker.v1"):
+        raise ValueError("storage_online_request_invalid")
+    archive_group_override(request)
+    capture_preparation(request)
+
+
+def request_configuration(request, inventory_path):
+    """Shared read-only policy, inventory and budget validation; no SQL or files opened for writing."""
+    from core.storage_inventory import read_storage_inventory
+    from core.storage_targets import StoragePolicy
+    from scripts.db import archive_reference_v2_placement as references
+    from scripts.db.archive_file_v2_proof import validate_inventory_budget
+    from scripts.automation.storage_online_controller import validate_copy_budget
+    from portal.backend.service.storage.header_resource_claims import _limits
+
+    validate_request_shape(request)
+    validate_copy_budget(**{k:request[k] for k in ("command_seconds","page_rows","max_page_bytes")})
+    validate_inventory_budget(max_files=request["max_objects"],max_bytes=request["max_bytes"])
+    policy = StoragePolicy.from_dict(request["policy"])
+    limits = _limits(request["resource_limits"], migration=True)
+    targets = read_storage_inventory(inventory_path)
+    if len(targets) != 2:
+        raise RuntimeError("storage_online_two_targets_required")
+    references._fixed_inputs(policy, limits, targets)
+    if (policy.archives != policy.history or policy.backups != policy.history
+            or not policy.movement_enabled or not policy.backup_enabled):
+        raise RuntimeError("storage_online_fixed_policy_required")
+    if {t.root for t in targets} != {"/var/lib/postgresql/data", "/qt-history"}:
+        raise RuntimeError("storage_online_fixed_roots_required")
+    return policy,limits,targets
+
+
+def inspect_request_configuration(request, inventory_path, *, history_uuid):
+    """Candidate-image probe: read-only SQL environment and original cluster only."""
+    from sqlalchemy import create_engine,text
+    from sqlalchemy.pool import NullPool
+    from scripts.automation.storage_online_controller import OnlineController
+
+    policy, _, targets = request_configuration(request, inventory_path)
+    history = next(target for target in targets if target.target_id == policy.history[0])
+    if history.filesystem_uuid != history_uuid:
+        raise RuntimeError("storage_online_history_uuid_changed")
+    engine=create_engine(os.environ["PG_DSN"],poolclass=NullPool,connect_args={"connect_timeout":5})
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            conn.exec_driver_sql("SET LOCAL statement_timeout='10s'")
+            identity=conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text "
+                "FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
+            if identity!=request["database_identity"]:
+                raise RuntimeError("storage_online_database_binding_changed")
+            OnlineController._require_job_environment(conn,allow_connections=True)
+            OnlineController._supported_builtin_catalog(conn)
+    finally:
+        engine.dispose()
+    return {"validated":True}
+
+
 def prepared_controller_main():
     """Private explicit capture/controller entrypoint; never pause or activate."""
     import contextlib
@@ -271,15 +335,7 @@ def prepared_controller_main():
             or hashlib.sha256(data).hexdigest() != os.environ.get("QT_ONLINE_REQUEST_SHA256")):
         raise RuntimeError("storage_online_request_binding_changed")
     request = json.loads(data, object_pairs_hook=unique)
-    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id", "capture_preparation"} != {
-            "schema_version", "source_revision", "source_tree_hash", "database_identity",
-            "source_device", "source_inode", "expected_started_at", "policy",
-            "resource_limits", "max_page_bytes", "max_objects", "max_bytes",
-            "page_rows", "command_seconds"}
-            or request["schema_version"] != "qt.storage_online_worker.v1"):
-        raise ValueError("storage_online_request_invalid")
-    archive_group_override(request)
-    capture_preparation(request)
+    validate_request_shape(request)
     for key, variable in (("source_revision", "QT_IMAGE_SOURCE_REVISION"),
                           ("source_tree_hash", "QT_IMAGE_SOURCE_TREE_HASH")):
         value = request[key]
@@ -299,22 +355,10 @@ def prepared_controller_main():
         with contextlib.redirect_stdout(sys.stderr):
             from sqlalchemy import create_engine, text
             from sqlalchemy.pool import NullPool
-            from core.storage_inventory import read_storage_inventory
-            from core.storage_targets import StoragePolicy
-            from scripts.db import archive_reference_v2_placement as references
             from scripts.automation.storage_online_controller import OnlineController, serve
-            from portal.backend.service.storage.header_resource_claims import _limits
 
             admit_archive_configuration(request, Path("/qt-history/archives/objects"))
-            policy = StoragePolicy.from_dict(request["policy"])
-            limits = _limits(request["resource_limits"], migration=True)
-            targets = read_storage_inventory(Path("/run/qt-online/inventory.json"))
-            if len(targets) != 2:
-                raise RuntimeError("storage_online_two_targets_required")
-            references._fixed_inputs(policy, limits, targets)
-            if (policy.archives != policy.history or policy.backups != policy.history
-                    or not policy.movement_enabled or not policy.backup_enabled):
-                raise RuntimeError("storage_online_fixed_policy_required")
+            policy,limits,targets = request_configuration(request, Path("/run/qt-online/inventory.json"))
             dsn = os.environ.get("PG_DSN")
             if not dsn:
                 raise RuntimeError("storage_online_pg_dsn_required")
@@ -330,8 +374,6 @@ def prepared_controller_main():
                         "WHERE d.datname=current_database()"))
                     if identity != request["database_identity"]:
                         raise RuntimeError("storage_online_database_binding_changed")
-                if {t.root for t in targets} != {"/var/lib/postgresql/data", "/qt-history"}:
-                    raise RuntimeError("storage_online_fixed_roots_required")
                 placement, started = prepare_capture(engine, request, targets=targets,
                     policy=policy, limits=limits, source=source)
                 if {t.target_id: t for t in targets} != {

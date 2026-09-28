@@ -2747,10 +2747,16 @@ new entrypoint, state owner or receipt is introduced. The complete operator,
 production resource admission and measured collection impact remain separate
 release requirements.
 
-## Fixed prepared-operation driver
+## Single local migration operation
 
-`storage_online_operation.run_prepared_operation` connects the existing owners
-from admitted source-serving preparation and an immutable worker request through
+`qt storage migrate --operation-file /absolute/private/operation.json` inspects a
+fixed local Linux migration plan. Adding `--execute` runs the admitted operation.
+The CLI calls `storage_online_operation.run_operation_plan` directly; it does not
+send an HTTP request, add an MCP operation, or implement another state owner.
+
+The operation acquires the existing deployment lock before initial admission and
+retains it across the existing initial preparation and prepared-source driver.
+The latter connects the existing owners through
 background copy, held switch, independently verified reader retirement, recovery
 mounts/repositories, private pending-WAL copy and application startup. It keeps
 the deployment lock and source hold through that entire transition. It does not
@@ -2786,7 +2792,44 @@ preparation the check is also bounded by the original capture deadline. All late
 live checks remain mandatory, including independently verified reader retirement
 before private recovery mounts. A changed or invalid plan refuses before pause.
 
-This is the internal operation driver, not a newly exposed public CLI. Admission
-before the initial host preparation, terminal reconciliation/release, actual
-source/fleet/resource admission and measured production impact remain required
-before a supported release command can be enabled.
+Before the initial pause, the operation additionally admits the original
+one-PGDATA source, its fixed mount-preparation recipe, candidate image attestation,
+source archive identity and the full future runtime configuration. A bounded
+read-only probe in the same candidate image checks the existing policy/resource
+rules, original cluster/database identity, supported builtin jobs and the history
+filesystem UUID. This probe has no source, archive, PGDATA or recovery-key mounts,
+no PostgreSQL PID sharing and no capabilities. It uses the existing `PG_DSN`.
+A failed check refuses before the initial preparation journal or any service stop.
+
+The plan is a caller-owned private regular JSON file, with no symlink, duplicate
+fields or unknown fields. It declares `qt.storage_online_operation.v1`, exact
+source/candidate identities, prepared paths, immutable worker configuration and
+explicit measured limits. It supplies a history cutoff and cumulative attempt
+limit; it cannot supply a capture start or preparation clock. The existing
+initial receipt supplies its saved completion time and original 600-second
+deadline to the worker request. A serving-source reentry uses those same values.
+An incomplete initial intent or any final intent requires reconciliation rather
+than repeating the operation. The configuration is read again before mutation.
+
+Runtime-ready return retains all phase journals and explicitly reports that
+ordinary relaunch and a complete encrypted pair are not yet confirmed. Terminal
+reconciliation/release, actual source/fleet/resource admission and measured
+production impact remain required. This command is not permission to dispatch
+an unqualified plan on production or bypass review.
+
+### Private operation plan fields
+
+The exact top-level fields are `schema_version`, `state_root`, `project`,
+`source_revision`, `source_image`, `image`, `history_uuid`, `history_before`,
+`attempt_seconds`, `request`, `inventory_path`, `descriptor_limit`, `memory_bytes`,
+`limits`, `keys_root`, `socket_volume` and `spool_destination`. Paths are canonical
+absolute existing paths. Existing private database/runtime recipes stay under
+`state_root`; key contents and DSNs do not belong in this plan.
+
+`request` is the existing `qt.storage_online_worker.v1` configuration. Its
+`expected_started_at` must be null and `capture_preparation` must be absent.
+`limits` contains the exact `OperationLimits` fields: `preparation_seconds`,
+`final_seconds`, `recovery_seconds`, `runtime_seconds`, `spool_max_bytes`,
+`spool_max_entries`, `spool_reserve_bytes`, `repository_max_bytes`,
+`repository_reserve_bytes` and `recent_free_bytes`. These values must come from
+release measurements; tiny rehearsal limits are not production defaults.

@@ -154,3 +154,128 @@ def test_preflight_preserves_named_background_worker_admission(monkeypatch,tmp_p
             source_image="source",image="candidate",request={},inventory_path=tmp_path,
             keys_root=tmp_path,socket_volume="socket",spool_destination=tmp_path,deadline=time.monotonic()+30)
     assert seen==([found] if journal_id==found else [])
+
+
+@pytest.fixture
+def operation_file(tmp_path):
+    request = dict(schema_version="qt.storage_online_worker.v1", source_revision="c"*40,
+        source_tree_hash="d"*64, database_identity="123/456", source_device=1, source_inode=2,
+        expected_started_at=None, policy={}, resource_limits={"movement_timeout_seconds":180},
+        max_page_bytes=1024, max_objects=128, max_bytes=1024, page_rows=2, command_seconds=30)
+    for name in ("keys", "spool"):
+        (tmp_path/name).mkdir()
+    (tmp_path/"inventory").write_text("fixture")
+    plan = dict(schema_version="qt.storage_online_operation.v1", state_root=str(tmp_path),
+        project="fixture", source_revision="a"*40, source_image="sha256:"+"b"*64,
+        image="sha256:"+"e"*64, history_uuid="uuid-hdd", history_before="2026-01-01",
+        attempt_seconds=180, request=request, inventory_path=str(tmp_path/"inventory"),
+        descriptor_limit=1024, memory_bytes=1024**3, limits=vars(limits()),
+        keys_root=str(tmp_path/"keys"), socket_volume="fixture-socket", spool_destination=str(tmp_path/"spool"))
+    path=tmp_path/"operation.json"
+    operation.host.save_receipt(path,plan,initial=True)
+    return path,plan
+
+
+@pytest.mark.parametrize("fault", ["clock", "capture", "deadline", "schema", "fields", "permissions", "symlink", "inventory_alias"])
+def test_private_plan_rejects_invented_clocks_or_ambiguous_inputs(operation_file,fault):
+    import json
+    path,plan=operation_file
+    if fault=="clock": plan["request"]["expected_started_at"]="2026-01-01T00:00:00+00:00"
+    elif fault=="capture": plan["request"]["capture_preparation"]=None
+    elif fault=="deadline": plan["attempt_seconds"]=96*3600+1
+    elif fault=="schema": plan["schema_version"]="unknown"
+    elif fault=="fields": plan["replay"]=True
+    elif fault=="inventory_alias": plan["inventory_path"]+="/../inventory"
+    path.write_text(json.dumps(plan))
+    if fault=="permissions": path.chmod(0o644)
+    elif fault=="symlink":
+        target=path.with_name("target.json");path.rename(target);path.symlink_to(target)
+    with pytest.raises((ValueError,RuntimeError,OSError)):
+        operation.load_operation_plan(path)
+
+
+@pytest.mark.parametrize("execute", [False,True])
+def test_full_operator_admits_before_initial_pause_under_one_lock(monkeypatch,operation_file,execute):
+    path,plan=operation_file
+    events=[];held=[]
+    @contextmanager
+    def lock(root):
+        assert not held
+        held.append(root)
+        try: yield
+        finally: held.pop()
+    def inspect(root,**kw):
+        assert held==[root]
+        events.append("inspect")
+        return {"observed":True}
+    preparation=dict(phase="serving",history_uuid="uuid-hdd",started_at=1000.,completed_at=1010.,deadline=1600.)
+    def prepare(root,**kw):
+        assert held==[root] and events==["inspect"]
+        events.append("prepare")
+        return preparation
+    def run(root,**kw):
+        assert held==[root] and events==["inspect","prepare"]
+        assert kw["request"]["capture_preparation"]==dict(requested_at=1010.,deadline=1600.,history_before="2026-01-01",attempt_seconds=180)
+        events.append("driver")
+        return {"ordinary_relaunch_authorized":False,"complete_backup_confirmed":False}
+    monkeypatch.setattr(operation.host,"deployment_lock",lock)
+    monkeypatch.setattr(operation,"inspect_initial_operation",inspect)
+    monkeypatch.setattr(operation.initial,"prepare_online_source_locked",prepare)
+    monkeypatch.setattr(operation,"run_prepared_operation_locked",run)
+    result=operation.run_operation_plan(path,execute=execute)
+    assert events==(["inspect","prepare","driver"] if execute else ["inspect"])
+    assert result["phase"]==("runtime_ready" if execute else "inspected")
+    assert operation.load_operation_plan(path)==plan and not held
+
+
+@pytest.mark.parametrize("failure", ["preflight", "plan_changed", "initial_uncertain", "final_intent"])
+def test_full_operator_never_advances_or_replays_uncertain_initial_work(monkeypatch,operation_file,failure):
+    path,plan=operation_file
+    calls=[]
+    def inspect(root,**kw):
+        calls.append("inspect")
+        if failure=="preflight":raise RuntimeError("preflight_refused")
+        if failure=="plan_changed":
+            changed=dict(plan,attempt_seconds=179)
+            operation.host.save_receipt(path,changed,initial=False)
+        return {}
+    def prepare(root,**kw):
+        calls.append("prepare")
+        raise RuntimeError("initial_uncertain")
+    monkeypatch.setattr(operation,"inspect_initial_operation",inspect)
+    monkeypatch.setattr(operation.initial,"prepare_online_source_locked",prepare)
+    monkeypatch.setattr(operation,"run_prepared_operation_locked",lambda *a,**kw:pytest.fail("driver dispatched"))
+    if failure=="final_intent":(path.parent/"storage-online-final.json").write_text("unreadable retained intent")
+    with pytest.raises(RuntimeError):operation.run_operation_plan(path,execute=True)
+    assert calls==([] if failure=="final_intent" else ["inspect","prepare"] if failure=="initial_uncertain" else ["inspect"])
+
+
+def test_full_operator_reentry_preserves_original_preparation_deadline(monkeypatch,operation_file):
+    path,plan=operation_file
+    (path.parent/operation.initial.STATE).write_text("owned fixture")
+    saved=dict(phase="serving",history_uuid=plan["history_uuid"],started_at=1000.,completed_at=1010.,deadline=1600.)
+    monkeypatch.setattr(operation.initial,"_load",lambda _:saved)
+    monkeypatch.setattr(operation,"inspect_prepared_operation",lambda *a,**kw:{})
+    monkeypatch.setattr(operation.initial,"prepare_online_source_locked",lambda *a,**kw:pytest.fail("initial phase restarted"))
+    def driver(root,**kw):
+        assert kw["request"]["capture_preparation"]["deadline"]==1600.
+        assert kw["request"]["capture_preparation"]["requested_at"]==1010.
+        raise RuntimeError("existing worker owns expiry admission")
+    monkeypatch.setattr(operation,"run_prepared_operation_locked",driver)
+    with pytest.raises(RuntimeError,match="existing worker owns"):
+        operation.run_operation_plan(path,execute=True)
+
+
+def test_cli_migrate_uses_local_owner_without_api_client(monkeypatch,operation_file,capsys):
+    from cli import main
+    path,_=operation_file
+    parser=main.build_parser()
+    monkeypatch.setattr(main,"_client",lambda _:pytest.fail("HTTP client opened"))
+    calls=[]
+    def run(path,**kw):calls.append((path,kw));return {"phase":"inspected"}
+    monkeypatch.setattr(operation,"run_operation_plan",run)
+    for tail in ([],["--execute"]):
+        args=parser.parse_args(["storage","migrate","--operation-file",str(path),*tail])
+        assert args.func(args)==0
+    assert calls==[(str(path),{"execute":False}),(str(path),{"execute":True})]
+    assert 'inspected' in capsys.readouterr().out
