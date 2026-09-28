@@ -46,7 +46,7 @@ _OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "inspect_r
 def validate_copy_budget(*, command_seconds, page_rows, max_page_bytes):
     if type(command_seconds) is not int or not 1 <= command_seconds <= 60:
         raise ValueError("storage_online_command_budget_invalid")
-    if type(page_rows) is not int or not 1 <= page_rows <= 256:
+    if type(page_rows) is not int or not 1 <= page_rows <= 4096:
         raise ValueError("storage_online_page_rows_invalid")
     if type(max_page_bytes) is not int or max_page_bytes <= 0:
         raise ValueError("storage_online_page_bytes_invalid")
@@ -75,7 +75,11 @@ class OnlineController:
         self.source_root, self.destination_root = Path(source_root), Path(destination_root)
         self.expected_started_at = expected_started_at
         self.max_objects, self.max_bytes = max_objects, max_bytes
-        self.max_page_bytes, self.page_rows = max_page_bytes, page_rows
+        self.max_page_bytes = max_page_bytes
+        # The explicit request may use the existing SQL helper's larger batch.
+        # Archive inventory and held final work retain their independent ceiling.
+        self.sql_page_rows = page_rows
+        self.page_rows = min(page_rows, 256)
         self.controller_id = uuid4().hex
         self.state = "new"
         self._stack = None
@@ -624,7 +628,7 @@ class OnlineController:
                     result = self._catalog_step(request["relation"], request["max_duration_seconds"])
                 elif operation == "sql_copy":
                     report = online.copy_pass(self.engine, placement=self.placement,
-                        policy=self.policy, resource_limits=self.limits, page_rows=self.page_rows,
+                        policy=self.policy, resource_limits=self.limits, page_rows=self.sql_page_rows,
                         max_pages=2, max_duration_seconds=self.limits["movement_timeout_seconds"])
                     result = {key: report[key] for key in
                               ("outcome", "phase", "committed_pages", "verified_page_rows")}
@@ -636,7 +640,7 @@ class OnlineController:
                     result = online.preparation_step(self.engine, step=request["step"],
                         relation=request["relation"], placement=self.placement,
                         policy=self.policy, resource_limits=self._admitted_limits,
-                        expected_started_at=self.expected_started_at, page_rows=self.page_rows,
+                        expected_started_at=self.expected_started_at, page_rows=self.sql_page_rows,
                         max_duration_seconds=request["max_duration_seconds"])
                 self.check()
         except BaseException as exc:

@@ -3054,3 +3054,23 @@ HDD placement. Every page retains the same resource watcher and original clock.
 The prepass and relocation count toward total elapsed time. Production admission
 must still include queues, source growth, retained data, WAL/temp and full pauses;
 less allocation overlap alone does not establish sufficient capacity or speed.
+
+
+### Background SQL page budget
+
+The online worker's existing explicit `page_rows` request accepts up to 4,096
+rows for background SQL copying and identity-capture preparation, matching the
+existing database page helpers. Requests omitted by direct callers retain the
+128-row default; existing requests of at most 256 keep their previous behavior.
+Archive copy/reproof and all held final work use at most `min(page_rows, 256)`.
+Their byte, object and final-time limits are unchanged. The worker keeps two
+pages per SQL command, per-page transactions/resource watches, the admitted
+command deadline and original cumulative capture deadline. A final-bound worker
+cannot return to background copying. No new request field or execution path is
+introduced.
+
+The split addresses measured normal-controller overhead: the prior 256-row
+request projected beyond the existing 96-hour window for the observed source
+cardinality. A larger declared SQL batch still needs measured allocation,
+throughput and workload admission; it does not extend any clock or establish a
+production migration estimate.

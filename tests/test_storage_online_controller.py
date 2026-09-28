@@ -417,3 +417,54 @@ def test_catalog_move_expired_absolute_deadline_never_opens_database():
     with pytest.raises(ValueError,match="attempt_binding_invalid"):
         move_reference_catalog(NoDatabase(),relation="market.fact_archive_material_aliases",
             policy=None,resource_limits=None,deadline=monotonic()-1)
+
+
+@pytest.mark.parametrize("rows", [0, True, 4097, 2.5, "4096"])
+def test_copy_budget_refuses_invalid_sql_batch(rows):
+    from scripts.automation.storage_online_controller import validate_copy_budget
+    with pytest.raises(ValueError, match="storage_online_page_rows_invalid"):
+        validate_copy_budget(command_seconds=30, page_rows=rows, max_page_bytes=1024)
+
+
+@pytest.mark.parametrize("rows", [128, 256, 4096])
+def test_background_sql_batch_does_not_expand_archive_or_final_work(monkeypatch, tmp_path, rows):
+    from scripts.automation import storage_online_controller as module
+    # No resource work is performed here; native qualification exercises the
+    # unchanged SQL/resource guards through the real channel and controller.
+    monkeypatch.setattr(module, "_limits", lambda value, **kw: value)
+    controller=module.OnlineController(object(), placement=object(), policy=object(),
+        resource_limits={"movement_timeout_seconds":60}, source_root=tmp_path,
+        destination_root=tmp_path, expected_started_at="original-clock",
+        max_objects=10, max_bytes=1024, max_page_bytes=512, page_rows=rows,
+        command_seconds=30)
+    assert controller.sql_page_rows==rows
+    assert controller.page_rows==min(rows,256)
+    assert controller.limits["movement_timeout_seconds"]==30
+    assert controller._admitted_limits["movement_timeout_seconds"]==60
+    controller.state="background"
+    controller.proof=SimpleNamespace(hashed_bytes=0)
+    monkeypatch.setattr(controller,"_admit_attempt",lambda:None)
+    monkeypatch.setattr(controller,"check",lambda:None)
+    seen={}
+    def sql(engine,**kw):
+        seen["sql"]=kw
+        return dict(outcome="page_budget_reached",phase="raw_baseline",
+                    committed_pages={"raw":2},verified_page_rows={"raw":rows*2})
+    monkeypatch.setattr(module.online,"copy_pass",sql)
+    controller.command(dict(controller_id=controller.controller_id,sequence=1,operation="sql_copy"))
+    assert seen["sql"]["page_rows"]==rows
+    assert seen["sql"]["max_pages"]==2
+    assert seen["sql"]["max_duration_seconds"]==30
+    def archive(engine,**kw):
+        seen["archive"]=kw
+        return dict(family=kw["family"],page_objects=0,copied_objects=0,
+                    reused_objects=0,verified_bytes=0,baseline_complete=True)
+    monkeypatch.setattr(module.archive_online,"copy_page",archive)
+    controller.command(dict(controller_id=controller.controller_id,sequence=2,operation="archive_copy"))
+    assert seen["archive"]["page_rows"]==min(rows,256)
+    assert seen["archive"]["max_page_bytes"]==512
+    assert seen["archive"]["resource_limits"]["movement_timeout_seconds"]==30
+    # Once final work is bound, larger background batches cannot be dispatched.
+    controller._final_deadline=monotonic()+10
+    with pytest.raises(RuntimeError,match="final_background_work_refused"):
+        controller.command(dict(controller_id=controller.controller_id,sequence=3,operation="sql_copy"))

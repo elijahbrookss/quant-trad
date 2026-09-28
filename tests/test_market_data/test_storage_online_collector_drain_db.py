@@ -236,22 +236,23 @@ def test_real_collector_stop_waits_for_ack_and_recovers_retained_wal(
             # All fixture publishers have joined. This internal DB switch is not
             # a host publisher-exclusion certificate or a production entrypoint.
             from scripts.automation.storage_online_controller import OnlineController
-            from scripts.db import fact_header_v2_handoff as handoff
+            from scripts.automation.storage_online_operation import prepare_background
             from scripts.db import fact_header_v2_online_proof as protection
-            from tests.test_market_data.test_storage_online_controller_db import _drain, _reprove
             with engine.begin() as conn:
                 protection.prepare(conn)
                 started = conn.scalar(text("SELECT prepared_at FROM qt_fact_header_cutover_v2.capture"))
             runtime_root = options["destination_root"].parent
             monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(runtime_root))
             monkeypatch.setenv("QT_MARKET_DATA_EXPECTED_UUID", storage.copy_plan.history.filesystem_uuid)
-            handoff.stage_handoff(engine, placement=storage.copy_plan,
-                                  max_duration_seconds=120, **options)
             with OnlineController(engine, placement=storage.copy_plan,
                     expected_started_at=started.isoformat(), max_objects=128,
                     max_bytes=64*1024**2, **options) as worker:
-                _drain(worker)
-                _reprove(worker)
+                # Fresh online captures use the supported serial staging order;
+                # the historical held-copy helper cannot prepare this schema.
+                def exchange(operation, **fields):
+                    return worker.command(dict(controller_id=worker.controller_id,
+                        sequence=worker._sequence+1, operation=operation, **fields))
+                prepare_background(exchange, preparation_seconds=60)
                 worker.commit_database(deadline=monotonic()+30)
                 assert worker.inspect_outcome(deadline=monotonic()+4)["database_handoff_committed"]
             # Preserve the original SSD working/spool root and bytes. Restore
