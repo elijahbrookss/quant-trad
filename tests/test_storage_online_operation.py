@@ -15,8 +15,8 @@ def limits():
 def test_background_finishes_finite_preparation_before_chasing_live_tail():
     calls=[]
     replies=iter([
-        dict(outcome="identity_relocation_required",phase="identity_relocation_required"),
         dict(outcome="raw_relocation_required",phase="raw_relocation_required"),
+        dict(outcome="identity_relocation_required",phase="identity_relocation_required"),
         dict(outcome="page_budget_reached",phase="catch_up"),
         *[dict(outcome="both_tails_observed_empty",phase="catch_up")]*3])
     family=iter(sorted(operation._FAMILIES));proved=set()
@@ -33,7 +33,7 @@ def test_background_finishes_finite_preparation_before_chasing_live_tail():
     result=operation.prepare_background(exchange,preparation_seconds=30)
     assert result==dict(reference_count=1,tail_rounds=3,final_switch_authorized=False)
     steps=[kw['step'] for op,kw in calls if op=='prepare_step']
-    assert steps==['catalog_history','identity_history','raw_history','identity_capture',
+    assert steps==['catalog_history','raw_history','identity_history','identity_capture',
                    'reference_prepare','reference_validate','reference_adopt','catalog_history','catalog_history']
     assert all(kw['max_duration_seconds']==30 for op,kw in calls if op=='prepare_step')
 
@@ -286,3 +286,22 @@ def test_operation_accepts_measured_spool_scan_without_changing_copy_budget():
     measured.validate({'resource_limits': {'movement_timeout_seconds': 180}})
     assert measured.spool_max_bytes == limits().spool_max_bytes
     assert measured.final_seconds == limits().final_seconds
+
+
+@pytest.mark.parametrize("started,header_complete,identity_ready,raw_complete,raw_ready,expected", [
+    (False,False,False,False,False,"raw_baseline"),
+    (False,False,False,True,False,"raw_relocation_required"),
+    (False,False,False,True,True,"header_baseline"),
+    (True,False,False,False,False,"header_baseline"),
+    (True,True,False,False,False,"identity_relocation_required"),
+    (True,True,True,False,False,"raw_baseline"),
+    (True,True,True,True,False,"raw_relocation_required"),
+    (True,True,True,True,True,"catch_up"),
+])
+def test_online_phase_order_retires_raw_first_but_preserves_started_headers(
+        started, header_complete, identity_ready, raw_complete, raw_ready, expected):
+    from scripts.db.fact_header_v2_online import _phase
+    header=dict(after_day="2026-09-01" if started else None,
+        baseline_complete=header_complete,identity_history_ready=identity_ready)
+    lookup=dict(baseline_complete=raw_complete,history_ready=raw_ready)
+    assert _phase(header,lookup)==expected

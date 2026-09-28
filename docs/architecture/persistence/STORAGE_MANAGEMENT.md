@@ -3026,3 +3026,20 @@ all require that exact retained hold. The normal deployer recognizes it only
 after the qualified online terminal grant succeeds. Missing, changed, unrelated
 or standalone legacy holds still refuse; no hold is deleted and no migration
 operation is replayed.
+
+### Online baseline order and SSD headroom
+
+For a new online attempt, finish the bounded raw lookup baseline and commit its
+existing physical HDD relocation before allocating header pages and identities.
+This avoids adding the complete raw staging allocation to the completed recent
+headers. Header identity relocation still finishes before following live tails.
+The original capture deadline, per-page resource watcher, exact verification and
+final writer boundary are unchanged; no separate placement option is introduced.
+
+An already-started header baseline keeps the former header/identity/raw order,
+selected from its existing durable header cursor. No progress or clock is reset.
+A failed raw relocation preserves its SSD copy and source; header copying cannot
+start until actual bound history placement is committed and reverified. Phase
+limits still need measured admission, including queue growth while the other
+baseline runs, retained data, WAL/temp and source growth. Reducing allocation
+overlap alone does not establish sufficient production headroom or a pause ETA.

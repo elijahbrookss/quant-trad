@@ -53,9 +53,22 @@ def _advance(engine, options):
     pytest.fail("bounded fixture passes did not converge")
 
 
+def _finish_raw_before_header_faults(engine, options):
+    # Exercise the new finite raw phase before injecting header-specific faults.
+    for _ in range(16):
+        result = online.copy_pass(engine, **options)
+        assert result["committed_pages"]["headers"] == 0
+        if result["outcome"] == "raw_relocation_required":
+            with engine.begin() as conn:
+                raw.place_on_history(conn)
+            return
+    pytest.fail("tiny raw baseline did not reach its explicit relocation")
+
+
 def test_online_pass_commits_progress_with_concurrent_intake_and_preserves_source(
         placed, tmp_path, monkeypatch):
     engine, options = _prepare(placed, tmp_path, monkeypatch)
+    _finish_raw_before_header_faults(engine, options)
     with engine.connect() as conn:
         original_start = conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture"))
         frozen = _frozen_records(conn)
@@ -101,6 +114,7 @@ def test_online_pass_commits_progress_with_concurrent_intake_and_preserves_sourc
 def test_online_pass_interrupted_page_rolls_back_without_losing_earlier_pages(
         placed, tmp_path, monkeypatch):
     engine, options = _prepare(placed, tmp_path, monkeypatch)
+    _finish_raw_before_header_faults(engine, options)
     copied = [0]
 
     def kill_second(conn, cursor, statement, parameters, context, executemany):

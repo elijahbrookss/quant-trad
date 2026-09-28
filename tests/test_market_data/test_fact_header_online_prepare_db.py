@@ -140,8 +140,9 @@ def test_online_preparation_refuses_busy_source_without_partial_capture(
     online.prepare_attempt(engine, **options)
 
 
+@pytest.mark.parametrize("header_started", [False, True])
 def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
-        storage, tmp_path, monkeypatch):
+        storage, tmp_path, monkeypatch, header_started):
     from scripts.db import archive_reference_v2_placement as catalogs
     from scripts.db import fact_header_v2_references as references
     from tests.test_market_data.test_fact_header_copy_db import _insert
@@ -163,7 +164,11 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
     with pytest.raises(RuntimeError, match="attempt_binding_changed"):
         online.preparation_step(engine, step="identity_history",
             **(steps | {"expected_started_at": "different attempt"}))
-    moved = set()
+    if header_started:
+        # A prior version may have committed header pages before being resumed.
+        with engine.begin() as conn:
+            headers.copy_page(conn, page_rows=1)
+    moved = []
     for _ in range(40):
         result = online.copy_pass(engine, max_pages=2, page_rows=2, **args)
         if result["outcome"] == "identity_relocation_required":
@@ -177,10 +182,16 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         report = online.preparation_step(engine, step=phase, **steps)
         assert report["committed"] and not report["final_switch_authorized"]
         assert online.preparation_step(engine, step=phase, **steps)["reused"]
-        moved.add(phase)
+        moved.append(phase)
+        if phase == "raw_history" and not header_started:
+            with engine.begin() as conn:
+                assert headers._inspect_progress(conn)["verified_rows"] == 0
+                assert raw._inspect(conn)["history_ready"]
+                assert conn.scalar(text(f"SELECT count(*) FROM {headers.SCHEMA}.fact_versions")) == 0
     else:
         pytest.fail("tiny explicit phase fixture did not converge")
-    assert moved == {"identity_history", "raw_history"}
+    assert moved == (["identity_history", "raw_history"] if header_started
+                     else ["raw_history", "identity_history"])
     online.preparation_step(engine, step="identity_capture", **steps)
     with engine.begin() as conn:
         slots = [row["relation"] for row in references.inspect_references(conn)["references"]

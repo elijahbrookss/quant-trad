@@ -148,10 +148,17 @@ def preparation_step(engine, *, step, placement, policy, resource_limits,
             if retained.inspect_reference_catalog(
                     conn, relation=retained.RETAINED_LEGACY)["placement"] != "history":
                 raise RuntimeError("fact_header_online_retained_relocation_required")
-        if (not header["baseline_complete"]
-                or (step != "identity_history" and not header["identity_history_ready"])
-                or (step not in {"identity_history", "raw_history"}
-                    and not lookup["history_ready"])):
+        if step == "raw_history":
+            # A fresh attempt retires raw staging before allocating headers.
+            # Already-started header copies keep their original allocation order.
+            allowed = lookup["baseline_complete"] and (
+                lookup["history_ready"] or header["after_day"] is None
+                or (header["baseline_complete"] and header["identity_history_ready"]))
+        else:
+            allowed = (header["baseline_complete"]
+                and (step == "identity_history" or header["identity_history_ready"])
+                and (step == "identity_history" or lookup["history_ready"]))
+        if not allowed:
             raise RuntimeError("fact_header_online_preparation_order_required")
         args = {"timeout_seconds": seconds}
         if relation_step:
@@ -177,8 +184,12 @@ def preparation_step(engine, *, step, placement, policy, resource_limits,
     return result
 
 def _phase(header, lookup):
-    # Finish each finite baseline before following an unbounded live tail.
-    # Keep the proven SSD allocation order: identities retire before raw grows.
+    # Finish finite raw staging and retire it before new headers grow on SSD.
+    # The durable header cursor preserves the old order for an already-started
+    # attempt; changing its order could add raw staging to existing headers/IDs.
+    if (not header["baseline_complete"] and header["after_day"] is None
+            and not lookup["history_ready"]):
+        return "raw_relocation_required" if lookup["baseline_complete"] else "raw_baseline"
     if not header["baseline_complete"]:
         return "header_baseline"
     if not header["identity_history_ready"]:
