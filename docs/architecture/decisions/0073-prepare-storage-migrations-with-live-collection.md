@@ -9,6 +9,8 @@ tags:
   - storage
   - migration
 code_paths:
+  - tests/test_storage_online_runtime.py
+  - scripts/automation/storage_online_runtime.py
   - scripts/provenance/source_tree_hash.py
   - portal/backend/Dockerfile
   - tests/test_storage_online_repositories.py
@@ -1463,3 +1465,33 @@ encrypted-pair publication still require connected qualification. Production
 pause and capacity admission remain unfinished. The runtime package explicitly
 includes the existing online worker/controller dependency closure, and those files
 participate in source attestation.
+
+
+### Connect private pending-WAL preparation after native WAL readiness
+
+The final-state owner may enter `storage_online_runtime.prepare_spool` only from
+`recovery_wal_ready`, inside the same live source/deployment hold and original
+final/capture window. This internal application-handover boundary begins by
+preparing pending WAL; it does not yet start the application or certify recovery.
+The original source root remains read-only. An already prepared empty private
+UID1000 destination must be on the same SSD, separate from the source hierarchy.
+
+One fixed, isolated filesystem helper reuses `prepare_recovery_spool`. It has only
+source/read-only and destination/read-write mounts, no network, no shared peer PID
+namespace, no database or keys, and only CHOWN/DAC_OVERRIDE/FOWNER capabilities
+needed for the existing private ownership transition. Ordinary runtime privileges
+are unchanged. Host checks retain original source identities, database bindings,
+repository-helper retirement and the source hold; the child independently enforces
+the original deadline and SSD reserve before bounded one-MiB writes. The helper
+must actually exit cleanly before its copy result is accepted. Local CLI loss never
+means its daemon work was canceled.
+
+The existing final receipt journals create/copy intent before dispatch. A private,
+bounded `.qt-recovery-copy.json` in the new working root contains copied-file hashes;
+the final receipt stores its digest and compact counts, avoiding an unbounded
+control receipt. Original files, acknowledgements and permissions stay untouched.
+Any failed or uncertain copy retains the unactivated destination and unresolved
+intent, with no reuse or replay. `recovery_spool_ready` certifies only preserving
+copy preparation. The matching application must still recover and acknowledge WAL
+through normal QT database/archive processing before collection and encrypted-pair
+outcomes can complete the supported operator.

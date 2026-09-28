@@ -36,7 +36,13 @@ parser.add_argument('--recovery-mounts',action='store_true',help='preserving alr
 parser.add_argument('--recovery-create-reply-loss',action='store_true',help='discard completed owned recovery database create reply, retaining unresolved intent')
 parser.add_argument('--recovery-repositories',action='store_true',help='continue held committed operation through actual encrypted repositories and native WAL delivery')
 parser.add_argument('--recovery-repository-reply-loss',action='store_true',help='discard completed preparer reply and retain unresolved repository intent')
+parser.add_argument('--recovery-spool',action='store_true',help='prepare preserved pending WAL in a new private SSD root after native WAL readiness')
+parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
 options=parser.parse_args()
+if options.recovery_spool and (not options.recovery_repositories or options.recovery_repository_reply_loss):
+ parser.error('--recovery-spool requires successful --recovery-repositories')
+if options.recovery_spool_reply_loss and not options.recovery_spool:
+ parser.error('--recovery-spool-reply-loss requires --recovery-spool')
 if options.recovery_repository_reply_loss and not options.recovery_repositories:
  parser.error('--recovery-repository-reply-loss requires --recovery-repositories')
 if options.recovery_repositories and (not options.recovery_mounts or options.recovery_create_reply_loss):
@@ -106,6 +112,8 @@ try:
  report['distinct_drive_roots']=history_parent.stat().st_dev != ROOT.stat().st_dev
  history.mkdir();created_history=True
  working=state/'working';working.mkdir();control=state/'control';control.mkdir();control.chmod(0o777)
+ if options.recovery_spool:
+  candidate_working=state/'candidate-working';candidate_working.mkdir(mode=0o700)
  if options.recovery_mounts:
   recovery_keys=state/'fixture-recovery-keys';recovery_keys.mkdir(mode=0o700)
   (recovery_keys/'disposable-marker').write_text('disposable fixture only')
@@ -868,6 +876,54 @@ os.chown(root,70,70)
           max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
       raise AssertionError('completed repository preparation replay admitted')
      except RuntimeError as exc:assert str(exc)=='storage_online_repository_live_transition_required'
+    if options.recovery_spool:
+     owned.append(project+'-storage-spool-prepare')
+     spool_before=final_host._load(state/final_host.STATE)
+     spool_started=time.monotonic()
+     actual_spool_action=host_boundary.supervised_source_action
+     if options.recovery_spool_reply_loss:
+      def lose_copy_reply(arguments,**kwargs):
+       actual_spool_action(arguments,**kwargs)
+       if arguments[:2]==['start','--attach']:
+        raise EOFError('owned completed spool copy reply discarded')
+      host_boundary.supervised_source_action=lose_copy_reply
+     try:
+      result=final_host.prepare_online_runtime_spool_locked(state,worker_process=worker,
+          destination=candidate_working,max_bytes=64*1024**2,max_entries=4096,
+          reserve_bytes=8*1024**2,max_duration_seconds=15)
+      assert not options.recovery_spool_reply_loss
+      spool_after=final_host._load(state/final_host.STATE)
+      assert spool_after['phase']=='recovery_spool_ready'
+      assert result['source_preserved'] and not result['runtime_activation_authorized']
+      assert result['copied_files']==drained['pending_files'] and result['copied_bytes']==drained['pending_bytes']
+      assert all(spool_after[k]==spool_before[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery','repositories'))
+      report['recovery_spool']=dict(source_preserved=True,private_candidate_owner=1000,
+          copied_files=result['copied_files'],copied_bytes=result['copied_bytes'],
+          component_seconds=time.monotonic()-spool_started,
+          final_entry_to_spool_ready_seconds=spool_after['runtime_spool']['finished_at']-spool_after['started_at'],
+          runtime_activation_authorized=False)
+      probe="import json,hashlib,stat;from pathlib import Path;items=json.loads(__import__('sys').argv[1]);root=Path('/candidate');assert (root.stat().st_uid,root.stat().st_gid,stat.S_IMODE(root.stat().st_mode))==(1000,1000,0o700);[(lambda p,v: (p.read_bytes(),None) if hashlib.sha256(p.read_bytes()).hexdigest()==v['sha256'] and (p.stat().st_uid,p.stat().st_gid,stat.S_IMODE(p.stat().st_mode))==(1000,1000,0o600) else (_ for _ in ()).throw(AssertionError('copied WAL differs')))(root/v['path'],v) for v in items];print('private candidate copy readable')"
+      run(['run','--rm','--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','64m',
+          '--mount','type=bind,source='+str(candidate_working)+',target=/candidate,readonly',
+          '--entrypoint','python',image,'-c',probe,json.dumps(json.loads((candidate_working/'.qt-recovery-copy.json').read_text())['copied_files'])])
+     except EOFError as exc:
+      assert options.recovery_spool_reply_loss and str(exc)=='owned completed spool copy reply discarded'
+      spool_after=final_host._load(state/final_host.STATE)
+      assert spool_after['phase']=='recovery_spool_preparing'
+      assert spool_after['runtime_spool']['completed']==['create'] and spool_after['runtime_spool']['inflight']=='copy'
+      assert spool_after['runtime_spool']['report'] is None
+      status=json.loads(run(['inspect',spool_after['runtime_spool']['helper_id'],'--format','{{json .State}}']).stdout)
+      assert status['Pid']==0 and not status['Running'] and status['ExitCode']==0
+      assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
+      report['recovery_spool_lost_reply']=dict(actual_copy_completed=True,unresolved_intent_retained=True,
+          source_not_restarted=True,runtime_activation_authorized=False)
+     finally:host_boundary.supervised_source_action=actual_spool_action
+     try:
+      final_host.prepare_online_runtime_spool_locked(state,worker_process=worker,
+          destination=candidate_working,max_bytes=64*1024**2,max_entries=4096,
+          reserve_bytes=8*1024**2,max_duration_seconds=15)
+      raise AssertionError('completed or uncertain spool copy replay admitted')
+     except RuntimeError as exc:assert str(exc)=='storage_online_runtime_spool_live_transition_required'
     source_holds.close()
     report['held_database_commit']['read_worker_pid0_before_hold_release']=True
    # Fixture teardown only, AFTER verified worker retirement. This does not
@@ -1001,6 +1057,8 @@ finally:
   mine=details['Config']['Labels'].get('qt.disposable')==project
   if name==project+'-storage-online' and (state/launch._STATE).exists():
    mine=json.loads((state/launch._STATE).read_text())['container_id']==details['Id']
+  if name==project+'-storage-spool-prepare':
+   mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
   if name==project+'-storage-repository-prepare':
    mine=details['Config']['Labels'].get('com.docker.compose.project')==project+'-recovery' and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)
@@ -1010,7 +1068,7 @@ finally:
  if created_history:
   assert history.parent==history_parent and history.name==project
   cleanup=project+'-cleanup'
-  r=run(['run','--rm','--name',cleanup,'--user','0:0','--network','none','--memory','64m','--cpus','0.25','--mount','type=bind,source='+str(history)+',target=/h','--mount','type=bind,source='+str(state)+',target=/s','--entrypoint','python',options.image,'-c',"import shutil;from pathlib import Path;[(shutil.rmtree(p) if p.is_dir() else p.unlink()) for p in Path('/h').iterdir()];[shutil.rmtree(Path('/s')/n) for n in ('working','control','fixture-recovery-keys') if (Path('/s')/n).exists()]"],check=False)
+  r=run(['run','--rm','--name',cleanup,'--user','0:0','--network','none','--memory','64m','--cpus','0.25','--mount','type=bind,source='+str(history)+',target=/h','--mount','type=bind,source='+str(state)+',target=/s','--entrypoint','python',options.image,'-c',"import shutil;from pathlib import Path;[(shutil.rmtree(p) if p.is_dir() else p.unlink()) for p in Path('/h').iterdir()];[shutil.rmtree(Path('/s')/n) for n in ('working','control','fixture-recovery-keys','candidate-working') if (Path('/s')/n).exists()]"],check=False)
   report['cleanup_exit_code']=r.returncode
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()

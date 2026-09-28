@@ -70,7 +70,7 @@ def validate_journal(saved):
             or any(value[field] is not None and (not isinstance(value[field],str)
                 or not re.fullmatch(r"[0-9a-f]{64}",value[field])) for field in ("helper_id","helper_contract","helper_retirement"))):
         raise RuntimeError("storage_online_repository_journal_invalid")
-    if saved["phase"] == "recovery_wal_ready":
+    if saved["phase"] != "recovery_repository_preparing":
         if (value["completed"] != list(_ACTIONS) or value["inflight"] is not None
                 or type(value["finished_at"]) not in (int,float)
                 or not value["started_at"] <= value["finished_at"] <= saved["deadline"]):
