@@ -623,8 +623,12 @@ show_release() {
     echo "Receipt presence alone does not confirm migration or fleet health."
   fi
   if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
-    echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
-    echo "Use the preserving storage procedure to reconcile database and runtime state."
+    if storage_online_pending; then
+      echo "Initial preparation receipt retained; exact terminal admission determines deployment access."
+    else
+      echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
+      echo "Use the preserving storage procedure to reconcile database and runtime state."
+    fi
   fi
   if ! test -f "$state_file"; then
     echo "No successful release has been recorded at $state_file"

@@ -3005,6 +3005,10 @@ root is prepared with the application/operator owner and database shared group
 before source startup. The backend keeps internal port 8000 and uses a distinct
 loopback address for its owned host listener. Deployment runs as the ordinary
 operator; no host account membership or original source permission is changed.
+After ordinary Compose adoption, the rehearsal resolves the unique current
+database container and verifies the original cluster and frozen data. It records
+any container recreation and the additional deployment time, and checks the
+actual pgAdmin HTTP endpoint. This elapsed fixture time is not production downtime.
 
 
 Terminal deployment admission also verifies the initial preserving hold through

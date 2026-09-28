@@ -470,6 +470,7 @@ os.chown(root,70,70)
    env={**os.environ,'QT_SINGLE_NODE_ENV_FILE':str(canonical['environment']),
         'QT_SINGLE_NODE_STATE_ROOT':str(state)}
    deployment_log=state/'ordinary-deployment.log'
+   deployment_started=time.monotonic()
    with deployment_log.open('w') as stream:
     deployment_log.chmod(0o600)
     deployment_command=['bash',str(options.canonical_deployment_repository/'scripts/automation/server_deploy.sh'),'deploy',revision]
@@ -477,9 +478,27 @@ os.chown(root,70,70)
    assert deployed.returncode==0, 'canonical ordinary deployment failed; see private fixture log'
    terminal=final_host._load(state/final_host.STATE)
    assert terminal['release']['status']=='deployed'
-   assert host_boundary.cluster_identifier(pgid)==original_cluster
-   assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+   # Compose may adopt the preserving container by recreation. Resolve its
+   # exact service identity, then verify the original cluster/data, not a stale ID.
+   databases=run(['ps','-aq','--filter','label=com.docker.compose.project='+project,
+     '--filter','label=com.docker.compose.service=tsdb']).stdout.split()
+   assert len(databases)==1, 'ordinary deployment database identity is ambiguous'
+   deployed_database=databases[0]
+   assert host_boundary.cluster_identifier(deployed_database)==original_cluster
+   assert host_boundary.database_query(deployed_database,frozen_sql)==before_final_frozen
+   from urllib.request import urlopen
+   pgadmin_deadline=time.monotonic()+30  # post-deployment fixture observation only
+   while True:
+    try:
+     with urlopen(canonical['pgadmin_url'],timeout=2) as response:
+      assert response.status==200
+     break
+    except (OSError, AssertionError):
+     if time.monotonic()>=pgadmin_deadline:raise
+     time.sleep(.2)
    report['ordinary_deployment']=dict(recorded=True,cluster_preserved=True,frozen_preserved=True,
+     database_container_recreated=deployed_database!=pgid,pgadmin_http_ready=True,
+     deployment_seconds=time.monotonic()-deployment_started,
      retained_marker=True,production_admission=False)
   log.close()
   report.update(passed=True,image=image,fixture_seconds=time.monotonic()-started)
@@ -1338,7 +1357,7 @@ finally:
   diagnostic=run(['logs','--tail','160',project+'-market-data-collector'],check=False)
   (state/'worker-shutdown.log').write_text(diagnostic.stdout+diagnostic.stderr)
  if options.recovery_runtime:
-  for service_name in ('initialize','backend','market-data-collector','storage-maintenance'):
+  for service_name in ('initialize','backend','market-data-collector','storage-maintenance',*(('pgadmin',) if canonical else ())):
    diagnostic=run(['logs','--tail','120',project+'-'+service_name+'-1'],check=False)
    (state/('runtime-'+service_name+'.log')).write_text(diagnostic.stdout+diagnostic.stderr)
    diagnostic=run(['inspect',project+'-'+service_name+'-1','--format','{{json .State}}'],check=False)

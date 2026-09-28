@@ -192,11 +192,14 @@ def test_read_only_release_reports_online_intent_without_parsing_private_receipt
     state.mkdir()
     marker = state / marker_name
     marker.write_text('{"private":"DO_NOT_PRINT"')
+    (state / "storage-handoff.json").write_text('{"private":"DO_NOT_PRINT"')
     result = subprocess.run(["bash", str(SCRIPT), "release"], capture_output=True, text=True, timeout=10,
                             env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state)})
     assert result.returncode == 0, result.stderr
     assert "Storage online receipts retained" in result.stdout
     assert "Receipt presence alone does not confirm migration or fleet health" in result.stdout
+    assert "Initial preparation receipt retained" in result.stdout
+    assert "Storage handoff hold: active" not in result.stdout
     assert "No successful release" in result.stdout
     assert "DO_NOT_PRINT" not in result.stdout + result.stderr
     assert marker.exists()
