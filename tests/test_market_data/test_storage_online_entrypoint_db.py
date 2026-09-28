@@ -102,13 +102,24 @@ def _declare_targets(storage, control, monkeypatch, *, recent_root):
     assert os.getenv("QT_DB_TEST_ISOLATED") == "1" and os.getuid() == 70
     recent, history = Path(recent_root), Path("/qt-history")
     assert recent.stat().st_dev != history.stat().st_dev
-    udev = control/"udev-placement"
-    udev.mkdir()
-    targets = (StorageTarget("ssd", "Recent", "uuid-copy-ssd", str(recent), "ssd"),
-               StorageTarget("hdd", "History", "uuid-copy-hdd", str(history), "hdd"))
-    for target in targets:
-        dev = Path(target.root).stat().st_dev
-        (udev/f"b{os.major(dev)}:{os.minor(dev)}").write_text("E:ID_FS_UUID="+target.filesystem_uuid+"\n")
+    real = os.getenv("QT_ONLINE_CANONICAL_FIXTURE") == "1"
+    udev = Path("/run/qt-host-udev/data") if real else control/"udev-placement"
+    if not real:
+        udev.mkdir()
+    def identity(root, fallback):
+        if not real:
+            return fallback
+        dev = root.stat().st_dev
+        lines = (udev/f"b{os.major(dev)}:{os.minor(dev)}").read_text().splitlines()
+        values = [line.split("=", 1)[1] for line in lines if line.startswith("E:ID_FS_UUID=")]
+        assert len(values) == 1 and values[0]
+        return values[0]
+    targets = (StorageTarget("ssd", "Recent", identity(recent, "uuid-copy-ssd"), str(recent), "ssd"),
+               StorageTarget("hdd", "History", identity(history, "uuid-copy-hdd"), str(history), "hdd"))
+    if not real:
+        for target in targets:
+            dev = Path(target.root).stat().st_dev
+            (udev/f"b{os.major(dev)}:{os.minor(dev)}").write_text("E:ID_FS_UUID="+target.filesystem_uuid+"\n")
     monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
     storage.copy_plan = _UnpreparedTargets(*targets, storage.today)
     storage.copy_udev = udev

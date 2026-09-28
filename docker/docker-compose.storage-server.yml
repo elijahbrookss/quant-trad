@@ -12,6 +12,14 @@ x-storage-environment: &storage-environment
   QT_MARKET_DATA_WORKING_EXPECTED_UUID: ${QT_MARKET_DATA_WORKING_EXPECTED_UUID:?SSD filesystem UUID is required}
   QT_STORAGE_INVENTORY_PATH: /run/quanttrad/storage-inventory.json
 
+x-existing-secrets: &existing-secrets
+  type: bind
+  source: ${QT_SERVER_ENV_FILE:-../secrets.env}
+  target: /app/secrets.env
+  read_only: true
+  bind:
+    create_host_path: false
+
 x-history-mount: &history-mount
   type: bind
   source: ${QT_STORAGE_HDD_ROOT:?Prepared HDD root is required}
@@ -77,6 +85,12 @@ services:
       - *history-mount
       - *working-mount
       - *inventory-mount
+      - *existing-secrets
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
 
   initialize:
     pull_policy: never
@@ -90,6 +104,7 @@ services:
       - *history-mount
       - *working-mount
       - *inventory-mount
+      - *existing-secrets
 
   market-data-collector:
     pull_policy: never
@@ -103,6 +118,7 @@ services:
       - *history-mount
       - *working-mount
       - *inventory-mount
+      - *existing-secrets
 
   storage-maintenance:
     pull_policy: never

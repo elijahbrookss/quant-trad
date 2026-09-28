@@ -1,7 +1,7 @@
 """Owned prepared-host launcher rehearsal with real QT publication.
 
 Synthetic service peers; optional owned initial pause and held database switch.
-No production inputs or runtime/recovery activation.
+No production inputs. Optional modes qualify owned runtime/recovery and deployment.
 All created containers, volume, network and scratch files are owned by this run.
 """
 import argparse,json,os,select,subprocess,sys,time,uuid
@@ -43,7 +43,10 @@ parser.add_argument('--recovery-spool',action='store_true',help='prepare preserv
 parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
 parser.add_argument("--recovery-runtime",action="store_true",help="start actual split application composition after committed recovery preparation")
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
+parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.canonical_deployment_repository and not options.completion_observation:
+ parser.error('--canonical-deployment-repository requires --completion-observation')
 if options.completion_observation and not options.full_operation:
  parser.error('--completion-observation requires --full-operation')
 if options.full_operation and not options.operation_driver:
@@ -108,6 +111,7 @@ network=project+'_quanttrad'
 source_holds=ExitStack()
 created_network=False
 created_history=False
+canonical=None
 owned=[];volume=project+'-pg';created_volume=False
 recovery_socket=project+'-recovery-socket';created_recovery_socket=False
 started=time.monotonic()
@@ -158,7 +162,8 @@ os.chown(root,70,70)
   assert source_config.get('Labels',{}).get('qt.guarded-source-fixture')=='true'
   assert dict(v.split('=',1) for v in source_config['Env'])['QT_IMAGE_SOURCE_REVISION']==revision
   report['guarded_source_fixture']=dict(image=source_image,application_runtime_qualified=False)
- (state/'release.env').write_text('current_revision='+revision+'\n')
+ (state/'release.env').write_text('current_revision='+revision+'\ncurrent_source_tree_hash='+envvalues['QT_IMAGE_SOURCE_TREE_HASH']+'\nprevious_revision=\ndeployed_at=fixture\nstorage_layout=\n')
+ (state/'release.env').chmod(0o600)
  def labels(service):
   return ['--label','com.docker.compose.project='+project,'--label','com.docker.compose.service='+service,'--label','com.docker.compose.oneoff=False']
  pg=run(['image','inspect',options.database_image,'--format','{{.Id}}']).stdout.strip()
@@ -173,6 +178,14 @@ os.chown(root,70,70)
  pgname=project+'-db';owned.append(pgname)
  password=uuid.uuid4().hex
  dbname='qt_migration_online_'+uuid.uuid4().hex[:16]
+ if options.canonical_deployment_repository:
+  from scripts.ci.online_operation_fixture import prepare_canonical_configuration
+  canonical=prepare_canonical_configuration(repository=options.canonical_deployment_repository,
+    state=state,project=project,image=image,database_image=pg,revision=revision,
+    source_hash=envvalues['QT_IMAGE_SOURCE_TREE_HASH'],password=password,dbname=dbname,
+    history=history,candidate_working=candidate_working,volume=volume,network=network,
+    recovery_keys=recovery_keys,recovery_socket=recovery_socket)
+ history_uuid=canonical['history_uuid'] if canonical else 'uuid-copy-hdd'
  if options.prepare_source:
   pgname=project+'-tsdb-1';owned.append(pgname)
   service=dict(image=pg,pull_policy='never',hostname='tsdb.quanttrad',
@@ -185,6 +198,7 @@ os.chown(root,70,70)
   model=dict(name=project,services={'tsdb':service},
     volumes={'postgres-data':dict(name=volume,external=True)},
     networks={'quanttrad':dict(name=network,external=True)})
+  if canonical:model=canonical['database']
   source_recipe=state/'source.compose.json';source_recipe.write_text(json.dumps(model));source_recipe.chmod(0o600)
   recipe=json.loads(json.dumps(model))
   recipe['services']['tsdb']['volumes'].append(dict(type='bind',source=str(history),target='/qt-history',bind=dict(create_host_path=False)))
@@ -212,9 +226,13 @@ os.chown(root,70,70)
   from scripts.automation.storage_online_final import _SOURCE_WRITERS
   if options.commit_switch and service in _SOURCE_WRITERS:
    target='/app/logs/market-structure'
+   canonical_mounts=[]
+   if canonical:
+    canonical_mounts=['--mount','type=bind,source='+str(canonical['environment'])+',target=/app/secrets.env,readonly']
+    if service=='backend':canonical_mounts+=['--mount','type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock']
    run(['run','-d','--name',name,'--pull','never','--network',network,
      '--user','70:70','--read-only','--memory','128m','--cpus','0.25','--pids-limit','32',
-     *labels(service),'--mount','type=bind,source='+str(working)+',target='+target,
+     *labels(service),*canonical_mounts,'--mount','type=bind,source='+str(working)+',target='+target,
      '--env','PG_DSN=postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname,
      '--env','QT_ONLINE_GUARDED_SOURCE_FIXTURE=1','--env','QT_DISABLE_DOTENV=1',
      '--env','QT_STORAGE_SOURCE_FENCE_ROOT='+target,'--env','MARKET_STRUCTURE_STORAGE_ROOT='+target,
@@ -248,13 +266,14 @@ os.chown(root,70,70)
   udev=state/'initial-udev';udev.mkdir()
   device=history.stat().st_dev
   (udev/f'b{os.major(device)}:{os.minor(device)}').write_text('E:ID_FS_UUID=uuid-copy-hdd\n')
+  if canonical:udev=Path('/run/udev/data')
   os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
   original_cluster=host_boundary.cluster_identifier(pgid)
   if not options.full_operation:
-   preparation=initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')
+   preparation=initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid=history_uuid)
    prepared_bytes=(state/initial.STATE).read_bytes()
    assert preparation['phase']=='serving' and preparation['deadline']-preparation['started_at']==600
-   assert initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid='uuid-copy-hdd')==preparation
+   assert initial.prepare_online_source(state,project=project,source_revision=revision,history_uuid=history_uuid)==preparation
    pgid=host_boundary.inventory(project)['tsdb']['id']
    assert host_boundary.cluster_identifier(pgid)==original_cluster
    assert not host_boundary.inventory(project)['initialize']['running']
@@ -273,6 +292,11 @@ os.chown(root,70,70)
    '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
+ if canonical:
+  position=args.index('--entrypoint')
+  args[position:position]=['--env','QT_ONLINE_CANONICAL_FIXTURE=1',
+    '--mount','type=bind,source=/run/udev/data,target=/run/qt-host-udev/data,readonly',
+    '--mount','type=bind,source='+str(Path(__file__).resolve().parents[2]/'tests/test_market_data/test_storage_online_entrypoint_db.py')+',target=/app/tests/test_market_data/test_storage_online_entrypoint_db.py,readonly']
  log=(state/'fixture.log').open('w')
  fixture=subprocess.Popen(args,stdout=log,stderr=subprocess.STDOUT,env={**os.environ,'PG_DSN':'postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname})
  until=time.monotonic()+180
@@ -293,7 +317,7 @@ os.chown(root,70,70)
   assert launch._capture_observation(pgid) is None
   report['capture_absent_before_owned_worker']=True
  inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes());inventory.chmod(0o644)
- udev=control/Path(json.loads((control/'ready.json').read_text())['udev']).relative_to('/qt-control')
+ udev=Path('/run/udev/data') if canonical else control/Path(json.loads((control/'ready.json').read_text())['udev']).relative_to('/qt-control')
  os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
  source=host_boundary.identities(host_boundary.inventory(project))
  original_source_metadata=[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
@@ -308,9 +332,18 @@ os.chown(root,70,70)
   # Reviewed fixture configuration is prepared BEFORE any driver dispatch.
   base=host_boundary.load_receipt(state/initial.held.DATABASE_RECIPE)
   recovery_model=recovery_host.database_recipe(base,keys_root=recovery_keys,socket_volume=recovery_socket,history=history)
-  write_runtime_recipe(state=state,runtime_model=recovery_model,inventory=inventory,udev=udev,
-    image=image,password=password,dbname=dbname,history=history,project=project,
-    candidate_working=candidate_working,owned=owned)
+  if canonical:
+   from scripts.automation import storage_online_runtime as runtime_host
+   from scripts.automation.storage_online_release import _service_definition
+   assert _service_definition(canonical['runtime']['services']['tsdb'],image_environment={})==_service_definition(recovery_model['services']['tsdb'],image_environment={})
+   canonical['runtime']['services']['tsdb']=recovery_model['services']['tsdb']
+   assert canonical['runtime']['volumes']==recovery_model['volumes']
+   host_boundary.save_receipt(state/runtime_host.RUNTIME_RECIPE,canonical['runtime'],initial=True)
+   owned.extend(project+'-'+name+'-1' for name in runtime_host._APPLICATIONS)
+  else:
+   write_runtime_recipe(state=state,runtime_model=recovery_model,inventory=inventory,udev=udev,
+     image=image,password=password,dbname=dbname,history=history,project=project,
+     candidate_working=candidate_working,owned=owned)
   # Exercise prepared-operation preflight with an actual retired owned worker.
   # Capture is created once and keeps its original clock across driver reentry.
   if not options.full_operation:
@@ -359,10 +392,11 @@ os.chown(root,70,70)
    if options.full_operation:
     capture_plan=request.pop('capture_preparation')
     plan=dict(schema_version='qt.storage_online_operation.v1',state_root=str(state),**kwargs,
-      source_image=source_image,history_uuid='uuid-copy-hdd',history_before=capture_plan['history_before'],
+      source_image=source_image,history_uuid=history_uuid,history_before=capture_plan['history_before'],
       attempt_seconds=capture_plan['attempt_seconds'],limits=vars(limits),keys_root=str(recovery_keys),
       socket_volume=recovery_socket,spool_destination=str(candidate_working))
     plan['inventory_path']=str(inventory)
+    if canonical:plan.update(deployment_environment=str(canonical['environment']),deployment_repository=str(options.canonical_deployment_repository.resolve()))
     operation_file=state/'operation.json'
     host_boundary.save_receipt(operation_file,plan,initial=True)
     inspected=operation.run_operation_plan(operation_file)
@@ -420,14 +454,38 @@ os.chown(root,70,70)
      if observed['ready']:break
      time.sleep(.2)
     again=operation.run_operation_plan(operation_file,execute=True)
-    assert again['ready'] and not again['ordinary_relaunch_authorized']
+    if not canonical:assert again['ready'] and not again['ordinary_relaunch_authorized']
     assert observed['plan_id']==saved['commit']['confirmed_plan_id']
-    assert again['recovery_generation']==observed['recovery_generation']
-    assert (state/final_host.STATE).read_bytes()==final_bytes
+    if not canonical:assert again['recovery_generation']==observed['recovery_generation']
+    if not canonical:assert (state/final_host.STATE).read_bytes()==final_bytes
     assert (state/initial.STATE).read_bytes()==prepared_bytes
     report['completion_observation']=dict(observed,after_original_final_deadline=True,
-      repeated_without_dispatch=True,journals_unchanged=True)
+      repeated_without_dispatch=True,journals_unchanged=not bool(canonical))
    finally:host_boundary.supervised_source_action=actual_action
+  if canonical:
+   published=final_host._load(state/final_host.STATE)
+   assert published['release']['status']=='published'
+   report['canonical_publication']=dict(retained_marker=True,exact_public_recipe=True)
+   env={**os.environ,'QT_SINGLE_NODE_ENV_FILE':str(canonical['environment']),
+        'QT_SINGLE_NODE_STATE_ROOT':str(state)}
+   deployment_log=state/'ordinary-deployment.log'
+   with deployment_log.open('w') as stream:
+    deployment_log.chmod(0o600)
+    deployment_command=['bash',str(options.canonical_deployment_repository/'scripts/automation/server_deploy.sh'),'deploy',revision]
+    if 70 not in os.getgroups():
+     # Grant only this disposable operator process the archive group. No host
+     # account or existing path permissions change; application capabilities stay dropped.
+     groups=','.join(str(group) for group in sorted(set(os.getgroups())|{70}))
+     deployment_command=['sudo','-n','--preserve-env=QT_SINGLE_NODE_ENV_FILE,QT_SINGLE_NODE_STATE_ROOT,PYTHONPATH',
+       'setpriv','--reuid='+str(os.getuid()),'--regid='+str(os.getgid()),'--groups='+groups,*deployment_command]
+    deployed=subprocess.run(deployment_command,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=1800)
+   assert deployed.returncode==0, 'canonical ordinary deployment failed; see private fixture log'
+   terminal=final_host._load(state/final_host.STATE)
+   assert terminal['release']['status']=='deployed'
+   assert host_boundary.cluster_identifier(pgid)==original_cluster
+   assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+   report['ordinary_deployment']=dict(recorded=True,cluster_preserved=True,frozen_preserved=True,
+     retained_marker=True,production_admission=False)
   log.close()
   report.update(passed=True,image=image,fixture_seconds=time.monotonic()-started)
  else:
@@ -1291,11 +1349,14 @@ finally:
    diagnostic=run(['inspect',project+'-'+service_name+'-1','--format','{{json .State}}'],check=False)
    (state/('runtime-'+service_name+'-state.json')).write_text(diagnostic.stdout)
  cleanup_failures=[]
+ if canonical:
+  owned.extend(run(['ps','-aq','--filter','label=com.docker.compose.project='+project]).stdout.split())
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue
   details=json.loads(observed.stdout)
   mine=details['Config']['Labels'].get('qt.disposable')==project
+  if canonical and details['Config']['Labels'].get('com.docker.compose.project')==project:mine=True
   if name==project+'-storage-online' and (state/launch._STATE).exists():
    mine=json.loads((state/launch._STATE).read_text())['container_id']==details['Id']
   if name==project+'-storage-spool-prepare':
@@ -1303,6 +1364,11 @@ finally:
   if name==project+'-storage-repository-prepare':
    mine=details['Config']['Labels'].get('com.docker.compose.project')==project+'-recovery' and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)
+ if canonical:
+  for name in run(['volume','ls','-q','--filter','label=com.docker.compose.project='+project]).stdout.split():
+   details=json.loads(run(['volume','inspect',name]).stdout)[0]
+   assert details['Labels'].get('com.docker.compose.project')==project
+   run(['volume','rm',name])
  if created_volume:run(['volume','rm',volume])
  if created_recovery_socket:run(['volume','rm',recovery_socket])
  if created_network:run(['network','rm',network])

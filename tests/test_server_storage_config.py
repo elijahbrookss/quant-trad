@@ -36,6 +36,9 @@ def test_fixed_overlay_preserves_spool_and_database_paths_without_fallback_mount
         assert ("/app/logs/market-structure" in mounts) != maintenance
         if not maintenance:
             assert "pid" not in service
+            assert mounts["/app/secrets.env"]["read_only"] is True
+            assert mounts["/app/secrets.env"]["bind"] == {"create_host_path": False}
+        assert ("/var/run/docker.sock" in mounts) == (name == "backend")
         assert "HDD_ROOT:?" in mounts["/qt-history"]["source"]
         assert mounts["/run/quanttrad/storage-inventory.json"]["read_only"]
         environment = service["environment"]

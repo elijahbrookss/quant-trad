@@ -2984,3 +2984,22 @@ claiming fresh fleet health from obsolete migration container identities.
 This terminal path still requires integrated release qualification and review;
 component file/render tests do not establish production pause, capacity, workload
 or successful migration-plus-deployment outcomes.
+
+
+The public storage composition also requires the existing read-only application
+secret file and backend Docker socket to exist; neither may be created as an
+empty fallback directory. This matches the migration runtime mount admission.
+The fixed database recipe accepts Compose's explicit null entrypoint, which
+inherits the qualified image entrypoint. Empty or custom entrypoint overrides
+remain prohibited, and actual image/container entrypoints remain bound by the
+preserving preparation checks.
+
+The existing disposable online rehearsal accepts
+`--canonical-deployment-repository <exact-clean-checkout>` with the full-operation
+and completion-observation modes. It renders that checkout's public composition,
+uses real read-only filesystem UUID metadata and distinct owned listener ports,
+and drives the existing terminal publication and ordinary deployer. It uses
+synthetic guarded source peers and disposable credentials; it cannot establish
+production collection performance or production admission. When needed, only its
+deployment subprocess receives the archive supplemental group; no host account
+membership or original source permission is changed.

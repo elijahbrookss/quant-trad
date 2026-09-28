@@ -90,8 +90,11 @@ def _database_recipe(state_root: Path, project: str) -> tuple[dict, str]:
         raise RuntimeError("storage_database_invalid_fixed_recipe")
     service = model["services"]["tsdb"]
     allowed = {"image", "command", "hostname", "init", "restart", "shm_size", "healthcheck",
-               "environment", "labels", "volumes", "networks", "logging", "pull_policy", "user"}
-    if (set(service)-allowed or service.get("pull_policy") != "never"
+               "environment", "labels", "volumes", "networks", "logging", "pull_policy", "user", "entrypoint"}
+    # Compose emits null for the unchanged image entrypoint. Empty/list/string
+    # overrides still refuse; subsequent admission binds the actual image entrypoint.
+    if (set(service)-allowed or service.get("entrypoint") is not None
+            or service.get("pull_policy") != "never"
             or service.get("healthcheck", {}).get("test") != _TCP_PROBE
             or set(service.get("networks", {})) != {"quanttrad"}
             or set(service["networks"]["quanttrad"])-{"aliases"}):

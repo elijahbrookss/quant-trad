@@ -348,6 +348,22 @@ def database_setup(tmp_path, monkeypatch):
     return state, docker
 
 
+@pytest.mark.parametrize("entrypoint", [None, [], "", ["sh"], "sh"])
+def test_database_recipe_only_accepts_inherited_entrypoint(database_setup, entrypoint):
+    state, docker = database_setup
+    docker.model["services"]["tsdb"]["entrypoint"] = entrypoint
+    (state/pause.DATABASE_RECIPE).write_text(json.dumps(docker.model))
+    if entrypoint is None:
+        model, _ = pause._database_recipe(state, PROJECT)
+        assert model["services"]["tsdb"]["entrypoint"] is None
+        admitted = pause.inspect_database_preparation(state, PROJECT, docker.rows, "fixture-hdd")
+        assert admitted["image"] == docker.original["image"]
+    else:
+        with pytest.raises(RuntimeError, match="storage_database_unsafe_fixed_recipe"):
+            pause._database_recipe(state, PROJECT)
+    assert docker.operations == []
+
+
 def enter_database(state):
     return pause.paused_storage_clients(state, project=PROJECT, source_revision=REVISION,
                                         prepare_database=True, history_uuid="fixture-hdd")
