@@ -619,8 +619,8 @@ require_no_alert_preview() {
 
 show_release() {
   if storage_online_pending; then
-    echo "Storage online intent: unresolved; ordinary deployment/recovery is blocked."
-    echo "Preserve online receipts and reconcile the database, mounts and runtime before resuming server operations."
+    echo "Storage online receipts retained; deployment admission checks the terminal handoff."
+    echo "Receipt presence alone does not confirm migration or fleet health."
   fi
   if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
     echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
@@ -636,6 +636,7 @@ show_release() {
     -e 's/^previous_revision=/previous revision: /p' \
     -e 's/^deployed_at=/deployed at: /p' \
     -e 's/^storage_layout=/storage layout: /p' \
+    -e 's/^pending_storage_revision=/pending storage deployment: /p' \
     "$state_file"
   if test -f "$state_root/promotion.env"; then
     echo "unfinished promotion candidate: $(promotion_value candidate_revision)"
@@ -828,8 +829,8 @@ restore_alerting_preview() {
 }
 
 deploy_release() {
-  require_no_storage_handoff
   local requested_ref="${1:-}"
+  require_no_storage_handoff "$requested_ref"
   require_no_alert_preview
   if test -f "$state_root/promotion.env" && test "${promotion_in_progress:-false}" != "true"; then
     die "an unfinished promotion is recorded; run recover before another deployment"
@@ -844,6 +845,17 @@ deploy_release() {
   fi
   # Building can take minutes. Recheck before replacing any running services.
   validate_storage_root
+  if storage_online_pending; then
+    compose config --format json | PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import json, sys
+from scripts.automation.storage_online_release import check_deployment_render
+raw=sys.stdin.read(524289)
+if len(raw.encode()) > 524288:
+    raise RuntimeError("storage_online_release_render_too_large")
+check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3],
+    revision=sys.argv[4], source_hash=sys.argv[5], model=json.loads(raw))
+' "$state_root" "$env_file" "$repo_root" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH"
+  fi
   if test "${promotion_in_progress:-false}" = "true" && test "${reuse_release_images:-false}" != "true"; then
     printf 'activation_started=true\n' >>"$state_root/promotion.env"
   fi
@@ -852,12 +864,22 @@ deploy_release() {
   verify_initializer
   verify_release_image backend
   verify_release_image market-data-collector
+  if test "$(recorded_storage_layout)" = ssd-hdd-v1; then
+    verify_release_image storage-maintenance
+  fi
   verify_release_image docker-stats
   verify_release_image frontend
   verify_release_image frontend-v2
   compose exec -T backend /app/scripts/qt data collectors fleet >/dev/null
   compose ps
   record_release
+  if storage_online_pending; then
+    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH" <<'PY'
+import sys
+from scripts.automation.storage_online_release import record_deployment
+record_deployment(sys.argv[1], environment_path=sys.argv[2], revision=sys.argv[3], source_hash=sys.argv[4])
+PY
+  fi
   show_release
 }
 
@@ -888,7 +910,11 @@ storage_online_pending() {
 # Presence alone is a hold: corrupt/partial state must never permit a restart.
 require_no_storage_handoff() {
   if storage_online_pending; then
-    die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
+    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$repo_root" "${action:-}" "${1:-}" <<'PY' || die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
+import sys
+from scripts.automation.storage_online_release import admit_deployment
+admit_deployment(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3], action=sys.argv[4], revision=sys.argv[5])
+PY
   fi
   if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
     die "storage handoff hold is active; reconcile the preserving storage procedure before resuming server operations"
@@ -1017,7 +1043,7 @@ shift || true
 case "$action" in
   init-env|deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
     acquire_deployment_lock
-    require_no_storage_handoff
+    require_no_storage_handoff "${1:-}"
     ;;
 esac
 

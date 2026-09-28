@@ -66,6 +66,8 @@ def _load(path):
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming or gated
     fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set()) | ({"recovery"} if recovering else set()) | ({"repositories"} if saved.get("phase") in _REPOSITORY_PHASES else set()) | ({"runtime_spool"} if saved.get("phase") in _SPOOL_PHASES else set()) | ({"runtime"} if saved.get("phase") in _RUNTIME_PHASES else set())
+    if "release" in saved:
+        fields = fields | {"release"}
     if (set(saved) != fields or saved["schema"] != SCHEMA
             or saved["phase"] not in {"stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"} | _COMMIT_PHASES
             or type(saved["duration_seconds"]) is not int
@@ -173,6 +175,9 @@ def _load(path):
     if saved["phase"] in _RUNTIME_PHASES:
         from scripts.automation.storage_online_runtime import validate_runtime_journal
         validate_runtime_journal(saved)
+    if "release" in saved:
+        from scripts.automation.storage_online_release import validate_release_journal
+        validate_release_journal(saved)
     return saved
 
 
@@ -1335,3 +1340,26 @@ def inspect_runtime_completion_locked(state_root, *, timeout_seconds=60):
     if time.time() < saved["runtime"]["finished_at"] or _boot_seconds() < saved["started_boot"]:
         raise RuntimeError("storage_online_final_clock_moved_backwards")
     return inspect_completed_runtime(state_root, saved=saved, timeout_seconds=timeout_seconds)
+
+
+def publish_deployment_configuration_locked(state_root, *, repository, environment_path):
+    """Terminal metadata transition; all migration actions must already be complete."""
+    from scripts.automation import storage_online_release as release
+    state_root=launch._canonical(state_root)
+    observed=inspect_runtime_completion_locked(state_root)
+    if observed.get("ready") is not True:
+        raise RuntimeError("storage_online_release_complete_recovery_required")
+    saved=_load(state_root/STATE)
+    if "release" in saved:
+        if saved["release"]["status"]!="publishing":
+            raise RuntimeError("storage_online_release_already_published")
+        if (saved["release"]["repository"]!=str(repository)
+                or saved["release"]["environment_path"]!=str(environment_path)):
+            raise RuntimeError("storage_online_release_binding_changed")
+        release.inspect_deployment_configuration(state_root, repository=repository,
+            environment_path=environment_path, saved=saved)
+        return release.reconcile_configuration_files(state_root,saved=saved)
+    configuration=release.inspect_deployment_configuration(state_root,
+        repository=repository,environment_path=environment_path,saved=saved)
+    return release.publish_configuration(state_root,repository=repository,
+        environment_path=environment_path,saved=saved,configuration=configuration)

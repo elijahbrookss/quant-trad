@@ -1691,8 +1691,8 @@ limit; it cannot supply a capture start or preparation clock. The existing
 initial receipt supplies its saved completion time and original 600-second
 deadline to the worker request. A serving-source reentry uses those same values.
 An incomplete initial intent or uncertain final intent requires reconciliation
-rather than repeating the operation. A durably ready runtime permits only the
-completion observation described below. The configuration is read again before mutation.
+rather than repeating the operation. A durably ready runtime permits the completion observation and optional terminal
+configuration handoff described below. The configuration is read again before mutation.
 
 Runtime-ready return retains all phase journals and explicitly reports that
 ordinary relaunch and a complete encrypted pair are not yet confirmed. Terminal
@@ -1704,8 +1704,8 @@ an unqualified plan on production or bypass review.
 
 Reentering the same `qt storage migrate --operation-file ...` command after
 `recovery_runtime_ready` performs bounded runtime observation, including with
-`--execute`. Optional private environment staging follows only a successful
-observation, as described below. All runtime actions must already be durably completed inside the
+`--execute`. Optional private environment staging and terminal publication follow only a
+successful observation, as described below. All runtime actions must already be durably completed inside the
 original final window. Inflight or incomplete actions, reboot, backward clocks,
 changed configuration and another handoff refuse. No service action, migration
 retry, policy change, deadline renewal or journal removal occurs.
@@ -1780,5 +1780,53 @@ The proposal derives storage bindings from the admitted runtime and grants no
 release or restart authority. This finite adapter connects migration to the
 existing deployment owner; it does not add a workflow engine or another CLI.
 See [Storage Management](../persistence/STORAGE_MANAGEMENT.md#preparing-the-private-deployment-environment)
-for its input and artifact contracts. Canonical configuration comparison and
-terminal release publication remain required before ordinary deployment resumes.
+for its input and artifact contracts. Canonical configuration comparison and retained terminal publication below
+remain required before ordinary deployment resumes.
+
+
+### Terminal handoff to the existing deployer
+
+An operation plan may additionally name `deployment_repository`, an absolute
+clean checkout of the exact candidate revision and application source hash.
+With both deployment inputs present, the existing `--execute` path can publish
+the configuration only after fresh runtime and complete encrypted-pair admission.
+Inspection without `--execute` does not publish. This is the final-state owner's
+terminal file transition, not another deployment command or migration retry.
+
+A real canonical Compose render must preserve all five storage service definitions,
+private inputs, privileges, commands, health checks, resources and existing named
+volumes/network. Only explicit fixed environment bindings, immutable image-to-build
+wiring, the preserved secret-file location and equivalent read-only udev data
+mount are normalized. Unknown differences refuse without logging private values.
+The four application roles also use `pull_policy: never`; the existing deployer
+owns their build. Non-storage UI and observability profiles remain deployer-owned.
+
+Before either active file changes, a `release` section in the existing final
+receipt records exact proposal, original-file, configuration and request hashes.
+Original environment and `release.env` bytes are preserved as private create-once
+artifacts. Atomic replacements publish the proposed environment and a bridge
+release record with the fixed layout and exact pending candidate, but no completed
+current/previous revision. An old source-layout revision is not a rollback target.
+All original migration journals and clocks remain unchanged and retained.
+
+Interrupted file publication can reconcile only exact original/proposed bytes,
+after fresh runtime/pair and clean-checkout/configuration checks. Conflicting or
+partial inputs refuse. This does not replay SQL, Docker actions or incomplete
+migration phases. Publication may occur after the original final deadline only
+because all migration/runtime actions already completed inside that deadline.
+
+The existing deployment interlock then admits only `deploy` for that exact first
+candidate. It checks the actual resolved storage configuration again after builds
+and immediately before activation, rejecting environment or mount drift. Its
+normal fleet checks, including the dedicated maintenance image, must pass before
+release bookkeeping records the completed handoff. A crash between normal release
+recording and final receipt recording permits only the same normal deployment,
+which repeats its full fleet checks; a release file alone never certifies success.
+Later ordinary releases and credential/configuration updates use the existing
+deployment/recovery validation and retain the migration evidence; the initial
+environment fingerprint does not freeze their active settings forever. Operation reentry after handoff reports recorded state without
+claiming fresh fleet health from obsolete migration container identities.
+
+This terminal path still requires integrated release qualification and review;
+component file/render tests do not establish production pause, capacity, workload
+or successful migration-plus-deployment outcomes.

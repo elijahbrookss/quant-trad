@@ -288,7 +288,7 @@ def load_operation_plan(path):
     from scripts.automation.storage_online_worker import validate_request_shape
 
     plan=host.load_receipt(launch._canonical(path))
-    if (not isinstance(plan,dict) or set(plan)-{"deployment_environment"}!=_PLAN_FIELDS
+    if (not isinstance(plan,dict) or set(plan)-{"deployment_environment","deployment_repository"}!=_PLAN_FIELDS
             or plan["schema_version"]!="qt.storage_online_operation.v1"
             or not isinstance(plan["limits"],dict)
             or set(plan["limits"])!=set(OperationLimits.__dataclass_fields__)
@@ -315,6 +315,11 @@ def load_operation_plan(path):
             raise ValueError("storage_online_operation_plan_path_invalid")
         from scripts.automation.storage_online_release import read_private_environment
         read_private_environment(Path(value))
+    if "deployment_repository" in plan:
+        value=plan["deployment_repository"]
+        if ("deployment_environment" not in plan or not isinstance(value,str)
+                or str(launch._canonical(value))!=value or not Path(value).is_dir()):
+            raise ValueError("storage_online_operation_deployment_repository_invalid")
     return plan
 
 
@@ -393,6 +398,27 @@ def run_operation_plan(path, *, execute=False):
                     or worker["binding"]["image"] != plan["image"] or request != plan["request"]
                     or saved.get("runtime_spool",{}).get("destination") != plan["spool_destination"]):
                 raise RuntimeError("storage_online_completion_plan_changed")
+            if "release" in saved:
+                from scripts.automation import storage_online_release as release
+                value = saved["release"]
+                if (plan.get("deployment_repository") != value["repository"]
+                        or plan.get("deployment_environment") != value["environment_path"]):
+                    raise RuntimeError("storage_online_release_binding_changed")
+                if load_operation_plan(path) != plan:
+                    raise RuntimeError("storage_online_operation_plan_changed")
+                if value["status"] == "publishing":
+                    if execute:
+                        return final.publish_deployment_configuration_locked(state_root,
+                            repository=plan["deployment_repository"], environment_path=plan["deployment_environment"])
+                    return dict(phase="deployment_configuration_unresolved", ordinary_relaunch_authorized=False,
+                        migration_replay_authorized=False)
+                release.admit_deployment(state_root, environment_path=plan["deployment_environment"],
+                    repository=plan["deployment_repository"], action="deploy", revision=value["candidate_revision"])
+                # Ordinary deployment owns current fleet verification after this
+                # handoff. Never reuse the retired migration's container identities.
+                return dict(phase="deployment_recorded" if value["status"] == "deployed" else "deployment_configuration_published",
+                    deployment_revision=value["candidate_revision"], migration_replay_authorized=False,
+                    ordinary_relaunch_authorized=False, current_fleet_verified=False)
             result = final.inspect_runtime_completion_locked(state_root)
             if load_operation_plan(path) != plan:
                 raise RuntimeError("storage_online_operation_plan_changed")
@@ -400,8 +426,20 @@ def run_operation_plan(path, *, execute=False):
                 from scripts.automation.storage_online_release import prepare_deployment_environment
                 result["deployment"] = prepare_deployment_environment(state_root,
                     environment_path=plan["deployment_environment"], saved=saved, execute=execute)
+                if "deployment_repository" in plan:
+                    from scripts.automation.storage_online_release import inspect_deployment_configuration
+                    if not execute and not any(os.path.lexists(state_root/name) for name in
+                            ("storage-online-source.env", "storage-online-deployment.env")):
+                        result["deployment"]["configuration"] = dict(preparation_required=True,
+                            ordinary_relaunch_authorized=False)
+                    else:
+                        result["deployment"]["configuration"] = inspect_deployment_configuration(state_root,
+                            repository=plan["deployment_repository"], environment_path=plan["deployment_environment"], saved=saved)
                 if load_operation_plan(path) != plan:
                     raise RuntimeError("storage_online_operation_plan_changed")
+                if execute and "deployment_repository" in plan:
+                    return final.publish_deployment_configuration_locked(state_root,
+                        repository=plan["deployment_repository"], environment_path=plan["deployment_environment"])
             return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
         prepared=initial._load(state_root) if os.path.lexists(state_root/initial.STATE) else None
         if prepared is None:

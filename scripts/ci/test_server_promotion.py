@@ -30,6 +30,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--storage-layout", action="store_true")
     storage_layout = parser.parse_args().storage_layout
+    service_names = SERVICES + (("storage-maintenance",) if storage_layout else ())
     project = 'qt-promotion-rehearsal-' + uuid.uuid4().hex[:12]
     print('Owned disposable project: ' + project, flush=True)
     tags, recovery_tags = set(), set()
@@ -98,13 +99,16 @@ RUN chmod +x /app/scripts/qt
 CMD ["python", "/app/fixture.py"]
 ''')
         services = {}
-        for service in SERVICES:
+        for service in service_names:
             item = dict(image=f'{project}-{service}:${{QT_RELEASE_REVISION}}', build=dict(context='..', args=dict(QT_SOURCE_REVISION='${QT_RELEASE_REVISION}', QT_SOURCE_TREE_HASH='${QT_SOURCE_TREE_HASH}')), environment={'FIXTURE_SERVICE': service}, volumes=['proof:/proof'], stop_grace_period='10s', init=True)
             if service != 'initialize':
                 item['healthcheck'] = dict(test=['CMD', 'test', '-f', '/tmp/ready'], interval='1s', timeout='2s', start_period='30s', retries=10)
             services[service] = item
         for service in ('initialize', 'market-data-collector', 'docker-stats'):
             services[service]['image'] = services['backend']['image']
+        if storage_layout:
+            services['storage-maintenance']['image'] = services['backend']['image']
+            services['storage-maintenance'].pop('build')
         services['market-data-collector']['depends_on'] = {'initialize': {'condition': 'service_completed_successfully'}}
         if storage_layout:
             # One prebuilt disposable database stand-in, preserved across app revisions.
@@ -121,7 +125,7 @@ CMD ["python", "/app/fixture.py"]
                 {'type': 'bind', 'source': '${QT_FIXTURE_HISTORY}', 'target': '/history', 'bind': {'create_host_path': False}},
                 {'type': 'bind', 'source': '${QT_FIXTURE_WORKING}', 'target': '/working', 'bind': {'create_host_path': False}},
             ],
-        } for service in SERVICES}}
+        } for service in service_names}}
         if storage_layout:
             storage_path.write_text(json.dumps(storage_model))
         (repo / '.gitignore').write_text('*.pyc\n__pycache__/\n')
@@ -271,7 +275,7 @@ CMD ["python", "/app/fixture.py"]
             if result.returncode:
                 raise RuntimeError('rehearsal cleanup failed: ' + result.stderr)
             for revision in (first, second, bad):
-                tags.update(f'{project}-{service}:{revision}' for service in SERVICES)
+                tags.update(f'{project}-{service}:{revision}' for service in service_names)
             existing = run(['docker', 'image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']).stdout.splitlines()
             owned = sorted((tags | recovery_tags).intersection(existing))
             if owned:
