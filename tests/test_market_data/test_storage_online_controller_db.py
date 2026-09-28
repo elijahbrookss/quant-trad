@@ -292,7 +292,9 @@ def test_controller_explicit_preparation_preserves_pages_and_original_attempt(
         assert first.state == "background" and first._sequence == 0
         for _ in range(32):
             result = _command(first, "sql_copy")["result"]
-            if result["outcome"] == "identity_relocation_required":
+            if result["outcome"] == "raw_relocation_required":
+                phase(first, "raw_history")
+            elif result["outcome"] == "identity_relocation_required":
                 phase(first, "identity_history")
                 break
         else:
