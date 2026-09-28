@@ -1410,3 +1410,19 @@ concurrent. No lock file, receipt, command surface or permissions repair is adde
 This supplements content proof and SQL fences. It only excludes cooperating store
 implementations; exact legacy/source/host admission remains necessary. A dead
 worker releasing its lock cannot authorize source restart or recovery activation.
+
+
+### Add recovery mounts only after the read-capability worker is retired
+
+Keep the existing final-state owner and continuous deployment/source holds across
+the committed switch and reader retirement. A separate fixed recreation phase may
+then add the already prepared key directory and independent PostgreSQL socket to
+the already HDD-mounted database. It preserves the initial recipe, PGDATA, HDD,
+image and settings; it does not reinterpret initial preparation or renew its clock.
+The phase has its own shorter bound inside the original final/capture window.
+Journal each daemon action before dispatch in the existing final receipt, refuse
+uncertain replay, and verify the original cluster with target logins still closed.
+This is a real privilege transition, not a generic workflow abstraction or another
+operator. Mount readiness is distinct from repositories, WAL delivery, application
+recovery and complete encrypted-pair publication; those must still be composed and
+qualified before release.

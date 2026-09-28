@@ -77,7 +77,11 @@ def docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
     return result.stdout
 
 
-def inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None, activating: bool = False) -> dict[str, dict]:
+def inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None,
+              activating: bool = False, removing_database_id: str | None = None) -> dict[str, dict]:
+    if removing_database_id is not None and (not database_preparing or activating
+            or not re.fullmatch(r"[0-9a-f]{64}", removing_database_id)):
+        raise ValueError("storage_pause_invalid_removing_database")
     ids = set()
     for selector in (f"label=com.docker.compose.project={project}", f"network={project}_quanttrad"):
         ids.update(docker("ps", "--all", "--quiet", "--no-trunc", "--filter", selector).split())
@@ -105,6 +109,13 @@ def inventory(project: str, *, database_preparing: bool = False, operator_id: st
             continue
         if row["paused"] or row["restarting"] or row["oom"]:
             raise RuntimeError(f"storage_pause_unstable_container: service={service}")
+        if (service == "tsdb" and row["id"] == removing_database_id
+                and row["status"] == "removing" and row["running"] is False
+                and row["pid"] == 0 and row["exit_code"] == 0):
+            # Only the exact cleanly stopped database whose removal the caller
+            # has already journaled. Other services and uncertain states refuse.
+            result[service] = row
+            continue
         if row["running"]:
             if row["status"] != "running" or row["pid"] <= 0:
                 raise RuntimeError(f"storage_pause_unstable_container: service={service}")

@@ -32,7 +32,13 @@ parser.add_argument('--close-logins',choices=('success','lost-reply'),help='clos
 parser.add_argument('--abort-restore-lost-reply',action='store_true',help='discard completed owned login restoration reply; preserve unresolved journal')
 parser.add_argument('--commit-switch',action='store_true',help='one-shot real host-to-worker COMMIT and verified worker retirement; no runtime activation')
 parser.add_argument('--guarded-source-image',help='owned synthetic source image with the real source lifetime guard')
+parser.add_argument('--recovery-mounts',action='store_true',help='preserving already-HDD database recovery mounts after committed reader retirement; no runtime start')
+parser.add_argument('--recovery-create-reply-loss',action='store_true',help='discard completed owned recovery database create reply, retaining unresolved intent')
 options=parser.parse_args()
+if options.recovery_create_reply_loss and not options.recovery_mounts:
+ parser.error('--recovery-create-reply-loss requires --recovery-mounts')
+if options.recovery_mounts and not options.commit_switch:
+ parser.error('--recovery-mounts requires --commit-switch')
 if options.commit_switch and (options.close_logins!='success' or not options.guarded_source_image
     or options.abort_resume or options.worker_shutdown or options.worker_attach_loss):
  parser.error('--commit-switch requires confirmed gate and guarded fixture image, without abort/signal/attach faults')
@@ -76,6 +82,7 @@ source_holds=ExitStack()
 created_network=False
 created_history=False
 owned=[];volume=project+'-pg';created_volume=False
+recovery_socket=project+'-recovery-socket';created_recovery_socket=False
 started=time.monotonic()
 report={'project':project,'production_inputs':False,'full_host_pause_qualified':False,
         'real_collector_performance_qualified':False,'synthetic_service_peers':True}
@@ -93,6 +100,11 @@ try:
  report['distinct_drive_roots']=history_parent.stat().st_dev != ROOT.stat().st_dev
  history.mkdir();created_history=True
  working=state/'working';working.mkdir();control=state/'control';control.mkdir();control.chmod(0o777)
+ if options.recovery_mounts:
+  recovery_keys=state/'fixture-recovery-keys';recovery_keys.mkdir(mode=0o700)
+  (recovery_keys/'disposable-marker').write_text('disposable fixture only')
+  (recovery_keys/'disposable-marker').chmod(0o600)
+  run(['volume','create','--label','qt.disposable='+project,recovery_socket]);created_recovery_socket=True
  image=run(['image','inspect',options.image,'--format','{{.Id}}']).stdout.strip()
  envvalues=dict(v.split('=',1) for v in json.loads(run(['image','inspect',image,'--format','{{json .Config.Env}}']).stdout))
  revision=envvalues['QT_IMAGE_SOURCE_REVISION']
@@ -758,6 +770,37 @@ try:
      with host_boundary.deployment_lock(state):raise AssertionError('deployment lock released before recovery handover')
     except RuntimeError as exc:assert str(exc)=='storage_pause_deployment_lock_busy'
     report['held_database_commit']['deployment_lock_retained_after_worker_retirement']=True
+    if options.recovery_mounts:
+     before=final_host._load(state/final_host.STATE)
+     original_recipe=(state/initial.held.DATABASE_RECIPE).read_bytes()
+     started_recovery=time.monotonic()
+     if options.recovery_create_reply_loss:
+      actual_action=host_boundary.supervised_source_action
+      def lose_created_reply(arguments,**kwargs):
+       actual_action(arguments,**kwargs)
+       if arguments[0]=='compose' and 'create' in arguments:
+        raise EOFError('owned completed recovery create reply discarded')
+      host_boundary.supervised_source_action=lose_created_reply
+     result=final_host.prepare_recovery_database_locked(state,worker_process=worker,
+         keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
+     assert result['database_recovery_mounts_ready'] and not result['runtime_activation_authorized']
+     pgid=result['database_id'];owned.append(pgid)
+     source['tsdb']=host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))['tsdb']
+     after=final_host._load(state/final_host.STATE)
+     assert after['phase']=='recovery_database_ready'
+     assert all(after[k]==before[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate'))
+     assert (state/initial.held.DATABASE_RECIPE).read_bytes()==original_recipe
+     assert host_boundary.cluster_identifier(pgid,maintenance=True)==original_cluster
+     report['recovery_mounts']=dict(preserved_cluster=True,original_recipe_preserved=True,
+         login_gate_still_closed=True,reader_retired_before_mounts=True,
+         phase_seconds=time.monotonic()-started_recovery,
+         final_entry_to_database_ready_seconds=after['recovery']['finished_at']-after['started_at'],
+         runtime_activation_authorized=False,encrypted_recovery_qualified=False)
+     try:
+      final_host.prepare_recovery_database_locked(state,worker_process=worker,
+          keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
+      raise AssertionError('completed recovery phase replay admitted')
+     except RuntimeError as exc:assert str(exc)=='storage_online_recovery_committed_live_hold_required'
     source_holds.close()
     report['held_database_commit']['read_worker_pid0_before_hold_release']=True
    # Fixture teardown only, AFTER verified worker retirement. This does not
@@ -805,9 +848,9 @@ try:
   report['source_clients_unchanged']=True
  if options.prepare_source:
   assert (state/initial.STATE).read_bytes()==prepared_bytes
-  if options.final_pause:
+  if options.final_pause and not options.recovery_mounts:
    initial._admit_source(state,preparation,require_running=False,operator_id=first_id)
-  else:
+  elif not options.final_pause:
    assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
   assert (working/'objects'/'native-intake').stat().st_size>intake_before
   assert not host_boundary.inventory(project,operator_id=first_id)['initialize']['running']
@@ -815,12 +858,37 @@ try:
   report['synthetic_intake_continued']=True
  if options.final_pause:
   assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+  if options.recovery_mounts:
+   retained=json.loads(host_boundary.database_query(pgid,'SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1'))
+   assert retained==final_host._load(state/final_host.STATE)['binding']['capture']
   report['frozen_and_original_capture_retained_after_final']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
  report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
 except BaseException as exc:
- if (options.worker_shutdown=='fail' and str(exc)=='storage_pause_unclean_stop: service=market-data-collector'
+ if (options.recovery_create_reply_loss and isinstance(exc,EOFError)
+     and str(exc)=='owned completed recovery create reply discarded'):
+  saved=final_host._load(state/final_host.STATE)
+  assert saved['phase']=='recovery_preparing'
+  assert saved['recovery']['completed']==['stop','remove'] and saved['recovery']['inflight']=='create'
+  pending=host_boundary.inventory(project,database_preparing=True,operator_id=receipt['container_id'])
+  assert all(not pending[n]['running'] for n in host_boundary.STOP)
+  assert pending['tsdb']['status']=='created' and not pending['tsdb']['running'] and pending['tsdb']['pid']==0
+  assert pending['tsdb']['id']!=saved['recovery']['original_id']
+  retired=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
+  assert retired['Pid']==0 and not retired['Running'] and worker.poll() is not None
+  before=(state/final_host.STATE).read_bytes()
+  try:
+   final_host.prepare_recovery_database_locked(state,worker_process=worker,
+       keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
+   raise AssertionError('uncertain recovery creation replay admitted')
+  except RuntimeError as refusal:assert str(refusal)=='storage_online_recovery_committed_live_hold_required'
+  assert (state/final_host.STATE).read_bytes()==before
+  report.update(passed=True,recovery_create_reply_loss=dict(actual_creation_completed=True,
+      replacement_not_started=True,inflight_retained=True,replay_refused=True,
+      reader_retired=True,source_not_restarted=True,runtime_activation_authorized=False),
+      fixture_seconds=time.monotonic()-started)
+ elif (options.worker_shutdown=='fail'  and str(exc)=='storage_pause_unclean_stop: service=market-data-collector'
      and report.get('failed_drain_live_proof_retained_before_exit')):
   # Expected refusal from both final admission and launcher exit. Never restart
   # failed source, suppress the guard, or turn stopped status into drain authority.
@@ -868,11 +936,12 @@ finally:
    mine=json.loads((state/launch._STATE).read_text())['container_id']==details['Id']
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)
  if created_volume:run(['volume','rm',volume])
+ if created_recovery_socket:run(['volume','rm',recovery_socket])
  if created_network:run(['network','rm',network])
  if created_history:
   assert history.parent==history_parent and history.name==project
   cleanup=project+'-cleanup'
-  r=run(['run','--rm','--name',cleanup,'--user','0:0','--network','none','--memory','64m','--cpus','0.25','--mount','type=bind,source='+str(history)+',target=/h','--mount','type=bind,source='+str(state)+',target=/s','--entrypoint','python',options.image,'-c',"import shutil;from pathlib import Path;[(shutil.rmtree(p) if p.is_dir() else p.unlink()) for p in Path('/h').iterdir()];[shutil.rmtree(Path('/s')/n) for n in ('working','control') if (Path('/s')/n).exists()]"],check=False)
+  r=run(['run','--rm','--name',cleanup,'--user','0:0','--network','none','--memory','64m','--cpus','0.25','--mount','type=bind,source='+str(history)+',target=/h','--mount','type=bind,source='+str(state)+',target=/s','--entrypoint','python',options.image,'-c',"import shutil;from pathlib import Path;[(shutil.rmtree(p) if p.is_dir() else p.unlink()) for p in Path('/h').iterdir()];[shutil.rmtree(Path('/s')/n) for n in ('working','control','fixture-recovery-keys') if (Path('/s')/n).exists()]"],check=False)
   report['cleanup_exit_code']=r.returncode
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()

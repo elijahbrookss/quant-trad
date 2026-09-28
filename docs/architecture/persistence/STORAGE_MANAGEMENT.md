@@ -37,6 +37,8 @@ code_paths:
   - tests/test_storage_online_drain.py
   - tests/test_market_data/test_storage_online_collector_drain_db.py
   - tests/test_market_data/tiered_v1_ingestion.py
+  - scripts/automation/storage_online_recovery.py
+  - tests/test_storage_online_recovery.py
   - scripts/automation/storage_online_final.py
   - tests/test_storage_online_final.py
   - scripts/automation/storage_online_prepare.py
@@ -123,6 +125,7 @@ Each boundary owns a different kind of truth:
 | `storage_online_prepare` | Initial preparation receipt, original 600-second window, original source identity and preserving initial resumption. | Final switch or a later recovery-mount transition. It still reuses the existing database preparation procedure. |
 | `storage_online_launch` | Exact migration-worker configuration, launcher lock lifetime, verified worker retirement and original capture binding. | Completion of a SQL switch or permission to expose recovery keys to a live read-capability worker. |
 | `storage_online_final` | Final wall/boot window, durable switch intent, source-stop/start journal and same-worker host coordination. | SQL commit truth from an exit code, stale receipt, or observed empty queue. |
+| `storage_online_recovery` | Fixed preserving recreation of the already HDD-mounted database after committed reconciliation and verified reader retirement, journaled in the existing final receipt. | Repository readiness, restored access, application startup or a complete encrypted pair. |
 | `storage_online_controller` and bounded copy/proof components | Live controller ownership, current proof, original attempt/command deadlines and bounded preparation progress. | Host publisher exclusion or runtime activation. Process-local proof cannot be restored from a saved status reply. |
 | `fact_header_v2_handoff` | Verified SQL transaction and authoritative outcome inspection; separately admitted policy/runtime checks. | A safe host pause or source restart. The complete online host-to-worker COMMIT path remains unfinished. |
 | Recovery preparation and maintenance | Repository identity, native WAL delivery and publication/retention of complete encrypted database/archive pairs. | Permission to add secret mounts before exact committed reconciliation and verified read-worker retirement. |
@@ -2500,3 +2503,35 @@ symlinks, deadline exhaustion and reused destinations refuse. Failed partial
 copies are retained and cannot be silently adopted or repaired. A returned copy
 report never grants switch, rollback, recovery-mount or runtime activation
 authority; the final-state owner must compose those transitions.
+
+
+### Preserving recovery mounts after the committed switch
+
+The final-state owner exposes an internal recovery transition only inside the
+same live source hold that admitted COMMIT. It requires a freshly confirmed
+committed outcome and independently rechecks the exact stopped migration reader,
+its original start identity and reaped attach process before exposing recovery
+mounts. A persisted committed receipt alone cannot enter the transition.
+
+The fixed recreation code is in `storage_online_recovery`. It derives a separate
+private recipe from the unchanged initial database recipe, adding only the existing
+private recovery-key directory and an independently prepared local socket volume.
+The database image, environment, command, network, original PGDATA and existing HDD
+mount remain bound. Keys, source files and existing volumes are neither generated,
+removed nor changed. The initial recipe and its original 600-second receipt remain
+unchanged; the separately bounded phase can only shorten the original final
+wall/boot/monotonic and capture deadlines.
+
+The existing final receipt records `recovery_preparing`, ordered stop/remove/create/
+start intent before each daemon request, and `recovery_database_ready` only after
+fresh original-cluster, closed-login and absent-target-backend/prepared-transaction
+checks. Only a cleanly stopped original container may be removed, without volumes.
+The same source hold and host deployment lock stay live. A lost request/reply,
+changed binding or expired deadline leaves the action unresolved; local CLI reaping
+does not cancel the daemon request and this transition has no replay/reentry path.
+
+Database mount readiness grants no collection or runtime activation authority.
+Repository preparation, native WAL delivery, preserving private spool-copy recovery,
+matching runtime startup and a complete encrypted pair remain required steps of
+the unfinished complete operator. Production pause and resource admission still
+require the integrated measured operation.

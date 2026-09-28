@@ -1,7 +1,7 @@
 """Internal final source-stop boundary under the existing launcher's host lock.
 
-Held database switch, no recovery activation or production CLI. Internal source abort
-resumption requires the live SQL fence; intent survives failure and completion.
+Held database switch and preserving recovery mounts, no runtime activation or CLI.
+Internal source abort requires the live SQL fence; intent survives every outcome.
 """
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ from scripts.automation import storage_online_prepare as initial
 
 STATE = "storage-online-final.json"
 SCHEMA = "qt.storage_online_final.v1"
-_COMMIT_PHASES = {"commit_dispatching", "committed"}
+_RECOVERY_PHASES = {"recovery_preparing", "recovery_database_ready"}
+_COMMIT_PHASES = {"commit_dispatching", "committed"} | _RECOVERY_PHASES
 _SOURCE_HOLD = ContextVar("storage_online_source_hold", default=None)
 _FIELDS = {"schema", "phase", "binding", "started_at", "deadline", "boot_id",
            "started_boot", "deadline_boot", "duration_seconds", "paused_at"}
@@ -55,14 +56,15 @@ def _remaining(saved):
 
 def _load(path):
     saved = host_boundary.load_receipt(path)
+    recovering = saved.get("phase") in _RECOVERY_PHASES
     committing = saved.get("phase") in _COMMIT_PHASES
     gated = committing or saved.get("phase") in {"login_closing", "login_closed"} or (
         saved.get("phase") in {"source_resuming", "source_resumed"} and "login_gate" in saved)
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming or gated
-    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set())
+    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set()) | ({"recovery"} if recovering else set())
     if (set(saved) != fields or saved["schema"] != SCHEMA
-            or saved["phase"] not in ("stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed", "commit_dispatching", "committed")
+            or saved["phase"] not in {"stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"} | _COMMIT_PHASES
             or type(saved["duration_seconds"]) is not int
             or not 1 <= saved["duration_seconds"] <= 96*3600
             or any(type(saved[k]) not in (int, float) or not math.isfinite(saved[k])
@@ -72,7 +74,7 @@ def _load(path):
             or abs(saved["deadline"]-saved["started_at"]-saved["duration_seconds"]) > .000001
             or abs(saved["deadline_boot"]-saved["started_boot"]-saved["duration_seconds"]) > .000001):
         raise RuntimeError("storage_online_final_receipt_invalid")
-    if saved["phase"] in ("paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed", "commit_dispatching", "committed"):
+    if saved["phase"] in {"paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"} | _COMMIT_PHASES:
         if (type(saved["paused_at"]) not in (int, float)
                 or not saved["started_at"] <= saved["paused_at"] <= saved["deadline"]):
             raise RuntimeError("storage_online_final_receipt_invalid")
@@ -149,9 +151,12 @@ def _load(path):
                 or not isinstance(commit["source_image"], str)
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", commit["source_image"])
                 or (saved["phase"] == "commit_dispatching" and commit["confirmed_at"] is not None)
-                or (saved["phase"] == "committed" and (type(commit["confirmed_at"]) not in (int, float)
+                or (saved["phase"] != "commit_dispatching" and (type(commit["confirmed_at"]) not in (int, float)
                     or not commit["requested_at"] <= commit["confirmed_at"] <= saved["deadline"]))):
             raise RuntimeError("storage_online_commit_receipt_invalid")
+    if recovering:
+        from scripts.automation.storage_online_recovery import validate_recovery_journal
+        validate_recovery_journal(saved)
     return saved
 
 
@@ -1207,3 +1212,28 @@ def commit_online_handoff_locked(state_root, *, exchange):
             host_boundary.save_receipt(path, saved, initial=False)
             budget()
         return result
+
+
+def prepare_recovery_database_locked(state_root, *, worker_process, keys_root,
+                                     socket_volume, max_duration_seconds):
+    """Preserve the committed HDD database while adding its recovery mounts.
+
+    Only this still-live source hold may enter after confirmed COMMIT and actual
+    worker retirement. The separate phase bound shortens the original final
+    window; it never reuses or renews initial preparation. No runtime is started.
+    """
+    from scripts.automation.storage_online_recovery import prepare_database
+
+    state_root = launch._canonical(state_root)
+    held = _SOURCE_HOLD.get()
+    if held is None or held[0] != state_root:
+        raise RuntimeError("storage_online_live_source_hold_required")
+    _, binding, source_image, source_check = held
+    saved = _load(state_root/STATE)
+    if (saved["phase"] != "committed" or saved["binding"] != binding
+            or saved["commit"]["source_image"] != source_image):
+        raise RuntimeError("storage_online_recovery_committed_live_hold_required")
+    source_check()
+    return prepare_database(state_root, saved=saved, worker_process=worker_process,
+        keys_root=keys_root, socket_volume=socket_volume,
+        max_duration_seconds=max_duration_seconds, source_check=source_check)
