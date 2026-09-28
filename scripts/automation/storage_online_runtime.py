@@ -104,6 +104,22 @@ def _copy_report(destination, expected):
     return json.loads(raw)
 
 
+def inspect_spool_destination(source, destination):
+    """Require a separate empty private application directory on the original SSD."""
+    source=Path(source)
+    destination=Path(destination)
+    if (not destination.is_absolute() or destination.resolve(strict=True)!=destination
+            or source==destination or source in destination.parents or destination in source.parents
+            or any(c in str(source)+str(destination) for c in (",","\n","\r"))):
+        raise ValueError("storage_online_runtime_spool_roots_invalid")
+    src=source.stat();dst=destination.stat()
+    if (not stat.S_ISDIR(dst.st_mode) or stat.S_IMODE(dst.st_mode)!=0o700
+            or (dst.st_uid,dst.st_gid)!=(1000,1000) or dst.st_dev!=src.st_dev
+            or any(destination.iterdir())):
+        raise RuntimeError("storage_online_runtime_spool_new_private_ssd_required")
+    return destination,src,dst
+
+
 def prepare_spool(state_root, *, saved, worker_process, source_check,
                   destination, max_bytes, max_entries, reserve_bytes, max_duration_seconds):
     if (type(max_duration_seconds) is not int or not 1<=max_duration_seconds<=600
@@ -119,16 +135,7 @@ def prepare_spool(state_root, *, saved, worker_process, source_check,
         raise RuntimeError("storage_online_runtime_spool_binding_changed")
     roots=preparation["source_roots"]
     source=next(Path(name) for name in roots if str(Path(name)/"objects") in roots)
-    destination=Path(destination)
-    if (not destination.is_absolute() or destination.resolve(strict=True)!=destination
-            or source==destination or source in destination.parents or destination in source.parents
-            or any(c in str(source)+str(destination) for c in (",","\n","\r"))):
-        raise ValueError("storage_online_runtime_spool_roots_invalid")
-    src=source.stat();dst=destination.stat()
-    if (not stat.S_ISDIR(dst.st_mode) or stat.S_IMODE(dst.st_mode)!=0o700
-            or (dst.st_uid,dst.st_gid)!=(1000,1000) or dst.st_dev!=src.st_dev
-            or any(destination.iterdir())):
-        raise RuntimeError("storage_online_runtime_spool_new_private_ssd_required")
+    destination,src,dst=inspect_spool_destination(source,destination)
     source_identity=[src.st_dev,src.st_ino];destination_identity=[dst.st_dev,dst.st_ino]
     project=saved["binding"]["project"];name=project+"-storage-spool-prepare"
     image=worker["binding"]["image"];database_id=saved["recovery"]["replacement_id"]
@@ -275,41 +282,54 @@ _APPLICATION_HEALTH = {
 
 
 def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
-    """Admit the existing split application composition before replacing clients.
-
-    This private rendered snapshot contains only the four application services
-    and the already prepared database. Infrastructure remains exactly owned by
-    the source receipt; it is not redeployed by application recovery.
-    """
-    model = host.load_receipt(state_root/RUNTIME_RECIPE, max_bytes=524288)
-    database_model = host.load_receipt(state_root/recovery.RECIPE)
-    project = saved["binding"]["project"]
-    if (set(model)!={"name","services","volumes","networks"} or model["name"]!=project
-            or set(model["services"])!=set(_APPLICATIONS)|{"tsdb"}
-            or model["networks"]!=database_model["networks"]
-            or model["volumes"]!=database_model["volumes"]
-            or model["services"]["tsdb"]!=database_model["services"]["tsdb"]
-            or host.digest(database_model)!=saved["recovery"]["recipe_sha256"]):
+    """Bind the shared recipe inspection to committed recovery and private copy."""
+    database_model=host.load_receipt(state_root/recovery.RECIPE)
+    if (host.digest(database_model)!=saved["recovery"]["recipe_sha256"]
+            or database_model["name"]!=saved["binding"]["project"]):
         raise RuntimeError("storage_online_runtime_fixed_composition_required")
     binding=worker["binding"]
     request_raw=preserving._runtime_configuration_bytes(state_root/"storage-online-request.json")
     if hashlib.sha256(request_raw).hexdigest()!=binding["request_sha256"]:
         raise RuntimeError("storage_online_runtime_request_changed")
-    request=json.loads(request_raw)
+    inventory=Path(binding["mounts"]["/run/qt-online/inventory.json"]["source"])
+    model,admission=inspect_runtime_configuration(state_root,database_model=database_model,
+        image_id=binding["image"],request=json.loads(request_raw),inventory=inventory,
+        udev_root=binding["mounts"]["/run/qt-online/udev"]["source"],
+        destination=saved["runtime_spool"]["destination"],rows=rows,
+        database_id=saved["recovery"]["replacement_id"])
+    # Bind the exact bytes the shared inspector consumed, not an earlier read.
+    if admission["files"][str(inventory)]!=binding["inventory_sha256"]:
+        raise RuntimeError("storage_online_runtime_inventory_changed")
+    return model,admission
+
+
+def inspect_runtime_configuration(state_root, *, database_model, image_id, request,
+        inventory, udev_root, destination, rows, database_id):
+    """Inspect the fixed split recipe without granting runtime/start authority.
+
+    Used before source pause and again against the actual committed replacement.
+    The same image, environment, ownership, mounts, keys and limit rules apply.
+    No database, filesystem or recipe is changed by this inspection.
+    """
+    model = host.load_receipt(state_root/RUNTIME_RECIPE, max_bytes=524288)
+    project = database_model["name"]
+    if (set(model)!={"name","services","volumes","networks"} or model["name"]!=project
+            or set(model["services"])!=set(_APPLICATIONS)|{"tsdb"}
+            or model["networks"]!=database_model["networks"]
+            or model["volumes"]!=database_model["volumes"]
+            or model["services"]["tsdb"]!=database_model["services"]["tsdb"]):
+        raise RuntimeError("storage_online_runtime_fixed_composition_required")
     group=launch.archive_group_override(request)
     if group!="70":
         raise RuntimeError("storage_online_runtime_shared_archive_required")
-    image=json.loads(host.docker("image","inspect","--format","{{json .}}",binding["image"]))
+    image=json.loads(host.docker("image","inspect","--format","{{json .}}",image_id))
     image_env=dict(v.split("=",1) for v in image["Config"].get("Env") or [])
-    if (image["Id"]!=binding["image"]
+    if (image["Id"]!=image_id
             or image_env.get("QT_IMAGE_SOURCE_REVISION")!=request["source_revision"]
             or image_env.get("QT_IMAGE_SOURCE_TREE_HASH")!=request["source_tree_hash"]):
         raise RuntimeError("storage_online_runtime_source_changed")
-    controls=binding["mounts"]
-    inventory=Path(controls["/run/qt-online/inventory.json"]["source"])
+    inventory=Path(inventory)
     raw=preserving._runtime_configuration_bytes(inventory)
-    if hashlib.sha256(raw).hexdigest()!=binding["inventory_sha256"]:
-        raise RuntimeError("storage_online_runtime_inventory_changed")
     targets=json.loads(raw)["targets"]
     if len(targets)!=2 or {t["medium"] for t in targets}!={"ssd","hdd"}:
         raise RuntimeError("storage_online_runtime_targets_changed")
@@ -321,7 +341,7 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
     info=archive.stat()
     if archive.resolve(strict=True)!=archive or info.st_gid!=int(group) or stat.S_IMODE(info.st_mode)!=0o2770:
         raise RuntimeError("storage_online_runtime_archive_root_not_prepared")
-    database=host.database_details(saved["recovery"]["replacement_id"])
+    database=host.database_details(database_id)
     collector=host.database_details(rows["market-data-collector"]["id"])
     launch._dsn(database,collector)  # Validate original credentials/cluster, without using the worker loopback DSN.
     dsn=dict(v.split("=",1) for v in collector["config"]["Env"])["PG_DSN"]
@@ -339,12 +359,12 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
     for name,module in _APPLICATIONS.items():
         service=model["services"][name]
         maintenance=name=="storage-maintenance"
-        if (service.get("image")!=binding["image"] or service.get("pull_policy")!="never"
+        if (service.get("image")!=image_id or service.get("pull_policy")!="never"
                 or service.get("user")!=("70:70" if maintenance else "1000:1000")
                 or service.get("command")!=["python","-m",module]
                 or service.get("entrypoint") is not None or service.get("init") is not True
                 or service.get("cap_drop")!=["ALL"] or service.get("security_opt")!=["no-new-privileges:true"]
-                or (service.get("pid","") not in ("service:tsdb", "container:"+saved["recovery"]["replacement_id"])
+                or (service.get("pid","") not in ("service:tsdb", "container:"+database_id)
                     if maintenance else service.get("pid","") != "")
                 or service.get("restart") not in ("no","unless-stopped")
                 or set(service.get("networks",{}))!={"quanttrad"}
@@ -374,7 +394,7 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
         if name=="backend" and environment.get("QT_MARKET_DATA_ROOT")!=history+"/archives":
             raise RuntimeError("storage_online_runtime_bot_archive_root_changed")
         expected_mounts=[dbmounts["/qt-history"],bind(inventory,"/run/quanttrad/storage-inventory.json",True),
-            bind(Path(controls["/run/qt-online/udev"]["source"]),"/run/qt-host-udev/data",True)]
+            bind(Path(udev_root),"/run/qt-host-udev/data",True)]
         if maintenance:
             expected_mounts += [dbmounts[k] for k in ("/var/lib/postgresql/data","/run/quanttrad/recovery","/var/run/postgresql")]
             if (any(environment.get(k)!="true" for k in ("QT_MARKET_DATA_LIFECYCLE_ENABLED",
@@ -385,13 +405,13 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
             if len(limits)!=1:raise RuntimeError("storage_online_runtime_limits_mount_missing")
             limit_path=Path(literal(limits[0]["source"]))
             limit_raw=preserving._runtime_configuration_bytes(limit_path)
-            preserving._validate_runtime_maintenance(binding["image"],limit_path,[t["target_id"] for t in targets])
+            preserving._validate_runtime_maintenance(image_id,limit_path,[t["target_id"] for t in targets])
             if preserving._runtime_configuration_bytes(limit_path)!=limit_raw:
                 raise RuntimeError("storage_online_runtime_limits_changed")
             files[str(limit_path)]=hashlib.sha256(limit_raw).hexdigest()
             expected_mounts.append(bind(limit_path,"/run/quanttrad/storage-maintenance.json",True))
         else:
-            expected_mounts.append(bind(saved["runtime_spool"]["destination"],"/app/logs/market-structure"))
+            expected_mounts.append(bind(str(destination),"/app/logs/market-structure"))
             # Existing env_file rendering does not require a secret-file mount.
             # If the original service had one, preserve that exact read-only path.
             old=host.database_details(rows[name]["id"])
@@ -416,7 +436,7 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
     if host.digest(host.load_receipt(state_root/RUNTIME_RECIPE,max_bytes=524288))!=host.digest(model):
         raise RuntimeError("storage_online_runtime_recipe_changed")
     return model,dict(recipe_sha256=host.digest(model),files=files,
-        images={n:binding["image"] for n in _APPLICATIONS},archive_identity=[info.st_dev,info.st_ino,info.st_gid,stat.S_IMODE(info.st_mode)])
+        images={n:image_id for n in _APPLICATIONS},archive_identity=[info.st_dev,info.st_ino,info.st_gid,stat.S_IMODE(info.st_mode)])
 
 
 _RUNTIME_ACTIONS = tuple(["remove:"+n for n in _APPLICATIONS if n!="storage-maintenance"]+

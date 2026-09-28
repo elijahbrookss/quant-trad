@@ -66,6 +66,16 @@ def database_recipe(base, *, keys_root, socket_volume, history):
     return model
 
 
+def inspect_socket_volume(socket_volume, pgdata_volume):
+    """Read-only admission of the fixed independent local PostgreSQL socket."""
+    socket_info = json.loads(host.docker("volume", "inspect", "--format", "{{json .}}", socket_volume))
+    if (socket_volume == pgdata_volume
+            or socket_info.get("Name") != socket_volume or socket_info.get("Driver") != "local"
+            or socket_info.get("Options") not in (None, {}) or socket_info.get("Scope") != "local"):
+        raise RuntimeError("storage_online_recovery_socket_not_independent")
+    return socket_info
+
+
 def prepare_database(state_root, *, saved, worker_process, keys_root, socket_volume,
                      max_duration_seconds, source_check):
     """Single live invocation; every failed dispatch remains unresolved, never retried."""
@@ -100,11 +110,7 @@ def prepare_database(state_root, *, saved, worker_process, keys_root, socket_vol
             raise RuntimeError("storage_online_recovery_original_recipe_changed")
         model = database_recipe(base, keys_root=keys_root, socket_volume=socket_volume, history=history)
         service = model["services"]["tsdb"]
-        socket_info = json.loads(host.docker("volume", "inspect", "--format", "{{json .}}", socket_volume))
-        if (socket_volume == mounts["/var/lib/postgresql/data"].get("Name")
-                or socket_info.get("Name") != socket_volume or socket_info.get("Driver") != "local"
-                or socket_info.get("Options") not in (None, {}) or socket_info.get("Scope") != "local"):
-            raise RuntimeError("storage_online_recovery_socket_not_independent")
+        socket_info = inspect_socket_volume(socket_volume, mounts["/var/lib/postgresql/data"].get("Name"))
         key_stat = Path(keys_root).stat()
         key_binding = (key_stat.st_dev, key_stat.st_ino, key_stat.st_uid, key_stat.st_gid, key_stat.st_mode)
         recipe_path = state_root/RECIPE

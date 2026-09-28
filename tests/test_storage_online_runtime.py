@@ -246,3 +246,41 @@ def test_prepared_recipe_accepts_only_database_service_pid_reference(split_recip
     model['services']['storage-maintenance']['pid']='service:tsdb'
     admitted,_=admit()
     assert admitted['services']['storage-maintenance']['pid']=='service:tsdb'
+
+
+def test_preflight_and_activation_share_same_recipe_checks(split_recipe,monkeypatch,tmp_path):
+    model,admit=split_recipe
+    expected,proof=admit()
+    worker=runtime.host.load_receipt(tmp_path/runtime.recovery.RECIPE)
+    request=json.loads((tmp_path/"storage-online-request.json").read_text())
+    rows={n:dict(id=n) for n in runtime._APPLICATIONS if n!="storage-maintenance"}
+    args=dict(database_model=worker,image_id="sha256:"+"a"*64,request=request,
+        inventory=tmp_path/"inventory.json",udev_root=tmp_path/"udev"/"data",
+        destination=str(tmp_path/"new"),rows=rows,database_id="db")
+    # This uses no committed receipt or replacement: it cannot supply authority.
+    assert runtime.inspect_runtime_configuration(tmp_path,**args)==(expected,proof)
+    model["services"]["market-data-collector"]["cap_add"]=["DAC_READ_SEARCH"]
+    runtime.host.save_receipt(tmp_path/runtime.RUNTIME_RECIPE,model,initial=False)
+    with pytest.raises(RuntimeError,match="application_contract_changed"):
+        runtime.inspect_runtime_configuration(tmp_path,**args)
+
+
+@pytest.mark.parametrize("fault", ["project", "inventory"])
+def test_activation_keeps_original_project_and_consumed_inventory_binding(split_recipe,monkeypatch,tmp_path,fault):
+    model,admit=split_recipe
+    original=runtime.inspect_runtime_configuration
+    if fault=="project":
+        load=runtime.host.load_receipt
+        def changed(path,**kw):
+            value=load(path,**kw)
+            if path==tmp_path/runtime.recovery.RECIPE:value["name"]="foreign"
+            return value
+        monkeypatch.setattr(runtime.host,"load_receipt",changed)
+    else:
+        def changed(*a,**kw):
+            result,proof=original(*a,**kw)
+            proof["files"][str(kw["inventory"]) ]="f"*64
+            return result,proof
+        monkeypatch.setattr(runtime,"inspect_runtime_configuration",changed)
+    with pytest.raises(RuntimeError,match="fixed_composition_required" if fault=="project" else "inventory_changed"):
+        admit()

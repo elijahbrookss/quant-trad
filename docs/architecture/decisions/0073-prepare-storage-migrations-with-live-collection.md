@@ -1649,7 +1649,23 @@ Compose reference `service:tsdb`, which permits advance runtime configuration;
 actual container admission still requires the exact replacement database PID
 namespace. Foreign services and application PID sharing remain refused.
 
-This is the internal operation driver, not a newly exposed public CLI. Initial
-host preparation, full private-plan preflight, terminal reconciliation/release,
-actual source/fleet/resource admission and measured production impact remain
-required before a supported release command can be enabled.
+Before worker launch and again before the final pause, the driver observes the
+serving source and inspects the proposed fixed runtime composition. Source image
+and writer contracts, the separate empty private SSD spool, independent local
+socket, private recovery-key directory, shared archive root, maintenance limits,
+application mounts and environment must all match. Recipe/configuration digests
+and directory identities must remain unchanged between those observations.
+The runtime owner supplies the same configuration inspection used at activation;
+spool and socket checks likewise remain with their existing owners. Future
+maintenance must refer to `service:tsdb`, never the current source container PID.
+
+These bounded observations neither capture data nor pause/start services. They
+confer no lock, publisher-exclusion, COMMIT or recovery authority. After background
+preparation the check is also bounded by the original capture deadline. All later
+live checks remain mandatory, including independently verified reader retirement
+before private recovery mounts. A changed or invalid plan refuses before pause.
+
+This is the internal operation driver, not a newly exposed public CLI. Admission
+before the initial host preparation, terminal reconciliation/release, actual
+source/fleet/resource admission and measured production impact remain required
+before a supported release command can be enabled.

@@ -229,6 +229,17 @@ def _capture_observation(database_id):
         "FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
 
 
+def observe_owned_worker(state_root, project):
+    """Resolve only the existing named worker journal; no launch/reentry authority."""
+    state_path = state_root/_STATE
+    saved = host_boundary.load_receipt(state_path) if os.path.lexists(state_path) else None
+    name = project+"-storage-online"
+    found = host_boundary.docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
+    if len(found) > 1 or (found and (not saved or saved.get("container_id") not in (None, found[0]))):
+        raise RuntimeError("storage_online_unowned_container")
+    return saved, name, found
+
+
 @contextmanager
 def launched_online_worker_locked(state_root, *, project, source_revision, image,
                            request, inventory_path, descriptor_limit, memory_bytes):
@@ -264,11 +275,7 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
                   flags=re.MULTILINE) != [source_revision]:
         raise RuntimeError("storage_online_source_release_changed")
     state_path = state_root/_STATE
-    saved = host_boundary.load_receipt(state_path) if os.path.lexists(state_path) else None
-    name = project+"-storage-online"
-    found = host_boundary.docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
-    if len(found) > 1 or (found and (not saved or saved.get("container_id") not in (None, found[0]))):
-        raise RuntimeError("storage_online_unowned_container")
+    saved, name, found = observe_owned_worker(state_root, project)
     if (os.path.lexists(state_root/host_boundary.HOLD)
             or os.path.lexists(state_root/"storage-online-preparation.json")):
         from scripts.automation.storage_online_prepare import admit_serving_source

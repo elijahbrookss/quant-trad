@@ -302,6 +302,14 @@ os.chown(root,70,70)
   write_runtime_recipe(state=state,runtime_model=recovery_model,inventory=inventory,udev=udev,
     image=image,password=password,dbname=dbname,history=history,project=project,
     candidate_working=candidate_working,owned=owned)
+  # Exercise prepared-operation preflight with an actual retired owned worker.
+  # Capture is created once and keeps its original clock across driver reentry.
+  with launch.launched_online_worker(state,**kwargs) as (first_worker,first_receipt):
+   first_channel=host_boundary.OnlineWorkerChannel(first_worker,
+     deadline=time.monotonic()+first_receipt['deadline']-time.time())
+   assert first_channel.greeting['state']=='background'
+   original_capture=host_boundary.load_receipt(state/launch._STATE)['capture']
+   original_capture_deadline=first_receipt['deadline']
   background=operation.prepare_background
   frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t))::text"
   before_final_frozen=host_boundary.database_query(pgid,frozen_sql)
@@ -342,6 +350,8 @@ os.chown(root,70,70)
   assert result['runtime']['collector_process_healthy'] and not result['ordinary_relaunch_authorized']
   pgid=saved['recovery']['replacement_id'];owned.append(pgid)
   worker_receipt=host_boundary.load_receipt(state/launch._STATE)
+  assert worker_receipt['capture']==original_capture and worker_receipt['deadline']==original_capture_deadline
+  report['operation_preflight_retired_worker_reentry']=True
   retired=json.loads(run(['inspect',worker_receipt['container_id'],'--format','{{json .State}}']).stdout)
   assert not retired['Running'] and retired['Pid']==0
   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]

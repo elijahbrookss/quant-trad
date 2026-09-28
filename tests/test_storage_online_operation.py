@@ -59,6 +59,7 @@ def test_operation_keeps_holds_and_never_advances_after_uncertainty(monkeypatch,
         held.add('source')
         try:yield
         finally:held.remove('source');events.append('source_released')
+    monkeypatch.setattr(operation,'inspect_prepared_operation',lambda *a,**kw: {})
     monkeypatch.setattr(operation.host,'deployment_lock',lock)
     monkeypatch.setattr(operation.launch,'launched_online_worker_locked',launch)
     monkeypatch.setattr(operation.final,'held_source_writers_locked',source)
@@ -105,3 +106,51 @@ def test_invalid_limits_refuse_before_host_dispatch(monkeypatch,tmp_path):
             request={'resource_limits':{'movement_timeout_seconds':120}},inventory_path=tmp_path,
             descriptor_limit=1024,memory_bytes=1024**3,limits=replace(limits(),spool_max_entries=4097),
             keys_root=tmp_path,socket_volume='x',spool_destination=tmp_path)
+
+
+@pytest.mark.parametrize("failure", ["initial", "changed", "expired"])
+def test_preflight_refusal_never_pauses_source(monkeypatch,tmp_path,failure):
+    events=[]
+    @contextmanager
+    def lock(*a,**kw):
+        yield
+    @contextmanager
+    def launch(*a,**kw):
+        events.append("launch")
+        try:yield object(),dict(container_id="worker",deadline=time.time()+180)
+        finally:events.append("retired")
+    def inspect(*a,**kw):
+        events.append("inspect")
+        if failure=="initial" or failure=="expired" and "launch" in events:
+            raise RuntimeError("preflight_refused")
+        return {"recipe": "changed" if "launch" in events else "original"}
+    monkeypatch.setattr(operation.host,"deployment_lock",lock)
+    monkeypatch.setattr(operation.launch,"launched_online_worker_locked",launch)
+    monkeypatch.setattr(operation,"inspect_prepared_operation",inspect)
+    monkeypatch.setattr(operation,"prepare_background",lambda *a,**kw: events.append("background"))
+    monkeypatch.setattr(operation.host,"OnlineWorkerChannel",lambda *a,**kw:SimpleNamespace(exchange=lambda *a,**kw:None))
+    monkeypatch.setattr(operation.final,"stop_online_source_locked",lambda *a,**kw:pytest.fail("source paused"))
+    with pytest.raises(RuntimeError,match="preflight"):
+        operation.run_prepared_operation(tmp_path,project="test",source_revision="a"*40,
+            source_image="sha256:"+"b"*64,image="candidate",request={"resource_limits":{"movement_timeout_seconds":180}},
+            inventory_path=tmp_path/"inventory",descriptor_limit=1024,memory_bytes=1024**3,
+            limits=limits(),keys_root=tmp_path/"keys",socket_volume="socket",spool_destination=tmp_path/"spool")
+    assert events==(["inspect"] if failure=="initial" else ["inspect","launch","background","inspect","retired"])
+
+
+@pytest.mark.parametrize("journal_id", [None, "a"*64, "b"*64])
+def test_preflight_preserves_named_background_worker_admission(monkeypatch,tmp_path,journal_id):
+    found="a"*64
+    if journal_id is not None:
+        operation.host.save_receipt(tmp_path/operation.launch._STATE,{"container_id":journal_id},initial=True)
+    monkeypatch.setattr(operation.host,"docker",lambda *a,**kw:found)
+    seen=[]
+    def source(*a,**kw):
+        seen.append(kw["operator_id"])
+        raise RuntimeError("serving_boundary_reached")
+    monkeypatch.setattr(operation.initial,"admit_serving_source",source)
+    with pytest.raises(RuntimeError,match="serving_boundary_reached" if journal_id==found else "unowned_container"):
+        operation.inspect_prepared_operation(tmp_path,project="fixture",source_revision="r",
+            source_image="source",image="candidate",request={},inventory_path=tmp_path,
+            keys_root=tmp_path,socket_volume="socket",spool_destination=tmp_path,deadline=time.monotonic()+30)
+    assert seen==([found] if journal_id==found else [])
