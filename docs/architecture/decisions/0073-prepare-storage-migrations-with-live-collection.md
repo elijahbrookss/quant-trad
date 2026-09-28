@@ -9,6 +9,10 @@ tags:
   - storage
   - migration
 code_paths:
+  - src/core/storage_writer_fence.py
+  - portal/backend/run_backend.py
+  - portal/backend/workers/single_node_initializer.py
+  - tests/test_market_data/test_storage_writer_fence.py
   - src/market_data/archive.py
   - src/core/settings.py
   - tests/test_market_data/test_archive_shared_ownership.py
@@ -71,6 +75,32 @@ for only some phases. Increasing the database increases this outage.
 Removing the host hold alone is insufficient. Verification, reference
 relocation, archive publication, source/runtime compatibility and recovery
 activation also need explicitly qualified concurrency boundaries.
+
+## Source runtime lifetime interlock
+
+A deployed-source rehearsal demonstrated that closing target database logins can
+still leave the old backend serving its API briefly. SQL login closure therefore
+cannot establish filesystem publisher exclusion.
+
+The three existing source entrypoints (backend, collector and initializer) now
+support the internal operator input `QT_STORAGE_SOURCE_FENCE_ROOT`. When supplied,
+it must name the existing canonical, co-located source archive/working directory.
+They retain shared nonblocking directory-flock ownership before starting work.
+The backend passes that same open file description to its supervised children;
+parent exit does not unlock surviving children. Missing/replaced/aliased roots,
+a split source layout, or an exclusive operator hold refuse startup. Without the
+input, ordinary startup remains unchanged. No marker, source permission change,
+new directory, public command or schedule is added.
+
+This is a cooperating, image-qualified process boundary. A preserving preparatory
+source release and exact image/entrypoint/environment/root admission are required
+before relying on it. The final host must own the exclusive side continuously
+through its admitted transition; an observation that it could acquire a lock is
+not authority. That host integration and preparatory release remain unfinished.
+Arbitrary tools, unqualified images, alternate entrypoints and privileged path
+replacement are not excluded by this helper. Database gates, live proofs, original
+deadlines, durable intent and uncertain-outcome handling remain separate required
+boundaries. Kernel release after owner death never authorizes automatic recovery.
 
 ## Decision
 

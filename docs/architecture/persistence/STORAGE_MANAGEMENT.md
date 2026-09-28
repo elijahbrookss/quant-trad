@@ -9,6 +9,10 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - src/core/storage_writer_fence.py
+  - portal/backend/run_backend.py
+  - portal/backend/workers/single_node_initializer.py
+  - tests/test_market_data/test_storage_writer_fence.py
   - docker/docker-compose.storage-server.yml
   - portal/backend/workers/market_data_collector_health.py
   - portal/backend/service/bots/runner.py
@@ -157,6 +161,32 @@ by flock. Exact image/mount/publisher admission and host lifecycle exclusion rem
 required before the host may dispatch a switch. Kernel release on process death
 is not restart or recovery authority. The original final marker and unresolved
 outcome rules continue to block automatic activation.
+
+## Source runtime lifetime interlock
+
+A deployed-source rehearsal demonstrated that closing target database logins can
+still leave the old backend serving its API briefly. SQL login closure therefore
+cannot establish filesystem publisher exclusion.
+
+The three existing source entrypoints (backend, collector and initializer) now
+support the internal operator input `QT_STORAGE_SOURCE_FENCE_ROOT`. When supplied,
+it must name the existing canonical, co-located source archive/working directory.
+They retain shared nonblocking directory-flock ownership before starting work.
+The backend passes that same open file description to its supervised children;
+parent exit does not unlock surviving children. Missing/replaced/aliased roots,
+a split source layout, or an exclusive operator hold refuse startup. Without the
+input, ordinary startup remains unchanged. No marker, source permission change,
+new directory, public command or schedule is added.
+
+This is a cooperating, image-qualified process boundary. A preserving preparatory
+source release and exact image/entrypoint/environment/root admission are required
+before relying on it. The final host must own the exclusive side continuously
+through its admitted transition; an observation that it could acquire a lock is
+not authority. That host integration and preparatory release remain unfinished.
+Arbitrary tools, unqualified images, alternate entrypoints and privileged path
+replacement are not excluded by this helper. Database gates, live proofs, original
+deadlines, durable intent and uncertain-outcome handling remain separate required
+boundaries. Kernel release after owner death never authorizes automatic recovery.
 
 ## From a prepared drive to a reviewed change
 

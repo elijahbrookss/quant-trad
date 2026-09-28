@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from core.settings import get_settings
+from core.storage_writer_fence import retain_source_writer_fence
 from core.storage_mounts import require_configured_archive_mount, require_configured_working_mount
 
 from portal.backend.db import db
@@ -161,6 +162,7 @@ def main() -> int:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     require_configured_archive_mount()
+    retain_source_writer_fence()
     require_configured_working_mount()
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
