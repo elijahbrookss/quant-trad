@@ -1,6 +1,6 @@
-"""Explicit-mount launcher for an already prepared online storage controller.
+"""Explicit-mount launcher for the fixed online capture and copy controller.
 
-No preparation, chown, publisher pause, database switch or runtime activation.
+No chown, publisher pause, database switch or runtime activation.
 The caller retains this context and its deployment lock while driving the
 bounded worker pipe. Interrupted background work retains its original attempt.
 """
@@ -20,7 +20,7 @@ import time
 from urllib.parse import quote, unquote, urlsplit
 
 from scripts.automation import storage_host_boundary as host_boundary
-from scripts.automation.storage_online_worker import archive_group_override
+from scripts.automation.storage_online_worker import archive_group_override, capture_preparation, admit_capture
 
 _COMMAND = ["-m", "scripts.automation.storage_online_worker"]
 _CAPS = ["DAC_READ_SEARCH", "SETGID", "SETUID"]
@@ -219,6 +219,16 @@ def _dsn(database, collector):
             quote(db_env["POSTGRES_DB"], safe=""))
 
 
+def _capture_observation(database_id):
+    if host_boundary.database_query(database_id,
+            "SELECT to_regclass('qt_fact_header_cutover_v2.capture') IS NOT NULL").strip() != "t":
+        return None
+    return json.loads(host_boundary.database_query(database_id,
+        "SELECT json_build_object('started_at',prepared_at,'seconds',"
+        "COALESCE((to_jsonb(c)->>'attempt_seconds')::int,86400))::text "
+        "FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
+
+
 @contextmanager
 def launched_online_worker_locked(state_root, *, project, source_revision, image,
                            request, inventory_path, descriptor_limit, memory_bytes):
@@ -240,6 +250,7 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
             or type(memory_bytes) is not int or not 512*1024**2 <= memory_bytes <= 8*1024**3):
         raise ValueError("storage_online_launch_inputs_invalid")
     archive_group = archive_group_override(request)
+    capture_plan = capture_preparation(request)
     data = (json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)+"\n").encode()
     if len(data) > 65536:
         raise ValueError("storage_online_request_budget_exceeded")
@@ -295,19 +306,30 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
     source = _canonical(working/"objects").stat()
     if (source.st_dev, source.st_ino) != (request.get("source_device"), request.get("source_inode")):
         raise RuntimeError("storage_online_source_root_changed")
-    # Derive the host ceiling from the SAME original persisted attempt.
-    observed = json.loads(host_boundary.database_query(database_id,
-        "SELECT json_build_object('started_at',prepared_at,'seconds',"
-        "COALESCE((to_jsonb(c)->>'attempt_seconds')::int,86400))::text "
-        "FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
-    started = datetime.fromisoformat(observed["started_at"])
-    if (started.tzinfo is None
-            or started != datetime.fromisoformat(request["expected_started_at"])
-            or type(observed["seconds"]) is not int or not 1 <= observed["seconds"] <= 96*3600):
-        raise RuntimeError("storage_online_original_attempt_changed")
-    deadline = started.timestamp()+observed["seconds"]
-    if deadline <= time.time():
-        raise RuntimeError("storage_online_original_attempt_expired")
+    # The optional first capture stays inside the ORIGINAL initial preparation
+    # window. The capture itself owns the later cumulative migration clock.
+    if capture_plan is not None:
+        from scripts.automation.storage_online_prepare import admit_serving_source
+        preparation = admit_serving_source(state_root, project=project,
+            source_revision=source_revision, operator_id=found[0] if found else None)
+        if (capture_plan["deadline"] != preparation["deadline"]
+                or not preparation["completed_at"] <= capture_plan["requested_at"] <= time.time()):
+            raise RuntimeError("storage_online_capture_preparation_binding_changed")
+        observed = _capture_observation(database_id)
+        if saved is None and observed is not None:
+            raise RuntimeError("storage_online_initial_capture_already_exists")
+        if observed is None:
+            if capture_plan["deadline"] <= time.time() or (saved and saved.get("capture") is not None):
+                raise RuntimeError("storage_online_capture_preparation_expired_or_missing")
+            deadline = None
+        else:
+            deadline = admit_capture(request, observed)
+    else:
+        observed = json.loads(host_boundary.database_query(database_id,
+            "SELECT json_build_object('started_at',prepared_at,'seconds',"
+            "COALESCE((to_jsonb(c)->>'attempt_seconds')::int,86400))::text "
+            "FROM qt_fact_header_cutover_v2.capture c WHERE id=1"))
+        deadline = admit_capture(request, observed)
     overrides = {"PG_DSN": dsn, "QT_DISABLE_DOTENV": "1",
                  "QT_ARCHIVE_SHARED_GROUP_ID": archive_group, "QT_LOGGING_LOKI_URL": "",
                  "QT_ONLINE_REQUEST_SHA256": digest, "QT_STORAGE_UDEV_ROOT": "/run/qt-online/udev"}
@@ -319,12 +341,19 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
         mounts=mounts, descriptor_limit=descriptor_limit, memory_bytes=memory_bytes,
         environment_sha256=host_boundary.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
     if saved:
-        if (set(saved) != {"binding", "container_id", "contract", "deadline"}
-                or saved["binding"] != binding or saved["deadline"] != deadline
+        expected_fields = {"binding", "container_id", "contract", "deadline"}
+        if capture_plan is not None:
+            expected_fields.add("capture")
+        if (set(saved) != expected_fields or saved["binding"] != binding
+                or (saved["deadline"] is not None and saved["deadline"] != deadline)
+                or (capture_plan is not None and saved["capture"] is not None and saved["capture"] != observed)
                 or (saved["container_id"] is not None and not found)):
             raise RuntimeError("storage_online_saved_launch_changed")
     else:
         saved = dict(binding=binding, container_id=None, contract=None, deadline=deadline)
+        if capture_plan is not None:
+            saved["capture"] = None
+        # This is the existing durable worker intent, before any Docker start.
         host_boundary.save_receipt(state_path, saved, initial=True)
     if not found:
         found = [host_boundary.docker(*_arguments(name, image, database_id, mounts, overrides,
@@ -344,6 +373,26 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=None, bufsize=0)
     try:
+        if capture_plan is not None:
+            startup_deadline = time.monotonic()+max(0, capture_plan["deadline"]-time.time())
+            while observed is None:
+                if process.poll() is not None:
+                    raise RuntimeError("storage_online_capture_worker_exited")
+                if time.monotonic() >= startup_deadline or time.time() >= capture_plan["deadline"]:
+                    raise RuntimeError("storage_online_capture_preparation_expired")
+                with host_boundary.docker_deadline(startup_deadline):
+                    admit_serving_source(state_root, project=project,
+                        source_revision=source_revision, operator_id=found[0])
+                    _admit(found[0], binding, contract)
+                    observed = _capture_observation(database_id)
+                if observed is None:
+                    time.sleep(min(.1, max(0, startup_deadline-time.monotonic())))
+            deadline = admit_capture(request, observed)
+            # Exact capture identity, not process exit or a saved negative read.
+            # Lost reply before this write retains the initial intent; a later
+            # admission must inspect the same persisted capture and owned worker.
+            saved.update(capture=observed, deadline=deadline)
+            host_boundary.save_receipt(state_path, saved, initial=False)
         yield process, {"container_id": found[0], "request_sha256": digest,
                         "deadline": deadline, "source_clients_unchanged": True,
                         "final_switch_authorized": False}

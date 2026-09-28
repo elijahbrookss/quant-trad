@@ -17,6 +17,7 @@ parser.add_argument('--output-root',type=Path,required=True)
 parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
+parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
@@ -40,6 +41,8 @@ parser.add_argument('--recovery-spool',action='store_true',help='prepare preserv
 parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
 parser.add_argument("--recovery-runtime",action="store_true",help="start actual split application composition after committed recovery preparation")
 options=parser.parse_args()
+if options.initial_capture and not (options.prepare_source and options.worker_phases):
+ parser.error("--initial-capture requires --prepare-source --worker-phases")
 if options.recovery_runtime and (not options.recovery_spool or options.recovery_spool_reply_loss):
  parser.error("--recovery-runtime requires successful --recovery-spool")
 if options.recovery_spool and (not options.recovery_repositories or options.recovery_repository_reply_loss):
@@ -212,7 +215,7 @@ os.chown(root,70,70)
    import ast
    fixture_tree=ast.parse((Path(__file__).resolve().parents[2]/"tests/test_market_data/test_collector_shutdown_signal.py").read_text())
    SCRIPT=next(ast.literal_eval(node.value) for node in fixture_tree.body if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="SCRIPT" for t in node.targets))
-   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_DISABLE_DOTENV=1',
+   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),'--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_DISABLE_DOTENV=1',
              '--env','QT_LOGGING_LOKI_URL=','--env','QT_LOGGING_LEVEL=INFO']
    run(['run','-d','--name',name,'--pull','never','--network',network,
      '--user','70:70','--read-only','--memory','512m','--cpus','2','--pids-limit','64',
@@ -256,7 +259,7 @@ os.chown(root,70,70)
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
-   '--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
+   '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
  log=(state/'fixture.log').open('w')
@@ -273,6 +276,10 @@ os.chown(root,70,70)
    if time.monotonic()>received_deadline:raise RuntimeError('real Docker collector did not receive frame')
    time.sleep(.05)
  request=json.loads((control/'request.json').read_text())
+ if options.initial_capture:
+  request['capture_preparation'].update(requested_at=time.time(),deadline=preparation['deadline'])
+  assert launch._capture_observation(pgid) is None
+  report['capture_absent_before_owned_worker']=True
  inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes());inventory.chmod(0o644)
  udev=control/Path(json.loads((control/'ready.json').read_text())['udev']).relative_to('/qt-control')
  os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
@@ -290,9 +297,28 @@ os.chown(root,70,70)
  if options.commit_switch:
   source_holds.enter_context(host_boundary.deployment_lock(state))
   launch_context=launch.launched_online_worker_locked
+ if options.initial_capture:
+  capture_entry=time.monotonic()
+  with launch_context(state,**kwargs) as (worker,receipt):
+   first_channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time())
+   assert first_channel.greeting['state']=='background'
+   original_capture=host_boundary.load_receipt(state/launch._STATE)['capture']
+   original_capture_deadline=receipt['deadline']
+   report['initial_capture_ready_seconds']=time.monotonic()-capture_entry
+  # Actual clean worker retirement, then original capture/controller reentry.
+  # No copy, final pause or recovery action was dispatched by the first worker.
  for attempt in range(1 if options.final_pause else 2):
   with launch_context(state,**kwargs) as (worker,receipt):
    channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
+   if options.initial_capture:
+    saved_worker=host_boundary.load_receipt(state/launch._STATE)
+    assert saved_worker['capture']==launch._capture_observation(pgid)
+    assert saved_worker['deadline']==receipt['deadline']
+    assert saved_worker['capture']==original_capture and receipt['deadline']==original_capture_deadline
+    report['initial_capture_restart_preserved_original_clock']=True
+    assert host_boundary.source_clients_serving(host_boundary.inventory(project,operator_id=receipt['container_id']))
+    report['initial_capture_while_source_serving']=True
+    report['initial_capture_binding']=saved_worker['capture']
    assert not greeting['final_switch_authorized']
    assert greeting['background_hashed_bytes']==0
    assert receipt['source_clients_unchanged']

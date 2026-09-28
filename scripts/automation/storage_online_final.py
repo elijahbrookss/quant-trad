@@ -326,11 +326,10 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id, 
     _admit_mount_writers(rows, operator_id=worker_id)
     capture = (session["capture"] if session is not None else json.loads(host_boundary.database_query(rows["tsdb"]["id"],
         "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1")))
-    seconds = capture.get("attempt_seconds", 86400)
-    started = datetime.fromisoformat(capture["prepared_at"])
-    if (started.tzinfo is None or type(seconds) is not int or not 1 <= seconds <= 96*3600
-            or started != datetime.fromisoformat(request["expected_started_at"])
-            or started.timestamp()+seconds != worker["deadline"]):
+    observed = {"started_at": capture["prepared_at"], "seconds": capture.get("attempt_seconds", 86400)}
+    deadline = launch.admit_capture(request, observed)
+    if (deadline != worker["deadline"]
+            or (launch.capture_preparation(request) is not None and worker.get("capture") != observed)):
         raise RuntimeError("storage_online_final_original_capture_changed")
     allowance = request["resource_limits"]["movement_timeout_seconds"]
     if type(allowance) is not int or not 1 <= allowance <= 96*3600:

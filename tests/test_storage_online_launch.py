@@ -107,7 +107,8 @@ def test_nested_database_mount_and_control_alias_refused(tmp_path):
 
 
 @pytest.mark.parametrize("archive_group", [None, 70])
-def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, monkeypatch, archive_group):
+@pytest.mark.parametrize("initial_capture", [False, True])
+def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, monkeypatch, archive_group, initial_capture):
     database, collector, inventory, request_path = _inputs(tmp_path)
     request_path.unlink()
     state_root = tmp_path/"state"
@@ -136,6 +137,16 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
     if archive_group is not None:
         request["archive_shared_group_id"] = archive_group
     created=[]
+    if initial_capture:
+        from scripts.automation import storage_online_prepare as initial
+        request["expected_started_at"] = None
+        request["capture_preparation"] = dict(requested_at=started.timestamp()-1,
+            deadline=started.timestamp()+500, attempt_seconds=60, history_before="2026-01-01")
+        monkeypatch.setattr(initial, "admit_serving_source", lambda *a,**k: {
+            "completed_at":started.timestamp()-2, "deadline":request["capture_preparation"]["deadline"]})
+        live = [False]
+        monkeypatch.setattr(launch, "_capture_observation", lambda _: {
+            "started_at":started.isoformat(), "seconds":60} if live[0] else None)
     def docker(*args,**kwargs):
         if args[0]=="ps": return worker_id if created else ""
         if args[0]=="image": return json.dumps({"Id":image,"Config":{"Env":[
@@ -163,10 +174,15 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
         with launch.launched_online_worker(state_root,**kwargs): pass
     original=json.loads((state_root/launch._STATE).read_text())
     assert original["container_id"] is None and len(created)==1
-    monkeypatch.setattr(launch.subprocess,"Popen",lambda *a,**k:
-        SimpleNamespace(stdin=io.BytesIO(),stdout=io.BytesIO(),wait=lambda **kw:0,poll=lambda:0))
+    def start(*a, **k):
+        if initial_capture:
+            live[0] = True
+        return SimpleNamespace(stdin=io.BytesIO(),stdout=io.BytesIO(),wait=lambda **kw:0,poll=lambda:None if initial_capture else 0)
+    # The dedicated retirement cases below qualify actual CLI/daemon retirement.
+    monkeypatch.setattr(launch, "_retire_worker", lambda *a: None)
+    monkeypatch.setattr(launch.subprocess,"Popen", start)
     with launch.launched_online_worker(state_root,**kwargs) as (_,receipt):
-        assert receipt["deadline"] == original["deadline"]
+        assert receipt["deadline"] == (started.timestamp()+60 if initial_capture else original["deadline"])
         assert not receipt["final_switch_authorized"]
     assert len(created)==1
     with pytest.raises(RuntimeError,match="saved_launch_changed"):

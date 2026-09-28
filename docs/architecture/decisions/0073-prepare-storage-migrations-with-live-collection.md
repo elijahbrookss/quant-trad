@@ -9,6 +9,7 @@ tags:
   - storage
   - migration
 code_paths:
+  - tests/test_storage_online_capture.py
   - tests/test_storage_online_runtime.py
   - scripts/automation/storage_online_runtime.py
   - scripts/provenance/source_tree_hash.py
@@ -564,7 +565,8 @@ removes these markers. Exact terminal host reconciliation and receipt retention
 must be qualified before any release mechanism is added; deleting evidence is
 not reconciliation. The initial preparation operator persists intent before its first source stop.
 Production admission must verify that the host's ordinary deployment entrypoint
-enforces this interlock. The launcher itself accepts already prepared attempts;
+enforces this interlock. The launcher accepts prepared attempts or the explicitly
+bound initial capture described below;
 the separate initial transition below does not initialize capture.
 This guard does not authorize a production preparation, final switch or restart.
 
@@ -1580,3 +1582,32 @@ same channel with the next sequence; unread or partial replies cannot take
 that path. No replacement deadline, receipt, state owner, listener or operator
 entrypoint is added. The complete production operator and actual source/load
 admission remain unfinished.
+
+### Initial capture in the same confined worker
+
+The existing private worker request may include `capture_preparation`, fixing the
+cutoff, requested capture duration, request time and the original initial
+preparation deadline. It cannot also claim an existing capture start. The launcher
+requires the already completed source-resumption receipt, unchanged serving
+clients and the exact original 600-second deadline. It persists the existing
+worker intent before dispatch; it does not stop collectors for capture or copying.
+
+The same confined worker first admits the actual pinned database environment and
+builtin job set. It reuses `prepare_history_tablespace` and `prepare_attempt` to
+create the fixed destination and atomic online captures. The latter uses NOWAIT
+writer fencing for the short transaction, not a client stop or baseline copy.
+Both phases use only the remaining initial window; no new 600-second allowance
+is created. Source roots and permissions remain unchanged.
+
+The launcher independently observes the committed capture and records its actual
+start and duration in the existing worker receipt before yielding the retained
+controller. That database capture owns the unchanged cumulative migration limit.
+A background restart must match those original fields, inventory and immutable
+request. A missing capture can be created only inside the original preparation
+window; an existing capture is inspected, never replaced or given a new clock.
+The final-state owner rechecks this exact saved capture before any final pause.
+Uncertain final operations still have no replay authority. No new operator CLI,
+receipt file, scheduler, service or general workflow framework is introduced.
+
+The complete supported operator still needs production fleet/resource admission,
+terminal outcome handling and measured collection/query impact before release.

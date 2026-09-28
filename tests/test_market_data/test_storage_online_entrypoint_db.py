@@ -97,6 +97,7 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
             if time.monotonic() >= deadline:
                 raise AssertionError("online entrypoint fixture host deadline: "+name)
             time.sleep(0.1)
+    initial_capture = os.getenv("QT_ONLINE_INITIAL_CAPTURE") == "1"
     atomic = os.getenv("QT_ONLINE_ATOMIC_PREPARE") == "1"
     worker_phases = os.getenv("QT_ONLINE_WORKER_PHASES") == "1"
     assert not worker_phases or atomic
@@ -117,12 +118,16 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         destination=Path("/qt-history/archives/objects")
         assert not any(destination.iterdir())
         destination.parent.chmod(0o2770);destination.chmod(0o2770)
-    if atomic:
+    if atomic and not initial_capture:
         online.prepare_attempt(engine, placement=storage.copy_plan, attempt_seconds=180,
             **{k:v for k,v in options.items() if k not in {"page_rows", "max_page_bytes"}})
     with engine.begin() as conn:
-        protection.prepare(conn)
-        started = capture.inspect_capture(conn)["started_at"]
+        if initial_capture:
+            assert conn.scalar(text("SELECT to_regclass('qt_fact_header_cutover_v2.capture')")) is None
+            started = None
+        else:
+            protection.prepare(conn)
+            started = capture.inspect_capture(conn)["started_at"]
         identity = conn.scalar(text("SELECT system_identifier::text||'/'||"
             "(SELECT oid::text FROM pg_database WHERE datname=current_database()) FROM pg_control_system()"))
         frozen = _frozen_records(conn)
@@ -148,6 +153,9 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         expected_started_at=started, policy=asdict(options["policy"]),
         resource_limits=options["resource_limits"], max_page_bytes=options["max_page_bytes"],
         max_objects=128,max_bytes=64*1024**2,page_rows=2,command_seconds=30)
+    if initial_capture:
+        request["capture_preparation"] = dict(history_before=storage.copy_plan.history_before.isoformat(),
+            attempt_seconds=180, requested_at=None, deadline=None)
     if os.getenv("QT_ONLINE_RUNTIME_FIXTURE")=="1":
         request["archive_shared_group_id"]=70
     # Generated disposable credentials only, private fixture control, never receipts.
@@ -160,6 +168,10 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         prepare_definition(storage, book, source/"objects")
     (control/"ready.json").write_text(json.dumps({"udev":str(storage.copy_udev)}))
     wait("publish")
+    if initial_capture:
+        with engine.begin() as conn:
+            started = capture.inspect_capture(conn)["started_at"]
+        assert started is not None
     _raw_book_fixture(storage, source, monkeypatch,
         definition_id="host-entrypoint-live",provider_product_id="BTC-USD-HOST-ENTRY",
         event_start=BASE+timedelta(hours=4), replay_features=runtime_recovery is not None)

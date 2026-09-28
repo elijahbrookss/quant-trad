@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - tests/test_storage_online_capture.py
   - tests/test_storage_host_channel.py
   - tests/test_storage_online_runtime.py
   - scripts/automation/storage_online_runtime.py
@@ -133,7 +134,7 @@ Each boundary owns a different kind of truth:
 | `storage_online_final` | Final wall/boot window, durable switch intent, source-stop/start journal and same-worker host coordination. | SQL commit truth from an exit code, stale receipt, or observed empty queue. |
 | `storage_online_recovery` | Fixed preserving recreation of the already HDD-mounted database after committed reconciliation and verified reader retirement, journaled in the existing final receipt. | Repository readiness, restored access, application startup or a complete encrypted pair. |
 | `storage_online_controller` and bounded copy/proof components | Live controller ownership, current proof, original attempt/command deadlines and bounded preparation progress. | Host publisher exclusion or runtime activation. Process-local proof cannot be restored from a saved status reply. |
-| `fact_header_v2_handoff` | Verified SQL transaction and authoritative outcome inspection; separately admitted policy/runtime checks. | A safe host pause or source restart. The complete online host-to-worker COMMIT path remains unfinished. |
+| `fact_header_v2_handoff` | Verified SQL transaction and authoritative outcome inspection; separately admitted policy/runtime checks. | A safe host pause or source restart. The host final-state owner supplies the held COMMIT transition. |
 | Recovery preparation and maintenance | Repository identity, native WAL delivery and publication/retention of complete encrypted database/archive pairs. | Permission to add secret mounts before exact committed reconciliation and verified read-worker retirement. |
 
 The shared host boundary has no CLI or migration state machine. Both historical
@@ -1617,7 +1618,8 @@ removes these markers. Exact terminal host reconciliation and receipt retention
 must be qualified before any release mechanism is added; deleting evidence is
 not reconciliation. The initial preparation operator persists intent before its first source stop.
 Production admission must verify that the host's ordinary deployment entrypoint
-enforces this interlock. The launcher itself accepts already prepared attempts;
+enforces this interlock. The launcher accepts prepared attempts or the explicitly
+bound initial capture described below;
 the separate initial transition below does not initialize capture.
 This guard does not authorize a production preparation, final switch or restart.
 
@@ -2696,3 +2698,32 @@ same channel with the next sequence; unread or partial replies cannot take
 that path. No replacement deadline, receipt, state owner, listener or operator
 entrypoint is added. The complete production operator and actual source/load
 admission remain unfinished.
+
+### Initial capture in the same confined worker
+
+The existing private worker request may include `capture_preparation`, fixing the
+cutoff, requested capture duration, request time and the original initial
+preparation deadline. It cannot also claim an existing capture start. The launcher
+requires the already completed source-resumption receipt, unchanged serving
+clients and the exact original 600-second deadline. It persists the existing
+worker intent before dispatch; it does not stop collectors for capture or copying.
+
+The same confined worker first admits the actual pinned database environment and
+builtin job set. It reuses `prepare_history_tablespace` and `prepare_attempt` to
+create the fixed destination and atomic online captures. The latter uses NOWAIT
+writer fencing for the short transaction, not a client stop or baseline copy.
+Both phases use only the remaining initial window; no new 600-second allowance
+is created. Source roots and permissions remain unchanged.
+
+The launcher independently observes the committed capture and records its actual
+start and duration in the existing worker receipt before yielding the retained
+controller. That database capture owns the unchanged cumulative migration limit.
+A background restart must match those original fields, inventory and immutable
+request. A missing capture can be created only inside the original preparation
+window; an existing capture is inspected, never replaced or given a new clock.
+The final-state owner rechecks this exact saved capture before any final pause.
+Uncertain final operations still have no replay authority. No new operator CLI,
+receipt file, scheduler, service or general workflow framework is introduced.
+
+The complete supported operator still needs production fleet/resource admission,
+terminal outcome handling and measured collection/query impact before release.
