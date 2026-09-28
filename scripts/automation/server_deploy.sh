@@ -540,6 +540,14 @@ require_no_alert_preview() {
 }
 
 show_release() {
+  if storage_online_pending; then
+    echo "Storage online intent: unresolved; ordinary deployment/recovery is blocked."
+    echo "Preserve online receipts and reconcile the database, mounts and runtime before resuming server operations."
+  fi
+  if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
+    echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
+    echo "Use the preserving storage procedure to reconcile database and runtime state."
+  fi
   if ! test -f "$state_file"; then
     echo "No successful release has been recorded at $state_file"
     return 0
@@ -741,6 +749,7 @@ restore_alerting_preview() {
 }
 
 deploy_release() {
+  require_no_storage_handoff
   local requested_ref="${1:-}"
   require_no_alert_preview
   if test -f "$state_root/promotion.env" && test "${promotion_in_progress:-false}" != "true"; then
@@ -784,6 +793,29 @@ acquire_deployment_lock() {
   flock --exclusive --nonblock 9 || die "another server operation holds the deployment lock"
 }
 
+# A lost controller releases the process lock, not the durable migration intent.
+# The request precedes the worker receipt; neither expiry nor SQL cancellation
+# proves that an old runtime/recipe can safely serve retained or relocated data.
+storage_online_pending() {
+  local marker
+  for marker in storage-online-preparation.json storage-online-request.json storage-online-worker.json storage-online-final.json; do
+    if test -e "$state_root/$marker" || test -L "$state_root/$marker"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Presence alone is a hold: corrupt/partial state must never permit a restart.
+require_no_storage_handoff() {
+  if storage_online_pending; then
+    die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
+  fi
+  if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
+    die "storage handoff hold is active; reconcile the preserving storage procedure before resuming server operations"
+  fi
+}
+
 promotion_value() {
   sed -n "s/^$1=//p" "$state_root/promotion.env" | tail -n 1
 }
@@ -798,6 +830,7 @@ prepare_recovery() {
 }
 
 recover_promotion() {
+  require_no_storage_handoff
   test -f "$state_root/promotion.env" || die "no unfinished promotion is recorded"
   local previous candidate activation
   previous="$(promotion_value previous_revision)"
@@ -833,6 +866,7 @@ recover_promotion() {
 }
 
 promote_release() {
+  require_no_storage_handoff
   local candidate="${1:-}" flag="${2:-}" previous="${3:-}"
   [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$previous" =~ ^[0-9a-f]{40}$ ]] \
     && test "$flag" = --compatible-with && test "$#" = 3 \
@@ -882,8 +916,9 @@ action="${1:-}"
 shift || true
 
 case "$action" in
-  deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
+  init-env|deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
     acquire_deployment_lock
+    require_no_storage_handoff
     ;;
 esac
 

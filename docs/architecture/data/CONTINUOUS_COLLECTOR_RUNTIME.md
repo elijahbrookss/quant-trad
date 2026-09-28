@@ -452,3 +452,12 @@ This backport preserves the deployed research revision and v1 storage layout.
 Its activation requires a separately qualified preserving release; no production
 recipe, collector state or storage data is changed by adding the code. See
 [ADR0074](../decisions/0074-retain-source-writer-interlock-during-storage-preparation.md).
+
+
+The existing release script also refuses every mutating action when a storage
+hold, preparation, request, worker or final marker exists, including a corrupt
+file, expired/canceled receipt, directory or dangling symlink. Process death or
+loss of the deployment flock cannot erase this durable refusal. Read-only
+release status reports the hold without printing private receipt contents.
+This reuses the migration branch's existing refusal; it does not introduce a
+new state file, parse a receipt into authority, or enable the new storage layout.

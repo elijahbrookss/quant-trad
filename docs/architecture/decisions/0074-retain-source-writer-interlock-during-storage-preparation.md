@@ -9,6 +9,8 @@ tags:
   - migration
   - recovery
 code_paths:
+  - scripts/automation/server_deploy.sh
+  - tests/test_server_promotion.py
   - src/core/storage_writer_fence.py
   - portal/backend/run_backend.py
   - portal/backend/workers/market_data_collector.py
@@ -50,3 +52,12 @@ replacement/configuration removal and database readiness before child spawn.
 The source-compatible package and deployment remain separately qualified; this
 code does not authorize migration or ordinary relaunch after an unresolved
 final transition.
+
+
+The existing release script also refuses every mutating action when a storage
+hold, preparation, request, worker or final marker exists, including a corrupt
+file, expired/canceled receipt, directory or dangling symlink. Process death or
+loss of the deployment flock cannot erase this durable refusal. Read-only
+release status reports the hold without printing private receipt contents.
+This reuses the migration branch's existing refusal; it does not introduce a
+new state file, parse a receipt into authority, or enable the new storage layout.
