@@ -960,7 +960,8 @@ def test_host_commit_intent_is_once_only_and_never_grants_runtime(guarded_source
                     assert operation == "inspect_outcome"
                     result.update(outcome="uncommitted" if fault == "uncommitted" else "committed",
                         database_handoff_committed=fault != "uncommitted",
-                        initial_policy_activated=fault not in {"uncommitted", "missing_policy"})
+                        initial_policy_activated=fault not in {"uncommitted", "missing_policy"},
+                        confirmed_plan_id="handoff-"+"e"*32)
             reply["result"] = result
             return reply
         if fault in {"lost_reply", "bad_reply", "gate", "missing_policy"}:

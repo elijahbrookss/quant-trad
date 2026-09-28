@@ -839,7 +839,7 @@ from portal.backend.workers.market_data_collector_health import live_worker_for_
 raw=sys.stdin.buffer.read(65537)
 if len(raw)>65536: raise ValueError('storage_runtime_request_too_large')
 request=json.loads(raw,object_pairs_hook=_unique_fields)
-worker=live_worker_for_host()
+worker=live_worker_for_host(storage_maintenance='confirmed_plan_id' in request)
 engine=create_engine(os.environ['PG_DSN'],poolclass=NullPool,hide_parameters=True,
                      connect_args={'connect_timeout':10})
 try:

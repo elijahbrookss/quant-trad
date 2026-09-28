@@ -284,3 +284,58 @@ def test_activation_keeps_original_project_and_consumed_inventory_binding(split_
         monkeypatch.setattr(runtime,"inspect_runtime_configuration",changed)
     with pytest.raises(RuntimeError,match="fixed_composition_required" if fault=="project" else "inventory_changed"):
         admit()
+
+
+@pytest.mark.parametrize("phase",["login_closing","commit_dispatching","committed","recovery_runtime_starting"])
+def test_completion_never_replays_or_inspects_an_uncertain_action(tmp_path,monkeypatch,phase):
+    monkeypatch.setattr(final,"_load",lambda _:dict(phase=phase))
+    monkeypatch.setattr(runtime,"inspect_completed_runtime",lambda *a,**kw:pytest.fail("uncertain operation admitted"))
+    with pytest.raises(RuntimeError,match="runtime_not_confirmed"):
+        final.inspect_runtime_completion_locked(tmp_path)
+
+
+@pytest.mark.parametrize("fault",[None,"reboot","backwards"])
+def test_completion_observation_after_expiry_preserves_original_clocks(tmp_path,monkeypatch,fault):
+    saved=dict(phase="recovery_runtime_ready",boot_id="original",started_boot=10,
+        deadline=80,deadline_boot=70,runtime=dict(finished_at=75))
+    original=deepcopy(saved)
+    monkeypatch.setattr(final,"_load",lambda _:saved)
+    monkeypatch.setattr(final,"_boot_id",lambda:"different" if fault=="reboot" else "original")
+    monkeypatch.setattr(final,"_boot_seconds",lambda:200)
+    monkeypatch.setattr(final.time,"time",lambda:74 if fault=="backwards" else 300)
+    calls=[]
+    def observe(root,**kwargs):
+        calls.append(kwargs)
+        assert kwargs["saved"]==original
+        return dict(ready=True,ordinary_relaunch_authorized=False)
+    monkeypatch.setattr(runtime,"inspect_completed_runtime",observe)
+    if fault:
+        with pytest.raises(RuntimeError,match="boot_changed|clock_moved_backwards"):
+            final.inspect_runtime_completion_locked(tmp_path)
+        assert not calls
+    else:
+        assert final.inspect_runtime_completion_locked(tmp_path)["ready"]
+        assert len(calls)==1
+    assert saved==original
+
+
+@pytest.mark.parametrize("change",["missing","other_plan","changed_policy","not_ready","source_not_retained"])
+def test_published_runtime_certificate_cannot_be_substituted(monkeypatch,change):
+    from types import SimpleNamespace
+    from scripts.db import fact_header_v2_handoff as handoff
+    receipt=dict(schema_version=handoff.RECEIPT_VERSION,initial_policy_required=True,
+                 policy_fingerprint="original")
+    expected=handoff._policy_plan_id(receipt)
+    row=dict(state="ready",evidence=dict(source_retained=True,handoff=receipt))
+    if change=="other_plan":expected="handoff-"+"0"*32
+    if change=="changed_policy":receipt["policy_fingerprint"]="changed"
+    if change=="not_ready":row["state"]="preparing"
+    if change=="source_not_retained":row["evidence"]["source_retained"]=False
+    class Connection:
+        def scalar(self,*a,**kw):return True
+        def execute(self,*a,**kw):return self
+        def mappings(self):return self
+        def one_or_none(self):return None if change=="missing" else row
+    monkeypatch.setattr(handoff,"assert_fact_storage_contract",lambda *_:pytest.fail("substituted certificate admitted"))
+    with pytest.raises(RuntimeError,match="certificate_changed"):
+        handoff._inspect_published_runtime_policy(Connection(),policy=SimpleNamespace(fingerprint="original"),plan_id=expected)

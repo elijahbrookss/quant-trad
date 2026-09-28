@@ -122,8 +122,9 @@ The release workflow is: prepare the fixed SSD/HDD destination, copy and catch u
 while the original source serves, admit a short final pause, switch once, then
 activate the matching runtime and publish a complete encrypted recovery pair.
 This is the workflow required by [ADR 0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md).
-**Its complete operator is not implemented or qualified yet.** Internal phase
-helpers and disposable rehearsals are not alternative supported release commands.
+**The single operator reaches runtime readiness; production release remains
+unqualified.** Internal phase helpers and disposable rehearsals are not
+alternative supported release commands.
 The historical operator that holds clients throughout copying is not this
 release's production path.
 
@@ -148,8 +149,9 @@ Receipt serialization, file permissions, error codes, service admission and
 locking retain their prior behavior. Schema validation and transition decisions
 stay with the phase that owns each receipt.
 
-The remaining release integration must connect these owners into one operation,
-including continuous publisher exclusion and the post-switch recovery transition.
+The single operation connects these owners, including publisher exclusion and
+the post-switch recovery transition. Remaining release work must qualify terminal
+release, actual source/fleet admission and production operating impact.
 It must not accumulate another set of competing receipt meanings or public phase
 commands. An uncertain switch requires fresh authoritative inspection; an
 in-flight or partially completed Docker start remains unresolved and cannot be
@@ -2808,8 +2810,9 @@ explicit measured limits. It supplies a history cutoff and cumulative attempt
 limit; it cannot supply a capture start or preparation clock. The existing
 initial receipt supplies its saved completion time and original 600-second
 deadline to the worker request. A serving-source reentry uses those same values.
-An incomplete initial intent or any final intent requires reconciliation rather
-than repeating the operation. The configuration is read again before mutation.
+An incomplete initial intent or uncertain final intent requires reconciliation
+rather than repeating the operation. A durably ready runtime permits only the
+completion observation described below. The configuration is read again before mutation.
 
 Runtime-ready return retains all phase journals and explicitly reports that
 ordinary relaunch and a complete encrypted pair are not yet confirmed. Terminal
@@ -2833,3 +2836,31 @@ absolute existing paths. Existing private database/runtime recipes stay under
 `spool_max_entries`, `spool_reserve_bytes`, `repository_max_bytes`,
 `repository_reserve_bytes` and `recent_free_bytes`. These values must come from
 release measurements; tiny rehearsal limits are not production defaults.
+
+### Completion observation after runtime readiness
+
+Reentering the same `qt storage migrate --operation-file ...` command after
+`recovery_runtime_ready` performs bounded observation only, including with
+`--execute`. All runtime actions must already be durably completed inside the
+original final window. Inflight or incomplete actions, reboot, backward clocks,
+changed configuration and another handoff refuse. No service action, migration
+retry, policy change, deadline renewal or journal removal occurs.
+
+The original live worker returns the initial-policy plan identifier during its
+fresh committed-outcome inspection. That identifier hashes the full handoff
+receipt and is retained by the host final-state owner. The dedicated maintenance
+process verifies that exact database certificate, current applied policy, live
+supervisor outcome and matching complete encrypted database/archive pair. It
+reuses the existing policy-record and recovery-copy checks. It does not gain
+access to private application source files; the earlier live switch inspection
+remains the filesystem proof. Older receipts without the confirmed identifier
+are preserved and cannot enter this completion path.
+
+The host also freshly checks the admitted image/recipe, private spool, helpers,
+retired reader, database identity and healthy exact application containers. A
+backup still running yields a pending observation while collection continues.
+A complete pair returns `recovery_verified`; this is an observation, not a new
+journal state or deployment authority. The original final marker remains, and
+ordinary deployment/relaunch continues to refuse until release bookkeeping and
+its preserving deployment path are separately qualified. The observation's
+bounded I/O timeout never extends initial, capture or final mutation deadlines.

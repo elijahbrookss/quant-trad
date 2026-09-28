@@ -565,12 +565,7 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
                     if name in journal["candidate_ids"] and row["id"]!=journal["candidate_ids"][name]:
                         raise RuntimeError("storage_online_runtime_candidate_changed")
                     details=preserving._runtime_candidate_details(name,row,model,observation)
-                    service=model["services"][name];h=details["host"]
-                    if (h.get("CapDrop")!=["ALL"] or h.get("SecurityOpt")!=service["security_opt"]
-                            or sorted(h.get("GroupAdd") or [])!=sorted(str(v) for v in service["group_add"])
-                            or h.get("Init") is not True or h.get("VolumesFrom") or h.get("Sysctls")
-                            or h.get("IpcMode") not in ("private","") or h.get("UsernsMode") or h.get("UTSMode")):
-                        raise RuntimeError("storage_online_runtime_candidate_privileges_changed")
+                    admit_candidate_privileges(details, model["services"][name])
                     if "start:"+name in journal["completed"]:
                         status=json.loads(host.docker("inspect","--format","{{json .State}}",row["id"]))
                         if (status["OOMKilled"] or status["Paused"] or status["Restarting"]
@@ -640,3 +635,108 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
         host.save_receipt(path,saved,initial=False);check()
         return dict(application_containers=dict(journal["candidate_ids"]),collector_process_healthy=True,
                     complete_backup_confirmed=False,ordinary_relaunch_authorized=False)
+
+
+def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
+    """Bounded observation of an already durably ready runtime, even after expiry.
+
+    Never dispatch a start, replay an action, renew a migration clock or retire a
+    marker. A backup may finish with collection serving after the final window.
+    The caller holds the deployment lock and the final owner validates the journal.
+    """
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
+        raise ValueError("storage_online_completion_timeout_invalid")
+    if saved["phase"] != "recovery_runtime_ready":
+        raise RuntimeError("storage_online_completion_runtime_not_confirmed")
+    validate_runtime_journal(saved)
+    plan_id = saved["commit"].get("confirmed_plan_id")
+    if not isinstance(plan_id, str) or not re.fullmatch(r"handoff-[0-9a-f]{32}", plan_id):
+        raise RuntimeError("storage_online_completion_plan_not_confirmed")
+    worker = host.load_receipt(state_root/launch._STATE)
+    preparation = initial._load(state_root)
+    if (host.digest(worker) != saved["binding"]["worker_sha256"]
+            or host.digest(preparation) != saved["binding"]["preparation_sha256"]
+            or worker["container_id"] != saved["binding"]["worker_id"]):
+        raise RuntimeError("storage_online_completion_binding_changed")
+    journal = saved["runtime"]
+    deadline = time.monotonic()+timeout_seconds  # observation only, never migration authority
+    with host.docker_deadline(deadline):
+        rows = host.inventory(saved["binding"]["project"], operator_id=worker["container_id"],
+                              activating=True, runtime_maintenance=True)
+        model, admission = admit_runtime_recipe(state_root, saved, worker, preparation, rows)
+        if admission != journal["admission"]:
+            raise RuntimeError("storage_online_completion_recipe_changed")
+        database_id = saved["recovery"]["replacement_id"]
+        database = host.database_details(database_id)
+        networks = host.database_networks(database)
+        observation = dict(admission={**admission, "images":{
+                **admission["images"], "tsdb":model["services"]["tsdb"]["image"]}},
+            compose_hashes=journal["compose_hashes"], binding=dict(database_id=database_id),
+            receipt=dict(project=saved["binding"]["project"], database_preparation=dict(networks=networks)))
+        destination = Path(saved["runtime_spool"]["destination"])
+
+        def check():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("storage_online_completion_observation_expired")
+            if host.load_receipt(state_root/"storage-online-final.json") != saved:
+                raise RuntimeError("storage_online_completion_journal_changed")
+            launch._admit(worker["container_id"], worker["binding"], worker["contract"])
+            state = json.loads(host.docker("inspect", "--format", "{{json .State}}", worker["container_id"]))
+            if (any(state.get(k) is not False for k in ("Running", "Paused", "Restarting", "Dead"))
+                    or state.get("Pid") != 0 or state.get("Status") != "exited"
+                    or state.get("StartedAt") != saved["binding"]["worker_started_at"]):
+                raise RuntimeError("storage_online_completion_reader_not_retired")
+            for stage in ("runtime_spool", "repositories"):
+                value = saved[stage]
+                current = json.loads(host.docker("inspect", "--format", "{{json .State}}", value["helper_id"]))
+                if host.digest(current) != value["helper_retirement"]:
+                    raise RuntimeError("storage_online_completion_helper_changed")
+            root = destination.stat()
+            if (destination.resolve(strict=True) != destination
+                    or [root.st_dev, root.st_ino] != saved["runtime_spool"]["destination_identity"]
+                    or (root.st_uid, root.st_gid, stat.S_IMODE(root.st_mode)) != (1000,1000,0o700)):
+                raise RuntimeError("storage_online_completion_private_root_changed")
+            _copy_report(destination, saved["runtime_spool"]["report"]["manifest_sha256"])
+            current = host.inventory(saved["binding"]["project"], operator_id=worker["container_id"],
+                                     activating=True, runtime_maintenance=True)
+            expected_ids = {**journal["candidate_ids"], "tsdb":database_id}
+            if not set(expected_ids) <= set(current):
+                raise RuntimeError("storage_online_completion_container_missing")
+            for name, identity in expected_ids.items():
+                row = current[name]
+                if row["id"] != identity:
+                    raise RuntimeError("storage_online_completion_container_changed")
+                details = preserving._runtime_candidate_details(name,row,model,observation)
+                if name != "tsdb":
+                    admit_candidate_privileges(details, model["services"][name])
+                state = json.loads(host.docker("inspect", "--format", "{{json .State}}", identity))
+                if (state["OOMKilled"] or state["Paused"] or state["Restarting"]
+                        or (name == "initialize" and (state["Running"] or state["ExitCode"] != 0 or state["Status"] != "exited"))
+                        or (name != "initialize" and (not state["Running"] or state.get("Health",{}).get("Status") != "healthy"))):
+                    raise RuntimeError("storage_online_completion_unhealthy")
+            if host.cluster_identifier(database_id, maintenance=True) != preparation["cluster"]:
+                raise RuntimeError("storage_online_completion_cluster_changed")
+            if admit_runtime_recipe(state_root,saved,worker,preparation,current)[1] != admission:
+                raise RuntimeError("storage_online_completion_recipe_changed")
+
+        check()
+        raw = preserving._runtime_configuration_bytes(state_root/"storage-online-request.json")
+        request = json.loads(raw)
+        identity = saved["binding"]["capture"]["cluster_id"]+"/"+saved["binding"]["capture"]["database_oid"]
+        result = preserving._runtime_observation(journal["candidate_ids"]["storage-maintenance"],
+            dict(policy=request["policy"], database_identity=identity,
+                 inventory_path="/run/quanttrad/storage-inventory.json", confirmed_plan_id=plan_id),
+            dict(plan_id=plan_id))
+        check()
+        return {**result, "runtime_ready":True, "complete_backup_confirmed":result["ready"],
+                "ordinary_relaunch_authorized":False, "storage_mutations_performed":False}
+
+
+def admit_candidate_privileges(details, service):
+    """The same privilege checks apply at activation and completion observation."""
+    h = details["host"]
+    if (h.get("CapDrop") != ["ALL"] or h.get("SecurityOpt") != service["security_opt"]
+            or sorted(h.get("GroupAdd") or []) != sorted(str(v) for v in service["group_add"])
+            or h.get("Init") is not True or h.get("VolumesFrom") or h.get("Sysctls")
+            or h.get("IpcMode") not in ("private", "") or h.get("UsernsMode") or h.get("UTSMode")):
+        raise RuntimeError("storage_online_runtime_candidate_privileges_changed")

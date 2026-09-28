@@ -881,6 +881,7 @@ class OnlineController:
             return {"outcome": "committed" if committed else "uncommitted",
                     "database_handoff_committed": committed,
                     "initial_policy_activated": policy_activated,
+                    **({"confirmed_plan_id": configured["plan_id"]} if policy_activated else {}),
                     "collection_resume_authorized": False, "runtime_activation_authorized": False}
         except RuntimeError as exc:
             if str(exc) not in {"fact_header_copy_migration_busy", "fact_header_handoff_outcome_pending"}:

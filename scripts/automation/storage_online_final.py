@@ -146,7 +146,10 @@ def _load(path):
             raise RuntimeError("storage_online_login_receipt_invalid")
     if committing:
         commit = saved["commit"]
-        if (not isinstance(commit, dict) or set(commit) != {"requested_at", "worker_sequence", "source_image", "confirmed_at", "initial_policy_activated"}
+        if (not isinstance(commit, dict) or set(commit)-{"confirmed_plan_id"} != {"requested_at", "worker_sequence", "source_image", "confirmed_at", "initial_policy_activated"}
+                or ("confirmed_plan_id" in commit and commit["confirmed_plan_id"] is not None
+                    and (not isinstance(commit["confirmed_plan_id"], str)
+                         or not re.fullmatch(r"handoff-[0-9a-f]{32}", commit["confirmed_plan_id"])))
                 or commit.get("initial_policy_activated") is not (saved["phase"] != "commit_dispatching")
                 or type(commit["requested_at"]) not in (int, float)
                 or not saved["login_gate"]["closed_at"] <= commit["requested_at"] <= saved["deadline"]
@@ -1183,7 +1186,7 @@ def commit_online_handoff_locked(state_root, *, exchange):
         admit(session)
         saved.update(phase="commit_dispatching", commit={"requested_at": time.time(),
             "worker_sequence": sequence+1, "source_image": source_image, "confirmed_at": None,
-            "initial_policy_activated": False})
+            "initial_policy_activated": False, "confirmed_plan_id": None})
         host_boundary.save_receipt(path, saved, initial=False)  # BEFORE possible COMMIT.
         budget()
         reply = exchange("commit_database", deadline=deadline)
@@ -1223,6 +1226,10 @@ def commit_online_handoff_locked(state_root, *, exchange):
         if result["outcome"] == "committed":
             if result.get("initial_policy_activated") is not True:
                 raise RuntimeError("storage_online_committed_policy_unconfirmed")
+            if (not isinstance(result.get("confirmed_plan_id"), str)
+                    or not re.fullmatch(r"handoff-[0-9a-f]{32}", result["confirmed_plan_id"])):
+                raise RuntimeError("storage_online_committed_plan_unconfirmed")
+            saved["commit"]["confirmed_plan_id"] = result["confirmed_plan_id"]
             saved["commit"]["initial_policy_activated"] = True
             saved["phase"] = "committed"
             saved["commit"]["confirmed_at"] = time.time()
@@ -1309,3 +1316,22 @@ def activate_online_runtime_locked(state_root, *, worker_process, max_duration_s
     check()
     return activate_runtime(state_root,saved=saved,worker_process=worker_process,
         source_check=check,max_duration_seconds=max_duration_seconds)
+
+
+def inspect_runtime_completion_locked(state_root, *, timeout_seconds=60):
+    """Observe a fully journaled runtime; never resolve or replay uncertain actions.
+
+    Original clocks remain unchanged. Expiry is allowed only for this bounded
+    inspection after all starts durably finished inside the original window.
+    Reboot and backward clocks still refuse; no saved observation grants release.
+    """
+    from scripts.automation.storage_online_runtime import inspect_completed_runtime
+    state_root = launch._canonical(state_root)
+    saved = _load(state_root/STATE)
+    if saved["phase"] != "recovery_runtime_ready":
+        raise RuntimeError("storage_online_completion_runtime_not_confirmed")
+    if saved["boot_id"] != _boot_id():
+        raise RuntimeError("storage_online_final_boot_changed")
+    if time.time() < saved["runtime"]["finished_at"] or _boot_seconds() < saved["started_boot"]:
+        raise RuntimeError("storage_online_final_clock_moved_backwards")
+    return inspect_completed_runtime(state_root, saved=saved, timeout_seconds=timeout_seconds)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 
 import hashlib
+import re
 import json
 import logging
 import math
@@ -511,6 +512,15 @@ def inspect_handoff(conn, *, policy, source_root, destination_root):
         device = saved["recent_device" if role == "source" else "history_device"]
         if list(archives._root(path, device)[1]) != receipt[role+"_root_identity"]:
             raise RuntimeError("fact_header_handoff_archive_root_changed")
+    _verify_handoff_relations(conn, receipt, pid=pid)
+    return {"database_handoff_committed": True, "source_preserved": True,
+            "collection_resume_authorized": False, "root_activation_required": True,
+            "receipt": receipt}
+
+
+def _verify_handoff_relations(conn, receipt, *, pid):
+    """Recheck the same committed relation identities, retained guards and placement."""
+    saved = receipt["binding"]
     expected_names = set((*headers.TABLE_NAMES, raw.NAME))
     if (set(receipt["active_relation_oids"]) != expected_names
             or set(receipt["retained_relation_oids"]) != {"fact_versions", raw.NAME}):
@@ -532,10 +542,6 @@ def inspect_handoff(conn, *, policy, source_root, destination_root):
     for relation in ("market.fact_identities", raw.SOURCE, *reference_move.RELATIONS):
         physical.verify_group(conn, relation, history=True, saved=saved, pid=pid)
     assert_fact_storage_contract(conn)
-    return {"database_handoff_committed": True, "source_preserved": True,
-            "collection_resume_authorized": False, "root_activation_required": True,
-            "receipt": receipt}
-
 
 POLICY_OPERATION = "qt.storage_preserving_handoff_policy.v1"
 
@@ -556,10 +562,14 @@ def inspect_handoff_policy(conn, *, policy, source_root, destination_root):
                               destination_root=destination_root)
     if not outcome["database_handoff_committed"]:
         return {"policy_activated": False, "collection_resume_authorized": False}
+    return _inspect_initial_policy_records(conn, policy=policy, plan_id=_policy_plan_id(outcome["receipt"]))
+
+
+def _inspect_initial_policy_records(conn, *, policy, plan_id):
+    """One interpretation of the existing initial-policy records."""
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                             "hashtextextended('qt.storage.management.v1',0))")):
         raise RuntimeError("fact_header_policy_outcome_pending")
-    plan_id = _policy_plan_id(outcome["receipt"])
     plan = conn.execute(text("""SELECT state,policy_hash,policy,base_revision,progress
         FROM public.portal_storage_plans WHERE id=:id"""), {"id": plan_id}).mappings().one_or_none()
     if plan is None:
@@ -578,6 +588,35 @@ def inspect_handoff_policy(conn, *, policy, source_root, destination_root):
             "policy_revision": progress["policy_revision"], "plan_id": plan_id,
             "runtime_activation_required": True, "collection_resume_authorized": False}
 
+
+
+def _inspect_published_runtime_policy(conn, *, policy, plan_id):
+    """Observe the exact previously confirmed certificate without source file access.
+
+    Used only after host-confirmed runtime readiness. The bound plan identifier
+    hashes the complete handoff receipt observed by the original live worker.
+    This grants no copy, switch, rollback, restart or source-file authority.
+    """
+    if not isinstance(plan_id, str) or not re.fullmatch(r"handoff-[0-9a-f]{32}", plan_id):
+        raise ValueError("storage_runtime_handoff_plan_invalid")
+    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"), {"name": LOCK}):
+        raise RuntimeError("fact_header_handoff_outcome_pending")
+    row = conn.execute(text("SELECT state,evidence FROM market.fact_storage_state "
+                            "WHERE layout_version='market.fact_storage_tiers.v2'")).mappings().one_or_none()
+    evidence = row["evidence"] if row is not None else None
+    receipt = evidence.get("handoff") if isinstance(evidence, dict) else None
+    if (row is None or row["state"] != "ready" or evidence.get("source_retained") is not True
+            or not isinstance(receipt, dict) or receipt.get("schema_version") != RECEIPT_VERSION
+            or receipt.get("initial_policy_required") is not True
+            or receipt.get("policy_fingerprint") != policy.fingerprint
+            or _policy_plan_id(receipt) != plan_id):
+        raise RuntimeError("storage_runtime_handoff_certificate_changed")
+    pid = physical.verify(conn, receipt["binding"])
+    destination = archives._root(receipt["destination_root"], receipt["binding"]["history_device"])
+    if list(destination[1]) != receipt["destination_root_identity"]:
+        raise RuntimeError("fact_header_handoff_archive_root_changed")
+    _verify_handoff_relations(conn, receipt, pid=pid)
+    return _inspect_initial_policy_records(conn, policy=policy, plan_id=plan_id)
 
 
 def _stage_initial_policy(conn, *, policy, receipt, placement, deadline, check):
@@ -962,8 +1001,12 @@ def inspect_runtime_handoff(request, *, engine, worker):
         if identity != request["database_identity"]:
             raise RuntimeError("storage_runtime_database_changed")
         try:
-            outcome = inspect_handoff_policy(conn, policy=policy,
-                source_root=request["source_root"], destination_root=request["destination_root"])
+            if "confirmed_plan_id" in request:
+                outcome = _inspect_published_runtime_policy(conn, policy=policy,
+                    plan_id=request["confirmed_plan_id"])
+            else:
+                outcome = inspect_handoff_policy(conn, policy=policy,
+                    source_root=request["source_root"], destination_root=request["destination_root"])
         except RuntimeError as exc:
             if str(exc) in ("fact_header_handoff_outcome_pending", "fact_header_policy_outcome_pending"):
                 return {"ready": False, "reason": "storage_operation_running"}
@@ -990,6 +1033,8 @@ def inspect_runtime_handoff(request, *, engine, worker):
                 copy_class = EncryptedRecoveryCopies
                 copy_options = dict(incremental=incremental, connection_url=engine.url)
                 byte_limit = limits["max_bytes"]
+        if "confirmed_plan_id" in request and not copy_options:
+            raise RuntimeError("storage_runtime_encrypted_recovery_required")
         root = Path(history.root)/copy_class.namespace/namespace
         # Only inspect a published recovery directory. The existing copy class
         # may create these paths for writers; admission must never create them.

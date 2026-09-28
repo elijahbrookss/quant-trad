@@ -1688,11 +1688,40 @@ explicit measured limits. It supplies a history cutoff and cumulative attempt
 limit; it cannot supply a capture start or preparation clock. The existing
 initial receipt supplies its saved completion time and original 600-second
 deadline to the worker request. A serving-source reentry uses those same values.
-An incomplete initial intent or any final intent requires reconciliation rather
-than repeating the operation. The configuration is read again before mutation.
+An incomplete initial intent or uncertain final intent requires reconciliation
+rather than repeating the operation. A durably ready runtime permits only the
+completion observation described below. The configuration is read again before mutation.
 
 Runtime-ready return retains all phase journals and explicitly reports that
 ordinary relaunch and a complete encrypted pair are not yet confirmed. Terminal
 reconciliation/release, actual source/fleet/resource admission and measured
 production impact remain required. This command is not permission to dispatch
 an unqualified plan on production or bypass review.
+
+### Completion observation after runtime readiness
+
+Reentering the same `qt storage migrate --operation-file ...` command after
+`recovery_runtime_ready` performs bounded observation only, including with
+`--execute`. All runtime actions must already be durably completed inside the
+original final window. Inflight or incomplete actions, reboot, backward clocks,
+changed configuration and another handoff refuse. No service action, migration
+retry, policy change, deadline renewal or journal removal occurs.
+
+The original live worker returns the initial-policy plan identifier during its
+fresh committed-outcome inspection. That identifier hashes the full handoff
+receipt and is retained by the host final-state owner. The dedicated maintenance
+process verifies that exact database certificate, current applied policy, live
+supervisor outcome and matching complete encrypted database/archive pair. It
+reuses the existing policy-record and recovery-copy checks. It does not gain
+access to private application source files; the earlier live switch inspection
+remains the filesystem proof. Older receipts without the confirmed identifier
+are preserved and cannot enter this completion path.
+
+The host also freshly checks the admitted image/recipe, private spool, helpers,
+retired reader, database identity and healthy exact application containers. A
+backup still running yields a pending observation while collection continues.
+A complete pair returns `recovery_verified`; this is an observation, not a new
+journal state or deployment authority. The original final marker remains, and
+ordinary deployment/relaunch continues to refuse until release bookkeeping and
+its preserving deployment path are separately qualified. The observation's
+bounded I/O timeout never extends initial, capture or final mutation deadlines.

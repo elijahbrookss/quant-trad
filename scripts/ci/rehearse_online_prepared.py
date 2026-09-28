@@ -42,7 +42,10 @@ parser.add_argument('--recovery-repository-reply-loss',action='store_true',help=
 parser.add_argument('--recovery-spool',action='store_true',help='prepare preserved pending WAL in a new private SSD root after native WAL readiness')
 parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
 parser.add_argument("--recovery-runtime",action="store_true",help="start actual split application composition after committed recovery preparation")
+parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 options=parser.parse_args()
+if options.completion_observation and not options.full_operation:
+ parser.error('--completion-observation requires --full-operation')
 if options.full_operation and not options.operation_driver:
  parser.error('--full-operation requires --operation-driver')
 if options.operation_driver and not (options.recovery_runtime and options.initial_capture):
@@ -394,6 +397,29 @@ os.chown(root,70,70)
   report['operation_driver']=dict(**result,final_entry_to_applications_ready_seconds=saved['runtime']['finished_at']-saved['started_at'],
     initial_recipe_preserved=True,source_metadata_preserved=True,reader_retired=True,frozen_preserved=True,
     fixture_only_publication_and_verification=True,production_admission=False)
+  if options.completion_observation:
+   final_bytes=(state/final_host.STATE).read_bytes()
+   # Actual expiry, not altered clocks or a restarted migration allowance.
+   while time.time() <= saved['deadline']+.1:
+    time.sleep(min(.2,saved['deadline']+.2-time.time()))
+   observed_deadline=time.monotonic()+180  # fixture observation only; services already serving
+   def no_dispatch(*a,**kw):raise AssertionError('completion observation replayed a mutation')
+   host_boundary.supervised_source_action=no_dispatch
+   try:
+    while True:
+     assert time.monotonic()<observed_deadline, 'complete paired recovery observation timed out'
+     observed=operation.run_operation_plan(operation_file)
+     if observed['ready']:break
+     time.sleep(.2)
+    again=operation.run_operation_plan(operation_file,execute=True)
+    assert again['ready'] and not again['ordinary_relaunch_authorized']
+    assert observed['plan_id']==saved['commit']['confirmed_plan_id']
+    assert again['recovery_generation']==observed['recovery_generation']
+    assert (state/final_host.STATE).read_bytes()==final_bytes
+    assert (state/initial.STATE).read_bytes()==prepared_bytes
+    report['completion_observation']=dict(observed,after_original_final_deadline=True,
+      repeated_without_dispatch=True,journals_unchanged=True)
+   finally:host_boundary.supervised_source_action=actual_action
   log.close()
   report.update(passed=True,image=image,fixture_seconds=time.monotonic()-started)
  else:

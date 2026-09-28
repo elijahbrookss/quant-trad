@@ -377,7 +377,20 @@ def run_operation_plan(path, *, execute=False):
     limits=OperationLimits(**plan["limits"])
     with host.deployment_lock(state_root):
         if os.path.lexists(state_root/"storage-online-final.json"):
-            raise RuntimeError("storage_online_final_requires_reconciliation")
+            saved = final._load(state_root/final.STATE)
+            worker = host.load_receipt(state_root/launch._STATE)
+            request = host.load_receipt(state_root/"storage-online-request.json")
+            request.pop("capture_preparation", None)
+            if (saved["binding"]["project"] != plan["project"]
+                    or saved["binding"]["source_revision"] != plan["source_revision"]
+                    or saved.get("commit",{}).get("source_image") != plan["source_image"]
+                    or worker["binding"]["image"] != plan["image"] or request != plan["request"]
+                    or saved.get("runtime_spool",{}).get("destination") != plan["spool_destination"]):
+                raise RuntimeError("storage_online_completion_plan_changed")
+            result = final.inspect_runtime_completion_locked(state_root)
+            if load_operation_plan(path) != plan:
+                raise RuntimeError("storage_online_operation_plan_changed")
+            return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
         prepared=initial._load(state_root) if os.path.lexists(state_root/initial.STATE) else None
         if prepared is None:
             observation=inspect_initial_operation(state_root,plan=plan,
