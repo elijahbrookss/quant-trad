@@ -44,6 +44,7 @@ Common agent/tool workflow commands:
 - `qt indicators types`
 - `qt indicators validate-config --type <type> --params-json '<json>'`
 - `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
+- `qt data derive-candles --dataset-id <frozen_id> --source-series-id <id> --start <iso> --end <iso> --timeframe <coarser_interval>`
 - `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
 - `qt research check requirements --request-json <request.json>`
 - `qt research check preview --request-json <request.json>`

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, SourceIdentity
+from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, DatasetSeriesRequest, SourceIdentity
 from portal.backend.db import InstrumentRecord, db
 from portal.backend.service.indicators.indicator_service.api import create_instance
 from portal.backend.service.research import service
@@ -97,8 +97,8 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
     assert replay["original_plan_hash"] == replay["replayed_plan_hash"]
 
 
-@pytest.mark.parametrize("matched_origin", [False, True, "shared_landmark"])
-def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch, matched_origin):
+@pytest.mark.parametrize("matched_origin, derived", [(False, False), (True, False), ("shared_landmark", False), ("shared_landmark", True)])
+def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch, matched_origin, derived):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
     token = uuid.uuid4().hex
@@ -114,7 +114,7 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
     source = SourceIdentity(provider="TEST", venue="ISOLATED", source_kind="historical",
                             adapter_version=f"candle-check.{token}")
     source_id = market_data_repo.register_source(source, lineage={"fixture": token})
-    for minutes in (5, 30):
+    for minutes in ((1,) if derived else (5, 30)):
         series = market_data_repo.register_series(
             instrument_id=instrument_id, fact_type=CANDLE_FACT_TYPE,
             timeframe_seconds=minutes * 60, contract_version=CANDLE_FACT_VERSION,
@@ -133,6 +133,16 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
             ))
         market_data_repo.ingest_candles(series_id=series, source_id=source_id,
                                        facts=candles, request={"fixture": token})
+    if derived:
+        from portal.backend.service.market.candle_derivation_service import derive_candles
+        source_dataset = market_data_repo.freeze_dataset(requests=[DatasetSeriesRequest(
+            series_id=series, start=start, end=start + timedelta(days=5))])
+        for target_seconds in (300, 1800):
+            receipt = derive_candles(store=market_data_repo, dataset_id=source_dataset.dataset_id,
+                source_series_id=series, start=start.isoformat(),
+                end=(start + timedelta(days=5)).isoformat(), target_seconds=target_seconds)
+            assert receipt["provider_call_performed"] is False
+            assert receipt["outcome"]["inserted_count"] == 5 * 86400 // target_seconds
     indicator = create_instance("market_profile", f"Mixed frame {token}", {
         "bin_size": 1, "days_back": 3, "use_merged_value_areas": False,
     })
