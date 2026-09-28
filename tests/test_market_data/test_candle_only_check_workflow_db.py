@@ -97,7 +97,7 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
     assert replay["original_plan_hash"] == replay["replayed_plan_hash"]
 
 
-@pytest.mark.parametrize("matched_origin, derived", [(False, False), (True, False), ("shared_landmark", False), ("shared_landmark", True)])
+@pytest.mark.parametrize("matched_origin, derived", [(False, False), (True, False), ("shared_landmark", False), ("shared_landmark", True), ("first_return", False)])
 def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch, matched_origin, derived):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
@@ -124,6 +124,10 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
             opened = start + timedelta(minutes=index * minutes)
             closed = opened + timedelta(minutes=minutes)
             price = 150 if start + timedelta(days=2, hours=12) <= opened else 100
+            if matched_origin == "first_return" and opened < start+timedelta(days=2,hours=12):
+                price = 100 + (-2, 0, 2)[(index*minutes//30) % 3]
+            if matched_origin == "first_return" and start+timedelta(days=2,hours=12,minutes=5) <= opened < start+timedelta(days=2,hours=12,minutes=10):
+                price = 100
             candles.append(CandleFact(
                 open_time=opened, close_time=closed, open=price, high=price + 1,
                 low=price - 1, close=price, volume=10 * minutes, trade_count=None,
@@ -145,7 +149,7 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
             assert receipt["outcome"]["inserted_count"] == 5 * 86400 // target_seconds
     indicator = create_instance("market_profile", f"Mixed frame {token}", {
         "bin_size": 1, "days_back": 3, "use_merged_value_areas": False,
-    })
+    }, version="v2" if matched_origin == "first_return" else None)
 
     class ProviderCallTrap:
         def __init__(self, **kwargs):
@@ -168,7 +172,7 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
         "inputs": [], "gap_policy": "reject",
         "preparation": {"freeze": True, "name": f"candle-only-{token}"},
     }
-    if matched_origin:
+    if matched_origin and matched_origin != "first_return":
         payload["outcomes"]["matched_origin"] = {
             "detector": {"type": "indicator_event", "output_name": "confirmed_balance_breakout",
                          "event_keys": [{"key": "confirmed_balance_breakout_long", "direction": "long"}]},
@@ -182,19 +186,25 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
             "readiness_contract": "market_profile.value_location.v1",
             "dependence": "leave_one_original_profile_out.v1",
         }
+    if matched_origin == "first_return":
+        payload["outcomes"]["first_return"] = {
+            "classification_lag_bars": 1, "sample_lag_bars": 2,
+            "readiness_contract": "market_profile.first_return_state.v2",
+            "dependence": "leave_one_original_profile_out.v1",
+        }
     prepared = service.prepare_research_check_evidence(payload)
     assert prepared["status"] == "frozen", prepared
     run = service.run_research_check(prepared["next_request"])
     assert run["replayable"] is True
     assert run["evidence"]["input_binding"]["provider_access"] == "disabled"
     evaluated = run["result"]["result"]
-    assert evaluated["schema_version"] == ("event_fact_analysis_result.v7" if matched_origin == "shared_landmark" else "event_fact_analysis_result.v6" if matched_origin else "event_fact_analysis_result.v5")
-    assert evaluated["analysis_status"] in ({"completed", "insufficient_evidence"} if matched_origin == "shared_landmark" else {"completed"})
+    assert evaluated["schema_version"] == ("event_fact_analysis_result.v8" if matched_origin == "first_return" else "event_fact_analysis_result.v7" if matched_origin == "shared_landmark" else "event_fact_analysis_result.v6" if matched_origin else "event_fact_analysis_result.v5")
+    assert evaluated["analysis_status"] in ({"completed", "insufficient_evidence"} if matched_origin in {"shared_landmark", "first_return"} else {"completed"})
     assert evaluated["sample_count"] > 0
     assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
     assert all(event["fact_references"] == {} for event in evaluated["events"])
 
-    if matched_origin:
+    if matched_origin and matched_origin != "first_return":
         attribution = evaluated["matched_origin_attribution"]
         assert attribution["matched_count"] > 0
         assert attribution["horizons"]["24"]["common_pair_count"] > 0
@@ -209,6 +219,12 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
         assert shared["origin_count"] == evaluated["sample_count"]
         assert shared["classification_counts"].get("confirmed_by_landmark", 0) > 0
         assert shared["horizons"]["24"]["leave_one_profile_out"]["method"] == "leave_one_original_profile_out.v1"
+    if matched_origin == "first_return":
+        analysis = evaluated["first_return_comparison"]
+        assert analysis["classification_counts"].get("returned_by_landmark", 0) > 0
+        assert any(r["outcomes"]["24"]["status"] == "resolved" for r in analysis["origins"])
+        assert indicator["version"] == "v2"
+        assert indicator["manifest"]["version"] == "v2"
     replay = service.replay_research_check(run["check"]["id"])
     assert replay["status"] == "matched", replay
     assert replay["matches"] is True

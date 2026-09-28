@@ -210,3 +210,11 @@ or unordered mapping iteration.
 
 - Full indicator tutorials are intentionally deferred to guide docs.
 - Existing indicator families may need focused architecture notes only if they introduce distinct runtime contracts.
+
+## Versioned original-range returns
+
+Market Profile keeps v1 as its default and offers explicit v2 first-return
+outputs. The record's immutable runtime version selects its complete manifest
+at creation, planning and replay; consumers still select outputs without changing
+Indicator truth. See [ADR 0075](../decisions/0075-pin-first-return-to-original-range-and-indicator-version.md)
+for original-range memory, expiry, gap and strictly prior ATR semantics.

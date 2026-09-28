@@ -29,6 +29,7 @@ from research_science.check import (
 from . import checks
 from .matched_origin_evaluator import MatchedOriginEvaluator, normalize_matched_origin
 from .shared_landmark_evaluator import SharedLandmarkEvaluator, normalize_shared_landmark
+from .first_return_evaluator import FirstReturnEvaluator, normalize_first_return
 from .event_fact_evaluator import (
     EVENT_FACT_ANALYSIS,
     EVENT_FACT_EVALUATOR_VERSION,
@@ -280,6 +281,17 @@ def _register_event_fact_family() -> None:
         descriptive_outcomes_enabled=True,
     )
     CHECK_REGISTRY.register_evaluator(candle_evaluator)
+    first_return_evaluator = FirstReturnEvaluator()
+    CHECK_REGISTRY.register_evaluator(first_return_evaluator)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=EVENT_FACT_ANALYSIS,
+        definition_version="9", evaluator_id=first_return_evaluator.evaluator_id,
+        evaluator_version=first_return_evaluator.version,
+        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION, result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={"family": EVENT_FACT_ANALYSIS, "event_ownership": "indicator",
+            "input_policy": "candle_only_indicator.v1", "operator_model": "first_return_comparison.v1",
+            "outcome_summary": "eligible_population_descriptive.v1"},
+    ))
     landmark_evaluator = SharedLandmarkEvaluator()
     CHECK_REGISTRY.register_evaluator(landmark_evaluator)
     CHECK_REGISTRY.register_definition(
@@ -735,7 +747,8 @@ def materialize_check_definition(
     )
     matched_origin = _mapping(payload.get("outcomes"), field="outcomes").get("matched_origin")
     shared_landmark = _mapping(payload.get("outcomes"), field="outcomes").get("shared_landmark")
-    default_version = "8" if shared_landmark is not None else "7" if matched_origin is not None else "5" if availability_trigger else "6" if candle_only else "4"
+    first_return = _mapping(payload.get("outcomes"), field="outcomes").get("first_return")
+    default_version = "9" if first_return is not None else "8" if shared_landmark is not None else "7" if matched_origin is not None else "5" if availability_trigger else "6" if candle_only else "4"
     resolved_base_version = str(
         base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
     )
@@ -747,6 +760,8 @@ def materialize_check_definition(
         raise ValueError("matched_origin_invalid: requires event_fact_analysis definition version 7 or 8")
     if shared_landmark is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "8" or matched_origin is None):
         raise ValueError("shared_landmark_invalid: requires matched_origin and definition version 8")
+    if first_return is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "9" or matched_origin is not None or shared_landmark is not None):
+        raise ValueError("first_return_invalid: requires standalone definition version 9")
     base = CHECK_REGISTRY.resolve_definition(family, resolved_base_version)
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")
@@ -761,7 +776,7 @@ def materialize_check_definition(
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8"} and (
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9"} and (
         inputs or detector.get("type") != "indicator_event"
     ):
         raise ValueError(
@@ -775,7 +790,10 @@ def materialize_check_definition(
         outcomes["shared_landmark"] = normalize_shared_landmark(
             shared_landmark, outcomes=outcomes, gap_policy=str(payload.get("gap_policy") or ""),
         )
-    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8"}:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "9":
+        outcomes["first_return"] = normalize_first_return(first_return, outcomes=outcomes,
+            detector=detector, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
+    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9"}:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
     if family == EVENT_FACT_ANALYSIS:
         detector, statistics, inputs = _validate_event_fact_bindings(

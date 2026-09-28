@@ -32,6 +32,7 @@ from ..manifest import (
 )
 from .outputs import build_market_profile_outputs, build_not_ready_outputs
 from .signal_state import BreakoutRetestStateMachine
+from .first_return import FirstReturnState
 from .state import derive_market_profile_bar_state
 
 log = logging.getLogger(__name__)
@@ -71,8 +72,14 @@ class TypedMarketProfileIndicator(Indicator):
         params: Mapping[str, Any],
         source_facts: Mapping[str, Any],
     ) -> None:
+        from indicators.registry import get_indicator_manifest
+
+        self._first_return = (FirstReturnState(
+            atr_period=int(params.get("retest_atr_period", DEFAULT_RETEST_ATR_PERIOD)),
+            lifetime_bars=int(params.get("reclaim_max_bars", DEFAULT_RECLAIM_MAX_BARS)),
+        ) if version == "v2" else None)
         self.runtime_spec = build_runtime_spec(
-            MANIFEST,
+            get_indicator_manifest("market_profile", version),
             instance_id=indicator_id,
             version=version,
         )
@@ -102,7 +109,7 @@ class TypedMarketProfileIndicator(Indicator):
         self._current_transform_summary: dict[str, Any] = {}
         self._current_overlay_summary: dict[str, Any] = {}
         self._overlay_ready = False
-        self._outputs: dict[str, RuntimeOutput] = build_not_ready_outputs(datetime.min)
+        self._outputs: dict[str, RuntimeOutput] = self._not_ready_outputs(datetime.min)
         self._signal_state_params = {
             "breakout_confirm_bars": params.get(
                 "breakout_confirm_bars", DEFAULT_BREAKOUT_CONFIRM_BARS
@@ -151,6 +158,8 @@ class TypedMarketProfileIndicator(Indicator):
                 indicator_id=self._indicator_id,
                 gap=gap,
             )
+        if self._first_return is not None:
+            self._first_return.interrupt("candle_gap")
         if normalized == "continue_degraded":
             return {
                 "indicator_id": self._indicator_id,
@@ -201,6 +210,8 @@ class TypedMarketProfileIndicator(Indicator):
             )
             self._log_source_continuity_warning_once()
         if not effective_profiles:
+            if self._first_return is not None:
+                self._first_return.interrupt("profile_unavailable")
             self._reset_outputs(bar.time)
             return
 
@@ -221,23 +232,37 @@ class TypedMarketProfileIndicator(Indicator):
         }
         self._overlay_ready = True
         additional_signal_events = self._signal_state.step(bar_state)
+        first_return = self._first_return.step(bar_state) if self._first_return is not None else None
         if self._gap_rewarm_remaining > 0:
             self._gap_rewarm_remaining -= 1
             if self._gap_rewarm_remaining == 0:
                 self._signal_state.clear_sequence()
-            self._outputs = build_not_ready_outputs(bar.time)
+            if self._first_return is not None:
+                self._first_return.interrupt("gap_rewarm")
+            self._outputs = self._not_ready_outputs(bar.time)
             return
         self._outputs = build_market_profile_outputs(
             bar_state,
             additional_signal_events=additional_signal_events,
         )
+        if first_return is not None:
+            events, context = first_return
+            self._outputs["first_value_return"] = RuntimeOutput(bar_time=bar.time, ready=True, value={"events": events})
+            self._outputs["first_return_state"] = RuntimeOutput(bar_time=bar.time, ready=True, value=context)
         self._log_signal_events(bar_state=bar_state)
+
+    def _not_ready_outputs(self, bar_time: datetime) -> dict[str, RuntimeOutput]:
+        outputs = build_not_ready_outputs(bar_time)
+        if self._first_return is not None:
+            outputs["first_value_return"] = RuntimeOutput(bar_time=bar_time, ready=False, value={"events": []})
+            outputs["first_return_state"] = RuntimeOutput(bar_time=bar_time, ready=False, value={"state_key": None, "fields": {}})
+        return outputs
 
     def _reset_outputs(self, bar_time: datetime) -> None:
         self._current_effective_profiles = []
         self._current_overlay_summary = {}
         self._overlay_ready = False
-        self._outputs = build_not_ready_outputs(bar_time)
+        self._outputs = self._not_ready_outputs(bar_time)
         self._previous_profile_key = None
         self._previous_location = None
 
@@ -247,6 +272,7 @@ class TypedMarketProfileIndicator(Indicator):
             "confirmed_balance_breakout",
             "balance_reclaim",
             "balance_retest",
+            "first_value_return",
         ):
             runtime_output = self._outputs.get(output_name)
             events = runtime_output.value.get("events") if runtime_output is not None else None
