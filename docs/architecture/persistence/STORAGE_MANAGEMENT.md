@@ -2159,11 +2159,28 @@ scheduler name or application name is accepted as an exemption. These controls
 do not establish host/archive/spool exclusion or expose a COMMIT wire command.
 A qualified preserving job/gate restoration is still required before production.
 
-Actual production job definitions and their interruption/retry semantics still
-need source admission. Pinned extension identity alone does not establish that
-an arbitrary custom job is safe to interrupt or replay after partial commits.
-The disposable job demonstrates preserved committed work, not exactly-once
-semantics for every scheduled procedure.
+The supported operator admits only the two built-in jobs observed on the serving
+cluster: Timescale 2.14.2 telemetry (job 1) and job-error retention (job 2).
+Before serving commands and again before entering the retained final session,
+the existing controller checks their exact enabled schedules, retry limits,
+configuration, check function and lack of hypertable association. It also pins
+the retention/check SQL bodies and execution attributes to the qualified public
+installation SQL; names or extension version alone do not establish identity.
+Unknown/custom jobs, NULL retention configuration and modified functions refuse
+before host login closure. The worker
+also encodes its private archive override as YAML `null`, matching the existing
+central settings contract; an empty or malformed group remains invalid. Configuration remains inside PostgreSQL.
+
+The same worker retains the complete job-definition fingerprint and rechecks it
+before stopping jobs, on fresh final-session observations and before internal
+COMMIT. The host requires the live admission result before changing access;
+a saved result grants no replay or switch authority. This deliberately avoids
+arbitrary custom-job interruption/replay support. The built-ins perform telemetry
+and job-error cleanup rather than QT fact publication, but their normal retry
+behavior still does not promise exactly-once execution. The previous generic
+scheduler fixture remains lower-level lifecycle evidence only. Source-image,
+archive/spool publisher exclusion and the complete host switch remain separate
+unfinished release requirements.
 
 Jobs can publish changes between the last tail pass and their retirement. The
 existing `copy_final_delta_locked` now also accepts confirmed `login_closed` and

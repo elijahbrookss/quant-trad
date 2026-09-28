@@ -87,6 +87,7 @@ class OnlineController:
         self._jobs_stop_requested = False
         self._jobs_stopped = False
         self._jobs_catalog = None
+        self._builtin_catalog = None
         self._archive_namespace_check = None
         self._rollback_context = self._rollback_check = None
         self._sequence = 0
@@ -226,8 +227,10 @@ class OnlineController:
                     "'oid',d.oid::bigint,'name',d.datname,'allow_connections',d.datallowconn) "
                     "FROM pg_database d WHERE datname=current_database()"))
                 captured = conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1"))
+                self._check_builtin_jobs(conn)
         self._ownership(deadline=deadline)
         return {"database": observed, "capture": captured, "backend_pid": self._final_pid,
+                "builtin_jobs_admitted": self._builtin_catalog is not None,
                 "owner_pid": self._pid, "database_switch_authorized": False,
                 "collection_resume_authorized": False, "runtime_activation_authorized": False}
 
@@ -246,6 +249,7 @@ class OnlineController:
             with capture._bounded_step(conn, math.ceil(deadline-monotonic())) as shorten:
                 shorten(deadline-monotonic())
                 self._require_job_environment(conn)
+                self._check_builtin_jobs(conn)
                 self._jobs_catalog = self._job_catalog(conn)
                 self._jobs_stop_requested = True  # Before a nontransactional request.
                 if conn.scalar(text("SELECT _timescaledb_functions.stop_background_workers()")) is not True:
@@ -268,6 +272,68 @@ class OnlineController:
             sleep(min(.1, max(0, deadline-monotonic())))
         result = self.final_session_observation(deadline=deadline)
         return {**result, "database_jobs_stopped": True, "job_definitions_preserved": True}
+
+    def admit_builtin_database_jobs(self):
+        """Bind the fixed release's two built-ins before any host login mutation.
+
+        Low-level scheduler fixtures may exercise arbitrary jobs directly, but
+        the private operator channel admits only this pinned production set.
+        The live worker retains this binding through stop, residual and COMMIT;
+        a saved fingerprint is never reentry or publisher-exclusion authority.
+        """
+        if self.state != "background" or self._jobs_stop_requested:
+            raise RuntimeError("storage_online_builtin_job_admission_state_invalid")
+        self._admit_attempt()
+        with self._database_connection() as conn, conn.begin():
+            with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
+                                        deadline=self._final_deadline):
+                self._require_job_environment(conn, allow_connections=True)
+                current = self._supported_builtin_catalog(conn)
+                if self._builtin_catalog is not None and current != self._builtin_catalog:
+                    raise RuntimeError("storage_online_builtin_job_definitions_changed")
+                self._builtin_catalog = current
+
+    @classmethod
+    def _supported_builtin_catalog(cls, conn):
+        # Names alone are insufficient. The retention bodies are SHA256-pinned
+        # to the immutable Timescale2.14.2 installation SQL; telemetry is job1
+        # in that separately qualified library. No configuration text leaves PG.
+        supported = conn.scalar(text("""SELECT
+          (SELECT count(*)=2 AND bool_and(COALESCE(
+            proc_schema='_timescaledb_functions' AND scheduled
+            AND hypertable_id IS NULL AND max_retries=-1 AND retry_period=INTERVAL '1 hour'
+            AND ((id=1 AND proc_name='policy_telemetry'
+              AND schedule_interval=INTERVAL '24 hours' AND max_runtime=INTERVAL '100 seconds'
+              AND config IS NULL AND check_schema IS NULL AND check_name IS NULL)
+             OR (id=2 AND proc_name='policy_job_error_retention'
+              AND schedule_interval=INTERVAL '1 month' AND max_runtime=INTERVAL '1 hour'
+              AND config='{"drop_after":"1 month"}'::jsonb
+              AND check_schema='_timescaledb_functions'
+              AND check_name='policy_job_error_retention_check')),FALSE))
+           FROM _timescaledb_config.bgw_job)
+          AND (SELECT count(*)=2 AND bool_and(COALESCE(
+            l.lanname='plpgsql' AND p.prokind='f' AND NOT p.prosecdef AND NOT p.proretset
+            AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']
+            AND ((p.proname='policy_job_error_retention' AND p.proargtypes='23 3802'::oidvector
+              AND p.prorettype=23
+              AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')=
+                'fba947300c166170545db4e9661d5a0ffef23f426cdfd70a7c98d8676cab3576')
+             OR (p.proname='policy_job_error_retention_check' AND p.proargtypes='3802'::oidvector
+              AND p.prorettype=2278
+              AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')=
+                'd462ef51a7bd05890a16072a8ea57d8dbfdbe88be76f6a03396251d905fff358')),FALSE))
+           FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+             JOIN pg_language l ON l.oid=p.prolang
+           WHERE n.nspname='_timescaledb_functions'
+             AND p.proname IN ('policy_job_error_retention','policy_job_error_retention_check'))
+        """))
+        if supported is not True:
+            raise RuntimeError("storage_online_builtin_jobs_unqualified")
+        return cls._job_catalog(conn)
+
+    def _check_builtin_jobs(self, conn):
+        if self._builtin_catalog is not None and self._supported_builtin_catalog(conn) != self._builtin_catalog:
+            raise RuntimeError("storage_online_builtin_job_definitions_changed")
 
     @staticmethod
     def _job_catalog(conn):
@@ -456,6 +522,7 @@ class OnlineController:
                 result = {"attempt_cancelled": True, "source_preserved": True}
             elif session:
                 if operation == "final_session_begin":
+                    self.admit_builtin_database_jobs()
                     self._stack.enter_context(self.final_database_session(deadline=request["deadline"]))
                 result = (self.quiesce_final_database_jobs(deadline=request["deadline"])
                           if operation == "final_session_quiesce"
@@ -634,6 +701,7 @@ class OnlineController:
             if not self._jobs_stopped:
                 raise RuntimeError("storage_online_jobs_stop_unconfirmed")
             self._require_job_environment(conn)
+            self._check_builtin_jobs(conn)
             if self._job_catalog(conn) != self._jobs_catalog:
                 raise RuntimeError("storage_online_job_definitions_changed")
         conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
@@ -814,11 +882,13 @@ class OnlineController:
                                     "FROM pg_database WHERE datname=current_database()"))
                                 self._require_job_environment(conn,
                                     allow_connections=database["allow_connections"])
+                                self._check_builtin_jobs(conn)
                                 if self._job_catalog(conn) != self._jobs_catalog:
                                     raise RuntimeError("storage_online_job_definitions_changed")
                                 session = {"database": database,
                                     "capture": conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1")),
                                     "backend_pid": pid, "owner_pid": self._pid,
+                                    "builtin_jobs_admitted": self._builtin_catalog is not None,
                                     "database_switch_authorized": False}
                             return {**session, "database_handoff_committed": False,
                                     "database_resume_fence_held": True,

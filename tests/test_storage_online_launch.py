@@ -143,7 +143,7 @@ def test_interrupted_create_reuses_container_and_original_deadline(tmp_path, mon
         if args[0]=="create":
             created.append(args)
             assert "disposable" not in " ".join(args)
-            assert "QT_ARCHIVE_SHARED_GROUP_ID="+("" if archive_group is None else "70") in args
+            assert "QT_ARCHIVE_SHARED_GROUP_ID="+("null" if archive_group is None else "70") in args
             return worker_id
         if args[0]=="inspect":
             return json.dumps({"Running":False,"Paused":False,"Restarting":False,"OOMKilled":False,"Dead":False,"Pid":0,"Status":"exited"})
@@ -240,5 +240,19 @@ def test_worker_archive_settings_and_prepared_root_are_required(tmp_path, monkey
         with pytest.raises(PermissionError, match="shared_directory_invalid"):
             admit_archive_configuration({"archive_shared_group_id": 70}, root)
         assert root.stat().st_mode & 0o7777 == 0o700
+    finally:
+        clear_settings_cache()
+
+
+def test_private_worker_archive_override_clears_yaml_group(monkeypatch, tmp_path):
+    from core.settings import get_settings, clear_settings_cache
+    from scripts.automation.storage_online_worker import admit_archive_configuration
+    config = tmp_path / "config.yaml"
+    config.write_text("storage:\n  archive_shared_group_id: 70\n")
+    monkeypatch.setenv("QT_CONFIG_FILE", str(config))
+    monkeypatch.setenv("QT_ARCHIVE_SHARED_GROUP_ID", launch.archive_group_override({}))
+    try:
+        assert get_settings(force_reload=True).storage.archive_shared_group_id is None
+        admit_archive_configuration({}, tmp_path / "unused-private-root")
     finally:
         clear_settings_cache()

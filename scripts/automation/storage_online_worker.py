@@ -117,7 +117,7 @@ def archive_group_override(request):
     retain private publication and explicitly override image/YAML defaults.
     """
     if "archive_shared_group_id" not in request:
-        return ""
+        return "null"  # Central YAML environment parser: explicit private default.
     value = request["archive_shared_group_id"]
     if type(value) is not int or value != 70:
         raise ValueError("storage_online_archive_group_requires_worker_gid")
@@ -244,6 +244,7 @@ def prepared_controller_main():
                         **{key: request[key] for key in (
                             "expected_started_at", "max_page_bytes", "max_objects",
                             "max_bytes", "page_rows", "command_seconds")}) as controller:
+                    controller.admit_builtin_database_jobs()
                     serve(controller, input_fd=sys.stdin.fileno(), output_fd=protocol_fd)
             finally:
                 engine.dispose()

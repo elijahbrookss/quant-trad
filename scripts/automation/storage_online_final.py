@@ -909,6 +909,7 @@ def _final_session_reply(reply, *, operation, binding, deadline, sequence, state
             or reply.get("collection_resume_authorized") is not False
             or not isinstance(result, dict) or not isinstance(result.get("database"), dict)
             or not _valid_database_gate(result["database"])
+            or result.get("builtin_jobs_admitted") is not True
             or result.get("capture") != binding["capture"]
             or any(type(result.get(k)) is not int or result[k] <= 0 for k in ("backend_pid", "owner_pid"))
             or result["backend_pid"] == result["owner_pid"]

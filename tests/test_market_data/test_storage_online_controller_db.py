@@ -1113,3 +1113,36 @@ def test_gated_residual_catchup_reuses_session_and_preserves_pages(storage, tmp_
         with control.connect() as admin:
             admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
         control.dispose()
+
+
+def test_operator_admits_only_pinned_builtin_jobs(storage, tmp_path, monkeypatch):
+    """Actual catalog and SQL bodies, with every unsupported change rolled back."""
+    engine, settings, _ = _setup(storage, tmp_path, monkeypatch, stage=False)
+    with OnlineController(engine, **settings) as worker:
+        worker.admit_builtin_database_jobs()
+        admitted = worker._builtin_catalog
+        assert admitted and worker.state == "background" and not worker._jobs_stop_requested
+        with engine.connect() as conn, conn.begin():
+            assert worker._supported_builtin_catalog(conn) == admitted
+            mutations = (
+                "UPDATE _timescaledb_config.bgw_job SET config=NULL WHERE id=2",
+                "UPDATE _timescaledb_config.bgw_job SET proc_name='custom_job' WHERE id=2",
+                "UPDATE _timescaledb_config.bgw_job SET scheduled=false WHERE id=1",
+                "UPDATE _timescaledb_config.bgw_job SET schedule_interval=INTERVAL '1 minute' WHERE id=2",
+                "CREATE OR REPLACE FUNCTION _timescaledb_functions.policy_job_error_retention_check(config jsonb) RETURNS void LANGUAGE plpgsql SET search_path TO pg_catalog, pg_temp AS 'BEGIN RETURN; END'",
+            )
+            for mutation in mutations:
+                point = conn.begin_nested()
+                conn.exec_driver_sql(mutation)
+                with pytest.raises(RuntimeError, match="builtin_jobs_unqualified"):
+                    worker._check_builtin_jobs(conn)
+                point.rollback()
+                assert worker._supported_builtin_catalog(conn) == admitted
+            point = conn.begin_nested()
+            conn.exec_driver_sql("UPDATE _timescaledb_config.bgw_job SET application_name='changed builtin' WHERE id=2")
+            with pytest.raises(RuntimeError, match="builtin_job_definitions_changed"):
+                worker._check_builtin_jobs(conn)
+            point.rollback()
+            assert worker._supported_builtin_catalog(conn) == admitted
+            assert conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+        assert not worker._jobs_stop_requested and not worker._jobs_stopped

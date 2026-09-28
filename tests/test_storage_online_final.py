@@ -637,7 +637,7 @@ def test_ambiguous_namespace_name_and_id_prefix_refuses(mount_writer_setup):
     with pytest.raises(RuntimeError, match="namespace_alias_invalid"): admit()
 
 
-@pytest.mark.parametrize("fault", [None, "save_reply", "sql_reply", "worker_reply", "jobs_reply", "jobs_unconfirmed", "identity", "expiry"])
+@pytest.mark.parametrize("fault", [None, "save_reply", "sql_reply", "worker_reply", "jobs_reply", "jobs_unconfirmed", "identity", "builtins", "expiry"])
 def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup, monkeypatch, fault):
     path, rows, clock, state, stop = pause_setup
     state["binding"]["capture"] = {"original": "capture"}
@@ -683,6 +683,7 @@ def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup,
             last_sequence=sequence[0], final_switch_authorized=False, collection_resume_authorized=False,
             result=dict(database=observed,capture=state["binding"]["capture"],backend_pid=2,owner_pid=1,
                 database_jobs_stopped=fault != "jobs_unconfirmed",job_definitions_preserved=True,
+                builtin_jobs_admitted=fault != "builtins",
                 database_switch_authorized=False,collection_resume_authorized=False,runtime_activation_authorized=False))
     save = host_boundary.save_receipt
     def save_reply(*args, **kwargs):
@@ -697,8 +698,8 @@ def test_host_login_gate_journals_before_mutation_and_never_reopens(pause_setup,
         assert result["new_logins_closed"] and not result["database_switch_authorized"]
     receipt = final._load(path/final.STATE)
     assert receipt["deadline"] == original["deadline"] and receipt["switch"] == original["switch"]
-    assert len(calls) == (0 if fault in {"save_reply","identity"} else 1)
-    if fault != "identity":
+    assert len(calls) == (0 if fault in {"save_reply","identity","builtins"} else 1)
+    if fault not in {"identity", "builtins"}:
         assert receipt["phase"] == ("login_closed" if fault is None else "login_closing")
         before = (path/final.STATE).read_bytes()
         with pytest.raises(RuntimeError,match="login_switch_intent_required"):
@@ -740,7 +741,7 @@ def test_gated_residual_host_retains_intent_and_refuses_drift(pause_setup, monke
         if operation == "final_session_check":
             reply["result"] = dict(database={**database,"allow_connections":fault == "gate"},
                 capture=state["binding"]["capture"],backend_pid=3 if fault == "session" and len(calls)>1 else 2,
-                owner_pid=1,database_switch_authorized=False,collection_resume_authorized=False,
+                owner_pid=1,builtin_jobs_admitted=True,database_switch_authorized=False,collection_resume_authorized=False,
                 runtime_activation_authorized=False)
         else:
             assert operation == "final_delta"
@@ -787,7 +788,7 @@ def test_gated_abort_journals_restoration_under_same_live_fence(resume_setup, mo
         reply = old_exchange(operation,**kwargs)
         if operation == "final_session_check":reply["state"] = "background"
         reply["result"].update(database={**database,"allow_connections":opened[0]},
-            capture=capture,backend_pid=2,owner_pid=1,database_switch_authorized=False)
+            capture=capture,backend_pid=2,owner_pid=1,builtin_jobs_admitted=True,database_switch_authorized=False)
         return reply
     actions = []
     def action(arguments, *, deadline, check, input):
