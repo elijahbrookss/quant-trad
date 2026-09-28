@@ -79,7 +79,23 @@ def recovery_copy(tmp_path, monkeypatch):
     (wal.parent/"segment.ack.json").write_text("old projection is not authority")
     # A real read-only mount/account transition is qualified by the native
     # fixture; unit tests exercise copying, preservation and fault boundaries.
-    monkeypatch.setattr(drain.os, "statvfs", lambda _: SimpleNamespace(f_flag=os.ST_RDONLY))
+    # Model the privileged preparer without depending on the CI runner's UID.
+    # Keep the real source stats and all I/O; only the target account admission
+    # and ownership operation are simulated here (both are native-qualified).
+    real_uid = os.geteuid()
+    native_fstat = os.fstat
+    def preparer_stat(fd):
+        info = native_fstat(fd)
+        if Path(os.readlink(f"/proc/self/fd/{fd}")) == target:
+            values = list(info)
+            values[4] = 0
+            return os.stat_result(values)
+        return info
+    proxy = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    proxy.geteuid = lambda: 0
+    proxy.fstat = preparer_stat
+    proxy.statvfs = lambda _: SimpleNamespace(f_flag=os.ST_RDONLY)
+    monkeypatch.setattr(drain, "os", proxy)
     changed = []
     chown = os.fchown
     def destination_chown(fd, uid, gid):
@@ -87,7 +103,7 @@ def recovery_copy(tmp_path, monkeypatch):
         assert path == target or target in path.parents
         assert (uid, gid) == (1000, 1000)
         changed.append(path)
-        if os.geteuid() in (0, 1000):
+        if real_uid in (0, 1000):
             chown(fd, uid, gid)
     monkeypatch.setattr(drain.os, "fchown", destination_chown)
     def copy(**overrides):
