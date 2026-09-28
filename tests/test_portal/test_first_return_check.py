@@ -131,3 +131,20 @@ def test_later_return_does_not_relabel_complete_cutoff_outside_state():
     future["event"]["metadata"]["breakout_time"]=_time(4)
     outputs.append(future)
     assert run(inputs,plan)["first_return_comparison"]["origins"][1]["classification"]==OUTSIDE
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_rederived_frozen_plan_retains_pinned_indicator_version(version):
+    from portal.backend.service.research.planning import plan_research_check, rederive_research_check_plan_from_pinned_inputs
+    from portal.backend.service.indicators.indicator_service.requirements import plan_runtime_requirements_for_indicators
+    from portal.backend.service.indicators.indicator_factory import IndicatorFactory
+    definition, req = normalize_check_request(request())
+    meta = IndicatorFactory().build_meta_from_record({"id":"profile-1","type":"market_profile","version":version,"params":{"days_back":3}})
+    def planner(ids, **kwargs):
+        return plan_runtime_requirements_for_indicators(ids, **kwargs, preloaded_metas={"profile-1":meta})
+    plan = plan_research_check(definition, req, indicator_planner=planner,
+                              instrument_loader=lambda _: {"id":"instrument-1"}, inspect_coverage=False)
+    rebuilt = rederive_research_check_plan_from_pinned_inputs(definition, req, plan,
+        subject_snapshots={"instrument-1":{"id":"instrument-1"}})
+    assert rebuilt.indicator_graph[0]["manifest"]["version"] == version
+    assert rebuilt.to_dict() == plan.to_dict()

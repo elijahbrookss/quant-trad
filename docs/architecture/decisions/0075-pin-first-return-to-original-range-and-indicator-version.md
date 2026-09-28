@@ -35,6 +35,8 @@ validation accept `version`; updates cannot change it. The existing reserved
 Indicator metadata envelope persists `runtime_version`; absent means v1. No
 schema migration or implicit data rewrite occurs. Factory, requirement plans,
 runtime graphs and frozen evidence validation select the recorded manifest.
+Semantic plan reconstruction must carry the version from the pinned manifest
+into its preloaded metadata; dropping it would silently select the v1 default.
 
 The v2 owner consumes the existing raw breakout builder and retains separate
 origins, original reference identity, VAH/VAL/POC and clocks. A subsequent close

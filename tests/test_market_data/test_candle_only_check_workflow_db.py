@@ -126,7 +126,12 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
             price = 150 if start + timedelta(days=2, hours=12) <= opened else 100
             if matched_origin == "first_return" and opened < start+timedelta(days=2,hours=12):
                 price = 100 + (-2, 0, 2)[(index*minutes//30) % 3]
-            if matched_origin == "first_return" and start+timedelta(days=2,hours=12,minutes=5) <= opened < start+timedelta(days=2,hours=12,minutes=10):
+            if matched_origin == "first_return" and (
+                start+timedelta(days=2,hours=11,minutes=55) <= opened < start+timedelta(days=2,hours=12)
+                or start+timedelta(days=2,hours=12,minutes=5) <= opened < start+timedelta(days=2,hours=12,minutes=10)
+            ):
+                # Inside immediately before the 12:00 origin, then a strict
+                # first return at its one-bar classification landmark.
                 price = 100
             candles.append(CandleFact(
                 open_time=opened, close_time=closed, open=price, high=price + 1,
