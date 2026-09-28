@@ -377,3 +377,43 @@ def test_handoff_catalog_refuses_without_both_owned_locks(monkeypatch, held):
     monkeypatch.setattr(header_catalog, "_observe_header_catalog", forbidden)
     with pytest.raises(RuntimeError, match="handoff_locks_required"):
         header_catalog.read_transaction_header_catalog(conn)
+
+
+def test_catalog_and_discovery_commands_keep_fixed_scope_and_fresh_observation(monkeypatch):
+    from scripts.automation import storage_online_controller as module
+    controller=module.OnlineController.__new__(module.OnlineController)
+    controller._final_connection_entered=False;controller._final_deadline=None
+    controller.controller_id="c"*32;controller.state="background";controller._sequence=0
+    controller._last_request=controller._last_reply=None;controller._reproved=set()
+    controller._admitted_limits={"movement_timeout_seconds":60}
+    controller.proof=SimpleNamespace(deadline=monotonic()+90,hashed_bytes=0)
+    controller._admit_attempt=lambda:None;controller.check=lambda:None
+    calls=[]
+    controller._catalog_step=lambda relation,seconds: calls.append((relation,seconds)) or {"committed":True}
+    controller._reference_page=lambda after: calls.append(after) or {"references":[],"next_after":None}
+    request=dict(controller_id=controller.controller_id,sequence=1,operation="prepare_step",
+                 step="catalog_history",relation="market.fact_archive_material_aliases",max_duration_seconds=30)
+    for changed in ({"relation":"market.fact_versions"},{"relation":"market.fact_archive_material_aliases;DROP TABLE x"},
+                    {"relation":None},{"max_duration_seconds":61},{"source_root":"/elsewhere"}):
+        with pytest.raises(ValueError):controller.command(request|changed)
+    assert not calls
+    reply=controller.command(request)
+    assert controller.command(request)==reply and len(calls)==1
+    discovery=dict(controller_id=controller.controller_id,sequence=2,operation="inspect_references",after=None)
+    result=controller.command(discovery)
+    assert result["result"]["references"]==[] and not result["migration_ready"]
+    with pytest.raises(RuntimeError,match="fresh_sequence_required"):controller.command(discovery)
+    for changed in ({"after":True},{"after":"x"*257},{"limit":999}):
+        with pytest.raises(ValueError):controller.command(discovery|changed|{"sequence":3})
+    controller._final_deadline=monotonic()+20
+    with pytest.raises(RuntimeError,match="background_work_refused"):
+        controller.command(discovery|{"sequence":3})
+
+
+def test_catalog_move_expired_absolute_deadline_never_opens_database():
+    from scripts.db.archive_reference_v2_placement import move_reference_catalog
+    class NoDatabase:
+        def connect(self):pytest.fail("expired catalog operation opened database")
+    with pytest.raises(ValueError,match="attempt_binding_invalid"):
+        move_reference_catalog(NoDatabase(),relation="market.fact_archive_material_aliases",
+            policy=None,resource_limits=None,deadline=monotonic()-1)

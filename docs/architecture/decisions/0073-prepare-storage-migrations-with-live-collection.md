@@ -1611,3 +1611,14 @@ receipt file, scheduler, service or general workflow framework is introduced.
 
 The complete supported operator still needs production fleet/resource admission,
 terminal outcome handling and measured collection/query impact before release.
+
+## Fixed catalog preparation in the retained worker
+
+Reference discovery and the three supported retained/archive catalog moves now
+run through the existing worker channel. Discovery delegates to the bounded
+reference inspector and returns pages of at most 32 names. Catalog relocation
+reuses the existing allowlisted mover, with exact placement/capture identity
+checked under its locks and the original proof/capture deadline retained.
+The disposable host fixture observes results instead of supplying reference
+names or performing catalog mutations. These background commands add no final
+switch authority, new operator entrypoint or generic relocation mechanism.

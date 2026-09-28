@@ -338,6 +338,7 @@ os.chown(root,70,70)
       reply=command('prepare_step',step=step,relation=relation,max_duration_seconds=30)
       assert reply['result']['committed'] and not reply['final_switch_authorized']
       return reply
+     phase('catalog_history','qt_fact_storage_cutover_v1.fact_versions')
      for _ in range(64):
       reply=command('sql_copy')
       outcome=reply['result']['outcome']
@@ -346,15 +347,23 @@ os.chown(root,70,70)
       elif outcome=='both_tails_observed_empty' and (control/'published').exists():break
      else:raise RuntimeError('tiny_worker_phases_did_not_converge')
      phase('identity_capture')
-     (control/'inspect-references').write_text('inspect')
-     waitfile('references.json')
-     relations=json.loads((control/'references.json').read_text())
-     assert isinstance(relations,list) and len(relations)<=128
+     relations=[];after=None;catalog_relations=None
+     while True:
+      page=command('inspect_references',after=after)['result']
+      assert len(page['references'])<=32
+      if catalog_relations is None:catalog_relations=page['catalogs']
+      assert page['catalogs']==catalog_relations
+      relations.extend(row['relation'] for row in page['references'])
+      after=page['next_after']
+      if after is None:break
+     assert len(relations)==len(set(relations))<=8192
      for relation in relations:
       phase('reference_prepare',relation);phase('reference_validate',relation)
      phase('reference_adopt')
+     for relation in catalog_relations:phase('catalog_history',relation)
      (control/'phases-finished').write_text('finished')
-     waitfile('catalogs-moved')
+     waitfile('catalogs-verified')
+     report['reference_discovery_and_catalog_moves_owned_by_worker']=True
      report['explicit_preparation_through_worker']=True
      report['worker_reference_relations']=len(relations)
     baselines=set()

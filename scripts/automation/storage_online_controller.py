@@ -32,13 +32,15 @@ from scripts.db import fact_header_v2_online as online
 from scripts.db import fact_header_v2_online_proof as protection
 from scripts.db import fact_header_v2_handoff as handoff
 from scripts.db import fact_header_v2_cancel as cancellation
+from scripts.db import fact_header_v2_references as references
+from scripts.db import archive_reference_v2_placement as catalogs
 from scripts.db.archive_file_v2_proof import ArchiveFileProof
 
 logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
 _ROLLBACK_OPERATIONS = {"rollback_fence_begin", "rollback_fence_check", "rollback_fence_end"}
 _SESSION_OPERATIONS = {"final_session_begin", "final_session_check", "final_session_quiesce"}
-_OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "commit_database", "cancel", "close"}
+_OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "inspect_references", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "commit_database", "cancel", "close"}
 
 
 class OnlineController:
@@ -427,8 +429,39 @@ class OnlineController:
             result["baseline_complete"] = report["baseline_complete"]
         return result
 
+    def _reference_page(self, after):
+        """Bounded discovery from the existing reference owner, no switch claim."""
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            report = references.inspect_references(conn, timeout_seconds=min(10, self.limits["movement_timeout_seconds"]))
+        rows = [row for row in report["references"] if row["relation"] != references.PARENT]
+        if after is not None and after not in {row["relation"] for row in rows}:
+            raise RuntimeError("storage_online_reference_discovery_changed")
+        remaining = [row for row in rows if after is None or row["relation"] > after]
+        page = remaining[:32]
+        return {"references": [{key: row[key] for key in ("relation", "prepared", "validated")} for row in page],
+                "next_after": page[-1]["relation"] if len(remaining)>len(page) else None,
+                "catalogs": list(catalogs.RELATIONS), "references_complete": report["references_complete"],
+                "migration_ready": False}
+
+    def _catalog_step(self, relation, seconds):
+        """Use the existing fixed mover under this worker's original binding."""
+        if relation == catalogs.RETAINED_LEGACY:
+            with self.engine.begin() as conn:
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                with capture.migration_step(conn, min(10, seconds)):
+                    if not conn.scalar(text("SELECT to_regclass(:relation)"), {"relation": relation}):
+                        return {"relation": relation, "present": False, "committed": True,
+                                "migration_ready": False}
+        report = catalogs.move_reference_catalog(self.engine, relation=relation, policy=self.policy,
+            resource_limits={**self._admitted_limits, "movement_timeout_seconds": seconds},
+            expected_started_at=self.expected_started_at, placement=self.placement,
+            deadline=min(self.proof.deadline, monotonic()+seconds))
+        return {key: report[key] for key in ("relation", "placement", "reused", "committed", "migration_ready")}
+
     def command(self, request):
         fields = {"controller_id", "sequence", "operation"}
+        discovering = isinstance(request, dict) and request.get("operation") == "inspect_references"
         preparing = isinstance(request, dict) and request.get("operation") == "prepare_step"
         draining = isinstance(request, dict) and request.get("operation") == "source_drain"
         finalizing = isinstance(request, dict) and request.get("operation") == "final_delta"
@@ -440,6 +473,8 @@ class OnlineController:
             fields |= {"deadline"}
         if draining:
             fields |= {"deadline", "max_entries"}
+        if discovering:
+            fields |= {"after"}
         if preparing:
             fields |= {"step", "relation", "max_duration_seconds"}
         if (not isinstance(request, dict)
@@ -475,12 +510,16 @@ class OnlineController:
                     or type(request["max_entries"]) is not int
                     or not 1 <= request["max_entries"] <= 1_000_000):
                 raise ValueError("storage_online_spool_command_budget_invalid")
+        if discovering and (request["after"] is not None and (
+                not isinstance(request["after"], str) or not 1 <= len(request["after"]) <= 256)):
+            raise ValueError("storage_online_reference_discovery_invalid")
         if preparing:
             step, relation = request["step"], request["relation"]
-            relation_step = step in {"reference_prepare", "reference_validate"} if isinstance(step, str) else False
-            if (not isinstance(step, str) or step not in online._PREPARATION_STEPS
+            relation_step = step in {"reference_prepare", "reference_validate", "catalog_history"} if isinstance(step, str) else False
+            if (not isinstance(step, str) or step not in {*online._PREPARATION_STEPS, "catalog_history"}
                     or (relation_step and (not isinstance(relation, str) or not 1 <= len(relation) <= 256))
                     or (not relation_step and relation is not None)
+                    or (step == "catalog_history" and relation not in (*catalogs.RELATIONS, catalogs.RETAINED_LEGACY))
                     or type(request["max_duration_seconds"]) is not int
                     or not 1 <= request["max_duration_seconds"] <= self._admitted_limits["movement_timeout_seconds"]):
                 raise ValueError("storage_online_preparation_command_invalid")
@@ -495,8 +534,8 @@ class OnlineController:
                 raise RuntimeError("storage_online_final_session_fresh_sequence_required")
             if fencing:
                 raise RuntimeError("storage_online_rollback_fresh_sequence_required")
-            if draining or inspecting:
-                raise RuntimeError("storage_online_observation_fresh_sequence_required" if inspecting
+            if draining or inspecting or discovering:
+                raise RuntimeError("storage_online_observation_fresh_sequence_required" if inspecting or discovering
                                    else "storage_online_spool_fresh_sequence_required")
             return deepcopy(self._last_reply)
         readable = operation in {"inspect_outcome", "close"} and self.state in {"commit_unknown", "committed", "rolled_back", "aborted"}
@@ -575,7 +614,11 @@ class OnlineController:
                     raise RuntimeError("storage_online_spool_deadline_expired")
             else:
                 self._admit_attempt()
-                if operation == "sql_copy":
+                if discovering:
+                    result = self._reference_page(request["after"])
+                elif preparing and request["step"] == "catalog_history":
+                    result = self._catalog_step(request["relation"], request["max_duration_seconds"])
+                elif operation == "sql_copy":
                     report = online.copy_pass(self.engine, placement=self.placement,
                         policy=self.policy, resource_limits=self.limits, page_rows=self.page_rows,
                         max_pages=2, max_duration_seconds=self.limits["movement_timeout_seconds"])

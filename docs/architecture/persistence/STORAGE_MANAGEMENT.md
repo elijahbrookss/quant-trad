@@ -1778,8 +1778,10 @@ adoption are explicit commands. They do not widen short SQL/archive page or
 status limits. A same-process identical reply can be replayed without another
 mutation. A failed command closes further work; a replacement controller admits
 durable progress and starts with no file proof. Source clients are not paused or
-restarted by these commands. Retained/reference catalog movement remains a
-separate operator boundary, and no final-switch/runtime command is exposed.
+restarted by these commands. The same worker also delegates `catalog_history` to the existing fixed catalog
+mover. Only the retained rollback table and the two archive reference catalogs
+are admitted; arbitrary relations remain refused. These commands grant no final
+switch or runtime authority.
 
 Disposable controller qualification traverses the finite header/raw phases,
 restarts after committed identity relocation, publishes additional QT archives,
@@ -1793,10 +1795,12 @@ The optional owned host rehearsal adds --worker-phases with --prepare-source.
 After initial source resumption and atomic capture, it sends explicit private
 moves, identity mirroring and reference preparation/validation/adoption through
 the launched worker's real pipe, alongside real QT publication and bounded copy
-commands. The application fixture supplies its incoming-reference names only
-after mirroring; this private diagnostic channel is not a production operator
-discovery interface. Retained/reference catalog moves remain explicit external
-fixture phases. Existing source receipts, empty-proof reentry and worker-only
+commands. After mirroring, `inspect_references` uses the existing reference inspector and
+returns at most 32 names per reply, with a fresh sequence for every observation.
+The existing bounded reference inventory and each mutation still validate the
+actual database. The same worker moves the three fixed catalogs through
+`catalog_history`; the fixture only verifies their final placement and retained
+rows. No test process supplies production reference names or moves catalogs. Existing source receipts, empty-proof reentry and worker-only
 exception cleanup are still checked. Synthetic services/UUID metadata/UID70
 directories and small data do not establish production collector performance or
 the final pause/recovery sequence.
@@ -2727,3 +2731,15 @@ receipt file, scheduler, service or general workflow framework is introduced.
 
 The complete supported operator still needs production fleet/resource admission,
 terminal outcome handling and measured collection/query impact before release.
+
+### Worker-owned reference discovery and fixed catalog preparation
+
+Catalog moves retain the controller's exact placement and capture start, checked
+inside the existing migration/storage locks. Their time limit is clipped to the
+original live proof and capture deadlines, including already completed retries.
+An absent optional retained rollback table is reported without creating it.
+Discovery and catalog preparation are background-only operations; they cannot
+resume after final-session admission or an uncertain command. No generic mover,
+new entrypoint, state owner or receipt is introduced. The complete operator,
+production resource admission and measured collection impact remain separate
+release requirements.

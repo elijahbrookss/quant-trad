@@ -227,6 +227,9 @@ class _MoveWatch:
                     != (original.filesystem_uuid, original.device_id, original.path)):
                 raise RuntimeError("storage_move_filesystem_changed")
             if current.available_bytes < self.floors[target.target_id]:
+                logger.error("storage_move_space_budget_exceeded | target_id=%s available_bytes=%s floor_bytes=%s original_available_bytes=%s",
+                             target.target_id, current.available_bytes,
+                             self.floors[target.target_id], original.available_bytes)
                 raise RuntimeError("storage_move_space_budget_exceeded")
 
     def check(self):

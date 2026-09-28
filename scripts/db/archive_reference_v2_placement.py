@@ -7,6 +7,7 @@ and preserves table identity and every logical definition. V1 stays active.
 from __future__ import annotations
 
 import logging
+import math
 from time import monotonic
 
 from sqlalchemy import text
@@ -20,7 +21,7 @@ from portal.backend.service.storage.header_resources import observe_header_resou
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
 from scripts.db import fact_header_v2_references as references
 from scripts.db.fact_header_v2_admission import _columns, _constraints, _secondary_indexes
-from scripts.db.fact_header_v2_capture import SCHEMA, migration_step, capture_remaining_seconds
+from scripts.db.fact_header_v2_capture import SCHEMA, migration_step, capture_remaining_seconds, inspect_capture
 
 RELATIONS = ("market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies")
 RETAINED_LEGACY = "qt_fact_storage_cutover_v1.fact_versions"
@@ -188,9 +189,12 @@ def _budget(conn, *, observed, policy, limits, targets, resources):
     return budget, floors
 
 
-def move_reference_catalog(engine, *, relation, policy, resource_limits, cancelled=None):
+def move_reference_catalog(engine, *, relation, policy, resource_limits, cancelled=None,
+                           expected_started_at=None, placement=None, deadline=None):
     """Move one known catalog+indexes atomically; preserve source semantics.
 
+    An online caller may additionally bind the exact capture/placement and an
+    earlier absolute deadline; these can only narrow the existing admission.
     Caller supplies measured resource allowances using the existing limits
     contract. Net filesystem consumption is supervised through commit/rollback;
     this is not per-process IO attribution or an instantaneous disk quota.
@@ -198,13 +202,19 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
     while the original attempt is still valid, retrying: a verified already-HDD catalog is acknowledged without rewriting.
     """
     _known(relation)
+    if ((expected_started_at is None) != (placement is None)
+            or (placement is not None and (not isinstance(placement, physical.CopyPlacement)
+                or not isinstance(expected_started_at, str) or not expected_started_at))
+            or (deadline is not None and (type(deadline) not in (int, float)
+                or not math.isfinite(deadline) or deadline <= monotonic()))):
+        raise ValueError("archive_reference_move_attempt_binding_invalid")
     limits = _limits(resource_limits, migration=True)
     if cancelled is not None and not callable(cancelled):
         raise ValueError("archive_reference_move_cancellation_callback_invalid")
     if cancelled is not None and cancelled():
         raise RuntimeError("storage_move_cancelled")
     started = monotonic()
-    deadline = started + limits["movement_timeout_seconds"]
+    deadline = min(deadline, started+limits["movement_timeout_seconds"]) if deadline is not None else started+limits["movement_timeout_seconds"]
     with engine.connect() as conn:
         watch = None
         try:
@@ -213,7 +223,7 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous_ms:
                     deadline = min(deadline, started+previous_ms/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"]):
+                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("archive_reference_move_storage_busy")
@@ -224,6 +234,10 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                     observed = inspect_reference_catalog(conn, relation=relation)
                     saved = observed["_binding"]
                     plan = physical._restore(saved["plan"])
+                    if (placement is not None and (plan != placement
+                            or inspect_capture(conn)["started_at"] != expected_started_at)):
+                        raise RuntimeError("archive_reference_move_attempt_binding_changed")
+                    deadline = min(deadline, monotonic()+float(capture_remaining_seconds(conn)))
                     targets = (plan.recent, plan.history)
                     _fixed_inputs(policy, limits, targets)
                     if observed["placement"] == "history":
@@ -261,6 +275,8 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                 # Watch remains pinned to this connection through commit.
             if watch is not None:
                 watch.check()
+            if monotonic() >= deadline:
+                raise RuntimeError("archive_reference_move_time_budget_exceeded")
             logger.info("archive_reference_catalog_on_history | relation=%s reused=%s duration_seconds=%s",
                         relation, receipt["reused"], monotonic()-started)
             return {**receipt, "committed": True}

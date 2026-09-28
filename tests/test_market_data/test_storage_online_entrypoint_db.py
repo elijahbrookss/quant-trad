@@ -132,15 +132,19 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
             "(SELECT oid::text FROM pg_database WHERE datname=current_database()) FROM pg_control_system()"))
         frozen = _frozen_records(conn)
         assert conn.scalar(text("SHOW archive_mode")) == "off"
+    retained_before = None
     if worker_phases:
-        # The retained-table move remains an explicit external phase. Only the
-        # controller's qualified private/reference phases go through its pipe.
+        # Create an actual immutable retained rollback source in this owned
+        # database. The fixture never moves it; the retained worker must do so.
+        from tests.test_market_data.test_archive_reference_placement_db import _seed_retained_source, _rows
         with engine.begin() as conn:
             retained = conn.scalar(text("SELECT to_regclass(:name)"),
                 {"name": catalogs.RETAINED_LEGACY}) is not None
-        if retained:
-            catalogs.move_reference_catalog(engine, relation=catalogs.RETAINED_LEGACY,
-                policy=options["policy"], resource_limits=options["resource_limits"])
+        if not retained:
+            retained_before = _seed_retained_source(engine)
+        else:
+            with engine.begin() as conn:
+                retained_before = _rows(conn, catalogs.RETAINED_LEGACY)
     elif atomic:
         _stage_online_fixture(engine, storage.copy_plan, options, started)
     else:
@@ -177,21 +181,13 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         event_start=BASE+timedelta(hours=4), replay_features=runtime_recovery is not None)
     (control/"published").write_text("published")
     if worker_phases:
-        wait("inspect-references")
-        # This private diagnostic channel supplies only fixture catalog names;
-        # it is not a production discovery or release-authority interface.
-        with engine.begin() as conn:
-            relations = [r["relation"] for r in references.inspect_references(conn)["references"]
-                         if r["relation"] != references.PARENT]
-        assert len(relations) <= 128
-        (control/"references.json").write_text(json.dumps(relations))
         wait("phases-finished")
         with engine.begin() as conn:
             assert references.inspect_references(conn)["references_complete"]
-        for relation in catalogs.RELATIONS:
-            catalogs.move_reference_catalog(engine, relation=relation,
-                policy=options["policy"], resource_limits=options["resource_limits"])
-        (control/"catalogs-moved").write_text("moved")
+            for relation in (*catalogs.RELATIONS, catalogs.RETAINED_LEGACY):
+                assert catalogs.inspect_reference_catalog(conn, relation=relation)["placement"] == "history"
+            assert _rows(conn, catalogs.RETAINED_LEGACY) == retained_before
+        (control/"catalogs-verified").write_text("verified")
     if os.getenv("QT_ONLINE_FINAL_DELTA") == "1":
         wait("final-publish")
         _raw_book_fixture(storage, source, monkeypatch,
