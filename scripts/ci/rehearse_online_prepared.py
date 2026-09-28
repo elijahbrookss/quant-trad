@@ -480,7 +480,7 @@ os.chown(root,70,70)
    assert terminal['release']['status']=='deployed'
    # Compose may adopt the preserving container by recreation. Resolve its
    # exact service identity, then verify the original cluster/data, not a stale ID.
-   databases=run(['ps','-aq','--filter','label=com.docker.compose.project='+project,
+   databases=run(['ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+project,
      '--filter','label=com.docker.compose.service=tsdb']).stdout.split()
    assert len(databases)==1, 'ordinary deployment database identity is ambiguous'
    deployed_database=databases[0]

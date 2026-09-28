@@ -105,7 +105,7 @@ def prepare_canonical_configuration(*, repository, state, project, image, databa
         QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA='false', QT_SINGLE_NODE_ENABLE_SCHEDULED_FACTS='false',
         QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS='false', QT_SINGLE_NODE_ENABLE_TRADE_STREAMS='false',
         QT_SINGLE_NODE_ENABLE_L2_STREAMS='false', QT_ALERTS_ENABLED='false',
-        PGADMIN_DEFAULT_EMAIL='fixture@example.com', PGADMIN_DEFAULT_PASSWORD=password,
+        PGADMIN_DEFAULT_EMAIL='storage-fixture@quanttrad.dev', PGADMIN_DEFAULT_PASSWORD=password,
         GF_SECURITY_ADMIN_USER='fixture', GF_SECURITY_ADMIN_PASSWORD=password,
         QT_SECURITY_PROVIDER_CREDENTIAL_KEY=base64.urlsafe_b64encode(os.urandom(32)).decode())
     # Reserve distinct loopback ports during rendering; the owned recipe never
