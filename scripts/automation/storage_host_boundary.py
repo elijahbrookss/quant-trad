@@ -12,13 +12,17 @@ from contextvars import ContextVar
 import fcntl
 import hashlib
 import json
+import logging
+import math
 import os
 from pathlib import Path
 import re
+import select
 import stat
 import subprocess
 import tempfile
 import time
+import threading
 
 HOLD = "storage-handoff.json"
 
@@ -358,3 +362,170 @@ def supervised_source_action(arguments, *, deadline, check, input=None):
         if process.poll() is None:
             process.kill()
         process.wait(timeout=1)  # Cleanup only, never another daemon action.
+
+
+class OnlineWorkerChannel:
+    """One bounded, non-replayable host conversation with the retained worker.
+
+    Phase owners supply deadlines and durable intent before calling exchange.
+    Any framing, timeout, identity or sequence failure permanently poisons this
+    channel. It never reconnects, replays, reconciles outcomes or grants action
+    authority. The existing launcher still owns process retirement.
+    """
+    def __init__(self, process, *, deadline, command_seconds=40):
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or deadline <= time.monotonic()
+                or type(command_seconds) not in (int, float)
+                or not math.isfinite(command_seconds) or not 0 < command_seconds <= 3600):
+            raise ValueError("storage_online_channel_budget_invalid")
+        self._input = process.stdin.fileno()
+        self._output = process.stdout.fileno()
+        self._deadline = deadline
+        self._command_seconds = command_seconds
+        self._sequence = 0
+        self._controller_id = None
+        self._final_deadline = None
+        self._failed = False
+        self._lock = threading.Lock()
+        self.last_reply = None
+        try:
+            greeting = self._read(min(deadline, time.monotonic()+command_seconds))
+            self._validate(greeting, operation=None)
+            if greeting.get("state") != "background" or greeting.get("bound_final_deadline") is not None:
+                raise RuntimeError("storage_online_channel_greeting_invalid")
+            self._controller_id = greeting["controller_id"]
+            self.greeting = greeting
+            self.last_reply = greeting
+        except BaseException:
+            self._failed = True
+            raise
+
+    @property
+    def sequence(self):
+        return self._sequence
+
+    @staticmethod
+    def _unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("storage_online_channel_duplicate_field")
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _finite(value):
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("storage_online_channel_nonfinite_number")
+        return value
+
+    @staticmethod
+    def _wait(fd, event, deadline):
+        remaining = deadline-time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("storage_online_channel_deadline_expired")
+        poller = select.poll()  # Descriptor counts may exceed FD_SETSIZE.
+        poller.register(fd, event)
+        if not poller.poll(math.ceil(remaining*1000)) or time.monotonic() >= deadline:
+            raise TimeoutError("storage_online_channel_deadline_expired")
+
+    def _read(self, deadline):
+        data = bytearray()
+        previous = os.get_blocking(self._output)
+        os.set_blocking(self._output, False)
+        try:
+            while True:
+                self._wait(self._output, select.POLLIN, deadline)
+                try:
+                    part = os.read(self._output, 16385-len(data))
+                except BlockingIOError:
+                    continue
+                if not part:
+                    raise RuntimeError("storage_online_channel_truncated_reply" if data else "storage_online_channel_eof")
+                data.extend(part)
+                if len(data) > 16384:
+                    raise RuntimeError("storage_online_channel_reply_bound_exceeded")
+                if b"\n" in data:
+                    if data.count(b"\n") != 1 or not data.endswith(b"\n"):
+                        raise RuntimeError("storage_online_channel_pipelined_reply")
+                    try:
+                        return json.loads(data, object_pairs_hook=self._unique,
+                            parse_float=self._finite, parse_constant=self._finite)
+                    except (ValueError, UnicodeError, RecursionError):
+                        raise RuntimeError("storage_online_channel_reply_invalid") from None
+        finally:
+            os.set_blocking(self._output, previous)
+
+    def _validate(self, reply, *, operation):
+        if (not isinstance(reply, dict)
+                or reply.get("schema_version") != "qt.storage_online_controller.v1"
+                or not isinstance(reply.get("controller_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", reply["controller_id"])
+                or self._controller_id is not None and reply["controller_id"] != self._controller_id
+                or type(reply.get("last_sequence")) is not int
+                or reply["last_sequence"] != self._sequence
+                or reply.get("operation") != operation
+                or any(reply.get(key) is not False for key in (
+                    "migration_ready", "final_switch_authorized", "collection_resume_authorized"))):
+            raise RuntimeError("storage_online_channel_reply_binding_changed")
+        bound = reply.get("bound_final_deadline")
+        if bound is not None:
+            if (type(bound) not in (int, float) or not math.isfinite(bound)
+                    or bound > self._deadline
+                    or self._final_deadline is not None and bound != self._final_deadline):
+                raise RuntimeError("storage_online_channel_final_deadline_changed")
+            self._final_deadline = bound
+        elif self._final_deadline is not None:
+            raise RuntimeError("storage_online_channel_final_deadline_changed")
+
+    def exchange(self, operation, *, response_deadline=None, **parameters):
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("storage_online_channel_command_inflight")
+        try:
+            if self._failed:
+                raise RuntimeError("storage_online_channel_unresolved")
+            try:
+                if (not isinstance(operation, str) or not re.fullmatch(r"[a-z_]{1,64}", operation)
+                        or set(parameters) & {"controller_id", "sequence", "operation"}):
+                    raise ValueError("storage_online_channel_command_invalid")
+                deadline = min(self._deadline, time.monotonic()+self._command_seconds)
+                for value in (response_deadline, parameters.get("deadline"), self._final_deadline):
+                    if value is not None:
+                        if type(value) not in (int, float) or not math.isfinite(value):
+                            raise ValueError("storage_online_channel_budget_invalid")
+                        deadline = min(deadline, value)
+                self._sequence += 1  # Never reuse a possibly dispatched sequence.
+                if self._sequence > 2**53:
+                    raise RuntimeError("storage_online_channel_sequence_exhausted")
+                data = json.dumps(dict(controller_id=self._controller_id,
+                    sequence=self._sequence, operation=operation, **parameters),
+                    separators=(",", ":"), allow_nan=False).encode()+b"\n"
+                if len(data) > 4096:
+                    raise ValueError("storage_online_channel_command_bound_exceeded")
+                previous = os.get_blocking(self._input)
+                os.set_blocking(self._input, False)
+                try:
+                    while data:
+                        self._wait(self._input, select.POLLOUT, deadline)
+                        try:
+                            count = os.write(self._input, data)
+                        except BlockingIOError:
+                            continue
+                        if count <= 0:
+                            raise RuntimeError("storage_online_channel_write_failed")
+                        data = data[count:]
+                finally:
+                    os.set_blocking(self._input, previous)
+                reply = self._read(deadline)
+                self._validate(reply, operation=operation)
+                self.last_reply = reply
+                return reply
+            except BaseException as exc:
+                self._failed = True
+                logging.getLogger(__name__).error(
+                    "storage_online_channel_failed | operation=%s sequence=%s error_type=%s",
+                    operation, self._sequence, type(exc).__name__)
+                raise
+        finally:
+            self._lock.release()

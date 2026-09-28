@@ -1558,3 +1558,25 @@ fresh record precede maintenance startup and the physical baseline. This uses
 synthetic guarded source peers and filesystem identities and does not establish
 production pause, throughput, capacity, or full-fleet admission. The supported
 production operator and reviewed deployment remain unfinished.
+
+
+### Retained worker channel ownership
+
+The shared host boundary owns `OnlineWorkerChannel`, the host side of the
+existing bounded worker protocol. The real host rehearsal now uses this same
+channel instead of its local read/write loop. It admits one initial controller
+identity, assigns each sequence once, permits one outstanding operation, and
+bounds command/reply frames and nonblocking pipe I/O by the caller's original
+capture/final deadline. Poll supports the already admitted high descriptor
+counts. Duplicate fields, nonfinite numbers, wrong identities/sequences,
+truncated or oversized frames and uncertain writes permanently retire the
+conversation from further use; it never reconnects or replays.
+
+Phase owners still persist dispatch intent and validate operation-specific
+results. The channel supplies no switch, rollback or recovery authority, and
+the existing launcher independently verifies process retirement. A caller that
+has fully received a valid response and then discards it can continue on that
+same channel with the next sequence; unread or partial replies cannot take
+that path. No replacement deadline, receipt, state owner, listener or operator
+entrypoint is added. The complete production operator and actual source/load
+admission remain unfinished.

@@ -281,22 +281,10 @@ os.chown(root,70,70)
  kwargs=dict(project=project,source_revision=revision,image=image,request=request,
              inventory_path=inventory,descriptor_limit=1024,memory_bytes=1024**3)
  name=project+'-storage-online';owned.append(name)
- def read(deadline=None):
-  data=b'';deadline=deadline if deadline is not None else time.monotonic()+40
-  while not data.endswith(b'\n'):
-   if time.monotonic()>deadline or len(data)>16384:raise RuntimeError('worker_protocol_budget')
-   if select.select([worker.stdout],[],[],max(.001,deadline-time.monotonic()))[0]:
-    piece=os.read(worker.stdout.fileno(),1)
-    if not piece:raise RuntimeError('worker_eof')
-    data+=piece
-  return json.loads(data)
- sequence=0
  def command(op,*,response_deadline=None,**extra):
-  global sequence,last_reply
-  sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode())
-  reply=read(extra.get('deadline',response_deadline))
-  last_reply=reply
-  return reply
+  global last_reply
+  last_reply=channel.exchange(op,response_deadline=response_deadline,**extra)
+  return last_reply
  first_deadline=None
  launch_context=launch.launched_online_worker
  if options.commit_switch:
@@ -304,7 +292,7 @@ os.chown(root,70,70)
   launch_context=launch.launched_online_worker_locked
  for attempt in range(1 if options.final_pause else 2):
   with launch_context(state,**kwargs) as (worker,receipt):
-   greeting=read();sequence=0
+   channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
    assert not greeting['final_switch_authorized']
    assert greeting['background_hashed_bytes']==0
    assert receipt['source_clients_unchanged']
@@ -1047,7 +1035,7 @@ os.chown(root,70,70)
    pass
   try:
    with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
-    greeting=read();sequence=0
+    channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
     assert greeting['background_hashed_bytes']==0
     assert receipt['deadline']==first_deadline
     raise HostInterrupted()
@@ -1096,7 +1084,7 @@ os.chown(root,70,70)
   report['frozen_and_original_capture_retained_after_final']=True
  report['durable_request_and_receipt_retained']=True
  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
- report.update(passed=True,image=image,first_process_commands=sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
+ report.update(passed=True,image=image,first_process_commands=channel.sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
 except BaseException as exc:
  if (options.recovery_create_reply_loss and isinstance(exc,EOFError)
      and str(exc)=='owned completed recovery create reply discarded'):
