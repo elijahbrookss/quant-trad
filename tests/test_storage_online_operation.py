@@ -305,3 +305,19 @@ def test_online_phase_order_retires_raw_first_but_preserves_started_headers(
         baseline_complete=header_complete,identity_history_ready=identity_ready)
     lookup=dict(baseline_complete=raw_complete,history_ready=raw_ready)
     assert _phase(header,lookup)==expected
+
+
+@pytest.mark.parametrize("empty,identity_done,identity_moved,raw_ready,expected", [
+    (False,False,False,False,"raw_baseline"),
+    (True,True,False,False,"raw_baseline"),
+    (False,False,False,True,"identity_baseline"),
+    (False,True,False,True,"identity_relocation_required"),
+    (False,True,True,True,"header_baseline"),
+    (True,True,True,True,"catch_up"),
+])
+def test_fresh_identity_staging_phase_preserves_empty_and_nonempty_order(
+        empty, identity_done, identity_moved, raw_ready, expected):
+    from scripts.db.fact_header_v2_online import _phase
+    header=dict(after_day=None, baseline_complete=empty,
+        identity_baseline_complete=identity_done,identity_history_ready=identity_moved)
+    assert _phase(header,dict(baseline_complete=raw_ready,history_ready=raw_ready)) == expected

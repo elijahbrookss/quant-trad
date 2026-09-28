@@ -69,7 +69,7 @@ def prepare_attempt(engine, *, placement, policy, resource_limits, source_root,
         if not destination.is_relative_to(Path(placement.history.root).resolve(strict=True)):
             raise RuntimeError("fact_header_online_archive_outside_fixed_target")
         headers.prepare_copy(conn, placement=placement, timeout_seconds=seconds,
-                             attempt_seconds=attempt_seconds)
+                             attempt_seconds=attempt_seconds, stage_identity_first=True)
         # The raw manifest FK must precede archive trigger binding. Integrity
         # guards must precede the first copied row, including on a retry.
         raw.prepare_copy(conn, timeout_seconds=seconds)
@@ -154,6 +154,8 @@ def preparation_step(engine, *, step, placement, policy, resource_limits,
             allowed = lookup["baseline_complete"] and (
                 lookup["history_ready"] or header["after_day"] is None
                 or (header["baseline_complete"] and header["identity_history_ready"]))
+        elif step == "identity_history" and header.get("identity_baseline_complete") is not None:
+            allowed = header["identity_baseline_complete"] and lookup["history_ready"]
         else:
             allowed = (header["baseline_complete"]
                 and (step == "identity_history" or header["identity_history_ready"])
@@ -187,9 +189,14 @@ def _phase(header, lookup):
     # Finish finite raw staging and retire it before new headers grow on SSD.
     # The durable header cursor preserves the old order for an already-started
     # attempt; changing its order could add raw staging to existing headers/IDs.
-    if (not header["baseline_complete"] and header["after_day"] is None
-            and not lookup["history_ready"]):
+    if ((not header["baseline_complete"] or header.get("identity_baseline_complete") is not None)
+            and header["after_day"] is None and not lookup["history_ready"]):
         return "raw_relocation_required" if lookup["baseline_complete"] else "raw_baseline"
+    if header.get("identity_baseline_complete") is not None:
+        if not header["identity_baseline_complete"]:
+            return "identity_baseline"
+        if not header["identity_history_ready"]:
+            return "identity_relocation_required"
     if not header["baseline_complete"]:
         return "header_baseline"
     if not header["identity_history_ready"]:
@@ -279,12 +286,14 @@ def copy_pass(engine, *, placement, policy, resource_limits, max_pages=32,
                 family = next_tail
                 next_tail = "raw" if family == "headers" else "headers"
             else:
-                family = "headers" if phase == "header_baseline" else "raw"
-            copier = headers if family == "headers" else raw
-            report = copier.copy_page(conn, page_rows=page_rows,
+                family = {"header_baseline": "headers", "identity_baseline": "identities",
+                          "raw_baseline": "raw"}[phase]
+            copier = (headers.copy_identity_page if family == "identities" else
+                      headers.copy_page if family == "headers" else raw.copy_page)
+            report = copier(conn, page_rows=page_rows,
                                       timeout_seconds=min(seconds, max(1, int(remaining))))
-        pages[family] += 1
-        rows[family] += report["verified_page_rows"]
+        pages[family] = pages.get(family, 0) + 1
+        rows[family] = rows.get(family, 0) + report["verified_page_rows"]
         if phase == "catch_up":
             if report["caught_up_at_observation"]:
                 tail_seen.add(family)

@@ -99,6 +99,13 @@ def _inspect_progress(conn):
     inspect_capture(conn)
     _source_columns(conn)
     state = dict(conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one())
+    identity_fields = {"identity_after_day", "identity_after_seq", "identity_after_id",
+                       "identity_baseline_complete"}
+    present = identity_fields.intersection(state)
+    if present and (present != identity_fields
+            or state["identity_history_ready"] and not state["identity_baseline_complete"]
+            or state["after_day"] is not None and not state["identity_history_ready"]):
+        raise RuntimeError("fact_header_identity_staging_progress_invalid")
     if state["identity_capture"]:
         inspect_identity_capture(conn)
     elif conn.scalar(text("""
@@ -119,8 +126,15 @@ def _inspect_progress(conn):
 
 
 def prepare_copy(conn, *, placement=None, timeout_seconds=30,
-                 attempt_seconds=DEFAULT_ATTEMPT_SECONDS):
-    """Create a private target atomically; retry never resets copied progress."""
+                 attempt_seconds=DEFAULT_ATTEMPT_SECONDS, stage_identity_first=False):
+    """Create private targets atomically; retry retains their original sequence.
+
+    Fresh online attempts build identities alone on SSD and relocate them before
+    allocating headers. Older targets have no identity cursor and keep their
+    existing combined copy. This creation choice never upgrades saved attempts.
+    """
+    if type(stage_identity_first) is not bool or (stage_identity_first and placement is None):
+        raise ValueError("fact_header_identity_staging_requires_placement")
     with migration_step(conn, timeout_seconds), (physical.tablespace(conn,"") if placement is not None else nullcontext()):
         binding=physical.observe(conn,placement)[0] if placement is not None else None
         install_capture(conn, attempt_seconds=attempt_seconds)
@@ -140,6 +154,11 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30,
             # Build the private identity indexes on SSD before bulk relocation.
             tables[name].create(conn)
         assert_v1_source_admission(conn)
+        identity_columns = ("identity_after_day date,identity_after_seq bigint,identity_after_id text,"
+                            "identity_baseline_complete boolean NOT NULL,"
+                            "CHECK((identity_after_day IS NULL)=(identity_after_seq IS NULL) "
+                            "AND (identity_after_day IS NULL)=(identity_after_id IS NULL)),"
+                            if stage_identity_first else "")
         conn.exec_driver_sql(f"""
             CREATE TABLE {STATE}(
                 id integer PRIMARY KEY CHECK(id=1),
@@ -149,6 +168,7 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30,
                 identity_capture boolean NOT NULL DEFAULT false,
                 identity_history_ready boolean NOT NULL DEFAULT false,
                 verified_rows bigint NOT NULL DEFAULT 0 CHECK(verified_rows>=0),
+                {identity_columns}
                 targets jsonb NOT NULL,
                 placement jsonb,
                 CHECK((high_day IS NULL)=(high_seq IS NULL) AND (high_day IS NULL)=(high_id IS NULL)),
@@ -159,8 +179,8 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30,
             ORDER BY storage_day DESC,market_commit_seq DESC,id DESC LIMIT 1
         """)).one_or_none()
         conn.execute(text(f"""
-            INSERT INTO {STATE}(id,high_day,high_seq,high_id,baseline_complete,targets,placement)
-            VALUES(1,:day,:seq,:identity,:empty,CAST(:targets AS jsonb),CAST(:placement AS jsonb))
+            INSERT INTO {STATE}(id,high_day,high_seq,high_id,baseline_complete,targets,placement{",identity_baseline_complete" if stage_identity_first else ""})
+            VALUES(1,:day,:seq,:identity,:empty,CAST(:targets AS jsonb),CAST(:placement AS jsonb){",:empty" if stage_identity_first else ""})
         """), {"day":high[0] if high else None,"seq":high[1] if high else None,
                "identity":high[2] if high else None,"empty":high is None,
                "targets":json.dumps({name:_shape(conn,name) for name in TABLE_NAMES}),
@@ -201,11 +221,7 @@ def _partition(conn, day, *, placement=None, pid=None):
     conn.execute(text(f"INSERT INTO {SCHEMA}.fact_header_partitions(storage_day) VALUES(:day)"),{"day":day})
 
 
-def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False):
-    if not rows:
-        return
-    for day in sorted({row["storage_day"] for row in rows}):
-        _partition(conn,day,placement=placement,pid=pid)
+def _copy_identities(conn, rows, *, from_source):
     ids = [row["id"] for row in rows]
     if from_source:
         conn.execute(text(f"INSERT INTO {SCHEMA}.fact_identities ({','.join(IDENTITY_COLUMNS)}) "
@@ -219,6 +235,14 @@ def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False):
     """),{"ids":ids}).mappings()}
     if any(identities.get(row["id"]) != {name:row[name] for name in IDENTITY_COLUMNS} for row in rows):
         raise RuntimeError("fact_header_copy_identity_mismatch")
+
+def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False):
+    if not rows:
+        return
+    for day in sorted({row["storage_day"] for row in rows}):
+        _partition(conn,day,placement=placement,pid=pid)
+    _copy_identities(conn, rows, from_source=from_source)
+    ids = [row["id"] for row in rows]
     if from_source:
         conn.execute(text(f"INSERT INTO {SCHEMA}.fact_versions ({','.join(HEADER_COLUMNS)}) "
                           f"SELECT {','.join(HEADER_COLUMNS)} FROM {SOURCE} WHERE id=ANY(:ids) "
@@ -249,20 +273,60 @@ def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False):
     conn.execute(text(f"DELETE FROM {QUEUE} WHERE id=ANY(:ids)"),{"ids":ids})
 
 
+def _baseline_rows(conn, state, page_rows, *, identities_only=False):
+    prefix = "identity_after_" if identities_only else "after_"
+    after = {"after_"+key: state[prefix+key] for key in ("day", "seq", "id")}
+    predicate = "(storage_day,market_commit_seq,id) <= (:high_day,:high_seq,:high_id)"
+    if after["after_day"] is not None:
+        predicate += " AND (storage_day,market_commit_seq,id) > (:after_day,:after_seq,:after_id)"
+    columns = (*IDENTITY_COLUMNS, "market_commit_seq") if identities_only else HEADER_COLUMNS
+    return [dict(row) for row in conn.execute(text(f"""
+        SELECT {",".join(columns)} FROM {SOURCE} WHERE {predicate}
+        ORDER BY storage_day,market_commit_seq,id LIMIT :limit
+    """), {**state, **after, "limit": page_rows}).mappings()]
+
+
+def copy_identity_page(conn, *, page_rows=128, timeout_seconds=30):
+    """Build only fresh online identity indexes on SSD; retain every header tail.
+
+    Each page and its separate cursor commit together. The original source high
+    water mark and capture clock are reused. No header, partition, source mirror
+    or captured-queue entry is created or retired by this preliminary pass.
+    """
+    if type(page_rows) is not int or not 1 <= page_rows <= 4096:
+        raise ValueError("fact_header_copy_page_rows_out_of_bounds")
+    with migration_step(conn, timeout_seconds):
+        state = _inspect_progress(conn)
+        if (state.get("identity_baseline_complete") is None or state["identity_history_ready"]
+                or state["identity_capture"] or state["after_day"] is not None):
+            raise RuntimeError("fact_header_identity_staging_order_required")
+        rows = ([] if state["identity_baseline_complete"] else
+                _baseline_rows(conn, state, page_rows, identities_only=True))
+        if rows:
+            _copy_identities(conn, rows, from_source=True)
+            last = rows[-1]
+            conn.execute(text(f"""UPDATE {STATE} SET identity_after_day=:day,
+                identity_after_seq=:seq,identity_after_id=:identity WHERE id=1"""),
+                {"day": last["storage_day"], "seq": last["market_commit_seq"], "identity": last["id"]})
+        else:
+            conn.exec_driver_sql(f"UPDATE {STATE} SET identity_baseline_complete=true WHERE id=1")
+        state = _inspect_progress(conn)
+        logger.info("fact_header_identity_page_verified | rows=%s baseline_complete=%s",
+                    len(rows), state["identity_baseline_complete"])
+        return {"verified_page_rows": len(rows),
+                "identity_baseline_complete": state["identity_baseline_complete"]}
+
+
 def copy_page(conn, *, page_rows=128, timeout_seconds=30):
     """Copy a bounded baseline or captured page, including its durable cursor."""
     if type(page_rows) is not int or not 1 <= page_rows <= 4096:
         raise ValueError("fact_header_copy_page_rows_out_of_bounds")
     with migration_step(conn, timeout_seconds):
         state = _inspect_progress(conn)
+        if state.get("identity_baseline_complete") is not None and not state["identity_history_ready"]:
+            raise RuntimeError("fact_header_identity_staging_order_required")
         if not state["baseline_complete"]:
-            predicate = "(storage_day,market_commit_seq,id) <= (:high_day,:high_seq,:high_id)"
-            if state["after_day"] is not None:
-                predicate += " AND (storage_day,market_commit_seq,id) > (:after_day,:after_seq,:after_id)"
-            rows = [dict(row) for row in conn.execute(text(f"""
-                SELECT {",".join(HEADER_COLUMNS)} FROM {SOURCE} WHERE {predicate}
-                ORDER BY storage_day,market_commit_seq,id LIMIT :limit
-            """), {**state,"limit":page_rows}).mappings()]
+            rows = _baseline_rows(conn, state, page_rows)
         else:
             # Keep the query bounded using the queue PK and source global ID PK.
             queued = conn.execute(text(f"SELECT id FROM {QUEUE} ORDER BY id LIMIT :limit FOR UPDATE"),
@@ -305,7 +369,8 @@ def place_identity_on_history(conn, *, timeout_seconds=30):
         state = _inspect_progress(conn)
         if state["placement"] is None or state["identity_history_ready"]:
             return {"identity_history_ready":state["identity_history_ready"],"reused":True}
-        if not state["baseline_complete"]:
+        ready = state.get("identity_baseline_complete", state["baseline_complete"])
+        if not ready:
             raise RuntimeError("fact_header_identity_history_baseline_incomplete")
         if state["identity_capture"]:
             raise RuntimeError("fact_header_identity_history_capture_already_active")

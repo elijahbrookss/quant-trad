@@ -3030,16 +3030,27 @@ operation is replayed.
 ### Online baseline order and SSD headroom
 
 For a new online attempt, finish the bounded raw lookup baseline and commit its
-existing physical HDD relocation before allocating header pages and identities.
-This avoids adding the complete raw staging allocation to the completed recent
-headers. Header identity relocation still finishes before following live tails.
-The original capture deadline, per-page resource watcher, exact verification and
-final writer boundary are unchanged; no separate placement option is introduced.
+existing physical HDD relocation. Next build the private identity registry on
+SSD through a separate bounded cursor, and commit its existing HDD relocation
+before allocating copied header pages. The three large SSD allocations therefore
+occur in sequence. Building random identity indexes directly on HDD failed the
+bounded working-set comparison; the identity prepass retains SSD construction.
 
-An already-started header baseline keeps the former header/identity/raw order,
-selected from its existing durable header cursor. No progress or clock is reset.
-A failed raw relocation preserves its SSD copy and source; header copying cannot
-start until actual bound history placement is committed and reverified. Phase
-limits still need measured admission, including queue growth while the other
-baseline runs, retained data, WAL/temp and source growth. Reducing allocation
-overlap alone does not establish sufficient production headroom or a pause ETA.
+The existing copy-progress row owns the optional identity cursor and completion
+bit. They are created atomically only for a new online attempt; existing progress
+schemas are never altered. Earlier targets without this cursor retain their
+combined identity/header copy and recorded order. Reentry preserves every cursor,
+placement and the original capture deadline. No new operator or policy is added.
+
+Identity pages compare every identity field, retain the source high-water mark,
+and never retire a captured header entry. Only the existing exact full-header
+page comparison can do that. Both source and private shadow remain protected by
+the existing immutable guards. Identity mirroring still begins only after header
+baseline/catch-up; final verification and the writer boundary remain unchanged.
+
+Failed pages or relocation retain earlier committed work and original source.
+Header copying refuses until the completed staged identity registry has verified
+HDD placement. Every page retains the same resource watcher and original clock.
+The prepass and relocation count toward total elapsed time. Production admission
+must still include queues, source growth, retained data, WAL/temp and full pauses;
+less allocation overlap alone does not establish sufficient capacity or speed.

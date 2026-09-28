@@ -163,9 +163,14 @@ must be included in the operator's measured admission budget. The source, small
 cursor and transactional composite-key queue remain on the recent SSD.
 
 The private global identity registry uses the same bounded SSD-build/HDD-transfer
-sequence. Its SSD allowance is separate from the raw lookup copy. It relocates
-before source identity mirroring is enabled, so building the registry does not
-hold a long source-writer fence. Final verification requires HDD placement.
+sequence. Fresh online preparation builds it with a separate durable identity
+cursor after raw relocation, then moves it before header allocation. This avoids
+overlapping large SSD copies without random HDD bulk-index construction. Existing
+prepared targets keep their original combined copy; no saved schema is upgraded.
+Identity pages preserve the original capture clock and leave the full-header queue
+intact. It relocates before source identity mirroring is enabled, so building the
+registry does not hold a long source-writer fence. Final verification requires HDD
+placement. Prepass and relocation costs remain part of the measured operation.
 Before the writer fence, explicit ANALYZE refreshes the new partition-parent and
 identity statistics so bounded ordered verification does not repeatedly scan
 and sort the remaining copied table. Normal child auto-analysis is insufficient

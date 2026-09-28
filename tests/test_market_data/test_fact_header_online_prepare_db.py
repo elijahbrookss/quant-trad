@@ -1,5 +1,6 @@
 """Atomic preparation on the owned QT SSD/HDD fixture; no host cutover."""
 from datetime import timedelta
+from pathlib import Path
 import os
 
 import pytest
@@ -15,6 +16,7 @@ from scripts.db import fact_header_v2_online_proof as protection
 from scripts.db import archive_root_v2_online as archives
 from tests.test_market_data.test_archive_online_copy_db import _prepare
 from tests.test_market_data.test_fact_header_copy_db import _frozen_records
+from tests.test_market_data.test_fact_header_copy_placement_db import _assert_disk
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, storage
 
@@ -148,6 +150,10 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
     from tests.test_market_data.test_fact_header_copy_db import _insert
 
     engine, options, _ = _setup(storage, tmp_path, monkeypatch)
+    if header_started:
+        # Exact former progress schema: no new columns or implicit upgrade.
+        with engine.begin() as conn:
+            headers.prepare_copy(conn, placement=storage.copy_plan, attempt_seconds=180)
     prepared = online.prepare_attempt(engine, **options)
     args = {k:options[k] for k in ("placement", "policy", "resource_limits")}
     steps = dict(**args, expected_started_at=prepared["started_at"])
@@ -169,8 +175,10 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         with engine.begin() as conn:
             headers.copy_page(conn, page_rows=1)
     moved = []
+    identity_pages = 0
     for _ in range(40):
         result = online.copy_pass(engine, max_pages=2, page_rows=2, **args)
+        identity_pages += result["committed_pages"].get("identities", 0)
         if result["outcome"] == "identity_relocation_required":
             phase = "identity_history"
         elif result["outcome"] == "raw_relocation_required":
@@ -183,6 +191,12 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         assert report["committed"] and not report["final_switch_authorized"]
         assert online.preparation_step(engine, step=phase, **steps)["reused"]
         moved.append(phase)
+        if phase == "identity_history" and not header_started:
+            with engine.begin() as conn:
+                progress = headers._inspect_progress(conn)
+                assert progress["verified_rows"] == 0 and progress["identity_baseline_complete"]
+                assert conn.scalar(text(f"SELECT count(*) FROM {headers.SCHEMA}.fact_versions")) == 0
+                _assert_disk(conn, headers.SCHEMA+".fact_identities", Path("/qt-history"))
         if phase == "raw_history" and not header_started:
             with engine.begin() as conn:
                 assert headers._inspect_progress(conn)["verified_rows"] == 0
@@ -190,6 +204,7 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
                 assert conn.scalar(text(f"SELECT count(*) FROM {headers.SCHEMA}.fact_versions")) == 0
     else:
         pytest.fail("tiny explicit phase fixture did not converge")
+    assert (identity_pages == 0) is header_started
     assert moved == (["identity_history", "raw_history"] if header_started
                      else ["raw_history", "identity_history"])
     online.preparation_step(engine, step="identity_capture", **steps)
@@ -236,3 +251,74 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         assert _saved(conn) == original and _frozen_records(conn) == frozen
         assert headers._inspect_progress(conn)["identity_history_ready"]
         assert raw._inspect(conn)["history_ready"]
+
+
+def test_identity_prepass_preserves_prior_pages_tail_and_clock_after_interruption(
+        storage, tmp_path, monkeypatch):
+    from tests.test_market_data.test_fact_header_copy_db import _insert
+    engine, options, _ = _setup(storage, tmp_path, monkeypatch)
+    online.prepare_attempt(engine, **options)
+    with engine.begin() as conn:
+        original = _saved(conn)
+        frozen = _frozen_records(conn)
+        with pytest.raises(RuntimeError, match="identity_history_baseline_incomplete"):
+            headers.place_identity_on_history(conn)
+    with engine.begin() as conn:
+        with pytest.raises(RuntimeError, match="identity_staging_order_required"):
+            headers.copy_page(conn)
+    with engine.begin() as conn:
+        assert headers.copy_identity_page(conn, page_rows=1)["verified_page_rows"] == 1
+        saved = headers._inspect_progress(conn)
+    with engine.begin() as writer:
+        added = _insert(writer, storage, "identity-prepass-concurrent")
+    def broken(conn, rows, **kw):
+        original_copy(conn, rows, **kw)
+        raise RuntimeError("injected identity page interruption")
+    original_copy = headers._copy_identities
+    with monkeypatch.context() as patch:
+        patch.setattr(headers, "_copy_identities", broken)
+        with pytest.raises(RuntimeError, match="injected identity"):
+            with engine.begin() as conn:
+                headers.copy_identity_page(conn, page_rows=1)
+    online.prepare_attempt(engine, **(options | {"attempt_seconds": 96*3600}))
+    with engine.begin() as conn:
+        current = headers._inspect_progress(conn)
+        assert {k:v for k,v in current.items() if k != "_placement_pid"} == {
+            k:v for k,v in saved.items() if k != "_placement_pid"}
+        assert conn.scalar(text(f"SELECT count(*) FROM {headers.SCHEMA}.fact_identities")) == 1
+        assert conn.scalar(text(f"SELECT count(*) FROM {headers.SCHEMA}.fact_versions")) == 0
+        assert conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {headers.QUEUE} WHERE id=:id)"), {"id": added["id"]})
+        _assert_disk(conn, headers.SCHEMA+".fact_identities", Path("/qt-source/pgdata"))
+        assert _saved(conn) == original
+    for _ in range(30):
+        with engine.begin() as conn:
+            report = headers.copy_identity_page(conn, page_rows=2)
+        if report["identity_baseline_complete"]:
+            break
+    else:
+        pytest.fail("identity baseline did not converge")
+    with engine.begin() as conn:
+        assert conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {headers.QUEUE} WHERE id=:id)"), {"id": added["id"]})
+        headers.place_identity_on_history(conn)
+        _assert_disk(conn, headers.SCHEMA+".fact_identities", Path("/qt-history"))
+        assert headers._inspect_progress(conn)["verified_rows"] == 0
+    for _ in range(30):
+        with engine.begin() as conn:
+            report = headers.copy_page(conn, page_rows=2)
+        if report["caught_up_at_observation"]:
+            break
+    else:
+        pytest.fail("header baseline and captured tail did not converge")
+    for _ in range(30):
+        with engine.begin() as conn:
+            report = raw.copy_page(conn, page_rows=2)
+        if report["caught_up_at_observation"]:
+            break
+    else:
+        pytest.fail("raw baseline did not converge")
+    with engine.begin() as conn:
+        raw.place_on_history(conn)
+        headers.enable_identity_capture(conn, page_rows=2)
+        with headers.verified_copy(conn, page_rows=2) as proof:
+            assert proof["verified_header_rows"] == proof["verified_identity_rows"]
+        assert _saved(conn) == original and _frozen_records(conn) == frozen
