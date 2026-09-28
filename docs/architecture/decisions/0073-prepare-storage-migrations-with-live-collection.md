@@ -1525,3 +1525,36 @@ fresh collection, current/frozen reads, complete paired recovery and the final
 operator/release outcome still require connected evidence. The final marker remains,
 and ordinary launch/deploy has no new bypass. This continuation is implemented;
 its native integration qualification is in progress, not a production approval.
+
+
+### Atomic initial policy in the online switch
+
+The online COMMIT command now stages the existing fixed targets, prepared history
+tablespace registration and first saved policy in the same database transaction
+as the verified table switch. It reuses the existing initial-policy implementation;
+the historical separately invoked activation remains available for its original
+procedure. No new CLI, scheduler, policy format or authority owner is added.
+
+Catalog observation uses the already retained connection while target logins are
+closed. The storage/migration transaction locks, physical verification, existing
+configuration refusal, resource watch and original final/capture deadlines cover
+both operations. A failure rolls back both the table switch and initial policy.
+The ordinary runtime still performs no implicit migration or policy activation.
+
+A successful pipe reply must confirm initial policy activation. After a lost
+successful reply, the same worker freshly inspects the committed handoff and
+current policy before the host accepts the outcome. The existing final receipt
+binds that confirmation; older committed receipts without it cannot enter recovery.
+No possibly dispatched COMMIT is replayed. This closes the missing registration
+that otherwise let application startup reach an unconfigured history worker.
+
+The connected disposable rehearsal now covers the atomic switch/policy, verified
+reader retirement, preserving recovery mounts and native WAL, private pending-file
+copy, normal book/trade recovery of all 12 retained segments, duplicate-free reentry,
+a fresh scripted trade, current and frozen reads, and a complete encrypted pair
+through the dedicated supervisor. History maintenance is configured and idle for
+the small fixture; raw compaction runs successfully. Collector startup and the
+fresh record precede maintenance startup and the physical baseline. This uses
+synthetic guarded source peers and filesystem identities and does not establish
+production pause, throughput, capacity, or full-fleet admission. The supported
+production operator and reviewed deployment remain unfinished.

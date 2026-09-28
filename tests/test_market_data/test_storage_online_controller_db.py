@@ -1290,3 +1290,47 @@ def test_held_host_dispatch_commits_once_and_reconciles_same_worker(
         with control.connect() as admin:
             admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
         control.dispose()
+
+
+def test_controller_atomic_policy_rolls_back_with_switch_and_reconciles_lost_reply(storage, tmp_path, monkeypatch):
+    engine, settings, _ = _setup(storage, tmp_path, monkeypatch)
+    inspect_args = {k: settings[k] for k in ("policy", "source_root", "destination_root")}
+    with engine.begin() as conn:
+        frozen = _frozen_records(conn)
+    actual_policy = handoff._stage_initial_policy
+    def interrupted_policy(*args, **kwargs):
+        result = actual_policy(*args, **kwargs)
+        assert result["policy_activated"] and result["policy_current"]
+        raise RuntimeError("owned fixture interruption after initial policy staging")
+    with OnlineController(engine, **settings) as worker:
+        _drain(worker)
+        _reprove(worker)
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(handoff, "_stage_initial_policy", interrupted_policy)
+            with pytest.raises(RuntimeError, match="interruption after initial policy staging"):
+                worker.commit_database(deadline=time.monotonic()+30, activate_policy=True)
+        assert worker.state == "commit_unknown"
+    with engine.begin() as conn:
+        assert not handoff.inspect_handoff(conn, **inspect_args)["database_handoff_committed"]
+        for table in ("portal_storage_targets", "portal_storage_policy", "portal_storage_header_tablespaces", "portal_storage_plans"):
+            assert conn.scalar(text("SELECT count(*) FROM public."+table)) == 0
+        assert _frozen_records(conn) == frozen
+    engine.dispose()  # Retire diagnostic connections before fresh publisher admission.
+    with OnlineController(engine, **settings) as worker:
+        _reprove(worker)
+        actual_commit = handoff.commit_handoff
+        def lost_reply(*args, **kwargs):
+            result = actual_commit(*args, **kwargs)
+            assert result["initial_policy_activated"]
+            raise RuntimeError("owned fixture lost atomic switch reply")
+        with monkeypatch.context() as lost:
+            lost.setattr(handoff, "commit_handoff", lost_reply)
+            with pytest.raises(RuntimeError, match="lost atomic switch reply"):
+                worker.commit_database(deadline=time.monotonic()+30, activate_policy=True)
+        outcome = worker.inspect_outcome(deadline=time.monotonic()+4)
+        assert outcome["database_handoff_committed"] and outcome["initial_policy_activated"]
+        assert not outcome["collection_resume_authorized"] and not outcome["runtime_activation_authorized"]
+    with engine.begin() as conn:
+        assert handoff.inspect_handoff_policy(conn, **inspect_args)["policy_current"]
+        assert conn.scalar(text("SELECT count(*) FROM public.portal_storage_header_tablespaces")) == 1
+        assert _frozen_records(conn) == frozen

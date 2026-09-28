@@ -492,7 +492,8 @@ does not change raw-object expiry rules or add a timer.
 ### Live working files and finished archives
 
 The continuous runtime and bounded stream-capture path can keep live spool and
-raw encoding scratch on SSD while publishing immutable objects to HDD.
+raw and book-checkpoint encoding scratch on SSD while publishing immutable
+objects to HDD.
 MARKET_STRUCTURE_WORKING_ROOT selects the existing live working directory;
 QT_MARKET_DATA_WORKING_EXPECTED_UUID identifies its filesystem. Archive root and
 identity remain MARKET_STRUCTURE_STORAGE_ROOT and QT_MARKET_DATA_EXPECTED_UUID.
@@ -504,7 +505,7 @@ Without an explicit working root, spool/scratch paths and archive admission
 retain their existing behavior. In dedicated archive mode, an explicit working
 root requires its own UUID. Startup checks both mounts; spool creation and reads
 (including crash-tail repair) enforce the working boundary. A missing/wrong mount
-never creates a fallback directory. Raw publication admits staging on the
+never creates a fallback directory. Raw and book-checkpoint publication admit staging on the
 configured working filesystem or the archive filesystem; a failed working-mount
 check cannot fall back to archive admission. Canonical historical staging and
 existing raw compaction placement remain unchanged.

@@ -145,7 +145,7 @@ def require_configured_working_mount(
 
 
 def require_configured_staging_mount(path: Path) -> FilesystemEvidence | None:
-    """Raw publication may stage on the admitted working or archive filesystem."""
+    """Raw and checkpoint encoding stage on an admitted working or archive filesystem."""
     configured = os.environ.get("MARKET_STRUCTURE_WORKING_ROOT", "").strip()
     if configured and Path(path).resolve().is_relative_to(Path(configured).resolve()):
         return require_configured_working_mount(path)

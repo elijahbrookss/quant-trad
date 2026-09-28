@@ -540,7 +540,7 @@ class OnlineController:
                 self._require_host_source_exclusion()
                 self._host_source_hold_required = True
                 try:
-                    outcome = self.commit_database(deadline=request["deadline"])
+                    outcome = self.commit_database(deadline=request["deadline"], activate_policy=True)
                 except Exception as exc:
                     if self.state != "commit_unknown":
                         raise
@@ -548,13 +548,14 @@ class OnlineController:
                     # fresh inspection; never reissue a possibly sent COMMIT.
                     logger.error("storage_online_commit_unknown | controller_id=%s error_type=%s",
                                  self.controller_id, type(exc).__name__)
-                    result = {"database_handoff_committed": None,
+                    result = {"database_handoff_committed": None, "initial_policy_activated": None,
                               "collection_resume_authorized": False,
                               "runtime_activation_authorized": False}
                 else:
-                    if outcome.get("database_handoff_committed") is not True:
+                    if (outcome.get("database_handoff_committed") is not True
+                            or outcome.get("initial_policy_activated") is not True):
                         raise RuntimeError("storage_online_commit_result_invalid")
-                    result = {"database_handoff_committed": True,
+                    result = {"database_handoff_committed": True, "initial_policy_activated": True,
                               "collection_resume_authorized": False,
                               "runtime_activation_authorized": False}
             elif inspecting:
@@ -757,7 +758,7 @@ class OnlineController:
             if str(exc) != "market_archive_namespace_busy":
                 raise
 
-    def commit_database(self, *, deadline):
+    def commit_database(self, *, deadline, activate_policy=False):
         """Internal SQL switch, used after the pipe host admits its held source.
 
         Caller must own separately qualified exact publisher drain/short-pause
@@ -795,7 +796,8 @@ class OnlineController:
             destination_root=self.destination_root, max_objects=self.max_objects,
             max_bytes=self.max_bytes, page_rows=self.page_rows, file_proof=self.proof,
             deadline=deadline, publisher_check=self._require_external_sql_clients_absent,
-            connection=self._final_connection if self._final_connection_entered else None)
+            connection=self._final_connection if self._final_connection_entered else None,
+            activate_policy=activate_policy)
         self.state = "committed"
         return result
 
@@ -817,12 +819,21 @@ class OnlineController:
                         raise RuntimeError("storage_online_attempt_binding_changed")
                     observed = handoff.inspect_handoff(conn, policy=self.policy,
                         source_root=self.source_root, destination_root=self.destination_root)
+                    policy_activated = False
+                    if observed.get("receipt", {}).get("initial_policy_required") is True:
+                        configured = handoff.inspect_handoff_policy(conn, policy=self.policy,
+                            source_root=self.source_root, destination_root=self.destination_root)
+                        policy_activated = (configured.get("policy_activated") is True
+                                            and configured.get("policy_current") is True)
+                        if not policy_activated:
+                            raise RuntimeError("storage_online_committed_policy_unconfirmed")
             self._ownership()
             if monotonic() >= deadline:
                 raise RuntimeError("storage_online_outcome_deadline_expired")
             committed = observed["database_handoff_committed"]
             return {"outcome": "committed" if committed else "uncommitted",
                     "database_handoff_committed": committed,
+                    "initial_policy_activated": policy_activated,
                     "collection_resume_authorized": False, "runtime_activation_authorized": False}
         except RuntimeError as exc:
             if str(exc) not in {"fact_header_copy_migration_busy", "fact_header_handoff_outcome_pending"}:

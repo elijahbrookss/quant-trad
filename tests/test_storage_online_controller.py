@@ -364,3 +364,16 @@ def test_job_stop_lost_ack_cannot_be_retried_or_admitted_as_completed():
         controller.quiesce_final_database_jobs(deadline=monotonic()+1)
     with pytest.raises(RuntimeError,match="jobs_stop_unconfirmed"):
         controller._require_external_sql_clients_absent(None,deadline=monotonic()+1)
+
+
+@pytest.mark.parametrize("held", [0, 1, 3])
+def test_handoff_catalog_refuses_without_both_owned_locks(monkeypatch, held):
+    from types import SimpleNamespace
+    from portal.backend.service.storage import header_catalog
+    conn = SimpleNamespace(in_transaction=lambda: True,
+        get_isolation_level=lambda: "READ COMMITTED", scalar=lambda query: held)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unowned catalog observation reached")
+    monkeypatch.setattr(header_catalog, "_observe_header_catalog", forbidden)
+    with pytest.raises(RuntimeError, match="handoff_locks_required"):
+        header_catalog.read_transaction_header_catalog(conn)

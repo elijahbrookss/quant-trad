@@ -146,7 +146,8 @@ def _load(path):
             raise RuntimeError("storage_online_login_receipt_invalid")
     if committing:
         commit = saved["commit"]
-        if (not isinstance(commit, dict) or set(commit) != {"requested_at", "worker_sequence", "source_image", "confirmed_at"}
+        if (not isinstance(commit, dict) or set(commit) != {"requested_at", "worker_sequence", "source_image", "confirmed_at", "initial_policy_activated"}
+                or commit.get("initial_policy_activated") is not (saved["phase"] != "commit_dispatching")
                 or type(commit["requested_at"]) not in (int, float)
                 or not saved["login_gate"]["closed_at"] <= commit["requested_at"] <= saved["deadline"]
                 or type(commit["worker_sequence"]) is not int
@@ -1182,7 +1183,8 @@ def commit_online_handoff_locked(state_root, *, exchange):
             raise RuntimeError("storage_online_commit_gate_changed")
         admit(session)
         saved.update(phase="commit_dispatching", commit={"requested_at": time.time(),
-            "worker_sequence": sequence+1, "source_image": source_image, "confirmed_at": None})
+            "worker_sequence": sequence+1, "source_image": source_image, "confirmed_at": None,
+            "initial_policy_activated": False})
         host_boundary.save_receipt(path, saved, initial=False)  # BEFORE possible COMMIT.
         budget()
         reply = exchange("commit_database", deadline=deadline)
@@ -1197,6 +1199,7 @@ def commit_online_handoff_locked(state_root, *, exchange):
                 or reply.get("collection_resume_authorized") is not False
                 or not isinstance(result, dict)
                 or result.get("database_handoff_committed") is not (True if reply["state"] == "committed" else None)
+                or result.get("initial_policy_activated") is not (True if reply["state"] == "committed" else None)
                 or result.get("collection_resume_authorized") is not False
                 or result.get("runtime_activation_authorized") is not False):
             raise RuntimeError("storage_online_commit_reply_invalid")
@@ -1219,6 +1222,9 @@ def commit_online_handoff_locked(state_root, *, exchange):
             raise RuntimeError("storage_online_commit_outcome_invalid")
         admit(session)
         if result["outcome"] == "committed":
+            if result.get("initial_policy_activated") is not True:
+                raise RuntimeError("storage_online_committed_policy_unconfirmed")
+            saved["commit"]["initial_policy_activated"] = True
             saved["phase"] = "committed"
             saved["commit"]["confirmed_at"] = time.time()
             host_boundary.save_receipt(path, saved, initial=False)

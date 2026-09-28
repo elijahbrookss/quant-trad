@@ -907,7 +907,7 @@ def test_final_source_hold_retains_original_window_and_metadata(guarded_source):
     assert (path/final.STATE).read_bytes() == before
 
 
-@pytest.mark.parametrize("fault", [None, "lost_reply", "bad_reply", "unknown_reply", "uncommitted", "gate"])
+@pytest.mark.parametrize("fault", [None, "lost_reply", "bad_reply", "unknown_reply", "uncommitted", "gate", "missing_policy"])
 def test_host_commit_intent_is_once_only_and_never_grants_runtime(guarded_source, monkeypatch, fault):
     import json
     path, rows, clock, root, image, _ = guarded_source
@@ -955,13 +955,15 @@ def test_host_commit_intent_is_once_only_and_never_grants_runtime(guarded_source
                     if fault == "lost_reply": raise EOFError("unread commit frame")
                     if fault == "bad_reply": reply["controller_id"] = "f"*32
                     result["database_handoff_committed"] = None if reply["state"] == "commit_unknown" else True
+                    result["initial_policy_activated"] = result["database_handoff_committed"]
                 else:
                     assert operation == "inspect_outcome"
                     result.update(outcome="uncommitted" if fault == "uncommitted" else "committed",
-                        database_handoff_committed=fault != "uncommitted")
+                        database_handoff_committed=fault != "uncommitted",
+                        initial_policy_activated=fault not in {"uncommitted", "missing_policy"})
             reply["result"] = result
             return reply
-        if fault in {"lost_reply", "bad_reply", "gate"}:
+        if fault in {"lost_reply", "bad_reply", "gate", "missing_policy"}:
             with pytest.raises((EOFError, RuntimeError)):
                 final.commit_online_handoff_locked(path, exchange=exchange)
         else:
@@ -969,7 +971,7 @@ def test_host_commit_intent_is_once_only_and_never_grants_runtime(guarded_source
             assert not result["collection_resume_authorized"] and not result["runtime_activation_authorized"]
         receipt = final._load(path/final.STATE)
         assert receipt["phase"] == ("login_closed" if fault == "gate" else
-            "commit_dispatching" if fault in {"lost_reply", "bad_reply", "uncommitted"} else "committed")
+            "commit_dispatching" if fault in {"lost_reply", "bad_reply", "uncommitted", "missing_policy"} else "committed")
         if fault != "gate":
             before = (path/final.STATE).read_bytes()
             with pytest.raises(RuntimeError, match="commit_closed_gate_required"):

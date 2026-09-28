@@ -79,6 +79,34 @@ def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30,
                 deadline=deadline, destination_tablespace_oids=destination_tablespace_oids)
 
 
+
+def read_transaction_header_catalog(conn, *, max_partitions=4096, timeout_seconds=30,
+                                    destination_tablespace_oids=()):
+    """Observe the fixed inventory inside an already fenced operator transaction.
+
+    No connection, commit or policy authority is created. The caller retains its
+    transaction and storage/migration locks through use of this observation.
+    """
+    _validate_request(max_partitions, timeout_seconds, destination_tablespace_oids)
+    if not conn.in_transaction() or conn.get_isolation_level() != "READ COMMITTED":
+        raise RuntimeError("header_catalog_requires_read_committed_transaction")
+    held = conn.scalar(text("""
+        SELECT count(*) FROM pg_locks
+        WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+          AND mode='ExclusiveLock' AND objsubid=1
+          AND (classid::bigint,objid::bigint) IN (
+            SELECT ((hashtextextended(name,0)>>32)&4294967295),
+                   (hashtextextended(name,0)&4294967295)
+            FROM (VALUES ('qt.storage.management.v1'),
+                         ('quant-trad:fact-header-cutover:v2')) AS locks(name))
+    """))
+    if held != 2:
+        raise RuntimeError("header_catalog_handoff_locks_required")
+    return _observe_header_catalog(conn, max_partitions=max_partitions,
+        deadline=monotonic()+timeout_seconds,
+        destination_tablespace_oids=destination_tablespace_oids, handoff_locked=True)
+
+
 def read_locked_header_group(conn, *, storage_day, heap_oid, timeout_seconds=30,
                              destination_tablespace_oids=()):
     """Lock and observe one daily group in the caller's READ COMMITTED transaction.
@@ -103,7 +131,7 @@ def read_locked_header_group(conn, *, storage_day, heap_oid, timeout_seconds=30,
 
 
 def _observe_header_catalog(conn, *, max_partitions, deadline,
-                            destination_tablespace_oids, storage_day=None, heap_oid=None):
+                            destination_tablespace_oids, storage_day=None, heap_oid=None, handoff_locked=False):
     # Restore the caller's statement budget after successful observation. On
     # failure the caller must roll back; never hide an aborted transaction.
     previous = conn.execute(text("""
@@ -123,14 +151,14 @@ def _observe_header_catalog(conn, *, max_partitions, deadline,
 
     result = _read_catalog(query, max_partitions=max_partitions, deadline=deadline,
         destination_tablespace_oids=destination_tablespace_oids,
-        storage_day=storage_day, heap_oid=heap_oid)
+        storage_day=storage_day, heap_oid=heap_oid, handoff_locked=handoff_locked)
     conn.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                  {"timeout": previous["original"]})
     return result
 
 
 def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oids,
-                  storage_day, heap_oid):
+                  storage_day, heap_oid, handoff_locked=False):
     # ONLY avoids locking an unbounded descendant inventory before admission.
     query("LOCK TABLE ONLY market.fact_versions, ONLY market.fact_header_partitions IN ACCESS SHARE MODE")
     context = query("""
@@ -146,7 +174,7 @@ def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oid
         FROM pg_control_system() c
         CROSS JOIN pg_database d WHERE d.datname=current_database()
     """).mappings().one()
-    if context["version"] // 10000 != 15 or (storage_day is None and context["read_only"] != "on"):
+    if context["version"] // 10000 != 15 or (storage_day is None and not handoff_locked and context["read_only"] != "on"):
         raise RuntimeError("header_catalog_database_contract_unqualified")
     parent = query("""
         SELECT relkind, relpersistence, pg_get_partkeydef(oid) AS partition_key

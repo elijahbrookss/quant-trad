@@ -33,7 +33,7 @@ def transition(tmp_path, monkeypatch):
         switch=dict(entered_at=now-3,deadline_monotonic=mono+50,worker_sequence=1),
         login_gate=dict(database=dict(cluster="1234",oid=123,name="owned",allow_connections=True),
                         requested_at=now-2,closed_at=now-1.5,database_jobs_stopped=True),
-        commit=dict(requested_at=now-1,worker_sequence=3,source_image=image,confirmed_at=now))
+        commit=dict(requested_at=now-1,worker_sequence=3,source_image=image,confirmed_at=now,initial_policy_activated=True))
     host.save_receipt(tmp_path/final.STATE,saved,initial=True)
     mounts=[dict(Destination="/var/lib/postgresql/data",Type="volume",Name="owned-pg",RW=True),
             dict(Destination="/qt-history",Type="bind",Source=str(history),RW=True)]
@@ -159,3 +159,17 @@ def test_inventory_only_admits_exact_journaled_clean_database_removal(monkeypatc
         with pytest.raises(RuntimeError):host.inventory("qt-owned",database_preparing=True)
     else:
         with pytest.raises((RuntimeError,ValueError)):host.inventory("qt-owned",**kwargs)
+
+
+@pytest.mark.parametrize("value", [None, False, 1])
+def test_committed_receipt_requires_confirmed_initial_policy_before_recovery(transition, value):
+    path, state, _, saved, run = transition
+    if value is None:
+        del saved["commit"]["initial_policy_activated"]
+    else:
+        saved["commit"]["initial_policy_activated"] = value
+    host.save_receipt(path/final.STATE, saved, initial=False)
+    before = (path/final.STATE).read_bytes()
+    with pytest.raises(RuntimeError, match="commit_receipt_invalid"):
+        run()
+    assert state["actions"] == [] and (path/final.STATE).read_bytes() == before

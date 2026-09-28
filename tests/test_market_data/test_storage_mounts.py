@@ -225,3 +225,32 @@ def test_raw_staging_accepts_only_admitted_working_or_archive_paths(mounted_arch
     with pytest.raises(StorageMountError, match="identity_mismatch"):
         require_configured_staging_mount(working/"tmp")
     assert not (working/"tmp").exists()
+
+
+def test_book_checkpoint_stages_on_working_mount_and_publishes_to_archive(mounted_archive, tmp_path, monkeypatch):
+    from market_data.book_archive import publish_book_checkpoint, encode_book_checkpoint_parquet
+    from market_data.order_book import Level2BookReconstructor
+    from tests.test_market_data.test_order_book_phase2 import _contract, _snapshot
+    archive, _, _ = mounted_archive
+    working = tmp_path / "working"
+    working.mkdir()
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(working))
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "test-archive-uuid")
+    checkpoint = Level2BookReconstructor(series_id=1, contract=_contract()).process(_snapshot()).checkpoints[0]
+    store = FilesystemRawArchiveObjectStore(archive / "objects")
+    encoded, acknowledgement = publish_book_checkpoint(checkpoint, object_store=store,
+        temporary_directory=working / "tmp")
+    assert not encoded.path.exists()
+    published = store.local_path(acknowledgement.object_key)
+    assert published.is_file() and published.is_relative_to(archive)
+    assert hashlib.sha256(published.read_bytes()).hexdigest() == encoded.sha256
+    staged = encode_book_checkpoint_parquet(checkpoint, temporary_directory=archive / "tmp")
+    staged.path.unlink()
+    with pytest.raises(StorageMountError, match="storage_path_outside_archive"):
+        encode_book_checkpoint_parquet(checkpoint, temporary_directory=tmp_path / "unassigned")
+    assert not (tmp_path / "unassigned").exists()
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "wrong-uuid")
+    with pytest.raises(StorageMountError, match="identity_mismatch"):
+        encode_book_checkpoint_parquet(checkpoint, temporary_directory=working / "refused")
+    assert not (working / "refused").exists()
+    assert hashlib.sha256(published.read_bytes()).hexdigest() == encoded.sha256

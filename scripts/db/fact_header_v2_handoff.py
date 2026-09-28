@@ -330,7 +330,7 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
 
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
                    max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None,
-                   deadline=None, publisher_check=None, connection=None):
+                   deadline=None, publisher_check=None, connection=None, activate_policy=False):
     """Commit one fully verified fixed handoff; sources remain retained.
 
     Rechecks every copied header, identity, lookup and archive object under
@@ -339,8 +339,11 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
     uncertain response, use inspect_handoff; never blindly replay the switch.
     An optional absolute monotonic deadline only shortens these existing ceilings;
     it is never renewed between final-pause phases. This does not prove publisher
-    drain or authorize collection to resume.
+    drain or authorize collection to resume. When activate_policy is true, the
+    existing first policy/target registry is staged in this same transaction.
     """
+    if type(activate_policy) is not bool:
+        raise ValueError("fact_header_handoff_policy_flag_invalid")
     limits = _limits(resource_limits, migration=True)
     if publisher_check is not None and not callable(publisher_check):
         raise ValueError("fact_header_handoff_publisher_check_invalid")
@@ -428,9 +431,15 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                                     "verified_header_rows": verified["verified_header_rows"],
                                     "verified_lookup_rows": lookup["verified_lookup_rows"],
                                 }
+                                if activate_policy:
+                                    receipt["initial_policy_required"] = True
                                 _switch_verified_tables(conn, verified, prevalidated=True,
                                     raw_mapping=True, evidence={"source_retained": True, "handoff": receipt})
                                 watch.check()
+                    if activate_policy:
+                        _stage_initial_policy(conn, policy=policy, receipt=receipt,
+                            placement=plan, deadline=deadline, check=watch.check)
+                        watch.check()
                 # Successful savepoint contexts have ended, but watcher and
                 # transaction locks still protect the actual COMMIT. Recheck
                 # external SQL clients on this SAME transaction immediately
@@ -450,7 +459,8 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                         receipt["verified_header_rows"], monotonic()-started)
             return {"database_handoff_committed": True, "source_preserved": True,
                     "collection_resume_authorized": False, "root_activation_required": True,
-                    "receipt": receipt, "resource_budget": budget}
+                    "receipt": receipt, "resource_budget": budget,
+                    **({"initial_policy_activated": True} if activate_policy else {})}
         except Exception as exc:
             if watch is not None and watch.failure is not None:
                 raise RuntimeError(watch.failure) from exc
@@ -569,6 +579,95 @@ def inspect_handoff_policy(conn, *, policy, source_root, destination_root):
             "runtime_activation_required": True, "collection_resume_authorized": False}
 
 
+
+def _stage_initial_policy(conn, *, policy, receipt, placement, deadline, check):
+    """Stage the existing initial policy records in the caller's guarded transaction."""
+    from portal.backend.db.storage_target_models import StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord
+    from portal.backend.service.storage.header_catalog import read_transaction_header_catalog
+    from portal.backend.service.storage.header_filesystem import verify_header_filesystem
+    from portal.backend.service.storage.header_destinations import register_header_tablespaces
+    from portal.backend.service.storage_management import _target
+
+    targets = (placement.recent, placement.history)
+    if (not policy.movement_enabled or not policy.backup_enabled
+            or policy.archives != policy.history or policy.backups != policy.history):
+        raise ValueError("fact_header_policy_fixed_history_archive_recovery_required")
+    cutoff = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date - :days"),
+                         {"days": policy.recent_days})
+    if placement.history_before > cutoff:
+        raise RuntimeError("fact_header_policy_recent_window_already_on_history")
+    source_root, destination_root = receipt["source_root"], receipt["destination_root"]
+    if not Path(destination_root).resolve(strict=True).is_relative_to(
+            Path(placement.history.root).resolve(strict=True)):
+        raise RuntimeError("fact_header_policy_archive_outside_history_target")
+    def probe_budget():
+        check()
+        remaining = min(30, int(deadline-monotonic()))
+        if remaining < 1:
+            raise RuntimeError("fact_header_policy_time_budget_exceeded")
+        return remaining
+    catalog = read_transaction_header_catalog(conn, max_partitions=4096,
+        timeout_seconds=probe_budget(),
+        destination_tablespace_oids=(placement.history_tablespace_oid,))
+    verified = verify_header_filesystem(catalog, targets,
+        pg_controldata=placement.pg_controldata,
+        timeout_seconds=probe_budget(),
+        destination_assignments={placement.history.target_id: placement.history_tablespace_oid})
+    if any(group.storage_day >= cutoff and any(
+            relation.target_id != placement.recent.target_id for relation in group.relations)
+            for group in verified.snapshot.partitions):
+        raise RuntimeError("fact_header_policy_recent_files_not_on_ssd")
+    check()
+    plan_id = _policy_plan_id(receipt)
+    with Session(bind=conn, join_transaction_mode="create_savepoint") as session, session.begin():
+        records = list(session.scalars(select(StorageTargetRecord).limit(3)))
+        if len(records)>2 or any(row.id not in {x.target_id for x in targets} for row in records):
+            raise RuntimeError("fact_header_policy_target_inventory_changed")
+        by_id = {row.id: row for row in records}
+        for target in targets:
+            row = by_id.get(target.target_id)
+            if row is None:
+                session.add(StorageTargetRecord(id=target.target_id, label=target.label,
+                    filesystem_uuid=target.filesystem_uuid, root=target.root, medium=target.medium,
+                    roles=list(target.roles), state=target.state))
+            elif (_target(row) != target or row.reserved_bytes or row.auxiliary_reserved_bytes):
+                raise RuntimeError("fact_header_policy_target_identity_or_claim_changed")
+        if session.scalar(select(StoragePlanRecord.id).where(
+                StoragePlanRecord.state.in_(("queued", "running", "blocked"))).limit(1)):
+            raise RuntimeError("fact_header_policy_change_in_progress")
+        session.flush()
+        register_header_tablespaces(session, verified=verified)
+        config = session.get(StoragePolicyRecord, 1)
+        old_plan = session.get(StoragePlanRecord, plan_id)
+        if old_plan is not None:
+            result = inspect_handoff_policy(conn, policy=policy,
+                source_root=source_root, destination_root=destination_root)
+            if not result.get("policy_current"):
+                raise RuntimeError("fact_header_policy_changed_after_activation")
+        else:
+            if config is None:
+                config = StoragePolicyRecord(id=1, revision=0)
+                session.add(config)
+            if config.revision != 0 or config.policy not in (None, policy.to_dict()):
+                raise RuntimeError("fact_header_policy_existing_configuration_requires_review")
+            now = session.scalar(text("SELECT clock_timestamp()"))
+            config.policy = policy.to_dict()
+            config.revision = 1
+            config.applied_plan_id = plan_id
+            config.updated_at = now
+            session.add(StoragePlanRecord(id=plan_id, request_id=plan_id, base_revision=0,
+                policy=policy.to_dict(), policy_hash=policy.fingerprint, state="completed",
+                impact={"database_handoff_verified": True},
+                progress={"operation": POLICY_OPERATION, "policy_revision": 1,
+                          "database_handoff_plan": plan_id, "runtime_activation_required": True},
+                created_at=now, updated_at=now))
+            session.flush()
+            result = inspect_handoff_policy(conn, policy=policy,
+                source_root=source_root, destination_root=destination_root)
+        check()
+    return result
+
+
 def activate_handoff_policy(engine, *, policy, resource_limits, source_root, destination_root,
                             cancelled=None):
     """Apply the first fixed policy/registry atomically after a committed handoff.
@@ -579,12 +678,6 @@ def activate_handoff_policy(engine, *, policy, resource_limits, source_root, des
     resource limits supervise the transaction through commit. Outcome inspection
     is available after expiry; activation does not extend the one-day clock.
     """
-    from portal.backend.db.storage_target_models import StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord
-    from portal.backend.service.storage.header_catalog import read_header_catalog
-    from portal.backend.service.storage.header_filesystem import verify_header_filesystem
-    from portal.backend.service.storage.header_destinations import register_header_tablespaces
-    from portal.backend.service.storage_management import _target
-
     limits = _limits(resource_limits, migration=True)
     if cancelled is not None and not callable(cancelled):
         raise ValueError("fact_header_policy_cancellation_callback_invalid")
@@ -633,74 +726,8 @@ def activate_handoff_policy(engine, *, policy, resource_limits, source_root, des
                         capacity=resources.capacity, floors=floors, deadline=deadline,
                         cancelled=cancelled, grace=limits["cancellation_grace_seconds"])
                     watch.start()
-                    # Read-only, bounded catalog observation uses its established
-                    # independent transaction. Cooperating changes remain fenced
-                    # by our storage lock; publishers must be paused by the caller.
-                    def probe_budget():
-                        watch.check()
-                        remaining = min(30, int(deadline-monotonic()))
-                        if remaining < 1:
-                            raise RuntimeError("fact_header_policy_time_budget_exceeded")
-                        return remaining
-                    catalog = read_header_catalog(engine, max_partitions=4096,
-                        timeout_seconds=probe_budget(),
-                        destination_tablespace_oids=(placement.history_tablespace_oid,))
-                    verified = verify_header_filesystem(catalog, targets,
-                        pg_controldata=placement.pg_controldata,
-                        timeout_seconds=probe_budget(),
-                        destination_assignments={placement.history.target_id: placement.history_tablespace_oid})
-                    if any(group.storage_day >= cutoff and any(
-                            relation.target_id != placement.recent.target_id for relation in group.relations)
-                            for group in verified.snapshot.partitions):
-                        raise RuntimeError("fact_header_policy_recent_files_not_on_ssd")
-                    watch.check()
-                    plan_id = _policy_plan_id(receipt)
-                    with Session(bind=conn, join_transaction_mode="create_savepoint") as session, session.begin():
-                        records = list(session.scalars(select(StorageTargetRecord).limit(3)))
-                        if len(records)>2 or any(row.id not in {x.target_id for x in targets} for row in records):
-                            raise RuntimeError("fact_header_policy_target_inventory_changed")
-                        by_id = {row.id: row for row in records}
-                        for target in targets:
-                            row = by_id.get(target.target_id)
-                            if row is None:
-                                session.add(StorageTargetRecord(id=target.target_id, label=target.label,
-                                    filesystem_uuid=target.filesystem_uuid, root=target.root, medium=target.medium,
-                                    roles=list(target.roles), state=target.state))
-                            elif (_target(row) != target or row.reserved_bytes or row.auxiliary_reserved_bytes):
-                                raise RuntimeError("fact_header_policy_target_identity_or_claim_changed")
-                        if session.scalar(select(StoragePlanRecord.id).where(
-                                StoragePlanRecord.state.in_(("queued", "running", "blocked"))).limit(1)):
-                            raise RuntimeError("fact_header_policy_change_in_progress")
-                        session.flush()
-                        register_header_tablespaces(session, verified=verified)
-                        config = session.get(StoragePolicyRecord, 1)
-                        old_plan = session.get(StoragePlanRecord, plan_id)
-                        if old_plan is not None:
-                            result = inspect_handoff_policy(conn, policy=policy,
-                                source_root=source_root, destination_root=destination_root)
-                            if not result.get("policy_current"):
-                                raise RuntimeError("fact_header_policy_changed_after_activation")
-                        else:
-                            if config is None:
-                                config = StoragePolicyRecord(id=1, revision=0)
-                                session.add(config)
-                            if config.revision != 0 or config.policy not in (None, policy.to_dict()):
-                                raise RuntimeError("fact_header_policy_existing_configuration_requires_review")
-                            now = session.scalar(text("SELECT clock_timestamp()"))
-                            config.policy = policy.to_dict()
-                            config.revision = 1
-                            config.applied_plan_id = plan_id
-                            config.updated_at = now
-                            session.add(StoragePlanRecord(id=plan_id, request_id=plan_id, base_revision=0,
-                                policy=policy.to_dict(), policy_hash=policy.fingerprint, state="completed",
-                                impact={"database_handoff_verified": True},
-                                progress={"operation": POLICY_OPERATION, "policy_revision": 1,
-                                          "database_handoff_plan": plan_id, "runtime_activation_required": True},
-                                created_at=now, updated_at=now))
-                            session.flush()
-                            result = inspect_handoff_policy(conn, policy=policy,
-                                source_root=source_root, destination_root=destination_root)
-                        watch.check()
+                    result = _stage_initial_policy(conn, policy=policy, receipt=receipt,
+                        placement=placement, deadline=deadline, check=watch.check)
             watch.check()
             logger.info("fact_header_initial_policy_activated | plan_id=%s policy_revision=%s",
                         result["plan_id"], result["policy_revision"])

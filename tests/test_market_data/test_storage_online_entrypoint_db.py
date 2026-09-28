@@ -100,6 +100,10 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
     atomic = os.getenv("QT_ONLINE_ATOMIC_PREPARE") == "1"
     worker_phases = os.getenv("QT_ONLINE_WORKER_PHASES") == "1"
     assert not worker_phases or atomic
+    runtime_recovery = None
+    if os.getenv("QT_ONLINE_RUNTIME_FIXTURE")=="1":
+        from tests.test_market_data.online_runtime_recovery_fixture import configure_source
+        runtime_recovery = configure_source(storage, monkeypatch)
     engine, options, source, book = _prepare(storage, control, monkeypatch,
         source_directory="/app/logs/market-structure",
         destination_directory="/qt-history/archives/objects",
@@ -158,7 +162,7 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
     wait("publish")
     _raw_book_fixture(storage, source, monkeypatch,
         definition_id="host-entrypoint-live",provider_product_id="BTC-USD-HOST-ENTRY",
-        event_start=BASE+timedelta(hours=4))
+        event_start=BASE+timedelta(hours=4), replay_features=runtime_recovery is not None)
     (control/"published").write_text("published")
     if worker_phases:
         wait("inspect-references")
@@ -180,9 +184,12 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         wait("final-publish")
         _raw_book_fixture(storage, source, monkeypatch,
             definition_id="host-entrypoint-final", provider_product_id="BTC-USD-HOST-FINAL",
-            event_start=BASE+timedelta(hours=5))
+            event_start=BASE+timedelta(hours=5), replay_features=runtime_recovery is not None)
         (control/"final-published").write_text("published")
     wait("finished")
+    if runtime_recovery is not None:
+        from tests.test_market_data.online_runtime_recovery_fixture import finish_source
+        finish_source(storage, runtime_recovery, control, options["policy"])
     with engine.begin() as conn:
         assert _frozen_records(conn)==frozen
         assert capture.inspect_capture(conn)["started_at"]==started

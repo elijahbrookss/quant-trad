@@ -978,7 +978,28 @@ os.chown(root,70,70)
       owned.append(project+'-'+service_name+'-1')
      host_boundary.save_receipt(state/runtime_host.RUNTIME_RECIPE,runtime_model,initial=True)
      started_runtime=time.monotonic()
-     result=final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=60)
+     actual_runtime_action=host_boundary.supervised_source_action
+     recovery_spec=json.loads((control/'runtime-recovery.json').read_text())
+     def recover_before_maintenance(args,**kwargs):
+      current=final_host._load(state/final_host.STATE)
+      if current['runtime']['inflight']=='start:storage-maintenance':
+       # Test-only transport seam, inside the already admitted ordinary app.
+       # Normal recovery/fresh intake completes BEFORE maintenance can back up.
+       remaining=min(kwargs['deadline']-time.monotonic(),final_host._remaining(current))
+       assert remaining>0
+       code="import json,sys;from tests.test_market_data.online_runtime_recovery_fixture import verify;print('QT_CONNECTED_RECOVERY='+json.dumps(verify(json.loads(sys.argv[1]))))"
+       recovered=run(['exec',current['runtime']['candidate_ids']['market-data-collector'],
+         'python','-c',code,json.dumps(recovery_spec)],timeout=remaining,check=False)
+       (state/'runtime-recovery.log').write_text(recovered.stdout+recovered.stderr)
+       assert recovered.returncode==0, 'ordinary connected recovery failed; see runtime-recovery.log'
+       replies=[json.loads(line.split('=',1)[1]) for line in recovered.stdout.splitlines() if line.startswith('QT_CONNECTED_RECOVERY=')]
+       assert len(replies)==1
+       report['normal_runtime_recovery']=replies[0]
+      return actual_runtime_action(args,**kwargs)
+     host_boundary.supervised_source_action=recover_before_maintenance
+     try:
+      result=final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=60)
+     finally:host_boundary.supervised_source_action=actual_runtime_action
      activated=final_host._load(state/final_host.STATE)
      assert activated['phase']=='recovery_runtime_ready' and result['collector_process_healthy']
      report['recovery_runtime']=dict(component_seconds=time.monotonic()-started_runtime,
@@ -995,7 +1016,16 @@ os.chown(root,70,70)
       outcome=lifecycle[0].get('last_run')
       if outcome is not None:
        assert outcome['status']=='completed' and outcome['failure_count']==0, outcome
-       report['recovery_runtime']['maintenance_outcome']=outcome
+       pair=outcome['local_recovery']
+       assert pair['state']=='completed' and pair['policy_hash']==recovery_spec['policy_hash'], pair
+       code="import json,sys;from pathlib import Path;paths=list(Path('/qt-history/recovery-incremental').glob('*/'+sys.argv[1]+'/complete.json'));assert len(paths)==1;print(json.dumps(json.loads(paths[0].read_text())))"
+       remaining=final_host._remaining(activated)
+       observed=run(['exec',activated['runtime']['candidate_ids']['storage-maintenance'],'python','-c',code,pair['generation']],timeout=remaining)
+       certificate=json.loads(observed.stdout)
+       assert certificate['schema_version']=='qt.encrypted_recovery_pair.v1' and certificate['name']==pair['generation']
+       assert certificate['database_type']=='full' and certificate['archive_objects']>0
+       (state/'runtime-pair-certificate.json').write_text(json.dumps(certificate))
+       report['recovery_runtime'].update(maintenance_outcome=outcome,complete_pair_confirmed=True)
        break
       time.sleep(.2)
      try:
