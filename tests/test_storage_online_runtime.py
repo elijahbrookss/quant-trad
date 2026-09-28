@@ -215,7 +215,10 @@ def test_split_recipe_refuses_ownership_and_mount_regressions(split_recipe,fault
 def test_runtime_health_admission_matches_existing_public_compositions():
     import yaml
     base=yaml.safe_load(Path('docker/docker-compose.server.yml').read_text())
-    overlay=yaml.safe_load(Path('docker/docker-compose.storage-server.yml').read_text())
+    class ComposeLoader(yaml.SafeLoader):
+        pass
+    ComposeLoader.add_constructor('!reset', lambda loader, node: None)
+    overlay=yaml.load(Path('docker/docker-compose.storage-server.yml').read_text(), Loader=ComposeLoader)
     for name,probe in runtime._APPLICATION_HEALTH.items():
         owner=overlay if name=='storage-maintenance' else base
         assert owner['services'][name]['healthcheck']['test']==probe

@@ -106,6 +106,11 @@ CMD ["python", "/app/fixture.py"]
         for service in ('initialize', 'market-data-collector', 'docker-stats'):
             services[service]['image'] = services['backend']['image']
         services['market-data-collector']['depends_on'] = {'initialize': {'condition': 'service_completed_successfully'}}
+        if storage_layout:
+            # One prebuilt disposable database stand-in, preserved across app revisions.
+            services['tsdb'].pop('build')
+            services['tsdb']['image']='${QT_STORAGE_DATABASE_IMAGE:?Fixture database image is required}'
+            services['tsdb']['pull_policy']='never'
         config = dict(name=project, services=services, volumes={'proof': {}}, networks={'default': {'internal': True}})
         compose_path = repo / 'docker/docker-compose.server.yml'
         compose_path.write_text(json.dumps(config))
@@ -146,7 +151,15 @@ CMD ["python", "/app/fixture.py"]
         env = {k: v for k, v in os.environ.items() if not k.startswith(('QT_', 'PG_', 'POSTGRES_', 'COMPOSE_'))}
         env.update(QT_SINGLE_NODE_ENV_FILE=str(root / 'secrets.env'), QT_SINGLE_NODE_STATE_ROOT=str(root / 'state'), QT_MARKET_DATA_ROOT=str(root / 'archive'), QT_DEPLOY_WAIT_SECONDS='90', QT_REBUILD_DATABASE_IMAGE='1', PATH=str(root / 'bin') + ':' + os.environ['PATH'])
         if storage_layout:
-            env.update(QT_FIXTURE_HISTORY=str(root / 'history'), QT_FIXTURE_WORKING=str(root / 'working'))
+            database_tag=project+'-database:fixture'
+            tags.add(database_tag)
+            first_hash=run(['python3','scripts/provenance/source_tree_hash.py','--root',str(repo),
+                           '--git-revision',first],cwd=repo).stdout.strip()
+            run(['docker','build','--tag',database_tag,'--build-arg','QT_SOURCE_REVISION='+first,
+                 '--build-arg','QT_SOURCE_TREE_HASH='+first_hash,str(repo)])
+            database_image=run(['docker','image','inspect','--format','{{.Id}}',database_tag]).stdout.strip()
+            env.update(QT_FIXTURE_HISTORY=str(root / 'history'), QT_FIXTURE_WORKING=str(root / 'working'),
+                       QT_STORAGE_DATABASE_IMAGE=database_image,QT_REBUILD_DATABASE_IMAGE='0')
         deploy = ['bash', 'scripts/automation/server_deploy.sh']
         run(deploy + ['init-env'], cwd=repo, env=env)
         if storage_layout:
@@ -164,6 +177,8 @@ CMD ["python", "/app/fixture.py"]
             print('Rehearsal: initial deployment', flush=True)
             run(deploy + ['deploy', first], cwd=repo, env=env)
             assert state()['current_revision'] == first
+            database_id=run(['docker','ps','-q','--filter',f'label=com.docker.compose.project={project}',
+                             '--filter','label=com.docker.compose.service=tsdb']).stdout.strip()
             refused = run(deploy + ['promote', second, '--compatible-with', first], cwd=repo, env={**env, 'QT_FIXTURE_CI': 'failure'}, ok=False)
             assert refused.returncode and state()['current_revision'] == first
             assert run(['git', 'rev-parse', 'HEAD'], cwd=repo).stdout.strip() == first
@@ -171,6 +186,9 @@ CMD ["python", "/app/fixture.py"]
             success = run(deploy + ['promote', second, '--compatible-with', first], cwd=repo, env=env)
             assert 'event=promotion_succeeded' in success.stdout
             assert state()['current_revision'] == second and state()['previous_revision'] == first
+            if storage_layout:
+                assert run(['docker','ps','-q','--filter',f'label=com.docker.compose.project={project}',
+                            '--filter','label=com.docker.compose.service=tsdb']).stdout.strip()==database_id
             collect_tags()  # retain this snapshot before the refusal probe replaces it
             if storage_layout:
                 assert state()['storage_layout'] == 'ssd-hdd-v1'
@@ -232,6 +250,11 @@ CMD ["python", "/app/fixture.py"]
             assert not marker.exists() and state()['current_revision'] == second
             if storage_layout:
                 assert state()['storage_layout'] == 'ssd-hdd-v1'
+                # Frozen Compose recovery may recreate a service with the same
+                # pinned image/resources. Container identity is not cluster identity.
+                recovered_database=run(['docker','ps','-q','--filter',f'label=com.docker.compose.project={project}',
+                                        '--filter','label=com.docker.compose.service=tsdb']).stdout.strip()
+                assert run(['docker','inspect','--format','{{.Image}}',recovered_database]).stdout.strip()==database_image
                 for role in ('history', 'working'):
                     assert (root / role / 'sentinel').read_text() == role + '-retained'
                 print('PASS: recorded storage mounts survive promotion and offline recovery; unsupported candidate and altered snapshot refused; current mount overrides ignored during pinned recovery', flush=True)

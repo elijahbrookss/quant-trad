@@ -382,6 +382,10 @@ require_storage_runtime_environment() {
     || grep -Eq '^[[:space:]]*(export[[:space:]]+)?QT_STORAGE_SOURCE_FENCE_ROOT[[:space:]]*=' "$env_file"; then
     die "source-only storage fence remains configured; preserve the original environment and complete the reviewed storage environment transition"
   fi
+  local database_image
+  database_image="$(first_value "${QT_STORAGE_DATABASE_IMAGE:-}" "$(env_value QT_STORAGE_DATABASE_IMAGE)")"
+  [[ "$database_image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "storage deployment requires the qualified immutable database image"
 }
 
 storage_overlay_for() {
@@ -479,11 +483,34 @@ build_release_images() {
       "$(env_value QT_REBUILD_DATABASE_IMAGE)" \
       "0"
   )"
-  compose pull --ignore-buildable
-
-  if ! docker image inspect quanttrad-postgres:2.14.2-pg15 >/dev/null 2>&1 \
-    || test "$rebuild_database_image" = "1"; then
-    compose build --pull tsdb
+  if test "$(recorded_storage_layout)" = "ssd-hdd-v1"; then
+    local database_image service
+    local -a pull_services=()
+    database_image="$(first_value "${QT_STORAGE_DATABASE_IMAGE:-}" "$(env_value QT_STORAGE_DATABASE_IMAGE)")"
+    [[ "$database_image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || die "storage deployment requires the qualified immutable database image"
+    test "$rebuild_database_image" != "1" \
+      || die "storage database replacement requires a separately qualified preserving procedure"
+    docker image inspect "$database_image" >/dev/null 2>&1 \
+      || die "qualified storage database image is unavailable locally"
+    # Explicit pull never gets the database: application deployment cannot
+    # fetch, rebuild or retag the already qualified PostgreSQL runtime.
+    # Maintenance shares the backend image built below; it is not a remote pull.
+    local configured_services
+    configured_services="$(compose config --services)" || return
+    while IFS= read -r service; do
+      if test -n "$service" && test "$service" != "tsdb" && test "$service" != "storage-maintenance"; then
+        pull_services+=("$service")
+      fi
+    done <<<"$configured_services"
+    test "${#pull_services[@]}" -gt 0 || die "storage application services are missing"
+    compose pull --ignore-buildable "${pull_services[@]}"
+  else
+    compose pull --ignore-buildable
+    if ! docker image inspect quanttrad-postgres:2.14.2-pg15 >/dev/null 2>&1 \
+      || test "$rebuild_database_image" = "1"; then
+      compose build --pull tsdb
+    fi
   fi
 
   compose build --pull backend frontend frontend-v2

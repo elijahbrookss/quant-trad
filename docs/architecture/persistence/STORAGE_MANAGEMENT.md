@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_online_release.py
+  - tests/test_storage_online_release.py
   - scripts/automation/storage_online_operation.py
   - tests/test_storage_online_operation.py
   - scripts/ci/online_operation_fixture.py
@@ -2840,8 +2842,9 @@ release measurements; tiny rehearsal limits are not production defaults.
 ### Completion observation after runtime readiness
 
 Reentering the same `qt storage migrate --operation-file ...` command after
-`recovery_runtime_ready` performs bounded observation only, including with
-`--execute`. All runtime actions must already be durably completed inside the
+`recovery_runtime_ready` performs bounded runtime observation, including with
+`--execute`. Optional private environment staging follows only a successful
+observation, as described below. All runtime actions must already be durably completed inside the
 original final window. Inflight or incomplete actions, reboot, backward clocks,
 changed configuration and another handoff refuse. No service action, migration
 retry, policy change, deadline renewal or journal removal occurs.
@@ -2906,3 +2909,30 @@ acceptable way to retire it. The preserving completion transition must prepare t
 correct private environment while retaining its original evidence. Source-layout
 deployment behavior is unchanged. Explicit names and an absent source-only setting
 alone do not authorize release, restart, or deletion of any migration journal.
+
+### Preparing the private deployment environment
+
+The existing operation plan may include `deployment_environment`, the absolute
+path of the existing private (0600) deployment environment. After a fresh
+`recovery_verified` observation, inspection computes a proposed environment
+fingerprint. `--execute` additionally preserves the exact original bytes as
+`storage-online-source.env` and creates `storage-online-deployment.env` in the
+private state directory. Both are 0600, created once, and refuse changed or
+partially written artifacts without overwriting them.
+
+The internal release adapter derives the project, copied SSD spool, HDD archive,
+UUIDs, inventory, maintenance limits, recovery-key directory, shared group,
+database image, named volumes and network from the admitted runtime. It preserves
+unrelated environment entries and credential bytes, removes the source-only
+writer-fence setting from the proposal, and rejects duplicate or malformed dotenv
+input. It does not edit the active environment, release metadata or migration
+journals, restart services, or grant deployment authority. Publishing the proposal
+still requires canonical configuration comparison and the terminal transition in
+the existing release owner. Its hashes are configuration evidence, not completion
+or replay tokens.
+
+The storage overlay requires `QT_STORAGE_DATABASE_IMAGE` as the qualified local
+image ID, removes the inherited database build, and sets `pull_policy: never`.
+The deployer refuses database rebuilding in this layout and excludes PostgreSQL
+from application pulls. Maintenance shares the newly built backend image and is
+also excluded from remote pulls. Ordinary source-layout builds are unchanged.

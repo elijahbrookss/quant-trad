@@ -94,6 +94,7 @@ def main():
                 # No Docker socket is mounted in this rehearsal. Keep its
                 # synthetic group distinct from the actual archive group.
                 QT_DOCKER_SOCKET_GID='65534', QT_ARCHIVE_SHARED_GROUP_ID='70',
+                QT_STORAGE_DATABASE_IMAGE=run(['docker','image','inspect','--format','{{.Id}}','quanttrad-postgres:2.14.2-pg15'], env=env).stdout.strip(),
                 QT_STORAGE_POSTGRES_VOLUME=project+'-postgres',
                 QT_STORAGE_RECOVERY_SOCKET_VOLUME=project+'-recovery-socket',
                 QT_STORAGE_NETWORK=project+'-network')

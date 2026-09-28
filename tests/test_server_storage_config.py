@@ -5,11 +5,18 @@ import yaml
 
 from scripts.provenance import source_tree_hash
 
+class ComposeLoader(yaml.SafeLoader):
+    pass
+
+
+ComposeLoader.add_constructor("!reset", lambda loader, node: None)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_fixed_overlay_preserves_spool_and_database_paths_without_fallback_mounts():
-    overlay = yaml.safe_load((ROOT / "docker/docker-compose.storage-server.yml").read_text())
+    overlay = yaml.load((ROOT / "docker/docker-compose.storage-server.yml").read_text(), Loader=ComposeLoader)
     services = overlay["services"]
     assert set(services) == {"tsdb", "backend", "initialize", "market-data-collector", "storage-maintenance"}
     assert services["storage-maintenance"]["pid"] == "service:tsdb"
@@ -61,7 +68,7 @@ def test_packaged_preserving_operator_is_part_of_runtime_attestation(tmp_path):
 
 
 def test_fixed_overlay_requires_existing_named_resources():
-    overlay=yaml.safe_load((ROOT/"docker/docker-compose.storage-server.yml").read_text())
+    overlay=yaml.load((ROOT/"docker/docker-compose.storage-server.yml").read_text(), Loader=ComposeLoader)
     for name,variable in (("postgres-data","QT_STORAGE_POSTGRES_VOLUME"),
                           ("storage-recovery-socket","QT_STORAGE_RECOVERY_SOCKET_VOLUME")):
         assert overlay["volumes"][name]==dict(name="${"+variable+":?"+(
@@ -70,3 +77,10 @@ def test_fixed_overlay_requires_existing_named_resources():
     assert overlay["networks"]["quanttrad"]["external"] is True
     assert "${QT_STORAGE_NETWORK:?" in overlay["networks"]["quanttrad"]["name"]
     assert overlay["services"]["backend"]["environment"]["QT_BOT_RUNTIME_NETWORK"] == overlay["networks"]["quanttrad"]["name"]
+
+
+def test_storage_database_image_is_immutable_and_has_no_application_build():
+    overlay=yaml.load((ROOT/"docker/docker-compose.storage-server.yml").read_text(), Loader=ComposeLoader)
+    db=overlay["services"]["tsdb"]
+    assert db["image"].startswith("${QT_STORAGE_DATABASE_IMAGE:?")
+    assert db["build"] is None and db["pull_policy"] == "never"

@@ -46,6 +46,10 @@ x-recovery-secrets: &recovery-secrets
 
 services:
   tsdb:
+    # Preserve the qualified database image; ordinary application builds cannot replace it.
+    image: ${QT_STORAGE_DATABASE_IMAGE:?Qualified immutable database image is required}
+    build: !reset null
+    pull_policy: never
     volumes:
       - *history-mount
       - *recovery-secrets

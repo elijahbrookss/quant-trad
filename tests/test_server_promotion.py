@@ -245,7 +245,7 @@ def test_normal_compose_selects_recorded_storage_overlay(tmp_path, inherited_rec
     executable.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
     executable.chmod(0o700)
     result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; compose config',
-                   env={"FIXTURE_ROOT": str(tmp_path), "recovery_config_frozen": inherited_recovery,
+                   env={"FIXTURE_ROOT": str(tmp_path), "recovery_config_frozen": inherited_recovery, "QT_STORAGE_DATABASE_IMAGE": "sha256:"+"a"*64,
                         "PATH": str(binary)+os.pathsep+os.environ["PATH"]})
     assert result.returncode == 0, result.stderr
     assert str(overlay) in result.stdout.splitlines()
@@ -307,7 +307,7 @@ def test_storage_deployment_refuses_a_retained_source_fence(tmp_path,entry,sourc
         "export QT_STORAGE_SOURCE_FENCE_ROOT='/original'\n" if source=="exported-file" else
         "QT_STORAGE_SOURCE_FENCE_ROOT="+("" if source=="empty" else "/original")+"\n"))
     extra=dict(PATH=str(binary)+os.pathsep+os.environ['PATH'],FIXTURE_REPO=str(ROOT),
-               QT_SINGLE_NODE_ENV_FILE=str(private))
+               QT_SINGLE_NODE_ENV_FILE=str(private),QT_STORAGE_DATABASE_IMAGE="sha256:"+"a"*64)
     if source=="ambient":extra['QT_STORAGE_SOURCE_FENCE_ROOT']='/original'
     result=shell(tmp_path, '''
 repo_root="$FIXTURE_REPO"

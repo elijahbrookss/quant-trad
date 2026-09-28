@@ -288,7 +288,7 @@ def load_operation_plan(path):
     from scripts.automation.storage_online_worker import validate_request_shape
 
     plan=host.load_receipt(launch._canonical(path))
-    if (not isinstance(plan,dict) or set(plan)!=_PLAN_FIELDS
+    if (not isinstance(plan,dict) or set(plan)-{"deployment_environment"}!=_PLAN_FIELDS
             or plan["schema_version"]!="qt.storage_online_operation.v1"
             or not isinstance(plan["limits"],dict)
             or set(plan["limits"])!=set(OperationLimits.__dataclass_fields__)
@@ -309,6 +309,12 @@ def load_operation_plan(path):
     for field in ("state_root","inventory_path","keys_root","spool_destination"):
         if not isinstance(plan[field],str) or str(launch._canonical(plan[field]))!=plan[field]:
             raise ValueError("storage_online_operation_plan_path_invalid")
+    if "deployment_environment" in plan:
+        value=plan["deployment_environment"]
+        if not isinstance(value,str) or str(launch._canonical(value))!=value:
+            raise ValueError("storage_online_operation_plan_path_invalid")
+        from scripts.automation.storage_online_release import read_private_environment
+        read_private_environment(Path(value))
     return plan
 
 
@@ -390,6 +396,12 @@ def run_operation_plan(path, *, execute=False):
             result = final.inspect_runtime_completion_locked(state_root)
             if load_operation_plan(path) != plan:
                 raise RuntimeError("storage_online_operation_plan_changed")
+            if result["ready"] and "deployment_environment" in plan:
+                from scripts.automation.storage_online_release import prepare_deployment_environment
+                result["deployment"] = prepare_deployment_environment(state_root,
+                    environment_path=plan["deployment_environment"], saved=saved, execute=execute)
+                if load_operation_plan(path) != plan:
+                    raise RuntimeError("storage_online_operation_plan_changed")
             return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
         prepared=initial._load(state_root) if os.path.lexists(state_root/initial.STATE) else None
         if prepared is None:

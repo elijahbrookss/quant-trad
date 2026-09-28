@@ -343,3 +343,10 @@ acceptable way to retire it. The preserving completion transition must prepare t
 correct private environment while retaining its original evidence. Source-layout
 deployment behavior is unchanged. Explicit names and an absent source-only setting
 alone do not authorize release, restart, or deletion of any migration journal.
+
+The storage layout additionally binds `QT_STORAGE_DATABASE_IMAGE` to the already
+qualified local immutable image ID. Application deployment must not build or pull
+a replacement database. Its Compose overlay removes the inherited database build;
+`QT_REBUILD_DATABASE_IMAGE=1` is refused in this layout. Maintenance uses the same
+locally built backend image, so its image is not fetched as an unrelated service.
+The source-layout database build behavior remains unchanged.

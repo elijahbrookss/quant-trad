@@ -10,6 +10,8 @@ tags:
   - migration
 code_paths:
   - cli/main.py
+  - scripts/automation/storage_online_release.py
+  - tests/test_storage_online_release.py
   - scripts/automation/storage_online_operation.py
   - tests/test_storage_online_operation.py
   - scripts/ci/online_operation_fixture.py
@@ -1701,8 +1703,9 @@ an unqualified plan on production or bypass review.
 ### Completion observation after runtime readiness
 
 Reentering the same `qt storage migrate --operation-file ...` command after
-`recovery_runtime_ready` performs bounded observation only, including with
-`--execute`. All runtime actions must already be durably completed inside the
+`recovery_runtime_ready` performs bounded runtime observation, including with
+`--execute`. Optional private environment staging follows only a successful
+observation, as described below. All runtime actions must already be durably completed inside the
 original final window. Inflight or incomplete actions, reboot, backward clocks,
 changed configuration and another handoff refuse. No service action, migration
 retry, policy change, deadline renewal or journal removal occurs.
@@ -1767,3 +1770,15 @@ acceptable way to retire it. The preserving completion transition must prepare t
 correct private environment while retaining its original evidence. Source-layout
 deployment behavior is unchanged. Explicit names and an absent source-only setting
 alone do not authorize release, restart, or deletion of any migration journal.
+
+### Private environment proposal after verified recovery
+
+The one operation can stage a private environment proposal only after a fresh
+completed-runtime and encrypted-pair observation. Preserve original bytes and
+all journals; an existing partial or different proposal refuses replacement.
+The proposal derives storage bindings from the admitted runtime and grants no
+release or restart authority. This finite adapter connects migration to the
+existing deployment owner; it does not add a workflow engine or another CLI.
+See [Storage Management](../persistence/STORAGE_MANAGEMENT.md#preparing-the-private-deployment-environment)
+for its input and artifact contracts. Canonical configuration comparison and
+terminal release publication remain required before ordinary deployment resumes.
