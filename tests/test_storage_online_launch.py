@@ -256,3 +256,33 @@ def test_private_worker_archive_override_clears_yaml_group(monkeypatch, tmp_path
         admit_archive_configuration({}, tmp_path / "unused-private-root")
     finally:
         clear_settings_cache()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_standalone_launcher_retires_worker_before_releasing_lock(tmp_path, monkeypatch, interrupted):
+    from contextlib import contextmanager
+    events = []
+    @contextmanager
+    def lock(path):
+        assert path == tmp_path
+        events.append("locked")
+        try: yield
+        finally: events.append("unlocked")
+    @contextmanager
+    def worker(path, **kwargs):
+        assert events == ["locked"]
+        events.append("worker")
+        try: yield ("process", {"container_id": "owned"})
+        finally: events.append("retired")
+    monkeypatch.setattr(host_boundary, "deployment_lock", lock)
+    monkeypatch.setattr(launch, "launched_online_worker_locked", worker)
+    class Interrupted(RuntimeError): pass
+    try:
+        with launch.launched_online_worker(tmp_path, project="owned", source_revision="a"*40,
+                image="sha256:"+"b"*64, request={}, inventory_path=tmp_path,
+                descriptor_limit=1024, memory_bytes=1024**3) as result:
+            assert result[0] == "process"
+            if interrupted: raise Interrupted()
+    except Interrupted:
+        assert interrupted
+    assert events == ["locked", "worker", "retired", "unlocked"]

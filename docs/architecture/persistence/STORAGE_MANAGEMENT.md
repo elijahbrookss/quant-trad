@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/ci/online_guarded_source_fixture.py
   - src/core/storage_writer_fence.py
   - portal/backend/run_backend.py
   - portal/backend/workers/single_node_initializer.py
@@ -229,6 +230,24 @@ controlled adapters in that test; it does not qualify a complete Docker-pipe
 operator, production publishers, source-image rollout or recovery activation.
 Original capture and frozen records survive. Separate source-start tests cover
 the actual guarded entrypoints after loss of the kernel owner with logins closed.
+
+The connected Docker rehearsal now sends that same one-shot command over the
+actual private attach pipe, observes the committed SQL state, closes the worker
+and verifies its container stopped with PID0 before releasing the source hold.
+Its three source peers are explicitly synthetic images using the actual lifetime
+fence; an independent genuine QT publisher exercises copy/catch-up before final
+pause. This proves the host/worker connection and retirement ordering, not the
+production source fleet, post-switch recovery or a production pause allowance.
+The fixture's closed-login restoration occurs only after verified retirement
+and remains teardown, never production activation authority.
+
+The existing launcher has a caller-locked internal context for this transition.
+The ordinary `launched_online_worker` wrapper still acquires and retains the
+same deployment lock through verified retirement. The complete host workflow
+can hold that lock around `launched_online_worker_locked`, then retain it after
+worker exit while separately admitting preserving recovery. Source and worker
+identity checks, cleanup and original deadlines are shared unchanged; no second
+launcher policy or public command is introduced.
 
 Before recovery keys or repositories can be mounted, the read-capability worker
 must still be independently verified stopped and reaped. A separately bounded

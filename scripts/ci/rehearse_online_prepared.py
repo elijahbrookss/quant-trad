@@ -1,11 +1,14 @@
 """Owned prepared-host launcher rehearsal with real QT publication.
 
-Synthetic service peers; optional owned initial pause, no production or final switch.
+Synthetic service peers; optional owned initial pause and held database switch.
+No production inputs or runtime/recovery activation.
 All created containers, volume, network and scratch files are owned by this run.
 """
 import argparse,json,os,select,subprocess,sys,time,uuid
+from contextlib import ExitStack
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"src"))
 from scripts.automation import storage_host_boundary as host_boundary
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image',required=True)
@@ -27,7 +30,14 @@ parser.add_argument('--abort-resume-lost-end',action='store_true',help='discard 
 parser.add_argument('--worker-attach-loss',action='store_true',help='stop the owned worker Python process and kill its attach CLI before bounded retirement')
 parser.add_argument('--close-logins',choices=('success','lost-reply'),help='close owned target logins under durable final intent; no COMMIT or production reopen')
 parser.add_argument('--abort-restore-lost-reply',action='store_true',help='discard completed owned login restoration reply; preserve unresolved journal')
+parser.add_argument('--commit-switch',action='store_true',help='one-shot real host-to-worker COMMIT and verified worker retirement; no runtime activation')
+parser.add_argument('--guarded-source-image',help='owned synthetic source image with the real source lifetime guard')
 options=parser.parse_args()
+if options.commit_switch and (options.close_logins!='success' or not options.guarded_source_image
+    or options.abort_resume or options.worker_shutdown or options.worker_attach_loss):
+ parser.error('--commit-switch requires confirmed gate and guarded fixture image, without abort/signal/attach faults')
+if options.guarded_source_image and not options.commit_switch:
+ parser.error('--guarded-source-image is only admitted with --commit-switch')
 if options.abort_restore_lost_reply and (not options.abort_resume or options.close_logins!='success' or options.abort_resume_fence_loss or options.abort_resume_lost_end):
  parser.error('--abort-restore-lost-reply requires confirmed gated abort without other faults')
 if options.close_logins and (not options.switch_entry or options.abort_resume and options.close_logins!='success'):
@@ -62,6 +72,7 @@ project='qt-online-host-'+uuid.uuid4().hex[:12]
 state=ROOT/project;state.mkdir(mode=0o700)
 history=history_parent/project
 network=project+'_quanttrad'
+source_holds=ExitStack()
 created_network=False
 created_history=False
 owned=[];volume=project+'-pg';created_volume=False
@@ -85,6 +96,13 @@ try:
  image=run(['image','inspect',options.image,'--format','{{.Id}}']).stdout.strip()
  envvalues=dict(v.split('=',1) for v in json.loads(run(['image','inspect',image,'--format','{{json .Config.Env}}']).stdout))
  revision=envvalues['QT_IMAGE_SOURCE_REVISION']
+ source_image=image
+ if options.guarded_source_image:
+  source_image=run(['image','inspect',options.guarded_source_image,'--format','{{.Id}}']).stdout.strip()
+  source_config=json.loads(run(['image','inspect',source_image,'--format','{{json .Config}}']).stdout)
+  assert source_config.get('Labels',{}).get('qt.guarded-source-fixture')=='true'
+  assert dict(v.split('=',1) for v in source_config['Env'])['QT_IMAGE_SOURCE_REVISION']==revision
+  report['guarded_source_fixture']=dict(image=source_image,application_runtime_qualified=False)
  (state/'release.env').write_text('current_revision='+revision+'\n')
  def labels(service):
   return ['--label','com.docker.compose.project='+project,'--label','com.docker.compose.service='+service,'--label','com.docker.compose.oneoff=False']
@@ -136,6 +154,17 @@ try:
   if service=='market-data-collector':
    extra=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN=postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname]
    command_text="trap 'exit 0' TERM; while :; do printf x >> /app/logs/market-structure/objects/native-intake; sleep 1 & wait $!; done"
+  from scripts.automation.storage_online_final import _SOURCE_WRITERS
+  if options.commit_switch and service in _SOURCE_WRITERS:
+   target='/app/logs/market-structure'
+   run(['run','-d','--name',name,'--pull','never','--network',network,
+     '--user','70:70','--read-only','--memory','128m','--cpus','0.25','--pids-limit','32',
+     *labels(service),'--mount','type=bind,source='+str(working)+',target='+target,
+     '--env','PG_DSN=postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname,
+     '--env','QT_ONLINE_GUARDED_SOURCE_FIXTURE=1','--env','QT_DISABLE_DOTENV=1',
+     '--env','QT_STORAGE_SOURCE_FENCE_ROOT='+target,'--env','MARKET_STRUCTURE_STORAGE_ROOT='+target,
+     '--entrypoint','python',source_image,'-m',_SOURCE_WRITERS[service]])
+   continue
   if service=='market-data-collector' and options.worker_shutdown:
    import ast
    fixture_tree=ast.parse((Path(__file__).resolve().parents[2]/"tests/test_market_data/test_collector_shutdown_signal.py").read_text())
@@ -154,6 +183,12 @@ try:
    run(['run','-d','--name',name,'--pull','never','--network',network,
      '--user','70:70','--read-only','--memory','32m','--cpus','0.1',
      '--pids-limit','32',*labels(service),*extra,'--entrypoint','sh',image,'-c',command_text])
+ if options.commit_switch:
+  source_ready=time.monotonic()+15
+  while (not (working/'objects'/'native-intake').exists()
+         or run(['inspect',project+'-initialize','--format','{{.State.Status}}']).stdout.strip()!='exited'):
+   if time.monotonic()>source_ready:raise RuntimeError('owned_guarded_source_start_timeout')
+   time.sleep(.05)
  if options.prepare_source:
   udev=state/'initial-udev';udev.mkdir()
   device=history.stat().st_dev
@@ -214,13 +249,18 @@ try:
   return json.loads(data)
  sequence=0
  def command(op,*,response_deadline=None,**extra):
-  global sequence
+  global sequence,last_reply
   sequence+=1;worker.stdin.write((json.dumps(dict(controller_id=greeting['controller_id'],sequence=sequence,operation=op,**extra))+'\n').encode())
   reply=read(extra.get('deadline',response_deadline))
+  last_reply=reply
   return reply
  first_deadline=None
+ launch_context=launch.launched_online_worker
+ if options.commit_switch:
+  source_holds.enter_context(host_boundary.deployment_lock(state))
+  launch_context=launch.launched_online_worker_locked
  for attempt in range(1 if options.final_pause else 2):
-  with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
+  with launch_context(state,**kwargs) as (worker,receipt):
    greeting=read();sequence=0
    assert not greeting['final_switch_authorized']
    assert greeting['background_hashed_bytes']==0
@@ -415,6 +455,8 @@ try:
      report['final_stopped_only_exact_clients']=True
      report['final_worker_and_proof_retained']=True
      report['final_source_resumption_qualified']=False
+     if options.commit_switch:
+      source_check=source_holds.enter_context(final_host.held_source_writers_locked(state,source_image=source_image))
      if options.final_delta:
       # The independent fixture published its late tail before source pause,
       # then exited. Its writable mounts cannot remain live during admission.
@@ -543,6 +585,17 @@ try:
           new_logins_refused=True,fresh_negative_without_authority=True,original_clocks_preserved=True,
           replay_refused=True,uncertain_gate_resumption_refused=options.close_logins=='lost-reply',elapsed_seconds=time.monotonic()-gate_started)
         (state/'login-gate-intent.json').write_text(json.dumps(gated,indent=2))
+       if options.commit_switch:
+        commit_started=time.monotonic()
+        committed=final_host.commit_online_handoff_locked(state,exchange=command)
+        assert committed['outcome']=='committed' and committed['database_handoff_committed']
+        assert not committed['runtime_activation_authorized'] and not committed['collection_resume_authorized']
+        source_check()
+        final=last_reply  # Fresh inspect_outcome already received by the host seam.
+        assert final['operation']=='inspect_outcome' and final['state']=='committed'
+        report['held_database_commit']=dict(same_worker=True,fresh_committed_outcome=True,
+          source_kernel_hold_retained=True,elapsed_seconds=time.monotonic()-commit_started,
+          runtime_activation_authorized=False)
        if options.abort_resume:
         resume_started=time.monotonic()
         if options.abort_restore_lost_reply:
@@ -699,6 +752,14 @@ try:
   if options.close_logins and not options.abort_resume:
    retired=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
    assert not retired['Running'] and retired['Pid']==0
+   if options.commit_switch:
+    source_check()
+    try:
+     with host_boundary.deployment_lock(state):raise AssertionError('deployment lock released before recovery handover')
+    except RuntimeError as exc:assert str(exc)=='storage_pause_deployment_lock_busy'
+    report['held_database_commit']['deployment_lock_retained_after_worker_retirement']=True
+    source_holds.close()
+    report['held_database_commit']['read_worker_pid0_before_hold_release']=True
    # Fixture teardown only, AFTER verified worker retirement. This does not
    # authorize production gate restoration or remove its retained final marker.
    with host_boundary.docker_deadline(time.monotonic()+5):
@@ -790,6 +851,10 @@ except BaseException as exc:
   report.update(passed=False,error_type=type(exc).__name__,error=str(exc))
   raise
 finally:
+ try:source_holds.close()
+ except RuntimeError as exc:
+  report['source_hold_exit_error']=str(exc)
+  report['passed']=False
  if options.worker_shutdown:
   diagnostic=run(['logs','--tail','160',project+'-market-data-collector'],check=False)
   (state/'worker-shutdown.log').write_text(diagnostic.stdout+diagnostic.stderr)
