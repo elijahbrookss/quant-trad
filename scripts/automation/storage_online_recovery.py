@@ -45,7 +45,7 @@ def validate_recovery_journal(saved):
                 or value["inflight"] != _ACTIONS[len(value["completed"])])
             or (len(value["completed"]) >= 3) != (value["replacement_id"] is not None)):
         raise RuntimeError("storage_online_recovery_journal_invalid")
-    if saved["phase"] == "recovery_database_ready":
+    if saved["phase"] != "recovery_preparing":
         if (value["completed"] != list(_ACTIONS) or value["inflight"] is not None
                 or type(value["finished_at"]) not in (int, float)
                 or not value["started_at"] <= value["finished_at"] <= saved["deadline"]):
@@ -70,19 +70,7 @@ def prepare_database(state_root, *, saved, worker_process, keys_root, socket_vol
     deadline = min(time.monotonic()+max_duration_seconds, saved["switch"]["deadline_monotonic"])
 
     def retired():
-        source_check()
-        if time.monotonic() >= deadline or time.time() >= worker["deadline"]:
-            raise RuntimeError("storage_online_recovery_deadline_expired")
-        if (worker_process.args != ["docker", "start", "--attach", "--interactive", worker_id]
-                or worker_process.poll() is None):
-            raise RuntimeError("storage_online_recovery_attach_not_reaped")
-        launch._admit(worker_id, worker["binding"], worker["contract"])
-        status = json.loads(host.docker("inspect", "--format", "{{json .State}}", worker_id))
-        if (any(status.get(k) is not False for k in ("Running", "Paused", "Restarting", "Dead"))
-                or type(status.get("Pid")) is not int or status["Pid"] != 0
-                or status.get("Status") != "exited"
-                or status.get("StartedAt") != binding["worker_started_at"]):
-            raise RuntimeError("storage_online_recovery_reader_not_retired")
+        admit_retired_reader(worker_process, worker, saved, source_check, deadline)
 
     with host.docker_deadline(deadline):
         retired()
@@ -234,3 +222,21 @@ def prepare_database(state_root, *, saved, worker_process, keys_root, socket_vol
         check()
         return {"database_id": replacement["id"], "database_recovery_mounts_ready": True,
                 "collection_resume_authorized": False, "runtime_activation_authorized": False}
+
+
+def admit_retired_reader(worker_process, worker, saved, source_check, deadline):
+    """Recheck the exact retired reader before exposing recovery keys."""
+    worker_id = worker["container_id"]
+    source_check()
+    if time.monotonic() >= deadline or time.time() >= worker["deadline"]:
+        raise RuntimeError("storage_online_recovery_deadline_expired")
+    if (worker_process.args != ["docker", "start", "--attach", "--interactive", worker_id]
+            or worker_process.poll() is None):
+        raise RuntimeError("storage_online_recovery_attach_not_reaped")
+    launch._admit(worker_id, worker["binding"], worker["contract"])
+    status = json.loads(host.docker("inspect", "--format", "{{json .State}}", worker_id))
+    if (any(status.get(k) is not False for k in ("Running", "Paused", "Restarting", "Dead"))
+            or type(status.get("Pid")) is not int or status["Pid"] != 0
+            or status.get("Status") != "exited"
+            or status.get("StartedAt") != saved["binding"]["worker_started_at"]):
+        raise RuntimeError("storage_online_recovery_reader_not_retired")

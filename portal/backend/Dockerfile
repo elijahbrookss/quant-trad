@@ -40,7 +40,12 @@ COPY portal/ /app/portal
 COPY scripts/qt /app/scripts/qt
 COPY scripts/provenance/ /app/scripts/provenance/
 # Explicit operator entry points only; no startup migration or manual SQL bundle.
-COPY scripts/db/fact_header_v2_handoff.py \
+COPY scripts/db/archive_file_v2_proof.py \
+     scripts/db/archive_root_v2_online.py \
+     scripts/db/fact_header_v2_cancel.py \
+     scripts/db/fact_header_v2_online.py \
+     scripts/db/fact_header_v2_online_proof.py \
+     scripts/db/fact_header_v2_handoff.py \
      scripts/db/fact_header_v2_capture.py \
      scripts/db/fact_header_v2_copy.py \
      scripts/db/fact_header_v2_admission.py \
@@ -50,9 +55,12 @@ COPY scripts/db/fact_header_v2_handoff.py \
      scripts/db/archive_root_v2_copy.py \
      scripts/db/archive_reference_v2_placement.py /app/scripts/db/
 
-# The held worker performs only the bounded legacy ownership entry point,
-# then permanently drops to the database UID before opening a connection.
-COPY scripts/automation/storage_recovery_prepare.py \
+# Fixed online worker and preserving recovery dependencies. The held worker
+# drops to the database UID before opening a connection.
+COPY scripts/automation/storage_online_controller.py \
+     scripts/automation/storage_online_drain.py \
+     scripts/automation/storage_online_worker.py \
+     scripts/automation/storage_recovery_prepare.py \
      scripts/automation/storage_host_prepare.py \
      scripts/automation/storage_device_audit.py /app/scripts/automation/
 

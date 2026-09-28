@@ -13,6 +13,14 @@ ROOTS = ("config", "src", "cli", "portal", "scripts/provenance")
 # The fixed preserving operator is packaged with the matching runtime. Keep
 # this inventory aligned with Dockerfile COPY; unrelated manual SQL stays out.
 OPERATOR_FILES = (
+    "scripts/automation/storage_online_controller.py",
+    "scripts/automation/storage_online_drain.py",
+    "scripts/automation/storage_online_worker.py",
+    "scripts/db/archive_file_v2_proof.py",
+    "scripts/db/archive_root_v2_online.py",
+    "scripts/db/fact_header_v2_cancel.py",
+    "scripts/db/fact_header_v2_online.py",
+    "scripts/db/fact_header_v2_online_proof.py",
     "scripts/automation/storage_recovery_prepare.py",
     "scripts/automation/storage_host_prepare.py",
     "scripts/automation/storage_device_audit.py",

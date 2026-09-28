@@ -6,6 +6,7 @@ The inventory, private key files and independent key copy must already exist.
 """
 import argparse
 import json
+import math
 from pathlib import Path
 from time import monotonic
 
@@ -44,6 +45,12 @@ def prepare(args):
             or args.recent_free_bytes < 0):
         raise ValueError("recovery_preparation_budget_invalid")
     deadline = monotonic()+args.timeout_seconds
+    original_deadline = getattr(args, "deadline_monotonic", None)
+    if original_deadline is not None:
+        if (type(original_deadline) not in (int,float) or not math.isfinite(original_deadline)
+                or original_deadline <= monotonic()):
+            raise ValueError("recovery_preparation_original_deadline_invalid")
+        deadline = min(deadline, original_deadline)
     engine = create_engine(url, poolclass=NullPool, connect_args={"connect_timeout":10})
     try:
         with engine.connect() as owner, owner.begin():

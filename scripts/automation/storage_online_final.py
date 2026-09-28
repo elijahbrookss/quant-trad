@@ -24,7 +24,8 @@ from scripts.automation import storage_online_prepare as initial
 
 STATE = "storage-online-final.json"
 SCHEMA = "qt.storage_online_final.v1"
-_RECOVERY_PHASES = {"recovery_preparing", "recovery_database_ready"}
+_REPOSITORY_PHASES = {"recovery_repository_preparing", "recovery_wal_ready"}
+_RECOVERY_PHASES = {"recovery_preparing", "recovery_database_ready"} | _REPOSITORY_PHASES
 _COMMIT_PHASES = {"commit_dispatching", "committed"} | _RECOVERY_PHASES
 _SOURCE_HOLD = ContextVar("storage_online_source_hold", default=None)
 _FIELDS = {"schema", "phase", "binding", "started_at", "deadline", "boot_id",
@@ -62,7 +63,7 @@ def _load(path):
         saved.get("phase") in {"source_resuming", "source_resumed"} and "login_gate" in saved)
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming or gated
-    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set()) | ({"recovery"} if recovering else set())
+    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set()) | ({"recovery"} if recovering else set()) | ({"repositories"} if saved.get("phase") in _REPOSITORY_PHASES else set())
     if (set(saved) != fields or saved["schema"] != SCHEMA
             or saved["phase"] not in {"stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"} | _COMMIT_PHASES
             or type(saved["duration_seconds"]) is not int
@@ -157,6 +158,9 @@ def _load(path):
     if recovering:
         from scripts.automation.storage_online_recovery import validate_recovery_journal
         validate_recovery_journal(saved)
+    if saved["phase"] in _REPOSITORY_PHASES:
+        from scripts.automation.storage_online_repositories import validate_journal
+        validate_journal(saved)
     return saved
 
 
@@ -1237,3 +1241,22 @@ def prepare_recovery_database_locked(state_root, *, worker_process, keys_root,
     return prepare_database(state_root, saved=saved, worker_process=worker_process,
         keys_root=keys_root, socket_volume=socket_volume,
         max_duration_seconds=max_duration_seconds, source_check=source_check)
+
+
+def prepare_online_repositories_locked(state_root, *, worker_process, max_bytes,
+        reserve_bytes, recent_free_bytes, max_duration_seconds):
+    """Continue the same held committed operation through repository/WAL readiness."""
+    from scripts.automation.storage_online_repositories import prepare_repositories
+    state_root = launch._canonical(state_root)
+    held = _SOURCE_HOLD.get()
+    if held is None or held[0] != state_root:
+        raise RuntimeError("storage_online_live_source_hold_required")
+    _, binding, image, check = held
+    saved = _load(state_root/STATE)
+    if (saved["phase"] != "recovery_database_ready" or saved["binding"] != binding
+            or saved["commit"]["source_image"] != image):
+        raise RuntimeError("storage_online_repository_live_transition_required")
+    check()
+    return prepare_repositories(state_root, saved=saved, worker_process=worker_process,
+        source_check=check, max_bytes=max_bytes, reserve_bytes=reserve_bytes,
+        recent_free_bytes=recent_free_bytes, max_duration_seconds=max_duration_seconds)

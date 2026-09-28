@@ -34,7 +34,13 @@ parser.add_argument('--commit-switch',action='store_true',help='one-shot real ho
 parser.add_argument('--guarded-source-image',help='owned synthetic source image with the real source lifetime guard')
 parser.add_argument('--recovery-mounts',action='store_true',help='preserving already-HDD database recovery mounts after committed reader retirement; no runtime start')
 parser.add_argument('--recovery-create-reply-loss',action='store_true',help='discard completed owned recovery database create reply, retaining unresolved intent')
+parser.add_argument('--recovery-repositories',action='store_true',help='continue held committed operation through actual encrypted repositories and native WAL delivery')
+parser.add_argument('--recovery-repository-reply-loss',action='store_true',help='discard completed preparer reply and retain unresolved repository intent')
 options=parser.parse_args()
+if options.recovery_repository_reply_loss and not options.recovery_repositories:
+ parser.error('--recovery-repository-reply-loss requires --recovery-repositories')
+if options.recovery_repositories and (not options.recovery_mounts or options.recovery_create_reply_loss):
+ parser.error('--recovery-repositories requires successful --recovery-mounts')
 if options.recovery_create_reply_loss and not options.recovery_mounts:
  parser.error('--recovery-create-reply-loss requires --recovery-mounts')
 if options.recovery_mounts and not options.commit_switch:
@@ -108,6 +114,19 @@ try:
  image=run(['image','inspect',options.image,'--format','{{.Id}}']).stdout.strip()
  envvalues=dict(v.split('=',1) for v in json.loads(run(['image','inspect',image,'--format','{{json .Config.Env}}']).stdout))
  revision=envvalues['QT_IMAGE_SOURCE_REVISION']
+ if options.recovery_repositories:
+  # Independent generated keys only in this owned disposable fixture.
+  fixture_setup = """import json,os,secrets;from pathlib import Path
+root=Path('/keys')
+for name in ('database.key','archive.key'):
+ p=root/name;p.write_text(secrets.token_hex(32));p.chmod(0o600);os.chown(p,70,70)
+config=dict(pgbackrest='/usr/local/bin/pgbackrest',restic='/usr/local/bin/restic',pg_path='/var/lib/postgresql/data',pg_socket_path='/var/run/postgresql',database_key_path='/run/quanttrad/recovery/database.key',archive_key_path='/run/quanttrad/recovery/archive.key',max_chain_backups=4)
+p=root/'incremental-config.json';p.write_text(json.dumps(config));p.chmod(0o600);os.chown(p,70,70)
+os.chown(root,70,70)
+"""
+  run(['run','--rm','--network','none','--user','0:0','--cap-drop','ALL','--cap-add','CHOWN','--cap-add','DAC_OVERRIDE','--cap-add','FOWNER',
+      '--mount','type=bind,source='+str(recovery_keys)+',target=/keys','--entrypoint','python',image,'-c',fixture_setup])
+
  source_image=image
  if options.guarded_source_image:
   source_image=run(['image','inspect',options.guarded_source_image,'--format','{{.Id}}']).stdout.strip()
@@ -242,7 +261,7 @@ try:
    if time.monotonic()>received_deadline:raise RuntimeError('real Docker collector did not receive frame')
    time.sleep(.05)
  request=json.loads((control/'request.json').read_text())
- inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes())
+ inventory=state/'inventory.json';inventory.write_bytes((control/'inventory.json').read_bytes());inventory.chmod(0o644)
  udev=control/Path(json.loads((control/'ready.json').read_text())['udev']).relative_to('/qt-control')
  os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
  source=host_boundary.identities(host_boundary.inventory(project))
@@ -801,6 +820,54 @@ try:
           keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
       raise AssertionError('completed recovery phase replay admitted')
      except RuntimeError as exc:assert str(exc)=='storage_online_recovery_committed_live_hold_required'
+    if options.recovery_repositories:
+     owned.append(project+'-storage-repository-prepare')
+     before_repositories=final_host._load(state/final_host.STATE)
+     start_repositories=time.monotonic()
+     actual_repository_action=host_boundary.supervised_source_action
+     if options.recovery_repository_reply_loss:
+      def lose_preparer_reply(arguments,**kwargs):
+       actual_repository_action(arguments,**kwargs)
+       if arguments[:2]==['start','--attach']:
+        raise EOFError('owned completed repository preparation reply discarded')
+      host_boundary.supervised_source_action=lose_preparer_reply
+     try:
+      result=final_host.prepare_online_repositories_locked(state,worker_process=worker,
+          max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
+      assert not options.recovery_repository_reply_loss
+     except EOFError as exc:
+      assert options.recovery_repository_reply_loss and str(exc)=='owned completed repository preparation reply discarded'
+      unresolved=final_host._load(state/final_host.STATE)
+      assert unresolved['phase']=='recovery_repository_preparing'
+      assert unresolved['repositories']['inflight']=='prepare'
+      assert unresolved['repositories']['completed']==['logins','create']
+      assert unresolved['repositories']['report'] is None
+      assert all(unresolved[k]==before_repositories[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery'))
+      helper_state=json.loads(run(['inspect',unresolved['repositories']['helper_id'],'--format','{{json .State}}']).stdout)
+      assert not helper_state['Running'] and helper_state['Pid']==0 and helper_state['ExitCode']==0
+      assert host_boundary.maintenance_query(pgid,"SELECT current_setting('archive_mode')").strip()=='off'
+      assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
+      report['recovery_repository_lost_reply']=dict(actual_preparer_completed=True,
+          unresolved_intent_preserved=True,settings_not_dispatched=True,source_not_restarted=True,
+          limitation='Fully received response discarded; not late execution, unread framing or outer-controller loss.')
+     finally:
+      host_boundary.supervised_source_action=actual_repository_action
+     if not options.recovery_repository_reply_loss:
+      after_repositories=final_host._load(state/final_host.STATE)
+      assert after_repositories['phase']=='recovery_wal_ready'
+      assert result['native_wal_delivered'] and result['repositories_initialized'] and not result['backup_created']
+      assert all(after_repositories[k]==before_repositories[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery'))
+      assert host_boundary.cluster_identifier(pgid)==original_cluster
+      report['recovery_repositories']=dict(native_wal_delivered=True,encrypted_repositories_prepared=True,
+          reader_retired_before_keys=True,original_clocks_preserved=True,
+          component_seconds=time.monotonic()-start_repositories,
+          final_entry_to_wal_ready_seconds=after_repositories['repositories']['finished_at']-after_repositories['started_at'],
+          runtime_activation_authorized=False,backup_created=False)
+     try:
+      final_host.prepare_online_repositories_locked(state,worker_process=worker,
+          max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
+      raise AssertionError('completed repository preparation replay admitted')
+     except RuntimeError as exc:assert str(exc)=='storage_online_repository_live_transition_required'
     source_holds.close()
     report['held_database_commit']['read_worker_pid0_before_hold_release']=True
    # Fixture teardown only, AFTER verified worker retirement. This does not
@@ -934,6 +1001,8 @@ finally:
   mine=details['Config']['Labels'].get('qt.disposable')==project
   if name==project+'-storage-online' and (state/launch._STATE).exists():
    mine=json.loads((state/launch._STATE).read_text())['container_id']==details['Id']
+  if name==project+'-storage-repository-prepare':
+   mine=details['Config']['Labels'].get('com.docker.compose.project')==project+'-recovery' and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)
  if created_volume:run(['volume','rm',volume])
  if created_recovery_socket:run(['volume','rm',recovery_socket])

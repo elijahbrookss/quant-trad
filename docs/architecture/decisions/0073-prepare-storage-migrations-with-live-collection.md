@@ -9,6 +9,11 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/provenance/source_tree_hash.py
+  - portal/backend/Dockerfile
+  - tests/test_storage_online_repositories.py
+  - scripts/automation/storage_recovery_prepare.py
+  - scripts/automation/storage_online_repositories.py
   - scripts/ci/online_guarded_source_fixture.py
   - src/core/storage_writer_fence.py
   - portal/backend/run_backend.py
@@ -1426,3 +1431,35 @@ This is a real privilege transition, not a generic workflow abstraction or anoth
 operator. Mount readiness is distinct from repositories, WAL delivery, application
 recovery and complete encrypted-pair publication; those must still be composed and
 qualified before release.
+
+
+### Repository preparation and native WAL continuation
+
+After `recovery_database_ready`, the existing final-state owner can continue under
+that same live source/deployment hold through `storage_online_repositories`.
+It independently rechecks migration-reader retirement, the committed binding,
+original cluster, private recipe, filesystem identity and stopped original clients.
+The original final/capture deadline bounds the separately limited phase; helper
+startup cannot renew it. Docker mount-list ordering carries no identity meaning;
+all complete mount records are compared after sorting by destination.
+
+The same final receipt records ordered intent before restoring database logins,
+creating/running one fixed UID70 repository preparer, changing native archive
+settings, stopping/restarting that same database container and switching WAL.
+The preparer reuses `storage_recovery_prepare`, existing independent keys and
+repository code. Its fixed mounts include PostgreSQL data, HDD, recovery keys,
+socket and inventory, but never the private application spool. Only this preparer
+writes the existing archiver configuration; ordinary applications receive no keys
+or physical database access. The exact stopped preparer and configuration digest
+remain bound after it exits. No key generation, backup policy or recurring full
+backup is introduced.
+
+`recovery_wal_ready` requires the original cluster, exact native archive settings
+without a pending restart, successful repository preparation and observed native
+WAL delivery. A lost action/reply leaves its intent unresolved and permits no
+replay or automatic reversal. This state grants no application-start authority.
+Private spool recovery, matching runtime activation, fresh collection and complete
+encrypted-pair publication still require connected qualification. Production
+pause and capacity admission remain unfinished. The runtime package explicitly
+includes the existing online worker/controller dependency closure, and those files
+participate in source attestation.
