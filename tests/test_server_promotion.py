@@ -239,8 +239,14 @@ def test_normal_compose_selects_recorded_storage_overlay(tmp_path, inherited_rec
     docker.mkdir()
     overlay = docker / "docker-compose.storage-server.yml"
     overlay.write_text("services: {}\n")
-    result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; docker() { printf "%s\\n" "$@"; }; compose config',
-                   env={"FIXTURE_ROOT": str(tmp_path), "recovery_config_frozen": inherited_recovery})
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    executable = binary / "docker"
+    executable.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    executable.chmod(0o700)
+    result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; compose config',
+                   env={"FIXTURE_ROOT": str(tmp_path), "recovery_config_frozen": inherited_recovery,
+                        "PATH": str(binary)+os.pathsep+os.environ["PATH"]})
     assert result.returncode == 0, result.stderr
     assert str(overlay) in result.stdout.splitlines()
 
@@ -289,3 +295,28 @@ recover_promotion
     assert "docker-compose.storage-server" not in result.stdout
     assert "docker-compose.alert-email" not in result.stdout
     assert not (state / "promotion.env").exists()
+
+
+@pytest.mark.parametrize("entry", ["compose config", "compose_from_repo_root \"$repo_root\" '' config"])
+@pytest.mark.parametrize("source", ["ambient", "file", "empty", "exported-file", "absent"])
+def test_storage_deployment_refuses_a_retained_source_fence(tmp_path,entry,source):
+    binary=tmp_path/"bin";binary.mkdir()
+    docker=binary/"docker";docker.write_text("#!/bin/sh\necho COMPOSE_REACHED\n");docker.chmod(0o700)
+    private=tmp_path/"private.env"
+    private.write_text("" if source in {"ambient","absent"} else (
+        "export QT_STORAGE_SOURCE_FENCE_ROOT='/original'\n" if source=="exported-file" else
+        "QT_STORAGE_SOURCE_FENCE_ROOT="+("" if source=="empty" else "/original")+"\n"))
+    extra=dict(PATH=str(binary)+os.pathsep+os.environ['PATH'],FIXTURE_REPO=str(ROOT),
+               QT_SINGLE_NODE_ENV_FILE=str(private))
+    if source=="ambient":extra['QT_STORAGE_SOURCE_FENCE_ROOT']='/original'
+    result=shell(tmp_path, '''
+repo_root="$FIXTURE_REPO"
+recorded_storage_layout() { printf 'ssd-hdd-v1'; }
+git() { printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; }
+python3() { printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'; }
+'''+entry,env=extra)
+    if source=="absent":assert result.returncode==0 and 'COMPOSE_REACHED' in result.stdout,result.stderr
+    else:
+        assert result.returncode!=0 and 'source-only storage fence' in result.stderr
+        assert 'COMPOSE_REACHED' not in result.stdout
+    assert private.exists()

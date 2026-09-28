@@ -507,6 +507,9 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         'QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH':str(limits),
         'QT_STORAGE_RECOVERY_SECRETS_ROOT':str(recovery_secrets),
         'QT_ARCHIVE_SHARED_GROUP_ID':'70',
+        'QT_STORAGE_POSTGRES_VOLUME':recipe['volumes']['postgres-data']['name'],
+        'QT_STORAGE_RECOVERY_SOCKET_VOLUME':recipe['volumes']['storage-recovery-socket']['name'],
+        'QT_STORAGE_NETWORK':recipe['networks']['quanttrad']['name'],
         'QT_DOCKER_SOCKET_GID':str(Path('/var/run/docker.sock').stat().st_gid)}
     for flag in ('BOOTSTRAP_MARKET_DATA','ENABLE_SCHEDULED_FACTS','ENABLE_STRUCTURED_FACTS','ENABLE_TRADE_STREAMS','ENABLE_L2_STREAMS'):
         configured['QT_SINGLE_NODE_'+flag]='false'

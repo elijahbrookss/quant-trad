@@ -1748,3 +1748,22 @@ Restoration observations for the four preserved services are batched within each
 check. Container configuration, state and network identities remain fresh for
 every check before and after dispatch; no observation is cached across actions.
 This removes repeated Docker reads without extending the runtime deadline.
+
+
+### Canonical deployment resource bindings
+
+The fixed storage overlay requires explicit `QT_STORAGE_POSTGRES_VOLUME`,
+`QT_STORAGE_RECOVERY_SOCKET_VOLUME` and `QT_STORAGE_NETWORK` names. They identify
+already prepared external resources; Compose must not silently create replacements
+under its project-name defaults. Backend bot launches use that same explicit
+network. These names must agree with the admitted migration/runtime configuration,
+which is a prerequisite for releasing the retained migration hold.
+
+Ordinary deployment with the recorded storage layout refuses any remaining
+`QT_STORAGE_SOURCE_FENCE_ROOT`, including an empty value, in the process or private
+environment file. That setting belongs to the co-located source layout. Compose
+null/reset overrides can resolve it again from the env file, so they are not an
+acceptable way to retire it. The preserving completion transition must prepare the
+correct private environment while retaining its original evidence. Source-layout
+deployment behavior is unchanged. Explicit names and an absent source-only setting
+alone do not authorize release, restart, or deletion of any migration journal.

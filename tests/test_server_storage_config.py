@@ -58,3 +58,15 @@ def test_packaged_preserving_operator_is_part_of_runtime_attestation(tmp_path):
         path.write_text("changed operator")
         assert source_tree_hash.working_tree_hash(tmp_path) != original
         path.write_text("original operator")
+
+
+def test_fixed_overlay_requires_existing_named_resources():
+    overlay=yaml.safe_load((ROOT/"docker/docker-compose.storage-server.yml").read_text())
+    for name,variable in (("postgres-data","QT_STORAGE_POSTGRES_VOLUME"),
+                          ("storage-recovery-socket","QT_STORAGE_RECOVERY_SOCKET_VOLUME")):
+        assert overlay["volumes"][name]==dict(name="${"+variable+":?"+(
+            "Existing PostgreSQL volume is required" if name=="postgres-data" else
+            "Prepared recovery socket volume is required")+"}",external=True)
+    assert overlay["networks"]["quanttrad"]["external"] is True
+    assert "${QT_STORAGE_NETWORK:?" in overlay["networks"]["quanttrad"]["name"]
+    assert overlay["services"]["backend"]["environment"]["QT_BOT_RUNTIME_NETWORK"] == overlay["networks"]["quanttrad"]["name"]

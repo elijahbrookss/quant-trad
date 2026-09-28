@@ -64,6 +64,7 @@ services:
       # Bot readers receive the HDD archive subtree, read-only, through the
       # existing runner. This host path must equal QT_STORAGE_HDD_ROOT/archives.
       QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:?HDD archive host path is required}
+      QT_BOT_RUNTIME_NETWORK: ${QT_STORAGE_NETWORK:?Existing application network is required}
     # Capacity status uses the registered SSD mount. UID1000 cannot traverse
     # its private UID70 PostgreSQL directories; physical inspection is maintenance-only.
     volumes:
@@ -166,4 +167,16 @@ services:
         max-file: "5"
 
 volumes:
+  postgres-data:
+    name: ${QT_STORAGE_POSTGRES_VOLUME:?Existing PostgreSQL volume is required}
+    external: true
   storage-recovery-socket:
+    name: ${QT_STORAGE_RECOVERY_SOCKET_VOLUME:?Prepared recovery socket volume is required}
+    external: true
+
+networks:
+  quanttrad:
+    # Clear the base driver: this overlay uses an existing external network.
+    driver: ""
+    name: ${QT_STORAGE_NETWORK:?Existing application network is required}
+    external: true

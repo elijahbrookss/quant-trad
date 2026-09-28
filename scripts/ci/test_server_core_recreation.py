@@ -93,7 +93,10 @@ def main():
                 QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH=str(limits),
                 # No Docker socket is mounted in this rehearsal. Keep its
                 # synthetic group distinct from the actual archive group.
-                QT_DOCKER_SOCKET_GID='65534', QT_ARCHIVE_SHARED_GROUP_ID='70')
+                QT_DOCKER_SOCKET_GID='65534', QT_ARCHIVE_SHARED_GROUP_ID='70',
+                QT_STORAGE_POSTGRES_VOLUME=project+'-postgres',
+                QT_STORAGE_RECOVERY_SOCKET_VOLUME=project+'-recovery-socket',
+                QT_STORAGE_NETWORK=project+'-network')
             base += ['--file', 'docker/docker-compose.storage-server.yml']
         config = json.loads(run(base + ['config', '--format', 'json'], env=env).stdout)
         services = (*SERVICES, 'storage-maintenance') if args.storage_layout else SERVICES

@@ -373,6 +373,17 @@ recorded_storage_layout() {
   esac
 }
 
+# An old source fence is incompatible with the split archive/working layout.
+# Compose resolves null/reset values through env_file too; never pretend those
+# spellings remove a source-only input. Reviewed completion must retire it from
+# the private deployment environment, preserving its original evidence.
+require_storage_runtime_environment() {
+  if test "${QT_STORAGE_SOURCE_FENCE_ROOT+x}" = x \
+    || grep -Eq '^[[:space:]]*(export[[:space:]]+)?QT_STORAGE_SOURCE_FENCE_ROOT[[:space:]]*=' "$env_file"; then
+    die "source-only storage fence remains configured; preserve the original environment and complete the reviewed storage environment transition"
+  fi
+}
+
 storage_overlay_for() {
   local source_root="$1"
   local layout
@@ -392,6 +403,7 @@ compose() {
     storage_overlay="$(storage_overlay_for "$repo_root")" || return
     if test -n "$storage_overlay"; then
       compose_file_args+=(--file "$storage_overlay")
+      require_storage_runtime_environment
     fi
   fi
   local profile
@@ -440,6 +452,7 @@ compose_from_repo_root() {
   storage_overlay="$(storage_overlay_for "$source_root")" || return
   if test -n "$storage_overlay"; then
     compose_file_args+=(--file "$storage_overlay")
+    require_storage_runtime_environment
   fi
   if test -n "$extra_compose_file"; then
     test -f "$extra_compose_file" \
