@@ -194,7 +194,7 @@ def test_split_recipe_binds_existing_private_spool_and_single_owner(split_recipe
 
 
 @pytest.mark.parametrize('fault',['source-fence','collector-pid','collector-uid','maintenance-spool','maintenance-key-write',
-    'collector-owner','group','capability','db-definition','foreign-service','unresolved-pid'])
+    'collector-owner','group','capability','db-definition','foreign-service','foreign-pid-service'])
 def test_split_recipe_refuses_ownership_and_mount_regressions(split_recipe,fault):
     model,admit=split_recipe
     collector=model['services']['market-data-collector'];maintenance=model['services']['storage-maintenance']
@@ -207,7 +207,7 @@ def test_split_recipe_refuses_ownership_and_mount_regressions(split_recipe,fault
     elif fault=='group':collector['group_add']=[]
     elif fault=='capability':collector['cap_add']=['DAC_READ_SEARCH']
     elif fault=='db-definition':model['services']['tsdb']['user']='0:0'
-    elif fault=='unresolved-pid':maintenance['pid']='service:tsdb'
+    elif fault=='foreign-pid-service':maintenance['pid']='service:other-database'
     else:model['services']['another-maintenance']={}
     with pytest.raises(RuntimeError,match='storage_online_runtime_'):admit()
 
@@ -239,3 +239,10 @@ def test_inventory_only_admits_exact_stopped_application_removal(monkeypatch,fau
     if fault is None:assert h.inventory('fixture',**kwargs)['backend']['status']=='removing'
     else:
         with pytest.raises(RuntimeError):h.inventory('fixture',**kwargs)
+
+
+def test_prepared_recipe_accepts_only_database_service_pid_reference(split_recipe):
+    model,admit=split_recipe
+    model['services']['storage-maintenance']['pid']='service:tsdb'
+    admitted,_=admit()
+    assert admitted['services']['storage-maintenance']['pid']=='service:tsdb'

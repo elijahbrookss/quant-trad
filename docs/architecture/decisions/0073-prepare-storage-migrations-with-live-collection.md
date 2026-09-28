@@ -9,6 +9,9 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_operation.py
+  - tests/test_storage_online_operation.py
+  - scripts/ci/online_operation_fixture.py
   - tests/test_storage_online_capture.py
   - tests/test_storage_online_runtime.py
   - scripts/automation/storage_online_runtime.py
@@ -1622,3 +1625,31 @@ checked under its locks and the original proof/capture deadline retained.
 The disposable host fixture observes results instead of supplying reference
 names or performing catalog mutations. These background commands add no final
 switch authority, new operator entrypoint or generic relocation mechanism.
+
+## Fixed prepared-operation driver
+
+`storage_online_operation.run_prepared_operation` connects the existing owners
+from admitted source-serving preparation and an immutable worker request through
+background copy, held switch, independently verified reader retirement, recovery
+mounts/repositories, private pending-WAL copy and application startup. It keeps
+the deployment lock and source hold through that entire transition. It does not
+create receipts or infer authority from empty queues. The existing phase owners
+still validate all mutations and original capture/final wall/boot/monotonic clocks.
+
+Background preparation finishes finite SQL baselines and relocations before
+following the growing SQL/archive tails; reference pages stay bounded. A failed
+command, uncertain COMMIT, retirement failure or recovery action propagates
+without any automatic reconnect, replay, reopen, abort or marker removal. Numeric
+limits are explicit inputs, not production budgets. Runtime readiness explicitly
+does not claim a complete encrypted pair or ordinary relaunch authority.
+
+The fixed recovery database recipe can be rendered before dispatch without
+starting or changing a database. The maintenance PID setting may use the exact
+Compose reference `service:tsdb`, which permits advance runtime configuration;
+actual container admission still requires the exact replacement database PID
+namespace. Foreign services and application PID sharing remain refused.
+
+This is the internal operation driver, not a newly exposed public CLI. Initial
+host preparation, full private-plan preflight, terminal reconciliation/release,
+actual source/fleet/resource admission and measured production impact remain
+required before a supported release command can be enabled.

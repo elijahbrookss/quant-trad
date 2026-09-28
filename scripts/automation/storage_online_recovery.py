@@ -54,6 +54,18 @@ def validate_recovery_journal(saved):
         raise RuntimeError("storage_online_recovery_completion_invalid")
 
 
+def database_recipe(base, *, keys_root, socket_volume, history):
+    """Render the fixed preserving mounts without starting or changing a database."""
+    model = deepcopy(base)
+    service = model["services"]["tsdb"]
+    service["volumes"] += [dict(type="bind", source=str(keys_root),
+        target="/run/quanttrad/recovery", read_only=True, bind=dict(create_host_path=False)),
+        dict(type="volume", source="storage-recovery-socket", target="/var/run/postgresql")]
+    model["volumes"]["storage-recovery-socket"] = dict(name=socket_volume, external=True)
+    preserving._database_recovery_mounts(service, model["volumes"], history)
+    return model
+
+
 def prepare_database(state_root, *, saved, worker_process, keys_root, socket_volume,
                      max_duration_seconds, source_check):
     """Single live invocation; every failed dispatch remains unresolved, never retried."""
@@ -86,13 +98,8 @@ def prepare_database(state_root, *, saved, worker_process, keys_root, socket_vol
         base, history = preserving._database_recipe(state_root, binding["project"])
         if host.digest(base) != preparation["recipe_sha256"]:
             raise RuntimeError("storage_online_recovery_original_recipe_changed")
-        model = deepcopy(base)
+        model = database_recipe(base, keys_root=keys_root, socket_volume=socket_volume, history=history)
         service = model["services"]["tsdb"]
-        service["volumes"] += [dict(type="bind", source=str(keys_root),
-            target="/run/quanttrad/recovery", read_only=True, bind=dict(create_host_path=False)),
-            dict(type="volume", source="storage-recovery-socket", target="/var/run/postgresql")]
-        model["volumes"]["storage-recovery-socket"] = dict(name=socket_volume, external=True)
-        preserving._database_recovery_mounts(service, model["volumes"], history)
         socket_info = json.loads(host.docker("volume", "inspect", "--format", "{{json .}}", socket_volume))
         if (socket_volume == mounts["/var/lib/postgresql/data"].get("Name")
                 or socket_info.get("Name") != socket_volume or socket_info.get("Driver") != "local"

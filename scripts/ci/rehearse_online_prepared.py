@@ -19,6 +19,7 @@ parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
 parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
+parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
@@ -41,6 +42,8 @@ parser.add_argument('--recovery-spool',action='store_true',help='prepare preserv
 parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
 parser.add_argument("--recovery-runtime",action="store_true",help="start actual split application composition after committed recovery preparation")
 options=parser.parse_args()
+if options.operation_driver and not (options.recovery_runtime and options.initial_capture):
+ parser.error('--operation-driver requires --recovery-runtime --initial-capture')
 if options.initial_capture and not (options.prepare_source and options.worker_phases):
  parser.error("--initial-capture requires --prepare-source --worker-phases")
 if options.recovery_runtime and (not options.recovery_spool or options.recovery_spool_reply_loss):
@@ -287,839 +290,862 @@ os.chown(root,70,70)
  original_source_metadata=[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
  kwargs=dict(project=project,source_revision=revision,image=image,request=request,
              inventory_path=inventory,descriptor_limit=1024,memory_bytes=1024**3)
- name=project+'-storage-online';owned.append(name)
- def command(op,*,response_deadline=None,**extra):
-  global last_reply
-  last_reply=channel.exchange(op,response_deadline=response_deadline,**extra)
-  return last_reply
- first_deadline=None
- launch_context=launch.launched_online_worker
- if options.commit_switch:
-  source_holds.enter_context(host_boundary.deployment_lock(state))
-  launch_context=launch.launched_online_worker_locked
- if options.initial_capture:
-  capture_entry=time.monotonic()
-  with launch_context(state,**kwargs) as (worker,receipt):
-   first_channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time())
-   assert first_channel.greeting['state']=='background'
-   original_capture=host_boundary.load_receipt(state/launch._STATE)['capture']
-   original_capture_deadline=receipt['deadline']
-   report['initial_capture_ready_seconds']=time.monotonic()-capture_entry
-  # Actual clean worker retirement, then original capture/controller reentry.
-  # No copy, final pause or recovery action was dispatched by the first worker.
- for attempt in range(1 if options.final_pause else 2):
-  with launch_context(state,**kwargs) as (worker,receipt):
-   channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
-   if options.initial_capture:
-    saved_worker=host_boundary.load_receipt(state/launch._STATE)
-    assert saved_worker['capture']==launch._capture_observation(pgid)
-    assert saved_worker['deadline']==receipt['deadline']
-    assert saved_worker['capture']==original_capture and receipt['deadline']==original_capture_deadline
-    report['initial_capture_restart_preserved_original_clock']=True
-    assert host_boundary.source_clients_serving(host_boundary.inventory(project,operator_id=receipt['container_id']))
-    report['initial_capture_while_source_serving']=True
-    report['initial_capture_binding']=saved_worker['capture']
-   assert not greeting['final_switch_authorized']
-   assert greeting['background_hashed_bytes']==0
-   assert receipt['source_clients_unchanged']
-   if attempt==0:
-    first_deadline=receipt['deadline']
-    previous_id=greeting['controller_id']
-    try:
-     with launch.launched_online_worker(state,**kwargs):
-      raise AssertionError('second owning launcher admitted')
-    except RuntimeError as exc:
-     assert str(exc)=='storage_pause_deployment_lock_busy'
-    for _ in range(3):command('reprove')
-    assert command('status')['background_hashed_bytes']>0
-    (control/'publish').write_text('publish')
-    if options.worker_phases:
-     def phase(step,relation=None):
-      reply=command('prepare_step',step=step,relation=relation,max_duration_seconds=30)
-      assert reply['result']['committed'] and not reply['final_switch_authorized']
-      return reply
-     phase('catalog_history','qt_fact_storage_cutover_v1.fact_versions')
-     for _ in range(64):
-      reply=command('sql_copy')
-      outcome=reply['result']['outcome']
-      if outcome=='identity_relocation_required':phase('identity_history')
-      elif outcome=='raw_relocation_required':phase('raw_history')
-      elif outcome=='both_tails_observed_empty' and (control/'published').exists():break
-     else:raise RuntimeError('tiny_worker_phases_did_not_converge')
-     phase('identity_capture')
-     relations=[];after=None;catalog_relations=None
-     while True:
-      page=command('inspect_references',after=after)['result']
-      assert len(page['references'])<=32
-      if catalog_relations is None:catalog_relations=page['catalogs']
-      assert page['catalogs']==catalog_relations
-      relations.extend(row['relation'] for row in page['references'])
-      after=page['next_after']
-      if after is None:break
-     assert len(relations)==len(set(relations))<=8192
-     for relation in relations:
-      phase('reference_prepare',relation);phase('reference_validate',relation)
-     phase('reference_adopt')
-     for relation in catalog_relations:phase('catalog_history',relation)
-     (control/'phases-finished').write_text('finished')
-     waitfile('catalogs-verified')
-     report['reference_discovery_and_catalog_moves_owned_by_worker']=True
-     report['explicit_preparation_through_worker']=True
-     report['worker_reference_relations']=len(relations)
-    baselines=set()
-    def archive_page():
-     page=command('archive_copy')['result']
-     if page.get('baseline_complete') is True:baselines.add(page['family'])
-    archive_page()
-    waitfile('published')
-    for i in range(30):
-     archive_page();command('reprove');reply=command('sql_copy')
-     if (reply['result']['outcome']=='both_tails_observed_empty'
-         and len(reply['reproved_families_at_observation'])==3
-         and (not options.final_delta or len(baselines)==3)):break
-    else:raise RuntimeError('tiny_host_tails_did_not_converge')
-    final=command('status');assert final['background_hashed_bytes']>0
-    first_id=receipt['container_id']
-    if options.final_pause:
-     from scripts.automation import storage_online_final as final_host
-     import multiprocessing,signal
-     pause_args=dict(project=project,source_revision=revision,worker_id=first_id,
-                     controller_id=greeting['controller_id'],max_duration_seconds=120 if options.recovery_runtime else 60)
-     # The independent diagnostic publisher shares source mounts but is outside
-     # the admitted project/network. Prove refusal, then let it finish while the
-     # real source peers still serve. Never exempt it from production admission.
-     with host_boundary.docker_deadline(time.monotonic()+5):
-      try:
-       final_host._admit_mount_writers(host_boundary.inventory(project,operator_id=first_id),operator_id=first_id)
-       raise AssertionError('independent fixture publisher admitted')
-      except RuntimeError as exc:
-       assert str(exc)=='storage_online_unadmitted_mount_writer'
-     assert not (state/final_host.STATE).exists()
-     assert initial._source_healthy(initial._admit_source(state,preparation,require_running=True,operator_id=first_id))
-     if options.final_delta:
-      (control/'final-publish').write_text('publish')
-      waitfile('final-published')
-     (control/'finished').write_text('finished');fixture.wait(timeout=30)
-     assert fixture.returncode==0
-     publisher_state=json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)
-     assert not publisher_state['Running'] and publisher_state['Pid']==0
-     frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t),'capture',(SELECT to_jsonb(c) FROM qt_fact_header_cutover_v2.capture c WHERE id=1))::text"
-     before_final_frozen=host_boundary.database_query(pgid,frozen_sql)
-     report['independent_publisher_retired_before_final']=dict(unadmitted_writer_refused=True,
-       original_clients_still_serving=True,fixture_exited=True,source_pause_started=False,
-       publisher_exclusion_authorized=False)
-     if options.worker_shutdown:
-      # Fail only the final drain, after original initial preparation/resumption.
-      marker=project+'-finalizer-marker';owned.append(marker)
-      run(['run','--name',marker,'--user','70:70','--network','none','--memory','64m',
-        '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
-        "from pathlib import Path;p=Path('/s/objects');[(p/n).unlink(missing_ok=True) for n in ('lifecycle-stopped','heartbeat-stopped')];"+
-        ("(p/'fail-final-drain').write_text('fail')" if options.worker_shutdown=='fail' else "None")])
-     def interrupt_first_stop():
-      original=host_boundary.docker
-      def stop_then_die(*args,**kwargs):
-       value=original(*args,**kwargs)
-       if args[0]=='stop':
-        assert final_host._load(state/final_host.STATE)['phase']=='stopping'
-        os.kill(os.getpid(),signal.SIGKILL)
-       return value
-      host_boundary.docker=stop_then_die
-      final_host.stop_online_source_locked(state,**pause_args)
-     child=multiprocessing.get_context('fork').Process(target=interrupt_first_stop)
-     child.start();child.join(timeout=30)
-     if child.is_alive():
-      child.kill();child.join(timeout=10)
-      raise RuntimeError('owned final pause child exceeded fixture deadline')
-     assert child.exitcode == -signal.SIGKILL
-     first=final_host._load(state/final_host.STATE)
-     assert first['phase']=='stopping'
-     rows=host_boundary.inventory(project,operator_id=first_id)
-     assert sum(not rows[n]['running'] for n in host_boundary.STOP)==2
+ if options.operation_driver:
+  from scripts.automation import storage_online_operation as operation
+  from scripts.automation import storage_online_final as final_host
+  from scripts.automation import storage_online_recovery as recovery_host
+  from scripts.ci.online_operation_fixture import write_runtime_recipe
+  owned.extend([project+'-storage-online',project+'-storage-repository-prepare',project+'-storage-spool-prepare'])
+  # Reviewed fixture configuration is prepared BEFORE any driver dispatch.
+  base=host_boundary.load_receipt(state/initial.held.DATABASE_RECIPE)
+  recovery_model=recovery_host.database_recipe(base,keys_root=recovery_keys,socket_volume=recovery_socket,history=history)
+  write_runtime_recipe(state=state,runtime_model=recovery_model,inventory=inventory,udev=udev,
+    image=image,password=password,dbname=dbname,history=history,project=project,
+    candidate_working=candidate_working,owned=owned)
+  background=operation.prepare_background
+  frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t))::text"
+  before_final_frozen=host_boundary.database_query(pgid,frozen_sql)
+  def publish_during_background(*args,**kw):
+   (control/'publish').write_text('publish')
+   result=background(*args,**kw)
+   (control/'phases-finished').write_text('finished');waitfile('catalogs-verified')
+   (control/'final-publish').write_text('publish');waitfile('final-published')
+   (control/'finished').write_text('finished');fixture.wait(timeout=30)
+   assert fixture.returncode==0
+   assert not json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)['Running']
+   return result
+  operation.prepare_background=publish_during_background
+  actual_action=host_boundary.supervised_source_action
+  def recover_before_maintenance(args,**kw):
+   saved=final_host._load(state/final_host.STATE)
+   if saved.get('runtime',{}).get('inflight')=='start:storage-maintenance':
+    recovery_spec=json.loads((control/'runtime-recovery.json').read_text())
+    code="import json,sys;from tests.test_market_data.online_runtime_recovery_fixture import verify;print('QT_CONNECTED_RECOVERY='+json.dumps(verify(json.loads(sys.argv[1]))))"
+    recovered=run(['exec',saved['runtime']['candidate_ids']['market-data-collector'],
+      'python','-c',code,json.dumps(recovery_spec)],timeout=kw['deadline']-time.monotonic(),check=False)
+    (state/'runtime-recovery.log').write_text(recovered.stdout+recovered.stderr)
+    assert recovered.returncode==0, 'ordinary connected recovery failed; see runtime-recovery.log'
+    replies=[json.loads(line.split('=',1)[1]) for line in recovered.stdout.splitlines() if line.startswith('QT_CONNECTED_RECOVERY=')]
+    assert len(replies)==1;report['normal_runtime_recovery']=replies[0]
+   return actual_action(args,**kw)
+  host_boundary.supervised_source_action=recover_before_maintenance
+  try:
+   result=operation.run_prepared_operation(state,**kwargs,source_image=source_image,
+    limits=operation.OperationLimits(preparation_seconds=30,final_seconds=120,recovery_seconds=30,runtime_seconds=60,
+      spool_max_bytes=64*1024**2,spool_max_entries=4096,spool_reserve_bytes=8*1024**2,
+      repository_max_bytes=256*1024**2,repository_reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2),
+    keys_root=recovery_keys,socket_volume=recovery_socket,spool_destination=candidate_working)
+  finally:
+   operation.prepare_background=background;host_boundary.supervised_source_action=actual_action
+  saved=final_host._load(state/final_host.STATE)
+  assert saved['phase']=='recovery_runtime_ready'
+  assert result['runtime']['collector_process_healthy'] and not result['ordinary_relaunch_authorized']
+  pgid=saved['recovery']['replacement_id'];owned.append(pgid)
+  worker_receipt=host_boundary.load_receipt(state/launch._STATE)
+  retired=json.loads(run(['inspect',worker_receipt['container_id'],'--format','{{json .State}}']).stdout)
+  assert not retired['Running'] and retired['Pid']==0
+  assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
+  assert (state/initial.STATE).read_bytes()==prepared_bytes
+  assert host_boundary.cluster_identifier(pgid)==original_cluster
+  assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+  report['operation_driver']=dict(**result,final_entry_to_applications_ready_seconds=saved['runtime']['finished_at']-saved['started_at'],
+    initial_recipe_preserved=True,source_metadata_preserved=True,reader_retired=True,frozen_preserved=True,
+    fixture_only_publication_and_verification=True,production_admission=False)
+  log.close()
+  report.update(passed=True,image=image,fixture_seconds=time.monotonic()-started)
+ else:
+  name=project+'-storage-online';owned.append(name)
+  def command(op,*,response_deadline=None,**extra):
+   global last_reply
+   last_reply=channel.exchange(op,response_deadline=response_deadline,**extra)
+   return last_reply
+  first_deadline=None
+  launch_context=launch.launched_online_worker
+  if options.commit_switch:
+   source_holds.enter_context(host_boundary.deployment_lock(state))
+   launch_context=launch.launched_online_worker_locked
+  if options.initial_capture:
+   capture_entry=time.monotonic()
+   with launch_context(state,**kwargs) as (worker,receipt):
+    first_channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time())
+    assert first_channel.greeting['state']=='background'
+    original_capture=host_boundary.load_receipt(state/launch._STATE)['capture']
+    original_capture_deadline=receipt['deadline']
+    report['initial_capture_ready_seconds']=time.monotonic()-capture_entry
+   # Actual clean worker retirement, then original capture/controller reentry.
+   # No copy, final pause or recovery action was dispatched by the first worker.
+  for attempt in range(1 if options.final_pause else 2):
+   with launch_context(state,**kwargs) as (worker,receipt):
+    channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
+    if options.initial_capture:
+     saved_worker=host_boundary.load_receipt(state/launch._STATE)
+     assert saved_worker['capture']==launch._capture_observation(pgid)
+     assert saved_worker['deadline']==receipt['deadline']
+     assert saved_worker['capture']==original_capture and receipt['deadline']==original_capture_deadline
+     report['initial_capture_restart_preserved_original_clock']=True
+     assert host_boundary.source_clients_serving(host_boundary.inventory(project,operator_id=receipt['container_id']))
+     report['initial_capture_while_source_serving']=True
+     report['initial_capture_binding']=saved_worker['capture']
+    assert not greeting['final_switch_authorized']
+    assert greeting['background_hashed_bytes']==0
+    assert receipt['source_clients_unchanged']
+    if attempt==0:
+     first_deadline=receipt['deadline']
+     previous_id=greeting['controller_id']
      try:
-      paused=final_host.stop_online_source_locked(state,**pause_args)
+      with launch.launched_online_worker(state,**kwargs):
+       raise AssertionError('second owning launcher admitted')
      except RuntimeError as exc:
-      if options.worker_shutdown!='fail' or str(exc)!='storage_pause_unclean_stop: service=market-data-collector':raise
-      observed=command('status')
-      assert observed['controller_id']==greeting['controller_id']
-      assert observed['background_hashed_bytes']==final['background_hashed_bytes']
-      report['failed_drain_live_proof_retained_before_exit']=True
-      raise
-     assert paused['phase']=='paused'
-     assert paused['deadline']==first['deadline'] and paused['deadline_boot']==first['deadline_boot']
-     before=(state/final_host.STATE).read_bytes()
-     assert final_host.stop_online_source_locked(state,**pause_args)==paused
-     assert (state/final_host.STATE).read_bytes()==before
-     try:
-      final_host.stop_online_source_locked(state,**(pause_args|dict(controller_id='f'*32)))
-      raise AssertionError('changed controller admitted')
-     except RuntimeError as exc:
-      assert str(exc)=='storage_online_final_binding_changed'
-     inventory_before=inventory.read_bytes()
-     try:
-      inventory.write_bytes(inventory_before+b' ')
-      try:
+      assert str(exc)=='storage_pause_deployment_lock_busy'
+     for _ in range(3):command('reprove')
+     assert command('status')['background_hashed_bytes']>0
+     (control/'publish').write_text('publish')
+     if options.worker_phases:
+      def phase(step,relation=None):
+       reply=command('prepare_step',step=step,relation=relation,max_duration_seconds=30)
+       assert reply['result']['committed'] and not reply['final_switch_authorized']
+       return reply
+      phase('catalog_history','qt_fact_storage_cutover_v1.fact_versions')
+      for _ in range(64):
+       reply=command('sql_copy')
+       outcome=reply['result']['outcome']
+       if outcome=='identity_relocation_required':phase('identity_history')
+       elif outcome=='raw_relocation_required':phase('raw_history')
+       elif outcome=='both_tails_observed_empty' and (control/'published').exists():break
+      else:raise RuntimeError('tiny_worker_phases_did_not_converge')
+      phase('identity_capture')
+      relations=[];after=None;catalog_relations=None
+      while True:
+       page=command('inspect_references',after=after)['result']
+       assert len(page['references'])<=32
+       if catalog_relations is None:catalog_relations=page['catalogs']
+       assert page['catalogs']==catalog_relations
+       relations.extend(row['relation'] for row in page['references'])
+       after=page['next_after']
+       if after is None:break
+      assert len(relations)==len(set(relations))<=8192
+      for relation in relations:
+       phase('reference_prepare',relation);phase('reference_validate',relation)
+      phase('reference_adopt')
+      for relation in catalog_relations:phase('catalog_history',relation)
+      (control/'phases-finished').write_text('finished')
+      waitfile('catalogs-verified')
+      report['reference_discovery_and_catalog_moves_owned_by_worker']=True
+      report['explicit_preparation_through_worker']=True
+      report['worker_reference_relations']=len(relations)
+     baselines=set()
+     def archive_page():
+      page=command('archive_copy')['result']
+      if page.get('baseline_complete') is True:baselines.add(page['family'])
+     archive_page()
+     waitfile('published')
+     for i in range(30):
+      archive_page();command('reprove');reply=command('sql_copy')
+      if (reply['result']['outcome']=='both_tails_observed_empty'
+          and len(reply['reproved_families_at_observation'])==3
+          and (not options.final_delta or len(baselines)==3)):break
+     else:raise RuntimeError('tiny_host_tails_did_not_converge')
+     final=command('status');assert final['background_hashed_bytes']>0
+     first_id=receipt['container_id']
+     if options.final_pause:
+      from scripts.automation import storage_online_final as final_host
+      import multiprocessing,signal
+      pause_args=dict(project=project,source_revision=revision,worker_id=first_id,
+                      controller_id=greeting['controller_id'],max_duration_seconds=120 if options.recovery_runtime else 60)
+      # The independent diagnostic publisher shares source mounts but is outside
+      # the admitted project/network. Prove refusal, then let it finish while the
+      # real source peers still serve. Never exempt it from production admission.
+      with host_boundary.docker_deadline(time.monotonic()+5):
+       try:
+        final_host._admit_mount_writers(host_boundary.inventory(project,operator_id=first_id),operator_id=first_id)
+        raise AssertionError('independent fixture publisher admitted')
+       except RuntimeError as exc:
+        assert str(exc)=='storage_online_unadmitted_mount_writer'
+      assert not (state/final_host.STATE).exists()
+      assert initial._source_healthy(initial._admit_source(state,preparation,require_running=True,operator_id=first_id))
+      if options.final_delta:
+       (control/'final-publish').write_text('publish')
+       waitfile('final-published')
+      (control/'finished').write_text('finished');fixture.wait(timeout=30)
+      assert fixture.returncode==0
+      publisher_state=json.loads(run(['inspect',test,'--format','{{json .State}}']).stdout)
+      assert not publisher_state['Running'] and publisher_state['Pid']==0
+      frozen_sql="SELECT jsonb_build_object('datasets',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.datasets t),'dataset_series',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM market.dataset_series t),'capture',(SELECT to_jsonb(c) FROM qt_fact_header_cutover_v2.capture c WHERE id=1))::text"
+      before_final_frozen=host_boundary.database_query(pgid,frozen_sql)
+      report['independent_publisher_retired_before_final']=dict(unadmitted_writer_refused=True,
+        original_clients_still_serving=True,fixture_exited=True,source_pause_started=False,
+        publisher_exclusion_authorized=False)
+      if options.worker_shutdown:
+       # Fail only the final drain, after original initial preparation/resumption.
+       marker=project+'-finalizer-marker';owned.append(marker)
+       run(['run','--name',marker,'--user','70:70','--network','none','--memory','64m',
+         '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
+         "from pathlib import Path;p=Path('/s/objects');[(p/n).unlink(missing_ok=True) for n in ('lifecycle-stopped','heartbeat-stopped')];"+
+         ("(p/'fail-final-drain').write_text('fail')" if options.worker_shutdown=='fail' else "None")])
+      def interrupt_first_stop():
+       original=host_boundary.docker
+       def stop_then_die(*args,**kwargs):
+        value=original(*args,**kwargs)
+        if args[0]=='stop':
+         assert final_host._load(state/final_host.STATE)['phase']=='stopping'
+         os.kill(os.getpid(),signal.SIGKILL)
+        return value
+       host_boundary.docker=stop_then_die
        final_host.stop_online_source_locked(state,**pause_args)
-       raise AssertionError('changed admitted inventory accepted')
-      except RuntimeError as exc:
-       assert str(exc)=='storage_online_final_inventory_changed'
-     finally:
-      inventory.write_bytes(inventory_before)
-     assert (state/final_host.STATE).read_bytes()==before
-     rows=host_boundary.inventory(project,operator_id=first_id)
-     assert not any(rows[n]['running'] for n in host_boundary.STOP)
-     assert all(rows[n]['running'] for n in host_boundary.PASSIVE)
-     assert command('status')['controller_id']==greeting['controller_id']
-     drained=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
-     assert not drained['spool_empty_at_observation'] and not drained['publisher_drain_authorized']
-     assert drained['pending_files']>0  # Existing real QT fixture intentionally retains sealed WAL.
-     report['fixture_retained_spool_observation']=drained
-     if options.real_worker_publication:
-      result=json.loads((working/'objects'/'real-publication-result.json').read_text())
-      assert result['facts_manifests_mappings']==[1,1,1]
-      assert result['wal_retired_after_canonical_ack'] and result['stop_waited_for_publication']
-      report['real_docker_publication']=result
-     if options.worker_shutdown:
-      collector=rows['market-data-collector']['id']
-      stopped=json.loads(run(['inspect',collector,'--format','{{json .State}}']).stdout)
-      assert not stopped['Running'] and not stopped['OOMKilled']
-      assert stopped['ExitCode']==(5 if options.worker_shutdown=='fail' else 0)
-      assert (working/'objects'/'lifecycle-stopped').exists()
-      assert (working/'objects'/'heartbeat-stopped').exists()
-      logs=run(['logs','--tail','120',collector]).stdout+run(['logs','--tail','120',collector]).stderr
-      (state/'worker-shutdown.log').write_text(logs)
-      assert 'market_data_collector_shutdown_signal' in logs
-      if options.worker_shutdown=='fail':
-       assert 'market_data_collector_shutdown_failed' in logs
-       assert (working/'spool'/'qt-signal-owned-fixture'/'pending.sealed').read_bytes()==b'owned failed-finalizer WAL fixture'
-      report['docker_worker_shutdown']=dict(exit_code=stopped['ExitCode'],
-        supervisor_failure_propagated=options.worker_shutdown=='fail',
-        lifecycle_and_heartbeat_stopped=True, controlled_adapter=True,
-        publisher_drain_authorized=False, same_migration_controller=True)
-     # Inject ONLY this owned diagnostic WAL after the synthetic source stops.
-     # The observer must retain it even beside a misleading acknowledgement.
-     probe=project+'-spool-probe';owned.append(probe)
-     probe_args=['run','--name',probe,'--user','70:70','--network','none','--memory','64m',
-       '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c']
-     run(probe_args+["from pathlib import Path;p=Path('/s/spool/qt-final-owned-probe');p.mkdir(parents=True);(p/'segment.sealed').write_bytes(b'pending-WAL');(p/'segment.ack.json').write_text('{}')"])
-     pending=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
-     assert not pending['spool_empty_at_observation'] and pending['pending_files']==drained['pending_files']+1
-     assert (working/'spool/qt-final-owned-probe/segment.sealed').read_bytes()==b'pending-WAL'
-     # Remove only diagnostic bytes created immediately above; never source WAL.
-     cleanup_probe=project+'-spool-probe-cleanup';owned.append(cleanup_probe)
-     run(['run','--name',cleanup_probe,'--user','70:70','--network','none','--memory','64m',
-       '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
-       "from pathlib import Path;p=Path('/s/spool/qt-final-owned-probe');(p/'segment.sealed').unlink();(p/'segment.ack.json').unlink();p.rmdir()"])
-     restored=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
-     assert restored['pending_files']==drained['pending_files'] and restored['pending_bytes']==drained['pending_bytes']
-     assert not restored['spool_empty_at_observation']
-     assert (state/final_host.STATE).read_bytes()==before
-     report['read_only_spool_observation']=True
-     report['pending_spool_preserved']=True
-     report['final_stop_interrupted_reentry']=True
-     report['final_stop_seconds']=paused['paused_at']-paused['started_at']
-     report['final_original_deadline_preserved']=True
-     report['final_stopped_only_exact_clients']=True
-     report['final_worker_and_proof_retained']=True
-     report['final_source_resumption_qualified']=False
-     if options.commit_switch:
-      source_check=source_holds.enter_context(final_host.held_source_writers_locked(state,source_image=source_image))
-     if options.final_delta:
-      # The independent fixture published its late tail before source pause,
-      # then exited. Its writable mounts cannot remain live during admission.
-      # Bind the already persisted final window once. The older diagnostic's
-      # extra 25-second subwindow is insufficient for repeated global admission
-      # plus terminal reconciliation; the original 60-second fixture ceiling is
-      # unchanged and no later phase may renew or extend this absolute deadline.
-      deadline=time.monotonic()+final_host._remaining(paused)-1
-      def lost_reply(operation,**args):
-       command(operation,**args)
-       raise TimeoutError('fixture dropped fully received delta reply')
+      child=multiprocessing.get_context('fork').Process(target=interrupt_first_stop)
+      child.start();child.join(timeout=30)
+      if child.is_alive():
+       child.kill();child.join(timeout=10)
+       raise RuntimeError('owned final pause child exceeded fixture deadline')
+      assert child.exitcode == -signal.SIGKILL
+      first=final_host._load(state/final_host.STATE)
+      assert first['phase']=='stopping'
+      rows=host_boundary.inventory(project,operator_id=first_id)
+      assert sum(not rows[n]['running'] for n in host_boundary.STOP)==2
       try:
-       final_host.copy_final_delta_locked(state,exchange=lost_reply,deadline=deadline,max_rounds=1)
-       raise AssertionError('lost delta reply ignored')
-      except TimeoutError:
-       pass
-      # The pipe owner consumed that response and keeps its sequence. This is
-      # not blind recovery of an unread/partial reply or a dead worker.
-      delta=final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=8)
-      assert delta['last_observation']['sql']['outcome']=='both_tails_observed_empty'
-      assert all(x['captured_tail_empty_at_observation'] for x in delta['last_observation']['archives'])
-      assert not delta['publisher_drain_authorized'] and not delta['final_switch_authorized']
+       paused=final_host.stop_online_source_locked(state,**pause_args)
+      except RuntimeError as exc:
+       if options.worker_shutdown!='fail' or str(exc)!='storage_pause_unclean_stop: service=market-data-collector':raise
+       observed=command('status')
+       assert observed['controller_id']==greeting['controller_id']
+       assert observed['background_hashed_bytes']==final['background_hashed_bytes']
+       report['failed_drain_live_proof_retained_before_exit']=True
+       raise
+      assert paused['phase']=='paused'
+      assert paused['deadline']==first['deadline'] and paused['deadline_boot']==first['deadline_boot']
+      before=(state/final_host.STATE).read_bytes()
+      assert final_host.stop_online_source_locked(state,**pause_args)==paused
       assert (state/final_host.STATE).read_bytes()==before
+      try:
+       final_host.stop_online_source_locked(state,**(pause_args|dict(controller_id='f'*32)))
+       raise AssertionError('changed controller admitted')
+      except RuntimeError as exc:
+       assert str(exc)=='storage_online_final_binding_changed'
+      inventory_before=inventory.read_bytes()
+      try:
+       inventory.write_bytes(inventory_before+b' ')
+       try:
+        final_host.stop_online_source_locked(state,**pause_args)
+        raise AssertionError('changed admitted inventory accepted')
+       except RuntimeError as exc:
+        assert str(exc)=='storage_online_final_inventory_changed'
+      finally:
+       inventory.write_bytes(inventory_before)
+      assert (state/final_host.STATE).read_bytes()==before
+      rows=host_boundary.inventory(project,operator_id=first_id)
+      assert not any(rows[n]['running'] for n in host_boundary.STOP)
+      assert all(rows[n]['running'] for n in host_boundary.PASSIVE)
       assert command('status')['controller_id']==greeting['controller_id']
-      assert command('status')['background_hashed_bytes']>final['background_hashed_bytes']
-      report['held_final_delta']=dict(rounds_after_lost_reply=delta['rounds'],
-        original_deadline_preserved=True,pre_pause_publication_copied=True,
-        fully_received_reply_loss=True,final_switch_authorized=False)
-      final=command('status')
-      if options.switch_entry:
-       original_save=host_boundary.save_receipt
-       def save_then_interrupt(path,value,**args):
-        original_save(path,value,**args)
-        if path==state/final_host.STATE and value['phase']=='switch_entered':
-         raise RuntimeError('fixture interrupted after durable switch intent')
-       host_boundary.save_receipt=save_then_interrupt
+      drained=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
+      assert not drained['spool_empty_at_observation'] and not drained['publisher_drain_authorized']
+      assert drained['pending_files']>0  # Existing real QT fixture intentionally retains sealed WAL.
+      report['fixture_retained_spool_observation']=drained
+      if options.real_worker_publication:
+       result=json.loads((working/'objects'/'real-publication-result.json').read_text())
+       assert result['facts_manifests_mappings']==[1,1,1]
+       assert result['wal_retired_after_canonical_ack'] and result['stop_waited_for_publication']
+       report['real_docker_publication']=result
+      if options.worker_shutdown:
+       collector=rows['market-data-collector']['id']
+       stopped=json.loads(run(['inspect',collector,'--format','{{json .State}}']).stdout)
+       assert not stopped['Running'] and not stopped['OOMKilled']
+       assert stopped['ExitCode']==(5 if options.worker_shutdown=='fail' else 0)
+       assert (working/'objects'/'lifecycle-stopped').exists()
+       assert (working/'objects'/'heartbeat-stopped').exists()
+       logs=run(['logs','--tail','120',collector]).stdout+run(['logs','--tail','120',collector]).stderr
+       (state/'worker-shutdown.log').write_text(logs)
+       assert 'market_data_collector_shutdown_signal' in logs
+       if options.worker_shutdown=='fail':
+        assert 'market_data_collector_shutdown_failed' in logs
+        assert (working/'spool'/'qt-signal-owned-fixture'/'pending.sealed').read_bytes()==b'owned failed-finalizer WAL fixture'
+       report['docker_worker_shutdown']=dict(exit_code=stopped['ExitCode'],
+         supervisor_failure_propagated=options.worker_shutdown=='fail',
+         lifecycle_and_heartbeat_stopped=True, controlled_adapter=True,
+         publisher_drain_authorized=False, same_migration_controller=True)
+      # Inject ONLY this owned diagnostic WAL after the synthetic source stops.
+      # The observer must retain it even beside a misleading acknowledgement.
+      probe=project+'-spool-probe';owned.append(probe)
+      probe_args=['run','--name',probe,'--user','70:70','--network','none','--memory','64m',
+        '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c']
+      run(probe_args+["from pathlib import Path;p=Path('/s/spool/qt-final-owned-probe');p.mkdir(parents=True);(p/'segment.sealed').write_bytes(b'pending-WAL');(p/'segment.ack.json').write_text('{}')"])
+      pending=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
+      assert not pending['spool_empty_at_observation'] and pending['pending_files']==drained['pending_files']+1
+      assert (working/'spool/qt-final-owned-probe/segment.sealed').read_bytes()==b'pending-WAL'
+      # Remove only diagnostic bytes created immediately above; never source WAL.
+      cleanup_probe=project+'-spool-probe-cleanup';owned.append(cleanup_probe)
+      run(['run','--name',cleanup_probe,'--user','70:70','--network','none','--memory','64m',
+        '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
+        "from pathlib import Path;p=Path('/s/spool/qt-final-owned-probe');(p/'segment.sealed').unlink();(p/'segment.ack.json').unlink();p.rmdir()"])
+      restored=final_host.observe_source_drain_locked(state,exchange=command,max_entries=10000)
+      assert restored['pending_files']==drained['pending_files'] and restored['pending_bytes']==drained['pending_bytes']
+      assert not restored['spool_empty_at_observation']
+      assert (state/final_host.STATE).read_bytes()==before
+      report['read_only_spool_observation']=True
+      report['pending_spool_preserved']=True
+      report['final_stop_interrupted_reentry']=True
+      report['final_stop_seconds']=paused['paused_at']-paused['started_at']
+      report['final_original_deadline_preserved']=True
+      report['final_stopped_only_exact_clients']=True
+      report['final_worker_and_proof_retained']=True
+      report['final_source_resumption_qualified']=False
+      if options.commit_switch:
+       source_check=source_holds.enter_context(final_host.held_source_writers_locked(state,source_image=source_image))
+      if options.final_delta:
+       # The independent fixture published its late tail before source pause,
+       # then exited. Its writable mounts cannot remain live during admission.
+       # Bind the already persisted final window once. The older diagnostic's
+       # extra 25-second subwindow is insufficient for repeated global admission
+       # plus terminal reconciliation; the original 60-second fixture ceiling is
+       # unchanged and no later phase may renew or extend this absolute deadline.
+       deadline=time.monotonic()+final_host._remaining(paused)-1
+       def lost_reply(operation,**args):
+        command(operation,**args)
+        raise TimeoutError('fixture dropped fully received delta reply')
        try:
-        try:
-         final_host.record_switch_entry_locked(state,deadline=deadline,
-           observe_worker=lambda **args:command('status',response_deadline=args['deadline']))
-         raise AssertionError('switch intent interruption was lost')
-        except RuntimeError as exc:
-         assert str(exc)=='fixture interrupted after durable switch intent'
-       finally:host_boundary.save_receipt=original_save
-       entered=final_host._load(state/final_host.STATE)
-       assert entered['phase']=='switch_entered' and entered['binding']==paused['binding']
-       assert entered['deadline']==paused['deadline'] and entered['deadline_boot']==paused['deadline_boot']
-       assert entered['switch']['deadline_monotonic']==deadline
-       checkpoint=(state/final_host.STATE).read_bytes()
-       def unexpected_observation(**args):raise AssertionError('recorded switch intent was replayed')
-       for action in (
-         lambda:final_host.record_switch_entry_locked(state,deadline=deadline,observe_worker=unexpected_observation),
-         lambda:final_host.stop_online_source_locked(state,**pause_args)):
-        try:action();raise AssertionError('switch-entered pause reentry admitted')
-        except RuntimeError as exc:assert str(exc)=='storage_online_final_switch_reconciliation_required'
-       try:
-        final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=1)
-        raise AssertionError('tail mutation admitted after switch entry')
-       except RuntimeError as exc:assert str(exc)=='storage_online_final_delta_paused_source_required'
-       assert (state/final_host.STATE).read_bytes()==checkpoint
+        final_host.copy_final_delta_locked(state,exchange=lost_reply,deadline=deadline,max_rounds=1)
+        raise AssertionError('lost delta reply ignored')
+       except TimeoutError:
+        pass
+       # The pipe owner consumed that response and keeps its sequence. This is
+       # not blind recovery of an unread/partial reply or a dead worker.
+       delta=final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=8)
+       assert delta['last_observation']['sql']['outcome']=='both_tails_observed_empty'
+       assert all(x['captured_tail_empty_at_observation'] for x in delta['last_observation']['archives'])
+       assert not delta['publisher_drain_authorized'] and not delta['final_switch_authorized']
+       assert (state/final_host.STATE).read_bytes()==before
+       assert command('status')['controller_id']==greeting['controller_id']
+       assert command('status')['background_hashed_bytes']>final['background_hashed_bytes']
+       report['held_final_delta']=dict(rounds_after_lost_reply=delta['rounds'],
+         original_deadline_preserved=True,pre_pause_publication_copied=True,
+         fully_received_reply_loss=True,final_switch_authorized=False)
        final=command('status')
-       assert final['controller_id']==greeting['controller_id'] and final['background_hashed_bytes']>0
-       outcome=final_host.inspect_switch_outcome_locked(state,exchange=command)
-       assert outcome['outcome']=='uncommitted' and not outcome['collection_resume_authorized']
-       assert not outcome['runtime_activation_authorized']
-       assert (state/final_host.STATE).read_bytes()==checkpoint
-       report['fresh_outcome_observation']=dict(outcome='uncommitted',intent_preserved=True,
-         collection_resume_authorized=False,runtime_activation_authorized=False)
-       final=command('status')
-       report['switch_entry_checkpoint']=dict(interrupted_after_durable_save=True,
-         original_deadline_preserved=True,replay_refused=True,source_held=True,
-         database_commit_dispatched=False,collection_resume_authorized=False)
-       if options.close_logins:
-        report['database_job_environment']=json.loads(host_boundary.database_query(pgid,
-          "SELECT json_build_object('extensions',(SELECT jsonb_object_agg(extname,extversion) FROM pg_extension),"
-          "'preload',current_setting('shared_preload_libraries'))"))
-        real_maintenance=host_boundary.maintenance_query
-        def lost_gate_reply(container,sql):
-         result=real_maintenance(container,sql)
-         if "ALTER DATABASE" in sql:
-          raise TimeoutError('fixture lost fully received login-close reply')
-         return result
-        if options.close_logins=='lost-reply':host_boundary.maintenance_query=lost_gate_reply
-        gate_started=time.monotonic()
+       if options.switch_entry:
+        original_save=host_boundary.save_receipt
+        def save_then_interrupt(path,value,**args):
+         original_save(path,value,**args)
+         if path==state/final_host.STATE and value['phase']=='switch_entered':
+          raise RuntimeError('fixture interrupted after durable switch intent')
+        host_boundary.save_receipt=save_then_interrupt
         try:
-         if options.close_logins=='lost-reply':
-          try:
-           final_host.close_database_logins_locked(state,exchange=command)
-           raise AssertionError('lost gate reply accepted')
-          except TimeoutError as exc:assert str(exc)=='fixture lost fully received login-close reply'
-         else:
-          gate_result=final_host.close_database_logins_locked(state,exchange=command)
-          assert gate_result['new_logins_closed'] and not gate_result['database_switch_authorized']
-        finally:host_boundary.maintenance_query=real_maintenance
-        gated=final_host._load(state/final_host.STATE)
-        assert gated['phase']==('login_closing' if options.close_logins=='lost-reply' else 'login_closed')
-        assert gated['binding']==entered['binding'] and gated['switch']==entered['switch']
-        assert gated['deadline']==entered['deadline'] and gated['deadline_boot']==entered['deadline_boot']
-        with host_boundary.docker_deadline(deadline):
-         database=json.loads(real_maintenance(pgid,final_host._GATE_OBSERVE))
-         assert database=={**gated['login_gate']['database'],'allow_connections':False}
-         try:host_boundary.database_query(pgid,'SELECT 1');raise AssertionError('new target login accepted')
-         except RuntimeError as exc:assert str(exc).startswith('storage_pause_docker_failed')
-        current=command('final_session_check',deadline=deadline)
-        assert current['result']['database']==database and current['controller_id']==greeting['controller_id']
-        fresh=command('inspect_outcome',deadline=min(deadline,time.monotonic()+4))
-        assert fresh['result']['outcome']=='uncommitted' and not fresh['result']['collection_resume_authorized']
-        held_bytes=(state/final_host.STATE).read_bytes()
-        if options.close_logins=='success':
-         residual_started=time.monotonic()
-         residual=final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=2)
-         assert residual['last_observation']['sql']['outcome']=='both_tails_observed_empty'
-         assert all(p['captured_tail_empty_at_observation'] for p in residual['last_observation']['archives'])
-         assert not residual['publisher_drain_authorized'] and not residual['final_switch_authorized']
-         assert (state/final_host.STATE).read_bytes()==held_bytes
-         report['gated_residual']=dict(rounds=residual['rounds'],same_worker=True,
-           final_intent_unchanged=True,elapsed_seconds=time.monotonic()-residual_started,
-           limitation='Host route with already-converged fixture tail; nonempty late QT tail qualified separately.')
-        try:final_host.close_database_logins_locked(state,exchange=command);raise AssertionError('gate replay')
-        except RuntimeError as exc:assert str(exc)=='storage_online_login_switch_intent_required'
-        if options.close_logins=='lost-reply':
-         try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('uncertain gate source resume')
-         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
-        assert (state/final_host.STATE).read_bytes()==held_bytes
-        report['login_gate']=dict(mode=options.close_logins,phase=gated['phase'],same_worker=True,
-          new_logins_refused=True,fresh_negative_without_authority=True,original_clocks_preserved=True,
-          replay_refused=True,uncertain_gate_resumption_refused=options.close_logins=='lost-reply',elapsed_seconds=time.monotonic()-gate_started)
-        (state/'login-gate-intent.json').write_text(json.dumps(gated,indent=2))
-       if options.commit_switch:
-        commit_started=time.monotonic()
-        committed=final_host.commit_online_handoff_locked(state,exchange=command)
-        assert committed['outcome']=='committed' and committed['database_handoff_committed']
-        assert not committed['runtime_activation_authorized'] and not committed['collection_resume_authorized']
-        source_check()
-        final=last_reply  # Fresh inspect_outcome already received by the host seam.
-        assert final['operation']=='inspect_outcome' and final['state']=='committed'
-        report['held_database_commit']=dict(same_worker=True,fresh_committed_outcome=True,
-          source_kernel_hold_retained=True,elapsed_seconds=time.monotonic()-commit_started,
-          runtime_activation_authorized=False)
-       if options.abort_resume:
-        resume_started=time.monotonic()
-        if options.abort_restore_lost_reply:
-         action=host_boundary.supervised_source_action
-         actions=[]
-         def lose_restore_reply(*args,**kwargs):
-          action(*args,**kwargs)
-          actions.append(True)
-          assert len(actions)==1
-          raise TimeoutError('fixture discarded fully received login restoration reply')
-         host_boundary.supervised_source_action=lose_restore_reply
          try:
-          try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('lost restoration reply accepted')
-          except TimeoutError as exc:assert str(exc)=='fixture discarded fully received login restoration reply'
-         finally:host_boundary.supervised_source_action=action
-         pending=final_host._load(state/final_host.STATE)
-         assert pending['phase']=='source_resuming'
-         assert pending['resume']['gate_restore']=={'completed':[],'inflight':'logins'}
-         assert pending['resume']['completed']==[] and pending['resume']['inflight'] is None
-         assert pending['login_gate']==gated['login_gate'] and pending['switch']==entered['switch']
+          final_host.record_switch_entry_locked(state,deadline=deadline,
+            observe_worker=lambda **args:command('status',response_deadline=args['deadline']))
+          raise AssertionError('switch intent interruption was lost')
+         except RuntimeError as exc:
+          assert str(exc)=='fixture interrupted after durable switch intent'
+        finally:host_boundary.save_receipt=original_save
+        entered=final_host._load(state/final_host.STATE)
+        assert entered['phase']=='switch_entered' and entered['binding']==paused['binding']
+        assert entered['deadline']==paused['deadline'] and entered['deadline_boot']==paused['deadline_boot']
+        assert entered['switch']['deadline_monotonic']==deadline
+        checkpoint=(state/final_host.STATE).read_bytes()
+        def unexpected_observation(**args):raise AssertionError('recorded switch intent was replayed')
+        for action in (
+          lambda:final_host.record_switch_entry_locked(state,deadline=deadline,observe_worker=unexpected_observation),
+          lambda:final_host.stop_online_source_locked(state,**pause_args)):
+         try:action();raise AssertionError('switch-entered pause reentry admitted')
+         except RuntimeError as exc:assert str(exc)=='storage_online_final_switch_reconciliation_required'
+        try:
+         final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=1)
+         raise AssertionError('tail mutation admitted after switch entry')
+        except RuntimeError as exc:assert str(exc)=='storage_online_final_delta_paused_source_required'
+        assert (state/final_host.STATE).read_bytes()==checkpoint
+        final=command('status')
+        assert final['controller_id']==greeting['controller_id'] and final['background_hashed_bytes']>0
+        outcome=final_host.inspect_switch_outcome_locked(state,exchange=command)
+        assert outcome['outcome']=='uncommitted' and not outcome['collection_resume_authorized']
+        assert not outcome['runtime_activation_authorized']
+        assert (state/final_host.STATE).read_bytes()==checkpoint
+        report['fresh_outcome_observation']=dict(outcome='uncommitted',intent_preserved=True,
+          collection_resume_authorized=False,runtime_activation_authorized=False)
+        final=command('status')
+        report['switch_entry_checkpoint']=dict(interrupted_after_durable_save=True,
+          original_deadline_preserved=True,replay_refused=True,source_held=True,
+          database_commit_dispatched=False,collection_resume_authorized=False)
+        if options.close_logins:
+         report['database_job_environment']=json.loads(host_boundary.database_query(pgid,
+           "SELECT json_build_object('extensions',(SELECT jsonb_object_agg(extname,extversion) FROM pg_extension),"
+           "'preload',current_setting('shared_preload_libraries'))"))
+         real_maintenance=host_boundary.maintenance_query
+         def lost_gate_reply(container,sql):
+          result=real_maintenance(container,sql)
+          if "ALTER DATABASE" in sql:
+           raise TimeoutError('fixture lost fully received login-close reply')
+          return result
+         if options.close_logins=='lost-reply':host_boundary.maintenance_query=lost_gate_reply
+         gate_started=time.monotonic()
+         try:
+          if options.close_logins=='lost-reply':
+           try:
+            final_host.close_database_logins_locked(state,exchange=command)
+            raise AssertionError('lost gate reply accepted')
+           except TimeoutError as exc:assert str(exc)=='fixture lost fully received login-close reply'
+          else:
+           gate_result=final_host.close_database_logins_locked(state,exchange=command)
+           assert gate_result['new_logins_closed'] and not gate_result['database_switch_authorized']
+         finally:host_boundary.maintenance_query=real_maintenance
+         gated=final_host._load(state/final_host.STATE)
+         assert gated['phase']==('login_closing' if options.close_logins=='lost-reply' else 'login_closed')
+         assert gated['binding']==entered['binding'] and gated['switch']==entered['switch']
+         assert gated['deadline']==entered['deadline'] and gated['deadline_boot']==entered['deadline_boot']
          with host_boundary.docker_deadline(deadline):
-          assert host_boundary.database_query(pgid,"SELECT datallowconn FROM pg_database WHERE datname=current_database()").strip()=='t'
-          assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
-         try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('unresolved restoration replayed')
-         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
-         report['gated_abort_restore_lost_reply']=dict(actual_login_reopened=True,
-           fully_received_reply_discarded=True,restoration_unresolved=True,jobs_restart_dispatched=False,
-           source_starts_dispatched=False,original_clocks_preserved=True,replay_refused=True,
-           elapsed_seconds=time.monotonic()-resume_started,outer_loss_qualified=False)
-        elif options.abort_resume_fence_loss:
-         from scripts.ci.online_start_reply_fixture import held_start_reply
-         first_service=next(n for n in host_boundary.STOP if preparation['clients'][n]['was_running'])
-         first_source=source[first_service]['id']
-         killed=[]
-         def kill_owned_fence():
-          with host_boundary.docker_deadline(deadline):
-           if options.abort_resume_late_start:
-            before=host_boundary.inventory(project,operator_id=receipt['container_id'])
-            assert not any(before[n]['running'] for n in host_boundary.STOP)
-           pending=final_host._load(state/final_host.STATE)
-           assert pending['phase']=='source_resuming'
-           assert pending['resume']['inflight']['container_id']==first_source
-           sql="SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid() AND classid=((hashtextextended('quant-trad:fact-header-cutover:v2',0)>>32)&4294967295)::oid AND objid=(hashtextextended('quant-trad:fact-header-cutover:v2',0)&4294967295)::oid"
-           pid=host_boundary.database_query(pgid,sql).strip()
-           assert pid.isdigit()
-           assert host_boundary.database_query(pgid,'SELECT pg_terminate_backend('+pid+',5000)').strip()=='t'
-           killed.append(int(pid))
-         fault_arguments={'on_queued' if options.abort_resume_late_start else 'on_started':kill_owned_fence}
-         with held_start_reply(first_source,deadline=deadline,**fault_arguments) as fault:
+          database=json.loads(real_maintenance(pgid,final_host._GATE_OBSERVE))
+          assert database=={**gated['login_gate']['database'],'allow_connections':False}
+          try:host_boundary.database_query(pgid,'SELECT 1');raise AssertionError('new target login accepted')
+          except RuntimeError as exc:assert str(exc).startswith('storage_pause_docker_failed')
+         current=command('final_session_check',deadline=deadline)
+         assert current['result']['database']==database and current['controller_id']==greeting['controller_id']
+         fresh=command('inspect_outcome',deadline=min(deadline,time.monotonic()+4))
+         assert fresh['result']['outcome']=='uncommitted' and not fresh['result']['collection_resume_authorized']
+         held_bytes=(state/final_host.STATE).read_bytes()
+         if options.close_logins=='success':
+          residual_started=time.monotonic()
+          residual=final_host.copy_final_delta_locked(state,exchange=command,deadline=deadline,max_rounds=2)
+          assert residual['last_observation']['sql']['outcome']=='both_tails_observed_empty'
+          assert all(p['captured_tail_empty_at_observation'] for p in residual['last_observation']['archives'])
+          assert not residual['publisher_drain_authorized'] and not residual['final_switch_authorized']
+          assert (state/final_host.STATE).read_bytes()==held_bytes
+          report['gated_residual']=dict(rounds=residual['rounds'],same_worker=True,
+            final_intent_unchanged=True,elapsed_seconds=time.monotonic()-residual_started,
+            limitation='Host route with already-converged fixture tail; nonempty late QT tail qualified separately.')
+         try:final_host.close_database_logins_locked(state,exchange=command);raise AssertionError('gate replay')
+         except RuntimeError as exc:assert str(exc)=='storage_online_login_switch_intent_required'
+         if options.close_logins=='lost-reply':
+          try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('uncertain gate source resume')
+          except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+         assert (state/final_host.STATE).read_bytes()==held_bytes
+         report['login_gate']=dict(mode=options.close_logins,phase=gated['phase'],same_worker=True,
+           new_logins_refused=True,fresh_negative_without_authority=True,original_clocks_preserved=True,
+           replay_refused=True,uncertain_gate_resumption_refused=options.close_logins=='lost-reply',elapsed_seconds=time.monotonic()-gate_started)
+         (state/'login-gate-intent.json').write_text(json.dumps(gated,indent=2))
+        if options.commit_switch:
+         commit_started=time.monotonic()
+         committed=final_host.commit_online_handoff_locked(state,exchange=command)
+         assert committed['outcome']=='committed' and committed['database_handoff_committed']
+         assert not committed['runtime_activation_authorized'] and not committed['collection_resume_authorized']
+         source_check()
+         final=last_reply  # Fresh inspect_outcome already received by the host seam.
+         assert final['operation']=='inspect_outcome' and final['state']=='committed'
+         report['held_database_commit']=dict(same_worker=True,fresh_committed_outcome=True,
+           source_kernel_hold_retained=True,elapsed_seconds=time.monotonic()-commit_started,
+           runtime_activation_authorized=False)
+        if options.abort_resume:
+         resume_started=time.monotonic()
+         if options.abort_restore_lost_reply:
+          action=host_boundary.supervised_source_action
+          actions=[]
+          def lose_restore_reply(*args,**kwargs):
+           action(*args,**kwargs)
+           actions.append(True)
+           assert len(actions)==1
+           raise TimeoutError('fixture discarded fully received login restoration reply')
+          host_boundary.supervised_source_action=lose_restore_reply
           try:
-           final_host.resume_online_source_locked(state,exchange=command)
-           raise AssertionError('source resume ignored lost SQL ownership')
-          except (RuntimeError,EOFError,BrokenPipeError) as exc:
-           refusal=type(exc).__name__
-          if options.abort_resume_late_start:
-           assert fault['completed'].wait(max(0,deadline-time.monotonic()))
-         assert killed
-         if options.abort_resume_late_start:
-          assert fault['request_queued_at'] < fault['fence_loss_completed_at'] < fault['cli_reaped_before_forward_at'] < fault['daemon_started_after_cli_reaped_at']
-         else:
-          assert fault.get('cli_pending_after_daemon_start')
-         assert fault['cli'] is not None and fault['cli'].poll() is not None
-         assert fault['start_count']==1 and fault.get('fault_completed')
-         pending=final_host._load(state/final_host.STATE)
-         assert pending['phase']=='source_resuming' and pending['resume']['completed']==[]
-         assert pending['resume']['inflight']['container_id']==first_source
-         assert pending['deadline']==entered['deadline'] and pending['deadline_boot']==entered['deadline_boot']
-         assert pending['switch']==entered['switch'] and pending['binding']==entered['binding']
-         exact=host_boundary.inventory(project,operator_id=receipt['container_id'])
-         assert [n for n in host_boundary.STOP if exact[n]['running']]==[first_service]
-         unresolved=(state/final_host.STATE).read_bytes()
-         try:
-          final_host.resume_online_source_locked(state,exchange=command)
-          raise AssertionError('unresolved start replayed')
-         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
-         assert (state/final_host.STATE).read_bytes()==unresolved
-         report['source_abort_resumption_fault']=dict(real_daemon_start_status=fault['daemon_start_status'],
-           actual_cli_pending_at_fence_loss=True,local_cli_reaped=True,started_services=[first_service],
-           intermediary_queued_start_after_reap=options.abort_resume_late_start,
-           ordering={k:v for k,v in fault.items() if k.endswith("_at")},
-           no_further_start=True,original_deadlines_preserved=True,inflight_intent_retained=True,
-           replay_refused=True,partial_source_running=True,refusal=refusal,
-           daemon_late_completion_qualified=False,production_readiness=False)
-        else:
-         if options.abort_resume_lost_end:
-          def lose_end(operation,**kwargs):
-           reply=command(operation,**kwargs)
-           if operation=='rollback_fence_end':
-            raise TimeoutError('diagnostic fully received end acknowledgement discarded')
-           return reply
-          try:
-           final_host.resume_online_source_locked(state,exchange=lose_end)
-           raise AssertionError('lost end acknowledgement was ignored')
-          except TimeoutError:pass
+           try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('lost restoration reply accepted')
+           except TimeoutError as exc:assert str(exc)=='fixture discarded fully received login restoration reply'
+          finally:host_boundary.supervised_source_action=action
           pending=final_host._load(state/final_host.STATE)
-          assert pending['phase']=='source_resuming' and pending['resume']['inflight'] is None
-          assert pending['resume']['completed']==[n for n in host_boundary.STOP if preparation['clients'][n]['was_running']]
-          original_start=final_host._supervised_source_start
-          def forbid_start(*args,**kwargs):raise AssertionError('terminal reconciliation replayed a start')
-          final_host._supervised_source_start=forbid_start
-          try:
-           resumed=final_host.reconcile_source_resumed_locked(state,exchange=command)
-          finally:final_host._supervised_source_start=original_start
-          report['source_resume_terminal_reconciliation']=dict(fully_received_end_reply_discarded=True,
-            same_worker=True,no_starts_replayed=True,original_deadline_preserved=True,
-            partial_or_unread_response_qualified=False,outer_worker_loss_qualified=False)
-         else:
-          resumed=final_host.resume_online_source_locked(state,exchange=command)
-         terminal=final_host._load(state/final_host.STATE)
-         assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
-         if options.close_logins:
-          assert resumed['original_login_gate_restored'] and resumed['database_jobs_restart_requested']
-          assert terminal['login_gate']==gated['login_gate']
-          assert terminal['resume']['gate_restore']=={'completed':['logins','jobs'],'inflight':None}
+          assert pending['phase']=='source_resuming'
+          assert pending['resume']['gate_restore']=={'completed':[],'inflight':'logins'}
+          assert pending['resume']['completed']==[] and pending['resume']['inflight'] is None
+          assert pending['login_gate']==gated['login_gate'] and pending['switch']==entered['switch']
           with host_boundary.docker_deadline(deadline):
            assert host_boundary.database_query(pgid,"SELECT datallowconn FROM pg_database WHERE datname=current_database()").strip()=='t'
-          report['gated_abort_restore']=dict(original_access_restored=True,
-            jobs_restart_request_accepted=True,all_jobs_recovery_qualified=False,original_gate_evidence_retained=True)
+           assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
+          try:final_host.resume_online_source_locked(state,exchange=command);raise AssertionError('unresolved restoration replayed')
+          except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+          report['gated_abort_restore_lost_reply']=dict(actual_login_reopened=True,
+            fully_received_reply_discarded=True,restoration_unresolved=True,jobs_restart_dispatched=False,
+            source_starts_dispatched=False,original_clocks_preserved=True,replay_refused=True,
+            elapsed_seconds=time.monotonic()-resume_started,outer_loss_qualified=False)
+         elif options.abort_resume_fence_loss:
+          from scripts.ci.online_start_reply_fixture import held_start_reply
+          first_service=next(n for n in host_boundary.STOP if preparation['clients'][n]['was_running'])
+          first_source=source[first_service]['id']
+          killed=[]
+          def kill_owned_fence():
+           with host_boundary.docker_deadline(deadline):
+            if options.abort_resume_late_start:
+             before=host_boundary.inventory(project,operator_id=receipt['container_id'])
+             assert not any(before[n]['running'] for n in host_boundary.STOP)
+            pending=final_host._load(state/final_host.STATE)
+            assert pending['phase']=='source_resuming'
+            assert pending['resume']['inflight']['container_id']==first_source
+            sql="SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted AND pid<>pg_backend_pid() AND classid=((hashtextextended('quant-trad:fact-header-cutover:v2',0)>>32)&4294967295)::oid AND objid=(hashtextextended('quant-trad:fact-header-cutover:v2',0)&4294967295)::oid"
+            pid=host_boundary.database_query(pgid,sql).strip()
+            assert pid.isdigit()
+            assert host_boundary.database_query(pgid,'SELECT pg_terminate_backend('+pid+',5000)').strip()=='t'
+            killed.append(int(pid))
+          fault_arguments={'on_queued' if options.abort_resume_late_start else 'on_started':kill_owned_fence}
+          with held_start_reply(first_source,deadline=deadline,**fault_arguments) as fault:
+           try:
+            final_host.resume_online_source_locked(state,exchange=command)
+            raise AssertionError('source resume ignored lost SQL ownership')
+           except (RuntimeError,EOFError,BrokenPipeError) as exc:
+            refusal=type(exc).__name__
+           if options.abort_resume_late_start:
+            assert fault['completed'].wait(max(0,deadline-time.monotonic()))
+          assert killed
+          if options.abort_resume_late_start:
+           assert fault['request_queued_at'] < fault['fence_loss_completed_at'] < fault['cli_reaped_before_forward_at'] < fault['daemon_started_after_cli_reaped_at']
+          else:
+           assert fault.get('cli_pending_after_daemon_start')
+          assert fault['cli'] is not None and fault['cli'].poll() is not None
+          assert fault['start_count']==1 and fault.get('fault_completed')
+          pending=final_host._load(state/final_host.STATE)
+          assert pending['phase']=='source_resuming' and pending['resume']['completed']==[]
+          assert pending['resume']['inflight']['container_id']==first_source
+          assert pending['deadline']==entered['deadline'] and pending['deadline_boot']==entered['deadline_boot']
+          assert pending['switch']==entered['switch'] and pending['binding']==entered['binding']
+          exact=host_boundary.inventory(project,operator_id=receipt['container_id'])
+          assert [n for n in host_boundary.STOP if exact[n]['running']]==[first_service]
+          unresolved=(state/final_host.STATE).read_bytes()
+          try:
+           final_host.resume_online_source_locked(state,exchange=command)
+           raise AssertionError('unresolved start replayed')
+          except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+          assert (state/final_host.STATE).read_bytes()==unresolved
+          report['source_abort_resumption_fault']=dict(real_daemon_start_status=fault['daemon_start_status'],
+            actual_cli_pending_at_fence_loss=True,local_cli_reaped=True,started_services=[first_service],
+            intermediary_queued_start_after_reap=options.abort_resume_late_start,
+            ordering={k:v for k,v in fault.items() if k.endswith("_at")},
+            no_further_start=True,original_deadlines_preserved=True,inflight_intent_retained=True,
+            replay_refused=True,partial_source_running=True,refusal=refusal,
+            daemon_late_completion_qualified=False,production_readiness=False)
+         else:
+          if options.abort_resume_lost_end:
+           def lose_end(operation,**kwargs):
+            reply=command(operation,**kwargs)
+            if operation=='rollback_fence_end':
+             raise TimeoutError('diagnostic fully received end acknowledgement discarded')
+            return reply
+           try:
+            final_host.resume_online_source_locked(state,exchange=lose_end)
+            raise AssertionError('lost end acknowledgement was ignored')
+           except TimeoutError:pass
+           pending=final_host._load(state/final_host.STATE)
+           assert pending['phase']=='source_resuming' and pending['resume']['inflight'] is None
+           assert pending['resume']['completed']==[n for n in host_boundary.STOP if preparation['clients'][n]['was_running']]
+           original_start=final_host._supervised_source_start
+           def forbid_start(*args,**kwargs):raise AssertionError('terminal reconciliation replayed a start')
+           final_host._supervised_source_start=forbid_start
+           try:
+            resumed=final_host.reconcile_source_resumed_locked(state,exchange=command)
+           finally:final_host._supervised_source_start=original_start
+           report['source_resume_terminal_reconciliation']=dict(fully_received_end_reply_discarded=True,
+             same_worker=True,no_starts_replayed=True,original_deadline_preserved=True,
+             partial_or_unread_response_qualified=False,outer_worker_loss_qualified=False)
+          else:
+           resumed=final_host.resume_online_source_locked(state,exchange=command)
+          terminal=final_host._load(state/final_host.STATE)
+          assert terminal['phase']=='source_resumed' and resumed['original_source_resumed']
+          if options.close_logins:
+           assert resumed['original_login_gate_restored'] and resumed['database_jobs_restart_requested']
+           assert terminal['login_gate']==gated['login_gate']
+           assert terminal['resume']['gate_restore']=={'completed':['logins','jobs'],'inflight':None}
+           with host_boundary.docker_deadline(deadline):
+            assert host_boundary.database_query(pgid,"SELECT datallowconn FROM pg_database WHERE datname=current_database()").strip()=='t'
+           report['gated_abort_restore']=dict(original_access_restored=True,
+             jobs_restart_request_accepted=True,all_jobs_recovery_qualified=False,original_gate_evidence_retained=True)
 
-         assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
-         assert initial._source_healthy(initial._admit_source(state,initial._load(state),
-           require_running=True,operator_id=receipt['container_id']))
-         assert not run(['inspect',source['initialize']['id'],'--format','{{.State.Running}}']).stdout.strip()=='true'
-         terminal_bytes=(state/final_host.STATE).read_bytes()
-         try:
-          final_host.resume_online_source_locked(state,exchange=command)
-          raise AssertionError('terminal source resumption replayed')
-         except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
-         assert (state/final_host.STATE).read_bytes()==terminal_bytes
-         report['source_abort_resumption']=dict(exact_original_clients_healthy=True,
-           initializer_stays_stopped=True,original_deadlines_preserved=True,
-           final_marker_retained=True,same_live_controller=True,
-           elapsed_seconds=time.monotonic()-resume_started,production_readiness=False)
-   else:
-    assert greeting['controller_id']!=previous_id
-    assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
-    report['reentry_empty_proof']=True
+          assert all(terminal[k]==v for k,v in entered.items() if k!='phase')
+          assert initial._source_healthy(initial._admit_source(state,initial._load(state),
+            require_running=True,operator_id=receipt['container_id']))
+          assert not run(['inspect',source['initialize']['id'],'--format','{{.State.Running}}']).stdout.strip()=='true'
+          terminal_bytes=(state/final_host.STATE).read_bytes()
+          try:
+           final_host.resume_online_source_locked(state,exchange=command)
+           raise AssertionError('terminal source resumption replayed')
+          except RuntimeError as exc:assert str(exc)=='storage_online_resume_switch_intent_required'
+          assert (state/final_host.STATE).read_bytes()==terminal_bytes
+          report['source_abort_resumption']=dict(exact_original_clients_healthy=True,
+            initializer_stays_stopped=True,original_deadlines_preserved=True,
+            final_marker_retained=True,same_live_controller=True,
+            elapsed_seconds=time.monotonic()-resume_started,production_readiness=False)
+    else:
+     assert greeting['controller_id']!=previous_id
+     assert receipt['container_id']==first_id and receipt['deadline']==first_deadline
+     report['reentry_empty_proof']=True
+    if options.worker_attach_loss and attempt==0:
+     # Only the owned migration Python process in its admitted shared PG PID
+     # namespace; no PG/source peer receives a signal. Stop it so EOF cannot
+     # accidentally make a detached CLI look like a successful retirement.
+     stop_code="from pathlib import Path;import os,signal;ids=[int(p.name) for p in Path('/proc').iterdir() if p.name.isdigit() and (p/'cmdline').is_file() and (p/'cmdline').read_bytes().split(bytes([0]))[:3]==[b'python',b'-m',b'scripts.automation.storage_online_worker']];assert len(ids)==1;os.kill(ids[0],signal.SIGSTOP);print('owned_worker_stopped')"
+     assert run(['exec','--user','70:70',receipt['container_id'],'python','-c',stop_code]).stdout.strip()=='owned_worker_stopped'
+     worker.kill();worker.wait(timeout=5)
+     observed=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
+     assert observed['Running'] and observed['Pid']>0
+     report['worker_attach_loss']=dict(cli_reaped_before_retirement=True,daemon_worker_still_running=True)
+    elif not options.abort_resume_fence_loss:command('close')
    if options.worker_attach_loss and attempt==0:
-    # Only the owned migration Python process in its admitted shared PG PID
-    # namespace; no PG/source peer receives a signal. Stop it so EOF cannot
-    # accidentally make a detached CLI look like a successful retirement.
-    stop_code="from pathlib import Path;import os,signal;ids=[int(p.name) for p in Path('/proc').iterdir() if p.name.isdigit() and (p/'cmdline').is_file() and (p/'cmdline').read_bytes().split(bytes([0]))[:3]==[b'python',b'-m',b'scripts.automation.storage_online_worker']];assert len(ids)==1;os.kill(ids[0],signal.SIGSTOP);print('owned_worker_stopped')"
-    assert run(['exec','--user','70:70',receipt['container_id'],'python','-c',stop_code]).stdout.strip()=='owned_worker_stopped'
-    worker.kill();worker.wait(timeout=5)
     observed=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
-    assert observed['Running'] and observed['Pid']>0
-    report['worker_attach_loss']=dict(cli_reaped_before_retirement=True,daemon_worker_still_running=True)
-   elif not options.abort_resume_fence_loss:command('close')
-  if options.worker_attach_loss and attempt==0:
-   observed=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
-   assert not observed['Running'] and not observed['Restarting'] and observed['Pid']==0
-   report['worker_attach_loss']['daemon_worker_retired']=True
-  assert worker.returncode != 0 if (options.abort_resume_fence_loss or options.worker_attach_loss and attempt==0) else worker.returncode == 0
-  if options.close_logins and not options.abort_resume:
-   retired=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
-   assert not retired['Running'] and retired['Pid']==0
-   if options.commit_switch:
-    source_check()
-    try:
-     with host_boundary.deployment_lock(state):raise AssertionError('deployment lock released before recovery handover')
-    except RuntimeError as exc:assert str(exc)=='storage_pause_deployment_lock_busy'
-    report['held_database_commit']['deployment_lock_retained_after_worker_retirement']=True
-    if options.recovery_mounts:
-     before=final_host._load(state/final_host.STATE)
-     original_recipe=(state/initial.held.DATABASE_RECIPE).read_bytes()
-     started_recovery=time.monotonic()
-     if options.recovery_create_reply_loss:
-      actual_action=host_boundary.supervised_source_action
-      def lose_created_reply(arguments,**kwargs):
-       actual_action(arguments,**kwargs)
-       if arguments[0]=='compose' and 'create' in arguments:
-        raise EOFError('owned completed recovery create reply discarded')
-      host_boundary.supervised_source_action=lose_created_reply
-     result=final_host.prepare_recovery_database_locked(state,worker_process=worker,
-         keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
-     assert result['database_recovery_mounts_ready'] and not result['runtime_activation_authorized']
-     pgid=result['database_id'];owned.append(pgid)
-     source['tsdb']=host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))['tsdb']
-     after=final_host._load(state/final_host.STATE)
-     assert after['phase']=='recovery_database_ready'
-     assert all(after[k]==before[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate'))
-     assert (state/initial.held.DATABASE_RECIPE).read_bytes()==original_recipe
-     assert host_boundary.cluster_identifier(pgid,maintenance=True)==original_cluster
-     report['recovery_mounts']=dict(preserved_cluster=True,original_recipe_preserved=True,
-         login_gate_still_closed=True,reader_retired_before_mounts=True,
-         phase_seconds=time.monotonic()-started_recovery,
-         final_entry_to_database_ready_seconds=after['recovery']['finished_at']-after['started_at'],
-         runtime_activation_authorized=False,encrypted_recovery_qualified=False)
+    assert not observed['Running'] and not observed['Restarting'] and observed['Pid']==0
+    report['worker_attach_loss']['daemon_worker_retired']=True
+   assert worker.returncode != 0 if (options.abort_resume_fence_loss or options.worker_attach_loss and attempt==0) else worker.returncode == 0
+   if options.close_logins and not options.abort_resume:
+    retired=json.loads(run(['inspect',receipt['container_id'],'--format','{{json .State}}']).stdout)
+    assert not retired['Running'] and retired['Pid']==0
+    if options.commit_switch:
+     source_check()
      try:
-      final_host.prepare_recovery_database_locked(state,worker_process=worker,
+      with host_boundary.deployment_lock(state):raise AssertionError('deployment lock released before recovery handover')
+     except RuntimeError as exc:assert str(exc)=='storage_pause_deployment_lock_busy'
+     report['held_database_commit']['deployment_lock_retained_after_worker_retirement']=True
+     if options.recovery_mounts:
+      before=final_host._load(state/final_host.STATE)
+      original_recipe=(state/initial.held.DATABASE_RECIPE).read_bytes()
+      started_recovery=time.monotonic()
+      if options.recovery_create_reply_loss:
+       actual_action=host_boundary.supervised_source_action
+       def lose_created_reply(arguments,**kwargs):
+        actual_action(arguments,**kwargs)
+        if arguments[0]=='compose' and 'create' in arguments:
+         raise EOFError('owned completed recovery create reply discarded')
+       host_boundary.supervised_source_action=lose_created_reply
+      result=final_host.prepare_recovery_database_locked(state,worker_process=worker,
           keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
-      raise AssertionError('completed recovery phase replay admitted')
-     except RuntimeError as exc:assert str(exc)=='storage_online_recovery_committed_live_hold_required'
-    if options.recovery_repositories:
-     owned.append(project+'-storage-repository-prepare')
-     before_repositories=final_host._load(state/final_host.STATE)
-     start_repositories=time.monotonic()
-     actual_repository_action=host_boundary.supervised_source_action
-     if options.recovery_repository_reply_loss:
-      def lose_preparer_reply(arguments,**kwargs):
-       actual_repository_action(arguments,**kwargs)
-       if arguments[:2]==['start','--attach']:
-        raise EOFError('owned completed repository preparation reply discarded')
-      host_boundary.supervised_source_action=lose_preparer_reply
-     try:
-      result=final_host.prepare_online_repositories_locked(state,worker_process=worker,
-          max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
-      assert not options.recovery_repository_reply_loss
-     except EOFError as exc:
-      assert options.recovery_repository_reply_loss and str(exc)=='owned completed repository preparation reply discarded'
-      unresolved=final_host._load(state/final_host.STATE)
-      assert unresolved['phase']=='recovery_repository_preparing'
-      assert unresolved['repositories']['inflight']=='prepare'
-      assert unresolved['repositories']['completed']==['logins','create']
-      assert unresolved['repositories']['report'] is None
-      assert all(unresolved[k]==before_repositories[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery'))
-      helper_state=json.loads(run(['inspect',unresolved['repositories']['helper_id'],'--format','{{json .State}}']).stdout)
-      assert not helper_state['Running'] and helper_state['Pid']==0 and helper_state['ExitCode']==0
-      assert host_boundary.maintenance_query(pgid,"SELECT current_setting('archive_mode')").strip()=='off'
-      assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
-      report['recovery_repository_lost_reply']=dict(actual_preparer_completed=True,
-          unresolved_intent_preserved=True,settings_not_dispatched=True,source_not_restarted=True,
-          limitation='Fully received response discarded; not late execution, unread framing or outer-controller loss.')
-     finally:
-      host_boundary.supervised_source_action=actual_repository_action
-     if not options.recovery_repository_reply_loss:
-      after_repositories=final_host._load(state/final_host.STATE)
-      assert after_repositories['phase']=='recovery_wal_ready'
-      assert result['native_wal_delivered'] and result['repositories_initialized'] and not result['backup_created']
-      assert all(after_repositories[k]==before_repositories[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery'))
-      assert host_boundary.cluster_identifier(pgid)==original_cluster
-      report['recovery_repositories']=dict(native_wal_delivered=True,encrypted_repositories_prepared=True,
-          reader_retired_before_keys=True,original_clocks_preserved=True,
-          component_seconds=time.monotonic()-start_repositories,
-          final_entry_to_wal_ready_seconds=after_repositories['repositories']['finished_at']-after_repositories['started_at'],
-          runtime_activation_authorized=False,backup_created=False)
-     try:
-      final_host.prepare_online_repositories_locked(state,worker_process=worker,
-          max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
-      raise AssertionError('completed repository preparation replay admitted')
-     except RuntimeError as exc:assert str(exc)=='storage_online_repository_live_transition_required'
-    if options.recovery_spool:
-     owned.append(project+'-storage-spool-prepare')
-     spool_before=final_host._load(state/final_host.STATE)
-     spool_started=time.monotonic()
-     actual_spool_action=host_boundary.supervised_source_action
-     if options.recovery_spool_reply_loss:
-      def lose_copy_reply(arguments,**kwargs):
-       actual_spool_action(arguments,**kwargs)
-       if arguments[:2]==['start','--attach']:
-        raise EOFError('owned completed spool copy reply discarded')
-      host_boundary.supervised_source_action=lose_copy_reply
-     try:
-      result=final_host.prepare_online_runtime_spool_locked(state,worker_process=worker,
-          destination=candidate_working,max_bytes=64*1024**2,max_entries=4096,
-          reserve_bytes=8*1024**2,max_duration_seconds=15)
-      assert not options.recovery_spool_reply_loss
-      spool_after=final_host._load(state/final_host.STATE)
-      assert spool_after['phase']=='recovery_spool_ready'
-      assert result['source_preserved'] and not result['runtime_activation_authorized']
-      assert result['copied_files']==drained['pending_files'] and result['copied_bytes']==drained['pending_bytes']
-      assert all(spool_after[k]==spool_before[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery','repositories'))
-      report['recovery_spool']=dict(source_preserved=True,private_candidate_owner=1000,
-          copied_files=result['copied_files'],copied_bytes=result['copied_bytes'],
-          component_seconds=time.monotonic()-spool_started,
-          final_entry_to_spool_ready_seconds=spool_after['runtime_spool']['finished_at']-spool_after['started_at'],
-          runtime_activation_authorized=False)
-      probe="import json,hashlib,stat;from pathlib import Path;items=json.loads(__import__('sys').argv[1]);root=Path('/candidate');assert (root.stat().st_uid,root.stat().st_gid,stat.S_IMODE(root.stat().st_mode))==(1000,1000,0o700);[(lambda p,v: (p.read_bytes(),None) if hashlib.sha256(p.read_bytes()).hexdigest()==v['sha256'] and (p.stat().st_uid,p.stat().st_gid,stat.S_IMODE(p.stat().st_mode))==(1000,1000,0o600) else (_ for _ in ()).throw(AssertionError('copied WAL differs')))(root/v['path'],v) for v in items];print('private candidate copy readable')"
-      run(['run','--rm','--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','64m',
-          '--mount','type=bind,source='+str(candidate_working)+',target=/candidate,readonly',
-          '--entrypoint','python',image,'-c',probe,json.dumps(json.loads((candidate_working/'.qt-recovery-copy.json').read_text())['copied_files'])])
-     except EOFError as exc:
-      assert options.recovery_spool_reply_loss and str(exc)=='owned completed spool copy reply discarded'
-      spool_after=final_host._load(state/final_host.STATE)
-      assert spool_after['phase']=='recovery_spool_preparing'
-      assert spool_after['runtime_spool']['completed']==['create'] and spool_after['runtime_spool']['inflight']=='copy'
-      assert spool_after['runtime_spool']['report'] is None
-      status=json.loads(run(['inspect',spool_after['runtime_spool']['helper_id'],'--format','{{json .State}}']).stdout)
-      assert status['Pid']==0 and not status['Running'] and status['ExitCode']==0
-      assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
-      report['recovery_spool_lost_reply']=dict(actual_copy_completed=True,unresolved_intent_retained=True,
-          source_not_restarted=True,runtime_activation_authorized=False)
-     finally:host_boundary.supervised_source_action=actual_spool_action
-     try:
-      final_host.prepare_online_runtime_spool_locked(state,worker_process=worker,
-          destination=candidate_working,max_bytes=64*1024**2,max_entries=4096,
-          reserve_bytes=8*1024**2,max_duration_seconds=15)
-      raise AssertionError('completed or uncertain spool copy replay admitted')
-     except RuntimeError as exc:assert str(exc)=='storage_online_runtime_spool_live_transition_required'
-    if options.recovery_runtime:
-     from scripts.automation import storage_online_runtime as runtime_host
-     from scripts.automation import storage_online_recovery as recovery_host
-     runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE)
-     mounts={m['target']:m for m in runtime_model['services']['tsdb']['volumes']}
-     targets=json.loads(inventory.read_text())['targets']
-     ssd=next(t for t in targets if t['medium']=='ssd');hdd=next(t for t in targets if t['medium']=='hdd')
-     limits=state/'runtime-maintenance.json'
-     limits.write_text(json.dumps(dict(schema_version='qt.storage_maintenance_limits.v2',
-       history=dict(wal_bytes=16*1024**2,temporary_bytes={t['target_id']:1024**2 for t in targets},
-         growth_bytes_per_second={t['target_id']:0 for t in targets},maintenance_bytes={t['target_id']:1024**2 for t in targets},
-         movement_timeout_seconds=60,cancellation_grace_seconds=5),
-       recovery=dict(max_bytes=256*1024**2,timeout_seconds=60,headroom_bytes={t['target_id']:1024**2 for t in targets},max_objects=128,
-         incremental=dict(pgbackrest='/usr/local/bin/pgbackrest',restic='/usr/local/bin/restic',pg_path='/var/lib/postgresql/data',
-           pg_socket_path='/var/run/postgresql',database_key_path='/run/quanttrad/recovery/database.key',
-           archive_key_path='/run/quanttrad/recovery/archive.key',max_chain_backups=4)))))
-     limits.chmod(0o644)
-     def fixture_mount(source,target,readonly=False):
-      return dict(type='bind',source=str(source),target=target,read_only=readonly,bind=dict(create_host_path=False))
-     for service_name,module in runtime_host._APPLICATIONS.items():
-      maintenance=service_name=='storage-maintenance'
-      environment=dict(PG_DSN='postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname,
-        QT_DISABLE_DOTENV='1',QT_LOGGING_LOKI_URL='',QT_STORAGE_MAINTENANCE_OWNER='dedicated',QT_ARCHIVE_SHARED_GROUP_ID='70',
-        MARKET_STRUCTURE_STORAGE_ROOT='/qt-history/archives',MARKET_STRUCTURE_WORKING_ROOT='/qt-history/archives' if maintenance else '/app/logs/market-structure',
-        QT_MARKET_DATA_EXPECTED_UUID=hdd['filesystem_uuid'],QT_MARKET_DATA_WORKING_EXPECTED_UUID=(hdd if maintenance else ssd)['filesystem_uuid'],
-        QT_STORAGE_INVENTORY_PATH='/run/quanttrad/storage-inventory.json',QT_STORAGE_UDEV_ROOT='/run/qt-host-udev/data',
-        QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA='false',QT_SINGLE_NODE_ENABLE_SCHEDULED_FACTS='false',QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS='false',
-        QT_SINGLE_NODE_ENABLE_TRADE_STREAMS='false',QT_SINGLE_NODE_ENABLE_L2_STREAMS='false')
-      service_mounts=[mounts['/qt-history'],fixture_mount(inventory,'/run/quanttrad/storage-inventory.json',True),fixture_mount(udev,'/run/qt-host-udev/data',True)]
-      service=dict(image=image,pull_policy='never',user='70:70' if maintenance else '1000:1000',group_add=['70'],init=True,
-        restart='no',cap_drop=['ALL'],security_opt=['no-new-privileges:true'],command=['python','-m',module],
-        networks={'quanttrad':{}},environment=environment,volumes=service_mounts,mem_limit=(2 if service_name=='backend' else 1)*1024**3,memswap_limit=(2 if service_name=='backend' else 1)*1024**3,cpus=2,pids_limit=256,
-        labels={'qt.disposable':project})
-      if maintenance:
-       service['pid']='container:'+pgid
-       service_mounts.extend(mounts[k] for k in ('/var/lib/postgresql/data','/run/quanttrad/recovery','/var/run/postgresql'))
-       service_mounts.append(fixture_mount(limits,'/run/quanttrad/storage-maintenance.json',True))
-       environment.update(QT_MARKET_DATA_LIFECYCLE_ENABLED='true',QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED='true',
-         QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED='true',QT_STORAGE_MAINTENANCE_LIMITS_PATH='/run/quanttrad/storage-maintenance.json')
-      else:
-       service_mounts.append(fixture_mount(candidate_working,'/app/logs/market-structure'))
-       if service_name=='backend':
-        service_mounts.append(mounts['/var/lib/postgresql/data']);environment['QT_MARKET_DATA_ROOT']=str(history/'archives')
-      if service_name!='initialize':
-       probe=runtime_host._APPLICATION_HEALTH[service_name]
-       service['healthcheck']=dict(test=probe,interval='1s',timeout='3s',retries=15,start_period='2s')
-      runtime_model['services'][service_name]=service
-      owned.append(project+'-'+service_name+'-1')
-     host_boundary.save_receipt(state/runtime_host.RUNTIME_RECIPE,runtime_model,initial=True)
-     started_runtime=time.monotonic()
-     actual_runtime_action=host_boundary.supervised_source_action
-     recovery_spec=json.loads((control/'runtime-recovery.json').read_text())
-     def recover_before_maintenance(args,**kwargs):
-      current=final_host._load(state/final_host.STATE)
-      if current['runtime']['inflight']=='start:storage-maintenance':
-       # Test-only transport seam, inside the already admitted ordinary app.
-       # Normal recovery/fresh intake completes BEFORE maintenance can back up.
-       remaining=min(kwargs['deadline']-time.monotonic(),final_host._remaining(current))
-       assert remaining>0
-       code="import json,sys;from tests.test_market_data.online_runtime_recovery_fixture import verify;print('QT_CONNECTED_RECOVERY='+json.dumps(verify(json.loads(sys.argv[1]))))"
-       recovered=run(['exec',current['runtime']['candidate_ids']['market-data-collector'],
-         'python','-c',code,json.dumps(recovery_spec)],timeout=remaining,check=False)
-       (state/'runtime-recovery.log').write_text(recovered.stdout+recovered.stderr)
-       assert recovered.returncode==0, 'ordinary connected recovery failed; see runtime-recovery.log'
-       replies=[json.loads(line.split('=',1)[1]) for line in recovered.stdout.splitlines() if line.startswith('QT_CONNECTED_RECOVERY=')]
-       assert len(replies)==1
-       report['normal_runtime_recovery']=replies[0]
-      return actual_runtime_action(args,**kwargs)
-     host_boundary.supervised_source_action=recover_before_maintenance
-     try:
-      result=final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=60)
-     finally:host_boundary.supervised_source_action=actual_runtime_action
-     activated=final_host._load(state/final_host.STATE)
-     assert activated['phase']=='recovery_runtime_ready' and result['collector_process_healthy']
-     report['recovery_runtime']=dict(component_seconds=time.monotonic()-started_runtime,
-       final_entry_to_applications_ready_seconds=activated['runtime']['finished_at']-activated['started_at'],
-       actual_application_entrypoints=True,collector_process_healthy=True,actual_collection_throughput_measured=False,complete_pair_confirmed=False)
-     # Process health explicitly permits degraded workers. Require the real
-     # lifecycle result as separate evidence; use only the original final clock.
-     while True:
-      final_host._remaining(activated)
-      with host_boundary.docker_deadline(activated['switch']['deadline_monotonic']):
-       lifecycle=json.loads(host_boundary.database_query(pgid,
-         "SELECT coalesce(jsonb_agg(context->'storage_lifecycle'),'[]'::jsonb)::text FROM market.collector_worker_state WHERE worker_role='market_storage_maintenance'"))
-      assert len(lifecycle)==1
-      outcome=lifecycle[0].get('last_run')
-      if outcome is not None:
-       assert outcome['status']=='completed' and outcome['failure_count']==0, outcome
-       pair=outcome['local_recovery']
-       assert pair['state']=='completed' and pair['policy_hash']==recovery_spec['policy_hash'], pair
-       code="import json,sys;from pathlib import Path;paths=list(Path('/qt-history/recovery-incremental').glob('*/'+sys.argv[1]+'/complete.json'));assert len(paths)==1;print(json.dumps(json.loads(paths[0].read_text())))"
-       remaining=final_host._remaining(activated)
-       observed=run(['exec',activated['runtime']['candidate_ids']['storage-maintenance'],'python','-c',code,pair['generation']],timeout=remaining)
-       certificate=json.loads(observed.stdout)
-       assert certificate['schema_version']=='qt.encrypted_recovery_pair.v1' and certificate['name']==pair['generation']
-       assert certificate['database_type']=='full' and certificate['archive_objects']>0
-       (state/'runtime-pair-certificate.json').write_text(json.dumps(certificate))
-       report['recovery_runtime'].update(maintenance_outcome=outcome,complete_pair_confirmed=True)
-       break
-      time.sleep(.2)
-     try:
-      final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=30)
-      raise AssertionError('runtime replay admitted')
-     except RuntimeError as exc:assert str(exc)=='storage_online_runtime_live_transition_required'
-    source_holds.close()
-    report['held_database_commit']['read_worker_pid0_before_hold_release']=True
-   # Fixture teardown only, AFTER verified worker retirement. This does not
-   # authorize production gate restoration or remove its retained final marker.
-   with host_boundary.docker_deadline(time.monotonic()+5):
-    host_boundary.maintenance_query(pgid,"SELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
-   report['login_gate']['worker_retired_before_fixture_restore']=True
-  if not options.recovery_runtime:
-   assert host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))==source
- if not options.final_pause:
-  # A host exception must close only its background worker; source keeps serving.
-  class HostInterrupted(RuntimeError):
-   pass
-  try:
-   with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
-    channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
-    assert greeting['background_hashed_bytes']==0
-    assert receipt['deadline']==first_deadline
-    raise HostInterrupted()
-  except HostInterrupted:
-   pass
-  assert worker.returncode==0
-  assert host_boundary.identities(host_boundary.inventory(project,operator_id=first_id))==source
-  assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
-  report['host_exception_stopped_only_worker']=True
-  assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
-  saved=(state/launch._STATE).read_bytes()
-  try:
-   with launch.launched_online_worker(state,**(kwargs|dict(descriptor_limit=2048))):
-    raise AssertionError('changed resource binding admitted')
-  except RuntimeError as exc:
-   assert str(exc)=='storage_online_saved_launch_changed'
-  assert (state/launch._STATE).read_bytes()==saved
-  report['original_deadline_preserved']=True
-  report['first_process_hashed_bytes']=final['background_hashed_bytes']
-  report['source_clients_unchanged']=True
- else:
-  try:
-   with launch.launched_online_worker(state,**kwargs):
-    raise AssertionError('final intent permitted ordinary worker relaunch')
-  except RuntimeError as exc:
-   assert str(exc)=='storage_online_final_requires_reconciliation'
-  report['final_intent_blocks_relaunch']=True
-  assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
-  report['first_process_hashed_bytes']=final['background_hashed_bytes']
-  report['source_clients_unchanged']=not options.recovery_runtime
- if options.prepare_source:
-  assert (state/initial.STATE).read_bytes()==prepared_bytes
-  if options.final_pause and not options.recovery_mounts:
-   initial._admit_source(state,preparation,require_running=False,operator_id=first_id)
-  elif not options.final_pause:
-   assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
-  assert (working/'objects'/'native-intake').stat().st_size>intake_before
-  assert not host_boundary.inventory(project,operator_id=first_id,**(dict(activating=True,runtime_maintenance=True) if options.recovery_runtime else {}))['initialize']['running']
-  report['initial_to_worker_receipt_admission']=True
-  report['synthetic_intake_continued']=True
- if options.final_pause:
-  assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
-  if options.recovery_mounts:
-   retained=json.loads(host_boundary.database_query(pgid,'SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1'))
-   assert retained==final_host._load(state/final_host.STATE)['binding']['capture']
-  report['frozen_and_original_capture_retained_after_final']=True
- report['durable_request_and_receipt_retained']=True
- (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
- report.update(passed=True,image=image,first_process_commands=channel.sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
+      assert result['database_recovery_mounts_ready'] and not result['runtime_activation_authorized']
+      pgid=result['database_id'];owned.append(pgid)
+      source['tsdb']=host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))['tsdb']
+      after=final_host._load(state/final_host.STATE)
+      assert after['phase']=='recovery_database_ready'
+      assert all(after[k]==before[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate'))
+      assert (state/initial.held.DATABASE_RECIPE).read_bytes()==original_recipe
+      assert host_boundary.cluster_identifier(pgid,maintenance=True)==original_cluster
+      report['recovery_mounts']=dict(preserved_cluster=True,original_recipe_preserved=True,
+          login_gate_still_closed=True,reader_retired_before_mounts=True,
+          phase_seconds=time.monotonic()-started_recovery,
+          final_entry_to_database_ready_seconds=after['recovery']['finished_at']-after['started_at'],
+          runtime_activation_authorized=False,encrypted_recovery_qualified=False)
+      try:
+       final_host.prepare_recovery_database_locked(state,worker_process=worker,
+           keys_root=recovery_keys,socket_volume=recovery_socket,max_duration_seconds=30)
+       raise AssertionError('completed recovery phase replay admitted')
+      except RuntimeError as exc:assert str(exc)=='storage_online_recovery_committed_live_hold_required'
+     if options.recovery_repositories:
+      owned.append(project+'-storage-repository-prepare')
+      before_repositories=final_host._load(state/final_host.STATE)
+      start_repositories=time.monotonic()
+      actual_repository_action=host_boundary.supervised_source_action
+      if options.recovery_repository_reply_loss:
+       def lose_preparer_reply(arguments,**kwargs):
+        actual_repository_action(arguments,**kwargs)
+        if arguments[:2]==['start','--attach']:
+         raise EOFError('owned completed repository preparation reply discarded')
+       host_boundary.supervised_source_action=lose_preparer_reply
+      try:
+       result=final_host.prepare_online_repositories_locked(state,worker_process=worker,
+           max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
+       assert not options.recovery_repository_reply_loss
+      except EOFError as exc:
+       assert options.recovery_repository_reply_loss and str(exc)=='owned completed repository preparation reply discarded'
+       unresolved=final_host._load(state/final_host.STATE)
+       assert unresolved['phase']=='recovery_repository_preparing'
+       assert unresolved['repositories']['inflight']=='prepare'
+       assert unresolved['repositories']['completed']==['logins','create']
+       assert unresolved['repositories']['report'] is None
+       assert all(unresolved[k]==before_repositories[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery'))
+       helper_state=json.loads(run(['inspect',unresolved['repositories']['helper_id'],'--format','{{json .State}}']).stdout)
+       assert not helper_state['Running'] and helper_state['Pid']==0 and helper_state['ExitCode']==0
+       assert host_boundary.maintenance_query(pgid,"SELECT current_setting('archive_mode')").strip()=='off'
+       assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
+       report['recovery_repository_lost_reply']=dict(actual_preparer_completed=True,
+           unresolved_intent_preserved=True,settings_not_dispatched=True,source_not_restarted=True,
+           limitation='Fully received response discarded; not late execution, unread framing or outer-controller loss.')
+      finally:
+       host_boundary.supervised_source_action=actual_repository_action
+      if not options.recovery_repository_reply_loss:
+       after_repositories=final_host._load(state/final_host.STATE)
+       assert after_repositories['phase']=='recovery_wal_ready'
+       assert result['native_wal_delivered'] and result['repositories_initialized'] and not result['backup_created']
+       assert all(after_repositories[k]==before_repositories[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery'))
+       assert host_boundary.cluster_identifier(pgid)==original_cluster
+       report['recovery_repositories']=dict(native_wal_delivered=True,encrypted_repositories_prepared=True,
+           reader_retired_before_keys=True,original_clocks_preserved=True,
+           component_seconds=time.monotonic()-start_repositories,
+           final_entry_to_wal_ready_seconds=after_repositories['repositories']['finished_at']-after_repositories['started_at'],
+           runtime_activation_authorized=False,backup_created=False)
+      try:
+       final_host.prepare_online_repositories_locked(state,worker_process=worker,
+           max_bytes=256*1024**2,reserve_bytes=8*1024**2,recent_free_bytes=8*1024**2,max_duration_seconds=30)
+       raise AssertionError('completed repository preparation replay admitted')
+      except RuntimeError as exc:assert str(exc)=='storage_online_repository_live_transition_required'
+     if options.recovery_spool:
+      owned.append(project+'-storage-spool-prepare')
+      spool_before=final_host._load(state/final_host.STATE)
+      spool_started=time.monotonic()
+      actual_spool_action=host_boundary.supervised_source_action
+      if options.recovery_spool_reply_loss:
+       def lose_copy_reply(arguments,**kwargs):
+        actual_spool_action(arguments,**kwargs)
+        if arguments[:2]==['start','--attach']:
+         raise EOFError('owned completed spool copy reply discarded')
+       host_boundary.supervised_source_action=lose_copy_reply
+      try:
+       result=final_host.prepare_online_runtime_spool_locked(state,worker_process=worker,
+           destination=candidate_working,max_bytes=64*1024**2,max_entries=4096,
+           reserve_bytes=8*1024**2,max_duration_seconds=15)
+       assert not options.recovery_spool_reply_loss
+       spool_after=final_host._load(state/final_host.STATE)
+       assert spool_after['phase']=='recovery_spool_ready'
+       assert result['source_preserved'] and not result['runtime_activation_authorized']
+       assert result['copied_files']==drained['pending_files'] and result['copied_bytes']==drained['pending_bytes']
+       assert all(spool_after[k]==spool_before[k] for k in ('deadline','deadline_boot','switch','commit','binding','login_gate','recovery','repositories'))
+       report['recovery_spool']=dict(source_preserved=True,private_candidate_owner=1000,
+           copied_files=result['copied_files'],copied_bytes=result['copied_bytes'],
+           component_seconds=time.monotonic()-spool_started,
+           final_entry_to_spool_ready_seconds=spool_after['runtime_spool']['finished_at']-spool_after['started_at'],
+           runtime_activation_authorized=False)
+       probe="import json,hashlib,stat;from pathlib import Path;items=json.loads(__import__('sys').argv[1]);root=Path('/candidate');assert (root.stat().st_uid,root.stat().st_gid,stat.S_IMODE(root.stat().st_mode))==(1000,1000,0o700);[(lambda p,v: (p.read_bytes(),None) if hashlib.sha256(p.read_bytes()).hexdigest()==v['sha256'] and (p.stat().st_uid,p.stat().st_gid,stat.S_IMODE(p.stat().st_mode))==(1000,1000,0o600) else (_ for _ in ()).throw(AssertionError('copied WAL differs')))(root/v['path'],v) for v in items];print('private candidate copy readable')"
+       run(['run','--rm','--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','64m',
+           '--mount','type=bind,source='+str(candidate_working)+',target=/candidate,readonly',
+           '--entrypoint','python',image,'-c',probe,json.dumps(json.loads((candidate_working/'.qt-recovery-copy.json').read_text())['copied_files'])])
+      except EOFError as exc:
+       assert options.recovery_spool_reply_loss and str(exc)=='owned completed spool copy reply discarded'
+       spool_after=final_host._load(state/final_host.STATE)
+       assert spool_after['phase']=='recovery_spool_preparing'
+       assert spool_after['runtime_spool']['completed']==['create'] and spool_after['runtime_spool']['inflight']=='copy'
+       assert spool_after['runtime_spool']['report'] is None
+       status=json.loads(run(['inspect',spool_after['runtime_spool']['helper_id'],'--format','{{json .State}}']).stdout)
+       assert status['Pid']==0 and not status['Running'] and status['ExitCode']==0
+       assert not any(host_boundary.inventory(project,operator_id=receipt['container_id'])[n]['running'] for n in host_boundary.STOP)
+       report['recovery_spool_lost_reply']=dict(actual_copy_completed=True,unresolved_intent_retained=True,
+           source_not_restarted=True,runtime_activation_authorized=False)
+      finally:host_boundary.supervised_source_action=actual_spool_action
+      try:
+       final_host.prepare_online_runtime_spool_locked(state,worker_process=worker,
+           destination=candidate_working,max_bytes=64*1024**2,max_entries=4096,
+           reserve_bytes=8*1024**2,max_duration_seconds=15)
+       raise AssertionError('completed or uncertain spool copy replay admitted')
+      except RuntimeError as exc:assert str(exc)=='storage_online_runtime_spool_live_transition_required'
+     if options.recovery_runtime:
+      from scripts.automation import storage_online_runtime as runtime_host
+      from scripts.automation import storage_online_recovery as recovery_host
+      from scripts.ci.online_operation_fixture import write_runtime_recipe
+      write_runtime_recipe(state=state,runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE),
+        inventory=inventory,udev=udev,image=image,password=password,dbname=dbname,history=history,
+        project=project,candidate_working=candidate_working,owned=owned)
+      started_runtime=time.monotonic()
+      actual_runtime_action=host_boundary.supervised_source_action
+      recovery_spec=json.loads((control/'runtime-recovery.json').read_text())
+      def recover_before_maintenance(args,**kwargs):
+       current=final_host._load(state/final_host.STATE)
+       if current['runtime']['inflight']=='start:storage-maintenance':
+        # Test-only transport seam, inside the already admitted ordinary app.
+        # Normal recovery/fresh intake completes BEFORE maintenance can back up.
+        remaining=min(kwargs['deadline']-time.monotonic(),final_host._remaining(current))
+        assert remaining>0
+        code="import json,sys;from tests.test_market_data.online_runtime_recovery_fixture import verify;print('QT_CONNECTED_RECOVERY='+json.dumps(verify(json.loads(sys.argv[1]))))"
+        recovered=run(['exec',current['runtime']['candidate_ids']['market-data-collector'],
+          'python','-c',code,json.dumps(recovery_spec)],timeout=remaining,check=False)
+        (state/'runtime-recovery.log').write_text(recovered.stdout+recovered.stderr)
+        assert recovered.returncode==0, 'ordinary connected recovery failed; see runtime-recovery.log'
+        replies=[json.loads(line.split('=',1)[1]) for line in recovered.stdout.splitlines() if line.startswith('QT_CONNECTED_RECOVERY=')]
+        assert len(replies)==1
+        report['normal_runtime_recovery']=replies[0]
+       return actual_runtime_action(args,**kwargs)
+      host_boundary.supervised_source_action=recover_before_maintenance
+      try:
+       result=final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=60)
+      finally:host_boundary.supervised_source_action=actual_runtime_action
+      activated=final_host._load(state/final_host.STATE)
+      assert activated['phase']=='recovery_runtime_ready' and result['collector_process_healthy']
+      report['recovery_runtime']=dict(component_seconds=time.monotonic()-started_runtime,
+        final_entry_to_applications_ready_seconds=activated['runtime']['finished_at']-activated['started_at'],
+        actual_application_entrypoints=True,collector_process_healthy=True,actual_collection_throughput_measured=False,complete_pair_confirmed=False)
+      # Process health explicitly permits degraded workers. Require the real
+      # lifecycle result as separate evidence; use only the original final clock.
+      while True:
+       final_host._remaining(activated)
+       with host_boundary.docker_deadline(activated['switch']['deadline_monotonic']):
+        lifecycle=json.loads(host_boundary.database_query(pgid,
+          "SELECT coalesce(jsonb_agg(context->'storage_lifecycle'),'[]'::jsonb)::text FROM market.collector_worker_state WHERE worker_role='market_storage_maintenance'"))
+       assert len(lifecycle)==1
+       outcome=lifecycle[0].get('last_run')
+       if outcome is not None:
+        assert outcome['status']=='completed' and outcome['failure_count']==0, outcome
+        pair=outcome['local_recovery']
+        assert pair['state']=='completed' and pair['policy_hash']==recovery_spec['policy_hash'], pair
+        code="import json,sys;from pathlib import Path;paths=list(Path('/qt-history/recovery-incremental').glob('*/'+sys.argv[1]+'/complete.json'));assert len(paths)==1;print(json.dumps(json.loads(paths[0].read_text())))"
+        remaining=final_host._remaining(activated)
+        observed=run(['exec',activated['runtime']['candidate_ids']['storage-maintenance'],'python','-c',code,pair['generation']],timeout=remaining)
+        certificate=json.loads(observed.stdout)
+        assert certificate['schema_version']=='qt.encrypted_recovery_pair.v1' and certificate['name']==pair['generation']
+        assert certificate['database_type']=='full' and certificate['archive_objects']>0
+        (state/'runtime-pair-certificate.json').write_text(json.dumps(certificate))
+        report['recovery_runtime'].update(maintenance_outcome=outcome,complete_pair_confirmed=True)
+        break
+       time.sleep(.2)
+      try:
+       final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=30)
+       raise AssertionError('runtime replay admitted')
+      except RuntimeError as exc:assert str(exc)=='storage_online_runtime_live_transition_required'
+     source_holds.close()
+     report['held_database_commit']['read_worker_pid0_before_hold_release']=True
+    # Fixture teardown only, AFTER verified worker retirement. This does not
+    # authorize production gate restoration or remove its retained final marker.
+    with host_boundary.docker_deadline(time.monotonic()+5):
+     host_boundary.maintenance_query(pgid,"SELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
+    report['login_gate']['worker_retired_before_fixture_restore']=True
+   if not options.recovery_runtime:
+    assert host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))==source
+  if not options.final_pause:
+   # A host exception must close only its background worker; source keeps serving.
+   class HostInterrupted(RuntimeError):
+    pass
+   try:
+    with launch.launched_online_worker(state,**kwargs) as (worker,receipt):
+     channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
+     assert greeting['background_hashed_bytes']==0
+     assert receipt['deadline']==first_deadline
+     raise HostInterrupted()
+   except HostInterrupted:
+    pass
+   assert worker.returncode==0
+   assert host_boundary.identities(host_boundary.inventory(project,operator_id=first_id))==source
+   assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
+   report['host_exception_stopped_only_worker']=True
+   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
+   saved=(state/launch._STATE).read_bytes()
+   try:
+    with launch.launched_online_worker(state,**(kwargs|dict(descriptor_limit=2048))):
+     raise AssertionError('changed resource binding admitted')
+   except RuntimeError as exc:
+    assert str(exc)=='storage_online_saved_launch_changed'
+   assert (state/launch._STATE).read_bytes()==saved
+   report['original_deadline_preserved']=True
+   report['first_process_hashed_bytes']=final['background_hashed_bytes']
+   report['source_clients_unchanged']=True
+  else:
+   try:
+    with launch.launched_online_worker(state,**kwargs):
+     raise AssertionError('final intent permitted ordinary worker relaunch')
+   except RuntimeError as exc:
+    assert str(exc)=='storage_online_final_requires_reconciliation'
+   report['final_intent_blocks_relaunch']=True
+   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
+   report['first_process_hashed_bytes']=final['background_hashed_bytes']
+   report['source_clients_unchanged']=not options.recovery_runtime
+  if options.prepare_source:
+   assert (state/initial.STATE).read_bytes()==prepared_bytes
+   if options.final_pause and not options.recovery_mounts:
+    initial._admit_source(state,preparation,require_running=False,operator_id=first_id)
+   elif not options.final_pause:
+    assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
+   assert (working/'objects'/'native-intake').stat().st_size>intake_before
+   assert not host_boundary.inventory(project,operator_id=first_id,**(dict(activating=True,runtime_maintenance=True) if options.recovery_runtime else {}))['initialize']['running']
+   report['initial_to_worker_receipt_admission']=True
+   report['synthetic_intake_continued']=True
+  if options.final_pause:
+   assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+   if options.recovery_mounts:
+    retained=json.loads(host_boundary.database_query(pgid,'SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1'))
+    assert retained==final_host._load(state/final_host.STATE)['binding']['capture']
+   report['frozen_and_original_capture_retained_after_final']=True
+  report['durable_request_and_receipt_retained']=True
+  (control/'finished').write_text('finished');fixture.wait(timeout=30);log.close();assert fixture.returncode==0
+  report.update(passed=True,image=image,first_process_commands=channel.sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
+
 except BaseException as exc:
  if (options.recovery_create_reply_loss and isinstance(exc,EOFError)
      and str(exc)=='owned completed recovery create reply discarded'):

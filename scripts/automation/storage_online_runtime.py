@@ -344,7 +344,8 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
                 or service.get("command")!=["python","-m",module]
                 or service.get("entrypoint") is not None or service.get("init") is not True
                 or service.get("cap_drop")!=["ALL"] or service.get("security_opt")!=["no-new-privileges:true"]
-                or service.get("pid","")!=("container:"+saved["recovery"]["replacement_id"] if maintenance else "")
+                or (service.get("pid","") not in ("service:tsdb", "container:"+saved["recovery"]["replacement_id"])
+                    if maintenance else service.get("pid","") != "")
                 or service.get("restart") not in ("no","unless-stopped")
                 or set(service.get("networks",{}))!={"quanttrad"}
                 or any(service.get(k) for k in ("privileged","devices","device_cgroup_rules","cap_add",
@@ -477,8 +478,14 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
         database=host.database_details(database_id)
         dbcontract=host.database_contract(database);dbmounts=sorted(database["mounts"],key=lambda m:m["Destination"])
         networks=host.database_networks(database)
+        # Compose resolves the service PID reference before hashing a created
+        # container. Bind that resolution to the observed replacement database,
+        # exactly as the existing preserving runtime does; never rewrite recipe.
+        hash_model=deepcopy(model)
+        hash_model["services"]["storage-maintenance"]["pid"]="container:"+database_id
         hashes={}
-        for line in host.docker("compose","--project-name",project,"--file",str(recipe_path),"config","--hash","*").splitlines():
+        for line in host.docker("compose","--project-name",project,"--file","-","config","--hash","*",
+                               input=json.dumps(hash_model)).splitlines():
             name,digest=line.split()
             if name in hashes or not re.fullmatch(r"[0-9a-f]{64}",digest):
                 raise RuntimeError("storage_online_runtime_compose_hash_invalid")
