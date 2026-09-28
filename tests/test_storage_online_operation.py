@@ -12,12 +12,14 @@ def limits():
     return operation.OperationLimits(30,120,30,60,1024,64,1,1024,1,1)
 
 
-def test_background_finishes_finite_preparation_before_chasing_live_tail():
+def test_background_closes_sql_tail_before_bounded_identity_capture():
     calls=[]
     replies=iter([
         dict(outcome="raw_relocation_required",phase="raw_relocation_required"),
         dict(outcome="identity_relocation_required",phase="identity_relocation_required"),
         dict(outcome="page_budget_reached",phase="catch_up"),
+        dict(outcome="pass_time_budget_reached",phase="catch_up"),
+        dict(outcome="both_tails_observed_empty",phase="catch_up"),
         *[dict(outcome="both_tails_observed_empty",phase="catch_up")]*3])
     family=iter(sorted(operation._FAMILIES));proved=set()
     def exchange(op,**kw):
@@ -32,10 +34,31 @@ def test_background_finishes_finite_preparation_before_chasing_live_tail():
         raise AssertionError(op)
     result=operation.prepare_background(exchange,preparation_seconds=30)
     assert result==dict(reference_count=1,tail_rounds=3,final_switch_authorized=False)
+    identity_at=next(i for i,(op,kw) in enumerate(calls)
+                     if op=='prepare_step' and kw['step']=='identity_capture')
+    assert sum(op=='sql_copy' for op,_ in calls[:identity_at])==5
+    assert not any(op in {'inspect_references','archive_copy','reprove'} for op,_ in calls[:identity_at])
     steps=[kw['step'] for op,kw in calls if op=='prepare_step']
     assert steps==['catalog_history','raw_history','identity_history','identity_capture',
                    'reference_prepare','reference_validate','reference_adopt','catalog_history','catalog_history']
     assert all(kw['max_duration_seconds']==30 for op,kw in calls if op=='prepare_step')
+
+
+def test_background_tail_expiry_never_attempts_identity_capture():
+    calls=[]
+    def exchange(op,**kw):
+        calls.append((op,kw))
+        if op=='prepare_step':
+            assert kw['step']=='catalog_history'
+            return dict(result=dict(committed=True))
+        if op=='sql_copy':
+            if sum(name=='sql_copy' for name,_ in calls)==1:
+                return dict(result=dict(outcome='page_budget_reached',phase='catch_up'))
+            raise RuntimeError('fact_header_copy_attempt_expired')
+        raise AssertionError(op)
+    with pytest.raises(RuntimeError,match='attempt_expired'):
+        operation.prepare_background(exchange,preparation_seconds=30)
+    assert [op for op,_ in calls]==['prepare_step','sql_copy','sql_copy']
 
 
 @pytest.mark.parametrize('failure',[None,'commit','retirement','repositories','runtime'])

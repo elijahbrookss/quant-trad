@@ -82,8 +82,12 @@ def prepare_background(exchange, *, preparation_seconds):
             phase("identity_history")
         elif result["outcome"] == "raw_relocation_required":
             phase("raw_history")
-        elif result["phase"] == "catch_up":
-            break  # Do not chase a growing tail before finishing finite preparation.
+        elif result["phase"] == "catch_up" and result["outcome"] == "both_tails_observed_empty":
+            # The baseline may leave a large queue of concurrent arrivals.
+            # Drain it online before the bounded identity-capture writer fence.
+            # This observation only permits that step to attempt its own checks;
+            # it never grants a final switch or renews the capture deadline.
+            break
         elif result["outcome"] not in {"page_budget_reached", "pass_time_budget_reached"}:
             raise RuntimeError("storage_online_operation_copy_progress_invalid")
     phase("identity_capture")

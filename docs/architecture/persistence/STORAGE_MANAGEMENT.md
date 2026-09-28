@@ -3074,3 +3074,20 @@ request projected beyond the existing 96-hour window for the observed source
 cardinality. A larger declared SQL batch still needs measured allocation,
 throughput and workload admission; it does not extend any clock or establish a
 production migration estimate.
+
+
+### Baseline-to-identity transition under ongoing collection
+
+After the finite raw, identity and header baselines, the existing operation driver
+continues bounded, alternating SQL catch-up passes until both queues have been
+observed empty. Entering the `catch_up` phase alone does not establish readiness
+for identity mirroring: a long baseline can leave more captured arrivals than the
+short identity-capture fence permits. The same original capture, resource and
+command deadlines apply to these passes. Failure or expiry stops preparation;
+there is no new retry clock or writer hold for the backlog.
+
+The empty observation only permits an attempt at the existing identity-capture
+step. That step still takes its nonwaiting writer fence and independently checks
+its bounded queue, exact source and live attempt. New arrivals can still make it
+refuse. Reference validation and the final SQL/archive catch-up follow normally;
+none of these observations grants final switch or runtime authority.

@@ -1336,3 +1336,43 @@ def test_controller_atomic_policy_rolls_back_with_switch_and_reconciles_lost_rep
         assert handoff.inspect_handoff_policy(conn, **inspect_args)["policy_current"]
         assert conn.scalar(text("SELECT count(*) FROM public.portal_storage_header_tablespaces")) == 1
         assert _frozen_records(conn) == frozen
+
+
+def test_operation_catches_late_baseline_queue_before_identity_fence(storage, tmp_path, monkeypatch):
+    from scripts.automation.storage_online_operation import prepare_background
+    from tests.test_market_data.test_fact_header_online_prepare_db import _setup
+    from tests.test_market_data.test_fact_header_copy_db import _insert
+    from scripts.db import fact_header_v2_online as online
+    from scripts.db import fact_header_v2_copy as headers
+    engine, options, _ = _setup(storage, tmp_path, monkeypatch)
+    prepared = online.prepare_attempt(engine, **options)
+    with engine.connect() as conn:
+        frozen = _frozen_records(conn)
+    settings = {key: value for key, value in options.items() if key != 'attempt_seconds'}
+    settings.update(expected_started_at=prepared['started_at'], max_objects=128,
+                    max_bytes=64*1024**2, max_page_bytes=32*1024**2, page_rows=2, command_seconds=30)
+    injected = []
+    with OnlineController(engine, **settings) as worker:
+        def exchange(operation, **kwargs):
+            answer = worker.command(dict(controller_id=worker.controller_id,
+                sequence=worker._sequence+1, operation=operation, **kwargs))
+            report = answer.get('result', {})
+            if operation == 'sql_copy' and report.get('phase') == 'header_baseline' and not injected:
+                with engine.begin() as conn:
+                    for i in range(10):
+                        _insert(conn, storage, 'late-baseline-driver-'+str(i))
+                    queued = conn.scalar(text('SELECT count(*) FROM '+headers.QUEUE))
+                assert queued > worker.sql_page_rows
+                injected.append(queued)
+            return answer
+        result = prepare_background(exchange, preparation_seconds=30)
+        assert injected and not result['final_switch_authorized']
+        with engine.connect() as conn:
+            assert capture.inspect_capture(conn)['started_at'] == prepared['started_at']
+            assert _frozen_records(conn) == frozen
+            assert headers._inspect_progress(conn)['identity_capture']
+            assert not conn.scalar(text('SELECT EXISTS(SELECT 1 FROM '+headers.QUEUE+')'))
+            columns = ','.join(headers.HEADER_COLUMNS)
+            assert not conn.scalar(text('SELECT EXISTS((SELECT '+columns+' FROM '+headers.SOURCE+
+                ' EXCEPT SELECT '+columns+' FROM '+headers.SCHEMA+'.fact_versions) UNION ALL (SELECT '+
+                columns+' FROM '+headers.SCHEMA+'.fact_versions EXCEPT SELECT '+columns+' FROM '+headers.SOURCE+'))'))
