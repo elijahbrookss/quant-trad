@@ -187,3 +187,28 @@ else:
 """)
     assert result.returncode == 0, result.stderr
     assert (source.with_name("original") / "private.wal").read_bytes() == b"preserved original WAL"
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_guarded_backend_admits_database_before_spawning_any_child(source, ready):
+    result = _run(source, r"""
+from portal.backend import run_backend as worker
+from portal.backend.service import async_jobs
+calls = []
+def ready(**kwargs):
+    calls.append('database')
+    return READY
+async_jobs.wait_for_database_ready = ready
+def spawn(*args, **kwargs):
+    assert calls == ['database']
+    raise RuntimeError('admitted child sentinel')
+worker._spawn_process = spawn
+try:
+    result = worker.main()
+except RuntimeError as exc:
+    assert READY and str(exc) == 'admitted child sentinel'
+else:
+    assert not READY and result == 2
+assert calls == ['database']
+""".replace('READY', repr(ready)))
+    assert result.returncode == 0, result.stderr

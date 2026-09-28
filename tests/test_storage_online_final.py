@@ -822,3 +822,160 @@ def test_gated_abort_journals_restoration_under_same_live_fence(resume_setup, mo
         assert record["phase"] == "source_resumed" and record["login_gate"] == saved["login_gate"]
         assert record["resume"]["gate_restore"] == {"completed":["logins","jobs"],"inflight":None}
         assert actions == ["logins","jobs"] and len(starts)==len(host_boundary.STOP)-1
+
+
+@pytest.fixture
+def guarded_source(pause_setup, monkeypatch):
+    import stat
+    path, rows, clock, state, stop = pause_setup
+    root = path / "source"
+    root.mkdir(mode=0o750)
+    (root / "objects").mkdir(mode=0o700)
+    roots = {str(p): [p.stat().st_dev, p.stat().st_ino, p.stat().st_uid,
+                      p.stat().st_gid, stat.S_IMODE(p.stat().st_mode)]
+             for p in [root, root / "objects"]}
+    observe = final._observe
+    def with_roots(*args, **kwargs):
+        binding, preparation, current, limits = observe(*args, **kwargs)
+        return binding, dict(preparation, source_roots=roots), current, limits
+    monkeypatch.setattr(final, "_observe", with_roots)
+    image = "sha256:" + "d" * 64
+    target = "/app/logs/market-structure"
+    details = {rows[service]["id"]: dict(image=image,
+        config=dict(Entrypoint=None, Cmd=["python", "-m", module], Env=[
+            "QT_IMAGE_SOURCE_REVISION="+REVISION, "QT_STORAGE_SOURCE_FENCE_ROOT="+target,
+            "MARKET_STRUCTURE_STORAGE_ROOT="+target]),
+        mounts=[dict(Type="bind", Source=str(root), Destination=target, RW=True)])
+        for service, module in final._SOURCE_WRITERS.items()}
+    monkeypatch.setattr(host_boundary, "database_details", lambda identity: details[identity])
+    stop()
+    return path, rows, clock, root, image, details
+
+
+def test_final_source_hold_is_kernel_owned_and_cannot_be_reused(guarded_source):
+    import fcntl
+    import os
+    path, rows, clock, root, image, details = guarded_source
+    before = (path/final.STATE).read_bytes()
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="namespace_busy"):
+            with final.held_source_writers_locked(path, source_image=image):
+                pytest.fail("active source admitted")
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        with final.held_source_writers_locked(path, source_image=image) as check:
+            check()
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            assert (path/final.STATE).read_bytes() == before
+        with pytest.raises(RuntimeError, match="source_hold_closed"):
+            check()
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        assert (path/final.STATE).read_bytes() == before
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("drift", ["image", "command", "guard", "code_mount", "running"])
+def test_final_source_hold_refuses_unqualified_layout_before_lock(guarded_source, drift):
+    path, rows, clock, root, image, details = guarded_source
+    backend = details[rows['backend']['id']]
+    if drift == "image": backend['image'] = 'sha256:'+'e'*64
+    elif drift == "command": backend['config']['Cmd'] = ['python','-c','pass']
+    elif drift == "guard": backend['config']['Env'] = [v for v in backend['config']['Env'] if not v.startswith('QT_STORAGE_SOURCE_FENCE_ROOT=')]
+    elif drift == "code_mount": backend['mounts'].append(dict(Destination='/app/src/override.py'))
+    else: rows['backend']['running'] = True
+    with pytest.raises(RuntimeError, match="guarded_source_contract_required|source_hold_changed"):
+        with final.held_source_writers_locked(path, source_image=image):
+            pytest.fail("unqualified source admitted")
+
+
+def test_final_source_hold_retains_original_window_and_metadata(guarded_source):
+    path, rows, clock, root, image, details = guarded_source
+    before = (path/final.STATE).read_bytes()
+    with pytest.raises(RuntimeError, match="deadline_expired"):
+        with final.held_source_writers_locked(path, source_image=image) as check:
+            clock['boot'] = 161
+            check()
+    assert (path/final.STATE).read_bytes() == before
+    clock['boot'] = 100
+    with pytest.raises(RuntimeError, match="metadata_changed"):
+        with final.held_source_writers_locked(path, source_image=image) as check:
+            (root/'objects').chmod(0o750)
+            check()
+    assert (path/final.STATE).read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", [None, "lost_reply", "bad_reply", "unknown_reply", "uncommitted", "gate"])
+def test_host_commit_intent_is_once_only_and_never_grants_runtime(guarded_source, monkeypatch, fault):
+    import json
+    path, rows, clock, root, image, _ = guarded_source
+    capture = {"original": "capture"}
+    saved = final._load(path/final.STATE)
+    saved["binding"]["capture"] = capture
+    host_boundary.save_receipt(path/final.STATE, saved, initial=False)
+    original_observe = final._observe
+    def observe(*args, **kwargs):
+        kwargs.pop("session", None)
+        binding, prep, clients, limits = original_observe(*args, **kwargs)
+        return dict(binding, capture=capture), prep, {**clients, "tsdb": {"id": "e"*64}}, limits
+    monkeypatch.setattr(final, "_observe", observe)
+    database = dict(cluster="1234", oid=123, name="owned", allow_connections=True)
+    monkeypatch.setattr(host_boundary, "maintenance_query", lambda *a: json.dumps(
+        {**database, "allow_connections": fault == "gate"}))
+    calls = []
+    with final.held_source_writers_locked(path, source_image=image):
+        deadline = final.time.monotonic()+30
+        final.record_switch_entry_locked(path, deadline=deadline, observe_worker=lambda **kw: dict(
+            controller_id=CONTROLLER, operation="status", state="background", bound_final_deadline=deadline,
+            last_sequence=1, migration_ready=False, final_switch_authorized=False, collection_resume_authorized=False))
+        saved = final._load(path/final.STATE)
+        saved.update(phase="login_closed", login_gate=dict(database=database, requested_at=1000.,
+            closed_at=1001., database_jobs_stopped=True))
+        host_boundary.save_receipt(path/final.STATE, saved, initial=False)
+        clock.update(wall=1002., boot=102.)
+        def exchange(operation, **kwargs):
+            calls.append(operation)
+            assert kwargs["deadline"] <= deadline
+            reply = dict(controller_id=CONTROLLER, operation=operation, bound_final_deadline=deadline,
+                last_sequence=len(calls)+1, state="background", final_switch_authorized=False,
+                collection_resume_authorized=False)
+            result = dict(collection_resume_authorized=False, runtime_activation_authorized=False)
+            if operation == "final_session_check":
+                result.update(database={**database, "allow_connections": False}, capture=capture,
+                    backend_pid=2, owner_pid=1, builtin_jobs_admitted=True, database_switch_authorized=False)
+            else:
+                receipt = final._load(path/final.STATE)
+                assert receipt["phase"] == "commit_dispatching"
+                assert receipt["commit"]["worker_sequence"] == 3
+                assert receipt["deadline"] == saved["deadline"] and receipt["switch"] == saved["switch"]
+                reply["state"] = "commit_unknown" if fault in {"unknown_reply", "uncommitted"} else "committed"
+                if operation == "commit_database":
+                    if fault == "lost_reply": raise EOFError("unread commit frame")
+                    if fault == "bad_reply": reply["controller_id"] = "f"*32
+                    result["database_handoff_committed"] = None if reply["state"] == "commit_unknown" else True
+                else:
+                    assert operation == "inspect_outcome"
+                    result.update(outcome="uncommitted" if fault == "uncommitted" else "committed",
+                        database_handoff_committed=fault != "uncommitted")
+            reply["result"] = result
+            return reply
+        if fault in {"lost_reply", "bad_reply", "gate"}:
+            with pytest.raises((EOFError, RuntimeError)):
+                final.commit_online_handoff_locked(path, exchange=exchange)
+        else:
+            result = final.commit_online_handoff_locked(path, exchange=exchange)
+            assert not result["collection_resume_authorized"] and not result["runtime_activation_authorized"]
+        receipt = final._load(path/final.STATE)
+        assert receipt["phase"] == ("login_closed" if fault == "gate" else
+            "commit_dispatching" if fault in {"lost_reply", "bad_reply", "uncommitted"} else "committed")
+        if fault != "gate":
+            before = (path/final.STATE).read_bytes()
+            with pytest.raises(RuntimeError, match="commit_closed_gate_required"):
+                final.commit_online_handoff_locked(path, exchange=exchange)
+            with pytest.raises(RuntimeError, match="resume_switch_intent_required"):
+                final.resume_online_source_locked(path, exchange=exchange)
+            assert (path/final.STATE).read_bytes() == before
+        assert calls.count("commit_database") == (0 if fault == "gate" else 1)
+        assert calls.count("inspect_outcome") == (0 if fault in {"lost_reply", "bad_reply", "gate"} else 1)

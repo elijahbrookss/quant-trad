@@ -1146,3 +1146,147 @@ def test_operator_admits_only_pinned_builtin_jobs(storage, tmp_path, monkeypatch
             assert worker._supported_builtin_catalog(conn) == admitted
             assert conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
         assert not worker._jobs_stop_requested and not worker._jobs_stopped
+
+
+@pytest.mark.parametrize("lost_commit_reply", [False, True])
+def test_held_host_dispatch_commits_once_and_reconciles_same_worker(
+        storage, tmp_path, monkeypatch, lost_commit_reply):
+    """Real SQL/leases/kernel hold; host Docker observations are fixture adapters.
+
+    This connects final intent/gate/residual/COMMIT/outcome on one actual worker.
+    It does not certify a production source image or the later recovery mounts.
+    """
+    from contextlib import ExitStack
+    from pathlib import Path
+    import stat
+    from sqlalchemy import create_engine, literal
+    from sqlalchemy.pool import NullPool
+    from scripts.automation import storage_host_boundary as host
+    from scripts.automation import storage_online_final as final
+
+    engine, settings, source = _setup(storage, tmp_path, monkeypatch)
+    state = tmp_path / "host-state"
+    state.mkdir(mode=0o700)
+    with engine.begin() as conn:
+        frozen = _frozen_records(conn)
+        original_capture = conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1"))
+        database = conn.scalar(text("SELECT current_database()"))
+    quoted = engine.dialect.identifier_preparer.quote_identifier(database)
+    target = str(literal(database).compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+    control = create_engine(engine.url.set(database="postgres"), poolclass=NullPool,
+                            isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 2})
+    rows = {name: dict(id=f"{index+1:064x}", running=name != "initialize",
+                      status="exited" if name == "initialize" else "running", exit_code=0)
+            for index, name in enumerate(host.STOP+("tsdb",))}
+    root_metadata = {str(p): [p.stat().st_dev, p.stat().st_ino, p.stat().st_uid,
+                            p.stat().st_gid, stat.S_IMODE(p.stat().st_mode)]
+                     for p in [source, source / "objects"]}
+    preparation = dict(source_roots=root_metadata, clients={n: dict(was_running=rows[n]["running"]) for n in host.STOP})
+    image = "sha256:"+"a"*64  # Controlled Docker adapter, not a release image claim.
+    revision = "a"*40
+    root_target = "/app/logs/market-structure"
+    details = {rows[service]["id"]: dict(image=image,
+        config=dict(Entrypoint=None, Cmd=["python", "-m", module], Env=[
+            "QT_IMAGE_SOURCE_REVISION="+revision, "QT_STORAGE_SOURCE_FENCE_ROOT="+root_target,
+            "MARKET_STRUCTURE_STORAGE_ROOT="+root_target]),
+        mounts=[dict(Type="bind", Source=str(source), Destination=root_target, RW=True)])
+        for service, module in final._SOURCE_WRITERS.items()}
+    monkeypatch.setattr(host, "database_details", lambda identity: details[identity])
+    monkeypatch.setattr(final.initial, "_source_healthy", lambda _rows: True)
+    def stop_client(action, *args, **kwargs):
+        assert action == "stop" and args[:4] == ("--signal", "SIGTERM", "--timeout", "-1")
+        assert final._load(state/final.STATE)["phase"] == "stopping"
+        row = next(row for row in rows.values() if row["id"] == args[-1])
+        row.update(running=False, status="exited")
+        return ""
+    monkeypatch.setattr(host, "docker", stop_client)
+    def maintenance(identity, sql):
+        assert identity == rows['tsdb']['id']
+        with control.connect() as admin:
+            admin.exec_driver_sql("SET statement_timeout = '5s'")
+            if "ALTER DATABASE" in sql:
+                assert "ALLOW_CONNECTIONS false" in sql
+                assert final._load(state/final.STATE)['phase'] == 'login_closing'
+                admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS false")
+            return json.dumps(admin.exec_driver_sql(final._GATE_OBSERVE.replace(":'target'", target)).scalar_one())
+    monkeypatch.setattr(host, "maintenance_query", maintenance)
+    try:
+        with ExitStack() as holds:
+            with OnlineController(engine, **settings) as worker:
+                _drain(worker);_reprove(worker)
+                binding = dict(project="qt-held-fixture", source_revision=revision,
+                    worker_id="b"*64, controller_id=worker.controller_id, capture=original_capture)
+                def observe(_state, **kwargs):
+                    assert _state == state
+                    assert all(kwargs[k] == binding[k] for k in ('project','source_revision','worker_id','controller_id'))
+                    if 'session' in kwargs: assert kwargs['session']['capture'] == original_capture
+                    return binding, preparation, rows, dict(seconds=60, capture_deadline=time.time()+60)
+                monkeypatch.setattr(final, "_observe", observe)
+                calls = []
+                def exchange(operation, **kwargs):
+                    calls.append(operation)
+                    request = dict(controller_id=worker.controller_id, sequence=worker._sequence+1, operation=operation)
+                    if 'deadline' in kwargs: request['deadline'] = kwargs['deadline']
+                    if operation == 'commit_database':
+                        intent = final._load(state/final.STATE)
+                        assert intent['phase'] == 'commit_dispatching'
+                        assert intent['commit']['worker_sequence'] == request['sequence']
+                    return worker.command(request)
+                paused = final.stop_online_source_locked(state,
+                    **{k: binding[k] for k in ('project','source_revision','worker_id','controller_id')},
+                    max_duration_seconds=30)
+                check = holds.enter_context(final.held_source_writers_locked(state, source_image=image))
+                deadline = time.monotonic()+final._remaining(paused)-1
+                exchange('final_delta', deadline=deadline)
+                final.record_switch_entry_locked(state, deadline=deadline,
+                    observe_worker=lambda **kw: exchange('status'))
+                with control.connect() as admin:
+                    preparation['cluster'] = str(admin.exec_driver_sql('SELECT system_identifier FROM pg_control_system()').scalar_one())
+                final.close_database_logins_locked(state, exchange=exchange)
+                connection = worker._final_connection
+                final.copy_final_delta_locked(state, exchange=exchange, deadline=deadline, max_rounds=2)
+                actual_commit = Connection._commit_impl
+                renamed = []
+                lost = []
+                def after_statement(conn, cursor, statement, parameters, context, executemany):
+                    if statement.startswith('ALTER TABLE market.fact_versions SET SCHEMA'):
+                        assert conn is connection
+                        renamed.append(True)
+                def commit(conn):
+                    actual_commit(conn)
+                    if lost_commit_reply and conn is connection and renamed and not lost:
+                        lost.append(True)
+                        raise RuntimeError('fixture lost actual COMMIT result')
+                event.listen(engine, 'after_cursor_execute', after_statement)
+                try:
+                    with monkeypatch.context() as patch:
+                        patch.setattr(Connection, '_commit_impl', commit)
+                        outcome = final.commit_online_handoff_locked(state, exchange=exchange)
+                finally:
+                    event.remove(engine, 'after_cursor_execute', after_statement)
+                assert renamed and bool(lost) == lost_commit_reply
+                assert outcome['outcome'] == 'committed'
+                assert outcome['database_handoff_committed'] is True
+                assert not outcome['collection_resume_authorized'] and not outcome['runtime_activation_authorized']
+                receipt = final._load(state/final.STATE)
+                assert receipt['phase'] == 'committed'
+                assert receipt['deadline'] == paused['deadline'] and receipt['deadline_boot'] == paused['deadline_boot']
+                assert worker._final_connection is connection
+                assert calls.count('commit_database') == 1
+                with pytest.raises(RuntimeError, match='commit_closed_gate_required'):
+                    final.commit_online_handoff_locked(state, exchange=exchange)
+                assert calls.count('commit_database') == 1
+                worker.proof.verify_all()
+                check()
+            # Host kernel hold is still alive after controller/proof retirement.
+            check()
+        with control.connect() as admin:
+            admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+        with engine.begin() as conn:
+            assert _frozen_records(conn) == frozen
+            assert conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1")) == original_capture
+        assert final._load(state/final.STATE)['phase'] == 'committed'
+    finally:
+        with control.connect() as admin:
+            admin.exec_driver_sql("ALTER DATABASE "+quoted+" ALLOW_CONNECTIONS true")
+        control.dispose()

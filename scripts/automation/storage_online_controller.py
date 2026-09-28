@@ -2,7 +2,7 @@
 
 An admitted host owns preparation, publisher drain and runtime activation.
 The bounded pipe channel exposes background work and a retained rollback fence,
-never host restart or database COMMIT authority. One context
+and a host-admitted final COMMIT, never runtime restart authority. One context
 owns destination leases until close, including an internal final database
 commit/reconciliation. Never reconstruct authority from a serialized reply.
 """
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 _LOCK = "qt.storage.online.controller.v1"
 _ROLLBACK_OPERATIONS = {"rollback_fence_begin", "rollback_fence_check", "rollback_fence_end"}
 _SESSION_OPERATIONS = {"final_session_begin", "final_session_check", "final_session_quiesce"}
-_OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "cancel", "close"}
+_OPERATIONS = _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "sql_copy", "archive_copy", "reprove", "prepare_step", "source_drain", "final_delta", "inspect_outcome", "commit_database", "cancel", "close"}
 
 
 class OnlineController:
@@ -170,6 +170,8 @@ class OnlineController:
             self._rollback_check()
         self._ownership()
         self.proof.check()
+        if getattr(self, "_host_source_hold_required", False):
+            self._require_host_source_exclusion()
         if self._archive_namespace_check is not None:
             self._archive_namespace_check()
         if archives._root(self.source_root, self._source_device)[1] != self._source:
@@ -430,10 +432,11 @@ class OnlineController:
         preparing = isinstance(request, dict) and request.get("operation") == "prepare_step"
         draining = isinstance(request, dict) and request.get("operation") == "source_drain"
         finalizing = isinstance(request, dict) and request.get("operation") == "final_delta"
+        committing = isinstance(request, dict) and request.get("operation") == "commit_database"
         inspecting = isinstance(request, dict) and request.get("operation") == "inspect_outcome"
         fencing = isinstance(request, dict) and request.get("operation") in _ROLLBACK_OPERATIONS
         session = isinstance(request, dict) and request.get("operation") in _SESSION_OPERATIONS
-        if finalizing or inspecting or fencing or session:
+        if finalizing or inspecting or fencing or session or committing:
             fields |= {"deadline"}
         if draining:
             fields |= {"deadline", "max_entries"}
@@ -458,7 +461,7 @@ class OnlineController:
                 or not 0 < request["deadline"]-monotonic() <= min(5, self.limits["movement_timeout_seconds"])
                 or (self._final_deadline is not None and request["deadline"] > self._final_deadline)):
             raise ValueError("storage_online_outcome_command_budget_invalid")
-        if (fencing or session) and (type(request["deadline"]) not in (int, float)
+        if (fencing or session or committing) and (type(request["deadline"]) not in (int, float)
                 or not math.isfinite(request["deadline"])
                 or self._final_deadline is None or request["deadline"] != self._final_deadline
                 or not 0 < request["deadline"]-monotonic() <= self._admitted_limits["movement_timeout_seconds"]):
@@ -486,6 +489,8 @@ class OnlineController:
             # It is not a restart/resume token and never revives dead proof.
             if self.state not in {"closed", "cancelled"}:
                 self.check()
+            if committing:
+                raise RuntimeError("storage_online_commit_replay_refused")
             if session:
                 raise RuntimeError("storage_online_final_session_fresh_sequence_required")
             if fencing:
@@ -499,9 +504,9 @@ class OnlineController:
             or operation in {"rollback_fence_check", "rollback_fence_end", "close"} and self.state == "resume_fenced")
         if request["sequence"] != self._sequence+1 or (self.state != "background" and not readable and not rollback_allowed):
             raise RuntimeError("storage_online_command_sequence_or_state_invalid")
-        if self._final_deadline is not None and operation not in _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "close", "cancel"}:
+        if self._final_deadline is not None and operation not in _SESSION_OPERATIONS | _ROLLBACK_OPERATIONS | {"status", "source_drain", "final_delta", "inspect_outcome", "commit_database", "close", "cancel"}:
             raise RuntimeError("storage_online_final_background_work_refused")
-        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce", "final_delta"} | _ROLLBACK_OPERATIONS:
+        if self._final_connection_entered and operation not in {"status", "inspect_outcome", "close", "final_session_check", "final_session_quiesce", "final_delta", "commit_database"} | _ROLLBACK_OPERATIONS:
             raise RuntimeError("storage_online_final_session_background_work_refused")
         result = {}
         try:
@@ -529,6 +534,29 @@ class OnlineController:
                           else self.final_session_observation(deadline=request["deadline"]))
             elif fencing:
                 result = self._rollback_channel(operation, deadline=request["deadline"])
+            elif committing:
+                if not self._final_connection_entered or not self._jobs_stopped:
+                    raise RuntimeError("storage_online_commit_retained_session_required")
+                self._require_host_source_exclusion()
+                self._host_source_hold_required = True
+                try:
+                    outcome = self.commit_database(deadline=request["deadline"])
+                except Exception as exc:
+                    if self.state != "commit_unknown":
+                        raise
+                    # Consume once. Only a fully received unknown reply allows
+                    # fresh inspection; never reissue a possibly sent COMMIT.
+                    logger.error("storage_online_commit_unknown | controller_id=%s error_type=%s",
+                                 self.controller_id, type(exc).__name__)
+                    result = {"database_handoff_committed": None,
+                              "collection_resume_authorized": False,
+                              "runtime_activation_authorized": False}
+                else:
+                    if outcome.get("database_handoff_committed") is not True:
+                        raise RuntimeError("storage_online_commit_result_invalid")
+                    result = {"database_handoff_committed": True,
+                              "collection_resume_authorized": False,
+                              "runtime_activation_authorized": False}
             elif inspecting:
                 result = self.inspect_outcome(deadline=request["deadline"])
             elif finalizing:
@@ -565,7 +593,7 @@ class OnlineController:
                 self.check()
         except BaseException as exc:
             self._abandon_rollback_channel()
-            if self.state != "committed":
+            if self.state not in {"committed", "commit_unknown"}:
                 self.state = "failed"
             # Static guard codes are safe diagnostics; arbitrary database error
             # text may contain connection or source data and is never logged.
@@ -694,6 +722,8 @@ class OnlineController:
         the closed gate, pinned environment and job definitions must still match.
         Host/archive/spool exclusion remains separately required.
         """
+        if getattr(self, "_host_source_hold_required", False):
+            self._require_host_source_exclusion()
         self._ownership(deadline=deadline)
         if self._archive_namespace_check is not None:
             self._archive_namespace_check()
@@ -718,8 +748,17 @@ class OnlineController:
             raise RuntimeError("storage_online_sql_publishers_not_drained")
         self._ownership(deadline=deadline)
 
+    def _require_host_source_exclusion(self):
+        """Necessary live kernel check; host still owns exact publisher admission."""
+        try:
+            with archive_namespace(self.source_root.parent):
+                raise RuntimeError("storage_online_host_source_exclusion_required")
+        except RuntimeError as exc:
+            if str(exc) != "market_archive_namespace_busy":
+                raise
+
     def commit_database(self, *, deadline):
-        """Internal host seam, intentionally NOT a pipe command.
+        """Internal SQL switch, used after the pipe host admits its held source.
 
         Caller must own separately qualified exact publisher drain/short-pause
         admission and an absolute monotonic deadline covering that final pause.

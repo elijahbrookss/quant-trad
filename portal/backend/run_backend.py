@@ -81,11 +81,22 @@ def main() -> int:
     global _STOP
     _configure_logging()
     require_configured_archive_mount()
-    retain_source_writer_fence()
+    source_fence = retain_source_writer_fence()
     require_configured_working_mount()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+
+    if source_fence:
+        # A lost host lock must not let a late legacy API serve behind the
+        # persistent SQL login gate. Reuse the workers' existing DB readiness
+        # boundary and budget before spawning any API or worker process.
+        from portal.backend.service.async_jobs import wait_for_database_ready
+
+        timeout = _SETTINGS.workers.indicators.db_wait_timeout_seconds
+        if not wait_for_database_ready(timeout_seconds=timeout, poll_interval_seconds=0.5):
+            logger.error("backend_supervisor_source_database_unavailable | timeout_seconds=%s", timeout)
+            return 2
 
     host = _SETTINGS.backend.host
     port = _SETTINGS.backend.port

@@ -94,13 +94,61 @@ new directory, public command or schedule is added.
 
 This is a cooperating, image-qualified process boundary. A preserving preparatory
 source release and exact image/entrypoint/environment/root admission are required
-before relying on it. The final host must own the exclusive side continuously
-through its admitted transition; an observation that it could acquire a lock is
-not authority. That host integration and preparatory release remain unfinished.
+before relying on it. The internal final host retains the exclusive side using
+`held_source_writers_locked` and the existing archive namespace boundary. It
+binds the three fixed source commands, image, root and environment, then retains
+the actual directory inode hold across its caller's transition. Its callback
+rechecks original clocks and root metadata; it cannot be reused after exit.
+The preparatory release and complete publisher/operator admission remain
+unfinished. A saved observation is never lock authority.
 Arbitrary tools, unqualified images, alternate entrypoints and privileged path
 replacement are not excluded by this helper. Database gates, live proofs, original
 deadlines, durable intent and uncertain-outcome handling remain separate required
 boundaries. Kernel release after owner death never authorizes automatic recovery.
+
+
+### One-shot held switch and fresh outcome
+
+With the optional source fence configured, backend startup checks the existing
+shared database readiness contract before spawning any API or worker. It uses
+the existing worker startup timeout and fails nonzero when unavailable. This
+closes the observed late API startup after the exclusive owner's death while
+target logins remain closed. It does not introduce a second DSN or change
+ordinary unconfigured startup. Collector and initializer keep their existing
+database admission. This component evidence does not establish full outer-host
+loss recovery or exclude alternate publishers.
+
+`commit_online_handoff_locked` requires that live host source context, confirmed
+login closure and job retirement, the same worker/session and the original final
+deadline. It rechecks the source and gate and writes `commit_dispatching` into
+the existing final receipt before sending the internal `commit_database`
+command. The worker requires the retained SQL connection, fresh sequence and
+original bound deadline. It checks source namespace exclusion before and during
+the existing guarded switch. The host remains responsible for admission of all
+publishers; a contended inode by itself cannot certify who owns it.
+
+A fully received reply is followed by fresh `inspect_outcome` on that same
+worker, connection and proof. A lost SQL COMMIT result is explicitly reported as
+unknown, logged, consumed once and inspected without repeating COMMIT. Only a
+fresh committed outcome advances the existing receipt to `committed`. An unread
+or malformed pipe reply, failed inspection or uncommitted outcome retains the
+unresolved dispatch intent; no replay, source restart or automatic reversal is
+allowed. The original initial, capture, wall, boot and final monotonic ceilings
+are never renewed. Both commands return no runtime or collection-start authority.
+
+The disposable real SSD/HDD integration exercises actual gate closure, bounded
+residual copy, guarded SQL COMMIT and fresh outcome, including a deliberately
+lost real COMMIT result. Host Docker observations and the command exchange are
+controlled adapters in that test; it does not qualify a complete Docker-pipe
+operator, production publishers, source-image rollout or recovery activation.
+Original capture and frozen records survive. Separate source-start tests cover
+the actual guarded entrypoints after loss of the kernel owner with logins closed.
+
+Before recovery keys or repositories can be mounted, the read-capability worker
+must still be independently verified stopped and reaped. A separately bounded
+preserving transition from the already HDD-mounted database, matching runtime,
+retained-WAL recovery and encrypted paired publication remains required. Neither
+new final phase authorizes ordinary deployment or deletion of the retained marker.
 
 ## Decision
 
@@ -853,7 +901,8 @@ command and returns database_switch_authorized=False. It does not establish
 publisher exclusion or turn saved worker status into proof. Reentry cannot replay
 or remove it, even when no COMMIT was actually sent. Qualified outcome inspection,
 supervised source resumption, worker reaping and recovery/runtime activation
-remain required; no COMMIT pipe command or production entrypoint is enabled.
+remain required. The internal one-shot held switch is described above; no
+complete production operator is enabled.
 
 
 ### Fresh outcome inspection through the held worker

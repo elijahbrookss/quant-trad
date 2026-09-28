@@ -1,11 +1,13 @@
 """Internal final source-stop boundary under the existing launcher's host lock.
 
-No database switch, recovery activation or production CLI. Internal source abort
+Held database switch, no recovery activation or production CLI. Internal source abort
 resumption requires the live SQL fence; intent survives failure and completion.
 """
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import math
@@ -22,6 +24,8 @@ from scripts.automation import storage_online_prepare as initial
 
 STATE = "storage-online-final.json"
 SCHEMA = "qt.storage_online_final.v1"
+_COMMIT_PHASES = {"commit_dispatching", "committed"}
+_SOURCE_HOLD = ContextVar("storage_online_source_hold", default=None)
 _FIELDS = {"schema", "phase", "binding", "started_at", "deadline", "boot_id",
            "started_boot", "deadline_boot", "duration_seconds", "paused_at"}
 
@@ -51,13 +55,14 @@ def _remaining(saved):
 
 def _load(path):
     saved = host_boundary.load_receipt(path)
-    gated = saved.get("phase") in {"login_closing", "login_closed"} or (
+    committing = saved.get("phase") in _COMMIT_PHASES
+    gated = committing or saved.get("phase") in {"login_closing", "login_closed"} or (
         saved.get("phase") in {"source_resuming", "source_resumed"} and "login_gate" in saved)
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming or gated
-    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set())
+    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set())
     if (set(saved) != fields or saved["schema"] != SCHEMA
-            or saved["phase"] not in ("stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed")
+            or saved["phase"] not in ("stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed", "commit_dispatching", "committed")
             or type(saved["duration_seconds"]) is not int
             or not 1 <= saved["duration_seconds"] <= 96*3600
             or any(type(saved[k]) not in (int, float) or not math.isfinite(saved[k])
@@ -67,7 +72,7 @@ def _load(path):
             or abs(saved["deadline"]-saved["started_at"]-saved["duration_seconds"]) > .000001
             or abs(saved["deadline_boot"]-saved["started_boot"]-saved["duration_seconds"]) > .000001):
         raise RuntimeError("storage_online_final_receipt_invalid")
-    if saved["phase"] in ("paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"):
+    if saved["phase"] in ("paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed", "commit_dispatching", "committed"):
         if (type(saved["paused_at"]) not in (int, float)
                 or not saved["started_at"] <= saved["paused_at"] <= saved["deadline"]):
             raise RuntimeError("storage_online_final_receipt_invalid")
@@ -134,6 +139,19 @@ def _load(path):
                 or (saved["phase"] != "login_closing" and (type(gate["closed_at"]) not in (int, float)
                     or not gate["requested_at"] <= gate["closed_at"] <= saved["deadline"]))):
             raise RuntimeError("storage_online_login_receipt_invalid")
+    if committing:
+        commit = saved["commit"]
+        if (not isinstance(commit, dict) or set(commit) != {"requested_at", "worker_sequence", "source_image", "confirmed_at"}
+                or type(commit["requested_at"]) not in (int, float)
+                or not saved["login_gate"]["closed_at"] <= commit["requested_at"] <= saved["deadline"]
+                or type(commit["worker_sequence"]) is not int
+                or commit["worker_sequence"] <= saved["switch"]["worker_sequence"]
+                or not isinstance(commit["source_image"], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", commit["source_image"])
+                or (saved["phase"] == "commit_dispatching" and commit["confirmed_at"] is not None)
+                or (saved["phase"] == "committed" and (type(commit["confirmed_at"]) not in (int, float)
+                    or not commit["requested_at"] <= commit["confirmed_at"] <= saved["deadline"]))):
+            raise RuntimeError("storage_online_commit_receipt_invalid")
     return saved
 
 
@@ -1008,3 +1026,184 @@ def close_database_logins_locked(state_root, *, exchange):
               file=sys.stderr, flush=True)
         return {"new_logins_closed": True, "database_switch_authorized": False,
                 "collection_resume_authorized": False, "runtime_activation_authorized": False}
+
+
+_SOURCE_WRITERS = {
+    "backend": "portal.backend.run_backend",
+    "initialize": "portal.backend.workers.single_node_initializer",
+    "market-data-collector": "portal.backend.workers.market_data_collector",
+}
+
+
+def _source_writer_contract(details, *, service, source_image, source_revision, root):
+    """Admit fixed guarded source commands, not arbitrary image/entrypoint flags.
+
+    source_image is the separately qualified immutable preparatory release.
+    The original preparation contract binds the remaining configuration. This
+    check does not certify an unqualified image merely because its env matches.
+    """
+    config = details["config"]
+    entries = config.get("Env") or []
+    environment = dict(item.split("=", 1) for item in entries)
+    command = (config.get("Entrypoint") or []) + (config.get("Cmd") or [])
+    target = "/app/logs/market-structure"
+    mounts = [m for m in details["mounts"] if m.get("Destination") == target]
+    if (len(environment) != len(entries) or details["image"] != source_image
+            or command != ["python", "-m", _SOURCE_WRITERS[service]]
+            or environment.get("QT_IMAGE_SOURCE_REVISION") != source_revision
+            or environment.get("QT_STORAGE_SOURCE_FENCE_ROOT") != target
+            or environment.get("MARKET_STRUCTURE_STORAGE_ROOT") != target
+            or environment.get("MARKET_STRUCTURE_WORKING_ROOT", target) != target
+            or len(mounts) != 1 or mounts[0].get("Type") != "bind"
+            or mounts[0].get("Source") != str(root) or mounts[0].get("RW") is not True
+            or any(m.get("Destination", "").startswith(("/app/src", "/app/portal", "/app/scripts"))
+                   for m in details["mounts"])):
+        raise RuntimeError("storage_online_guarded_source_contract_required")
+
+
+@contextmanager
+def held_source_writers_locked(state_root, *, source_image):
+    """Hold the exact prepared source inode across final work and retirement.
+
+    Enter only after source stop, under the existing launcher/deployment lock.
+    The caller supplies the independently qualified source image and retains this
+    context through its transition. It reuses the existing kernel namespace
+    owner; no persisted receipt or returned observation is lock authority.
+    SQL gates, unknown publishers, live proof and outcome remain separate checks.
+    """
+    from market_data.archive_namespace import archive_namespace
+
+    if not isinstance(source_image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_image):
+        raise ValueError("storage_online_source_image_required")
+    state_root = launch._canonical(state_root)
+    saved = _load(state_root/STATE)
+    if saved["phase"] != "paused":
+        raise RuntimeError("storage_online_source_hold_paused_required")
+    binding = saved["binding"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    deadline = time.monotonic()+_remaining(saved)
+    with host_boundary.docker_deadline(deadline):
+        observed, preparation, rows, _ = _observe(state_root, **args)
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
+            raise RuntimeError("storage_online_source_hold_changed")
+        roots = preparation["source_roots"]
+        candidates = [Path(p) for p in roots if str(Path(p)/"objects") in roots]
+        if len(roots) != 2 or len(candidates) != 1:
+            raise RuntimeError("storage_online_source_hold_roots_invalid")
+        root = candidates[0]
+        for service in _SOURCE_WRITERS:
+            details = host_boundary.database_details(rows[service]["id"])
+            _source_writer_contract(details, service=service, source_image=source_image,
+                                    source_revision=binding["source_revision"], root=root)
+        with archive_namespace(root, exclusive=True) as namespace_check:
+            active = True
+            def check():
+                if not active:
+                    raise RuntimeError("storage_online_source_hold_closed")
+                current = _load(state_root/STATE)
+                _remaining(current)
+                if current["binding"] != binding or time.monotonic() >= deadline:
+                    raise RuntimeError("storage_online_source_hold_binding_changed")
+                namespace_check()
+                for name, expected in roots.items():
+                    info = Path(name).stat()
+                    actual = [info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode & 0o7777]
+                    if actual != expected or Path(name).resolve(strict=True) != Path(name):
+                        raise RuntimeError("storage_online_source_hold_metadata_changed")
+            token = _SOURCE_HOLD.set((state_root, binding, source_image, check))
+            try:
+                check()
+                yield check
+                check()
+            finally:
+                active = False
+                _SOURCE_HOLD.reset(token)
+
+
+def commit_online_handoff_locked(state_root, *, exchange):
+    """Dispatch once under the live source hold; freshly reconcile on SAME pipe.
+
+    A send/receive failure retains commit_dispatching and propagates. Only a
+    fully received reply permits the next fresh observation here. No replay,
+    source restart, read-worker retirement or recovery activation is performed.
+    """
+    state_root = launch._canonical(state_root)
+    held = _SOURCE_HOLD.get()
+    if not callable(exchange) or held is None or held[0] != state_root:
+        raise RuntimeError("storage_online_live_source_hold_required")
+    _, binding, source_image, source_check = held
+    path = state_root/STATE
+    saved = _load(path)
+    if saved["phase"] != "login_closed" or saved["binding"] != binding:
+        raise RuntimeError("storage_online_commit_closed_gate_required")
+    deadline = saved["switch"]["deadline_monotonic"]
+    sequence = saved["switch"]["worker_sequence"]
+    args = {key: binding[key] for key in ("project", "source_revision", "controller_id", "worker_id")}
+    expected_gate = {**saved["login_gate"]["database"], "allow_connections": False}
+
+    def budget():
+        source_check()
+        if not 0 < deadline-time.monotonic() <= _remaining(saved):
+            raise RuntimeError("storage_online_commit_deadline_expired")
+
+    def admit(session):
+        budget()
+        observed, _, rows, _ = _observe(state_root, **args, session=session)
+        if observed != binding or any(rows[n]["running"] for n in host_boundary.STOP):
+            raise RuntimeError("storage_online_commit_source_changed")
+        current_gate = json.loads(host_boundary.maintenance_query(rows["tsdb"]["id"], _GATE_OBSERVE))
+        if current_gate != expected_gate:
+            raise RuntimeError("storage_online_commit_gate_changed")
+        budget()
+
+    with host_boundary.docker_deadline(deadline):
+        budget()
+        reply = exchange("final_session_check", deadline=deadline)
+        session, sequence = _final_session_reply(reply, operation="final_session_check",
+            binding=binding, deadline=deadline, sequence=sequence)
+        if session["database"] != expected_gate:
+            raise RuntimeError("storage_online_commit_gate_changed")
+        admit(session)
+        saved.update(phase="commit_dispatching", commit={"requested_at": time.time(),
+            "worker_sequence": sequence+1, "source_image": source_image, "confirmed_at": None})
+        host_boundary.save_receipt(path, saved, initial=False)  # BEFORE possible COMMIT.
+        budget()
+        reply = exchange("commit_database", deadline=deadline)
+        budget()
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != "commit_database"
+                or reply.get("state") not in {"commit_unknown", "committed"}
+                or reply.get("bound_final_deadline") != deadline
+                or reply.get("last_sequence") != sequence+1
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False
+                or not isinstance(result, dict)
+                or result.get("database_handoff_committed") is not (True if reply["state"] == "committed" else None)
+                or result.get("collection_resume_authorized") is not False
+                or result.get("runtime_activation_authorized") is not False):
+            raise RuntimeError("storage_online_commit_reply_invalid")
+        admit(session)
+        # A reply, including a successful reply, is not the final outcome proof.
+        reply = exchange("inspect_outcome", deadline=min(deadline, time.monotonic()+5))
+        budget()
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if (not isinstance(reply, dict) or reply.get("controller_id") != binding["controller_id"]
+                or reply.get("operation") != "inspect_outcome"
+                or reply.get("state") not in {"commit_unknown", "committed"}
+                or reply.get("bound_final_deadline") != deadline
+                or reply.get("last_sequence") != sequence+2
+                or reply.get("final_switch_authorized") is not False
+                or reply.get("collection_resume_authorized") is not False
+                or not isinstance(result, dict) or result.get("outcome") not in {"committed", "uncommitted", "pending"}
+                or result.get("database_handoff_committed") is not {"committed": True, "uncommitted": False, "pending": None}[result["outcome"]]
+                or result.get("collection_resume_authorized") is not False
+                or result.get("runtime_activation_authorized") is not False):
+            raise RuntimeError("storage_online_commit_outcome_invalid")
+        admit(session)
+        if result["outcome"] == "committed":
+            saved["phase"] = "committed"
+            saved["commit"]["confirmed_at"] = time.time()
+            host_boundary.save_receipt(path, saved, initial=False)
+            budget()
+        return result
