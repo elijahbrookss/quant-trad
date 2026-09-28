@@ -554,25 +554,3 @@ Resource admission counts growth across the longer requested horizon. The
 routine movement ceiling remains one hour, and backup/recovery and activation
 limits are unchanged. Full-size logical disaster-restore validation remains
 user-waived; this migration deadline amendment does not restart it.
-
-
-## Fresh online identity creation — 2026-09-28
-
-The historical SSD-build/HDD-transfer procedure above remains valid for already
-prepared identity targets. Fresh online preparation now creates the empty global
-identity table and all indexes on their final registered HDD target. Actual-row
-allocation and continuing source growth exposed insufficient SSD room for another
-complete identity registry during header preparation. Avoiding that temporary
-copy preserves the existing reserve, retention and source data.
-
-The existing placement bit is set atomically with empty-target creation. All
-physical, source/capture, schema, copied-field and resource checks remain. No
-source writer mirrors identities until the existing baseline/catch-up boundary.
-Reentry reads the saved state; it cannot relocate or reinterpret an older SSD
-registry. The private copy helper's historical default remains unchanged; only
-fresh online preparation selects final placement during creation.
-
-This is the fixed identity destination already required at handoff, not general
-placement support. HDD random-index performance and complete online resource/
-deadline admission must be qualified; the capacity saving and small warm fixture
-alone are not production throughput evidence.

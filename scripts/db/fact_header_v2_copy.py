@@ -119,16 +119,8 @@ def _inspect_progress(conn):
 
 
 def prepare_copy(conn, *, placement=None, timeout_seconds=30,
-                 attempt_seconds=DEFAULT_ATTEMPT_SECONDS, identity_on_history=False):
-    """Create a private target atomically; retry never resets copied progress.
-
-    Fresh online preparation places identities at their final HDD destination to
-    avoid duplicating the global registry on SSD. Existing targets retain their
-    recorded placement and the historical transfer path; this flag affects only
-    creation and cannot move or reinterpret an already prepared target.
-    """
-    if type(identity_on_history) is not bool or (identity_on_history and placement is None):
-        raise ValueError("fact_header_copy_identity_history_requires_placement")
+                 attempt_seconds=DEFAULT_ATTEMPT_SECONDS):
+    """Create a private target atomically; retry never resets copied progress."""
     with migration_step(conn, timeout_seconds), (physical.tablespace(conn,"") if placement is not None else nullcontext()):
         binding=physical.observe(conn,placement)[0] if placement is not None else None
         install_capture(conn, attempt_seconds=attempt_seconds)
@@ -145,10 +137,8 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30,
         for name in TABLE_NAMES:
             if conn.scalar(text("SELECT to_regclass(:name)"), {"name":SCHEMA+"."+name}) is not None:
                 raise RuntimeError("fact_header_copy_unregistered_shadow")
-            history_identity = identity_on_history and name == "fact_identities"
-            with (physical.tablespace(conn, binding["history_name"])
-                  if history_identity else nullcontext()):
-                tables[name].create(conn)
+            # Build the private identity indexes on SSD before bulk relocation.
+            tables[name].create(conn)
         assert_v1_source_admission(conn)
         conn.exec_driver_sql(f"""
             CREATE TABLE {STATE}(
@@ -169,11 +159,10 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30,
             ORDER BY storage_day DESC,market_commit_seq DESC,id DESC LIMIT 1
         """)).one_or_none()
         conn.execute(text(f"""
-            INSERT INTO {STATE}(id,high_day,high_seq,high_id,baseline_complete,identity_history_ready,targets,placement)
-            VALUES(1,:day,:seq,:identity,:empty,:identity_history,CAST(:targets AS jsonb),CAST(:placement AS jsonb))
+            INSERT INTO {STATE}(id,high_day,high_seq,high_id,baseline_complete,targets,placement)
+            VALUES(1,:day,:seq,:identity,:empty,CAST(:targets AS jsonb),CAST(:placement AS jsonb))
         """), {"day":high[0] if high else None,"seq":high[1] if high else None,
                "identity":high[2] if high else None,"empty":high is None,
-               "identity_history":identity_on_history,
                "targets":json.dumps({name:_shape(conn,name) for name in TABLE_NAMES}),
                "placement":json.dumps(binding) if binding is not None else None})
         logger.info("fact_header_v2_shadow_prepared | source=%s", SOURCE)
