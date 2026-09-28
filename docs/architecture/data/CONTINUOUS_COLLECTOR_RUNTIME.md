@@ -14,6 +14,9 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - src/core/storage_writer_fence.py
+  - portal/backend/run_backend.py
+  - tests/test_market_data/test_storage_writer_fence.py
   - portal/backend/service/market/canonical_retention.py
   - src/core/settings.py
   - src/data_providers/structured_facts.py
@@ -426,3 +429,26 @@ The actual-core disposable rehearsal verifies clean collector stop and renewed
 heartbeat with enrollment disabled. It does not certify active provider-stream
 continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
+
+## Explicit source storage preparation interlock
+
+The existing backend, collector and initializer entrypoints accept the internal
+operator input `QT_STORAGE_SOURCE_FENCE_ROOT` for the current co-located archive
+and working directory. They acquire a nonblocking shared Linux directory lock
+before publishing or spawning work and keep it until process exit. Backend
+children inherit the same open descriptor, so an orphan cannot silently release
+the source interlock when its supervisor exits. The guarded backend also uses
+the existing database-readiness check before spawning children.
+
+An operator can acquire the exclusive side only after admitted source publishers
+retire. A missing, aliased, split or changed root and an exclusive hold refuse
+startup. This does not create a marker, change permissions, move data, migrate
+schema, or authorize a switch. Without the explicit input, ordinary startup is
+unchanged. This cooperative boundary must be combined with exact source-image,
+fleet, mount and database admission; arbitrary external processes and Docker
+bot containers are not covered by this process descriptor.
+
+This backport preserves the deployed research revision and v1 storage layout.
+Its activation requires a separately qualified preserving release; no production
+recipe, collector state or storage data is changed by adding the code. See
+[ADR0074](../decisions/0074-retain-source-writer-interlock-during-storage-preparation.md).
