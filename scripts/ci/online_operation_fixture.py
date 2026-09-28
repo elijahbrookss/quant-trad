@@ -156,5 +156,4 @@ def prepare_canonical_configuration(*, repository, state, project, image, databa
     database['services']['tsdb']['volumes'] = [mount for mount in database['services']['tsdb']['volumes']
         if mount['target']=='/var/lib/postgresql/data']
     return dict(environment=environment, runtime=model, database=database,
-                history_uuid=hdd_uuid, recent_uuid=ssd_uuid,
-                pgadmin_url='http://127.0.0.1:'+values['QT_PGADMIN_PORT']+'/misc/ping')
+                history_uuid=hdd_uuid, recent_uuid=ssd_uuid)

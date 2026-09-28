@@ -486,20 +486,22 @@ os.chown(root,70,70)
    deployed_database=databases[0]
    assert host_boundary.cluster_identifier(deployed_database)==original_cluster
    assert host_boundary.database_query(deployed_database,frozen_sql)==before_final_frozen
-   from urllib.request import urlopen
-   pgadmin_deadline=time.monotonic()+30  # post-deployment fixture observation only
-   while True:
-    try:
-     with urlopen(canonical['pgadmin_url'],timeout=2) as response:
-      assert response.status==200
-     break
-    except (OSError, AssertionError):
-     if time.monotonic()>=pgadmin_deadline:raise
-     time.sleep(.2)
    report['ordinary_deployment']=dict(recorded=True,cluster_preserved=True,frozen_preserved=True,
-     database_container_recreated=deployed_database!=pgid,pgadmin_http_ready=True,
+     database_container_recreated=deployed_database!=pgid,pgadmin_http_ready=False,
      deployment_seconds=time.monotonic()-deployment_started,
      retained_marker=True,production_admission=False)
+   # The fixture network is deliberately internal. Check the actual HTTP
+   # service inside its container, without enabling outside-provider access.
+   pgadmin_deadline=time.monotonic()+30  # post-deployment fixture observation only
+   while True:
+    response=run(['exec',project+'-pgadmin-1','/venv/bin/python3','-c',
+      "from urllib.request import urlopen; r=urlopen('http://127.0.0.1:80/misc/ping',timeout=2); assert r.status==200"],
+      timeout=5,check=False)
+    if response.returncode==0:break
+    if time.monotonic()>=pgadmin_deadline:
+     raise RuntimeError('canonical pgAdmin HTTP readiness failed; see retained service log')
+    time.sleep(.2)
+   report['ordinary_deployment']['pgadmin_http_ready']=True
   log.close()
   report.update(passed=True,image=image,fixture_seconds=time.monotonic()-started)
  else:

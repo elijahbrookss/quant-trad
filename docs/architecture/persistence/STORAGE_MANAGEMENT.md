@@ -3008,7 +3008,9 @@ operator; no host account membership or original source permission is changed.
 After ordinary Compose adoption, the rehearsal resolves the unique current
 database container and verifies the original cluster and frozen data. It records
 any container recreation and the additional deployment time, and checks the
-actual pgAdmin HTTP endpoint. This elapsed fixture time is not production downtime.
+actual pgAdmin HTTP endpoint from inside its container. The fixture network
+remains internal, so this does not qualify external listener access. This elapsed
+fixture time is not production downtime.
 
 
 Terminal deployment admission also verifies the initial preserving hold through
