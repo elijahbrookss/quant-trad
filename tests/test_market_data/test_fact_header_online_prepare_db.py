@@ -1,5 +1,6 @@
 """Atomic preparation on the owned QT SSD/HDD fixture; no host cutover."""
 from datetime import timedelta
+from pathlib import Path
 import os
 
 import pytest
@@ -15,6 +16,7 @@ from scripts.db import fact_header_v2_online_proof as protection
 from scripts.db import archive_root_v2_online as archives
 from tests.test_market_data.test_archive_online_copy_db import _prepare
 from tests.test_market_data.test_fact_header_copy_db import _frozen_records
+from tests.test_market_data.test_fact_header_copy_placement_db import _assert_disk
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, storage
 
@@ -47,6 +49,8 @@ def test_online_preparation_retry_preserves_original_clock_and_live_publication(
         protection.inspect_protection(conn)
         assert conn.scalar(text(f"SELECT verified_rows FROM {headers.STATE}")) == 0
         assert conn.scalar(text(f"SELECT verified_rows FROM {raw.STATE}")) == 0
+        assert headers._inspect_progress(conn)["identity_history_ready"]
+        _assert_disk(conn, capture.SCHEMA+".fact_identities", Path("/qt-history"))
     _raw_book_fixture(storage, source, monkeypatch,
                       definition_id="online-atomic-live",
                       provider_product_id="BTC-USD-ATOMIC",
@@ -148,7 +152,16 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
     from tests.test_market_data.test_fact_header_copy_db import _insert
 
     engine, options, _ = _setup(storage, tmp_path, monkeypatch)
-    prepared = online.prepare_attempt(engine, **options)
+    if header_started:
+        # Reproduce a previously prepared SSD identity target. The new online
+        # creation choice must not reinterpret its committed placement.
+        original_prepare = headers.prepare_copy
+        with monkeypatch.context() as patch:
+            patch.setattr(headers, "prepare_copy", lambda conn, **kw:
+                          original_prepare(conn, **(kw | {"identity_on_history": False})))
+            prepared = online.prepare_attempt(engine, **options)
+    else:
+        prepared = online.prepare_attempt(engine, **options)
     args = {k:options[k] for k in ("placement", "policy", "resource_limits")}
     steps = dict(**args, expected_started_at=prepared["started_at"])
     with engine.begin() as conn:
@@ -191,7 +204,7 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
     else:
         pytest.fail("tiny explicit phase fixture did not converge")
     assert moved == (["identity_history", "raw_history"] if header_started
-                     else ["raw_history", "identity_history"])
+                     else ["raw_history"])
     online.preparation_step(engine, step="identity_capture", **steps)
     with engine.begin() as conn:
         slots = [row["relation"] for row in references.inspect_references(conn)["references"]
@@ -236,3 +249,21 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         assert _saved(conn) == original and _frozen_records(conn) == frozen
         assert headers._inspect_progress(conn)["identity_history_ready"]
         assert raw._inspect(conn)["history_ready"]
+
+
+def test_online_preparation_preserves_existing_ssd_identity_and_original_clock(
+        storage, tmp_path, monkeypatch):
+    engine, options, _ = _setup(storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        headers.prepare_copy(conn, placement=storage.copy_plan, attempt_seconds=180)
+        original = _saved(conn)
+        original_progress = headers._inspect_progress(conn)
+        assert not original_progress["identity_history_ready"]
+        _assert_disk(conn, capture.SCHEMA+".fact_identities", Path("/qt-source/pgdata"))
+    online.prepare_attempt(engine, **options)
+    with engine.begin() as conn:
+        assert _saved(conn) == original
+        current_progress = headers._inspect_progress(conn)
+        assert {k:v for k,v in current_progress.items() if k != "_placement_pid"} == {
+            k:v for k,v in original_progress.items() if k != "_placement_pid"}
+        _assert_disk(conn, capture.SCHEMA+".fact_identities", Path("/qt-source/pgdata"))

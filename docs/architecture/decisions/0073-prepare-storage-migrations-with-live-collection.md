@@ -1853,3 +1853,18 @@ start until actual bound history placement is committed and reverified. Phase
 limits still need measured admission, including queue growth while the other
 baseline runs, retained data, WAL/temp and source growth. Reducing allocation
 overlap alone does not establish sufficient production headroom or a pause ETA.
+
+
+## Avoiding a second SSD identity registry — 2026-09-28
+
+Fresh atomic online preparation creates the private identity table/indexes at
+their already required HDD destination. This eliminates temporary SSD identity
+staging while preserving the raw-first bounded copy order, exact per-page checks,
+original capture deadline and final switch/recovery owners. It reuses the existing
+physical placement bit and verification; no new phase, journal, CLI or policy is
+introduced. Existing attempts retain their committed placement and any required
+explicit relocation. The historical helper default is unchanged.
+
+Actual metadata sampling motivates the capacity correction, but a warm small
+sample cannot qualify production HDD index performance or backlog convergence.
+The complete measured resource/pause and review gates still apply before rollout.

@@ -3032,7 +3032,12 @@ operation is replayed.
 For a new online attempt, finish the bounded raw lookup baseline and commit its
 existing physical HDD relocation before allocating header pages and identities.
 This avoids adding the complete raw staging allocation to the completed recent
-headers. Header identity relocation still finishes before following live tails.
+headers. Fresh online preparation creates the private global identity table and
+its indexes directly on their final HDD target, avoiding the additional SSD copy.
+The existing placement bit records this in the same atomic preparation transaction;
+physical file verification still runs before every copied page. Older prepared
+identity targets retain their recorded SSD placement and explicit relocation step
+before following live tails.
 The original capture deadline, per-page resource watcher, exact verification and
 final writer boundary are unchanged; no separate placement option is introduced.
 
@@ -3043,3 +3048,13 @@ start until actual bound history placement is committed and reverified. Phase
 limits still need measured admission, including queue growth while the other
 baseline runs, retained data, WAL/temp and source growth. Reducing allocation
 overlap alone does not establish sufficient production headroom or a pause ETA.
+
+Actual-row allocation measurements showed that the synthetic metadata estimate
+understated header size; temporary identity staging further exhausted online SSD
+headroom. Direct HDD identity creation uses the existing fixed destination and
+copy/verification machinery. It is an internal creation choice, not a policy or
+operator flag. The historical held helper retains its prior default. Reentry
+never reinterprets or moves an existing target based on the new creation choice.
+This trades temporary SSD use for HDD index work. A small warm-cache sample is
+insufficient to qualify the production identity working set, catch-up throughput
+or the original cumulative deadline; those remain release admission requirements.

@@ -69,7 +69,7 @@ def prepare_attempt(engine, *, placement, policy, resource_limits, source_root,
         if not destination.is_relative_to(Path(placement.history.root).resolve(strict=True)):
             raise RuntimeError("fact_header_online_archive_outside_fixed_target")
         headers.prepare_copy(conn, placement=placement, timeout_seconds=seconds,
-                             attempt_seconds=attempt_seconds)
+                             attempt_seconds=attempt_seconds, identity_on_history=True)
         # The raw manifest FK must precede archive trigger binding. Integrity
         # guards must precede the first copied row, including on a retry.
         raw.prepare_copy(conn, timeout_seconds=seconds)
