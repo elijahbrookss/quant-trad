@@ -2997,9 +2997,20 @@ preserving preparation checks.
 The existing disposable online rehearsal accepts
 `--canonical-deployment-repository <exact-clean-checkout>` with the full-operation
 and completion-observation modes. It renders that checkout's public composition,
-uses real read-only filesystem UUID metadata and distinct owned listener ports,
+uses real read-only filesystem UUID metadata and distinct owned listeners,
 and drives the existing terminal publication and ordinary deployer. It uses
 synthetic guarded source peers and disposable credentials; it cannot establish
-production collection performance or production admission. When needed, only its
-deployment subprocess receives the archive supplemental group; no host account
-membership or original source permission is changed.
+production collection performance or production admission. Its new empty archive
+root is prepared with the application/operator owner and database shared group
+before source startup. The backend keeps internal port 8000 and uses a distinct
+loopback address for its owned host listener. Deployment runs as the ordinary
+operator; no host account membership or original source permission is changed.
+
+
+Terminal deployment admission also verifies the initial preserving hold through
+its immutable hash in the completed online preparation receipt, itself bound by
+the final receipt. Publication, partial-file reconciliation and ordinary deploy
+all require that exact retained hold. The normal deployer recognizes it only
+after the qualified online terminal grant succeeds. Missing, changed, unrelated
+or standalone legacy holds still refuse; no hold is deleted and no migration
+operation is replayed.

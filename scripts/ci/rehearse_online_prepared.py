@@ -171,7 +171,8 @@ os.chown(root,70,70)
  run(['run','--name',prep,'--user','0:0','--network','none','--memory','64m','--cpus','0.25',
       '--mount','type=bind,source='+str(history)+',target=/h',
       '--mount','type=bind,source='+str(working)+',target=/s','--entrypoint','python',image,'-c',
-      "import os;os.mkdir('/s/objects');[(os.chown(p,70,70),os.chmod(p,0o755)) for p in ('/h','/s','/s/objects')];os.chmod('/h',0o777)"])
+      "import os;os.mkdir('/s/objects');[(os.chown(p,70,70),os.chmod(p,0o755)) for p in ('/h','/s','/s/objects')];os.chmod('/h',0o777)"+
+      (";os.mkdir('/h/archives');os.chown('/h/archives',1000,70);os.chmod('/h/archives',0o2770)" if options.canonical_deployment_repository else "")])
  assert run(['volume','inspect',volume],check=False).returncode != 0
  run(['volume','create','--label','qt.disposable='+project,volume]);created_volume=True
  run(['network','create','--internal',network]);created_network=True
@@ -472,12 +473,6 @@ os.chown(root,70,70)
    with deployment_log.open('w') as stream:
     deployment_log.chmod(0o600)
     deployment_command=['bash',str(options.canonical_deployment_repository/'scripts/automation/server_deploy.sh'),'deploy',revision]
-    if 70 not in os.getgroups():
-     # Grant only this disposable operator process the archive group. No host
-     # account or existing path permissions change; application capabilities stay dropped.
-     groups=','.join(str(group) for group in sorted(set(os.getgroups())|{70}))
-     deployment_command=['sudo','-n','--preserve-env=QT_SINGLE_NODE_ENV_FILE,QT_SINGLE_NODE_STATE_ROOT,PYTHONPATH',
-       'setpriv','--reuid='+str(os.getuid()),'--regid='+str(os.getgid()),'--groups='+groups,*deployment_command]
     deployed=subprocess.run(deployment_command,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=1800)
    assert deployed.returncode==0, 'canonical ordinary deployment failed; see private fixture log'
    terminal=final_host._load(state/final_host.STATE)

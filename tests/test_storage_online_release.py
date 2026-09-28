@@ -243,8 +243,13 @@ def publication(completed):
     root, source, saved, model = completed
     saved["binding"]["source_revision"] = "a"*40
     saved["runtime"]["finished_at"] = 1
+    hold=dict(phase="database_prepared",project=saved["binding"]["project"],source_revision="a"*40)
+    release.host.save_receipt(root/release.host.HOLD,hold,initial=True)
     for name, key in (("storage-online-preparation.json", "preparation_sha256"), ("storage-online-worker.json", "worker_sha256")):
         evidence={"fixture":name}
+        if name=="storage-online-preparation.json":
+            evidence.update(phase="serving",project=saved["binding"]["project"],
+                source_revision="a"*40,hold_sha256=release.host.digest(hold))
         release.host.save_receipt(root/name,evidence,initial=True)
         saved["binding"][key]=release.host.digest(evidence)
     release.host.save_receipt(root/"storage-online-final.json", saved, initial=False)
@@ -414,3 +419,29 @@ def test_already_published_file_is_synced_before_terminal_receipt(publication,mo
     release._publish_file(source,before=b"original",after=prepared)
     assert synced==[source.parent]
     assert source.read_bytes()==prepared
+
+
+@pytest.mark.parametrize("after_publication", [False, True])
+@pytest.mark.parametrize("fault", ["missing", "changed", "unrelated", "preparation"])
+def test_terminal_grant_requires_its_exact_retained_initial_hold(publication, monkeypatch, after_publication, fault):
+    from scripts.automation import storage_online_final as final
+    root, source, _, _ = publication
+    if after_publication:
+        publish(publication)
+    marker=root/release.host.HOLD
+    if fault=="missing":marker.unlink()
+    elif fault in {"changed", "unrelated"}:
+        hold=release.host.load_receipt(marker)
+        hold["phase" if fault=="changed" else "project"]="different"
+        release.host.save_receipt(marker,hold,initial=False)
+    else:
+        path=root/"storage-online-preparation.json"
+        value=release.host.load_receipt(path);value["hold_sha256"]="0"*64
+        release.host.save_receipt(path,value,initial=False)
+    before={path:path.read_bytes() for path in root.iterdir() if path.is_file()}
+    monkeypatch.setattr(final,"_load",lambda path:release.host.load_receipt(path))
+    with pytest.raises((RuntimeError,OSError)):
+        if after_publication:
+            release.admit_deployment(root,environment_path=source,repository=root,action="deploy",revision="c"*40)
+        else:publish(publication)
+    assert before=={path:path.read_bytes() for path in root.iterdir() if path.is_file()}

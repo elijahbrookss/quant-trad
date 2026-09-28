@@ -915,6 +915,9 @@ import sys
 from scripts.automation.storage_online_release import admit_deployment
 admit_deployment(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3], action=sys.argv[4], revision=sys.argv[5])
 PY
+    # The terminal grant also verifies the exact retained initial hold. A separate
+    # or changed legacy hold cannot pass that admission; no marker is removed.
+    return 0
   fi
   if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
     die "storage handoff hold is active; reconcile the preserving storage procedure before resuming server operations"

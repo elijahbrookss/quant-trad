@@ -425,6 +425,26 @@ def _publish_file(path, *, before, after):
         if os.path.exists(temporary):os.unlink(temporary)
 
 
+def _admit_initial_hold(state_root, saved):
+    """Bind the retained initial hold through its completed online preparation.
+
+    This is evidence preservation under an already qualified terminal grant, not
+    authority to resume an old held-copy procedure or remove its marker.
+    """
+    preparation = host.load_receipt(state_root/"storage-online-preparation.json")
+    if (host.digest(preparation) != saved["binding"]["preparation_sha256"]
+            or preparation.get("phase") != "serving"
+            or preparation.get("project") != saved["binding"]["project"]
+            or preparation.get("source_revision") != saved["binding"]["source_revision"]):
+        raise RuntimeError("storage_online_release_migration_evidence_changed")
+    hold = host.load_receipt(state_root/host.HOLD)
+    if (host.digest(hold) != preparation.get("hold_sha256")
+            or hold.get("phase") != "database_prepared"
+            or hold.get("project") != preparation["project"]
+            or hold.get("source_revision") != preparation["source_revision"]):
+        raise RuntimeError("storage_online_release_initial_hold_changed")
+
+
 def publish_configuration(state_root, *, repository, environment_path, saved, configuration):
     """Publish only terminal configuration, under the existing final-state owner.
 
@@ -443,6 +463,7 @@ def publish_configuration(state_root, *, repository, environment_path, saved, co
     prepared=read_private_environment(state_root/PREPARED_ENVIRONMENT)
     if read_private_environment(environment_path)!=original:
         raise RuntimeError("storage_online_release_environment_changed")
+    _admit_initial_hold(state_root, saved)
     source_release=read_private_environment(state_root/"release.env")
     values=_release_values(source_release)
     if (set(values)!={"current_revision","current_source_tree_hash","previous_revision","deployed_at","storage_layout"}
@@ -479,6 +500,7 @@ def reconcile_configuration_files(state_root, *, saved):
         raise RuntimeError("storage_online_release_not_publishing")
     if host.load_receipt(state_root/"storage-online-final.json")!=saved:
         raise RuntimeError("storage_online_release_journal_changed")
+    _admit_initial_hold(state_root, saved)
     files={}
     for name,key in ((SOURCE_ENVIRONMENT,"source_environment_sha256"),(PREPARED_ENVIRONMENT,"prepared_environment_sha256"),
                      (SOURCE_RELEASE,"source_release_sha256"),(BRIDGE_RELEASE,"bridge_release_sha256")):
@@ -487,6 +509,7 @@ def reconcile_configuration_files(state_root, *, saved):
             raise RuntimeError("storage_online_release_artifact_changed")
         files[name]=raw
     def check():
+        _admit_initial_hold(state_root, saved)
         if host.load_receipt(state_root/"storage-online-final.json") != saved:
             raise RuntimeError("storage_online_release_journal_changed")
         if any(read_private_environment(state_root/name) != raw for name, raw in files.items()):
@@ -539,9 +562,9 @@ def admit_deployment(state_root, *, environment_path, repository, action, revisi
             or host.digest(host.load_receipt(state_root/runtime.RUNTIME_RECIPE, max_bytes=524288))
                 != value["configuration"]["storage_configuration_sha256"]):
         raise RuntimeError("storage_online_release_request_changed")
-    for name, key in (("storage-online-preparation.json", "preparation_sha256"), ("storage-online-worker.json", "worker_sha256")):
-        if host.digest(host.load_receipt(state_root/name)) != saved["binding"][key]:
-            raise RuntimeError("storage_online_release_migration_evidence_changed")
+    _admit_initial_hold(state_root, saved)
+    if host.digest(host.load_receipt(state_root/"storage-online-worker.json")) != saved["binding"]["worker_sha256"]:
+        raise RuntimeError("storage_online_release_migration_evidence_changed")
     current=read_private_environment(state_root/"release.env")
     fields=_release_values(current)
     if value["status"]=="published":

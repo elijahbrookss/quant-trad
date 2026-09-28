@@ -159,7 +159,14 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         # Original private source archives keep their ownership and permissions.
         destination=Path("/qt-history/archives/objects")
         assert not any(destination.iterdir())
-        destination.parent.chmod(0o2770);destination.chmod(0o2770)
+        if os.getenv("QT_ONLINE_CANONICAL_FIXTURE") == "1":
+            # The empty shared root is provisioned before source startup with
+            # the normal operator/application owner and the database group.
+            parent = destination.parent.stat()
+            assert (parent.st_uid, parent.st_gid, parent.st_mode & 0o7777) == (1000, 70, 0o2770)
+        else:
+            destination.parent.chmod(0o2770)
+        destination.chmod(0o2770)
     if atomic and not initial_capture:
         online.prepare_attempt(engine, placement=storage.copy_plan, attempt_seconds=180,
             **{k:v for k,v in options.items() if k not in {"page_rows", "max_page_bytes"}})

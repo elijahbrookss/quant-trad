@@ -112,7 +112,14 @@ def prepare_canonical_configuration(*, repository, state, project, image, databa
     # uses production listeners. Binding conflicts still fail Docker startup.
     sockets = []
     try:
-        for key in ('QT_BACKEND_PORT','QT_FRONTEND_PORT','QT_FRONTEND_V2_PORT',
+        # The backend also consumes QT_BACKEND_PORT as its internal listener.
+        # Preserve the canonical 8000 health/peer contract and isolate its host
+        # listener on a distinct loopback address, rather than changing that port.
+        backend_address='127.253.'+str(os.urandom(1)[0])+'.'+str(1+os.urandom(1)[0]%254)
+        listener=socket.socket(); listener.bind((backend_address,8000)); sockets.append(listener)
+        values['QT_BACKEND_BIND_ADDRESS']=backend_address
+        values['QT_BACKEND_PORT']='8000'
+        for key in ('QT_FRONTEND_PORT','QT_FRONTEND_V2_PORT',
                     'QT_PGADMIN_PORT','QT_GRAFANA_PORT','QT_ALLOY_PORT'):
             listener = socket.socket(); listener.bind(('127.0.0.1', 0)); sockets.append(listener)
             values[key] = str(listener.getsockname()[1])
