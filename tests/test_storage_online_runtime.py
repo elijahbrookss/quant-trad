@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -89,3 +90,152 @@ def test_spool_helper_checks_space_before_opening_source(monkeypatch):
     with pytest.raises(RuntimeError,match='reserve_exhausted'):
         exec(runtime._COPY,{})
     assert not called
+
+
+@pytest.mark.parametrize("phase",["committed","recovery_wal_ready","recovery_runtime_starting","recovery_runtime_ready"])
+def test_runtime_entry_refuses_wrong_phase_without_dispatch(tmp_path,monkeypatch,phase):
+    saved=dict(phase=phase,binding={},commit=dict(source_image="image"))
+    monkeypatch.setattr(final,"_load",lambda _:saved)
+    calls=[];monkeypatch.setattr(runtime,"activate_runtime",lambda *a,**kw:calls.append(kw))
+    token=final._SOURCE_HOLD.set((tmp_path,{},"image",lambda:None))
+    try:
+        with pytest.raises(RuntimeError,match="runtime_live_transition_required"):
+            final.activate_online_runtime_locked(tmp_path,worker_process=object(),max_duration_seconds=30)
+    finally:final._SOURCE_HOLD.reset(token)
+    assert not calls
+
+
+def test_runtime_journal_never_accepts_reordered_dispatch_or_unconfirmed_completion():
+    now=time.time();deadline=time.monotonic()+30
+    saved=dict(phase="recovery_runtime_starting",deadline=now+30,switch=dict(deadline_monotonic=deadline),
+        runtime_spool=dict(finished_at=now-1),runtime=dict(started_at=now,deadline_monotonic=deadline,
+        completed=[],inflight="remove:initialize",finished_at=None,admission={},compose_hashes={},candidate_ids={}))
+    runtime.validate_runtime_journal(saved)
+    saved['runtime']['inflight']='start:market-data-collector'
+    with pytest.raises(RuntimeError,match='journal_invalid'):runtime.validate_runtime_journal(saved)
+    saved['runtime']['inflight']=None;saved['phase']='recovery_runtime_ready'
+    with pytest.raises(RuntimeError,match='completion_invalid'):runtime.validate_runtime_journal(saved)
+    saved['runtime']['deadline_monotonic']+=1
+    with pytest.raises(RuntimeError,match='journal_invalid'):runtime.validate_runtime_journal(saved)
+
+
+def test_runtime_inventory_extension_requires_explicit_activation():
+    with pytest.raises(ValueError,match='invalid_client_transition'):
+        runtime.host.inventory('fixture',runtime_maintenance=True)
+    with pytest.raises(ValueError,match='invalid_client_transition'):
+        runtime.host.inventory('fixture',activating=True,removing_client_id='a'*64)
+
+
+@pytest.fixture
+def split_recipe(tmp_path,monkeypatch):
+    import stat
+    h=runtime.host
+    image="sha256:"+"a"*64
+    root=tmp_path/'hdd';root.mkdir();archive=root/'archives';archive.mkdir()
+    real_stat=Path.stat
+    def fixture_stat(path,*args,**kwargs):
+        value=real_stat(path,*args,**kwargs)
+        if path==archive:
+            fields=list(value);fields[0]=stat.S_IFDIR|0o2770;fields[5]=70
+            return os.stat_result(fields)
+        return value
+    monkeypatch.setattr(Path,'stat',fixture_stat)
+    inventory=tmp_path/'inventory.json'
+    targets=[dict(medium='ssd',target_id='ssd',filesystem_uuid='SSD'),dict(medium='hdd',target_id='hdd',filesystem_uuid='HDD')]
+    inventory.write_text(json.dumps(dict(targets=targets)))
+    limits=tmp_path/'limits.json';limits.write_text('{}')
+    def mount(source,target,readonly=False):return dict(type='bind',source=str(source),target=target,read_only=readonly,bind=dict(create_host_path=False))
+    mounts=[mount(root,'/qt-history'),dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data'),
+        mount(tmp_path/'keys','/run/quanttrad/recovery',True),dict(type='volume',source='storage-recovery-socket',target='/var/run/postgresql')]
+    dbmodel=dict(name='fixture',services=dict(tsdb=dict(volumes=mounts)),networks=dict(quanttrad={}),volumes={})
+    h.save_receipt(tmp_path/runtime.recovery.RECIPE,dbmodel,initial=True)
+    request=dict(archive_shared_group_id=70,source_revision='b'*40,source_tree_hash='c'*64)
+    raw=json.dumps(request).encode();(tmp_path/'storage-online-request.json').write_bytes(raw)
+    worker=dict(binding=dict(image=image,request_sha256=hashlib.sha256(raw).hexdigest(),inventory_sha256=hashlib.sha256(inventory.read_bytes()).hexdigest(),
+        mounts={'/run/qt-online/inventory.json':dict(source=str(inventory)),'/run/qt-online/udev':dict(source=str(tmp_path/'udev'/'data'))}))
+    saved=dict(binding=dict(project='fixture'),recovery=dict(recipe_sha256=h.digest(dbmodel),replacement_id='db'),runtime_spool=dict(destination=str(tmp_path/'new')))
+    rows={n:dict(id=n) for n in runtime._APPLICATIONS if n!='storage-maintenance'}
+    monkeypatch.setattr(h,'database_details',lambda _:dict(mounts=[],config=dict(Env=['PG_DSN=fixture-dsn'])))
+    monkeypatch.setattr(runtime.launch,'_dsn',lambda *a:'fixture-dsn')
+    monkeypatch.setattr(runtime.preserving,'_validate_runtime_maintenance',lambda *a:None)
+    monkeypatch.setattr(h,'docker',lambda *a:json.dumps(dict(Id=image,Config=dict(Env=['QT_IMAGE_SOURCE_REVISION='+request['source_revision'],'QT_IMAGE_SOURCE_TREE_HASH='+request['source_tree_hash']]))))
+    model=deepcopy(dbmodel)
+    bytarget={m['target']:m for m in mounts}
+    for n,module in runtime._APPLICATIONS.items():
+        maintenance=n=='storage-maintenance'
+        env=dict(PG_DSN='fixture-dsn',QT_DISABLE_DOTENV='1',QT_STORAGE_MAINTENANCE_OWNER='dedicated',QT_ARCHIVE_SHARED_GROUP_ID='70',
+            MARKET_STRUCTURE_STORAGE_ROOT='/qt-history/archives',MARKET_STRUCTURE_WORKING_ROOT='/qt-history/archives' if maintenance else '/app/logs/market-structure',
+            QT_MARKET_DATA_EXPECTED_UUID='HDD',QT_MARKET_DATA_WORKING_EXPECTED_UUID='HDD' if maintenance else 'SSD',
+            QT_STORAGE_INVENTORY_PATH='/run/quanttrad/storage-inventory.json',QT_STORAGE_UDEV_ROOT='/run/qt-host-udev/data')
+        entries=[bytarget['/qt-history'],mount(inventory,'/run/quanttrad/storage-inventory.json',True),mount(tmp_path/'udev'/'data','/run/qt-host-udev/data',True)]
+        service=dict(image=image,pull_policy='never',user='70:70' if maintenance else '1000:1000',command=['python','-m',module],
+            init=True,cap_drop=['ALL'],security_opt=['no-new-privileges:true'],restart='no',group_add=['70'],networks={'quanttrad':{}},environment=env,volumes=entries)
+        if maintenance:
+            service['pid']='container:db'
+            entries.extend(bytarget[k] for k in ('/var/lib/postgresql/data','/run/quanttrad/recovery','/var/run/postgresql'))
+            entries.append(mount(limits,'/run/quanttrad/storage-maintenance.json',True))
+            env.update(QT_MARKET_DATA_LIFECYCLE_ENABLED='true',QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED='true',QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED='true',QT_STORAGE_MAINTENANCE_LIMITS_PATH='/run/quanttrad/storage-maintenance.json')
+        else:
+            entries.append(mount(tmp_path/'new','/app/logs/market-structure'))
+            if n=='backend':entries.append(bytarget['/var/lib/postgresql/data']);env['QT_MARKET_DATA_ROOT']=str(root/'archives')
+        if n!='initialize':service['healthcheck']=dict(test=runtime._APPLICATION_HEALTH[n])
+        model['services'][n]=service
+    def admit():
+        h.save_receipt(tmp_path/runtime.RUNTIME_RECIPE,model,initial=not (tmp_path/runtime.RUNTIME_RECIPE).exists())
+        return runtime.admit_runtime_recipe(tmp_path,saved,worker,{},rows)
+    return model,admit
+
+
+def test_split_recipe_binds_existing_private_spool_and_single_owner(split_recipe):
+    model,admit=split_recipe
+    admitted,proof=admit()
+    assert admitted==model and set(proof['images'])==set(runtime._APPLICATIONS)
+    assert len(proof['files'])==2
+
+
+@pytest.mark.parametrize('fault',['source-fence','collector-pid','collector-uid','maintenance-spool','maintenance-key-write',
+    'collector-owner','group','capability','db-definition','foreign-service','unresolved-pid'])
+def test_split_recipe_refuses_ownership_and_mount_regressions(split_recipe,fault):
+    model,admit=split_recipe
+    collector=model['services']['market-data-collector'];maintenance=model['services']['storage-maintenance']
+    if fault=='source-fence':collector['environment']['QT_STORAGE_SOURCE_FENCE_ROOT']=''
+    elif fault=='collector-pid':collector['pid']='service:tsdb'
+    elif fault=='collector-uid':collector['user']='70:70'
+    elif fault=='maintenance-spool':maintenance['volumes'].append(deepcopy(next(m for m in collector['volumes'] if m['target']=='/app/logs/market-structure')))
+    elif fault=='maintenance-key-write':next(m for m in maintenance['volumes'] if m['target']=='/run/quanttrad/recovery')['read_only']=False
+    elif fault=='collector-owner':collector['environment']['QT_STORAGE_MAINTENANCE_OWNER']='collector'
+    elif fault=='group':collector['group_add']=[]
+    elif fault=='capability':collector['cap_add']=['DAC_READ_SEARCH']
+    elif fault=='db-definition':model['services']['tsdb']['user']='0:0'
+    elif fault=='unresolved-pid':maintenance['pid']='service:tsdb'
+    else:model['services']['another-maintenance']={}
+    with pytest.raises(RuntimeError,match='storage_online_runtime_'):admit()
+
+
+def test_runtime_health_admission_matches_existing_public_compositions():
+    import yaml
+    base=yaml.safe_load(Path('docker/docker-compose.server.yml').read_text())
+    overlay=yaml.safe_load(Path('docker/docker-compose.storage-server.yml').read_text())
+    for name,probe in runtime._APPLICATION_HEALTH.items():
+        owner=overlay if name=='storage-maintenance' else base
+        assert owner['services'][name]['healthcheck']['test']==probe
+
+
+@pytest.mark.parametrize('fault',[None,'other-id','running','pid','unclean','ordinary'])
+def test_inventory_only_admits_exact_stopped_application_removal(monkeypatch,fault):
+    h=runtime.host
+    rows=[dict(id='a'*64,image='sha256:'+'c'*64,project='fixture',service='tsdb',oneoff='False',restart='no',
+        running=True,restarting=False,paused=False,pid=1,status='running',exit_code=0,oom=False),
+        dict(id='b'*64,image='sha256:'+'c'*64,project='fixture',service='backend',oneoff='False',restart='no',
+        running=False,restarting=False,paused=False,pid=0,status='removing',exit_code=0,oom=False)]
+    if fault=='running':rows[1]['running']=True
+    if fault=='pid':rows[1]['pid']=2
+    if fault=='unclean':rows[1]['exit_code']=137
+    def docker(action,*args):
+        return '\n'.join(r['id'] for r in rows) if action=='ps' else '\n'.join(json.dumps(r) for r in rows)
+    monkeypatch.setattr(h,'docker',docker)
+    kwargs=dict(activating=True,runtime_maintenance=True,removing_client_id='d'*64 if fault=='other-id' else 'b'*64)
+    if fault=='ordinary':kwargs={}
+    if fault is None:assert h.inventory('fixture',**kwargs)['backend']['status']=='removing'
+    else:
+        with pytest.raises(RuntimeError):h.inventory('fixture',**kwargs)

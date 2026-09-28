@@ -32,6 +32,7 @@ def runtime(monkeypatch):
         return {}
     monkeypatch.setattr(worker.os, "geteuid", lambda: 70)
     monkeypatch.setattr(worker, "require_configured_archive_mount", lambda: None)
+    monkeypatch.setattr(worker, "require_configured_working_mount", lambda: None)
     monkeypatch.setattr(worker, "FilesystemRawArchiveObjectStore", lambda *a, **k: None)
     monkeypatch.setattr(worker, "wait_for_database_ready", lambda **kwargs: True)
     monkeypatch.setattr(worker, "storage_maintenance_runners", runners)
@@ -86,3 +87,14 @@ def test_dedicated_runners_never_silently_disable_recovery():
 def test_invalid_owner_refuses(owner):
     with pytest.raises(ValueError, match="maintenance_owner_invalid"):
         StorageSettings(maintenance_owner=owner)
+
+
+def test_missing_working_mount_refuses_before_registry_or_lifecycle(runtime, monkeypatch):
+    from core.storage_mounts import StorageMountError
+    settings, stop, events = runtime
+    def unavailable():
+        raise StorageMountError("storage_mount_unavailable: owned fixture")
+    monkeypatch.setattr(worker, "require_configured_working_mount", unavailable)
+    with pytest.raises(StorageMountError, match="storage_mount_unavailable"):
+        worker.run(settings=settings, stop=stop)
+    assert not events

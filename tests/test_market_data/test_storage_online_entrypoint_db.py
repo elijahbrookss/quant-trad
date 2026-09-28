@@ -104,6 +104,15 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         source_directory="/app/logs/market-structure",
         destination_directory="/qt-history/archives/objects",
         recent_root="/var/lib/postgresql/data", prepare_captures=not atomic)
+    if os.getenv("QT_ONLINE_RUNTIME_FIXTURE")=="1":
+        # A prospective full startup observation, declared before capture/worker
+        # binding. The original 180s capture clock is never extended.
+        options["resource_limits"]["movement_timeout_seconds"] = 120
+        # Only these freshly created empty fixture destination directories.
+        # Original private source archives keep their ownership and permissions.
+        destination=Path("/qt-history/archives/objects")
+        assert not any(destination.iterdir())
+        destination.parent.chmod(0o2770);destination.chmod(0o2770)
     if atomic:
         online.prepare_attempt(engine, placement=storage.copy_plan, attempt_seconds=180,
             **{k:v for k,v in options.items() if k not in {"page_rows", "max_page_bytes"}})
@@ -135,6 +144,8 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         expected_started_at=started, policy=asdict(options["policy"]),
         resource_limits=options["resource_limits"], max_page_bytes=options["max_page_bytes"],
         max_objects=128,max_bytes=64*1024**2,page_rows=2,command_seconds=30)
+    if os.getenv("QT_ONLINE_RUNTIME_FIXTURE")=="1":
+        request["archive_shared_group_id"]=70
     # Generated disposable credentials only, private fixture control, never receipts.
     (control/"connection.json").write_text(json.dumps({"dsn":storage.dsn}))
     (control/"request.json").write_text(json.dumps(request))

@@ -1125,3 +1125,10 @@ def test_legacy_runtime_operator_refuses_unqualified_dedicated_topology(runtime_
         check()
     assert (state / host_boundary.HOLD).exists()
     assert not any(database.rows[name]["running"] for name in host_boundary.STOP)
+
+
+def test_legacy_runtime_recipe_keeps_backend_out_of_database_pid_namespace(runtime_recipe_setup):
+    state,database,operator,model,check=runtime_recipe_setup
+    model['services']['backend']['pid']='container:'+'a'*64
+    with pytest.raises(RuntimeError,match='writer_identity_or_command_changed'):
+        check()

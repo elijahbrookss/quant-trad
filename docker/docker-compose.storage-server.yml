@@ -119,7 +119,7 @@ services:
       QT_LOGGING_LOKI_URL: ""
       QT_STORAGE_UDEV_ROOT: /run/qt-host-udev/data
       # Maintenance never mounts or opens the original private SSD spool.
-      MARKET_STRUCTURE_WORKING_ROOT: /qt-history/archives/tmp
+      MARKET_STRUCTURE_WORKING_ROOT: /qt-history/archives
       QT_MARKET_DATA_WORKING_EXPECTED_UUID: ${QT_MARKET_DATA_EXPECTED_UUID:?HDD filesystem UUID is required}
       QT_MARKET_DATA_LIFECYCLE_ENABLED: "true"
       QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED: "true"

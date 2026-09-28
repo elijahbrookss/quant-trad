@@ -2602,3 +2602,41 @@ intent, with no reuse or replay. `recovery_spool_ready` certifies only preservin
 copy preparation. The matching application must still recover and acknowledge WAL
 through normal QT database/archive processing before collection and encrypted-pair
 outcomes can complete the supported operator.
+
+
+### Matching application startup after spool preparation
+
+The same final owner has an internal `activate_online_runtime_locked` continuation
+from `recovery_spool_ready`. Its private rendered recipe contains the unchanged
+prepared database and the existing initializer, backend, collector and dedicated
+maintenance entrypoints. It binds the candidate image, shared archive group,
+private new SSD working root, inventory and maintenance limits. The exact admitted
+UUID observation directory is mounted at the fixed runtime data path; its host
+basename does not define container layout. Applications keep
+UID1000; only maintenance uses UID70, the database PID namespace and recovery keys.
+The private recipe resolves maintenance's PostgreSQL PID namespace to the exact
+confirmed replacement container before computing its Compose hash; this avoids
+Compose changing the service hash during service-name resolution. The public
+overlay retains `service:tsdb`. The candidate environment must remove the old
+source-fence input, including any image default. No source file ownership is changed.
+
+Each original application removal, candidate creation and start has durable intent
+in the existing final receipt before dispatch. A failed or uncertain action is not
+replayed. Created candidates are checked against the admitted recipe before they
+start; earlier starts must remain healthy while later actions proceed. The original
+source/deployment hold, final clocks, retired migration reader, retired preparation
+helpers and private copy manifest remain checked throughout. The collector starts
+before maintenance; startup does not wait for a long physical baseline. Maintenance
+uses the already prepared archive root as its working root and creates its existing
+`tmp` and `canonical-staging` children there. It validates this mount before
+registering a worker, so an absent configured working root fails at startup. Infrastructure
+and UI services are not replaced by this application-recovery step.
+
+`recovery_runtime_ready` records application health only. Normal pending-WAL recovery,
+fresh collection, current/frozen reads, complete paired recovery and the final
+operator/release outcome still require connected evidence. The final marker remains,
+and ordinary launch/deploy has no new bypass. A connected disposable rehearsal now covers real application entrypoints and a
+successful raw-archive maintenance cycle after the switch. It uses synthetic
+source peers and filesystem identities; saved history/backup policy is unconfigured.
+It does not qualify production resources, pending-WAL acknowledgement, fresh
+collection or a complete encrypted pair through this operation.

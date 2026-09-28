@@ -38,7 +38,10 @@ parser.add_argument('--recovery-repositories',action='store_true',help='continue
 parser.add_argument('--recovery-repository-reply-loss',action='store_true',help='discard completed preparer reply and retain unresolved repository intent')
 parser.add_argument('--recovery-spool',action='store_true',help='prepare preserved pending WAL in a new private SSD root after native WAL readiness')
 parser.add_argument('--recovery-spool-reply-loss',action='store_true',help='discard actual completed spool-copy response; retain unresolved intent')
+parser.add_argument("--recovery-runtime",action="store_true",help="start actual split application composition after committed recovery preparation")
 options=parser.parse_args()
+if options.recovery_runtime and (not options.recovery_spool or options.recovery_spool_reply_loss):
+ parser.error("--recovery-runtime requires successful --recovery-spool")
 if options.recovery_spool and (not options.recovery_repositories or options.recovery_repository_reply_loss):
  parser.error('--recovery-spool requires successful --recovery-repositories')
 if options.recovery_spool_reply_loss and not options.recovery_spool:
@@ -97,6 +100,7 @@ owned=[];volume=project+'-pg';created_volume=False
 recovery_socket=project+'-recovery-socket';created_recovery_socket=False
 started=time.monotonic()
 report={'project':project,'production_inputs':False,'full_host_pause_qualified':False,
+        'declared_final_fixture_seconds':120 if options.recovery_runtime else 60,
         'real_collector_performance_qualified':False,'synthetic_service_peers':True}
 def run(args,timeout=120,check=True,env=None):
  if args[0] in ('run','create'):
@@ -208,7 +212,7 @@ os.chown(root,70,70)
    import ast
    fixture_tree=ast.parse((Path(__file__).resolve().parents[2]/"tests/test_market_data/test_collector_shutdown_signal.py").read_text())
    SCRIPT=next(ast.literal_eval(node.value) for node in fixture_tree.body if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="SCRIPT" for t in node.targets))
-   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_DISABLE_DOTENV=1',
+   extra += ['--env','QT_SIGNAL_HOST_FIXTURE=1','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_DISABLE_DOTENV=1',
              '--env','QT_LOGGING_LOKI_URL=','--env','QT_LOGGING_LEVEL=INFO']
    run(['run','-d','--name',name,'--pull','never','--network',network,
      '--user','70:70','--read-only','--memory','512m','--cpus','2','--pids-limit','64',
@@ -250,7 +254,7 @@ os.chown(root,70,70)
    '--mount','type=bind,source='+str(history)+',target=/qt-history',
    '--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure',
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
-   '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=',
+   '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
    '--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
@@ -357,7 +361,7 @@ os.chown(root,70,70)
      from scripts.automation import storage_online_final as final_host
      import multiprocessing,signal
      pause_args=dict(project=project,source_revision=revision,worker_id=first_id,
-                     controller_id=greeting['controller_id'],max_duration_seconds=60)
+                     controller_id=greeting['controller_id'],max_duration_seconds=120 if options.recovery_runtime else 60)
      # The independent diagnostic publisher shares source mounts but is outside
      # the admitted project/network. Prove refusal, then let it finish while the
      # real source peers still serve. Never exempt it from production admission.
@@ -924,6 +928,80 @@ os.chown(root,70,70)
           reserve_bytes=8*1024**2,max_duration_seconds=15)
       raise AssertionError('completed or uncertain spool copy replay admitted')
      except RuntimeError as exc:assert str(exc)=='storage_online_runtime_spool_live_transition_required'
+    if options.recovery_runtime:
+     from scripts.automation import storage_online_runtime as runtime_host
+     from scripts.automation import storage_online_recovery as recovery_host
+     runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE)
+     mounts={m['target']:m for m in runtime_model['services']['tsdb']['volumes']}
+     targets=json.loads(inventory.read_text())['targets']
+     ssd=next(t for t in targets if t['medium']=='ssd');hdd=next(t for t in targets if t['medium']=='hdd')
+     limits=state/'runtime-maintenance.json'
+     limits.write_text(json.dumps(dict(schema_version='qt.storage_maintenance_limits.v2',
+       history=dict(wal_bytes=16*1024**2,temporary_bytes={t['target_id']:1024**2 for t in targets},
+         growth_bytes_per_second={t['target_id']:0 for t in targets},maintenance_bytes={t['target_id']:1024**2 for t in targets},
+         movement_timeout_seconds=60,cancellation_grace_seconds=5),
+       recovery=dict(max_bytes=256*1024**2,timeout_seconds=60,headroom_bytes={t['target_id']:1024**2 for t in targets},max_objects=128,
+         incremental=dict(pgbackrest='/usr/local/bin/pgbackrest',restic='/usr/local/bin/restic',pg_path='/var/lib/postgresql/data',
+           pg_socket_path='/var/run/postgresql',database_key_path='/run/quanttrad/recovery/database.key',
+           archive_key_path='/run/quanttrad/recovery/archive.key',max_chain_backups=4)))))
+     limits.chmod(0o644)
+     def fixture_mount(source,target,readonly=False):
+      return dict(type='bind',source=str(source),target=target,read_only=readonly,bind=dict(create_host_path=False))
+     for service_name,module in runtime_host._APPLICATIONS.items():
+      maintenance=service_name=='storage-maintenance'
+      environment=dict(PG_DSN='postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname,
+        QT_DISABLE_DOTENV='1',QT_LOGGING_LOKI_URL='',QT_STORAGE_MAINTENANCE_OWNER='dedicated',QT_ARCHIVE_SHARED_GROUP_ID='70',
+        MARKET_STRUCTURE_STORAGE_ROOT='/qt-history/archives',MARKET_STRUCTURE_WORKING_ROOT='/qt-history/archives' if maintenance else '/app/logs/market-structure',
+        QT_MARKET_DATA_EXPECTED_UUID=hdd['filesystem_uuid'],QT_MARKET_DATA_WORKING_EXPECTED_UUID=(hdd if maintenance else ssd)['filesystem_uuid'],
+        QT_STORAGE_INVENTORY_PATH='/run/quanttrad/storage-inventory.json',QT_STORAGE_UDEV_ROOT='/run/qt-host-udev/data',
+        QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA='false',QT_SINGLE_NODE_ENABLE_SCHEDULED_FACTS='false',QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS='false',
+        QT_SINGLE_NODE_ENABLE_TRADE_STREAMS='false',QT_SINGLE_NODE_ENABLE_L2_STREAMS='false')
+      service_mounts=[mounts['/qt-history'],fixture_mount(inventory,'/run/quanttrad/storage-inventory.json',True),fixture_mount(udev,'/run/qt-host-udev/data',True)]
+      service=dict(image=image,pull_policy='never',user='70:70' if maintenance else '1000:1000',group_add=['70'],init=True,
+        restart='no',cap_drop=['ALL'],security_opt=['no-new-privileges:true'],command=['python','-m',module],
+        networks={'quanttrad':{}},environment=environment,volumes=service_mounts,mem_limit=(2 if service_name=='backend' else 1)*1024**3,memswap_limit=(2 if service_name=='backend' else 1)*1024**3,cpus=2,pids_limit=256,
+        labels={'qt.disposable':project})
+      if maintenance:
+       service['pid']='container:'+pgid
+       service_mounts.extend(mounts[k] for k in ('/var/lib/postgresql/data','/run/quanttrad/recovery','/var/run/postgresql'))
+       service_mounts.append(fixture_mount(limits,'/run/quanttrad/storage-maintenance.json',True))
+       environment.update(QT_MARKET_DATA_LIFECYCLE_ENABLED='true',QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED='true',
+         QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED='true',QT_STORAGE_MAINTENANCE_LIMITS_PATH='/run/quanttrad/storage-maintenance.json')
+      else:
+       service_mounts.append(fixture_mount(candidate_working,'/app/logs/market-structure'))
+       if service_name=='backend':
+        service_mounts.append(mounts['/var/lib/postgresql/data']);environment['QT_MARKET_DATA_ROOT']=str(history/'archives')
+      if service_name!='initialize':
+       probe=runtime_host._APPLICATION_HEALTH[service_name]
+       service['healthcheck']=dict(test=probe,interval='1s',timeout='3s',retries=15,start_period='2s')
+      runtime_model['services'][service_name]=service
+      owned.append(project+'-'+service_name+'-1')
+     host_boundary.save_receipt(state/runtime_host.RUNTIME_RECIPE,runtime_model,initial=True)
+     started_runtime=time.monotonic()
+     result=final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=60)
+     activated=final_host._load(state/final_host.STATE)
+     assert activated['phase']=='recovery_runtime_ready' and result['collector_process_healthy']
+     report['recovery_runtime']=dict(component_seconds=time.monotonic()-started_runtime,
+       final_entry_to_applications_ready_seconds=activated['runtime']['finished_at']-activated['started_at'],
+       actual_application_entrypoints=True,collector_process_healthy=True,actual_collection_throughput_measured=False,complete_pair_confirmed=False)
+     # Process health explicitly permits degraded workers. Require the real
+     # lifecycle result as separate evidence; use only the original final clock.
+     while True:
+      final_host._remaining(activated)
+      with host_boundary.docker_deadline(activated['switch']['deadline_monotonic']):
+       lifecycle=json.loads(host_boundary.database_query(pgid,
+         "SELECT coalesce(jsonb_agg(context->'storage_lifecycle'),'[]'::jsonb)::text FROM market.collector_worker_state WHERE worker_role='market_storage_maintenance'"))
+      assert len(lifecycle)==1
+      outcome=lifecycle[0].get('last_run')
+      if outcome is not None:
+       assert outcome['status']=='completed' and outcome['failure_count']==0, outcome
+       report['recovery_runtime']['maintenance_outcome']=outcome
+       break
+      time.sleep(.2)
+     try:
+      final_host.activate_online_runtime_locked(state,worker_process=worker,max_duration_seconds=30)
+      raise AssertionError('runtime replay admitted')
+     except RuntimeError as exc:assert str(exc)=='storage_online_runtime_live_transition_required'
     source_holds.close()
     report['held_database_commit']['read_worker_pid0_before_hold_release']=True
    # Fixture teardown only, AFTER verified worker retirement. This does not
@@ -931,7 +1009,8 @@ os.chown(root,70,70)
    with host_boundary.docker_deadline(time.monotonic()+5):
     host_boundary.maintenance_query(pgid,"SELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
    report['login_gate']['worker_retired_before_fixture_restore']=True
-  assert host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))==source
+  if not options.recovery_runtime:
+   assert host_boundary.identities(host_boundary.inventory(project,operator_id=receipt['container_id']))==source
  if not options.final_pause:
   # A host exception must close only its background worker; source keeps serving.
   class HostInterrupted(RuntimeError):
@@ -968,7 +1047,7 @@ os.chown(root,70,70)
   report['final_intent_blocks_relaunch']=True
   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
   report['first_process_hashed_bytes']=final['background_hashed_bytes']
-  report['source_clients_unchanged']=True
+  report['source_clients_unchanged']=not options.recovery_runtime
  if options.prepare_source:
   assert (state/initial.STATE).read_bytes()==prepared_bytes
   if options.final_pause and not options.recovery_mounts:
@@ -976,7 +1055,7 @@ os.chown(root,70,70)
   elif not options.final_pause:
    assert initial.admit_serving_source(state,project=project,source_revision=revision,operator_id=first_id)==preparation
   assert (working/'objects'/'native-intake').stat().st_size>intake_before
-  assert not host_boundary.inventory(project,operator_id=first_id)['initialize']['running']
+  assert not host_boundary.inventory(project,operator_id=first_id,**(dict(activating=True,runtime_maintenance=True) if options.recovery_runtime else {}))['initialize']['running']
   report['initial_to_worker_receipt_admission']=True
   report['synthetic_intake_continued']=True
  if options.final_pause:
@@ -1049,6 +1128,12 @@ finally:
  if options.worker_shutdown:
   diagnostic=run(['logs','--tail','160',project+'-market-data-collector'],check=False)
   (state/'worker-shutdown.log').write_text(diagnostic.stdout+diagnostic.stderr)
+ if options.recovery_runtime:
+  for service_name in ('initialize','backend','market-data-collector','storage-maintenance'):
+   diagnostic=run(['logs','--tail','120',project+'-'+service_name+'-1'],check=False)
+   (state/('runtime-'+service_name+'.log')).write_text(diagnostic.stdout+diagnostic.stderr)
+   diagnostic=run(['inspect',project+'-'+service_name+'-1','--format','{{json .State}}'],check=False)
+   (state/('runtime-'+service_name+'-state.json')).write_text(diagnostic.stdout)
  cleanup_failures=[]
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)

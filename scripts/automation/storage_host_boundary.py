@@ -78,10 +78,15 @@ def docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
 
 
 def inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None,
-              activating: bool = False, removing_database_id: str | None = None) -> dict[str, dict]:
+              activating: bool = False, removing_database_id: str | None = None,
+              runtime_maintenance: bool = False, removing_client_id: str | None = None) -> dict[str, dict]:
     if removing_database_id is not None and (not database_preparing or activating
             or not re.fullmatch(r"[0-9a-f]{64}", removing_database_id)):
         raise ValueError("storage_pause_invalid_removing_database")
+    if (runtime_maintenance and not activating or removing_client_id is not None and
+            (not activating or not runtime_maintenance or not re.fullmatch(r"[0-9a-f]{64}",removing_client_id))):
+        raise ValueError("storage_runtime_invalid_client_transition")
+    allowed_services=STOP+PASSIVE+(("storage-maintenance",) if runtime_maintenance else ())
     ids = set()
     for selector in (f"label=com.docker.compose.project={project}", f"network={project}_quanttrad"):
         ids.update(docker("ps", "--all", "--quiet", "--no-trunc", "--filter", selector).split())
@@ -97,11 +102,17 @@ def inventory(project: str, *, database_preparing: bool = False, operator_id: st
     result = {}
     for row in rows:
         service = row["service"]
-        if (row["project"] != project or service not in STOP + PASSIVE
+        if (row["project"] != project or service not in allowed_services
                 or row["oneoff"] != "False" or service in result):
             raise RuntimeError("storage_pause_unexpected_client: resolve active bots, one-off or unrecognized containers first")
         if row["restart"] not in ("no", "unless-stopped"):
             raise RuntimeError(f"storage_pause_unsafe_restart_policy: service={service}")
+        if (activating and row["id"]==removing_client_id and service in
+                ("backend","initialize","market-data-collector") and row["status"]=="removing"
+                and row["running"] is False and row["pid"]==0 and row["exit_code"] in (0,143)
+                and not any(row[k] for k in ("paused","restarting","oom"))):
+            result[service]=row
+            continue
         if activating and service != "tsdb":
             if row["paused"] or row["status"] not in ("created", "running", "restarting", "exited"):
                 raise RuntimeError(f"storage_runtime_unexpected_container_state: service={service}")

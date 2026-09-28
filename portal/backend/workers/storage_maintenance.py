@@ -12,7 +12,7 @@ import socket
 import threading
 
 from core.settings import get_settings
-from core.storage_mounts import require_configured_archive_mount
+from core.storage_mounts import require_configured_archive_mount, require_configured_working_mount
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.db import db
 from portal.backend.service.async_jobs import wait_for_database_ready
@@ -34,6 +34,7 @@ def run(*, settings, stop: threading.Event) -> int:
     if settings.storage.archive_shared_group_id is None:
         raise ValueError("storage_maintenance_shared_archive_required")
     require_configured_archive_mount()
+    require_configured_working_mount()
     FilesystemRawArchiveObjectStore(DEFAULT_STORAGE_ROOT / "objects")
     runners = storage_maintenance_runners(db, storage_root=DEFAULT_STORAGE_ROOT,
         limits_path=settings.storage.maintenance_limits_path, require_incremental=True)

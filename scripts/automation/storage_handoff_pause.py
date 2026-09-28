@@ -730,7 +730,8 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
                     or service.get("command")!=["python","-m",_RUNTIME_WRITERS[name]]
                     or service.get("entrypoint") is not None
                     or service.get("privileged",False) or service.get("devices") or service.get("cap_add")
-                    or (name!="backend" and service.get("group_add"))):
+                    or (name!="backend" and service.get("group_add"))
+                    or (name!="market-data-collector" and service.get("pid"))):
                 raise RuntimeError("storage_runtime_writer_identity_or_command_changed")
         if name in (*_RUNTIME_WRITERS,"docker-stats","frontend","frontend-v2"):
             details=json.loads(host_boundary.docker("image","inspect","--format",'{{json .}}',image))
@@ -881,16 +882,18 @@ def _runtime_candidate_details(name, row, model, saved):
     expected_entrypoint = service.get("entrypoint")
     if expected_entrypoint is None:
         expected_entrypoint = image["Config"].get("Entrypoint")
-    if (row["image"] != saved["admission"]["images"][name] or details["image"] != row["image"]
-            or image["Id"] != row["image"]
-            or config.get("Labels", {}).get("com.docker.compose.config-hash") != saved["compose_hashes"][name]
-            or dict(value.split("=", 1) for value in config.get("Env") or []) != expected_env
-            or config.get("Cmd") != expected_command or config.get("Entrypoint") != expected_entrypoint
-            or config.get("User", "") != service.get("user", image["Config"].get("User", ""))
-            or host.get("Privileged") or host.get("Devices") or host.get("DeviceRequests")
-            or host.get("CapAdd") or host.get("PidMode", "") != (
-                "container:"+saved["binding"]["database_id"] if name == "market-data-collector" else "")):
-        raise RuntimeError("storage_runtime_candidate_configuration_changed: service="+name)
+    differences = {
+        "image": row["image"] != saved["admission"]["images"][name] or details["image"] != row["image"] or image["Id"] != row["image"],
+        "compose_hash": config.get("Labels", {}).get("com.docker.compose.config-hash") != saved["compose_hashes"][name],
+        "environment": dict(value.split("=", 1) for value in config.get("Env") or []) != expected_env,
+        "command": config.get("Cmd") != expected_command,
+        "entrypoint": config.get("Entrypoint") != expected_entrypoint,
+        "user": config.get("User", "") != service.get("user", image["Config"].get("User", "")),
+        "privileges": bool(host.get("Privileged") or host.get("Devices") or host.get("DeviceRequests") or host.get("CapAdd")),
+        "pid": host.get("PidMode", "") != ("container:"+saved["binding"]["database_id"] if service.get("pid") in ("service:tsdb", "container:"+saved["binding"]["database_id"]) else ""),
+    }
+    if any(differences.values()):
+        raise RuntimeError("storage_runtime_candidate_configuration_changed: service="+name+" fields="+",".join(k for k,v in differences.items() if v))
     network = saved["receipt"]["project"]+"_quanttrad"
     network_id = saved["receipt"]["database_preparation"]["networks"][network]["network_id"]
     if (set(details["networks"]) != {network}

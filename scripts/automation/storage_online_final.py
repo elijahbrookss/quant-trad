@@ -1,6 +1,6 @@
 """Internal final source-stop boundary under the existing launcher's host lock.
 
-Held database switch and preserving recovery mounts, no runtime activation or CLI.
+Held database switch, preserving recovery and matching application startup; no CLI.
 Internal source abort requires the live SQL fence; intent survives every outcome.
 """
 from __future__ import annotations
@@ -24,7 +24,8 @@ from scripts.automation import storage_online_prepare as initial
 
 STATE = "storage-online-final.json"
 SCHEMA = "qt.storage_online_final.v1"
-_SPOOL_PHASES = {"recovery_spool_preparing", "recovery_spool_ready"}
+_RUNTIME_PHASES = {"recovery_runtime_starting", "recovery_runtime_ready"}
+_SPOOL_PHASES = {"recovery_spool_preparing", "recovery_spool_ready"} | _RUNTIME_PHASES
 _REPOSITORY_PHASES = {"recovery_repository_preparing", "recovery_wal_ready"} | _SPOOL_PHASES
 _RECOVERY_PHASES = {"recovery_preparing", "recovery_database_ready"} | _REPOSITORY_PHASES
 _COMMIT_PHASES = {"commit_dispatching", "committed"} | _RECOVERY_PHASES
@@ -64,7 +65,7 @@ def _load(path):
         saved.get("phase") in {"source_resuming", "source_resumed"} and "login_gate" in saved)
     resuming = saved.get("phase") in {"source_resuming", "source_resumed"}
     entered = saved.get("phase") == "switch_entered" or resuming or gated
-    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set()) | ({"recovery"} if recovering else set()) | ({"repositories"} if saved.get("phase") in _REPOSITORY_PHASES else set()) | ({"runtime_spool"} if saved.get("phase") in _SPOOL_PHASES else set())
+    fields = _FIELDS | ({"switch"} if entered else set()) | ({"resume"} if resuming else set()) | ({"login_gate"} if gated else set()) | ({"commit"} if committing else set()) | ({"recovery"} if recovering else set()) | ({"repositories"} if saved.get("phase") in _REPOSITORY_PHASES else set()) | ({"runtime_spool"} if saved.get("phase") in _SPOOL_PHASES else set()) | ({"runtime"} if saved.get("phase") in _RUNTIME_PHASES else set())
     if (set(saved) != fields or saved["schema"] != SCHEMA
             or saved["phase"] not in {"stopping", "paused", "switch_entered", "source_resuming", "source_resumed", "login_closing", "login_closed"} | _COMMIT_PHASES
             or type(saved["duration_seconds"]) is not int
@@ -165,6 +166,9 @@ def _load(path):
     if saved["phase"] in _SPOOL_PHASES:
         from scripts.automation.storage_online_runtime import validate_spool_journal
         validate_spool_journal(saved)
+    if saved["phase"] in _RUNTIME_PHASES:
+        from scripts.automation.storage_online_runtime import validate_runtime_journal
+        validate_runtime_journal(saved)
     return saved
 
 
@@ -1283,3 +1287,20 @@ def prepare_online_runtime_spool_locked(state_root, *, worker_process, destinati
     return prepare_spool(state_root,saved=saved,worker_process=worker_process,source_check=check,
         destination=destination,max_bytes=max_bytes,max_entries=max_entries,
         reserve_bytes=reserve_bytes,max_duration_seconds=max_duration_seconds)
+
+
+def activate_online_runtime_locked(state_root, *, worker_process, max_duration_seconds):
+    """Start matching applications only through the same committed held operation."""
+    from scripts.automation.storage_online_runtime import activate_runtime
+    state_root=launch._canonical(state_root)
+    held=_SOURCE_HOLD.get()
+    if held is None or held[0]!=state_root:
+        raise RuntimeError("storage_online_live_source_hold_required")
+    _,binding,image,check=held
+    saved=_load(state_root/STATE)
+    if (saved["phase"]!="recovery_spool_ready" or saved["binding"]!=binding
+            or saved["commit"]["source_image"]!=image):
+        raise RuntimeError("storage_online_runtime_live_transition_required")
+    check()
+    return activate_runtime(state_root,saved=saved,worker_process=worker_process,
+        source_check=check,max_duration_seconds=max_duration_seconds)
