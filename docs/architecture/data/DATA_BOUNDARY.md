@@ -48,6 +48,15 @@ code_paths:
 ---
 # Data Boundary
 
+## Explicit frozen candle derivation
+
+`qt data derive-candles` delegates to the canonical data producer described in
+[ADR 0074](../decisions/0074-derive-candles-from-frozen-source-snapshots.md).
+It verifies a frozen source series and writes exact complete coarser buckets
+through the existing Fact writer. It retains source timing and lineage, rejects
+source collisions without corrections, and never acquires or silently fills gaps.
+Checks continue to consume separately frozen, explicitly bound inputs.
+
 ## Scientific protocol allocation
 
 Scientific protocols reference only existing frozen `market_dataset.v1`

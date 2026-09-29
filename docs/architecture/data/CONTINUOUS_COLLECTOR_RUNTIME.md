@@ -14,6 +14,9 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - src/core/storage_writer_fence.py
+  - portal/backend/run_backend.py
+  - tests/test_market_data/test_storage_writer_fence.py
   - portal/backend/service/market/canonical_retention.py
   - src/core/settings.py
   - src/data_providers/structured_facts.py
@@ -538,3 +541,35 @@ collector health excludes maintenance-role heartbeats. The default composition
 and provider/stream shutdown contracts are unchanged. See
 [Storage Management](../persistence/STORAGE_MANAGEMENT.md#database-owned-maintenance-composition)
 for the ownership requirements and unfinished deployment/recovery qualification.
+
+## Explicit source storage preparation interlock
+
+The existing backend, collector and initializer entrypoints accept the internal
+operator input `QT_STORAGE_SOURCE_FENCE_ROOT` for the current co-located archive
+and working directory. They acquire a nonblocking shared Linux directory lock
+before publishing or spawning work and keep it until process exit. Backend
+children inherit the same open descriptor, so an orphan cannot silently release
+the source interlock when its supervisor exits. The guarded backend also uses
+the existing database-readiness check before spawning children.
+
+An operator can acquire the exclusive side only after admitted source publishers
+retire. A missing, aliased, split or changed root and an exclusive hold refuse
+startup. This does not create a marker, change permissions, move data, migrate
+schema, or authorize a switch. Without the explicit input, ordinary startup is
+unchanged. This cooperative boundary must be combined with exact source-image,
+fleet, mount and database admission; arbitrary external processes and Docker
+bot containers are not covered by this process descriptor.
+
+This backport preserves the deployed research revision and v1 storage layout.
+Its activation requires a separately qualified preserving release; no production
+recipe, collector state or storage data is changed by adding the code. See
+[ADR0074](../decisions/0074-retain-source-writer-interlock-during-storage-preparation.md).
+
+
+The existing release script also refuses every mutating action when a storage
+hold, preparation, request, worker or final marker exists, including a corrupt
+file, expired/canceled receipt, directory or dangling symlink. Process death or
+loss of the deployment flock cannot erase this durable refusal. Read-only
+release status reports the hold without printing private receipt contents.
+This reuses the migration branch's existing refusal; it does not introduce a
+new state file, parse a receipt into authority, or enable the new storage layout.

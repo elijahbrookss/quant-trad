@@ -1245,6 +1245,13 @@ def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_derive_candles(args: argparse.Namespace) -> int:
+    payload = {"dataset_id": args.dataset_id, "source_series_id": args.source_series_id,
+               "start": args.start, "end": args.end, "timeframe": args.timeframe}
+    _print_json(_client(args).request_json("POST", "/api/candles/derive", payload=payload))
+    return 0
+
+
 def _cmd_data_acquire_numeric_facts(args: argparse.Namespace) -> int:
     """Explicitly authorize one bounded manifest-driven numeric acquisition."""
 
@@ -3776,6 +3783,14 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest.add_argument("--timeframe", required=True)
     data_ingest.add_argument("--source-revision")
     data_ingest.set_defaults(func=_cmd_data_ingest_candles)
+    data_derive = data_sub.add_parser("derive-candles",
+        help="Coarsen exact frozen candles without provider access or gap filling.")
+    data_derive.add_argument("--dataset-id", required=True)
+    data_derive.add_argument("--source-series-id", type=int, required=True)
+    data_derive.add_argument("--start", required=True)
+    data_derive.add_argument("--end", required=True)
+    data_derive.add_argument("--timeframe", required=True)
+    data_derive.set_defaults(func=_cmd_data_derive_candles)
     data_numeric = data_sub.add_parser(
         "acquire-numeric-facts",
         help=(

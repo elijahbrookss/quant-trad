@@ -44,6 +44,7 @@ Common agent/tool workflow commands:
 - `qt indicators types`
 - `qt indicators validate-config --type <type> --params-json '<json>'`
 - `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
+- `qt data derive-candles --dataset-id <frozen_id> --source-series-id <id> --start <iso> --end <iso> --timeframe <coarser_interval>`
 - `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
 - `qt research check requirements --request-json <request.json>`
 - `qt research check preview --request-json <request.json>`
@@ -243,3 +244,19 @@ Review before cleanup:
 
 - Keep audit helpers in existing locations such as `scripts/reporting/` and
   `docs/engineering/`; do not add root-level prompt or workflow files.
+
+### Explicit Market Profile first-return research
+
+Create a separate `market_profile` instance through `qt indicators create
+--payload-json <file> --apply --confirm` with top-level `"version": "v2"`.
+`qt indicators validate-config --payload-json <file>` validates the same request.
+Omitting version retains v1. Do not edit a historical instance to change versions.
+
+An event-fact request with `outcomes.first_return` pins definition 9 / evaluator
+8. Declare `classification_lag_bars`, `sample_lag_bars`,
+`readiness_contract: "market_profile.first_return_state.v2"` and
+`dependence: "leave_one_original_profile_out.v1"`. Use the public
+`balance_breakout` detector, bar horizons, no Fact inputs and `gap_policy: reject`.
+The sample must follow classification and precede every original endpoint.
+Keep classification within the Indicator's declared origin lifetime. Outcomes
+are descriptive distance-to-original-POC changes, not trading returns.
