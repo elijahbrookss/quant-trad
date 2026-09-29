@@ -39,7 +39,9 @@ limits materialization; independently censor entry or targets outside it.
 Use per-dependency and per-horizon eligibility. Preserve undetectable clock
 intervals and unknown event counts. Measure raw risk separately from future/prior
 risk ratios and high-low paths. The baseline excludes the trigger, prices obey
-known-at, and future paths must be known by their target. Report calendar
+known-at, and retrospective labels preserve their own availability clock. Late
+complete paths remain usable outcomes with disclosed delays, never inputs to an
+earlier decision. Report calendar
 variation, missingness, stratum coverage and dependence without inference or
 promotion. Store all-clock-row digests plus bounded examples; frozen replay
 reconstructs detailed rows without another persisted candle-sized population.

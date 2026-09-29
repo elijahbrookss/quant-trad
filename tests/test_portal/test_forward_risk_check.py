@@ -161,11 +161,14 @@ def test_stratification_deletes_whole_days_from_both_groups_and_retains_unmatche
     assert _overlap(np.array([0,1,4]), np.array([3,4,5])) == {"positive_duration_overlapping_pairs":1,"connected_episodes":2,"largest_episode_observations":2,"effective_sample_size":None}
 
 
-def test_future_availability_is_checked_per_horizon():
+def test_late_complete_retrospective_path_keeps_its_availability_clock():
     inputs, plan = case()
     inputs["indicator_evidence"]["candles"][220]["known_at"] = clock(100)
     a = run(inputs, plan)["forward_risk_comparison"]["horizons"]
-    assert a["1800"]["cohorts"]["shock_crossing"]["unresolved_reasons"]["future_path_not_known_at_target"] == 1
+    assert a["1800"]["cohorts"]["shock_crossing"]["raw_risk"]["count"] == 1
+    assert a["1800"]["cohorts"]["shock_crossing"]["outcome_known_after_target_count"] == 1
+    assert a["1800"]["cohorts"]["shock_crossing"]["outcome_availability_delay_seconds"]["maximum"] == 69*60
+    assert a["7200"]["cohorts"]["shock_crossing"]["outcome_known_after_target_count"] == 0
     assert a["7200"]["cohorts"]["shock_crossing"]["raw_risk"]["count"] == 1
 
 

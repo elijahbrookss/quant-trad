@@ -478,8 +478,11 @@ available close at or after decision is the price sample. Subsequent 30, 120
 and 360 elapsed minutes independently resolve mean squared log returns and
 high-low path range divided by sample price. The trigger/sample high and low
 are excluded. Raw risk requires valid closes; range additionally requires
-valid highs/lows. Each future path must be known by its target close. Missing
-or late paths remain unresolved independently of other horizons. Zero or
+valid highs/lows. Complete retrospective paths retain late reports with explicit
+outcome known-at (maximum sample/path source availability), late-after-target
+counts and delay distributions by cohort and month. This label availability is
+never a decision feature. Missing/invalid paths remain unresolved independently
+of other horizons. Zero or
 unavailable prior risk censors only the ratio, preserving valid raw outcomes.
 
 The requirement declaration uses `outcome_boundary=evaluation_end_exclusive`:

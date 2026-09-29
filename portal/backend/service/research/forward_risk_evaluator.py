@@ -319,7 +319,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         sample_ok = observable & (sample >= 0)
         sample_times = np.full(n, -1, dtype=np.int64)
         sample_times[sample_ok] = times[sample[sample_ok]]+60
-        outcome_values: dict[str, np.ndarray] = {}; outcome_ranges: dict[str, np.ndarray] = {}; outcome_reasons: dict[str, np.ndarray] = {}; range_reasons: dict[str, np.ndarray] = {}
+        outcome_values: dict[str, np.ndarray] = {}; outcome_ranges: dict[str, np.ndarray] = {}; outcome_reasons: dict[str, np.ndarray] = {}; range_reasons: dict[str, np.ndarray] = {}; outcome_known: dict[str, np.ndarray] = {}
         for seconds in (1800, 7200, 21600):
             width = seconds//60
             values = np.full(n, np.nan); ranges = values.copy()
@@ -332,11 +332,9 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             candidate, target = candidate[inside], target[inside]
             future_known = pd.Series(known).rolling(width, min_periods=width).max().shift(-width).to_numpy()
             clock_complete = (np.isfinite(future_known[sample[candidate]])
-                & (future_known[sample[candidate]] <= times[target]+60)
                 & ((prior_bad_clock[target+1] - prior_bad_clock[sample[candidate]+1]) == 0))
             full = ((bad[target+1] - bad[sample[candidate]+1]) == 0) & clock_complete
             why[candidate] = "missing_or_invalid_future_close_path"
-            why[candidate[~clock_complete]] = "future_path_not_known_at_target"
             selected, endpoint = candidate[full], target[full]
             values[selected] = (prefix[endpoint+1] - prefix[sample[selected]+1]) / width
             why[selected] = ""
@@ -347,9 +345,12 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             ranges[chosen] = (future_high[sample[chosen]] - future_low[sample[chosen]]) / close[sample[chosen]]
             range_why = why.copy()
             range_why[candidate] = "missing_or_invalid_future_high_low_path"
-            range_why[candidate[~clock_complete]] = "future_path_not_known_at_target"
             range_why[chosen] = ""
             range_reasons[str(seconds)] = range_why
+            available_at = np.full(n, np.nan)
+            available_at[candidate[clock_complete]] = np.maximum(
+                future_known[sample[candidate[clock_complete]]], known[sample[candidate[clock_complete]]])
+            outcome_known[str(seconds)] = available_at
             outcome_values[str(seconds)] = values; outcome_ranges[str(seconds)] = ranges; outcome_reasons[str(seconds)] = why
         # Bounded examples plus an ordered all-observation digest avoid storing a second
         # year-sized copy of candles/results. Frozen inputs and versions own replay.
@@ -361,7 +362,8 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             for horizon in outcome_values:
                 row.extend([float(outcome_values[horizon][i]) if np.isfinite(outcome_values[horizon][i]) else None,
                             float(outcome_ranges[horizon][i]) if np.isfinite(outcome_ranges[horizon][i]) else None,
-                            str(outcome_reasons[horizon][i]), str(range_reasons[horizon][i])])
+                            str(outcome_reasons[horizon][i]), str(range_reasons[horizon][i]),
+                            int(outcome_known[horizon][i]) if np.isfinite(outcome_known[horizon][i]) else None])
             row.append(int(known[i]) if present[i] else None)
             digest.update(json.dumps(row, separators=(",", ":"), allow_nan=False).encode()+b"\n")
             if cohort[i] >= 0 and len(examples[GROUPS[cohort[i]]]) < 5:
@@ -384,6 +386,8 @@ class ForwardRiskEvaluator(EventFactEvaluator):
                     "path_range": _distribution(outcome_ranges[horizon][mask]), "future_prior_risk_ratio": _distribution(ratios[mask]),
                     "path_range_unresolved_reasons": dict(Counter(range_reasons[horizon][mask & ~np.isfinite(outcome_ranges[horizon])])),
                     "risk_ratio_unresolved_reasons": dict(Counter(ratio_why[mask & ~np.isfinite(ratios)])),
+                    "outcome_known_after_target_count": int((measured & (outcome_known[horizon] > sample_times+int(horizon))).sum()),
+                    "outcome_availability_delay_seconds": _distribution(np.maximum(0, outcome_known[horizon][measured]-sample_times[measured]-int(horizon))),
                     "zero_prior_risk_count": int((measured & (baseline == 0)).sum()),
                     "prior_baseline_unavailable_count": int((mask & ~np.isfinite(baseline)).sum()),
                     "unresolved_reasons": dict(Counter(outcome_reasons[horizon][mask & ~np.isfinite(values)])),
@@ -410,6 +414,8 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             for horizon, values in outcome_values.items():
                 row["horizons"][horizon] = {name: {"candidate_count": int((mask & (cohort == code)).sum()),
                     "raw_risk": _distribution(values[mask & (cohort == code)]),
+                    "outcome_known_after_target_count": int((mask & (cohort == code) & np.isfinite(values) & (outcome_known[horizon] > sample_times+int(horizon))).sum()),
+                    "outcome_availability_delay_seconds": _distribution(np.maximum(0, outcome_known[horizon][mask & (cohort == code) & np.isfinite(values)]-sample_times[mask & (cohort == code) & np.isfinite(values)]-int(horizon))),
                     "path_range": _distribution(outcome_ranges[horizon][mask & (cohort == code)]),
                     "future_prior_risk_ratio": _distribution(outcome_ratios[horizon][mask & (cohort == code)]),
                     "unresolved_reasons": dict(Counter(outcome_reasons[horizon][mask & (cohort == code) & ~np.isfinite(values)])),
@@ -447,11 +453,12 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             "entry_delay_seconds": _distribution(sample_times[sample_ok]-known[sample_ok]),
             "observation_ledger": {"schema_version": "candle_risk_observation_digest.v1",
                 "columns": ["candle_open_epoch", "cohort_code", "detection_exclusion", "reset_segment", "prior_mean_squared_log_return", "sample_close_epoch"]
-                    + [f"{h}_{field}" for h in outcome_values for field in ("mean_squared_log_return", "path_range", "risk_exclusion", "range_exclusion")] + ["decision_known_at_epoch"],
+                    + [f"{h}_{field}" for h in outcome_values for field in ("mean_squared_log_return", "path_range", "risk_exclusion", "range_exclusion", "outcome_known_at_epoch")] + ["decision_known_at_epoch"],
                 "cohort_codes": {str(i): name for i, name in enumerate(GROUPS)},
                 "ordered_clock_rows": int(in_period.sum()), "sha256_json_lines": digest.hexdigest(),
                 "examples": examples, "example_selection": "first_five_chronological_per_cohort",
                 "full_rows_persisted": False},
+            "outcome_availability_policy": "Retrospective frozen complete paths retain late reports with explicit outcome known-at; never reused as decision features.",
             "interpretation": "No independence, significance, causal, trading or promotion claim; unseen events remain unknown."}
         return {"schema_version": self.result_schema_version, "check_family": self.evaluator_id,
                 "status": "completed", "analysis_status": "descriptive_only", "sample_count": int(observable.sum()),
