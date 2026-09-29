@@ -5,6 +5,7 @@ import uuid
 from typing import Any, Dict, Optional, Sequence
 
 from indicators.manifest import resolve_manifest_color_palette
+from indicators.registry import get_indicator_manifest
 from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 from ..dependency_bindings import validate_dependency_bindings
 from .context import IndicatorServiceContext, _context
@@ -34,6 +35,7 @@ class IndicatorInstanceCreator:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
+        *, version: str | None = None,
     ) -> Dict[str, Any]:
         payload = self.validate(
             type_str,
@@ -43,6 +45,7 @@ class IndicatorInstanceCreator:
             color,
             color_palette,
             indicator_id=str(uuid.uuid4()),
+            version=version,
         )
         self._ctx.repository.upsert(payload)
         refreshed = self._ctx.repository.get(payload["id"])
@@ -58,8 +61,12 @@ class IndicatorInstanceCreator:
         color_palette: Optional[str] = None,
         *,
         indicator_id: str = "",
+        version: str | None = None,
     ) -> Dict[str, Any]:
         definition = self._resolve_type(type_str)
+        manifest = get_indicator_manifest(type_str, version)
+        if version is not None and manifest.version != version:
+            raise ValueError(f"indicator_version_unsupported: type={type_str} version={version}")
         params_copy = dict(params or {})
         datasource, exchange = pull_datasource_exchange(params_copy, ctx=self._ctx)
         resolved_params = definition.resolve_config(
@@ -67,13 +74,14 @@ class IndicatorInstanceCreator:
             strict_unknown=True,
         )
         resolved_dependencies = validate_dependency_bindings(
-            manifest=definition.MANIFEST,
+            manifest=manifest,
             bindings=dependencies,
             ctx=self._ctx,
         )
         meta = {
             "id": str(indicator_id or "").strip(),
             "type": type_str,
+            "version": manifest.version,
             "params": resolved_params,
             "dependencies": resolved_dependencies,
             "enabled": True,

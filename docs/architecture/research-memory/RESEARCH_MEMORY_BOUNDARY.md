@@ -420,3 +420,12 @@ Useful relations include:
 - [ADR 0037: Keep Research Presentations Metric-Contract Driven](../decisions/0037-keep-research-presentations-metric-contract-driven.md)
 - [ADR 0062: Use Frozen Bindings For Durable Check Evidence](../decisions/0062-use-frozen-bindings-for-durable-check-evidence.md)
 - [ADR 0065: Use Explicit Frozen-Check Admission For New Research Observations](../decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md)
+
+## First-return comparison
+
+Definition 9 / evaluator 8 of `event_fact_analysis` owns original-POC distance
+outcomes for Market Profile v2 public first returns. Fixed classification and
+sample lags preserve original endpoints. It exposes initial distance, entry and
+center state, unresolved reasons, group eligibility, profile/day contributions,
+overlap and leave-one-profile-out influence. Earlier definition versions retain
+their pinned meaning. See [ADR 0075](../decisions/0075-pin-first-return-to-original-range-and-indicator-version.md).

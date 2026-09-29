@@ -36,9 +36,14 @@ def get_indicator_definition(type_id: str) -> Any:
     return definition
 
 
-def get_indicator_manifest(type_id: str) -> IndicatorManifest:
+def get_indicator_manifest(type_id: str, version: str | None = None) -> IndicatorManifest:
     definition = get_indicator_definition(type_id)
     manifest = getattr(definition, "MANIFEST", None)
+    versions = getattr(definition, "MANIFEST_VERSIONS", None)
+    if version is not None and versions is not None:
+        if version not in versions:
+            raise ValueError(f"indicator_version_unsupported: type={type_id} version={version}")
+        manifest = versions[version]
     if not isinstance(manifest, IndicatorManifest):
         raise RuntimeError(f"indicator_definition_invalid: manifest missing type={type_id}")
     return manifest

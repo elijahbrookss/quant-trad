@@ -129,6 +129,7 @@ class MarketDataStore(Protocol):
         source_revision: Optional[str] = None,
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
+        require_same_source: bool = False,
         collection_fence: Optional[Mapping[str, Any]] = None,
     ) -> IngestionOutcome:
         ...

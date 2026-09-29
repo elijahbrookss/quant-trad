@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from indicators.manifest import (
     IndicatorManifest,
     IndicatorOutput,
@@ -286,3 +288,15 @@ __all__ = [
     "DEFAULT_USE_MERGED_VALUE_AREAS",
     "MANIFEST",
 ]
+
+
+# Explicit opt-in version: the v1 manifest remains byte-for-byte semantically stable.
+FIRST_RETURN_MANIFEST = replace(
+    MANIFEST, version="v2",
+    outputs=MANIFEST.outputs + (
+        IndicatorOutput(name="first_value_return", type="signal", label="First Return To Original Value",
+                        event_keys=("first_value_return_long", "first_value_return_short")),
+        IndicatorOutput(name="first_return_state", type="context", label="Original Range Return State",
+                        state_keys=("observed",), fields=("origins", "active_profile_key", "prior_atr", "prior_atr_ready", "prior_atr_known_at", "lifetime_bars")),
+    ),
+)
