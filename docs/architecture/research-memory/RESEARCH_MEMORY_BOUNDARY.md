@@ -72,6 +72,16 @@ Research memory must not:
 - fetch provider data outside existing data-boundary services,
 - reconstruct report truth or runtime truth.
 
+## Research Memory Text Admission
+
+Item creation and explicit Check-to-Observation admission accept an optional
+body of at most 8,192 characters, matching the existing persistence column.
+Their HTTP request contracts reject an oversized body with a field-specific
+422 response before invoking the service. Accepted text is never truncated;
+non-ASCII characters count as characters, not encoded bytes. Keep long Study
+material in its structured payload or linked evidence and use the body for a
+readable summary. This does not change stored records or database schema.
+
 ## Research Check Semantics
 
 A research check is a bounded analytical run that asks:
@@ -331,6 +341,14 @@ fallback rank metric when intent is missing. Missing rank keys, metric
 directions, grouping fields, or required dimensions fail loud before presenting
 misleading evidence.
 
+Saved Check comparisons expose each result's emitted `descriptive_outcomes`
+and `outcome_resolution` alongside its timeframe. These projections preserve
+population definitions, unresolved values, horizon kinds and inference limits
+without recalculating events or treating absent values as zero. Legacy
+`forward_summary` deltas still apply only to legacy `outcomes.summary` metrics;
+the descriptive projection does not create paired-population, common-clock or
+causal-effect statistics. Those calculations remain Check-owned work.
+
 ## Memory Graph
 
 The storage model is intentionally small:
@@ -402,3 +420,12 @@ Useful relations include:
 - [ADR 0037: Keep Research Presentations Metric-Contract Driven](../decisions/0037-keep-research-presentations-metric-contract-driven.md)
 - [ADR 0062: Use Frozen Bindings For Durable Check Evidence](../decisions/0062-use-frozen-bindings-for-durable-check-evidence.md)
 - [ADR 0065: Use Explicit Frozen-Check Admission For New Research Observations](../decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md)
+
+## First-return comparison
+
+Definition 9 / evaluator 8 of `event_fact_analysis` owns original-POC distance
+outcomes for Market Profile v2 public first returns. Fixed classification and
+sample lags preserve original endpoints. It exposes initial distance, entry and
+center state, unresolved reasons, group eligibility, profile/day contributions,
+overlap and leave-one-profile-out influence. Earlier definition versions retain
+their pinned meaning. See [ADR 0075](../decisions/0075-pin-first-return-to-original-range-and-indicator-version.md).
