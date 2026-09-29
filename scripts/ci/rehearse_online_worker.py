@@ -41,6 +41,32 @@ foreign=target/'foreign-private';foreign.write_bytes(b'not writable by UID70');o
 """
         container(project+"-prepare", ["--user", "0:0", "-v", volumes[0]+":/source",
                   "-v", volumes[1]+":/target"], initialize)
+        # The operator must reject an unprepared destination before pausing.
+        # Exercise its actual UID70/read-only probe, without source or SQL access.
+        container(project+"-archive-prepare", ["--user","70:70","--cap-drop","ALL",
+                  "--read-only","-v",volumes[1]+":/target"],
+                  "from pathlib import Path;p=Path('/target/archives/objects');p.mkdir(parents=True,mode=0o700)")
+        archive_args=["--user","70:70","--read-only","--cap-drop","ALL",
+            "--security-opt","no-new-privileges","-v",volumes[1]+":/qt-history:ro",
+            "-e","QT_DISABLE_DOTENV=1","-e","QT_ARCHIVE_SHARED_GROUP_ID=70",
+            "-e","QT_LOGGING_LOKI_URL="]
+        container(project+"-archive-refuse",archive_args,"""
+from pathlib import Path
+from scripts.automation.storage_online_operation import _ARCHIVE_DESTINATION_PROBE
+root=Path('/qt-history/archives/objects');before=root.stat()
+try: exec(_ARCHIVE_DESTINATION_PROBE)
+except PermissionError as exc: assert 'shared_directory_invalid' in str(exc)
+else: raise AssertionError('private archive destination admitted')
+after=root.stat();assert (before.st_ino,before.st_mode,before.st_uid,before.st_gid)==(after.st_ino,after.st_mode,after.st_uid,after.st_gid)
+assert not any(root.iterdir())
+""")
+        container(project+"-archive-ready",["--user","70:70","--cap-drop","ALL",
+                  "--read-only","-v",volumes[1]+":/target"],
+                  "from pathlib import Path;Path('/target/archives/objects').chmod(0o2770)")
+        result=container(project+"-archive-admit",archive_args,
+                  "from scripts.automation.storage_online_operation import _ARCHIVE_DESTINATION_PROBE;exec(_ARCHIVE_DESTINATION_PROBE)")
+        report["archive_preflight"]=json.loads(result.stdout)
+        assert report["archive_preflight"]["mode"]==0o2770
         args = ["--user", "0:0", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
                 "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
                 "--cap-add", "DAC_READ_SEARCH", "--cap-add", "SETUID", "--cap-add", "SETGID",

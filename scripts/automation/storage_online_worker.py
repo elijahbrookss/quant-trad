@@ -285,6 +285,25 @@ def request_configuration(request, inventory_path):
     return policy,limits,targets
 
 
+def inspect_storage_schema(conn):
+    """Require existing canonical control tables; never bootstrap during migration."""
+    from sqlalchemy import text
+    from portal.backend.db.storage_target_models import (
+        StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord,
+        StorageObjectLocationRecord, StorageHeaderTablespaceRecord,
+        StorageHeaderBatchRecord, StorageHeaderMoveRecord,
+    )
+
+    models = (StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord,
+              StorageObjectLocationRecord, StorageHeaderTablespaceRecord,
+              StorageHeaderBatchRecord, StorageHeaderMoveRecord)
+    missing = [model.__tablename__ for model in models
+               if conn.scalar(text("SELECT to_regclass(:relation)"),
+                              {"relation": "public."+model.__tablename__}) is None]
+    if missing:
+        raise RuntimeError("storage_online_storage_schema_missing: tables="+",".join(missing))
+
+
 def inspect_request_configuration(request, inventory_path, *, history_uuid):
     """Candidate-image probe: read-only SQL environment and original cluster only."""
     from sqlalchemy import create_engine,text
@@ -306,6 +325,7 @@ def inspect_request_configuration(request, inventory_path, *, history_uuid):
                 raise RuntimeError("storage_online_database_binding_changed")
             OnlineController._require_job_environment(conn,allow_connections=True)
             OnlineController._supported_builtin_catalog(conn)
+            inspect_storage_schema(conn)
     finally:
         engine.dispose()
     return {"validated":True}

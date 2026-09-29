@@ -479,7 +479,16 @@ portal_storage_targets, portal_storage_policy, portal_storage_plans, and
 portal_storage_object_locations are clean-schema ORM models under the existing
 Base and PG_DSN. The current bootstrap can create their missing clean tables.
 A deployment cutover still needs explicit schema validation, grants, host
-mounts, and a worker. These models do not alter market.fact_versions, its global
+mounts, and a worker. Before the initial service pause, the online operator
+requires all seven canonical storage-control tables to exist. A missing table
+fails with its name; migration never bootstraps or repairs the schema. The
+operator also checks the prepared archive destination as UID70 with a read-only
+HDD bind, no network or capabilities, using the existing archive group contract.
+The destination device, inode, owner, group and mode join the configuration
+binding. This detects an unprepared private directory before the worker starts;
+it does not change existing source or destination permissions.
+
+These models do not alter market.fact_versions, its global
 identity constraints, raw mappings, or existing archive manifest locations.
 
 The next physical design must move historical headers, mappings and indexes as

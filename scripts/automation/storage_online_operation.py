@@ -22,6 +22,7 @@ from scripts.automation import storage_online_launch as launch
 from scripts.automation import storage_online_final as final
 from scripts.automation import storage_online_runtime as runtime_owner
 from scripts.automation import storage_online_prepare as initial
+from scripts.automation.storage_online_worker import archive_group_override
 from scripts.automation import storage_online_recovery as recovery
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,40 @@ def inspect_prepared_operation(state_root, *, project, source_revision, source_i
         return dict(preparation_sha256=host.digest(preparation),**observed)
 
 
+_ARCHIVE_DESTINATION_PROBE = """
+import contextlib,json,sys,stat
+from pathlib import Path
+with contextlib.redirect_stdout(sys.stderr):
+    from market_data.archive import FilesystemRawArchiveObjectStore
+    root=Path('/qt-history/archives/objects')
+    FilesystemRawArchiveObjectStore(root,writable=False)
+    info=root.stat()
+print(json.dumps(dict(device=info.st_dev,inode=info.st_ino,uid=info.st_uid,
+    gid=info.st_gid,mode=stat.S_IMODE(info.st_mode))),flush=True)
+"""
+
+
+def inspect_archive_destination(image, history_root, request):
+    """Read the prepared destination as UID70 before any service pause.
+
+    The probe has no network, capabilities, source, PGDATA or key mounts. It
+    uses the archive owner's existing group contract and cannot repair modes.
+    """
+    output=host.docker("run","--rm","--pull","never","--network","none",
+        "--read-only","--user","70:70","--cap-drop","ALL",
+        "--security-opt","no-new-privileges","--memory","512m","--cpus","1",
+        "--pids-limit","64","--env","QT_DISABLE_DOTENV=1",
+        "--env","QT_ARCHIVE_SHARED_GROUP_ID="+archive_group_override(request),
+        "--env","QT_LOGGING_LOKI_URL=",
+        "--mount","type=bind,source="+history_root+",target=/qt-history,readonly",
+        "--entrypoint","python",image,"-c",_ARCHIVE_DESTINATION_PROBE)
+    result=json.loads(output)
+    if (set(result)!={"device","inode","uid","gid","mode"}
+            or any(type(value) is not int or value<0 for value in result.values())):
+        raise RuntimeError("storage_online_archive_destination_probe_unconfirmed")
+    return result
+
+
 def inspect_operation_configuration(state_root, *, project, source_revision, source_image,
         image, request, inventory_path, keys_root, socket_volume, spool_destination,
         roots, rows, recipe_sha256, deadline):
@@ -184,6 +219,7 @@ def inspect_operation_configuration(state_root, *, project, source_revision, sou
         raise RuntimeError("storage_online_operation_future_database_service_required")
     key = Path(keys_root).stat()
     observed = dict(runtime=admission,
+        archive_destination=inspect_archive_destination(image, history, request),
         socket_sha256=host.digest(socket), source_image=source_image,
         destination=[str(destination),info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode],
         keys=[str(keys_root),key.st_dev,key.st_ino,key.st_uid,key.st_gid,key.st_mode])

@@ -38,3 +38,22 @@ def test_prepared_attempt_cannot_silently_change_to_initial_preparation():
     value=request();value["expected_started_at"]=observed()["started_at"]
     with pytest.raises(ValueError, match="capture_preparation_invalid"):
         worker.capture_preparation(value)
+
+
+@pytest.mark.parametrize("missing", [(), ("portal_storage_targets",), ("portal_storage_policy",)])
+def test_preflight_requires_existing_storage_tables_without_schema_mutation(missing):
+    class Connection:
+        def __init__(self): self.relations=[]
+        def scalar(self, statement, parameters):
+            assert str(statement)=="SELECT to_regclass(:relation)"
+            relation=parameters["relation"]
+            self.relations.append(relation)
+            return None if relation.removeprefix("public.") in missing else relation
+    conn=Connection()
+    if missing:
+        with pytest.raises(RuntimeError,match="storage_schema_missing: tables="+missing[0]):
+            worker.inspect_storage_schema(conn)
+    else:
+        worker.inspect_storage_schema(conn)
+    assert len(conn.relations)==7 and len(set(conn.relations))==7
+    assert all(name.startswith("public.portal_storage_") for name in conn.relations)

@@ -62,3 +62,30 @@ def test_empty_legacy_namespace_is_not_a_retained_source(source_catalog):
         conn.exec_driver_sql("CREATE SCHEMA qt_fact_storage_cutover_v1")
     with pytest.raises(RuntimeError, match="uncaptured_key_free_source"):
         online._before_capture("fixture")
+
+
+def test_storage_control_preflight_requires_explicit_existing_tables(source_catalog):
+    from portal.backend.db import storage_target_models as models
+    from scripts.automation.storage_online_worker import inspect_storage_schema
+    classes=(models.StorageTargetRecord, models.StoragePolicyRecord, models.StoragePlanRecord,
+             models.StorageObjectLocationRecord, models.StorageHeaderTablespaceRecord,
+             models.StorageHeaderBatchRecord, models.StorageHeaderMoveRecord)
+    tables=[model.__table__ for model in classes]
+    with source_catalog.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        with pytest.raises(RuntimeError,match="storage_schema_missing: tables=portal_storage_targets"):
+            inspect_storage_schema(conn)
+        assert conn.scalar(text("SELECT to_regclass('public.portal_storage_targets')")) is None
+    # Only explicit fixture setup creates the canonical schema, never inspection.
+    models.Base.metadata.create_all(source_catalog,tables=tables)
+    with source_catalog.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        inspect_storage_schema(conn)
+        for table in tables:
+            assert conn.scalar(text('SELECT count(*) FROM public.'+table.name))==0
+    with source_catalog.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE public.portal_storage_policy RENAME TO retained_policy")
+    with source_catalog.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        with pytest.raises(RuntimeError,match="storage_schema_missing: tables=portal_storage_policy$"):
+            inspect_storage_schema(conn)

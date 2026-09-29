@@ -344,3 +344,32 @@ def test_fresh_identity_staging_phase_preserves_empty_and_nonempty_order(
     header=dict(after_day=None, baseline_complete=empty,
         identity_baseline_complete=identity_done,identity_history_ready=identity_moved)
     assert _phase(header,dict(baseline_complete=raw_ready,history_ready=raw_ready)) == expected
+
+
+
+def test_archive_preflight_is_confined_and_binds_existing_directory(monkeypatch):
+    import json
+    observed=dict(device=8,inode=123,uid=70,gid=70,mode=0o2770)
+    calls=[]
+    def docker(*args,**kwargs):
+        calls.append(args)
+        assert args[args.index("--network")+1]=="none"
+        assert args[args.index("--user")+1]=="70:70"
+        assert args[args.index("--cap-drop")+1]=="ALL"
+        assert "--read-only" in args and "--cap-add" not in args
+        mounts=[args[i+1] for i,value in enumerate(args) if value=="--mount"]
+        assert mounts==["type=bind,source=/fixture/history,target=/qt-history,readonly"]
+        assert "PG_DSN" not in args and "--pid" not in args
+        assert "QT_ARCHIVE_SHARED_GROUP_ID=70" in args
+        return json.dumps(observed)
+    monkeypatch.setattr(operation.host,"docker",docker)
+    assert operation.inspect_archive_destination("candidate","/fixture/history",{"archive_shared_group_id":70})==observed
+    assert len(calls)==1
+
+
+def test_archive_preflight_failure_propagates_without_repair(monkeypatch):
+    def refuse(*args,**kwargs):
+        raise RuntimeError("market_archive_shared_directory_invalid")
+    monkeypatch.setattr(operation.host,"docker",refuse)
+    with pytest.raises(RuntimeError,match="shared_directory_invalid"):
+        operation.inspect_archive_destination("candidate","/fixture/history",{"archive_shared_group_id":70})
