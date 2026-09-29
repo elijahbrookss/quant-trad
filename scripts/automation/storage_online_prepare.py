@@ -51,16 +51,36 @@ def _source_roots(details):
     return result
 
 
+# The previous payload cutover deliberately retains its fenced rollback table.
+# It is historical source data, not this online migration's capture namespace.
+# Admit that one fixed namespace only with its logged table and attached indexes;
+# an extra relation/function or any other cutover namespace still refuses.
+_UNCAPTURED_QUERY = """
+SELECT json_build_object(
+    'archive_mode', current_setting('archive_mode'),
+    'archive_command_disabled', current_setting('archive_command') IN ('','(disabled)'),
+    'archive_configuration', (SELECT count(*) FROM pg_file_settings
+        WHERE name IN ('archive_command','archive_library') AND setting<>''),
+    'captures', (SELECT count(*) FROM pg_namespace n
+        WHERE n.nspname LIKE 'qt%cutover%' AND (
+            n.nspname <> 'qt_fact_storage_cutover_v1'
+            OR NOT EXISTS (SELECT 1 FROM pg_class r
+                WHERE r.oid=to_regclass('qt_fact_storage_cutover_v1.fact_versions')
+                  AND r.relnamespace=n.oid AND r.relkind='r' AND r.relpersistence='p')
+            OR EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace=n.oid
+                AND c.oid<>to_regclass('qt_fact_storage_cutover_v1.fact_versions')
+                AND NOT (c.relkind='i' AND EXISTS (SELECT 1 FROM pg_index i
+                    WHERE i.indexrelid=c.oid
+                      AND i.indrelid=to_regclass('qt_fact_storage_cutover_v1.fact_versions'))))
+            OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace=n.oid)
+        )))
+"""
+
+
 def _before_capture(database_id):
     # Only catalog/settings lookups: no source history or archive content scan.
     host_boundary.source_storage(database_id)
-    value = json.loads(host_boundary.database_query(database_id,
-        "SELECT json_build_object('archive_mode',current_setting('archive_mode'),"
-        "'archive_command_disabled',current_setting('archive_command') IN ('','(disabled)'),"
-        "'archive_configuration',(SELECT count(*) FROM pg_file_settings "
-        "WHERE name IN ('archive_command','archive_library') AND setting<>''),"
-        "'captures',(SELECT count(*) FROM pg_namespace "
-        "WHERE nspname LIKE 'qt%cutover%'))"))
+    value = json.loads(host_boundary.database_query(database_id, _UNCAPTURED_QUERY))
     if value != {"archive_mode": "off", "archive_command_disabled": True,
                  "archive_configuration": 0, "captures": 0}:
         raise RuntimeError("storage_online_preparation_requires_uncaptured_key_free_source")

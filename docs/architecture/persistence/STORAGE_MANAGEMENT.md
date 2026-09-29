@@ -55,6 +55,7 @@ code_paths:
   - tests/test_storage_online_final.py
   - scripts/automation/storage_online_prepare.py
   - tests/test_storage_online_prepare.py
+  - tests/test_storage_online_prepare_db.py
   - scripts/automation/server_deploy.sh
   - tests/test_server_promotion.py
   - scripts/automation/storage_online_controller.py
@@ -2810,6 +2811,12 @@ rules, original cluster/database identity, supported builtin jobs and the histor
 filesystem UUID. This probe has no source, archive, PGDATA or recovery-key mounts,
 no PostgreSQL PID sharing and no capabilities. It uses the existing `PG_DSN`.
 A failed check refuses before the initial preparation journal or any service stop.
+The initial capture-absence check recognizes the earlier retained rollback table
+`qt_fact_storage_cutover_v1.fact_versions` and its attached indexes as historical
+data. That exact namespace must contain the logged table and no other relations
+or functions. Other cutover namespaces, including the v2 capture, still refuse.
+This distinction grants no mutation authority; retained-source immutability and
+placement checks remain with the existing catalog movement owner.
 
 The plan is a caller-owned private regular JSON file, with no symlink, duplicate
 fields or unknown fields. It declares `qt.storage_online_operation.v1`, exact
