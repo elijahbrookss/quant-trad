@@ -358,7 +358,7 @@ payload semantics.
 | Preview | `qt research check preview --request-json ...` | `POST /api/research/checks/evaluate` | `preview_research_check` |
 | Prepare/freeze | `qt research check prepare --request-json ... [--freeze]` | `POST /api/research/checks/prepare` | `prepare_research_check_evidence` |
 | Evidence | `qt research check run --request-json ... --dataset-id ...` | `POST /api/research/checks/run` | `run_research_check_evidence` |
-| Async evidence | add `--dispatch`; inspect with `qt research jobs status/result` | `POST /api/research/jobs/checks/run`; job reads | dispatch/status/result tools |
+| Async evidence | add `--dispatch` (optional `--single-attempt`); inspect with `qt research jobs status/result` | `POST /api/research/jobs/checks/run`; job reads | dispatch/status/result tools |
 | Replay | `qt research check replay <check_id>` | `POST /api/research/checks/{id}/replay` | `replay_research_check` |
 | Observation | `qt research observe-from-check <check_id> ...` | `POST /api/research/checks/{id}/observations` | `create_observation_from_check` |
 | Trail | `qt research trail <item_id>` | `GET /api/research/items/{id}/trail` | resource/tool trail read |

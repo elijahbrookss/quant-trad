@@ -415,6 +415,10 @@ def test_research_check_sweep_dispatch_enqueues_async_job(monkeypatch: pytest.Mo
         fake_enqueue_or_reuse_job,
     )
 
+    monkeypatch.setattr(research_async_dispatch, "get_job", lambda job_id: {
+        "id": job_id, "status": "queued", "attempts": 0, "max_attempts": 2,
+    })
+
     payload = research_async_dispatch.dispatch_research_check_sweep(
         {
             "title": "ATR sweep",

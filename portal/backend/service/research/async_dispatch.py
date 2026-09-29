@@ -19,6 +19,10 @@ JOB_TYPE_RESEARCH_CHECK_SWEEP = "research_check_sweep"
 RESEARCH_JOB_TYPES = {JOB_TYPE_RESEARCH_CHECK_RUN, JOB_TYPE_RESEARCH_CHECK_SWEEP}
 
 
+class ResearchJobDispatchReceiptError(RuntimeError):
+    """A job was enqueued/reused but its persisted policy could not be read."""
+
+
 def _canonical_request_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -143,9 +147,13 @@ def _job_payload(job: Mapping[str, Any], *, include_result: bool = False) -> dic
     return payload
 
 
-def dispatch_research_job(*, job_type: str, request: Mapping[str, Any]) -> dict[str, Any]:
+def dispatch_research_job(
+    *, job_type: str, request: Mapping[str, Any], max_attempts: int = 2
+) -> dict[str, Any]:
     if job_type not in RESEARCH_JOB_TYPES:
         raise ValueError(f"unsupported research job type: {job_type}")
+    if type(max_attempts) is not int or max_attempts not in {1, 2}:
+        raise ValueError("research_job_attempt_policy_invalid: max_attempts must be 1 or 2")
     normalized_request = dict(request or {})
     request_fingerprint = research_request_fingerprint(job_type=job_type, request=normalized_request)
     partition_key = _request_partition_key(
@@ -162,10 +170,28 @@ def dispatch_research_job(*, job_type: str, request: Mapping[str, Any]) -> dict[
         },
         partition_key=partition_key,
         request_fingerprint=request_fingerprint,
-        max_attempts=2,
+        max_attempts=max_attempts,
     )
     job_id = outcome.id
-    status = outcome.status
+    # Keep the scientific fingerprint unchanged: a new policy must not create
+    # a concurrent duplicate of an existing scientific request.
+    try:
+        persisted = get_job(job_id)
+    except Exception as exc:
+        raise ResearchJobDispatchReceiptError(
+            f"research_job_dispatch_receipt_unavailable: job_id={job_id}; reconcile before retry"
+        ) from exc
+    if persisted is None:
+        raise ResearchJobDispatchReceiptError(
+            f"research_job_dispatch_receipt_missing: job_id={job_id}; reconcile before retry"
+        )
+    actual_limit = int(persisted["max_attempts"])
+    if actual_limit != max_attempts:
+        raise ValueError(
+            f"research_job_attempt_policy_mismatch: job_id={job_id} "
+            f"requested={max_attempts} persisted={actual_limit}; reconcile existing job, do not redispatch"
+        )
+    status = str(persisted["status"])
     reused = outcome.reused
     logger.info(
         "research_job_dispatched | job_id=%s job_type=%s status=%s reused=%s check_family=%s",
@@ -181,18 +207,24 @@ def dispatch_research_job(*, job_type: str, request: Mapping[str, Any]) -> dict[
         "job_type": job_type,
         "status": status,
         "reused": reused,
+        "attempts": int(persisted["attempts"]),
+        "max_attempts": actual_limit,
         "request_fingerprint": request_fingerprint,
         "status_url": f"/api/research/jobs/{job_id}",
         "result_url": f"/api/research/jobs/{job_id}/result",
     }
 
 
-def dispatch_research_check_run(request: Mapping[str, Any]) -> dict[str, Any]:
+def dispatch_research_check_run(
+    request: Mapping[str, Any], *, max_attempts: int = 2
+) -> dict[str, Any]:
     if str(request.get("mode") or "").strip().lower() != "evidence":
         raise ValueError(
             "check_evidence_mode_required: async Check run accepts durable evidence only"
         )
-    return dispatch_research_job(job_type=JOB_TYPE_RESEARCH_CHECK_RUN, request=request)
+    return dispatch_research_job(
+        job_type=JOB_TYPE_RESEARCH_CHECK_RUN, request=request, max_attempts=max_attempts
+    )
 
 
 def dispatch_research_check_sweep(request: Mapping[str, Any]) -> dict[str, Any]:
