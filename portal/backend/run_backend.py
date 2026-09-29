@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from core.settings import get_settings
+from core.storage_writer_fence import retain_source_writer_fence, source_writer_fds
 from core.storage_mounts import require_configured_archive_mount
 
 _SETTINGS = get_settings()
@@ -47,7 +48,7 @@ def _spawn_process(name: str, cmd: List[str], env_overrides: Optional[Dict[str, 
     env = os.environ.copy()
     if env_overrides:
         env.update({k: str(v) for k, v in env_overrides.items()})
-    popen = subprocess.Popen(cmd, env=env)
+    popen = subprocess.Popen(cmd, env=env, pass_fds=source_writer_fds())
     logger.info("backend_supervisor_spawned | name=%s pid=%s cmd=%s", name, popen.pid, " ".join(cmd))
     return ManagedProcess(name=name, popen=popen)
 
@@ -80,9 +81,21 @@ def main() -> int:
     global _STOP
     _configure_logging()
     require_configured_archive_mount()
+    source_fence = retain_source_writer_fence()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+
+    if source_fence:
+        # A lost host lock must not let a late legacy API serve behind the
+        # persistent SQL login gate. Reuse the workers' existing DB readiness
+        # boundary and budget before spawning any API or worker process.
+        from portal.backend.service.async_jobs import wait_for_database_ready
+
+        timeout = _SETTINGS.workers.indicators.db_wait_timeout_seconds
+        if not wait_for_database_ready(timeout_seconds=timeout, poll_interval_seconds=0.5):
+            logger.error("backend_supervisor_source_database_unavailable | timeout_seconds=%s", timeout)
+            return 2
 
     host = _SETTINGS.backend.host
     port = _SETTINGS.backend.port

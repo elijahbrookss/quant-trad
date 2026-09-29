@@ -557,7 +557,7 @@ def collect_runtime_output_evidence_for_instance(
                     "indicator_evidence_graph_invalid: duplicate Indicator identity"
                 )
             current_manifest = serialize_indicator_manifest(
-                get_indicator_manifest(indicator_type)
+                get_indicator_manifest(indicator_type, (row.get("manifest") or {}).get("version"))
             )
             if current_manifest != dict(row.get("manifest") or {}):
                 raise RuntimeError(
