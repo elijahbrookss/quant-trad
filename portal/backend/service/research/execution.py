@@ -228,6 +228,8 @@ def _load_market_inputs(
                 expected_indicator_graph=plan.indicator_graph,
                 indicator_plan_start=str(plan.evaluation_range["start"]),
                 indicator_plan_end=str(plan.materialization_range["end_exclusive"]),
+                **({"capture_output_readiness": True}
+                   if plan.execution.get("capture_output_readiness") else {}),
             )
         except IndicatorGapRejectedError as exc:
             rejection = {
@@ -336,6 +338,8 @@ def _execution_input_hashes(
             "output_types": dict(indicator.get("output_types") or {}),
             "ready_counts": dict(indicator.get("ready_counts") or {}),
             "not_ready_counts": dict(indicator.get("not_ready_counts") or {}),
+            **({"output_readiness": indicator["output_readiness"]}
+               if "output_readiness" in indicator else {}),
             "outputs": list(indicator.get("outputs") or []),
         }
     )

@@ -78,3 +78,30 @@ Those are separate contracts if research later shows they are useful.
 - Missing declared outputs fail at the engine boundary.
 - Research checks and strategies consume the typed output, not private candle
   stats internals.
+
+
+## Recovery Across Declared Candle Gaps
+
+Candle Stats owns an explicit `reset_rewarm` transition through the existing
+Indicator engine gap hook. It clears all candle, previous-close, recursive ATR,
+threshold-cross, rolling metric and overlay history. The next observed candle
+seeds a fresh segment; no missing candle is invented and the original candle
+and known-at clocks remain unchanged. Recursive ATR retains arbitrarily old
+state, so recovery is a declared new initialization, not an assertion that a
+finite waiting period reconstructs the missing history.
+
+The first `max(gap_rewarm_bars, warmup_bars)` observed candles after each reset
+advance state but publish both typed outputs as not ready. Subsequent candles
+must also satisfy normal Indicator readiness. A second gap starts recovery
+again. Events encountered during recovery are not buffered or emitted later;
+a subsequent threshold cross uses only post-gap state. The configured overlay
+retention bound survives reset, but its old points do not. Overlay readiness
+continues to describe projection history, not analytical output eligibility.
+
+`reject` and `continue_degraded` keep their existing explicit meanings. Degraded
+continuation is not evidence that state has recovered. New research must pin
+the policy and code revision and report gaps and recovery intervals; the new
+transition does not reinterpret historical frozen evidence. Source coverage,
+pre-event baselines, confirmation and forward-path eligibility remain owned by
+their respective data and Check contracts. This capability does not by itself
+provide an ordinary-period control or forward realized-volatility outcome.

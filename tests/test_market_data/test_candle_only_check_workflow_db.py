@@ -15,7 +15,8 @@ from portal.backend.service.storage.repos.market_data import market_data_repo
 pytestmark = pytest.mark.db
 
 
-def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
+@pytest.mark.parametrize("forward_risk", [False, True])
+def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch, forward_risk):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
     token = uuid.uuid4().hex
@@ -36,10 +37,12 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
         timeframe_seconds=60, contract_version=CANDLE_FACT_VERSION,
     )
     candles = []
-    for index in range(400):
+    for index in range(800 if forward_risk else 400):
+        if forward_risk and index == 300:
+            continue
         opened = start + timedelta(minutes=index)
         closed = opened + timedelta(minutes=1)
-        width = 20 if index == 250 else 1
+        width = 20 if index in (250, 550) else 1
         candles.append(CandleFact(
             open_time=opened, close_time=closed, open=100, high=100 + width,
             low=100 - width, close=100, volume=10, trade_count=None,
@@ -49,6 +52,11 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
         ))
     market_data_repo.ingest_candles(series_id=series, source_id=source_id,
                                    facts=candles, request={"fixture": token})
+    if forward_risk:
+        market_data_repo.record_gap_evidence(series_id=series, source_id=source_id,
+            start=start+timedelta(minutes=300), end=start+timedelta(minutes=301),
+            classification="provider_missing_data", expected_count=1, observed_count=0,
+            evidence={"schema_version":"market_gap_evidence.v1", "reason_code":"fixture_gap"})
     indicator = create_instance("candle_stats", f"Candle-only {token}", {})
 
     class ProviderCallTrap:
@@ -72,17 +80,30 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
         "inputs": [], "gap_policy": "reject",
         "preparation": {"freeze": True, "name": f"candle-only-{token}"},
     }
+    if forward_risk:
+        payload["scope"]["end"] = (start+timedelta(minutes=790)).isoformat()
+        payload["outcomes"] = {"horizon_kind":"elapsed_time", "horizons":[1800,7200,21600], "primary_horizon":7200, "entry_lag_bars":0,
+            "forward_risk":{"schema_version":"candle_risk_comparison.v1", "baseline_bars":120, "readiness_contract":"candle_stats.public_outputs.v1", "outcome_boundary":"evaluation_end_exclusive"}}
+        payload.update(statistics={}, gap_policy="reset_rewarm")
     prepared = service.prepare_research_check_evidence(payload)
     assert prepared["status"] == "frozen", prepared
     run = service.run_research_check(prepared["next_request"])
     assert run["replayable"] is True
     assert run["evidence"]["input_binding"]["provider_access"] == "disabled"
     evaluated = run["result"]["result"]
-    assert evaluated["schema_version"] == "event_fact_analysis_result.v5"
-    assert evaluated["analysis_status"] == "completed"
-    assert evaluated["sample_count"] > 0
-    assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
-    assert all(event["fact_references"] == {} for event in evaluated["events"])
+    if forward_risk:
+        assert evaluated["schema_version"] == "event_fact_analysis_result.v9"
+        analysis = evaluated["forward_risk_comparison"]
+        assert analysis["coverage"]["first_blocking_stage_counts"]["missing_source_candle"] == 1
+        assert analysis["coverage"]["first_blocking_stage_counts"]["indicator_not_ready"] == 200
+        assert analysis["horizons"]["1800"]["cohorts"]["shock_crossing"]["candidate_count"] >= 2
+        assert analysis["horizons"]["1800"]["cohorts"]["shock_crossing"]["raw_risk"]["count"] >= 2
+    else:
+        assert evaluated["schema_version"] == "event_fact_analysis_result.v5"
+        assert evaluated["analysis_status"] == "completed"
+        assert evaluated["sample_count"] > 0
+        assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
+        assert all(event["fact_references"] == {} for event in evaluated["events"])
 
     market_data_repo.ingest_candles(
         series_id=series, source_id=source_id,
