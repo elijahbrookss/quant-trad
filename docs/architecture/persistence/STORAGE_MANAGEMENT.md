@@ -2803,6 +2803,15 @@ preparation the check is also bounded by the original capture deadline. All late
 live checks remain mandatory, including independently verified reader retirement
 before private recovery mounts. A changed or invalid plan refuses before pause.
 
+Database-setting equality binds the resolved environment and every effective
+container/host setting. Compose invocation metadata (`project.environment_file`,
+like `project.config_files` and `project.working_dir`) is excluded from that
+fingerprint: a resolved private recipe can omit the original env-file label while
+preserving all credential and configuration values. Unknown labels and changed
+environment values still fail equality. This normalization grants no permission
+to reinterpret older receipts, renew deadlines or resume an expired preparation;
+retained attempts must be reconciled with their original qualified owner.
+
 Before the initial pause, the operation additionally admits the original
 one-PGDATA source, its fixed mount-preparation recipe, candidate image attestation,
 source archive identity and the full future runtime configuration. A bounded

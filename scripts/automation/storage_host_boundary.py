@@ -251,7 +251,11 @@ def database_contract(details: dict, *, tcp_upgrade: bool = False) -> str:
     config.pop("Volumes", None)  # exact mounted devices are verified separately
     config["Env"] = sorted(config.get("Env") or [])
     labels = config.get("Labels") or {}
-    for name in ("config-hash", "project.config_files", "project.working_dir", "image", "version", "replace"):
+    # Compose records how it was invoked in these labels. Recreating an
+    # already-resolved recipe can omit environment_file without changing Env;
+    # effective environment values remain fully bound below and in preflight.
+    for name in ("config-hash", "project.config_files", "project.working_dir",
+                 "project.environment_file", "image", "version", "replace"):
         labels.pop("com.docker.compose."+name, None)
     config["Labels"] = labels
     if tcp_upgrade:

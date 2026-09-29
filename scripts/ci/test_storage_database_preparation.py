@@ -68,7 +68,13 @@ def main(*, online_source=False):
         recipe["services"]["tsdb"]["volumes"].append({"type": "bind", "source": str(history),
             "target": "/qt-history", "bind": {"create_host_path": False}})
         path = state/pause.DATABASE_RECIPE; path.write_text(json.dumps(recipe)); path.chmod(0o600)
-        compose = ["docker", "compose", "--project-name", project, "--file", str(source)]
+        # Real source deployments use --env-file; the resolved preparation
+        # recipe does not. Exercise that provenance-label difference in Docker.
+        source_environment = root/"source.env"
+        source_environment.write_text("QT_DISPOSABLE_ENVIRONMENT=1\n")
+        source_environment.chmod(0o600)
+        compose = ["docker", "compose", "--env-file", str(source_environment),
+                   "--project-name", project, "--file", str(source)]
         def cid():
             return run(["docker", "ps", "-aq", "--no-trunc", "--filter", "label=com.docker.compose.project="+project,
                         "--filter", "label=com.docker.compose.service=tsdb"], env=env).stdout.strip()

@@ -369,6 +369,34 @@ def enter_database(state):
                                         prepare_database=True, history_uuid="fixture-hdd")
 
 
+
+def test_database_preparation_preserves_settings_when_compose_env_file_label_disappears(database_setup):
+    state, docker = database_setup
+    label = "com.docker.compose.project.environment_file"
+    original = docker.details[docker.original["id"]]
+    original["config"]["Labels"][label] = "/private/source.env"
+    docker.tamper = lambda row, details: details["config"]["Labels"].pop(label)
+    with enter_database(state) as receipt:
+        assert receipt["phase"] == "database_prepared"
+    assert docker.operations == ["remove", "create", "start"]
+    assert not any(docker.rows[name]["running"] for name in host_boundary.STOP)
+
+
+@pytest.mark.parametrize("fault", ["environment", "other_label"])
+def test_compose_metadata_normalization_keeps_effective_configuration_bound(database_setup, fault):
+    import copy
+    _, docker = database_setup
+    original = docker.details[docker.original["id"]]
+    original["config"]["Labels"]["com.docker.compose.project.environment_file"] = "/private/source.env"
+    changed = copy.deepcopy(original)
+    changed["config"]["Labels"].pop("com.docker.compose.project.environment_file")
+    if fault == "environment":
+        changed["config"]["Env"] = ["POSTGRES_USER=other", "POSTGRES_PASSWORD=fixture-secret"]
+    else:
+        changed["config"]["Labels"]["storage.security_contract"] = "changed"
+    assert host_boundary.database_contract(changed) != host_boundary.database_contract(original)
+
+
 def test_database_preparation_preserves_hold_and_never_resumes_clients(database_setup):
     state, docker = database_setup
     with enter_database(state) as receipt:
