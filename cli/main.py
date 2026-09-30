@@ -2063,9 +2063,11 @@ def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
 def _cmd_research_check_run(args: argparse.Namespace) -> int:
     operations = ResearchOperations(_client(args))
     request = _canonical_research_request(args)
+    if args.single_attempt and not args.dispatch:
+        raise ValueError("--single-attempt requires --dispatch")
     if args.dispatch:
         result = operations.dispatch_evidence(
-            request, dataset_id=args.dataset_id
+            request, dataset_id=args.dataset_id, single_attempt=args.single_attempt
         )
         _print_research_job_dispatch(result)
     else:
@@ -4443,6 +4445,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_run.add_argument("--dataset-id")
     research_check_run.add_argument(
         "--dispatch", action="store_true", help="Queue evidence execution and return the research job id."
+    )
+    research_check_run.add_argument(
+        "--single-attempt", action="store_true",
+        help="Require one async claim attempt, with no automatic retry; requires --dispatch."
     )
     research_check_run.set_defaults(func=_cmd_research_check_run)
 

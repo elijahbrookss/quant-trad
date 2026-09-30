@@ -525,6 +525,7 @@ def collect_runtime_output_evidence_for_instance(
     expected_indicator_graph: Sequence[Mapping[str, Any]] | None = None,
     indicator_plan_start: str | None = None,
     indicator_plan_end: str | None = None,
+    capture_output_readiness: bool = False,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     """Collect per-bar declared output evidence from the canonical runtime path."""
@@ -657,6 +658,7 @@ def collect_runtime_output_evidence_for_instance(
     ready_counts: Counter[str] = Counter()
     not_ready_counts: Counter[str] = Counter()
     gap_transitions: list[dict[str, Any]] = []
+    readiness_intervals: list[dict[str, Any]] = []
     discontinuities: list[dict[str, Any]] = []
 
     requested_start = _utc(start)
@@ -798,6 +800,22 @@ def collect_runtime_output_evidence_for_instance(
                 "indicator_output_evidence_failed: declared outputs missing "
                 f"indicator_id={inst_id} bar_time={candle_time} outputs={missing_keys}"
             )
+        if capture_output_readiness:
+            readiness = {
+                ref.partition(".")[2]: bool(getattr(frame_outputs[ref], "ready", False))
+                for ref in target_output_refs
+            }
+            interval_end = _iso_utc(candle.time + timedelta(seconds=interval_seconds))
+            segment = len(gap_transitions)
+            if (readiness_intervals
+                    and readiness_intervals[-1]["end_exclusive"] == candle_time
+                    and readiness_intervals[-1]["ready_outputs"] == readiness
+                    and readiness_intervals[-1]["segment"] == segment):
+                readiness_intervals[-1]["end_exclusive"] = interval_end
+            else:
+                readiness_intervals.append({"start": candle_time,
+                    "end_exclusive": interval_end, "ready_outputs": readiness,
+                    "segment": segment})
         for output_ref in target_output_refs:
             runtime_output = frame_outputs[output_ref]
             output_type = output_types[output_ref]
@@ -902,6 +920,11 @@ def collect_runtime_output_evidence_for_instance(
         "not_ready_counts": dict(sorted(not_ready_counts.items())),
         "gap_policy": gap_policy,
         "gap_transitions": gap_transitions,
+        **({"output_readiness": {
+            "schema_version": "indicator_output_readiness.v1",
+            "clock": "candle_open_intervals_known_at_owned_by_source",
+            "indicator_id": inst_id, "intervals": readiness_intervals,
+        }} if capture_output_readiness else {}),
         "continuity_discontinuities": discontinuities,
         "indicator_graph": actual_indicator_graph,
         "indicator_graph_hash": semantic_hash(
