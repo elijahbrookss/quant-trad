@@ -1,4 +1,6 @@
 """Real transaction, owner exclusion and capture continuity during amendment."""
+from datetime import datetime
+
 import pytest
 from sqlalchemy import event, text
 
@@ -35,7 +37,8 @@ def test_explicit_amendment_preserves_start_queue_and_concurrent_collection(capt
         assert amendment.inspect_amendment(conn) == receipt
         actual = conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c"))
         assert actual == {**original, "attempt_seconds": 96*3600}
-        assert capture.install_capture(conn, attempt_seconds=10)["started_at"] == original["prepared_at"]
+        resumed_start = capture.install_capture(conn, attempt_seconds=10)["started_at"]
+        assert datetime.fromisoformat(resumed_start) == datetime.fromisoformat(original["prepared_at"])
         with pytest.raises(RuntimeError, match="capture_changed"):
             change(conn, original)
     assert ids(engine, capture.QUEUE) == ["before", "during"]
