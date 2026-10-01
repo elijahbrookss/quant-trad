@@ -136,7 +136,7 @@ def prepare_background(exchange, *, preparation_seconds):
 
 def inspect_prepared_operation(state_root, *, project, source_revision, source_image,
         image, request, inventory_path, keys_root, socket_volume, spool_destination,
-        deadline, operator_id=None):
+        deadline, operator_id=None, proposed_runtime_recipe=None):
     """Read-only prerequisite observation; never pause, capture or switch authority.
 
     Reuse actual source and runtime owners before worker launch and before final
@@ -154,7 +154,8 @@ def inspect_prepared_operation(state_root, *, project, source_revision, source_i
             source_revision=source_revision,source_image=source_image,image=image,request=request,
             inventory_path=inventory_path,keys_root=keys_root,socket_volume=socket_volume,
             spool_destination=spool_destination,roots=preparation["source_roots"],rows=rows,
-            recipe_sha256=preparation["recipe_sha256"],deadline=deadline)
+            recipe_sha256=preparation["recipe_sha256"],deadline=deadline,
+            **({"proposed_runtime_recipe":proposed_runtime_recipe} if proposed_runtime_recipe is not None else {}))
         return dict(preparation_sha256=host.digest(preparation),**observed)
 
 
@@ -194,7 +195,7 @@ def inspect_archive_destination(image, history_root, request):
 
 def inspect_operation_configuration(state_root, *, project, source_revision, source_image,
         image, request, inventory_path, keys_root, socket_volume, spool_destination,
-        roots, rows, recipe_sha256, deadline):
+        roots, rows, recipe_sha256, deadline, proposed_runtime_recipe=None):
     """Shared planned runtime checks for both initial and final preparation."""
     candidates = [Path(p) for p in roots if str(Path(p)/"objects") in roots]
     if len(roots) != 2 or len(candidates) != 1:
@@ -215,7 +216,8 @@ def inspect_operation_configuration(state_root, *, project, source_revision, sou
     runtime, admission = runtime_owner.inspect_runtime_configuration(state_root,
         database_model=model, image_id=image, request=request,
         inventory=launch._canonical(inventory_path), udev_root=udev,
-        destination=str(destination), rows=rows, database_id=rows["tsdb"]["id"])
+        destination=str(destination), rows=rows, database_id=rows["tsdb"]["id"],
+        **({"proposed_recipe":proposed_runtime_recipe} if proposed_runtime_recipe is not None else {}))
     # The replacement does not exist yet: pin its service, never the source PID.
     if runtime["services"]["storage-maintenance"].get("pid") != "service:tsdb":
         raise RuntimeError("storage_online_operation_future_database_service_required")

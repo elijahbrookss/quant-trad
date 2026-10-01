@@ -1456,7 +1456,7 @@ finally:
     if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
         and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
   if options.replacement_package_image and (state/'storage-online-package-amendment.json').exists():
-   package_saved=host_boundary.load_receipt(state/'storage-online-package-amendment.json')
+   package_saved=host_boundary.load_receipt(state/'storage-online-package-amendment.json',max_bytes=2*1024**2)
    launch_saved=host_boundary.load_receipt(state/launch._STATE)
    for proof in (package_saved['old_worker'],launch_saved):
     if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project

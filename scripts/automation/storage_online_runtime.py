@@ -304,14 +304,17 @@ def admit_runtime_recipe(state_root, saved, worker, preparation, rows):
 
 
 def inspect_runtime_configuration(state_root, *, database_model, image_id, request,
-        inventory, udev_root, destination, rows, database_id):
+        inventory, udev_root, destination, rows, database_id, proposed_recipe=None):
     """Inspect the fixed split recipe without granting runtime/start authority.
 
     Used before source pause and again against the actual committed replacement.
     The same image, environment, ownership, mounts, keys and limit rules apply.
     No database, filesystem or recipe is changed by this inspection.
     """
-    model = host.load_receipt(state_root/RUNTIME_RECIPE, max_bytes=524288)
+    original_model = host.load_receipt(state_root/RUNTIME_RECIPE, max_bytes=524288)
+    # A stopped-worker amendment validates its proposed fixed recipe through
+    # these same checks before publishing it. This is observation, never start authority.
+    model = deepcopy(original_model if proposed_recipe is None else proposed_recipe)
     project = database_model["name"]
     if (set(model)!={"name","services","volumes","networks"} or model["name"]!=project
             or set(model["services"])!=set(_APPLICATIONS)|{"tsdb"}
@@ -433,7 +436,7 @@ def inspect_runtime_configuration(state_root, *, database_model, image_id, reque
             raise RuntimeError("storage_online_runtime_application_mount_changed: service="+name)
         if name!="initialize" and service.get("healthcheck",{}).get("test")!=_APPLICATION_HEALTH[name]:
             raise RuntimeError("storage_online_runtime_healthcheck_required")
-    if host.digest(host.load_receipt(state_root/RUNTIME_RECIPE,max_bytes=524288))!=host.digest(model):
+    if host.digest(host.load_receipt(state_root/RUNTIME_RECIPE,max_bytes=524288))!=host.digest(original_model):
         raise RuntimeError("storage_online_runtime_recipe_changed")
     return model,dict(recipe_sha256=host.digest(model),files=files,
         images={n:image_id for n in _APPLICATIONS},archive_identity=[info.st_dev,info.st_ino,info.st_gid,stat.S_IMODE(info.st_mode)])

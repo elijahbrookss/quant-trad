@@ -19,10 +19,12 @@ import time
 
 from scripts.automation import storage_host_boundary as host
 from scripts.automation import storage_online_launch as launch
+from scripts.automation import storage_online_runtime as runtime
 from scripts.db import fact_header_v2_deadline as database
 
 STATE = "storage-online-deadline-amendment.json"
 PACKAGE_STATE = "storage-online-package-amendment.json"
+PACKAGE_JOURNAL_BYTES = 2*1024**2
 REQUEST = "storage-online-request.json"
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,7 @@ def _sha(data):
 
 def require_settled(state_root):
     for name, kind in ((STATE, "deadline"), (PACKAGE_STATE, "package")):
-        if os.path.lexists(state_root/name) and host.load_receipt(state_root/name).get("phase") != "complete":
+        if os.path.lexists(state_root/name) and host.load_receipt(state_root/name, max_bytes=PACKAGE_JOURNAL_BYTES if name == PACKAGE_STATE else 65536).get("phase") != "complete":
             raise RuntimeError("storage_online_"+kind+"_amendment_requires_reconciliation")
 
 
@@ -49,7 +51,7 @@ def _check_clock(wall_deadline, monotonic_deadline):
 def _replace(path, before, after):
     # A torn multi-file publication can contain only these exact old/new bytes.
     # An unknown file is never overwritten to force reentry.
-    host.load_receipt(path)
+    host.load_receipt(path, max_bytes=max(65536,len(before),len(after)))
     current = path.read_bytes()
     if current == after:
         return
@@ -180,7 +182,7 @@ def amend_operation(path, *, attempt_seconds, capacity_file, execute):
         raise ValueError("storage_online_deadline_arguments_invalid")
     operator_sha256 = _sha(Path(__file__).read_bytes()+Path(database.__file__).read_bytes())
     with host.deployment_lock(root):
-        if os.path.lexists(root/PACKAGE_STATE) and host.load_receipt(root/PACKAGE_STATE).get("phase") != "complete":
+        if os.path.lexists(root/PACKAGE_STATE) and host.load_receipt(root/PACKAGE_STATE, max_bytes=PACKAGE_JOURNAL_BYTES).get("phase") != "complete":
             raise RuntimeError("storage_online_package_amendment_requires_reconciliation")
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
             if os.path.lexists(root/name):
@@ -357,7 +359,7 @@ def amend_worker_package(path, *, package_file, execute):
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
             if os.path.lexists(root/name):
                 raise RuntimeError("storage_online_package_pre_final_serving_source_required")
-        journal = host.load_receipt(root/PACKAGE_STATE) if os.path.lexists(root/PACKAGE_STATE) else None
+        journal = host.load_receipt(root/PACKAGE_STATE, max_bytes=PACKAGE_JOURNAL_BYTES) if os.path.lexists(root/PACKAGE_STATE) else None
         if journal:
             if (journal["operation_path"] != str(path) or journal["package"] != package
                     or journal["operator_sha256"] != operator_sha256):
@@ -391,11 +393,23 @@ def amend_worker_package(path, *, package_file, execute):
             new_request = {**old_request, **{k:package[k] for k in ("source_revision", "source_tree_hash")}}
             new_plan = {**before_plan, "image":package["image"],
                         "request":{k:v for k,v in new_request.items() if k != "capture_preparation"}}
-            for candidate in (before_plan, new_plan):
+            runtime_path = root/runtime.RUNTIME_RECIPE
+            current_runtime = host.load_receipt(runtime_path, max_bytes=524288)
+            old_runtime_bytes = journal["old_runtime_bytes"] if journal else runtime_path.read_text()
+            old_runtime = json.loads(old_runtime_bytes) if journal else current_runtime
+            new_runtime = deepcopy(old_runtime)
+            for name in runtime._APPLICATIONS:
+                if old_runtime["services"][name].get("image") != before_plan["image"]:
+                    raise RuntimeError("storage_online_package_original_runtime_image_changed")
+                new_runtime["services"][name]["image"] = new_plan["image"]
+            new_runtime_bytes = (json.dumps(new_runtime,sort_keys=True)+"\n").encode()
+            if len(new_runtime_bytes) > 524288 or runtime_path.read_bytes() not in (old_runtime_bytes.encode(),new_runtime_bytes):
+                raise RuntimeError("storage_online_package_runtime_recipe_changed")
+            for candidate, proposed in ((before_plan, old_runtime), (new_plan, new_runtime)):
                 arguments = {k:candidate[k] for k in ("project", "source_revision", "source_image", "image",
                     "request", "inventory_path", "keys_root", "socket_volume", "spool_destination")}
                 operation.inspect_prepared_operation(root, **arguments,
-                    deadline=monotonic_deadline, operator_id=saved["container_id"])
+                    deadline=monotonic_deadline, operator_id=saved["container_id"], proposed_runtime_recipe=proposed)
             old_observed = _probe(before_plan, saved, action="package_inspect")
             new_observed = _probe(new_plan, saved, action="package_inspect")
             _unstarted_header_capture(old_observed, saved, old_request)
@@ -411,7 +425,8 @@ def amend_worker_package(path, *, package_file, execute):
                 if (operation.load_operation_plan(path) != before_plan
                         or _sha(path.read_bytes()) != package["plan_sha256"]
                         or _sha((root/REQUEST).read_bytes()) != saved["binding"]["request_sha256"]
-                        or host.load_receipt(root/launch._STATE) != saved):
+                        or host.load_receipt(root/launch._STATE) != saved
+                        or runtime_path.read_bytes() != old_runtime_bytes.encode()):
                     raise RuntimeError("storage_online_package_original_files_changed")
                 image_env = launch.inspect_candidate_image(new_plan["image"], new_request)
                 old_env = dict(v.split("=",1) for v in details["config"]["Env"])
@@ -425,10 +440,11 @@ def amend_worker_package(path, *, package_file, execute):
                     old_plan=before_plan, new_plan=new_plan, old_plan_bytes=path.read_text(),
                     old_request_bytes=(root/REQUEST).read_text(), old_worker_bytes=(root/launch._STATE).read_text(),
                     old_worker=saved, new_worker=new_worker, new_request=new_request, observed_sha256=observed_sha256,
+                    old_runtime_bytes=old_runtime_bytes, new_runtime=new_runtime,
                     phase="prepared", wall_deadline=wall_deadline, monotonic_deadline=monotonic_deadline,
                     boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
                 journal["intent_sha256"] = host.digest(journal)
-                if len(json.dumps(journal).encode()) > 65535:
+                if len(json.dumps(journal).encode()) > PACKAGE_JOURNAL_BYTES-1:
                     raise ValueError("storage_online_package_intent_budget_exceeded")
                 _check_clock(wall_deadline, monotonic_deadline)
                 host.save_receipt(root/PACKAGE_STATE, journal, initial=True)
@@ -443,6 +459,7 @@ def amend_worker_package(path, *, package_file, execute):
             elif name != "/"+archived:
                 raise RuntimeError("storage_online_package_worker_name_changed")
             for target,before,after in (
+                (runtime_path,journal["old_runtime_bytes"].encode(),new_runtime_bytes),
                 (root/REQUEST,journal["old_request_bytes"].encode(),request_bytes(journal["new_request"])),
                 (root/launch._STATE,journal["old_worker_bytes"].encode(),(json.dumps(journal["new_worker"],sort_keys=True)+"\n").encode()),
                 (path,journal["old_plan_bytes"].encode(),(json.dumps(journal["new_plan"],sort_keys=True)+"\n").encode())):

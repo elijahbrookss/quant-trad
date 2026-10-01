@@ -462,3 +462,40 @@ def test_spool_scan_bound_is_distinct_from_copied_file_bound(tmp_path, monkeypat
         runtime.prepare_spool(tmp_path, saved={"switch": {"deadline_monotonic": time.monotonic()+30}},
             worker_process=object(), source_check=lambda: None, destination=tmp_path/"new",
             max_bytes=1024, max_entries=entries, reserve_bytes=0, max_duration_seconds=30)
+
+
+@pytest.mark.parametrize("fault",[None,"capability","key-write","file-drift"])
+def test_proposed_runtime_uses_complete_validator_without_publication(split_recipe,monkeypatch,tmp_path,fault):
+    model,admit = split_recipe
+    admit()
+    path = tmp_path/runtime.RUNTIME_RECIPE
+    original = path.read_bytes()
+    proposed = deepcopy(model)
+    new_image = "sha256:"+"d"*64
+    for name in runtime._APPLICATIONS: proposed["services"][name]["image"] = new_image
+    request = json.loads((tmp_path/"storage-online-request.json").read_text())
+    request.update(source_revision="e"*40,source_tree_hash="f"*64)
+    def image(*args):
+        if fault == "file-drift":
+            changed = deepcopy(model);changed["services"]["backend"]["environment"]["FOREIGN"] = "retained"
+            runtime.host.save_receipt(path,changed,initial=False)
+        return json.dumps(dict(Id=new_image,Config=dict(Env=[
+            "QT_IMAGE_SOURCE_REVISION="+request["source_revision"],
+            "QT_IMAGE_SOURCE_TREE_HASH="+request["source_tree_hash"]])))
+    monkeypatch.setattr(runtime.host,"docker",image)
+    if fault == "capability": proposed["services"]["backend"]["cap_add"] = ["DAC_READ_SEARCH"]
+    if fault == "key-write":
+        for mount in proposed["services"]["storage-maintenance"]["volumes"]:
+            if mount["target"] == "/run/quanttrad/recovery": mount["read_only"] = False
+    args=dict(database_model=runtime.host.load_receipt(tmp_path/runtime.recovery.RECIPE),
+        image_id=new_image,request=request,inventory=tmp_path/"inventory.json",
+        udev_root=tmp_path/"udev"/"data",destination=str(tmp_path/"new"),
+        rows={n:dict(id=n) for n in runtime._APPLICATIONS if n!="storage-maintenance"},
+        database_id="db",proposed_recipe=proposed)
+    if fault:
+        with pytest.raises(RuntimeError,match="contract_changed|mount_changed|recipe_changed"):
+            runtime.inspect_runtime_configuration(tmp_path,**args)
+    else:
+        result,proof=runtime.inspect_runtime_configuration(tmp_path,**args)
+        assert result == proposed and proof["recipe_sha256"] == runtime.host.digest(proposed)
+    if fault != "file-drift": assert path.read_bytes() == original

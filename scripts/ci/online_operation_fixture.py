@@ -218,6 +218,13 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
         source_revision=environment["QT_IMAGE_SOURCE_REVISION"],
         source_tree_hash=environment["QT_IMAGE_SOURCE_TREE_HASH"])
     manifest_path = state/"package.json"; host_boundary.save_receipt(manifest_path, manifest, initial=True)
+    # Synthetic runtime peers: retain the image-only publication contract here;
+    # the dedicated runtime-inspector tests exercise complete recipe admission.
+    from scripts.automation import storage_online_runtime as runtime
+    recipe = dict(name=kwargs["project"], services={name:dict(image=kwargs["image"])
+        for name in runtime._APPLICATIONS})
+    recipe["services"]["tsdb"] = dict(image="unchanged-disposable-database")
+    host_boundary.save_receipt(state/runtime.RUNTIME_RECIPE, recipe, initial=True)
     real_preflight, real_replace = operation.inspect_prepared_operation, amendment._replace
     def fixture_preflight(state_root, **arguments):
         launch.inspect_candidate_image(arguments["image"], arguments["request"])
@@ -239,14 +246,14 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
             assert str(exc) == "owned package publication reply loss"
         finally:
             amendment._replace = real_replace
-        before = host_boundary.load_receipt(state/amendment.PACKAGE_STATE)
+        before = host_boundary.load_receipt(state/amendment.PACKAGE_STATE,max_bytes=amendment.PACKAGE_JOURNAL_BYTES)
         try:
             amendment.require_settled(state)
             raise AssertionError("partial package did not block launch")
         except RuntimeError as exc:
             assert str(exc) == "storage_online_package_amendment_requires_reconciliation"
         completed = operation.run_operation_plan(path, replacement_package_file=manifest_path, execute=True)
-        after = host_boundary.load_receipt(state/amendment.PACKAGE_STATE)
+        after = host_boundary.load_receipt(state/amendment.PACKAGE_STATE,max_bytes=amendment.PACKAGE_JOURNAL_BYTES)
         assert completed["migration_started"] is False and after["phase"] == "complete"
         for key in ("intent_sha256", "wall_deadline", "monotonic_deadline"):
             assert after[key] == before[key]

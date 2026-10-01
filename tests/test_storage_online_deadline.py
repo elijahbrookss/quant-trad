@@ -308,6 +308,9 @@ def package_attempt(attempt, monkeypatch):
     a.manifest = dict(schema_version="qt.storage_online_package.v1",
         plan_sha256=deadline._sha(a.path.read_bytes()), image="sha256:"+"3"*64,
         source_revision="4"*40, source_tree_hash="5"*64)
+    a.runtime = {"name":"qt-test","services":{name:{"image":a.plan["image"],"environment":{"PRIVATE":"preserved"}} for name in deadline.runtime._APPLICATIONS}}
+    a.runtime["services"]["tsdb"] = {"image":"database-unchanged"}
+    write(a.root/deadline.runtime.RUNTIME_RECIPE,a.runtime)
     a.package_path = a.path.parent/"package.json"
     write(a.package_path, a.manifest)
     a.package_run = lambda execute=True: deadline.amend_worker_package(
@@ -319,7 +322,7 @@ def assert_package_complete(a):
     saved = host.load_receipt(a.root/launch._STATE)
     request = host.load_receipt(a.root/deadline.REQUEST)
     plan = host.load_receipt(a.path)
-    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE,max_bytes=deadline.PACKAGE_JOURNAL_BYTES)
     assert journal["phase"] == "complete"
     assert saved["capture"] == a.worker["capture"]
     assert saved["deadline"] == a.worker["deadline"]
@@ -331,6 +334,10 @@ def assert_package_complete(a):
         **a.plan["request"], "source_revision":a.manifest["source_revision"],
         "source_tree_hash":a.manifest["source_tree_hash"]}}
     assert journal["old_worker"] == a.worker
+    expected_runtime = deepcopy(a.runtime)
+    for name in deadline.runtime._APPLICATIONS: expected_runtime["services"][name]["image"] = a.manifest["image"]
+    assert host.load_receipt(a.root/deadline.runtime.RUNTIME_RECIPE,max_bytes=524288) == expected_runtime
+    assert json.loads(journal["old_runtime_bytes"]) == a.runtime
     assert a.name.startswith("/qt-test-storage-online-package-before-")
     assert set(a.calls) == {"package_inspect"}
     deadline.require_settled(a.root)
@@ -349,7 +356,7 @@ def test_package_inspect_then_publish_preserves_capture_and_source_contract(pack
     assert len(a.calls) == count
 
 
-@pytest.mark.parametrize("boundary", ["rename", deadline.REQUEST, launch._STATE, "operation.json"])
+@pytest.mark.parametrize("boundary", ["rename", deadline.runtime.RUNTIME_RECIPE, deadline.REQUEST, launch._STATE, "operation.json"])
 def test_package_interrupted_publication_keeps_original_clock_and_converges(package_attempt,monkeypatch,boundary):
     a = package_attempt
     replace, docker = deadline._replace, host.docker
@@ -365,14 +372,14 @@ def test_package_interrupted_publication_keeps_original_clock_and_converges(pack
     monkeypatch.setattr(deadline,"_replace",interrupted_replace)
     monkeypatch.setattr(host,"docker",interrupted_docker)
     with pytest.raises(TimeoutError): a.package_run()
-    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE,max_bytes=deadline.PACKAGE_JOURNAL_BYTES)
     with pytest.raises(RuntimeError,match="package_amendment_requires_reconciliation"):
         deadline.require_settled(a.root)
     monkeypatch.setattr(deadline,"_replace",replace)
     monkeypatch.setattr(host,"docker",docker)
     a.package_run()
     assert_package_complete(a)
-    final = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    final = host.load_receipt(a.root/deadline.PACKAGE_STATE,max_bytes=deadline.PACKAGE_JOURNAL_BYTES)
     for key in ("wall_deadline","monotonic_deadline","intent_sha256"):
         assert final[key] == journal[key]
 
@@ -415,7 +422,7 @@ def test_package_partial_intent_cannot_renew_or_accept_changed_evidence(package_
     original = deadline._replace
     monkeypatch.setattr(deadline,"_replace",lambda *args: (_ for _ in ()).throw(TimeoutError()))
     with pytest.raises(TimeoutError): a.package_run()
-    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE,max_bytes=deadline.PACKAGE_JOURNAL_BYTES)
     monkeypatch.setattr(deadline,"_replace",original)
     if kind == "clock":
         monkeypatch.setattr(deadline.time,"monotonic",lambda:journal["monotonic_deadline"]+1)
@@ -427,7 +434,7 @@ def test_package_partial_intent_cannot_renew_or_accept_changed_evidence(package_
             "different-boot" if str(p)=="/proc/sys/kernel/random/boot_id" else read_text(p,*args,**kw))
     with pytest.raises(RuntimeError,match="expired_requires_reconciliation|reboot_requires_reconciliation|progress_changed"):
         a.package_run()
-    assert host.load_receipt(a.root/deadline.PACKAGE_STATE) == journal
+    assert host.load_receipt(a.root/deadline.PACKAGE_STATE,max_bytes=deadline.PACKAGE_JOURNAL_BYTES) == journal
 
 
 def test_package_blocks_live_worker_and_final_marker(package_attempt,monkeypatch):
@@ -482,3 +489,28 @@ def test_partial_package_blocks_real_entry_before_peer_actions(package_attempt,m
             with launch.launched_online_worker(a.root,project="qt-test",source_revision="a"*40,
                     image="candidate",request={},inventory_path=a.root,descriptor_limit=2048,memory_bytes=1024**3):
                 raise AssertionError("partial package launched a worker")
+
+
+def test_package_recipe_publication_preserves_large_private_configuration(package_attempt):
+    a = package_attempt
+    a.runtime["services"]["backend"]["environment"]["PRIVATE"] = "fixture-only"*10000
+    write(a.root/deadline.runtime.RUNTIME_RECIPE,a.runtime)
+    a.package_run()
+    assert_package_complete(a)
+    assert (a.root/deadline.PACKAGE_STATE).stat().st_mode & 0o777 == 0o600
+
+
+def test_package_reentry_refuses_foreign_runtime_edit(package_attempt,monkeypatch):
+    a = package_attempt
+    original = deadline._replace
+    def interrupted(path,before,after):
+        original(path,before,after)
+        if path.name == deadline.runtime.RUNTIME_RECIPE: raise TimeoutError()
+    monkeypatch.setattr(deadline,"_replace",interrupted)
+    with pytest.raises(TimeoutError): a.package_run()
+    changed = host.load_receipt(a.root/deadline.runtime.RUNTIME_RECIPE)
+    changed["services"]["backend"]["environment"]["FOREIGN"] = "preserved"
+    write(a.root/deadline.runtime.RUNTIME_RECIPE,changed)
+    monkeypatch.setattr(deadline,"_replace",original)
+    with pytest.raises(RuntimeError,match="runtime_recipe_changed"): a.package_run()
+    assert host.load_receipt(a.root/deadline.runtime.RUNTIME_RECIPE) == changed

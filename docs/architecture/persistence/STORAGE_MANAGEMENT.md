@@ -3244,3 +3244,13 @@ and deadline. The new worker performs identity ordering; the existing rehearsal
 then continues copying, reference validation and concurrent publication checks.
 Synthetic source peers qualify this transition only: production runtime preflight,
 physical rewrite cost, capacity and final handoff remain separate requirements.
+
+The package journal also preserves and publishes the future runtime recipe's
+four application image references. Every other recipe field, including database
+image, credentials, mounts, ownership, settings and limits, stays byte-equivalent
+as data. Both old and proposed recipes pass the same complete runtime validator
+before publication; ordinary activation continues to read the saved recipe.
+Inspection never publishes the proposal. File drift refuses, and partial recipe
+publication reconciles under the same package intent and clock. Private package
+journals are bounded to 2 MiB to retain both recipe states; the separate deadline
+journal keeps its existing 64 KiB bound. Recipe contents are never logged.
