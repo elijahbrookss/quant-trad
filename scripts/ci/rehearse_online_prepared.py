@@ -200,7 +200,8 @@ os.chown(root,70,70)
     volumes=[dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data')],
     networks={'quanttrad':{'aliases':['tsdb.quanttrad']}})
   if options.deadline_amendment:
-   service.update(mem_limit='512m',cpus=1,pids_limit=128)
+   service['command'] += ['-c','work_mem=4MB','-c','maintenance_work_mem=32MB',
+                          '-c','max_connections=32','-c','max_parallel_workers_per_gather=0']
   model=dict(name=project,services={'tsdb':service},
     volumes={'postgres-data':dict(name=volume,external=True)},
     networks={'quanttrad':dict(name=network,external=True)})
