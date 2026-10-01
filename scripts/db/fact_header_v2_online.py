@@ -90,6 +90,7 @@ def prepare_attempt(engine, *, placement, policy, resource_limits, source_root,
 
 _PREPARATION_STEPS = {
     "identity_history": headers.place_identity_on_history,
+    "identity_order": headers.prepare_identity_order,
     "raw_history": raw.place_on_history,
     "identity_capture": headers.enable_identity_capture,
     "reference_prepare": references.prepare_reference,
@@ -154,6 +155,8 @@ def preparation_step(engine, *, step, placement, policy, resource_limits,
             allowed = lookup["baseline_complete"] and (
                 lookup["history_ready"] or header["after_day"] is None
                 or (header["baseline_complete"] and header["identity_history_ready"]))
+        elif step == "identity_order":
+            allowed = header.get("identity_baseline_complete") and header["identity_history_ready"] and lookup["history_ready"]
         elif step == "identity_history" and header.get("identity_baseline_complete") is not None:
             allowed = header["identity_baseline_complete"] and lookup["history_ready"]
         else:
@@ -169,7 +172,12 @@ def preparation_step(engine, *, step, placement, policy, resource_limits,
             args["relation"] = relation
         if step == "identity_capture":
             args["page_rows"] = page_rows
+        if step == "identity_order":
+            args.update(temporary_bytes=limits["temporary_bytes"][placement.recent.target_id],
+                        rewrite_bytes=limits["maintenance_bytes"][placement.history.target_id])
         report = _PREPARATION_STEPS[step](conn, **args)
+        if step == "identity_order":
+            protection.inspect_protection(conn)
         capture_remaining_seconds(conn)
     result = {"schema_version": "qt.fact_header_online_preparation_step.v1",
               "step": step, "relation": relation,
@@ -197,6 +205,10 @@ def _phase(header, lookup):
             return "identity_baseline"
         if not header["identity_history_ready"]:
             return "identity_relocation_required"
+    if (header.get("identity_baseline_complete") and header["identity_history_ready"]
+            and not header["baseline_complete"] and header["after_day"] is None
+            and not header.get("header_id_order", False)):
+        return "identity_order_required"
     if not header["baseline_complete"]:
         return "header_baseline"
     if not header["identity_history_ready"]:

@@ -195,13 +195,36 @@ def test_many_acknowledgements_do_not_consume_pending_copy_budget(recovery_copy)
     assert not list(target.rglob("*.ack.json"))
 
 
-def test_larger_scan_budget_does_not_relax_pending_copy_file_limit(recovery_copy):
+def test_larger_scan_budget_does_not_relax_pending_copy_file_limit(recovery_copy, monkeypatch):
     source, target, wal, changed, copy = recovery_copy
     for index in range(4096):
         (wal.parent/f"pending-{index}.sealed").write_bytes(b"retained WAL")
     before = wal.read_bytes(), wal.stat()
+    # This checks file cardinality, not filesystem throughput. Keep actual I/O
+    # and fsync, but separate the file cap from the independently tested clock.
+    now = monotonic()
+    monkeypatch.setattr(drain, "monotonic", lambda: now)
     with pytest.raises(RuntimeError, match="copy_budget_exceeded"):
-        copy(max_entries=6000, deadline=monotonic()+30)
+        copy(max_entries=6000, deadline=now+30)
     assert len(list(target.rglob("*.sealed"))) + len(list(target.rglob("*.open"))) == 4096
     assert len(list(source.rglob("*.sealed"))) == 4096
     assert wal.read_bytes() == before[0] and wal.stat() == before[1]
+
+
+def test_recovery_copy_deadline_expiring_during_read_preserves_source(recovery_copy, monkeypatch):
+    source, target, wal, changed, copy = recovery_copy
+    before = wal.read_bytes(), wal.stat()
+    clock = [100.0]
+    monkeypatch.setattr(drain, "monotonic", lambda: clock[0])
+    read = drain.os.read
+    def expire_after_read(fd, length):
+        data = read(fd, length)
+        if data:
+            clock[0] = 102.0
+        return data
+    monkeypatch.setattr(drain.os, "read", expire_after_read)
+    fds = len(list(Path("/proc/self/fd").iterdir()))
+    with pytest.raises(RuntimeError, match="spool_deadline_expired"):
+        copy(deadline=101.0)
+    assert wal.read_bytes() == before[0] and wal.stat() == before[1]
+    assert len(list(Path("/proc/self/fd").iterdir())) == fds

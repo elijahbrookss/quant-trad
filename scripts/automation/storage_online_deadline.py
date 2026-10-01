@@ -1,4 +1,4 @@
-"""Explicit, stopped-worker deadline amendment for the existing migrate operator.
+"""Explicit stopped-worker amendments for the existing migrate operator.
 
 The host deployment lock excludes dispatch while the database audit and immutable
 worker request are reconciled. This owner never stops collection, sends commands
@@ -22,6 +22,7 @@ from scripts.automation import storage_online_launch as launch
 from scripts.db import fact_header_v2_deadline as database
 
 STATE = "storage-online-deadline-amendment.json"
+PACKAGE_STATE = "storage-online-package-amendment.json"
 REQUEST = "storage-online-request.json"
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,9 @@ def _sha(data):
 
 
 def require_settled(state_root):
-    if os.path.lexists(state_root/STATE) and host.load_receipt(state_root/STATE).get("phase") != "complete":
-        raise RuntimeError("storage_online_deadline_amendment_requires_reconciliation")
+    for name, kind in ((STATE, "deadline"), (PACKAGE_STATE, "package")):
+        if os.path.lexists(state_root/name) and host.load_receipt(state_root/name).get("phase") != "complete":
+            raise RuntimeError("storage_online_"+kind+"_amendment_requires_reconciliation")
 
 
 def _check_clock(wall_deadline, monotonic_deadline):
@@ -85,7 +87,7 @@ with contextlib.redirect_stdout(sys.stderr):
     engine=create_engine(os.environ['PG_DSN'],future=True,connect_args={'connect_timeout':5})
     try:
         with engine.begin() as conn:
-            if args['action']=='inspect':
+            if args['action'] in {'inspect','package_inspect'}:
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
             conn.exec_driver_sql("SET LOCAL statement_timeout='5s'")
             conn.exec_driver_sql("SET LOCAL lock_timeout='100ms'")
@@ -96,6 +98,19 @@ with contextlib.redirect_stdout(sys.stderr):
                 capture.inspect_capture(conn)
                 result=dict(capture=conn.scalar(text(f'SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1')),
                             audit=inspect_amendment(conn))
+            elif args['action']=='package_inspect':
+                from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as raw
+                from scripts.db import fact_header_v2_online_proof as protection
+                from scripts.db.fact_header_v2_admission import assert_v1_source_admission
+                with capture.migration_step(conn,5):
+                    if not conn.scalar(text('SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))'),
+                                       {'name':CONTROLLER_LOCK}):
+                        raise RuntimeError('storage_online_package_controller_active')
+                    assert_v1_source_admission(conn,identity_capture=False)
+                    result=dict(capture=conn.scalar(text(f'SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1')),
+                        header=conn.scalar(text(f'SELECT to_jsonb(c) FROM {headers.STATE} c WHERE id=1')),
+                        raw=conn.scalar(text(f'SELECT to_jsonb(c) FROM {raw.STATE} c WHERE id=1')),
+                        proof=protection.inspect_protection(conn))
             else:
                 raise ValueError('storage_online_deadline_probe_action_invalid')
     finally:
@@ -165,6 +180,8 @@ def amend_operation(path, *, attempt_seconds, capacity_file, execute):
         raise ValueError("storage_online_deadline_arguments_invalid")
     operator_sha256 = _sha(Path(__file__).read_bytes()+Path(database.__file__).read_bytes())
     with host.deployment_lock(root):
+        if os.path.lexists(root/PACKAGE_STATE) and host.load_receipt(root/PACKAGE_STATE).get("phase") != "complete":
+            raise RuntimeError("storage_online_package_amendment_requires_reconciliation")
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
             if os.path.lexists(root/name):
                 raise RuntimeError("storage_online_deadline_pre_final_serving_source_required")
@@ -297,3 +314,142 @@ def amend_operation(path, *, attempt_seconds, capacity_file, execute):
             logger.info("storage_online_deadline_amended | intent=%s worker_preserved=true migration_started=false", journal["intent_sha256"])
             return dict(phase="deadline_amended", deadline=journal["new_worker"]["deadline"],
                 original_started_at=journal["expected_capture"]["prepared_at"], migration_started=False)
+
+
+def _unstarted_header_capture(observed, saved, request):
+    header, raw = observed["header"], observed["raw"]
+    capture = observed["capture"]
+    if (not header.get("identity_baseline_complete") or not header["identity_history_ready"]
+            or header["identity_capture"] or header["baseline_complete"] or header["verified_rows"] != 0
+            or header.get("header_id_order", False)
+            or any(header["after_"+k] is not None for k in ("day", "seq", "id"))
+            or not raw["baseline_complete"] or not raw["history_ready"]
+            or datetime.fromisoformat(capture["prepared_at"]) != datetime.fromisoformat(saved["capture"]["started_at"])
+            or capture["attempt_seconds"] != saved["capture"]["seconds"]
+            or launch.admit_capture(request, saved["capture"]) != saved["deadline"]):
+        raise RuntimeError("storage_online_package_unstarted_header_capture_required")
+
+
+def amend_worker_package(path, *, package_file, execute):
+    """Replace one retired pre-header worker package without any database writes.
+
+    This shares the existing stopped-worker/file-publication boundary with the
+    deadline amendment. The manifest changes only candidate image/provenance;
+    original capture, placement, budgets, source fleet and private paths remain.
+    Partial publication is reconciled from exact old/new bytes, never guessed.
+    """
+    from scripts.automation import storage_online_operation as operation
+
+    path = launch._canonical(path)
+    plan = operation.load_operation_plan(path)
+    root = launch._canonical(plan["state_root"])
+    package = host.load_receipt(launch._canonical(package_file))
+    if (type(execute) is not bool or set(package) != {"schema_version", "plan_sha256", "image", "source_revision", "source_tree_hash"}
+            or package["schema_version"] != "qt.storage_online_package.v1"
+            or any(not isinstance(package[k], str) or not re.fullmatch(pattern, package[k])
+                   for k,pattern in (("plan_sha256",r"[0-9a-f]{64}"),("image",r"sha256:[0-9a-f]{64}"),
+                       ("source_revision",r"[0-9a-f]{40}"),("source_tree_hash",r"[0-9a-f]{64}")))):
+        raise ValueError("storage_online_package_manifest_invalid")
+    operator_sha256 = _sha(Path(__file__).read_bytes()+Path(database.__file__).read_bytes())
+    with host.deployment_lock(root):
+        if os.path.lexists(root/STATE) and host.load_receipt(root/STATE).get("phase") != "complete":
+            raise RuntimeError("storage_online_deadline_amendment_requires_reconciliation")
+        for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
+            if os.path.lexists(root/name):
+                raise RuntimeError("storage_online_package_pre_final_serving_source_required")
+        journal = host.load_receipt(root/PACKAGE_STATE) if os.path.lexists(root/PACKAGE_STATE) else None
+        if journal:
+            if (journal["operation_path"] != str(path) or journal["package"] != package
+                    or journal["operator_sha256"] != operator_sha256):
+                raise RuntimeError("storage_online_package_amendment_binding_changed")
+            if journal["phase"] == "complete":
+                return dict(phase="package_amendment_recorded", migration_started=False, current_capture_verified=False)
+            check = {k:v for k,v in journal.items() if k != "intent_sha256"}; check["phase"] = "prepared"
+            if (host.digest(check) != journal["intent_sha256"] or journal["phase"] not in {"prepared", "publishing"}
+                    or plan not in (journal["old_plan"], journal["new_plan"])):
+                raise RuntimeError("storage_online_package_intent_changed")
+            if Path("/proc/sys/kernel/random/boot_id").read_text().strip() != journal["boot_id"]:
+                raise RuntimeError("storage_online_package_reboot_requires_reconciliation")
+            before_plan, saved = journal["old_plan"], journal["old_worker"]
+            wall_deadline, monotonic_deadline = journal["wall_deadline"], journal["monotonic_deadline"]
+        else:
+            if _sha(path.read_bytes()) != package["plan_sha256"] or package["image"] == plan["image"]:
+                raise RuntimeError("storage_online_package_original_plan_required")
+            saved, _, found = launch.observe_owned_worker(root, plan["project"])
+            if not saved or found != [saved["container_id"]]:
+                raise RuntimeError("storage_online_package_original_worker_required")
+            before_plan = plan
+            wall_deadline = min(time.time()+300, saved["deadline"])
+            monotonic_deadline = time.monotonic()+max(0, wall_deadline-time.time())
+        _check_clock(wall_deadline, monotonic_deadline)
+        with host.docker_deadline(monotonic_deadline):
+            details = _retired(saved)
+            old_request = (json.loads(journal["old_request_bytes"]) if journal else host.load_receipt(root/REQUEST))
+            if ({k:v for k,v in old_request.items() if k != "capture_preparation"} != before_plan["request"]
+                    or _sha(request_bytes(old_request)) != saved["binding"]["request_sha256"]):
+                raise RuntimeError("storage_online_package_original_request_changed")
+            new_request = {**old_request, **{k:package[k] for k in ("source_revision", "source_tree_hash")}}
+            new_plan = {**before_plan, "image":package["image"],
+                        "request":{k:v for k,v in new_request.items() if k != "capture_preparation"}}
+            for candidate in (before_plan, new_plan):
+                arguments = {k:candidate[k] for k in ("project", "source_revision", "source_image", "image",
+                    "request", "inventory_path", "keys_root", "socket_volume", "spool_destination")}
+                operation.inspect_prepared_operation(root, **arguments,
+                    deadline=monotonic_deadline, operator_id=saved["container_id"])
+            old_observed = _probe(before_plan, saved, action="package_inspect")
+            new_observed = _probe(new_plan, saved, action="package_inspect")
+            _unstarted_header_capture(old_observed, saved, old_request)
+            if new_observed != old_observed:
+                raise RuntimeError("storage_online_package_existing_proof_changed")
+            observed_sha256 = host.digest(old_observed)
+            if journal and (journal["observed_sha256"] != observed_sha256 or journal["new_plan"] != new_plan):
+                raise RuntimeError("storage_online_package_progress_changed")
+            if not execute:
+                return dict(phase="package_amendment_reconciliation_required" if journal else "package_amendment_inspected",
+                            storage_mutations_performed=False, original_deadline=saved["deadline"], migration_started=False)
+            if journal is None:
+                if (operation.load_operation_plan(path) != before_plan
+                        or _sha(path.read_bytes()) != package["plan_sha256"]
+                        or _sha((root/REQUEST).read_bytes()) != saved["binding"]["request_sha256"]
+                        or host.load_receipt(root/launch._STATE) != saved):
+                    raise RuntimeError("storage_online_package_original_files_changed")
+                image_env = launch.inspect_candidate_image(new_plan["image"], new_request)
+                old_env = dict(v.split("=",1) for v in details["config"]["Env"])
+                overrides = {k:old_env[k] for k in ("PG_DSN", "QT_DISABLE_DOTENV", "QT_ARCHIVE_SHARED_GROUP_ID",
+                    "QT_LOGGING_LOKI_URL", "QT_STORAGE_UDEV_ROOT")}
+                digest = _sha(request_bytes(new_request)); overrides["QT_ONLINE_REQUEST_SHA256"] = digest
+                new_worker = deepcopy(saved); new_worker.update(container_id=None, contract=None)
+                new_worker["binding"].update(image=new_plan["image"], request_sha256=digest,
+                    environment_sha256=host.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
+                journal = dict(operation_path=str(path), operator_sha256=operator_sha256, package=package,
+                    old_plan=before_plan, new_plan=new_plan, old_plan_bytes=path.read_text(),
+                    old_request_bytes=(root/REQUEST).read_text(), old_worker_bytes=(root/launch._STATE).read_text(),
+                    old_worker=saved, new_worker=new_worker, new_request=new_request, observed_sha256=observed_sha256,
+                    phase="prepared", wall_deadline=wall_deadline, monotonic_deadline=monotonic_deadline,
+                    boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+                journal["intent_sha256"] = host.digest(journal)
+                if len(json.dumps(journal).encode()) > 65535:
+                    raise ValueError("storage_online_package_intent_budget_exceeded")
+                _check_clock(wall_deadline, monotonic_deadline)
+                host.save_receipt(root/PACKAGE_STATE, journal, initial=True)
+            journal["phase"] = "publishing"
+            host.save_receipt(root/PACKAGE_STATE, journal, initial=False)
+            _retired(saved)
+            archived = before_plan["project"]+"-storage-online-package-before-"+journal["intent_sha256"][:16]
+            name = host.docker("inspect", "--format", "{{.Name}}", saved["container_id"]).strip()
+            _check_clock(wall_deadline, monotonic_deadline)
+            if name == "/"+before_plan["project"]+"-storage-online":
+                host.docker("rename", saved["container_id"], archived)
+            elif name != "/"+archived:
+                raise RuntimeError("storage_online_package_worker_name_changed")
+            for target,before,after in (
+                (root/REQUEST,journal["old_request_bytes"].encode(),request_bytes(journal["new_request"])),
+                (root/launch._STATE,journal["old_worker_bytes"].encode(),(json.dumps(journal["new_worker"],sort_keys=True)+"\n").encode()),
+                (path,journal["old_plan_bytes"].encode(),(json.dumps(journal["new_plan"],sort_keys=True)+"\n").encode())):
+                _check_clock(wall_deadline, monotonic_deadline)
+                _replace(target,before,after)
+            _check_clock(wall_deadline, monotonic_deadline)
+            journal["phase"] = "complete"
+            host.save_receipt(root/PACKAGE_STATE, journal, initial=False)
+            logger.info("storage_online_package_amended | intent=%s worker_preserved=true migration_started=false",journal["intent_sha256"])
+            return dict(phase="package_amended", original_deadline=saved["deadline"], migration_started=False)

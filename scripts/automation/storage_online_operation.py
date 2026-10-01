@@ -81,6 +81,8 @@ def prepare_background(exchange, *, preparation_seconds):
         result = exchange("sql_copy")["result"]
         if result["outcome"] == "identity_relocation_required":
             phase("identity_history")
+        elif result["outcome"] == "identity_order_required":
+            phase("identity_order")
         elif result["outcome"] == "raw_relocation_required":
             phase("raw_history")
         elif result["phase"] == "catch_up" and result["outcome"] == "both_tails_observed_empty":
@@ -413,7 +415,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -423,6 +425,11 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     """
     if type(execute) is not bool:
         raise ValueError("storage_online_operation_execute_invalid")
+    if replacement_package_file is not None:
+        if extend_attempt_seconds is not None or capacity_file is not None:
+            raise ValueError("storage_online_package_and_deadline_amendments_must_be_separate")
+        from scripts.automation.storage_online_deadline import amend_worker_package
+        return amend_worker_package(path, package_file=replacement_package_file, execute=execute)
     if extend_attempt_seconds is not None:
         from scripts.automation.storage_online_deadline import amend_operation
         return amend_operation(path, attempt_seconds=extend_attempt_seconds, capacity_file=capacity_file, execute=execute)

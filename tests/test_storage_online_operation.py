@@ -17,6 +17,7 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
     replies=iter([
         dict(outcome="raw_relocation_required",phase="raw_relocation_required"),
         dict(outcome="identity_relocation_required",phase="identity_relocation_required"),
+        dict(outcome="identity_order_required",phase="identity_order_required"),
         dict(outcome="page_budget_reached",phase="catch_up"),
         dict(outcome="pass_time_budget_reached",phase="catch_up"),
         dict(outcome="both_tails_observed_empty",phase="catch_up"),
@@ -36,10 +37,10 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
     assert result==dict(reference_count=1,tail_rounds=3,final_switch_authorized=False)
     identity_at=next(i for i,(op,kw) in enumerate(calls)
                      if op=='prepare_step' and kw['step']=='identity_capture')
-    assert sum(op=='sql_copy' for op,_ in calls[:identity_at])==5
+    assert sum(op=='sql_copy' for op,_ in calls[:identity_at])==6
     assert not any(op in {'inspect_references','archive_copy','reprove'} for op,_ in calls[:identity_at])
     steps=[kw['step'] for op,kw in calls if op=='prepare_step']
-    assert steps==['catalog_history','raw_history','identity_history','identity_capture',
+    assert steps==['catalog_history','raw_history','identity_history','identity_order','identity_capture',
                    'reference_prepare','reference_validate','reference_adopt','catalog_history','catalog_history']
     assert all(kw['max_duration_seconds']==30 for op,kw in calls if op=='prepare_step')
 
@@ -335,7 +336,7 @@ def test_online_phase_order_retires_raw_first_but_preserves_started_headers(
     (True,True,False,False,"raw_baseline"),
     (False,False,False,True,"identity_baseline"),
     (False,True,False,True,"identity_relocation_required"),
-    (False,True,True,True,"header_baseline"),
+    (False,True,True,True,"identity_order_required"),
     (True,True,True,True,"catch_up"),
 ])
 def test_fresh_identity_staging_phase_preserves_empty_and_nonempty_order(

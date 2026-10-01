@@ -1851,8 +1851,8 @@ occur in sequence. Building random identity indexes directly on HDD failed the
 bounded working-set comparison; the identity prepass retains SSD construction.
 
 The existing copy-progress row owns the optional identity cursor and completion
-bit. They are created atomically only for a new online attempt; existing progress
-schemas are never altered. Earlier targets without this cursor retain their
+bit. They are created atomically only for a new online attempt; ordinary preparation never alters existing progress
+schemas; the explicit pre-header ordering step below is separately admitted. Earlier targets without this cursor retain their
 combined identity/header copy and recorded order. Reentry preserves every cursor,
 placement and the original capture deadline. No new operator or policy is added.
 
@@ -1869,6 +1869,37 @@ The prepass and relocation count toward total elapsed time. Production admission
 must still include queues, source growth, retained data, WAL/temp and full pauses;
 less allocation overlap alone does not establish sufficient capacity or speed.
 
+
+The first production header page timed out while trying to insert identities
+already copied by the completed prepass. After identity placement, header pages
+now compare existing identity projections first and submit only missing rows to
+the guarded INSERT. Missing rows receive the same exact read-back, including
+concurrent conflicts. This avoids duplicate trigger and unique-index work while
+retaining native header foreign keys, source/shadow guards and atomic full-page
+verification/checkpoint/queue retirement. No schema, source ordering or clock
+changes accompany this correction. Its correctness qualification does not prove
+that HDD lookup throughput meets the remaining production attempt budget.
+
+The remaining 4,096-row HDD identity read also exceeded the existing 30-second
+SQL bound. The coupled correction adds an explicit `identity_order` preparation
+step before the first header page: PostgreSQL clusters only the completed private
+identity table using its existing primary index, then records `header_id_order`
+in the existing copy-progress row in the same transaction. This explicit step
+may add that one column to an existing unstarted header copy; ordinary preparation
+and reentry never silently change a saved cursor's meaning. Started header copies
+retain their original order. The step refuses active identity mirroring, existing
+headers, insufficient rewrite allowance, or an unavailable NOWAIT private lock.
+
+With that recorded mode, header pages advance by global ID while retaining the
+original `(storage_day, market_commit_seq, id)` upper bound. Concurrent arrivals
+remain in the capture queue, including arrivals below an already passed ID. Exact
+page comparisons and the native FK remain mandatory. The private rewrite and its
+mode record roll back together; the original capture clock, source data and prior
+raw/identity proof remain intact. Temporary sorting uses the admitted SSD path,
+a bounded backend temp-file limit and no parallel maintenance workers; the
+rewrite uses the existing HDD maintenance allowance and resource watcher. This
+candidate still requires integrated correctness, interruption, measured physical
+cost and preserving package-transition qualification before production reentry.
 
 ### Background SQL page budget
 
@@ -1939,3 +1970,35 @@ exclusion and transactional rollback. Host fault injection covers lost replies
 and interruption between file publications. These are component qualifications;
 actual worker replacement/reentry and full production capacity admission must
 also be demonstrated before applying an amendment to a live migration.
+
+### Preserving a retired worker's package before header copying
+
+The same operator accepts an explicit `--replacement-package-file` manifest for
+a stopped migration that has completed raw and identity history preparation but
+has not copied any header page or enabled identity mirroring. The private
+`qt.storage_online_package.v1` manifest binds the original plan hash and the new
+candidate image, source revision and source tree hash. Inspection is the default.
+This amendment is separate from a deadline amendment and changes no capture
+timestamp, duration, placement, resource budget, serving source or private path.
+
+The existing stopped-worker amendment owner holds the deployment lock, admits
+both old and proposed packages through the full prepared-operation preflight,
+and compares their read-only observations of the original capture, completed
+progress and live proof contract. A running worker, final intent, differing
+observation or partially completed deadline amendment refuses. The SQL probes
+have only database network access, no data, PID namespace or recovery-key mounts.
+
+Before publishing files, the owner durably records exact old and proposed
+request, launch and plan states. It preserves the stopped container under an
+intent-bound name. An interrupted rename or file publication can reconcile only
+those exact states under the original 300-second wall/boot/monotonic transition
+window, bounded by the unchanged capture deadline. Ordinary launch remains
+blocked while publication is incomplete. The amendment does not launch a worker,
+perform a database migration, authorize a final switch or deploy the candidate.
+Subsequent normal operation must independently admit the replacement worker and
+all phase resources. A completed journal is historical evidence, not current
+capture or capacity authority.
+
+Native worker replacement/reentry and measured physical preparation cost remain
+necessary before applying this package change to production. Unit fault
+injection and a small database ordering fixture do not establish those outcomes.

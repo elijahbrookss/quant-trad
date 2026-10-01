@@ -535,3 +535,43 @@ def test_expired_attempt_refuses_copy_resume_without_resetting_progress(source):
             assert _headers(conn, SCHEMA+".fact_versions") == shadow
             assert _headers(conn, copy.SOURCE) == source.source_before
     assert source.archive_path.read_bytes() == source.archive_bytes
+
+
+@pytest.mark.parametrize("from_source", [True, False])
+def test_relocated_identity_reuse_checks_existing_and_inserts_only_missing(source, from_source):
+    engine = source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+        rows = _headers(conn, copy.SOURCE)
+        copy._copy_identities(conn, rows[:3], from_source=True)
+        # A duplicate INSERT would fire this BEFORE trigger even with ON CONFLICT.
+        conn.exec_driver_sql(f"""
+            CREATE FUNCTION {SCHEMA}.reject_duplicate_identity_test() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN
+                IF EXISTS(SELECT 1 FROM {SCHEMA}.fact_identities WHERE id=NEW.id) THEN
+                    RAISE EXCEPTION 'duplicate identity insert attempted';
+                END IF;
+                RETURN NEW;
+            END $$
+        """)
+        conn.exec_driver_sql(f"""CREATE TRIGGER reject_duplicate_identity_test
+            BEFORE INSERT ON {SCHEMA}.fact_identities FOR EACH ROW
+            EXECUTE FUNCTION {SCHEMA}.reject_duplicate_identity_test()""")
+        copy._copy_identities(conn, rows, from_source=from_source, reuse_existing=True)
+        copy._copy_identities(conn, rows, from_source=from_source, reuse_existing=True)
+        assert copy._read_identities(conn, [row["id"] for row in rows]) == {
+            row["id"]: {name: row[name] for name in copy.IDENTITY_COLUMNS} for row in rows}
+
+
+def test_identity_reuse_rejects_existing_mismatch_before_inserting_missing(source):
+    engine = source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+        rows = _headers(conn, copy.SOURCE)
+        copy._copy_identities(conn, rows[:1], from_source=True)
+        conn.execute(text(f"UPDATE {SCHEMA}.fact_identities SET observation_key=:key WHERE id=:id"),
+                     {"key": "deliberately-invalid-fixture", "id": rows[0]["id"]})
+        with pytest.raises(RuntimeError, match="fact_header_copy_identity_mismatch"):
+            copy._copy_identities(conn, rows, from_source=True, reuse_existing=True)
+        assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_identities")) == 1
+        assert conn.scalar(text(f"SELECT verified_rows FROM {copy.STATE}")) == 0

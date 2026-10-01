@@ -567,6 +567,7 @@ os.chown(root,70,70)
        reply=command('sql_copy')
        outcome=reply['result']['outcome']
        if outcome=='identity_relocation_required':phase('identity_history')
+       elif outcome=='identity_order_required':phase('identity_order')
        elif outcome=='raw_relocation_required':phase('raw_history')
        elif outcome=='both_tails_observed_empty' and (control/'published').exists():break
       else:raise RuntimeError('tiny_worker_phases_did_not_converge')

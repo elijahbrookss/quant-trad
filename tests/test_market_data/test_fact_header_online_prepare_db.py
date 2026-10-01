@@ -181,6 +181,8 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         identity_pages += result["committed_pages"].get("identities", 0)
         if result["outcome"] == "identity_relocation_required":
             phase = "identity_history"
+        elif result["outcome"] == "identity_order_required":
+            phase = "identity_order"
         elif result["outcome"] == "raw_relocation_required":
             phase = "raw_history"
         elif result["outcome"] == "both_tails_observed_empty":
@@ -206,7 +208,7 @@ def test_explicit_online_steps_preserve_commits_intake_and_original_attempt(
         pytest.fail("tiny explicit phase fixture did not converge")
     assert (identity_pages == 0) is header_started
     assert moved == (["identity_history", "raw_history"] if header_started
-                     else ["raw_history", "identity_history"])
+                     else ["raw_history", "identity_history", "identity_order"])
     online.preparation_step(engine, step="identity_capture", **steps)
     with engine.begin() as conn:
         slots = [row["relation"] for row in references.inspect_references(conn)["references"]
@@ -302,9 +304,48 @@ def test_identity_prepass_preserves_prior_pages_tail_and_clock_after_interruptio
         headers.place_identity_on_history(conn)
         _assert_disk(conn, headers.SCHEMA+".fact_identities", Path("/qt-history"))
         assert headers._inspect_progress(conn)["verified_rows"] == 0
+        original_node = conn.scalar(text(f"SELECT pg_relation_filenode('{headers.SCHEMA}.fact_identities')"))
+        original_temp = conn.scalar(text("SHOW temp_file_limit"))
+    concurrent = []
+    def live_source_while_private_locked(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("CLUSTER ") and not concurrent:
+            with engine.begin() as writer:
+                writer.exec_driver_sql("SET LOCAL lock_timeout='1s'")
+                concurrent.append(_insert(writer, storage, "identity-reorder-concurrent"))
+    def fail_after_rewrite(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("CLUSTER "):
+            raise RuntimeError("injected after native identity rewrite")
+    event.listen(engine, "before_cursor_execute", live_source_while_private_locked)
+    event.listen(engine, "after_cursor_execute", fail_after_rewrite)
+    try:
+        with engine.begin() as conn:
+            with pytest.raises(RuntimeError, match="injected after native identity rewrite"):
+                headers.prepare_identity_order(conn, temporary_bytes=32*1024**2, rewrite_bytes=64*1024**2)
+            assert conn.scalar(text(f"SELECT pg_relation_filenode('{headers.SCHEMA}.fact_identities')")) == original_node
+            assert conn.scalar(text("SHOW temp_file_limit")) == original_temp
+            assert not headers._inspect_progress(conn).get("header_id_order", False)
+            protection.inspect_protection(conn)
+    finally:
+        event.remove(engine, "before_cursor_execute", live_source_while_private_locked)
+        event.remove(engine, "after_cursor_execute", fail_after_rewrite)
+    assert concurrent
+    with engine.begin() as conn:
+        assert conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {headers.QUEUE} WHERE id=:id)"),
+                           {"id": concurrent[0]["id"]})
+        headers.prepare_identity_order(conn, temporary_bytes=32*1024**2, rewrite_bytes=64*1024**2)
+        assert headers._inspect_progress(conn)["header_id_order"]
+        assert headers.prepare_identity_order(conn, temporary_bytes=32*1024**2, rewrite_bytes=64*1024**2)["reused"]
+        assert _saved(conn) == original
+        protection.inspect_protection(conn)
+    last_id = None
     for _ in range(30):
         with engine.begin() as conn:
+            before = headers._inspect_progress(conn)
             report = headers.copy_page(conn, page_rows=2)
+            after = headers._inspect_progress(conn)
+            if not before["baseline_complete"] and report["verified_page_rows"]:
+                assert last_id is None or after["after_id"] > last_id
+                last_id = after["after_id"]
         if report["caught_up_at_observation"]:
             break
     else:

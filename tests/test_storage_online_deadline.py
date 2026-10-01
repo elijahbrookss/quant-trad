@@ -276,3 +276,209 @@ def test_wall_clock_jump_after_commit_preserves_uncertain_journal(attempt,monkey
     assert host.load_receipt(attempt.root/deadline.STATE)["phase"]=="database_dispatched"
     assert host.load_receipt(attempt.path)==attempt.plan
     assert host.load_receipt(attempt.root/launch._STATE)==attempt.worker
+
+@pytest.fixture
+def package_attempt(attempt, monkeypatch):
+    a = attempt
+    a.plan["request"]["source_tree_hash"] = "1"*64
+    a.plan["image"] = "sha256:"+"2"*64
+    write(a.path, a.plan)
+    request = host.load_receipt(a.root/deadline.REQUEST)
+    request["source_tree_hash"] = "1"*64
+    (a.root/deadline.REQUEST).write_bytes(deadline.request_bytes(request))
+    a.worker["binding"].update(image=a.plan["image"],
+        request_sha256=deadline._sha(deadline.request_bytes(request)))
+    write(a.root/launch._STATE, a.worker)
+    a.observed = dict(capture=deepcopy(a.capture),
+        header=dict(identity_baseline_complete=True, identity_history_ready=True,
+            identity_capture=False, baseline_complete=False, verified_rows=0,
+            after_day=None, after_seq=None, after_id=None),
+        raw=dict(baseline_complete=True, history_ready=True),
+        proof={"original":"proof"})
+    def inspect(*args, action, **kw):
+        assert action == "package_inspect"
+        a.calls.append(action)
+        return deepcopy(a.observed)
+    a.package_probe = inspect
+    monkeypatch.setattr(deadline, "_probe", inspect)
+    monkeypatch.setattr(deadline, "_retired", lambda saved: {"config":{"Env":[
+        "PG_DSN=private", "QT_DISABLE_DOTENV=1", "QT_ARCHIVE_SHARED_GROUP_ID=70",
+        "QT_LOGGING_LOKI_URL=", "QT_STORAGE_UDEV_ROOT=/dev"]}})
+    monkeypatch.setattr(launch, "inspect_candidate_image", lambda *args: {"IMAGE_ENV":"preserved"})
+    a.manifest = dict(schema_version="qt.storage_online_package.v1",
+        plan_sha256=deadline._sha(a.path.read_bytes()), image="sha256:"+"3"*64,
+        source_revision="4"*40, source_tree_hash="5"*64)
+    a.package_path = a.path.parent/"package.json"
+    write(a.package_path, a.manifest)
+    a.package_run = lambda execute=True: deadline.amend_worker_package(
+        a.path, package_file=a.package_path, execute=execute)
+    return a
+
+
+def assert_package_complete(a):
+    saved = host.load_receipt(a.root/launch._STATE)
+    request = host.load_receipt(a.root/deadline.REQUEST)
+    plan = host.load_receipt(a.path)
+    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    assert journal["phase"] == "complete"
+    assert saved["capture"] == a.worker["capture"]
+    assert saved["deadline"] == a.worker["deadline"]
+    assert saved["container_id"] is None and saved["contract"] is None
+    assert saved["binding"]["image"] == a.manifest["image"]
+    assert saved["binding"]["request_sha256"] == deadline._sha(deadline.request_bytes(request))
+    assert request["capture_preparation"] == json.loads(journal["old_request_bytes"])["capture_preparation"]
+    assert plan == {**a.plan, "image":a.manifest["image"], "request":{
+        **a.plan["request"], "source_revision":a.manifest["source_revision"],
+        "source_tree_hash":a.manifest["source_tree_hash"]}}
+    assert journal["old_worker"] == a.worker
+    assert a.name.startswith("/qt-test-storage-online-package-before-")
+    assert set(a.calls) == {"package_inspect"}
+    deadline.require_settled(a.root)
+
+
+def test_package_inspect_then_publish_preserves_capture_and_source_contract(package_attempt):
+    a = package_attempt
+    before = {p:p.read_bytes() for p in (a.path,a.root/launch._STATE,a.root/deadline.REQUEST)}
+    assert a.package_run(False)["storage_mutations_performed"] is False
+    assert all(p.read_bytes() == b for p,b in before.items())
+    assert not (a.root/deadline.PACKAGE_STATE).exists()
+    assert a.package_run()["migration_started"] is False
+    assert_package_complete(a)
+    count = len(a.calls)
+    assert a.package_run()["current_capture_verified"] is False
+    assert len(a.calls) == count
+
+
+@pytest.mark.parametrize("boundary", ["rename", deadline.REQUEST, launch._STATE, "operation.json"])
+def test_package_interrupted_publication_keeps_original_clock_and_converges(package_attempt,monkeypatch,boundary):
+    a = package_attempt
+    replace, docker = deadline._replace, host.docker
+    def interrupted_replace(path,before,after):
+        replace(path,before,after)
+        if path.name == boundary:
+            raise TimeoutError("publication reply lost")
+    def interrupted_docker(*args,**kw):
+        value = docker(*args,**kw)
+        if args[0] == boundary:
+            raise TimeoutError("publication reply lost")
+        return value
+    monkeypatch.setattr(deadline,"_replace",interrupted_replace)
+    monkeypatch.setattr(host,"docker",interrupted_docker)
+    with pytest.raises(TimeoutError): a.package_run()
+    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    with pytest.raises(RuntimeError,match="package_amendment_requires_reconciliation"):
+        deadline.require_settled(a.root)
+    monkeypatch.setattr(deadline,"_replace",replace)
+    monkeypatch.setattr(host,"docker",docker)
+    a.package_run()
+    assert_package_complete(a)
+    final = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    for key in ("wall_deadline","monotonic_deadline","intent_sha256"):
+        assert final[key] == journal[key]
+
+
+def test_package_unknown_request_is_preserved(package_attempt,monkeypatch):
+    a = package_attempt
+    original = deadline._replace
+    def foreign(path,before,after):
+        if path.name == deadline.REQUEST: write(path,{"foreign":True})
+        original(path,before,after)
+    monkeypatch.setattr(deadline,"_replace",foreign)
+    with pytest.raises(RuntimeError,match="file_changed"): a.package_run()
+    assert host.load_receipt(a.root/deadline.REQUEST) == {"foreign":True}
+    monkeypatch.setattr(deadline,"_replace",original)
+    with pytest.raises(RuntimeError,match="file_changed"): a.package_run()
+
+
+@pytest.mark.parametrize("change",["header_started","ordered","identity_incomplete","raw_incomplete","capture_drift","candidate_drift"])
+def test_package_requires_exact_unstarted_completed_baselines(package_attempt,monkeypatch,change):
+    a = package_attempt
+    if change == "header_started": a.observed["header"]["verified_rows"] = 1
+    if change == "ordered": a.observed["header"]["header_id_order"] = True
+    if change == "identity_incomplete": a.observed["header"]["identity_baseline_complete"] = False
+    if change == "raw_incomplete": a.observed["raw"]["baseline_complete"] = False
+    if change == "capture_drift": a.observed["capture"]["attempt_seconds"] += 1
+    if change == "candidate_drift":
+        def drift(plan,*args,**kw):
+            result = a.package_probe(plan,*args,**kw)
+            if plan["image"] == a.manifest["image"]: result["proof"]["original"] = "changed"
+            return result
+        monkeypatch.setattr(deadline,"_probe",drift)
+    with pytest.raises(RuntimeError,match="capture_required|proof_changed"): a.package_run()
+    assert not (a.root/deadline.PACKAGE_STATE).exists()
+    assert host.load_receipt(a.path) == a.plan
+
+
+@pytest.mark.parametrize("kind",["clock","reboot","proof"])
+def test_package_partial_intent_cannot_renew_or_accept_changed_evidence(package_attempt,monkeypatch,kind):
+    a = package_attempt
+    original = deadline._replace
+    monkeypatch.setattr(deadline,"_replace",lambda *args: (_ for _ in ()).throw(TimeoutError()))
+    with pytest.raises(TimeoutError): a.package_run()
+    journal = host.load_receipt(a.root/deadline.PACKAGE_STATE)
+    monkeypatch.setattr(deadline,"_replace",original)
+    if kind == "clock":
+        monkeypatch.setattr(deadline.time,"monotonic",lambda:journal["monotonic_deadline"]+1)
+    elif kind == "proof":
+        a.observed["proof"]["original"] = "changed"
+    else:
+        read_text = Path.read_text
+        monkeypatch.setattr(Path,"read_text",lambda p,*args,**kw:
+            "different-boot" if str(p)=="/proc/sys/kernel/random/boot_id" else read_text(p,*args,**kw))
+    with pytest.raises(RuntimeError,match="expired_requires_reconciliation|reboot_requires_reconciliation|progress_changed"):
+        a.package_run()
+    assert host.load_receipt(a.root/deadline.PACKAGE_STATE) == journal
+
+
+def test_package_blocks_live_worker_and_final_marker(package_attempt,monkeypatch):
+    a = package_attempt
+    def active(*args): raise RuntimeError("worker_must_be_retired")
+    monkeypatch.setattr(deadline,"_retired",active)
+    with pytest.raises(RuntimeError,match="worker_must_be_retired"): a.package_run()
+    assert not a.calls
+    write(a.root/"storage-online-final.json",{"intent":"retained"})
+    with pytest.raises(RuntimeError,match="pre_final_serving"): a.package_run()
+
+
+@pytest.mark.parametrize("entry",["deadline","package"])
+def test_package_and_deadline_partial_journals_exclude_each_other(package_attempt,entry):
+    a = package_attempt
+    if entry == "deadline":
+        write(a.root/deadline.PACKAGE_STATE,{"phase":"publishing"})
+        with pytest.raises(RuntimeError,match="package_amendment_requires_reconciliation"): a.run()
+    else:
+        write(a.root/deadline.STATE,{"phase":"database_dispatched"})
+        with pytest.raises(RuntimeError,match="deadline_amendment_requires_reconciliation"): a.package_run()
+    assert not a.calls
+
+
+def test_package_cli_uses_existing_operator_and_separate_amendments(package_attempt,monkeypatch):
+    from cli import main
+    a = package_attempt
+    calls = []
+    monkeypatch.setattr(deadline,"amend_worker_package",lambda path,**kw:
+        calls.append((path,kw)) or {"phase":"inspected"})
+    args = main.build_parser().parse_args(["storage","migrate","--operation-file",str(a.path),
+        "--replacement-package-file",str(a.package_path)])
+    assert args.func(args) == 0
+    assert calls == [(str(a.path),dict(package_file=str(a.package_path),execute=False))]
+    with pytest.raises(ValueError,match="must_be_separate"):
+        operation.run_operation_plan(a.path,replacement_package_file=a.package_path,extend_attempt_seconds=345600)
+
+
+@pytest.mark.parametrize("entry",["operation","worker"])
+def test_partial_package_blocks_real_entry_before_peer_actions(package_attempt,monkeypatch,entry):
+    a = package_attempt
+    write(a.root/deadline.PACKAGE_STATE,{"phase":"publishing"})
+    monkeypatch.setattr(operation,"OperationLimits",lambda **kw:None)
+    def forbidden(*args,**kwargs):
+        raise AssertionError("partial package reached a peer")
+    monkeypatch.setattr(host,"docker",forbidden)
+    monkeypatch.setattr(operation,"inspect_prepared_operation",forbidden)
+    with pytest.raises(RuntimeError,match="package_amendment_requires_reconciliation"):
+        if entry == "operation":
+            operation.run_operation_plan(a.path,execute=True)
+        else:
+            with launch.launched_online_worker(a.root,project="qt-test",source_revision="a"*40,
+                    image="candidate",request={},inventory_path=a.root,descriptor_limit=2048,memory_bytes=1024**3):
+                raise AssertionError("partial package launched a worker")

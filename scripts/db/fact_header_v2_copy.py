@@ -116,6 +116,11 @@ def _inspect_progress(conn):
         raise RuntimeError("fact_header_copy_unrecorded_identity_capture")
     if state["targets"] != {name:_shape(conn,name) for name in TABLE_NAMES}:
         raise RuntimeError("fact_header_copy_shadow_definition_changed")
+    if "header_id_order" in state and type(state["header_id_order"]) is not bool:
+        raise RuntimeError("fact_header_copy_baseline_order_invalid")
+    if state.get("header_id_order") and not (state.get("identity_baseline_complete")
+            and state["identity_history_ready"]):
+        raise RuntimeError("fact_header_copy_identity_order_not_prepared")
     state["_placement_pid"]=None
     if state["placement"] is not None:
         state["_placement_pid"]=physical.verify(conn,state["placement"])
@@ -221,8 +226,27 @@ def _partition(conn, day, *, placement=None, pid=None):
     conn.execute(text(f"INSERT INTO {SCHEMA}.fact_header_partitions(storage_day) VALUES(:day)"),{"day":day})
 
 
-def _copy_identities(conn, rows, *, from_source):
+def _read_identities(conn, ids):
+    return {row["id"]:dict(row) for row in conn.execute(text(f"""
+        SELECT {",".join(IDENTITY_COLUMNS)} FROM {SCHEMA}.fact_identities WHERE id=ANY(:ids)
+    """),{"ids":ids}).mappings()}
+
+
+def _copy_identities(conn, rows, *, from_source, reuse_existing=False):
     ids = [row["id"] for row in rows]
+    if reuse_existing:
+        # The completed prepass already populated most identities. Avoid firing
+        # BEFORE INSERT guards and probing every unique index for duplicates.
+        # Compare every existing projection; missing rows still use the guarded
+        # insert and exact read-back below, including concurrent conflicts.
+        identities = _read_identities(conn, ids)
+        if any(identities[row["id"]] != {name:row[name] for name in IDENTITY_COLUMNS}
+               for row in rows if row["id"] in identities):
+            raise RuntimeError("fact_header_copy_identity_mismatch")
+        rows = [row for row in rows if row["id"] not in identities]
+        if not rows:
+            return
+        ids = [row["id"] for row in rows]
     if from_source:
         conn.execute(text(f"INSERT INTO {SCHEMA}.fact_identities ({','.join(IDENTITY_COLUMNS)}) "
                           f"SELECT {','.join(IDENTITY_COLUMNS)} FROM {SOURCE} WHERE id=ANY(:ids) "
@@ -230,18 +254,16 @@ def _copy_identities(conn, rows, *, from_source):
     else:
         conn.execute(insert(_tables()["fact_identities"]).on_conflict_do_nothing(),
                      [{name:row[name] for name in IDENTITY_COLUMNS} for row in rows])
-    identities = {row["id"]:dict(row) for row in conn.execute(text(f"""
-        SELECT {",".join(IDENTITY_COLUMNS)} FROM {SCHEMA}.fact_identities WHERE id=ANY(:ids)
-    """),{"ids":ids}).mappings()}
+    identities = _read_identities(conn, ids)
     if any(identities.get(row["id"]) != {name:row[name] for name in IDENTITY_COLUMNS} for row in rows):
         raise RuntimeError("fact_header_copy_identity_mismatch")
 
-def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False):
+def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False, reuse_identities=False):
     if not rows:
         return
     for day in sorted({row["storage_day"] for row in rows}):
         _partition(conn,day,placement=placement,pid=pid)
-    _copy_identities(conn, rows, from_source=from_source)
+    _copy_identities(conn, rows, from_source=from_source, reuse_existing=reuse_identities)
     ids = [row["id"] for row in rows]
     if from_source:
         conn.execute(text(f"INSERT INTO {SCHEMA}.fact_versions ({','.join(HEADER_COLUMNS)}) "
@@ -277,12 +299,15 @@ def _baseline_rows(conn, state, page_rows, *, identities_only=False):
     prefix = "identity_after_" if identities_only else "after_"
     after = {"after_"+key: state[prefix+key] for key in ("day", "seq", "id")}
     predicate = "(storage_day,market_commit_seq,id) <= (:high_day,:high_seq,:high_id)"
+    id_order = not identities_only and state.get("header_id_order", False)
     if after["after_day"] is not None:
-        predicate += " AND (storage_day,market_commit_seq,id) > (:after_day,:after_seq,:after_id)"
+        predicate += (" AND id > :after_id" if id_order else
+                      " AND (storage_day,market_commit_seq,id) > (:after_day,:after_seq,:after_id)")
+    order = "id" if id_order else "storage_day,market_commit_seq,id"
     columns = (*IDENTITY_COLUMNS, "market_commit_seq") if identities_only else HEADER_COLUMNS
     return [dict(row) for row in conn.execute(text(f"""
         SELECT {",".join(columns)} FROM {SOURCE} WHERE {predicate}
-        ORDER BY storage_day,market_commit_seq,id LIMIT :limit
+        ORDER BY {order} LIMIT :limit
     """), {**state, **after, "limit": page_rows}).mappings()]
 
 
@@ -336,7 +361,8 @@ def copy_page(conn, *, page_rows=128, timeout_seconds=30):
             """),{"ids":queued}).mappings()] if queued else []
             if {row["id"] for row in rows} != set(queued):
                 raise RuntimeError("fact_header_copy_captured_source_missing")
-        _copy_rows(conn,rows,placement=state["placement"],pid=state["_placement_pid"],from_source=True)
+        _copy_rows(conn,rows,placement=state["placement"],pid=state["_placement_pid"],from_source=True,
+                   reuse_identities=state["identity_history_ready"])
         if state["placement"]:
             pid=physical.verify(conn,state["placement"])
             for day in sorted({row["storage_day"] for row in rows}):
@@ -390,6 +416,64 @@ def place_identity_on_history(conn, *, timeout_seconds=30):
         conn.exec_driver_sql(f"UPDATE {STATE} SET identity_history_ready=true WHERE id=1")
         _inspect_progress(conn)
         return {"identity_history_ready":True,"reused":False}
+
+
+
+def prepare_identity_order(conn, *, temporary_bytes, rewrite_bytes, timeout_seconds=30):
+    """Reorder only the completed private identity registry before any headers.
+
+    The explicit preparation transaction owns the rewrite and cursor-mode change.
+    Failed/interrupted CLUSTER rolls both back. Existing started header cursors
+    retain their original order and cannot be converted. Source writers never
+    depend on this private registry until later identity capture activation.
+    """
+    if any(type(value) is not int or value < 1024 for value in (temporary_bytes, rewrite_bytes)):
+        raise ValueError("fact_header_identity_order_resource_budget_required")
+    with migration_step(conn, timeout_seconds):
+        conn.exec_driver_sql(f"LOCK TABLE {STATE} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        state = _inspect_progress(conn)
+        if state.get("header_id_order"):
+            return {"reused": True}
+        if (state["placement"] is None or not state.get("identity_baseline_complete")
+                or not state["identity_history_ready"] or state["identity_capture"]
+                or state["baseline_complete"] or state["verified_rows"] != 0
+                or any(state["after_"+key] is not None for key in ("day", "seq", "id"))):
+            raise RuntimeError("fact_header_identity_order_unstarted_headers_required")
+        target = SCHEMA+".fact_identities"
+        conn.exec_driver_sql(f"LOCK TABLE {target} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        if conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {SCHEMA}.fact_versions LIMIT 1)")):
+            raise RuntimeError("fact_header_identity_order_unstarted_headers_required")
+        heap, indexes = conn.execute(text("SELECT pg_table_size(to_regclass(:name)),"
+            "pg_indexes_size(to_regclass(:name))"), {"name":target}).one()
+        if 2*heap+indexes > rewrite_bytes:
+            raise RuntimeError("fact_header_identity_order_rewrite_budget_insufficient")
+        index = conn.scalar(text("""SELECT c.relname FROM pg_index i
+            JOIN pg_class c ON c.oid=i.indexrelid
+            WHERE i.indrelid=to_regclass(:name) AND i.indisprimary AND i.indisvalid AND i.indisready"""),
+            {"name":target})
+        if index is None:
+            raise RuntimeError("fact_header_identity_order_primary_index_required")
+        # Temporary files keep the existing admitted SSD placement. Confine this
+        # backend's sort without multiplying its allowance across parallel workers.
+        settings = {name:conn.scalar(text("SELECT current_setting(:name)"), {"name":name})
+                    for name in ("temp_file_limit", "max_parallel_maintenance_workers")}
+        old_limit = conn.scalar(text("SELECT setting::bigint FROM pg_settings WHERE name='temp_file_limit'"))
+        limit = temporary_bytes//1024
+        if old_limit >= 0:
+            limit = min(limit, old_limit)
+        conn.execute(text("SELECT set_config('temp_file_limit',:value,true)"), {"value":str(limit)})
+        conn.exec_driver_sql("SET LOCAL max_parallel_maintenance_workers=0")
+        quote = conn.dialect.identifier_preparer.quote_identifier
+        conn.exec_driver_sql(f"CLUSTER {target} USING {quote(index)}")
+        # On failure migration_step rolls back the savepoint and LOCAL settings.
+        for name,value in settings.items():
+            conn.execute(text("SELECT set_config(:name,:value,true)"), {"name":name,"value":value})
+        if "header_id_order" not in state:
+            conn.exec_driver_sql(f"ALTER TABLE {STATE} ADD COLUMN header_id_order boolean NOT NULL DEFAULT false")
+        conn.exec_driver_sql(f"UPDATE {STATE} SET header_id_order=true WHERE id=1")
+        _inspect_progress(conn)
+        logger.info("fact_header_identity_order_prepared | heap_bytes=%s index_bytes=%s", heap, indexes)
+        return {"reused": False}
 
 
 def enable_identity_capture(conn, *, page_rows=128, timeout_seconds=30):
