@@ -157,3 +157,121 @@ def prepare_canonical_configuration(*, repository, state, project, image, databa
         if mount['target']=='/var/lib/postgresql/data']
     return dict(environment=environment, runtime=model, database=database,
                 history_uuid=hdd_uuid, recent_uuid=ssd_uuid)
+
+
+def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid,
+                              control, source, owned):
+    """Real Docker/SQL replacement before the first header, with synthetic peers.
+
+    Production runtime configuration admission is deliberately not claimed by
+    this fixture. Actual launch contracts, SQL observations, durable publication,
+    stopped-worker preservation and resumed capture remain real.
+    """
+    from copy import deepcopy
+    import time
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_prepare as initial
+    from scripts.automation import storage_online_deadline as amendment
+    from scripts.automation import storage_online_operation as operation
+
+    with launch.launched_online_worker(state, **kwargs) as (worker, receipt):
+        channel = host_boundary.OnlineWorkerChannel(worker,
+            deadline=time.monotonic()+receipt["deadline"]-time.time())
+        (control/"publish").write_text("publish")
+        channel.exchange("prepare_step", step="catalog_history",
+            relation="qt_fact_storage_cutover_v1.fact_versions", max_duration_seconds=30)
+        for _ in range(64):
+            page = channel.exchange("sql_copy")["result"]
+            result = page["outcome"]
+            if result == "raw_relocation_required":
+                channel.exchange("prepare_step", step="raw_history", max_duration_seconds=30)
+            elif result == "identity_relocation_required":
+                channel.exchange("prepare_step", step="identity_history", max_duration_seconds=30)
+                break
+            elif page["phase"] not in {"raw_baseline", "identity_baseline"}:
+                raise AssertionError("package fixture advanced beyond the unstarted header")
+        else:
+            raise AssertionError("tiny package baseline did not converge")
+        channel.exchange("close")
+    assert worker.returncode == 0
+    old_worker = host_boundary.load_receipt(state/launch._STATE)
+    old_id = old_worker["container_id"]; owned.append(old_id)
+    request = deepcopy(kwargs["request"]); capture_plan = request.pop("capture_preparation")
+    keys = state/"package-fixture-keys"; keys.mkdir(mode=0o700)
+    spool = state/"package-fixture-spool"; spool.mkdir(mode=0o700)
+    limits = operation.OperationLimits(preparation_seconds=30, final_seconds=30,
+        recovery_seconds=30, runtime_seconds=30, spool_max_bytes=1024**2,
+        spool_max_entries=128, spool_reserve_bytes=1024**2,
+        repository_max_bytes=256*1024**2, repository_reserve_bytes=1024**2, recent_free_bytes=1024**2)
+    plan = dict(schema_version="qt.storage_online_operation.v1", state_root=str(state),
+        **kwargs, source_image=kwargs["image"], history_uuid=history_uuid,
+        history_before=capture_plan["history_before"], attempt_seconds=old_worker["capture"]["seconds"],
+        limits=vars(limits), keys_root=str(keys), socket_volume=kwargs["project"]+"-unused-socket",
+        spool_destination=str(spool))
+    plan["request"] = request; plan["inventory_path"] = str(kwargs["inventory_path"])
+    path = state/"package-operation.json"; host_boundary.save_receipt(path, plan, initial=True)
+    candidate = host_boundary.docker("image","inspect",replacement_image,"--format","{{.Id}}").strip()
+    config = json.loads(host_boundary.docker("image","inspect",candidate,"--format","{{json .Config.Env}}"))
+    environment = dict(value.split("=",1) for value in config)
+    manifest = dict(schema_version="qt.storage_online_package.v1",
+        plan_sha256=amendment._sha(path.read_bytes()), image=candidate,
+        source_revision=environment["QT_IMAGE_SOURCE_REVISION"],
+        source_tree_hash=environment["QT_IMAGE_SOURCE_TREE_HASH"])
+    manifest_path = state/"package.json"; host_boundary.save_receipt(manifest_path, manifest, initial=True)
+    real_preflight, real_replace = operation.inspect_prepared_operation, amendment._replace
+    def fixture_preflight(state_root, **arguments):
+        launch.inspect_candidate_image(arguments["image"], arguments["request"])
+        return initial.admit_serving_source(state_root, project=kwargs["project"],
+            source_revision=kwargs["source_revision"], operator_id=arguments["operator_id"])
+    def publish_then_lose_reply(target, before, after):
+        real_replace(target, before, after)
+        if target.name == amendment.REQUEST:
+            raise TimeoutError("owned package publication reply loss")
+    operation.inspect_prepared_operation = fixture_preflight
+    try:
+        inspected = operation.run_operation_plan(path, replacement_package_file=manifest_path)
+        assert inspected["storage_mutations_performed"] is False
+        amendment._replace = publish_then_lose_reply
+        try:
+            operation.run_operation_plan(path, replacement_package_file=manifest_path, execute=True)
+            raise AssertionError("package publication interruption missing")
+        except TimeoutError as exc:
+            assert str(exc) == "owned package publication reply loss"
+        finally:
+            amendment._replace = real_replace
+        before = host_boundary.load_receipt(state/amendment.PACKAGE_STATE)
+        try:
+            amendment.require_settled(state)
+            raise AssertionError("partial package did not block launch")
+        except RuntimeError as exc:
+            assert str(exc) == "storage_online_package_amendment_requires_reconciliation"
+        completed = operation.run_operation_plan(path, replacement_package_file=manifest_path, execute=True)
+        after = host_boundary.load_receipt(state/amendment.PACKAGE_STATE)
+        assert completed["migration_started"] is False and after["phase"] == "complete"
+        for key in ("intent_sha256", "wall_deadline", "monotonic_deadline"):
+            assert after[key] == before[key]
+    finally:
+        operation.inspect_prepared_operation = real_preflight
+        amendment._replace = real_replace
+    kwargs["image"] = candidate
+    kwargs["request"] = host_boundary.load_receipt(state/amendment.REQUEST)
+    with launch.launched_online_worker(state, **kwargs) as (resumed, receipt):
+        owned.append(receipt["container_id"])
+        assert receipt["container_id"] != old_id and receipt["deadline"] == old_worker["deadline"]
+        channel = host_boundary.OnlineWorkerChannel(resumed,
+            deadline=time.monotonic()+receipt["deadline"]-time.time())
+        assert channel.greeting["state"] == "background"
+        assert host_boundary.load_receipt(state/launch._STATE)["capture"] == old_worker["capture"]
+        assert host_boundary.identities(host_boundary.inventory(kwargs["project"],
+            operator_id=receipt["container_id"])) == source
+        channel.exchange("prepare_step", step="identity_order", max_duration_seconds=30)
+        channel.exchange("close")
+    assert resumed.returncode == 0
+    for identity in (old_id, receipt["container_id"]):
+        observed = json.loads(host_boundary.docker("inspect","--format","{{json .State}}",identity))
+        assert not observed["Running"] and observed["Pid"] == 0 and not observed["OOMKilled"]
+    return dict(original_capture_preserved=True, original_deadline=old_worker["deadline"],
+        actual_new_worker_admitted=True, old_worker_preserved=True,
+        interrupted_publication_reconciled=True, preparation_through_new_worker=True,
+        source_clients_unchanged=True, production_runtime_preflight=False,
+        production_capacity_admission=False, final_handoff=False)

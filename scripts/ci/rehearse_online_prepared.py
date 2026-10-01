@@ -18,6 +18,7 @@ parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
 parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
+parser.add_argument('--replacement-package-image',help='qualify an actual new package and interrupted publication before header copying')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
@@ -54,6 +55,8 @@ if options.full_operation and not options.operation_driver:
  parser.error('--full-operation requires --operation-driver')
 if options.operation_driver and not (options.recovery_runtime and options.initial_capture):
  parser.error('--operation-driver requires --recovery-runtime --initial-capture')
+if options.replacement_package_image and (not options.initial_capture or options.final_pause or options.operation_driver or options.deadline_amendment):
+ parser.error('--replacement-package-image requires initial capture and excludes final/operation/deadline modes')
 if options.deadline_amendment and (not options.initial_capture or options.final_pause or options.operation_driver):
  parser.error('--deadline-amendment requires --initial-capture and excludes final/operation driver')
 if options.initial_capture and not (options.prepare_source and options.worker_phases):
@@ -199,7 +202,7 @@ os.chown(root,70,70)
     healthcheck=dict(test=initial.held._TCP_PROBE,interval='1s',timeout='2s',retries=90,start_period='10s'),
     volumes=[dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data')],
     networks={'quanttrad':{'aliases':['tsdb.quanttrad']}})
-  if options.deadline_amendment:
+  if options.deadline_amendment or options.replacement_package_image:
    service['command'] += ['-c','work_mem=4MB','-c','maintenance_work_mem=32MB',
                           '-c','max_connections=32','-c','max_parallel_workers_per_gather=0']
   model=dict(name=project,services={'tsdb':service},
@@ -531,6 +534,11 @@ os.chown(root,70,70)
     report['initial_capture_ready_seconds']=time.monotonic()-capture_entry
    # Actual clean worker retirement, then original capture/controller reentry.
    # No copy, final pause or recovery action was dispatched by the first worker.
+  if options.replacement_package_image:
+   from scripts.ci.online_operation_fixture import rehearse_package_amendment
+   report['package_amendment']=rehearse_package_amendment(state=state,kwargs=kwargs,
+     replacement_image=options.replacement_package_image,history_uuid=history_uuid,
+     control=control,source=source,owned=owned)
   for attempt in range(1 if options.final_pause else 2):
    with launch_context(state,**kwargs) as (worker,receipt):
     channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
@@ -1445,6 +1453,12 @@ finally:
    amendment_saved=host_boundary.load_receipt(state/'storage-online-deadline-amendment.json')
    launch_saved=host_boundary.load_receipt(state/launch._STATE)
    for proof in (amendment_saved['old_worker'],launch_saved):
+    if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
+        and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
+  if options.replacement_package_image and (state/'storage-online-package-amendment.json').exists():
+   package_saved=host_boundary.load_receipt(state/'storage-online-package-amendment.json')
+   launch_saved=host_boundary.load_receipt(state/launch._STATE)
+   for proof in (package_saved['old_worker'],launch_saved):
     if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
         and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
   if name==project+'-storage-spool-prepare':

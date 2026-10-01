@@ -2002,3 +2002,13 @@ capture or capacity authority.
 Native worker replacement/reentry and measured physical preparation cost remain
 necessary before applying this package change to production. Unit fault
 injection and a small database ordering fixture do not establish those outcomes.
+
+The existing disposable prepared-host rehearsal accepts
+`--replacement-package-image` with initial capture and worker phases. It finishes
+raw/identity history using the old package, retires that worker before any header
+page, injects a lost reply after publishing the new request, reconciles the
+original durable intent, and admits a different worker with the unchanged capture
+and deadline. The new worker performs identity ordering; the existing rehearsal
+then continues copying, reference validation and concurrent publication checks.
+Synthetic source peers qualify this transition only: production runtime preflight,
+physical rewrite cost, capacity and final handoff remain separate requirements.
