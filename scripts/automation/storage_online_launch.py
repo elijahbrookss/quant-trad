@@ -274,6 +274,8 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
     not measured production admission. The ordinary wrapper below owns its lock.
     """
     state_root, inventory_path = _canonical(state_root), _canonical(inventory_path)
+    from scripts.automation.storage_online_deadline import require_settled
+    require_settled(state_root)
     validate_launch_inputs(project=project,source_revision=source_revision,image=image,
         request=request,descriptor_limit=descriptor_limit,memory_bytes=memory_bytes)
     archive_group = archive_group_override(request)

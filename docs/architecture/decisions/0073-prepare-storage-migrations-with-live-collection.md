@@ -9,6 +9,10 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_deadline.py
+  - scripts/db/fact_header_v2_deadline.py
+  - tests/test_storage_online_deadline.py
+  - tests/test_market_data/test_fact_header_deadline_amendment_db.py
   - cli/main.py
   - scripts/automation/storage_online_release.py
   - tests/test_storage_online_release.py
@@ -1884,3 +1888,54 @@ request projected beyond the existing 96-hour window for the observed source
 cardinality. A larger declared SQL batch still needs measured allocation,
 throughput and workload admission; it does not extend any clock or establish a
 production migration estimate.
+
+
+### Explicit amendment of an unexpired capture deadline
+
+An operator may explicitly increase the total capture duration through the same
+`qt storage migrate --operation-file ... --extend-attempt-seconds ...
+--capacity-file ...` command. Inspection remains the default; `--execute` applies
+the amendment only. It does not start another migration or stop source clients.
+The ceiling remains 96 hours measured from the original database capture start.
+Ordinary reentry still requires unchanged clocks and byte-identical requests.
+Legacy captures without an explicit duration, expired/canceled attempts, a live
+worker, and any final-switch intent are ineligible.
+
+The existing deployment flock must be free and the exact background worker must
+be independently verified stopped with PID zero. Collection keeps serving. The
+host reuses the full prepared-source preflight and requires a fresh private
+`qt.storage_deadline_capacity.v1` forecast bound to the original plan bytes and
+amended absolute deadline. Both actual source/history filesystems must have room
+for named remaining targets, growth, queue, WAL, temporary, maintenance and
+recovery allocations above unchanged policy and operation reserve floors.
+Forecast evidence digests are retained; the operator remains responsible for
+measuring those inputs. A supplied number is not itself production admission.
+The normal live phase/resource guards still apply on migration reentry.
+
+`scripts/automation/storage_online_deadline.py` owns the host amendment journal,
+request/launch/plan publication and preservation of the retired worker. Its
+300-second wall/boot/monotonic transition window never restarts on reentry.
+`scripts/db/fact_header_v2_deadline.py` owns only the transactional duration change
+and audit. It excludes both the controller session lock and capture/page lock,
+checks the exact existing capture and intact capture contract, and stays bounded
+by the old attempt deadline. The duration and exact before/after audit commit
+together. The original capture timestamp, queued writes, completed pages,
+placements and all shorter phase limits remain unchanged.
+
+Durable intent precedes possible SQL dispatch. A lost reply requires exact audit
+and capture reconciliation; absence of that audit never permits blind replay.
+The old stopped container is retained under an amendment-specific name, and all
+original private plan/request/launch bytes remain in the private journal. Only
+exact old/new file states permit interrupted publication to finish. An incomplete
+journal blocks ordinary operation and direct worker launch. Reboot, transition
+expiry or unresolved SQL outcome requires explicit reconciliation, not a fresh
+clock. Once publication is complete, ordinary reentry creates an independently
+admitted worker using the same pinned image and amended request. No old process
+or cached live proof is edited. This boundary does not grant final-switch,
+recovery, backup-completion or deployment authority.
+
+Disposable database checks prove concurrent capture, old-clock refusal, owner
+exclusion and transactional rollback. Host fault injection covers lost replies
+and interruption between file publications. These are component qualifications;
+actual worker replacement/reentry and full production capacity admission must
+also be demonstrated before applying an amendment to a live migration.

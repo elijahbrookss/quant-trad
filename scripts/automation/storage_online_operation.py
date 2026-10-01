@@ -413,7 +413,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -423,10 +423,17 @@ def run_operation_plan(path, *, execute=False):
     """
     if type(execute) is not bool:
         raise ValueError("storage_online_operation_execute_invalid")
+    if extend_attempt_seconds is not None:
+        from scripts.automation.storage_online_deadline import amend_operation
+        return amend_operation(path, attempt_seconds=extend_attempt_seconds, capacity_file=capacity_file, execute=execute)
+    if capacity_file is not None:
+        raise ValueError("storage_online_capacity_file_requires_explicit_amendment")
     plan=load_operation_plan(path)
     state_root=launch._canonical(plan["state_root"])
     limits=OperationLimits(**plan["limits"])
     with host.deployment_lock(state_root):
+        from scripts.automation.storage_online_deadline import require_settled
+        require_settled(state_root)
         if os.path.lexists(state_root/"storage-online-final.json"):
             saved = final._load(state_root/final.STATE)
             worker = host.load_receipt(state_root/launch._STATE)

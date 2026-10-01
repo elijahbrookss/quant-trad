@@ -18,6 +18,7 @@ parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
 parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
+parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
 parser.add_argument('--full-operation',action='store_true',help='run the public operator before initial preparation with a retired seed fixture')
@@ -53,6 +54,8 @@ if options.full_operation and not options.operation_driver:
  parser.error('--full-operation requires --operation-driver')
 if options.operation_driver and not (options.recovery_runtime and options.initial_capture):
  parser.error('--operation-driver requires --recovery-runtime --initial-capture')
+if options.deadline_amendment and (not options.initial_capture or options.final_pause or options.operation_driver):
+ parser.error('--deadline-amendment requires --initial-capture and excludes final/operation driver')
 if options.initial_capture and not (options.prepare_source and options.worker_phases):
  parser.error("--initial-capture requires --prepare-source --worker-phases")
 if options.recovery_runtime and (not options.recovery_spool or options.recovery_spool_reply_loss):
@@ -1257,6 +1260,64 @@ os.chown(root,70,70)
    assert not json.loads(run(['inspect',first_id,'--format','{{json .State}}']).stdout)['Running']
    report['host_exception_stopped_only_worker']=True
    assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
+   if options.deadline_amendment:
+    from copy import deepcopy
+    from scripts.automation import storage_online_deadline as amendment
+    from scripts.automation import storage_online_operation as operation
+    old_worker=host_boundary.load_receipt(state/launch._STATE)
+    old_seconds=old_worker['capture']['seconds'];new_seconds=old_seconds+300
+    base_request=deepcopy(kwargs['request']);capture_plan=base_request.pop('capture_preparation')
+    fixture_keys=state/'deadline-fixture-keys';fixture_keys.mkdir(mode=0o700)
+    fixture_spool=state/'deadline-fixture-spool';fixture_spool.mkdir(mode=0o700)
+    limit=min(30,base_request['resource_limits']['movement_timeout_seconds'])
+    limits=operation.OperationLimits(preparation_seconds=limit,final_seconds=limit,recovery_seconds=limit,runtime_seconds=limit,
+      spool_max_bytes=1024**2,spool_max_entries=128,spool_reserve_bytes=1024**2,
+      repository_max_bytes=256*1024**2,repository_reserve_bytes=1024**2,recent_free_bytes=1024**2)
+    plan=dict(schema_version='qt.storage_online_operation.v1',state_root=str(state),**kwargs,
+      source_image=image,history_uuid=history_uuid,history_before=capture_plan['history_before'],
+      attempt_seconds=old_seconds,limits=vars(limits),keys_root=str(fixture_keys),
+      socket_volume=project+'-unused-socket',spool_destination=str(fixture_spool))
+    plan['inventory_path']=str(inventory);plan['request']=base_request
+    operation_file=state/'deadline-operation.json';host_boundary.save_receipt(operation_file,plan,initial=True)
+    forecast=dict(schema_version='qt.storage_deadline_capacity.v1',plan_sha256=amendment._sha(operation_file.read_bytes()),
+      attempt_seconds=new_seconds,through_epoch=old_worker['deadline']+300,observed_at=time.time(),filesystems=[])
+    for path in (working,history):
+     space=os.statvfs(path)
+     forecast['filesystems'].append(dict(path=str(path),device=path.stat().st_dev,
+      reserve_bytes=max(1024**2,(space.f_blocks*space.f_frsize*base_request['policy']['reserve_percent']+99)//100),
+      remaining_peak_bytes={k:1024 for k in ('targets','growth','queue','wal','temporary','maintenance','recovery')},
+      evidence_sha256=host_boundary.digest(dict(scope='tiny disposable fixture',source=source))))
+    forecast_file=state/'deadline-capacity.json';host_boundary.save_receipt(forecast_file,forecast,initial=True)
+    # This tests real SQL, request publication and Docker worker reentry. These
+    # synthetic source peers cannot claim unchanged production runtime preflight.
+    original_preflight=operation.inspect_prepared_operation
+    def fixture_preflight(state_root,**arguments):
+     return initial.admit_serving_source(state_root,project=project,source_revision=revision,
+                                        operator_id=arguments['operator_id'])
+    operation.inspect_prepared_operation=fixture_preflight
+    try:
+     observed=operation.run_operation_plan(operation_file,extend_attempt_seconds=new_seconds,capacity_file=forecast_file)
+     assert observed['old_deadline']==old_worker['deadline']
+     changed=operation.run_operation_plan(operation_file,extend_attempt_seconds=new_seconds,capacity_file=forecast_file,execute=True)
+    finally:operation.inspect_prepared_operation=original_preflight
+    assert changed['deadline']==old_worker['deadline']+300 and not changed['migration_started']
+    kwargs['request']=host_boundary.load_receipt(state/amendment.REQUEST)
+    old_id=old_worker['container_id'];owned.append(old_id)
+    with launch.launched_online_worker(state,**kwargs) as (amended_worker,amended_receipt):
+     owned.append(amended_receipt['container_id'])
+     amended_channel=host_boundary.OnlineWorkerChannel(amended_worker,deadline=time.monotonic()+amended_receipt['deadline']-time.time())
+     assert amended_channel.greeting['state']=='background' and amended_receipt['container_id']!=old_id
+     amended_channel.exchange('status');amended_channel.exchange('close')
+    new_worker=host_boundary.load_receipt(state/launch._STATE)
+    assert new_worker['capture']==dict(started_at=old_worker['capture']['started_at'],seconds=new_seconds)
+    assert new_worker['deadline']==old_worker['deadline']+300
+    assert host_boundary.identities(host_boundary.inventory(project,operator_id=amended_receipt['container_id']))==source
+    assert not json.loads(run(['inspect',old_id,'--format','{{json .State}}']).stdout)['Running']
+    assert not json.loads(run(['inspect',amended_receipt['container_id'],'--format','{{json .State}}']).stdout)['Running']
+    report['deadline_amendment']=dict(original_started_at=old_worker['capture']['started_at'],old_deadline=old_worker['deadline'],
+      amended_deadline=new_worker['deadline'],old_worker_preserved=True,new_worker_admitted=True,
+      source_clients_unchanged=True,actual_sql_audit=True,production_runtime_preflight=False,
+      production_capacity_admission=False,final_handoff=False)
    saved=(state/launch._STATE).read_bytes()
    try:
     with launch.launched_online_worker(state,**(kwargs|dict(descriptor_limit=2048))):
@@ -1264,7 +1325,8 @@ os.chown(root,70,70)
    except RuntimeError as exc:
     assert str(exc)=='storage_online_saved_launch_changed'
    assert (state/launch._STATE).read_bytes()==saved
-   report['original_deadline_preserved']=True
+   report['original_deadline_preserved']=not options.deadline_amendment
+   report['original_capture_start_preserved']=True
    report['first_process_hashed_bytes']=final['background_hashed_bytes']
    report['source_clients_unchanged']=True
   else:
@@ -1375,6 +1437,12 @@ finally:
   if canonical and details['Config']['Labels'].get('com.docker.compose.project')==project:mine=True
   if name==project+'-storage-online' and (state/launch._STATE).exists():
    mine=json.loads((state/launch._STATE).read_text())['container_id']==details['Id']
+  if options.deadline_amendment and (state/'storage-online-deadline-amendment.json').exists():
+   amendment_saved=host_boundary.load_receipt(state/'storage-online-deadline-amendment.json')
+   launch_saved=host_boundary.load_receipt(state/launch._STATE)
+   for proof in (amendment_saved['old_worker'],launch_saved):
+    if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
+        and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
   if name==project+'-storage-spool-prepare':
    mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
   if name==project+'-storage-repository-prepare':

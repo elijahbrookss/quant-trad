@@ -3274,7 +3274,9 @@ def _cmd_storage(args: argparse.Namespace) -> int:
     if args.storage_command == "migrate":
         from scripts.automation.storage_online_operation import run_operation_plan
 
-        _print_json(run_operation_plan(args.operation_file, execute=args.execute))
+        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file")
+                   if getattr(args, name, None) is not None}
+        _print_json(run_operation_plan(args.operation_file, execute=args.execute, **options))
         return 0
     client = _client(args)
     if args.storage_command == "status":
@@ -4893,6 +4895,8 @@ def build_parser() -> argparse.ArgumentParser:
     migration = storage_sub.add_parser("migrate", help="Inspect or execute a prepared local host migration plan; final release checks remain separate.")
     migration.add_argument("--operation-file", required=True, help="Private fixed SSD/HDD operation JSON on this Linux host.")
     migration.add_argument("--execute", action="store_true", help="Perform the admitted preserving migration; default is read-only inspection.")
+    migration.add_argument("--extend-attempt-seconds", type=int, help="Explicit total capture budget amendment, at most 96 hours; requires a retired background worker and fresh capacity evidence.")
+    migration.add_argument("--capacity-file", help="Private measured capacity forecast bound to the original plan and amended absolute horizon.")
     migration.set_defaults(func=_cmd_storage)
     storage_status = storage_sub.add_parser("status")
     storage_status.set_defaults(func=_cmd_storage)
