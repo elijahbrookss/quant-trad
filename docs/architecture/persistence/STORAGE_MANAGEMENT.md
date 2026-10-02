@@ -123,6 +123,17 @@ The existing storage lifecycle supervisor performs history movement and local re
 copies under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
 
+## Proposed forward-only transition
+
+[ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md)
+records a proposed alternative for the demonstrated copy and capacity problem:
+retain the existing header table as one sealed range beneath the same canonical
+parent, then use daily partitions for new writes. Disposable mechanics and real
+QT read-path diagnostics support further implementation, but current catalogue,
+startup and operator admission do not support this layout. It is not an
+alternative deploy command. Keeping old history on SSD would be an intermediate
+state; final historical placement and measured recovery remain required.
+
 ## One online migration workflow and its owners
 
 The release workflow is: prepare the fixed SSD/HDD destination, copy and catch up
