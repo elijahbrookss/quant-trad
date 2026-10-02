@@ -42,11 +42,13 @@ END;
 READ_SERIES_DAY_BODY = """
 DECLARE
     selected_days date[];
+    legacy_end date;
 BEGIN
     IF requested_series IS NULL OR requested_series <= 0
        OR range_start IS NULL OR range_end IS NULL OR range_end <= range_start THEN
         RAISE EXCEPTION 'canonical_series_day_request_invalid';
     END IF;
+    legacy_end := market.fact_header_legacy_end_day();
     SELECT array_agg(candidate.storage_day ORDER BY candidate.storage_day) INTO selected_days
     FROM (
         SELECT storage_day FROM market.fact_header_series_days
@@ -56,6 +58,15 @@ BEGIN
     ) AS candidate;
     IF cardinality(selected_days) > 4096 THEN
         RAISE EXCEPTION 'canonical_series_day_horizon_exceeded';
+    END IF;
+    IF legacy_end IS NOT NULL THEN
+        RETURN QUERY EXECUTE format(
+            'SELECT * FROM market.fact_versions '
+            'WHERE (storage_day < %L::date OR storage_day = ANY(%L::date[])) '
+            'AND series_id=$1 AND observation_time >= $2 AND observation_time < $3',
+            legacy_end,COALESCE(selected_days,ARRAY[]::date[])
+        ) USING requested_series,range_start,range_end;
+        RETURN;
     END IF;
     IF selected_days IS NULL THEN
         RETURN;

@@ -300,6 +300,7 @@ def assert_v1_source_admission(conn, *, identity_capture=False):
         SELECT to_regclass('market.fact_identities') IS NOT NULL
             OR to_regclass('market.fact_header_partitions') IS NOT NULL
             OR to_regclass('market.fact_header_series_days') IS NOT NULL
+            OR to_regclass('market.fact_header_legacy') IS NOT NULL
             OR EXISTS(SELECT 1 FROM market.fact_storage_state
                       WHERE layout_version='market.fact_storage_tiers.v2')
     """)):

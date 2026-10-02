@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - portal/backend/db/fact_header_legacy_schema.py
+  - tests/test_market_data/test_fact_header_legacy_db.py
   - scripts/automation/storage_online_deadline.py
   - scripts/db/fact_header_v2_deadline.py
   - tests/test_storage_online_deadline.py
@@ -129,10 +131,15 @@ settings page reports observed outcomes separately from saving configuration.
 records a proposed alternative for the demonstrated copy and capacity problem:
 retain the existing header table as one sealed range beneath the same canonical
 parent, then use daily partitions for new writes. Disposable mechanics and real
-QT read-path diagnostics support further implementation, but current catalogue,
-startup and operator admission do not support this layout. It is not an
-alternative deploy command. Keeping old history on SSD would be an intermediate
+QT read-path diagnostics support further implementation, but physical inventory
+and operator admission remain incomplete. It is not an alternative deploy command. Keeping old history on SSD would be an intermediate
 state; final historical placement and measured recovery remain required.
+The first runtime slice binds one sealed legacy relation and includes it in the
+same STABLE range reader; clean daily layouts use an empty binding catalogue.
+Missing/changed retained history refuses admission. The fixed full-copy handoff
+installs that empty catalogue without changing saved copy target fingerprints.
+Complete physical inventory and the forward operator remain unimplemented;
+current physical placement admission still refuses a broad legacy partition.
 
 ## One online migration workflow and its owners
 

@@ -40,7 +40,7 @@ def restore_tiered_v1_fixture(storage):
         conn.exec_driver_sql("DROP FUNCTION market.read_fact_headers_in_range(bigint,timestamptz,timestamptz)")
         conn.exec_driver_sql("DROP VIEW market.fact_rows")
         conn.exec_driver_sql("DROP TABLE market.fact_versions")
-        for name in ("fact_header_series_days", "fact_header_partitions", "fact_identities"):
+        for name in ("fact_header_legacy", "fact_header_series_days", "fact_header_partitions", "fact_identities"):
             conn.exec_driver_sql("DROP TABLE market."+name)
         conn.execute(text(DDL.read_text()))
         columns = conn.execute(text("""

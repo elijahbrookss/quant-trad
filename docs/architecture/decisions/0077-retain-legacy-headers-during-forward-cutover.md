@@ -10,6 +10,7 @@ tags:
   - postgres
   - explicit-migration
 code_paths:
+  - portal/backend/db/fact_header_legacy_schema.py
   - portal/backend/db/fact_identity_schema.py
   - portal/backend/db/fact_series_day_schema.py
   - portal/backend/db/market_data_models.py
@@ -21,9 +22,10 @@ code_paths:
 
 Proposed October 2, 2026 after the user asked whether new storage could become
 usable without rewriting all historical headers first. This is an evidence-backed
-proposal, not an implemented layout or production release decision.
-Current runtime admission correctly refuses it. The existing supported operator
-must not be used to approximate this proposal with manual schema edits.
+proposal, not a production release decision. The first implementation slice
+supports an explicit sealed legacy binding and canonical reads; the physical
+inventory and forward operator are still incomplete. The existing supported
+operator must not be used to approximate this proposal with manual schema edits.
 
 ## Avoid copying a table whose contents already match
 
@@ -75,6 +77,33 @@ Missing that boundary requires a qualified abort, not a longer unbounded pause.
 The disposable tests use controlled placement dates; they do not prove the
 wall-clock handoff or its failure behavior.
 
+## Implemented binding and read boundary
+
+`market.fact_header_legacy` is an immutable singleton catalogue, empty in a
+clean daily layout. An explicit cutover may bind the fixed
+`market.fact_versions_legacy` relation OID and exclusive `end_day`; the lower
+partition bound is `MINVALUE`. The catalogue never records a filesystem node,
+so later qualified movement may change a file without changing table identity.
+There is no arbitrary relation routing or runtime adoption.
+
+Startup checks the exact catalogue schema, native range/parent binding,
+code-owned function semantics, always-enabled mutation/truncate seals,
+attached valid indexes and cloned foreign-key enforcement. Daily catalogue
+checks still reject every unknown child and overlap. New-day provisioning
+refuses sealed dates. A missing catalogue on an existing database requires an
+explicit operator upgrade; bootstrap never creates a replacement silently.
+
+The existing STABLE range reader consults the same-snapshot binding, considers
+all retained storage days below the boundary, and combines them with the normal
+series/day selection. An absent or changed bound relation raises instead of
+returning incomplete history. Clean daily layouts retain their existing query.
+Native global identities, correction selection and archive hydration are unchanged.
+
+The full-copy operator's saved four-target protocol is unchanged. Its explicit
+final handoff creates the new empty catalogue. These additions do not provide
+a forward-cutover entrypoint or qualify deployment: physical inventory currently
+continues to refuse the broad retained range.
+
 ## Recent performance and eventual historical placement
 
 The retained table contains some recent history at cutover. Leaving it on SSD
@@ -110,8 +139,10 @@ correction, and corrupted archive bytes still failed checksum validation.
 The first diagnostic run failed on an incorrect test-side record attribute;
 the corrected run passed. Startup's catalogue refusal was asserted, not bypassed.
 
-These diagnostics do not implement the catalogue, admission or operator. They
-do not establish broad workload coverage, concurrent query plans, full-size
+Subsequent tracked regressions exercise the implemented binding and reader,
+including real startup, no-op/correction/frozen/archive reads, missing or detached
+history, disabled seals and native integrity drift. These small fixtures do not
+implement the forward operator or establish broad workload coverage, concurrent query plans, full-size
 index cost, HDD movement, final pause, expired-attempt retirement or production
 recovery. They must not be presented as a ready deployment or a migration-time
 estimate.

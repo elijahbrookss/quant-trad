@@ -28,7 +28,7 @@ FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v2"
 FACT_BOOK_PREFIX_TABLES = ("fact_book_prefix_chunks", "fact_book_prefix_dependencies")
 FACT_CANONICAL_DEPENDENCY_TABLES = ("fact_archive_canonical_dependencies",)
 FACT_STORAGE_TABLES = (
-    *IDENTITY_TABLES, *SERIES_DAY_TABLES,
+    *IDENTITY_TABLES, *SERIES_DAY_TABLES, "fact_header_legacy",
     "fact_hot_payloads", "fact_retention_partitions", "fact_archive_manifests",
     "fact_archive_series", "fact_archive_dependencies", "fact_archive_material_aliases",
     "fact_archive_verifications", "fact_storage_state",

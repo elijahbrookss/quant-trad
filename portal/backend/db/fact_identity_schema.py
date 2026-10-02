@@ -10,6 +10,10 @@ import logging
 
 from sqlalchemy import inspect, text
 
+from .fact_header_legacy_schema import (
+    assert_fact_header_legacy_contract, install_fact_header_legacy_functions,
+)
+
 logger = logging.getLogger(__name__)
 IDENTITY_TABLES = ("fact_identities", "fact_header_partitions")
 IDENTITY_CUTOVER = "docs/engineering/fact-header-layout-v2.md"
@@ -64,6 +68,7 @@ END;
 
 
 def install_fact_identity_functions(conn) -> None:
+    install_fact_header_legacy_functions(conn)
     for name, body in (
         ("register_fact_identity", REGISTER_IDENTITY_BODY),
         ("require_fact_identity_header", REQUIRE_HEADER_BODY),
@@ -119,6 +124,9 @@ def _assert_header_partition(conn, storage_day: date) -> None:
 def ensure_fact_header_partition(conn, storage_day: date) -> str:
     """Create one new empty partition; never replace a recorded missing partition."""
     name = fact_header_partition_name(storage_day)
+    end_day = conn.scalar(text("SELECT market.fact_header_legacy_end_day()"))
+    if end_day is not None and storage_day < end_day:
+        raise RuntimeError(f"fact_header_legacy_day_sealed: storage_day={storage_day} end_day={end_day}")
     relation = "market." + name
     exists = conn.execute(text(
         "SELECT 1 FROM market.fact_header_partitions WHERE storage_day=:day"
@@ -206,6 +214,7 @@ def assert_fact_identity_contract(conn) -> None:
         ), {"relation": "market." + table, "trigger": trigger}).one_or_none()
         if actual is None or tuple(actual) != (kind, "A", deferred, deferred, "market", function):
             raise RuntimeError(f"Canonical identity enforcement differs: {table}.{trigger}. See {IDENTITY_CUTOVER}; explicit cutover required")
+    legacy_end = assert_fact_header_legacy_contract(conn)
     days = conn.execute(text(
         "SELECT storage_day FROM market.fact_header_partitions ORDER BY storage_day LIMIT 4097"
     )).scalars().all()
@@ -214,8 +223,14 @@ def assert_fact_identity_contract(conn) -> None:
     for day in days:
         _assert_header_partition(conn, day)
     registered = {fact_header_partition_name(day) for day in days}
+    if legacy_end is not None:
+        if any(day < legacy_end for day in days):
+            raise RuntimeError("fact_header_legacy_daily_overlap")
+        registered.add("market.fact_versions_legacy")
+    registered = {name if name.startswith("market.") else "market." + name for name in registered}
     attached = set(conn.execute(text(
-        "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid "
+        "SELECT n.nspname || '.' || c.relname FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE i.inhparent='market.fact_versions'::regclass"
     )).scalars())
     if registered != attached:

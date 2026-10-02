@@ -312,6 +312,10 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
         CREATE TRIGGER trg_assert_fact_version_valid BEFORE INSERT ON market.fact_versions
         FOR EACH ROW EXECUTE FUNCTION market.assert_fact_version_valid()
     """)
+    # The daily-copy protocol and its saved target fingerprints remain unchanged.
+    # This new empty catalogue is installed only by the explicit final cutover.
+    from portal.backend.db import MarketFactHeaderLegacyRecord
+    MarketFactHeaderLegacyRecord.__table__.create(conn)
     install_fact_storage_functions(conn)
     for name in ("fact_versions","fact_identities","fact_header_partitions"):
         conn.exec_driver_sql(f"""

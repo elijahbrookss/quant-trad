@@ -207,6 +207,21 @@ class MarketFactHeaderPartitionRecord(Base):
                         server_default=text("clock_timestamp()"))
 
 
+class MarketFactHeaderLegacyRecord(Base):
+    """One explicit sealed legacy range; never inferred from existing relations."""
+
+    __tablename__ = "fact_header_legacy"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_market_fact_header_legacy_singleton"),
+        CheckConstraint("relation_oid > 0 AND relation_oid <= 4294967295",
+                        name="ck_market_fact_header_legacy_oid"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+    id = Column(Integer, primary_key=True, autoincrement=False)
+    end_day = Column(Date, nullable=False)
+    relation_oid = Column(BigInteger, nullable=False)
+
+
 class MarketFactHeaderSeriesDayRecord(Base):
     """Conservative observation bounds for each series and physical header day."""
 

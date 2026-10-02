@@ -37,6 +37,10 @@ def directory_engine():
                         FOR VALUES FROM ('2026-09-02') TO ('2026-09-03');
                 """))
                 MarketFactHeaderSeriesDayRecord.__table__.create(conn)
+                from portal.backend.db import MarketFactHeaderLegacyRecord
+                from portal.backend.db.fact_header_legacy_schema import install_fact_header_legacy_functions
+                MarketFactHeaderLegacyRecord.__table__.create(conn)
+                install_fact_header_legacy_functions(conn)
                 install_fact_series_day_functions(conn)
                 assert_fact_series_day_contract(conn)
             yield engine

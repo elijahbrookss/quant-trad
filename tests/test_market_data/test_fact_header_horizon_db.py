@@ -63,6 +63,10 @@ def test_range_selection_preserves_late_corrections(monkeypatch, record_property
                     ) PARTITION BY RANGE(storage_day);
                 """))
                 MarketFactHeaderSeriesDayRecord.__table__.create(conn)
+                from portal.backend.db import MarketFactHeaderLegacyRecord
+                from portal.backend.db.fact_header_legacy_schema import install_fact_header_legacy_functions
+                MarketFactHeaderLegacyRecord.__table__.create(conn)
+                install_fact_header_legacy_functions(conn)
                 install_fact_series_day_functions(conn)
                 for offset in range(days):
                     day = FIRST + timedelta(days=offset)
