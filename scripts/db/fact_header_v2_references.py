@@ -26,8 +26,8 @@ def _qualified(conn, relation):
     return "market."+conn.dialect.identifier_preparer.quote(relation[len("market."):])
 
 
-def _inventory(conn):
-    state=copy._inspect_progress(conn)
+def _inventory(conn, *, read_only_namespace=False):
+    state=copy._inspect_progress(conn, **({"read_only_namespace":True} if read_only_namespace else {}))
     if not state["identity_capture"]:
         raise RuntimeError("fact_header_reference_identity_capture_required")
     assert_v1_source_admission(conn,identity_capture=True)

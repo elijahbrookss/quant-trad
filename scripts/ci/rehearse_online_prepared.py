@@ -19,6 +19,7 @@ parser.add_argument('--require-distinct-devices',action='store_true')
 parser.add_argument('--prepare-source',action='store_true',help='qualify retained initial preparation before atomic capture and launch')
 parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
 parser.add_argument('--replacement-package-image',help='qualify an actual new package and interrupted publication before header copying')
+parser.add_argument('--terminal-cancellation',action='store_true',help='qualify preserving cancellation through a read-only mounted worker and lost reply reconciliation')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
@@ -55,6 +56,8 @@ if options.full_operation and not options.operation_driver:
  parser.error('--full-operation requires --operation-driver')
 if options.operation_driver and not (options.recovery_runtime and options.initial_capture):
  parser.error('--operation-driver requires --recovery-runtime --initial-capture')
+if options.terminal_cancellation and (not options.initial_capture or options.final_pause or options.operation_driver or options.deadline_amendment or options.replacement_package_image):
+ parser.error('--terminal-cancellation requires initial capture and excludes other terminal modes')
 if options.replacement_package_image and (not options.initial_capture or options.final_pause or options.operation_driver or options.deadline_amendment):
  parser.error('--replacement-package-image requires initial capture and excludes final/operation/deadline modes')
 if options.deadline_amendment and (not options.initial_capture or options.final_pause or options.operation_driver):
@@ -202,7 +205,7 @@ os.chown(root,70,70)
     healthcheck=dict(test=initial.held._TCP_PROBE,interval='1s',timeout='2s',retries=90,start_period='10s'),
     volumes=[dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data')],
     networks={'quanttrad':{'aliases':['tsdb.quanttrad']}})
-  if options.deadline_amendment or options.replacement_package_image:
+  if options.deadline_amendment or options.replacement_package_image or options.terminal_cancellation:
    service['command'] += ['-c','work_mem=4MB','-c','maintenance_work_mem=32MB',
                           '-c','max_connections=32','-c','max_parallel_workers_per_gather=0']
   model=dict(name=project,services={'tsdb':service},
@@ -298,6 +301,7 @@ os.chown(root,70,70)
    '--mount','type=bind,source='+str(control)+',target=/qt-control',
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
+   '--env','QT_ONLINE_TERMINAL_FIXTURE='+str(int(options.terminal_cancellation)),
    '--env','QT_ONLINE_FULL_OPERATION='+str(int(options.full_operation)),
    '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
@@ -539,6 +543,16 @@ os.chown(root,70,70)
    report['package_amendment']=rehearse_package_amendment(state=state,kwargs=kwargs,
      replacement_image=options.replacement_package_image,history_uuid=history_uuid,
      control=control,source=source,owned=owned)
+  if options.terminal_cancellation:
+   from scripts.ci.online_operation_fixture import rehearse_terminal_cancellation
+   report['terminal_cancellation']=rehearse_terminal_cancellation(state=state,kwargs=kwargs,
+     history_uuid=history_uuid,control=control,source=source,owned=owned)
+   (control/'finished').write_text('finished');fixture.wait(timeout=30)
+   assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
+   assert (control/'terminal-verified').exists()
+   log.close()
+   report.update(passed=True,image=image,fixture_seconds=time.monotonic()-started)
+   raise SystemExit(0)
   for attempt in range(1 if options.final_pause else 2):
    with launch_context(state,**kwargs) as (worker,receipt):
     channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt['deadline']-time.time());greeting=channel.greeting
@@ -1441,6 +1455,11 @@ finally:
  cleanup_failures=[]
  if canonical:
   owned.extend(run(['ps','-aq','--filter','label=com.docker.compose.project='+project]).stdout.split())
+ if options.terminal_cancellation and (state/'storage-online-terminal-worker.json').exists():
+  from scripts.automation import storage_online_terminal as terminal
+  saved_terminal=host_boundary.load_receipt(state/terminal.PROBE)
+  if saved_terminal.get('container_id'):
+   owned.append(saved_terminal['container_id'])
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue
@@ -1461,6 +1480,11 @@ finally:
    for proof in (package_saved['old_worker'],launch_saved):
     if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
         and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
+  if options.terminal_cancellation and (state/'storage-online-terminal-worker.json').exists():
+   terminal_saved=host_boundary.load_receipt(state/'storage-online-terminal-worker.json')
+   if name==terminal_saved['container_id']==details['Id']:
+    launch._admit(name,terminal_saved['binding'],terminal_saved['contract'],command=terminal.COMMAND)
+    mine=True
   if name==project+'-storage-spool-prepare':
    mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
   if name==project+'-storage-repository-prepare':

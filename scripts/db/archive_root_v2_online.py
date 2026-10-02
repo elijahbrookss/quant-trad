@@ -24,8 +24,8 @@ GUARD = "trg_qt_archive_v2_reject_change"
 _FUNCTION = SCHEMA + ".capture_archive_insert"
 
 
-def _roots(conn, source_root, destination_root):
-    saved = headers._inspect_progress(conn)["placement"]
+def _roots(conn, source_root, destination_root, *, read_only_namespace=False):
+    saved = headers._inspect_progress(conn, **({"read_only_namespace":True} if read_only_namespace else {}))["placement"]
     if saved is None:
         raise RuntimeError("archive_online_fixed_placement_required")
     source, source_id = archives._root(source_root, saved["recent_device"])
@@ -63,10 +63,10 @@ def _require_open(conn):
         raise RuntimeError("archive_online_capture_closed")
 
 
-def _inspect(conn, source_root, destination_root):
+def _inspect(conn, source_root, destination_root, *, read_only_namespace=False):
     _require_open(conn)
     row = conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one()
-    if row["roots"] != _roots(conn, source_root, destination_root) or row["binding"] != _binding(conn):
+    if row["roots"] != _roots(conn, source_root, destination_root, **({"read_only_namespace":True} if read_only_namespace else {})) or row["binding"] != _binding(conn):
         raise RuntimeError("archive_online_capture_binding_changed")
     if set(conn.execute(text(f"SELECT family FROM {PROGRESS}")).scalars()) != set(archives.FAMILIES):
         raise RuntimeError("archive_online_progress_families_changed")

@@ -417,7 +417,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -427,6 +427,11 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     """
     if type(execute) is not bool:
         raise ValueError("storage_online_operation_execute_invalid")
+    if cancel_attempt_file is not None:
+        if any(value is not None for value in (extend_attempt_seconds, capacity_file, replacement_package_file)):
+            raise ValueError("storage_online_terminal_must_be_separate")
+        from scripts.automation.storage_online_terminal import cancel_operation
+        return cancel_operation(path, package_file=cancel_attempt_file, execute=execute)
     if replacement_package_file is not None:
         if extend_attempt_seconds is not None or capacity_file is not None:
             raise ValueError("storage_online_package_and_deadline_amendments_must_be_separate")

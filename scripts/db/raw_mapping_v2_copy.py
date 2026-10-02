@@ -155,8 +155,8 @@ def _binding(conn):
     }))
 
 
-def _inspect(conn):
-    header_state=headers._inspect_progress(conn)
+def _inspect(conn, *, read_only_namespace=False):
+    header_state=headers._inspect_progress(conn, **({"read_only_namespace":True} if read_only_namespace else {}))
     if header_state["placement"] is None:
         raise RuntimeError("raw_mapping_copy_physical_placement_required")
     state=dict(conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one())

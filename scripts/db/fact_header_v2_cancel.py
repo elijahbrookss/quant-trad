@@ -37,7 +37,7 @@ def _triggers(conn, relations):
 
 def cancel_attempt(conn, *, expected_started_at, source_root=None,
                    destination_root=None, timeout_seconds=30,
-                   expected_capture=None, intent_sha256=None):
+                   expected_capture=None, intent_sha256=None, read_only_namespace=False):
     """Detach only admitted temporary write dependencies, preserving every row.
 
     Expiry forbids normal work but must not make dead queues grow forever.
@@ -50,6 +50,9 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
         raise ValueError("fact_header_cancel_timeout_out_of_bounds")
     if not isinstance(expected_started_at, str) or not expected_started_at:
         raise ValueError("fact_header_cancel_original_start_required")
+    if type(read_only_namespace) is not bool:
+        raise ValueError("fact_header_cancel_namespace_mode_invalid")
+    placement_options = {"read_only_namespace":True} if read_only_namespace else {}
     bound = expected_capture is not None or intent_sha256 is not None
     if bound:
         _validate_intent(expected_capture, intent_sha256)
@@ -65,14 +68,14 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
         saved = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
         if bound and _capture_binding(conn) != expected_capture:
             raise RuntimeError("fact_header_cancel_capture_preimage_changed")
-        header_state = headers._inspect_progress(conn) if _exists(conn, headers.STATE) else None
+        header_state = headers._inspect_progress(conn, **placement_options) if _exists(conn, headers.STATE) else None
         if header_state is None and any(_exists(conn, capture.SCHEMA+"."+name)
                                         for name in headers.TABLE_NAMES):
             raise RuntimeError("fact_header_cancel_unregistered_shadow")
         identity = bool(header_state and header_state["identity_capture"])
         if header_state is not None:
             assert_v1_source_admission(conn, identity_capture=identity)
-        slots = references._inventory(conn) if identity else {}
+        slots = references._inventory(conn, **placement_options) if identity else {}
         if not identity and conn.scalar(text("""
             SELECT EXISTS(SELECT 1 FROM pg_constraint
                 WHERE contype='f' AND confrelid=to_regclass(:target)
@@ -84,7 +87,7 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
         for relation in sorted(slots):
             conn.exec_driver_sql(f"LOCK TABLE {references._qualified(conn, relation)} "
                                  "IN ACCESS EXCLUSIVE MODE NOWAIT")
-        if slots and references._inventory(conn) != slots:
+        if slots and references._inventory(conn, **placement_options) != slots:
             raise RuntimeError("fact_header_cancel_reference_inventory_changed")
         staged = references._states(conn, slots) if slots else {}
         original_references = _incoming_references(conn) if header_state is not None else None
@@ -93,7 +96,7 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
             if header_state is None:
                 raise RuntimeError("fact_header_cancel_raw_without_headers")
             conn.exec_driver_sql(f"LOCK TABLE {raw.SOURCE} IN ACCESS EXCLUSIVE MODE NOWAIT")
-            raw_state = raw._inspect(conn)
+            raw_state = raw._inspect(conn, **placement_options)
         elif any(_exists(conn, name) for name in (raw.TARGET, raw.QUEUE)):
             raise RuntimeError("fact_header_cancel_unregistered_raw")
         archive_state = None
@@ -103,7 +106,7 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
             conn.exec_driver_sql("LOCK TABLE "+",".join(
                 "market."+name for name in archive_files.FAMILIES)+
                 " IN ACCESS EXCLUSIVE MODE NOWAIT")
-            archive_state = dict(archives._inspect(conn, source_root, destination_root))
+            archive_state = dict(archives._inspect(conn, source_root, destination_root, **placement_options))
         elif any(_exists(conn, name) for name in (archives.QUEUE, archives.PROGRESS, archives.CLOSED)):
             raise RuntimeError("fact_header_cancel_unregistered_archive")
         removed = {(capture.SOURCE, "trg_qt_header_v2_capture"),
@@ -173,7 +176,8 @@ def _validate_intent(expected_capture, intent_sha256):
 
 def _require_retired_controller(conn):
     # The transaction lock excludes another migration step. The controller's
-    # session lock also excludes an idle controller between commands.
+    # session lock also excludes an idle foreign controller between commands.
+    # A controller cancelling itself uses its retained owning SQL session.
     from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
                        {"name": CONTROLLER_LOCK}):

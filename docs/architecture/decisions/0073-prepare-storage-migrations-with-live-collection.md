@@ -9,6 +9,9 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_terminal.py
+  - tests/test_storage_online_terminal.py
+  - tests/test_terminal_placement.py
   - scripts/automation/storage_online_deadline.py
   - scripts/db/fact_header_v2_deadline.py
   - tests/test_storage_online_deadline.py
@@ -2022,3 +2025,44 @@ Inspection never publishes the proposal. File drift refuses, and partial recipe
 publication reconciles under the same package intent and clock. Private package
 journals are bounded to 2 MiB to retain both recipe states; the separate deadline
 journal keeps its existing 64 KiB bound. Recipe contents are never logged.
+
+
+### Explicit preserving terminal operator
+
+`qt storage migrate --operation-file <private-plan> --cancel-attempt-file
+<private-package>` inspects the original capture by default. `--execute` saves
+one private terminal intent before dispatching cancellation. The package has
+schema `qt.storage_online_terminal.v1` and exact `plan_sha256`, immutable `image`,
+`source_revision` and `source_tree_hash` fields. It does not amend the expired
+operation or any of its original files. This route is mutually exclusive with
+package and deadline amendments.
+
+The host verifies the original retired worker, exact source fleet, immutable
+request and prepared runtime through the existing owners. A new fixed terminal
+command uses the existing explicit-mount confinement, but every local mount is
+read-only. PostgreSQL remains the SQL writer. The terminal physical inspector
+requires local read-only targets while independently proving that the serving
+postmaster sees the same files and privately writable PGDATA/history directory.
+Normal copy placement still requires locally writable targets. The terminal
+command retains only source-read capability after its UID transition; no keys
+or new recovery mounts are exposed.
+
+Inspection records private worker lifecycle evidence without SQL mutation.
+Execution owns one 300-second wall/boot/monotonic intent window, retaining time
+for exact worker retirement. The SQL transaction remains at most 30 seconds.
+Prepared reentry cannot renew its clock or survive reboot as dispatch authority.
+Dispatched reentry only reads the exact SQL cancellation receipt; even an absent
+receipt never authorizes automatic replay. Read-only reconciliation may occur
+after the dispatch window or reboot without changing any original clock.
+The retired transient worker is removed without removing volumes, and its
+retirement is saved first. The original migration worker remains preserved.
+Any terminal intent blocks normal copying and amendment entrypoints.
+
+A controller cancelling its own active attempt uses its retained owning SQL
+session, so foreign controllers remain excluded without a lock handoff gap.
+
+This host route requires native confined-worker and physical/partial-reference/
+archive qualification before production use. Host fault injection and prior
+capture-only SQL tests do not prove that integration or production lock costs.
+It does not adopt copied targets, create a replacement capture, switch source,
+activate recovery or complete the storage release.

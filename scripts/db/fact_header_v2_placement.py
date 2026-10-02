@@ -86,8 +86,10 @@ def _observe_database(conn, pg_controldata, deadline):
     return context, process, cluster, binary
 
 
-def observe(conn, plan, *, deadline=None):
+def observe(conn, plan, *, deadline=None, read_only_namespace=False):
     """Bind two configured roots and an existing history tablespace to this PG."""
+    if type(read_only_namespace) is not bool:
+        raise ValueError("fact_header_copy_namespace_mode_invalid")
     if not isinstance(plan,CopyPlacement):
         raise ValueError("fact_header_copy_placement_invalid")
     deadline=min(monotonic()+30,deadline) if deadline is not None else monotonic()+30
@@ -104,7 +106,9 @@ def observe(conn, plan, *, deadline=None):
     capacities={}
     for role in ("recent","history"):
         target=getattr(plan,role)
-        capacity=target.inspect(require_writable=True)
+        capacity=target.inspect(require_writable=not read_only_namespace)
+        if read_only_namespace and not capacity.read_only:
+            raise RuntimeError("fact_header_terminal_readonly_namespace_required")
         resolved=Path(target.root).resolve(strict=True)
         if str(resolved)!=capacity.path or _device_id(resolved.stat().st_dev)!=capacity.device_id:
             raise RuntimeError("fact_header_copy_target_changed")
@@ -116,6 +120,11 @@ def observe(conn, plan, *, deadline=None):
     if (not root.is_relative_to(roots["recent"])
             or _device_id(root.stat().st_dev)!=capacities["recent"].device_id):
         raise RuntimeError("fact_header_copy_database_not_on_recent_ssd")
+    if read_only_namespace:
+        # Only the terminal inspector has a read-only local mount. PostgreSQL
+        # must still own privately writable PGDATA in its independently checked
+        # process namespace; history's directory is checked below as usual.
+        _same_process_file(pid, root, root.stat(), require_writable=True)
     declared=Path(destination["location"])
     link=root/"pg_tblspc"/str(plan.history_tablespace_oid)
     if (not declared.is_absolute() or ".." in declared.parts or not link.is_symlink()
@@ -132,8 +141,8 @@ def observe(conn, plan, *, deadline=None):
     if _cluster_identity(process,binary,deadline)!=cluster:
         raise RuntimeError("fact_header_copy_database_process_changed")
     for role in ("recent","history"):
-        current=getattr(plan,role).inspect(require_writable=True)
-        if (current.device_id!=capacities[role].device_id or current.read_only
+        current=getattr(plan,role).inspect(require_writable=not read_only_namespace)
+        if (current.device_id!=capacities[role].device_id or current.read_only != read_only_namespace
                 or current.filesystem_uuid!=capacities[role].filesystem_uuid
                 or Path(getattr(plan,role).root).resolve(strict=True)!=roots[role]):
             raise RuntimeError("fact_header_copy_target_changed")
@@ -152,8 +161,8 @@ def observe(conn, plan, *, deadline=None):
     return binding,pid
 
 
-def verify(conn, saved):
-    observed,pid=observe(conn,_restore(saved["plan"]))
+def verify(conn, saved, *, read_only_namespace=False):
+    observed,pid=observe(conn,_restore(saved["plan"]), **({"read_only_namespace":True} if read_only_namespace else {}))
     if observed!=saved:
         raise RuntimeError("fact_header_copy_placement_binding_changed")
     return pid

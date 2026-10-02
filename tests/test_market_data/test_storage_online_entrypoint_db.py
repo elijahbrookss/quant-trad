@@ -244,6 +244,29 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         definition_id="host-entrypoint-live",provider_product_id="BTC-USD-HOST-ENTRY",
         event_start=BASE+timedelta(hours=4), replay_features=runtime_recovery is not None)
     (control/"published").write_text("published")
+    if os.getenv("QT_ONLINE_TERMINAL_FIXTURE") == "1":
+        wait("finished")
+        from scripts.db import fact_header_v2_cancel as cancellation
+        from scripts.db import raw_mapping_v2_copy as raw
+        from scripts.db import archive_root_v2_online as archives
+        queues=(capture.QUEUE,raw.QUEUE,archives.QUEUE)
+        with engine.begin() as conn:
+            receipt=conn.scalar(text(f"SELECT receipt FROM {capture.CANCELLED} WHERE id=1"))
+            assert receipt["schema_version"]=="qt.fact_header_cancel.v2"
+            assert receipt["removed_reference_roots"] and receipt["archive_capture"]
+            before=[conn.scalar(text(f"SELECT count(*) FROM {q}")) for q in queues]
+            assert _frozen_records(conn)==frozen
+        _raw_book_fixture(storage, source, monkeypatch,
+            definition_id="host-entrypoint-after-cancel",provider_product_id="BTC-USD-AFTER-CANCEL",
+            event_start=BASE+timedelta(hours=6))
+        with engine.begin() as conn:
+            assert [conn.scalar(text(f"SELECT count(*) FROM {q}")) for q in queues]==before
+            assert _frozen_records(conn)==frozen
+            assert cancellation.inspect_cancellation(conn,expected_capture=receipt["capture"],
+                intent_sha256=receipt["intent_sha256"])==receipt
+        assert (source/"objects").stat().st_ino==info.st_ino
+        (control/"terminal-verified").write_text("verified")
+        return
     if worker_phases:
         wait("phases-finished")
         with engine.begin() as conn:

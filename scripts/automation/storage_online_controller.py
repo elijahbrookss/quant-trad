@@ -565,8 +565,11 @@ class OnlineController:
                 # Explicit terminal cleanup may be needed after proof/attempt
                 # expiry; do not renew either clock or require healthy leases.
                 self._ownership()
-                with self.engine.begin() as conn:
-                    cancellation.cancel_attempt(conn,
+                # Cancel on the retained owner session. Its session advisory
+                # lock excludes foreign controllers without rejecting itself
+                # or opening a release/reacquire race between SQL sessions.
+                with self._owner.begin():
+                    cancellation.cancel_attempt(self._owner,
                         expected_started_at=self.expected_started_at,
                         source_root=self.source_root, destination_root=self.destination_root,
                         timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))

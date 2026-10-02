@@ -95,7 +95,7 @@ def _shape(conn, name, *, schema=SCHEMA):
     return json.loads(json.dumps([oid,kind,persistence,partkey,columns,constraints,indexes]))
 
 
-def _inspect_progress(conn):
+def _inspect_progress(conn, *, read_only_namespace=False):
     inspect_capture(conn)
     _source_columns(conn)
     state = dict(conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one())
@@ -123,7 +123,7 @@ def _inspect_progress(conn):
         raise RuntimeError("fact_header_copy_identity_order_not_prepared")
     state["_placement_pid"]=None
     if state["placement"] is not None:
-        state["_placement_pid"]=physical.verify(conn,state["placement"])
+        state["_placement_pid"]=physical.verify(conn,state["placement"], **({"read_only_namespace":True} if read_only_namespace else {}))
         for name in (*TABLE_NAMES,"pending_fact_ids","capture","copy_progress"):
             physical.verify_group(conn,SCHEMA+"."+name,history=name=="fact_identities" and state["identity_history_ready"],
                                   saved=state["placement"],pid=state["_placement_pid"])

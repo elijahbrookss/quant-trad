@@ -29,7 +29,7 @@ _TMPFS = {"/tmp": "rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
 _STATE = "storage-online-worker.json"
 
 
-def _retire_worker(process, identity, binding, contract):
+def _retire_worker(process, identity, binding, contract, *, command=None):
     """Reap the attach CLI AND verify the exact read-capability worker stopped.
 
     A detached/failed CLI is not daemon completion. Keep the launcher's existing
@@ -44,7 +44,7 @@ def _retire_worker(process, identity, binding, contract):
             raise RuntimeError("storage_online_worker_retirement_expired")
         return value
     def observe():
-        _admit(identity, binding, contract)
+        _admit(identity, binding, contract, **({"command": command} if command is not None else {}))
         return json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", identity))
     try:
         if process.stdin:
@@ -144,7 +144,7 @@ def _explicit_mounts(database, collector, inventory_path, request_path, udev):
     return result, source
 
 
-def _arguments(name, image, database_id, mounts, overrides, descriptor_limit, memory_bytes, digest):
+def _arguments(name, image, database_id, mounts, overrides, descriptor_limit, memory_bytes, digest, *, command=None):
     args = ["create", "--name", name, "--pull", "never", "--user", "0:0", "--init",
             "--restart", "no", "--read-only", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--memory", str(memory_bytes),
@@ -162,10 +162,10 @@ def _arguments(name, image, database_id, mounts, overrides, descriptor_limit, me
                  ",target="+target+(",readonly" if mount["readonly"] else "")]
     for key, value in overrides.items():
         args += ["--env", key if key == "PG_DSN" else key+"="+value]
-    return args+[image, *_COMMAND]
+    return args+[image, *(_COMMAND if command is None else command)]
 
 
-def _admit(identity, binding, previous=None):
+def _admit(identity, binding, previous=None, *, command=None):
     details = host_boundary.database_details(identity)
     config, host = details["config"], details["host"]
     mounts = [m for m in details["mounts"] if m["Type"] != "tmpfs"]
@@ -175,7 +175,7 @@ def _admit(identity, binding, previous=None):
     limits = host.get("Ulimits") or []
     valid = (
         details["image"] == binding["image"] and config["User"] == "0:0"
-        and config["Entrypoint"] == ["python"] and config["Cmd"] == _COMMAND
+        and config["Entrypoint"] == ["python"] and config["Cmd"] == (_COMMAND if command is None else command)
         and config.get("OpenStdin") is True and not config.get("Tty")
         and config["Hostname"] in (identity[:12], binding["database_hostname"])
         and config["Labels"].get("qt.storage.online") == binding["request_sha256"]

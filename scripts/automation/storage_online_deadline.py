@@ -37,7 +37,13 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def require_unterminated(state_root):
+    if os.path.lexists(state_root/"storage-online-terminal.json"):
+        raise RuntimeError("storage_online_terminal_intent_requires_terminal_owner")
+
+
 def require_settled(state_root):
+    require_unterminated(state_root)
     for name, kind in ((STATE, "deadline"), (PACKAGE_STATE, "package")):
         if os.path.lexists(state_root/name) and host.load_receipt(state_root/name, max_bytes=PACKAGE_JOURNAL_BYTES if name == PACKAGE_STATE else 65536).get("phase") != "complete":
             raise RuntimeError("storage_online_"+kind+"_amendment_requires_reconciliation")
@@ -182,6 +188,7 @@ def amend_operation(path, *, attempt_seconds, capacity_file, execute):
         raise ValueError("storage_online_deadline_arguments_invalid")
     operator_sha256 = _sha(Path(__file__).read_bytes()+Path(database.__file__).read_bytes())
     with host.deployment_lock(root):
+        require_unterminated(root)
         if os.path.lexists(root/PACKAGE_STATE) and host.load_receipt(root/PACKAGE_STATE, max_bytes=PACKAGE_JOURNAL_BYTES).get("phase") != "complete":
             raise RuntimeError("storage_online_package_amendment_requires_reconciliation")
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
@@ -354,6 +361,7 @@ def amend_worker_package(path, *, package_file, execute):
         raise ValueError("storage_online_package_manifest_invalid")
     operator_sha256 = _sha(Path(__file__).read_bytes()+Path(database.__file__).read_bytes())
     with host.deployment_lock(root):
+        require_unterminated(root)
         if os.path.lexists(root/STATE) and host.load_receipt(root/STATE).get("phase") != "complete":
             raise RuntimeError("storage_online_deadline_amendment_requires_reconciliation")
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):

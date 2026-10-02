@@ -282,3 +282,100 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
         interrupted_publication_reconciled=True, preparation_through_new_worker=True,
         source_clients_unchanged=True, production_runtime_preflight=False,
         production_capacity_admission=False, final_handoff=False)
+
+
+def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned):
+    """Real confined worker/SQL cancellation; synthetic runtime preflight only."""
+    from copy import deepcopy
+    import time
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_prepare as initial
+    from scripts.automation import storage_online_deadline as amendment
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_terminal as terminal
+    with launch.launched_online_worker(state, **kwargs) as (worker, receipt):
+        channel=host_boundary.OnlineWorkerChannel(worker,
+            deadline=time.monotonic()+receipt["deadline"]-time.time())
+        (control/"publish").write_text("publish")
+        def phase(step, relation=None):
+            return channel.exchange("prepare_step",step=step,relation=relation,max_duration_seconds=30)
+        phase("catalog_history","qt_fact_storage_cutover_v1.fact_versions")
+        for _ in range(64):
+            page=channel.exchange("sql_copy")["result"]
+            outcome=page["outcome"]
+            if outcome=="raw_relocation_required":phase("raw_history")
+            elif outcome=="identity_relocation_required":phase("identity_history")
+            elif outcome=="identity_order_required":phase("identity_order")
+            elif outcome=="both_tails_observed_empty" and (control/"published").exists():break
+        else:raise AssertionError("tiny terminal baseline did not converge")
+        phase("identity_capture")
+        references=channel.exchange("inspect_references",after=None)["result"]["references"]
+        assert references
+        # Keep an actual partial native reference set, then cancel without
+        # completing the migration or relocating the remaining catalogs.
+        phase("reference_prepare",references[0]["relation"])
+        channel.exchange("archive_copy")
+        channel.exchange("close")
+    assert worker.returncode==0
+    old=host_boundary.load_receipt(state/launch._STATE)
+    owned.append(old["container_id"])
+    request=deepcopy(kwargs["request"]);capture_plan=request.pop("capture_preparation")
+    keys=state/"terminal-fixture-keys";keys.mkdir(mode=0o700)
+    spool=state/"terminal-fixture-spool";spool.mkdir(mode=0o700)
+    limits=operation.OperationLimits(preparation_seconds=30,final_seconds=30,recovery_seconds=30,
+        runtime_seconds=30,spool_max_bytes=1024**2,spool_max_entries=128,spool_reserve_bytes=1024**2,
+        repository_max_bytes=256*1024**2,repository_reserve_bytes=1024**2,recent_free_bytes=1024**2)
+    plan=dict(schema_version="qt.storage_online_operation.v1",state_root=str(state),**kwargs,
+        source_image=kwargs["image"],history_uuid=history_uuid,history_before=capture_plan["history_before"],
+        attempt_seconds=old["capture"]["seconds"],limits=vars(limits),keys_root=str(keys),
+        socket_volume=kwargs["project"]+"-unused-socket",spool_destination=str(spool))
+    plan["request"]=request;plan["inventory_path"]=str(kwargs["inventory_path"])
+    path=state/"terminal-operation.json";host_boundary.save_receipt(path,plan,initial=True)
+    manifest=dict(schema_version="qt.storage_online_terminal.v1",plan_sha256=amendment._sha(path.read_bytes()),
+        image=kwargs["image"],source_revision=request["source_revision"],source_tree_hash=request["source_tree_hash"])
+    manifest_path=state/"terminal-package.json";host_boundary.save_receipt(manifest_path,manifest,initial=True)
+    original_files={p:p.read_bytes() for p in (path,state/amendment.REQUEST,state/launch._STATE,kwargs["inventory_path"])}
+    actual_preflight,actual_probe=operation.inspect_prepared_operation,terminal._probe
+    calls=[]
+    def fixture_preflight(state_root,**arguments):
+        launch.inspect_candidate_image(arguments["image"],arguments["request"])
+        return initial.admit_serving_source(state_root,project=kwargs["project"],
+            source_revision=kwargs["source_revision"],operator_id=arguments["operator_id"])
+    def lose_committed_reply(*args,**arguments):
+        calls.append(arguments["action"])
+        result=actual_probe(*args,**arguments)
+        saved=host_boundary.load_receipt(state/terminal.PROBE)
+        assert saved["retired"] and all(m["readonly"] for m in saved["binding"]["mounts"].values())
+        assert not host_boundary.docker("ps","-aq","--filter","id="+saved["container_id"]).strip()
+        if arguments["action"]=="apply":raise TimeoutError("owned terminal COMMIT reply lost")
+        return result
+    operation.inspect_prepared_operation=fixture_preflight
+    terminal._probe=lose_committed_reply
+    try:
+        inspected=operation.run_operation_plan(path,cancel_attempt_file=manifest_path)
+        assert inspected["storage_mutations_performed"] is False and not (state/terminal.STATE).exists()
+        try:
+            operation.run_operation_plan(path,cancel_attempt_file=manifest_path,execute=True)
+            raise AssertionError("lost terminal COMMIT reply did not interrupt")
+        except TimeoutError as exc:assert str(exc)=="owned terminal COMMIT reply lost"
+        before=host_boundary.load_receipt(state/terminal.STATE,max_bytes=524288)
+        assert before["phase"]=="dispatched"
+        completed=operation.run_operation_plan(path,cancel_attempt_file=manifest_path,execute=True)
+        after=host_boundary.load_receipt(state/terminal.STATE,max_bytes=524288)
+        assert after["phase"]=="complete" and completed["source_retained"]
+        assert calls.count("apply")==1
+        assert all(after[k]==before[k] for k in ("intent_sha256","wall_deadline","monotonic_deadline","boot_id"))
+        assert all(p.read_bytes()==data for p,data in original_files.items())
+        try:amendment.require_settled(state)
+        except RuntimeError as exc:assert str(exc)=="storage_online_terminal_intent_requires_terminal_owner"
+        else:raise AssertionError("terminal intent permitted normal migration")
+    finally:
+        operation.inspect_prepared_operation=actual_preflight;terminal._probe=actual_probe
+    status=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",old["container_id"]))
+    assert not status["Running"] and status["Pid"]==0 and not status["OOMKilled"]
+    assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=old["container_id"]))==source
+    return dict(read_only_worker_mounts=True,partial_native_references_and_archives=True,
+        committed_reply_loss_reconciled=True,apply_dispatches=calls.count("apply"),
+        original_inputs_and_clocks_preserved=True,old_worker_preserved=True,transient_workers_retired=True,
+        source_clients_unchanged=True,production_runtime_preflight=False,production_cardinality=False,
+        expired_host_attempt_qualified=False,final_handoff=False)
