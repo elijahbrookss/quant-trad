@@ -284,7 +284,7 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
         production_capacity_admission=False, final_handoff=False)
 
 
-def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned):
+def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned, expired=False):
     """Real confined worker/SQL cancellation; synthetic runtime preflight only."""
     from copy import deepcopy
     import time
@@ -335,6 +335,16 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
         image=kwargs["image"],source_revision=request["source_revision"],source_tree_hash=request["source_tree_hash"])
     manifest_path=state/"terminal-package.json";host_boundary.save_receipt(manifest_path,manifest,initial=True)
     original_files={p:p.read_bytes() for p in (path,state/amendment.REQUEST,state/launch._STATE,kwargs["inventory_path"])}
+    if expired:
+        # This fixture creates its original 180-second capture once. Wait for
+        # natural expiry; never amend its start, lifetime, or worker receipt.
+        remaining=old["deadline"]-time.time()
+        assert old["capture"]["seconds"]==180 and remaining<=180
+        wait_deadline=time.monotonic()+max(0,remaining)+1
+        while time.monotonic()<wait_deadline:
+            time.sleep(max(0,min(.1,wait_deadline-time.monotonic())))
+        assert time.time()>=old["deadline"]
+        assert all(p.read_bytes()==data for p,data in original_files.items())
     actual_preflight,actual_probe=operation.inspect_prepared_operation,terminal._probe
     calls=[]
     def fixture_preflight(state_root,**arguments):
@@ -378,4 +388,4 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
         committed_reply_loss_reconciled=True,apply_dispatches=calls.count("apply"),
         original_inputs_and_clocks_preserved=True,old_worker_preserved=True,transient_workers_retired=True,
         source_clients_unchanged=True,production_runtime_preflight=False,production_cardinality=False,
-        expired_host_attempt_qualified=False,final_handoff=False)
+        expired_host_attempt_qualified=expired,final_handoff=False)

@@ -20,6 +20,7 @@ parser.add_argument('--prepare-source',action='store_true',help='qualify retaine
 parser.add_argument('--initial-capture',action='store_true',help='create placement and capture in the real confined worker while source serves')
 parser.add_argument('--replacement-package-image',help='qualify an actual new package and interrupted publication before header copying')
 parser.add_argument('--terminal-cancellation',action='store_true',help='qualify preserving cancellation through a read-only mounted worker and lost reply reconciliation')
+parser.add_argument('--terminal-cancellation-expired',action='store_true',help='wait for the original fixture capture to expire naturally before preserving cancellation')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
@@ -48,6 +49,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.terminal_cancellation_expired and not options.terminal_cancellation:
+ parser.error('--terminal-cancellation-expired requires --terminal-cancellation')
 if options.canonical_deployment_repository and not options.completion_observation:
  parser.error('--canonical-deployment-repository requires --completion-observation')
 if options.completion_observation and not options.full_operation:
@@ -302,6 +305,7 @@ os.chown(root,70,70)
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
    '--env','QT_ONLINE_TERMINAL_FIXTURE='+str(int(options.terminal_cancellation)),
+   '--env','QT_ONLINE_TERMINAL_EXPIRED='+str(int(options.terminal_cancellation_expired)),
    '--env','QT_ONLINE_FULL_OPERATION='+str(int(options.full_operation)),
    '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
@@ -546,7 +550,8 @@ os.chown(root,70,70)
   if options.terminal_cancellation:
    from scripts.ci.online_operation_fixture import rehearse_terminal_cancellation
    report['terminal_cancellation']=rehearse_terminal_cancellation(state=state,kwargs=kwargs,
-     history_uuid=history_uuid,control=control,source=source,owned=owned)
+     history_uuid=history_uuid,control=control,source=source,owned=owned,
+     expired=options.terminal_cancellation_expired)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()
@@ -1386,7 +1391,10 @@ os.chown(root,70,70)
   report.update(passed=True,image=image,first_process_commands=channel.sequence if options.final_pause else final['last_sequence']+(0 if options.worker_attach_loss else 1),final_status=final,source_owner=working.stat().st_uid,fixture_seconds=time.monotonic()-started)
 
 except BaseException as exc:
- if (options.recovery_create_reply_loss and isinstance(exc,EOFError)
+ if (options.terminal_cancellation and isinstance(exc,SystemExit)
+     and exc.code==0 and report.get('passed') is True):
+  pass
+ elif (options.recovery_create_reply_loss and isinstance(exc,EOFError)
      and str(exc)=='owned completed recovery create reply discarded'):
   saved=final_host._load(state/final_host.STATE)
   assert saved['phase']=='recovery_preparing'
@@ -1480,9 +1488,16 @@ finally:
    for proof in (package_saved['old_worker'],launch_saved):
     if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
         and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
+  if options.terminal_cancellation and (state/launch._STATE).exists():
+   original_saved=host_boundary.load_receipt(state/launch._STATE)
+   if (name==original_saved['container_id']==details['Id']
+       and original_saved['binding']['project']==project):
+    launch._admit(name,original_saved['binding'],original_saved['contract'])
+    mine=True
   if options.terminal_cancellation and (state/'storage-online-terminal-worker.json').exists():
    terminal_saved=host_boundary.load_receipt(state/'storage-online-terminal-worker.json')
-   if name==terminal_saved['container_id']==details['Id']:
+   if (name==terminal_saved['container_id']==details['Id']
+       and terminal_saved['binding']['project']==project):
     launch._admit(name,terminal_saved['binding'],terminal_saved['contract'],command=terminal.COMMAND)
     mine=True
   if name==project+'-storage-spool-prepare':

@@ -128,7 +128,7 @@ def _declare_targets(storage, control, monkeypatch, *, recent_root):
 
 def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, monkeypatch):
     control = Path("/qt-control")
-    deadline = time.monotonic()+180
+    deadline = time.monotonic()+(300 if os.getenv("QT_ONLINE_TERMINAL_EXPIRED")=="1" else 180)
     def wait(name):
         while not (control/name).exists():
             if time.monotonic() >= deadline:
