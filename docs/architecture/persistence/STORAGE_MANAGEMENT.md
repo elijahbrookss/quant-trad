@@ -140,7 +140,10 @@ Missing/changed retained history refuses admission. The fixed full-copy handoff
 installs that empty catalogue without changing saved copy target fingerprints.
 The physical catalogue inventories this fixed range with its complete heap,
 TOAST and ordinary indexes. It shares startup integrity checks within the same
-query budget. The forward operator and production movement qualification remain
+query budget. The constant-boundary helper avoids a legacy heap lock during
+new-day ingestion/provisioning. Canonical reads that include retained history
+still wait for its read lock; a large movement is not qualified by this fix.
+The forward operator and production movement qualification remain
 incomplete; inventory admission alone does not authorize a cutover.
 
 ## One online migration workflow and its owners

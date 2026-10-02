@@ -28,6 +28,8 @@ from sqlalchemy.engine import URL
 from core.storage_mounts import StorageMountError
 from core.storage_targets import StoragePolicy, StorageTarget
 from portal.backend.db.fact_identity_schema import fact_header_partition_name
+from portal.backend.db.fact_header_legacy_schema import install_fact_header_legacy_functions
+from portal.backend.db.market_data_models import MarketFactHeaderLegacyRecord
 from portal.backend.db.storage_target_models import (
     StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord, StorageHeaderTablespaceRecord,
     StorageHeaderBatchRecord, StorageHeaderMoveRecord,
@@ -90,6 +92,8 @@ def _worker(root, history):
                         FROM generate_series(1,2000) n;
                 """).format(partition=sql.Identifier(partition_name), day=sql.Literal(storage_day),
                             next_day=sql.Literal(storage_day + timedelta(days=1))))
+            MarketFactHeaderLegacyRecord.__table__.create(conn)
+            install_fact_header_legacy_functions(conn)
         before = None
         with engine.connect() as conn:
             before = conn.execute(text("SELECT id,md5(payload) FROM market.fact_versions")).all()

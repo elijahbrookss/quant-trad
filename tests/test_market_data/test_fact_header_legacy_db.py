@@ -5,7 +5,7 @@ Tiny owned fixtures only; this is not a forward-cutover operator.
 from dataclasses import replace
 from datetime import timedelta
 import pytest
-from sqlalchemy import text
+from sqlalchemy import text, event
 from sqlalchemy.exc import DBAPIError
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, BASE
 from tests.test_market_data.test_fact_header_copy_db import source, _headers, _frozen_records
@@ -267,3 +267,40 @@ def test_catalog_budget_includes_legacy_group(legacy):
         ensure_fact_header_partition(conn, legacy.legacy_cutoff)
     with pytest.raises(RuntimeError, match="partition_budget_exceeded"):
         read_header_catalog(engine, max_partitions=1)
+
+
+def test_new_fact_ingestion_and_existing_provisioning_survive_retained_heap_lock(legacy,monkeypatch):
+    engine = legacy.database._engine
+    day = legacy.legacy_cutoff
+    _placement(monkeypatch,day)
+    new = replace(legacy.original_facts[0],observation_key="new-after-legacy-cutover",
+                  observation_time=BASE+timedelta(days=10),
+                  accepted_at=BASE+timedelta(days=10),known_at=BASE+timedelta(days=10))
+    with engine.begin() as conn:
+        from portal.backend.db.fact_storage_schema import ensure_fact_payload_partition
+        ensure_fact_payload_partition(conn,day)
+    def bounded_connection(dbapi,record,proxy):
+        with dbapi.cursor() as cursor:
+            cursor.execute("SET statement_timeout='1000ms'")
+    event.listen(engine,"checkout",bounded_connection)
+    try:
+        with engine.begin() as blocker:
+            blocker.exec_driver_sql("LOCK TABLE ONLY market.fact_versions_legacy IN ACCESS EXCLUSIVE MODE")
+            with engine.begin() as conn:
+                assert conn.scalar(text("SELECT market.fact_header_legacy_end_day()")) == day
+                ensure_fact_header_partition(conn,day)
+                with pytest.raises(RuntimeError,match="fact_header_legacy_day_sealed"):
+                    ensure_fact_header_partition(conn,day-timedelta(days=1))
+            result = legacy.repo.ingest_facts(series_id=legacy.series_id,
+                                             source_id=legacy.source_id,facts=[new])
+            assert result.inserted_count == 1
+        # Canonical reads that need retained history still take its normal read
+        # lock. Validate the committed new fact and original frozen data after
+        # release; this test makes no claim of read independence during a move.
+        rows = legacy.repo.read_facts(series_id=legacy.series_id,start=new.observation_time,
+                                      end=new.observation_time+timedelta(seconds=1))
+        assert len(rows) == 1 and rows[0].fact.observation_key == new.observation_key
+        assert legacy.repo.read_dataset_fact_revisions(dataset_id=legacy.frozen_dataset_id,
+                                                       series_id=legacy.series_id) == legacy.frozen_result
+    finally:
+        event.remove(engine,"checkout",bounded_connection)

@@ -30,7 +30,9 @@ BEGIN
         WHERE c.oid=to_regclass('market.fact_versions_legacy')
           AND c.oid::bigint=bound_oid AND c.relkind='r' AND c.relpersistence='p'
           AND i.inhparent='market.fact_versions'::regclass
-          AND pg_get_expr(c.relpartbound,c.oid)=format(
+          -- The fixed date bound contains no Vars. OID zero deparses the same
+          -- catalog value without taking the retained heap's relation lock.
+          AND pg_get_expr(c.relpartbound,0)=format(
               'FOR VALUES FROM (MINVALUE) TO (%L)',bound_day::text)
     ) THEN
         RAISE EXCEPTION 'fact_header_legacy_binding_changed: relation_oid=% end_day=%',

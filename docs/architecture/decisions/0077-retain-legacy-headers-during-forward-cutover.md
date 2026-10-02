@@ -69,6 +69,17 @@ Source, known-at, commit, revision and invalidation selection stay unchanged.
 A missing new-day directory entry must remain an error or prevented invariant;
 legacy support cannot become a silent fallback for arbitrary missing metadata.
 
+The fixed date boundary has no column references. Its shared helper deparses
+with relation OID zero, retaining the exact OID/parent/range comparison while
+avoiding a read lock merely to inspect that constant. Native lock diagnostics
+showed the original relation-OID deparse blocked new-fact ingestion and existing
+partition provisioning behind a legacy heap lock; zero-OID deparse lets those
+operations complete. This does not make canonical history reads independent of
+that lock: even a recent observation-time range can include retained revisions.
+The diagnostic still timed out that read while the legacy heap was locked.
+Large legacy movement therefore needs explicit measured read-impact admission;
+this change is not a zero-interruption movement certificate.
+
 The range boundary must match stored data. The simplest candidate is a future
 UTC storage-day boundary: prepare and validate the old range while collecting,
 then drain writers for a bounded switch before admitting the new day. Existing
