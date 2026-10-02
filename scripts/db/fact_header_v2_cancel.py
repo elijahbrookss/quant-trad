@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from sqlalchemy import text
 
@@ -35,7 +36,8 @@ def _triggers(conn, relations):
 
 
 def cancel_attempt(conn, *, expected_started_at, source_root=None,
-                   destination_root=None, timeout_seconds=30):
+                   destination_root=None, timeout_seconds=30,
+                   expected_capture=None, intent_sha256=None):
     """Detach only admitted temporary write dependencies, preserving every row.
 
     Expiry forbids normal work but must not make dead queues grow forever.
@@ -48,7 +50,11 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
         raise ValueError("fact_header_cancel_timeout_out_of_bounds")
     if not isinstance(expected_started_at, str) or not expected_started_at:
         raise ValueError("fact_header_cancel_original_start_required")
+    bound = expected_capture is not None or intent_sha256 is not None
+    if bound:
+        _validate_intent(expected_capture, intent_sha256)
     with capture._bounded_step(conn, timeout_seconds):
+        _require_retired_controller(conn)
         capture.require_not_cancelled(conn)
         # Exact old source identity refuses a committed or uncertain v2 switch.
         # NOWAIT leaves a busy serving transaction alone, rather than draining it.
@@ -57,6 +63,8 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
         if captured["started_at"] != expected_started_at:
             raise RuntimeError("fact_header_cancel_attempt_binding_changed")
         saved = dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        if bound and _capture_binding(conn) != expected_capture:
+            raise RuntimeError("fact_header_cancel_capture_preimage_changed")
         header_state = headers._inspect_progress(conn) if _exists(conn, headers.STATE) else None
         if header_state is None and any(_exists(conn, capture.SCHEMA+"."+name)
                                         for name in headers.TABLE_NAMES):
@@ -140,6 +148,9 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
             "source_retained": True, "partial_copies_retained": True,
             "migration_ready": False, "final_switch_authorized": False,
         }
+        if bound:
+            receipt.update(schema_version="qt.fact_header_cancel.v2",
+                           capture=expected_capture, intent_sha256=intent_sha256)
         conn.exec_driver_sql(f"CREATE TABLE {capture.CANCELLED}("
                              "id integer PRIMARY KEY CHECK(id=1),"
                              "cancelled_at timestamptz NOT NULL DEFAULT clock_timestamp(),"
@@ -150,4 +161,86 @@ def cancel_attempt(conn, *, expected_started_at, source_root=None,
         logger.info("fact_header_attempt_cancellation_staged | source_oid=%s started_at=%s "
                     "temporary_triggers=%s reference_roots=%s",
                     captured["source_oid"], expected_started_at, len(removed), len(roots))
+        return receipt
+
+
+def _validate_intent(expected_capture, intent_sha256):
+    if (not isinstance(expected_capture, dict) or not expected_capture
+            or not isinstance(intent_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", intent_sha256) is None):
+        raise ValueError("fact_header_cancel_exact_intent_required")
+
+
+def _require_retired_controller(conn):
+    # The transaction lock excludes another migration step. The controller's
+    # session lock also excludes an idle controller between commands.
+    from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK
+    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
+                       {"name": CONTROLLER_LOCK}):
+        raise RuntimeError("fact_header_cancel_controller_active")
+
+
+def _capture_binding(conn):
+    value = conn.execute(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c")).scalar_one()
+    # PostgreSQL's JSON encoder emits oid values as strings; the native source
+    # context uses bigint. One canonical preimage is used before and after COMMIT.
+    return {**value, **{name: int(value[name]) for name in
+                       ("source_oid", "database_oid", "queue_oid")}}
+
+
+def inspect_cancellation(conn, *, expected_capture, intent_sha256, timeout_seconds=10):
+    """Read a committed terminal outcome; never replay a cancellation or copy.
+
+    The host must supply its durable intent and original capture preimage. None
+    means no committed marker was observed, NOT permission to redispatch after
+    an uncertain commit. No normal capture inspector is used after cancellation:
+    its temporary triggers intentionally no longer exist.
+    """
+    _validate_intent(expected_capture, intent_sha256)
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 30:
+        raise ValueError("fact_header_cancel_timeout_out_of_bounds")
+    with capture._bounded_step(conn, timeout_seconds):
+        _require_retired_controller(conn)
+        conn.exec_driver_sql(f"LOCK TABLE {capture.SOURCE} IN ACCESS SHARE MODE NOWAIT")
+        context = capture._context(conn)
+        if (any(expected_capture.get(k) != v for k, v in context.items())
+                or _capture_binding(conn) != expected_capture
+                or conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                               {"name": capture.QUEUE}) != expected_capture.get("queue_oid")):
+            raise RuntimeError("fact_header_cancel_capture_preimage_changed")
+        if not _exists(conn, capture.CANCELLED):
+            return None
+        # One actual durable marker, not an arbitrary view or multirow result.
+        kind = conn.execute(text("SELECT relkind,relpersistence FROM pg_class "
+                                 "WHERE oid=to_regclass(:name)"),
+                            {"name": capture.CANCELLED}).one()
+        if tuple(kind) != ("r", "p"):
+            raise RuntimeError("fact_header_cancel_receipt_layout_changed")
+        rows = conn.execute(text(f"SELECT id,cancelled_at,receipt FROM {capture.CANCELLED} LIMIT 2")).mappings().all()
+        if len(rows) != 1 or rows[0]["id"] != 1 or rows[0]["cancelled_at"] is None:
+            raise RuntimeError("fact_header_cancel_receipt_layout_changed")
+        receipt = rows[0]["receipt"]
+        if (not isinstance(receipt, dict)
+                or receipt.get("schema_version") != "qt.fact_header_cancel.v2"
+                or receipt.get("intent_sha256") != intent_sha256
+                or receipt.get("capture") != expected_capture
+                or receipt.get("source_retained") is not True
+                or receipt.get("partial_copies_retained") is not True
+                or receipt.get("migration_ready") is not False
+                or receipt.get("final_switch_authorized") is not False):
+            raise RuntimeError("fact_header_cancel_receipt_binding_changed")
+        relations = sorted({relation for relation, _ in receipt["removed_triggers"]})
+        if _triggers(conn, relations) != receipt["original_triggers"]:
+            raise RuntimeError("fact_header_cancel_original_trigger_changed")
+        if conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_constraint "
+                            "WHERE contype='f' AND confrelid=to_regclass(:target) "
+                            "AND connamespace='market'::regnamespace)"),
+                       {"target": references.TARGET}):
+            raise RuntimeError("fact_header_cancel_staged_reference_remains")
+        if receipt["original_references"] is not None:
+            # New source payload days may appear while collection continues.
+            # Validate their native references, and retain every original OID.
+            actual = _incoming_references(conn)
+            if any(row not in actual for row in receipt["original_references"]):
+                raise RuntimeError("fact_header_cancel_original_reference_changed")
         return receipt

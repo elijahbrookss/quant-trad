@@ -1501,7 +1501,15 @@ automatic replacement attempt occurs. Normal preparation, copy and switch
 entrypoints permanently refuse the canceled attempt.
 
 A rollback restores all dependencies and capture; a lost commit reply requires
-read-only receipt inspection. Cancellation is not a host abort or runtime
+read-only receipt inspection. The bound cancellation form takes an exact JSON
+capture preimage plus the host's durable intent SHA256 and records a v2 terminal
+receipt; the original internal call retains its v1 receipt. Both execution and
+inspection also exclude a live controller's session lock, including its idle
+periods. `inspect_cancellation` compares the intent, untouched capture, actual
+source/database/queue identity, original triggers and native references. It
+allows newly provisioned payload days only after validating their references.
+Missing or foreign receipts cannot authorize redispatch. Read-only inspection
+neither renews a capture nor removes data or temporary dependencies. Cancellation is not a host abort or runtime
 restart instruction. The persistent online host controller must invoke and
 qualify this boundary explicitly; source collection continues on the old layout.
 Production-cardinality lock/admission cost remains unmeasured.
