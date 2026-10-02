@@ -15,6 +15,7 @@ from core.storage_header_placement import (
     HeaderPartitionPlacement, HeaderPlacementSnapshot, RelationPlacement,
 )
 from portal.backend.db.fact_identity_schema import fact_header_partition_name
+from portal.backend.db.fact_header_legacy_schema import assert_fact_header_legacy_contract
 
 
 @dataclass(frozen=True)
@@ -109,7 +110,7 @@ def read_transaction_header_catalog(conn, *, max_partitions=4096, timeout_second
 
 def read_locked_header_group(conn, *, storage_day, heap_oid, timeout_seconds=30,
                              destination_tablespace_oids=()):
-    """Lock and observe one daily group in the caller's READ COMMITTED transaction.
+    """Lock and observe one daily or fixed legacy group in the caller's READ COMMITTED transaction.
 
     No commit, rollback or new connection occurs. The caller must roll back on
     error and keep the transaction open through any later physical operation.
@@ -160,7 +161,8 @@ def _observe_header_catalog(conn, *, max_partitions, deadline,
 def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oids,
                   storage_day, heap_oid, handoff_locked=False):
     # ONLY avoids locking an unbounded descendant inventory before admission.
-    query("LOCK TABLE ONLY market.fact_versions, ONLY market.fact_header_partitions IN ACCESS SHARE MODE")
+    query("LOCK TABLE ONLY market.fact_versions, ONLY market.fact_header_partitions, "
+          "ONLY market.fact_header_legacy IN ACCESS SHARE MODE")
     context = query("""
         SELECT clock_timestamp() AS captured_at,
                current_setting('data_directory') AS data_directory,
@@ -182,27 +184,46 @@ def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oid
     """).mappings().one()
     if tuple(parent.values()) != ("p", "p", "RANGE (storage_day)"):
         raise RuntimeError("header_catalog_parent_incompatible")
+    binding = query("SELECT end_day,relation_oid FROM market.fact_header_legacy WHERE id=1").one_or_none()
+    legacy_end = binding[0] if binding is not None else None
+    legacy_oid = binding[1] if binding is not None else None
+    if legacy_end is not None and (type(legacy_end) is not date or legacy_end <= date.min):
+        raise RuntimeError("header_catalog_legacy_boundary_invalid")
+    legacy_day = legacy_end - timedelta(days=1) if legacy_end is not None else None
+    selected_legacy = (storage_day is not None and storage_day == legacy_day
+                       and heap_oid == legacy_oid)
     if storage_day is not None:
-        # Identifiers derive only from a typed date. Hold the exact child through
-        # observation, caller DDL and verification; do not open another connection.
-        name = fact_header_partition_name(storage_day)
+        # The legacy name is fixed; daily names derive only from a typed date.
+        # Hold just the selected child through observation, DDL and verification.
+        name = "fact_versions_legacy" if selected_legacy else fact_header_partition_name(storage_day)
         query('LOCK TABLE ONLY market."' + name + '" IN ACCESS EXCLUSIVE MODE')
-        days = list(query("""
-            SELECT storage_day FROM market.fact_header_partitions
-            WHERE storage_day=:day FOR KEY SHARE
-        """, {"day": storage_day}).scalars())
-        if days != [storage_day]:
-            raise RuntimeError("header_catalog_group_not_registered")
+        if selected_legacy:
+            locked = query("SELECT end_day,relation_oid FROM market.fact_header_legacy "
+                           "WHERE id=1 FOR KEY SHARE").one_or_none()
+            if locked is None or tuple(locked) != (legacy_end, legacy_oid):
+                raise RuntimeError("header_catalog_legacy_binding_changed")
+            days = []
+        else:
+            days = list(query("""
+                SELECT storage_day FROM market.fact_header_partitions
+                WHERE storage_day=:day FOR KEY SHARE
+            """, {"day": storage_day}).scalars())
+            if days != [storage_day]:
+                raise RuntimeError("header_catalog_group_not_registered")
     else:
         days = list(query("""
             SELECT storage_day FROM market.fact_header_partitions
             ORDER BY storage_day LIMIT :limit
         """, {"limit": max_partitions + 1}).scalars())
-    if len(days) > max_partitions:
-        raise RuntimeError("header_catalog_partition_budget_exceeded")
+    if legacy_end is not None and any(day < legacy_end for day in days):
+        raise RuntimeError("header_catalog_overlapping_legacy_range")
     expected = {fact_header_partition_name(day): day for day in days}
     if len(expected) != len(days):
         raise RuntimeError("header_catalog_duplicate_day")
+    if legacy_end is not None and (storage_day is None or selected_legacy):
+        expected["fact_versions_legacy"] = legacy_day
+    if len(expected) > max_partitions:
+        raise RuntimeError("header_catalog_partition_budget_exceeded")
     children = list(query("""
         SELECT c.oid::bigint AS oid, n.nspname AS schema, c.relname AS name,
                c.relkind AS kind, c.relpersistence AS persistence,
@@ -213,17 +234,26 @@ def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oid
           AND (CAST(:heap_oid AS bigint) IS NULL OR c.oid::bigint=:heap_oid)
         ORDER BY c.oid LIMIT :limit
     """, {"limit": max_partitions + 1, "heap_oid": heap_oid}).mappings())
-    if len(children) != len(days) or {row["name"] for row in children} != set(expected):
+    if len(children) != len(expected) or {row["name"] for row in children} != set(expected):
         raise RuntimeError("header_catalog_registry_attachment_mismatch")
     for row in children:
         day = expected[row["name"]]
-        bound = f"FOR VALUES FROM ('{day.isoformat()}') TO ('{(day + timedelta(days=1)).isoformat()}')"
+        bound = (f"FOR VALUES FROM (MINVALUE) TO ('{legacy_end.isoformat()}')"
+                 if row["name"] == "fact_versions_legacy" else
+                 f"FOR VALUES FROM ('{day.isoformat()}') TO ('{(day + timedelta(days=1)).isoformat()}')")
         if (row["schema"], row["kind"], row["persistence"], row["bound"]) != ("market", "r", "p", bound):
             raise RuntimeError("header_catalog_partition_incompatible")
     if children:
-        # Every identifier comes from a validated date, never a free-form label.
+        # Every identifier is date-derived or the fixed legacy name.
         names = ", ".join('ONLY market."' + name + '"' for name in sorted(expected))
         query("LOCK TABLE " + names + " IN ACCESS SHARE MODE")
+    # Full and retained-group admission share the startup proof and SQL budget.
+    # pg_get_expr in that proof can acquire the retained heap's lock. A partial
+    # daily observation proves only its selected child and must not wait on an
+    # unrelated legacy move; it cannot certify or reserve the legacy group.
+    if storage_day is None or selected_legacy:
+        if assert_fact_header_legacy_contract(query=query) != legacy_end:
+            raise RuntimeError("header_catalog_legacy_binding_changed")
     oids = [row["oid"] for row in children]
     relations = list(query("""
         WITH bounded AS MATERIALIZED (
@@ -300,6 +330,7 @@ def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oid
         expected[row["name"]], placement(row),
         tuple(placement(index) for index in grouped[row["oid"]]),
         True, row["toast_colocated"],
+        legacy_end_day=legacy_end if row["name"] == "fact_versions_legacy" else None,
     ) for row in relations)
     if monotonic() >= deadline:
         raise RuntimeError("header_catalog_time_budget_exceeded")

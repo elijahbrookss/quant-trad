@@ -63,6 +63,10 @@ def _compare_reserved_group(move, verified):
             or not group.index_inventory_complete or not group.toast_colocated):
         raise StorageConflict("storage_move_group_mismatch")
     source = move.source_group
+    if (not isinstance(source, dict)
+            or source.get("legacy_end_day") != group.range_binding.get("legacy_end_day")
+            or ("legacy_end_day" in source) != bool(group.range_binding)):
+        raise StorageConflict("storage_move_range_binding_changed")
     try:
         if not isinstance(source, dict) or not isinstance(source["indexes"], list) or len(source["indexes"]) > 64:
             raise ValueError("source group")

@@ -23,8 +23,8 @@ code_paths:
 Proposed October 2, 2026 after the user asked whether new storage could become
 usable without rewriting all historical headers first. This is an evidence-backed
 proposal, not a production release decision. The first implementation slice
-supports an explicit sealed legacy binding and canonical reads; the physical
-inventory and forward operator are still incomplete. The existing supported
+supports an explicit sealed legacy binding, canonical reads and bounded physical
+inventory; the forward operator and production qualification are still incomplete. The existing supported
 operator must not be used to approximate this proposal with manual schema edits.
 
 ## Avoid copying a table whose contents already match
@@ -101,8 +101,14 @@ Native global identities, correction selection and archive hydration are unchang
 
 The full-copy operator's saved four-target protocol is unchanged. Its explicit
 final handoff creates the new empty catalogue. These additions do not provide
-a forward-cutover entrypoint or qualify deployment: physical inventory currently
-continues to refuse the broad retained range.
+a forward-cutover entrypoint or qualify deployment. The physical catalogue now
+admits the exact retained range through the shared integrity checks and includes
+all heap/TOAST and ordinary-index bytes in its normal inventory. The legacy
+range counts toward the existing group limit, without increasing SQL deadlines.
+Its newest possible day is the stable journal key and controls eligibility;
+plans and completion receipts additionally bind the exclusive range end.
+A changed or missing range proof refuses execution. Existing daily-only plan
+hashes omit the new optional field and remain unchanged.
 
 ## Recent performance and eventual historical placement
 

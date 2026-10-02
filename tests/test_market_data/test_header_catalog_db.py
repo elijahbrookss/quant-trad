@@ -7,6 +7,8 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
+from portal.backend.db.fact_header_legacy_schema import install_fact_header_legacy_functions
+from portal.backend.db.market_data_models import MarketFactHeaderLegacyRecord
 from portal.backend.service.storage.header_catalog import read_header_catalog, read_locked_header_group
 from tests.test_market_data.migration_test_support import fresh_migration_database
 
@@ -37,6 +39,8 @@ def catalog_engine():
                         FROM generate_series(1,2000) g;
                     INSERT INTO market.fact_versions VALUES ('same', '2026-09-01', 'other');
                 """))
+                MarketFactHeaderLegacyRecord.__table__.create(conn)
+                install_fact_header_legacy_functions(conn)
             yield engine
         finally:
             engine.dispose()

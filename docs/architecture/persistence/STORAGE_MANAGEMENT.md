@@ -131,15 +131,17 @@ settings page reports observed outcomes separately from saving configuration.
 records a proposed alternative for the demonstrated copy and capacity problem:
 retain the existing header table as one sealed range beneath the same canonical
 parent, then use daily partitions for new writes. Disposable mechanics and real
-QT read-path diagnostics support further implementation, but physical inventory
-and operator admission remain incomplete. It is not an alternative deploy command. Keeping old history on SSD would be an intermediate
+QT read-path diagnostics and bounded physical inventory support further implementation,
+but forward operator admission remains incomplete. It is not an alternative deploy command. Keeping old history on SSD would be an intermediate
 state; final historical placement and measured recovery remain required.
 The first runtime slice binds one sealed legacy relation and includes it in the
 same STABLE range reader; clean daily layouts use an empty binding catalogue.
 Missing/changed retained history refuses admission. The fixed full-copy handoff
 installs that empty catalogue without changing saved copy target fingerprints.
-Complete physical inventory and the forward operator remain unimplemented;
-current physical placement admission still refuses a broad legacy partition.
+The physical catalogue inventories this fixed range with its complete heap,
+TOAST and ordinary indexes. It shares startup integrity checks within the same
+query budget. The forward operator and production movement qualification remain
+incomplete; inventory admission alone does not authorize a cutover.
 
 ## One online migration workflow and its owners
 
@@ -380,7 +382,8 @@ so a future executor must move and verify the complete group transactionally.
 The plan records OIDs, physical file identifiers, target UUIDs, sizes and a
 deterministic evidence hash. Relation names are descriptive labels, not SQL.
 
-The planner handles at most 4,096 daily groups and 32 registered targets;
+The planner handles at most 4,096 groups (including the optional legacy range)
+and 32 registered targets;
 a smaller caller budget is rejected before sorting or planning if exceeded.
 Incomplete inventory, unverified source filesystems, or insufficient
 destination capacity blocks the whole proposal. No partial move list or
@@ -394,6 +397,15 @@ groups requires a separate cutover. Historical groups keep an eligible existing
 heap location if the rest of the group fits. Otherwise, allocation selects the
 eligible target with most remaining headroom, with target ID breaking ties.
 Adding an HDD therefore does not redistribute already valid history.
+
+The optional fixed legacy group covers `MINVALUE` through its exclusive
+`legacy_end_day`. Its journal `storage_day` is the latest possible day in that
+range, never a fabricated daily partition bound. Thus the whole group remains
+recent until that day is strictly outside the recent window. Legacy and daily
+ranges cannot overlap. Plans, saved source intent and physical completion
+receipts bind the exclusive end day; dropping or changing it refuses execution.
+Daily plans omit the optional field, preserving existing hashes and receipts.
+No released source bytes receive advance or duplicate capacity credit.
 
 Copy reservations accumulate across the proposed batch, subtract existing
 reservations and the policy reserve, and never credit space expected to be
@@ -424,7 +436,11 @@ a complete result. Concurrent file growth and index maintenance still require
 fresh checks before execution.
 
 The reader checks the registered daily partitions against their attached
-relations, schema, persistence and exact daily bounds. It observes table,
+relations, schema, persistence and exact daily bounds. The one fixed legacy
+child instead requires the immutable OID/range binding, native index and foreign
+key integrity and mutation seals used by startup. All checks use the catalogue's
+existing decreasing SQL budget. A selected-group observation locks only that
+child, so a daily move does not wait for an unrelated legacy heap lock. It observes table,
 ordinary-index and TOAST sizes/placement, rejects invalid ordinary indexes,
 and reports whether TOAST and its internal indexes are colocated. PostgreSQL's
 effective database-default tablespace is resolved when a relation stores

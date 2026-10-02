@@ -111,3 +111,16 @@ def test_stalled_watcher_invalidates_backend_before_it_can_return_to_pool():
         release.set()
         watch._thread.join(2)
         assert not watch._thread.is_alive()
+
+
+def test_legacy_physical_receipt_preserves_range_through_file_relocation(transition):
+    before, after = transition
+    def legacy(verified):
+        group = verified.snapshot.partitions[0]
+        group = replace(group, heap=replace(group.heap, name="fact_versions_legacy"),
+                        legacy_end_day=date(2026, 8, 2))
+        return replace(verified, snapshot=replace(verified.snapshot, partitions=(group,)))
+    receipt = _verify_transition(legacy(before), legacy(after), {10}, 9000, "hdd")
+    assert receipt["legacy_end_day"] == "2026-08-02"
+    with pytest.raises(StorageConflict, match="range_changed"):
+        _verify_transition(legacy(before), after, {10}, 9000, "hdd")

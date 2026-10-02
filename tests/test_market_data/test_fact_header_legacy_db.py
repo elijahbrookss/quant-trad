@@ -14,6 +14,7 @@ from portal.backend.db.fact_storage_schema import install_fact_storage_functions
 from portal.backend.db.fact_identity_schema import assert_fact_identity_contract, assert_fact_identity_references
 from portal.backend.db.fact_storage_schema import assert_fact_storage_contract
 from portal.backend.db.session import Database
+from portal.backend.service.storage.header_catalog import read_header_catalog, read_locked_header_group
 from portal.backend.db.fact_identity_schema import ensure_fact_header_partition
 
 pytestmark=pytest.mark.db
@@ -220,3 +221,49 @@ def test_native_legacy_proof_drift_refuses_admission(legacy,damage):
     with pytest.raises((RuntimeError,DBAPIError),match=expected):
         with engine.connect() as conn:
             assert_fact_identity_contract(conn)
+    catalog_error = "registry_attachment_mismatch" if damage == "empty_binding" else expected
+    with pytest.raises((RuntimeError,DBAPIError),match=catalog_error):
+        read_header_catalog(engine)
+
+
+def test_legacy_physical_catalog_counts_all_files_and_locks_exact_retained_group(legacy):
+    engine = legacy.database._engine
+    inventory = read_header_catalog(engine)
+    group, = [g for g in inventory.snapshot.partitions if g.legacy_end_day is not None]
+    assert group.legacy_end_day == legacy.legacy_cutoff
+    assert group.storage_day == legacy.legacy_cutoff-timedelta(days=1)
+    with engine.connect() as conn:
+        assert sum(r.byte_count for r in group.relations) == conn.scalar(text(
+            "SELECT pg_total_relation_size('market.fact_versions_legacy')"))
+        assert len(group.indexes) == conn.scalar(text(
+            "SELECT count(*) FROM pg_index WHERE indrelid='market.fact_versions_legacy'::regclass"))
+        assert len(group.indexes) >= 13
+    with engine.begin() as conn:
+        partial = read_locked_header_group(conn, storage_day=group.storage_day, heap_oid=group.heap.oid)
+        assert not partial.snapshot.inventory_complete
+        assert partial.snapshot.partitions == (group,)
+        assert conn.scalar(text("SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() "
+                                "AND relation=:oid AND mode='AccessExclusiveLock' AND granted"),
+                           {"oid":group.heap.oid}) == 1
+
+
+def test_daily_group_observation_does_not_wait_on_locked_legacy_heap(legacy):
+    engine = legacy.database._engine
+    day = legacy.legacy_cutoff
+    with engine.begin() as conn:
+        name = ensure_fact_header_partition(conn, day)
+        oid = conn.scalar(text("SELECT to_regclass(:name)::oid"), {"name":name})
+    with engine.begin() as blocker:
+        blocker.exec_driver_sql("LOCK TABLE ONLY market.fact_versions_legacy IN ACCESS EXCLUSIVE MODE")
+        with engine.begin() as conn:
+            partial = read_locked_header_group(conn, storage_day=day, heap_oid=oid, timeout_seconds=2)
+            group, = partial.snapshot.partitions
+            assert group.storage_day == day and group.legacy_end_day is None
+
+
+def test_catalog_budget_includes_legacy_group(legacy):
+    engine = legacy.database._engine
+    with engine.begin() as conn:
+        ensure_fact_header_partition(conn, legacy.legacy_cutoff)
+    with pytest.raises(RuntimeError, match="partition_budget_exceeded"):
+        read_header_catalog(engine, max_partitions=1)

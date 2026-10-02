@@ -283,3 +283,30 @@ def test_default_review_hash_unchanged_by_explicit_unlimited_pass():
     assert "max_moves" not in original and "deferred_storage_days" not in original
     bounded=plan_header_placement(**args,max_moves=1)
     assert bounded["plan_hash"]!=original["plan_hash"]
+
+
+def test_legacy_moves_as_one_complete_group_only_after_entire_range_is_history():
+    group = partition(day=CUTOFF)
+    group = replace(group, heap=replace(group.heap, name="fact_versions_legacy"),
+                    legacy_end_day=CUTOFF + timedelta(days=1))
+    retained = plan_header_placement(**inputs(group))
+    assert retained["moves"] == []
+    assert retained["retained"][0]["role"] == "recent"
+    assert retained["retained"][0]["legacy_end_day"] == group.legacy_end_day.isoformat()
+    older = replace(group, storage_day=CUTOFF-timedelta(days=1), legacy_end_day=CUTOFF)
+    plan = plan_header_placement(**inputs(older))
+    assert len(plan["moves"]) == 1
+    assert plan["moves"][0]["legacy_end_day"] == CUTOFF.isoformat()
+    assert plan["moves"][0]["copy_bytes"] == sum(r.byte_count for r in older.relations)
+    assert plan["moves"][0]["source_space_credited_bytes"] == 0
+    assert plan["scope"] == "dated_headers_with_fixed_legacy_range"
+
+
+def test_legacy_cannot_mask_an_overlapping_daily_group():
+    old = partition(day=CUTOFF)
+    old = replace(old, heap=replace(old.heap, name="fact_versions_legacy"),
+                  legacy_end_day=CUTOFF+timedelta(days=1))
+    with pytest.raises(ValueError, match="overlapping legacy"):
+        plan_header_placement(**inputs(old, partition(day=CUTOFF-timedelta(days=1), oid=20)))
+    with pytest.raises(ValueError, match="missing legacy range"):
+        replace(old, legacy_end_day=None)

@@ -55,7 +55,7 @@ def _physical_identity(verified):
         item["server_path_sha256"] = hashlib.sha256(bound["server_path"].encode("utf-8")).hexdigest()
         members.append(item)
     return {"database_identity": verified.snapshot.database_identity,
-            "storage_day": group.storage_day.isoformat(), "heap_oid": group.heap.oid,
+            "storage_day": group.storage_day.isoformat(), **group.range_binding, "heap_oid": group.heap.oid,
             "members": members}
 
 
@@ -64,6 +64,8 @@ def _verify_transition(before, after, moving_oids, destination_oid, target_id):
     new = _physical_identity(after)
     if any(old[key] != new[key] for key in ("database_identity", "storage_day", "heap_oid")):
         raise StorageConflict("storage_move_postcopy_group_changed")
+    if old.get("legacy_end_day") != new.get("legacy_end_day"):
+        raise StorageConflict("storage_move_postcopy_range_changed")
     prior = {item["oid"]: item for item in old["members"]}
     current = {item["oid"]: item for item in new["members"]}
     if prior.keys() != current.keys():

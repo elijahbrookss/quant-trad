@@ -88,3 +88,21 @@ def test_malformed_or_internally_inconsistent_durable_intent_is_refused(intent, 
     move.source_group[field] = value
     with pytest.raises(StorageConflict, match="intent_invalid"):
         _compare_reserved_group(move, verified)
+
+
+def test_legacy_reserved_intent_binds_exact_range(intent):
+    move, verified = intent
+    group = verified.snapshot.partitions[0]
+    group = replace(group, heap=replace(group.heap, name="fact_versions_legacy"),
+                    legacy_end_day=date(2026, 8, 2))
+    verified = replace(verified, snapshot=replace(verified.snapshot, partitions=(group,)))
+    move.source_group["heap"] = asdict(group.heap)
+    move.source_group.update(group.range_binding)
+    assert _compare_reserved_group(move, verified)[1] == 100
+    for bad in (None, "2026-08-03"):
+        move.source_group["legacy_end_day"] = bad
+        with pytest.raises(StorageConflict, match="range_binding_changed"):
+            _compare_reserved_group(move, verified)
+    del move.source_group["legacy_end_day"]
+    with pytest.raises(StorageConflict, match="range_binding_changed"):
+        _compare_reserved_group(move, verified)

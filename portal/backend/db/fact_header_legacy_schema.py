@@ -6,7 +6,7 @@ by the separate complete storage inventory and operator admission.
 """
 from __future__ import annotations
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 
 LEGACY_TABLE = "fact_header_legacy"
 LEGACY_RELATION = "market.fact_versions_legacy"
@@ -70,38 +70,48 @@ def install_fact_header_legacy_functions(conn) -> None:
         conn.execute(text(f"ALTER TABLE market.fact_header_legacy ENABLE ALWAYS TRIGGER {name}"))
 
 
-def _assert_trigger(conn, relation, name, kind):
-    actual = conn.execute(text("""
+def _assert_trigger(query, relation, name, kind):
+    actual = query("""
         SELECT t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,
                t.tgfoid=to_regprocedure('market.reject_fact_header_legacy_mutation()'),
                t.tgqual IS NULL,t.tgnargs
         FROM pg_trigger t WHERE t.tgrelid=to_regclass(:relation) AND t.tgname=:name
-    """), {"relation": relation, "name": name}).one_or_none()
+    """, {"relation": relation, "name": name}).one_or_none()
     if actual is None or tuple(actual) != (kind, "A", False, False, True, True, 0):
         raise RuntimeError(f"fact_header_legacy_seal_invalid: relation={relation} trigger={name}")
 
 
-def assert_fact_header_legacy_contract(conn):
+def assert_fact_header_legacy_contract(conn=None, *, query=None):
     """Validate the single optional retained child; return its exclusive end day."""
-    relation = conn.execute(text("""
+    # Catalog callers supply their existing per-query wall/statement budget.
+    # Startup uses the same SQL checks, avoiding a second interpretation.
+    if query is None:
+        query = lambda sql, parameters=None: conn.execute(text(sql), parameters or {})
+    relation = query("""
         SELECT relkind,relpersistence,relrowsecurity,relforcerowsecurity
         FROM pg_class WHERE oid=to_regclass('market.fact_header_legacy')
-    """)).one_or_none()
+    """).one_or_none()
     if relation is None or tuple(relation) != ("r", "p", False, False):
         raise RuntimeError("fact_header_legacy_catalog_missing_or_incompatible: explicit cutover required")
-    inspector = inspect(conn)
-    columns = {c["name"]: (str(c["type"]), c["nullable"])
-               for c in inspector.get_columns(LEGACY_TABLE, schema="market")}
-    if columns != {"id": ("INTEGER", False), "end_day": ("DATE", False),
-                   "relation_oid": ("BIGINT", False)}:
+    columns = dict(query("""
+        SELECT attname, ARRAY[format_type(atttypid,atttypmod),attnotnull::text]
+        FROM pg_attribute WHERE attrelid='market.fact_header_legacy'::regclass
+          AND attnum>0 AND NOT attisdropped
+    """).all())
+    if columns != {"id": ["integer", "true"], "end_day": ["date", "true"],
+                   "relation_oid": ["bigint", "true"]}:
         raise RuntimeError("fact_header_legacy_columns_incompatible")
-    if inspector.get_pk_constraint(LEGACY_TABLE, schema="market")["constrained_columns"] != ["id"]:
+    pk = query("""
+        SELECT pg_get_constraintdef(oid) FROM pg_constraint
+        WHERE conrelid='market.fact_header_legacy'::regclass AND contype='p'
+    """).scalars().all()
+    if pk != ["PRIMARY KEY (id)"]:
         raise RuntimeError("fact_header_legacy_primary_key_incompatible")
-    checks = dict(conn.execute(text("""
+    checks = dict(query("""
         SELECT conname,pg_get_constraintdef(oid) FROM pg_constraint
         WHERE conrelid='market.fact_header_legacy'::regclass AND contype='c'
           AND convalidated AND NOT condeferrable
-    """)).all())
+    """).all())
     if (checks.get("ck_market_fact_header_legacy_singleton") != "CHECK ((id = 1))"
             or checks.get("ck_market_fact_header_legacy_oid") !=
             "CHECK (((relation_oid > 0) AND (relation_oid <= '4294967295'::bigint)))"):
@@ -110,25 +120,25 @@ def assert_fact_header_legacy_contract(conn):
         (LEGACY_END_SIGNATURE, LEGACY_END_BODY, "s", "date"),
         ("market.reject_fact_header_legacy_mutation()", REJECT_LEGACY_MUTATION_BODY, "v", "trigger"),
     ):
-        actual = conn.execute(text("""
+        actual = query("""
             SELECT p.prosrc,p.provolatile,p.prosecdef,p.proretset,
                    p.prorettype=to_regtype(:result),p.proconfig,p.pronargs,l.lanname
             FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
             WHERE p.oid=to_regprocedure(:signature)
-        """), {"signature": signature, "result": result}).one_or_none()
+        """, {"signature": signature, "result": result}).one_or_none()
         if actual is None or tuple(actual) != (
                 body, volatility, False, False, True, ["search_path=pg_catalog"], 0, "plpgsql"):
             raise RuntimeError(f"fact_header_legacy_function_incompatible: function={signature}")
-    _assert_trigger(conn, "market.fact_header_legacy", "trg_guard_fact_header_legacy", 27)
-    _assert_trigger(conn, "market.fact_header_legacy", "trg_guard_fact_header_legacy_truncate", 34)
-    end_day = conn.scalar(text("SELECT market.fact_header_legacy_end_day()"))
+    _assert_trigger(query, "market.fact_header_legacy", "trg_guard_fact_header_legacy", 27)
+    _assert_trigger(query, "market.fact_header_legacy", "trg_guard_fact_header_legacy_truncate", 34)
+    end_day = query("SELECT market.fact_header_legacy_end_day()").scalar_one()
     if end_day is None:
         return None
-    _assert_trigger(conn, LEGACY_RELATION, "trg_seal_fact_versions_legacy", 31)
-    _assert_trigger(conn, LEGACY_RELATION, "trg_seal_fact_versions_legacy_truncate", 34)
+    _assert_trigger(query, LEGACY_RELATION, "trg_seal_fact_versions_legacy", 31)
+    _assert_trigger(query, LEGACY_RELATION, "trg_seal_fact_versions_legacy_truncate", 34)
     # ATTACH must retain valid native primary/revision keys and every parent
     # search index. An unlinked or invalid leaf cannot be admitted as history.
-    missing_index = conn.scalar(text("""
+    missing_index = query("""
         SELECT EXISTS (
             SELECT 1 FROM pg_index parent
             WHERE parent.indrelid='market.fact_versions'::regclass AND (
@@ -138,11 +148,11 @@ def assert_fact_header_legacy_contract(conn):
                     WHERE link.inhparent=parent.indexrelid
                       AND child.indrelid='market.fact_versions_legacy'::regclass
                       AND child.indisvalid AND child.indisready AND child.indislive)))
-    """))
+    """).scalar_one()
     if missing_index:
         raise RuntimeError("fact_header_legacy_index_binding_invalid")
     # Native FKs cloned from the canonical parent may not be disabled or lost.
-    missing_reference = conn.scalar(text("""
+    missing_reference = query("""
         SELECT EXISTS (
             SELECT 1 FROM pg_constraint parent
             WHERE parent.conrelid='market.fact_versions'::regclass AND parent.contype='f'
@@ -158,7 +168,7 @@ def assert_fact_header_legacy_contract(conn):
                   AND EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgconstraint=child.oid)
                   AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgconstraint=child.oid
                                   AND (t.tgenabled NOT IN ('O','A') OR t.tgqual IS NOT NULL))))
-    """))
+    """).scalar_one()
     if missing_reference:
         raise RuntimeError("fact_header_legacy_reference_binding_invalid")
     return end_day

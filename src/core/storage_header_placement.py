@@ -48,6 +48,9 @@ class HeaderPartitionPlacement:
     indexes: tuple[RelationPlacement, ...]
     index_inventory_complete: bool
     toast_colocated: bool
+    # The fixed legacy range is MINVALUE..end (exclusive). storage_day is its
+    # latest possible day, a stable journal key, not a fabricated daily bound.
+    legacy_end_day: date | None = None
 
     def __post_init__(self):
         if type(self.storage_day) is not date or not isinstance(self.heap, RelationPlacement):
@@ -57,6 +60,19 @@ class HeaderPartitionPlacement:
             raise ValueError("header_placement_invalid: index inventory")
         if type(self.index_inventory_complete) is not bool or type(self.toast_colocated) is not bool:
             raise ValueError("header_placement_invalid: inventory admission flags")
+
+        if self.legacy_end_day is not None:
+            if (type(self.legacy_end_day) is not date or self.legacy_end_day <= date.min
+                    or self.storage_day != self.legacy_end_day - timedelta(days=1)
+                    or (self.heap.schema, self.heap.name) != ("market", "fact_versions_legacy")):
+                raise ValueError("header_placement_invalid: fixed legacy range")
+        elif self.heap.schema == "market" and self.heap.name == "fact_versions_legacy":
+            raise ValueError("header_placement_invalid: missing legacy range")
+
+    @property
+    def range_binding(self):
+        # Omit for old daily plans so their durable hashes/receipts stay stable.
+        return {} if self.legacy_end_day is None else {"legacy_end_day": self.legacy_end_day.isoformat()}
 
     @property
     def relations(self):
@@ -154,6 +170,11 @@ def plan_header_placement(
             if relation.oid in relation_ids:
                 raise ValueError("header_placement_invalid: duplicate physical relation")
             relation_ids.add(relation.oid)
+    legacy = [item for item in ordered if item.legacy_end_day is not None]
+    if len(legacy) > 1 or (legacy and any(
+            item.legacy_end_day is None and item.storage_day < legacy[0].legacy_end_day
+            for item in ordered)):
+        raise ValueError("header_placement_invalid: overlapping legacy inventory")
     cutoff = snapshot.database_day - timedelta(days=policy.recent_days)
     blockers, retained, moves, deferred = [], [], [], []
     if not snapshot.inventory_complete:
@@ -172,7 +193,8 @@ def plan_header_placement(
                 continue
             if partition.storage_day >= cutoff:
                 if all(item.target_id == policy.recent[0] for item in partition.relations):
-                    retained.append({"storage_day": day, "target_id": policy.recent[0], "role": "recent"})
+                    retained.append({"storage_day": day, "target_id": policy.recent[0], "role": "recent",
+                                     **partition.range_binding})
                 else:
                     blockers.append({"code": "recent_header_placement_requires_separate_cutover",
                                      "storage_day": day})
@@ -211,11 +233,12 @@ def plan_header_placement(
                 continue
             _, _, target_id, copying, required = min(candidates)
             if not required:
-                retained.append({"storage_day": day, "target_id": target_id, "role": "history"})
+                retained.append({"storage_day": day, "target_id": target_id, "role": "history",
+                                 **partition.range_binding})
                 continue
             reservations[target_id] = reservations.get(target_id, 0) + required
             moves.append({
-                "storage_day": day, "destination_target_id": target_id,
+                "storage_day": day, **partition.range_binding, "destination_target_id": target_id,
                 "destination_filesystem_uuid": by_id[target_id].filesystem_uuid,
                 "heap": asdict(partition.heap),
                 "indexes": [asdict(item) for item in sorted(partition.indexes, key=lambda item: item.oid)],
@@ -231,7 +254,7 @@ def plan_header_placement(
         reservations = original_reservations
     payload = {
         "schema_version": "qt.header_placement_plan.v1",
-        "scope": "dated_header_partitions_only",
+        "scope": "dated_headers_with_fixed_legacy_range" if legacy else "dated_header_partitions_only",
         "database_identity": snapshot.database_identity,
         "database_day": snapshot.database_day.isoformat(),
         "captured_at": snapshot.captured_at.astimezone(UTC).isoformat(),
@@ -256,7 +279,7 @@ def plan_header_placement(
             "capacity": {key: asdict(capacity[key]) for key in sorted(capacity)},
             "existing_reservations": dict(sorted(original_reservations.items())),
             "partitions": [
-                {"storage_day": item.storage_day.isoformat(), "heap": asdict(item.heap),
+                {"storage_day": item.storage_day.isoformat(), **item.range_binding, "heap": asdict(item.heap),
                  "indexes": [asdict(index) for index in sorted(item.indexes, key=lambda index: index.oid)],
                  "index_inventory_complete": item.index_inventory_complete,
                  "toast_colocated": item.toast_colocated}
