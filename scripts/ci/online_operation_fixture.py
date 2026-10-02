@@ -184,9 +184,9 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
             page = channel.exchange("sql_copy")["result"]
             result = page["outcome"]
             if result == "raw_relocation_required":
-                channel.exchange("prepare_step", step="raw_history", max_duration_seconds=30)
+                channel.exchange("prepare_step", step="raw_history", relation=None, max_duration_seconds=30)
             elif result == "identity_relocation_required":
-                channel.exchange("prepare_step", step="identity_history", max_duration_seconds=30)
+                channel.exchange("prepare_step", step="identity_history", relation=None, max_duration_seconds=30)
                 break
             elif page["phase"] not in {"raw_baseline", "identity_baseline"}:
                 raise AssertionError("package fixture advanced beyond the unstarted header")
@@ -271,7 +271,7 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
         assert host_boundary.load_receipt(state/launch._STATE)["capture"] == old_worker["capture"]
         assert host_boundary.identities(host_boundary.inventory(kwargs["project"],
             operator_id=receipt["container_id"])) == source
-        channel.exchange("prepare_step", step="identity_order", max_duration_seconds=30)
+        channel.exchange("prepare_step", step="identity_order", relation=None, max_duration_seconds=30)
         channel.exchange("close")
     assert resumed.returncode == 0
     for identity in (old_id, receipt["container_id"]):
