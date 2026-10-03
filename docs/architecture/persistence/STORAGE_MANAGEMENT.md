@@ -3518,3 +3518,20 @@ switch-time evidence; normal policy-owned historical relocation is not prohibite
 by treating those file numbers as permanent. Inspection is not a fresh full data
 hash proof. Canonical host request/controller integration and production physical,
 capacity, pause, recovery and fleet qualification remain separate requirements.
+
+
+The existing process-local online controller has an explicit forward mode bound
+to the adoption operation, original start and UTC end day. It keeps its owning
+SQL session for adoption pages, native references, archive work, catalog moves,
+final attachment and outcome inspection. Mutable proof progress is validated by
+the adoption owner; it is not confused with the immutable operation, cancellation,
+placement and clock binding. Session loss refuses instead of reconnecting.
+
+Forward background sequencing skips the obsolete whole-header copy and capture
+preparation steps. Adoption/reference pages reuse the existing staging resource
+watch through COMMIT. Final residual work refuses incomplete finite baselines;
+synchronous mirrors maintain SQL arrivals while the archive queue is drained.
+Rollback inspection preserves the original source guards, including after work
+expiry, without reauthorizing work. This internal mode does not yet supply the
+canonical forward host request, key/adoption preparation or login-gate authority;
+those owners must explicitly admit the same session and operation before use.

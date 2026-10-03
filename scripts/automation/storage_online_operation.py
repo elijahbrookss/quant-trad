@@ -60,13 +60,15 @@ class OperationLimits:
             raise ValueError("storage_online_operation_limits_invalid")
 
 
-def prepare_background(exchange, *, preparation_seconds):
+def prepare_background(exchange, *, preparation_seconds, forward=False):
     """Follow finite baseline phases, then fairly catch SQL/archive live tails.
 
     The channel and worker retain the original capture deadline on every call.
     Empty observations only end background preparation; final owners independently
     exclude publishers, drain, verify and decide whether a switch is admissible.
     """
+    if type(forward) is not bool:
+        raise ValueError("storage_online_operation_forward_mode_invalid")
     if type(preparation_seconds) is not int or not 1 <= preparation_seconds <= 3600:
         raise ValueError("storage_online_operation_preparation_limit_invalid")
 
@@ -76,9 +78,12 @@ def prepare_background(exchange, *, preparation_seconds):
         if result.get("committed") is not True:
             raise RuntimeError("storage_online_operation_preparation_unconfirmed")
 
-    phase("catalog_history", "qt_fact_storage_cutover_v1.fact_versions")
+    if not forward:
+        phase("catalog_history", "qt_fact_storage_cutover_v1.fact_versions")
     while True:
         result = exchange("sql_copy")["result"]
+        if forward and result["phase"] not in {"forward_adoption", "catch_up"}:
+            raise RuntimeError("storage_online_operation_forward_progress_invalid")
         if result["outcome"] == "identity_relocation_required":
             phase("identity_history")
         elif result["outcome"] == "identity_order_required":
@@ -93,7 +98,8 @@ def prepare_background(exchange, *, preparation_seconds):
             break
         elif result["outcome"] not in {"page_budget_reached", "pass_time_budget_reached"}:
             raise RuntimeError("storage_online_operation_copy_progress_invalid")
-    phase("identity_capture")
+    if not forward:
+        phase("identity_capture")
     after = None
     seen = set()
     while True:

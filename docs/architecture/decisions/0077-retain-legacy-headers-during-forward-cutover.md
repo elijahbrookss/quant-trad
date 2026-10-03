@@ -352,3 +352,12 @@ Source file identities are switch-time evidence, not a ban on later policy-owned
 historical HDD relocation. The fixed catalog mover accepts the same forward
 intent and actual owning connection. Canonical host/controller wiring and physical
 admission are still required before this internal boundary can be deployed.
+
+
+Forward orchestration retains one controller-owned SQL session across page,
+reference, catalog and final work. Reopening a separate pooled session would
+conflict with its controller lock and cannot establish equivalent ownership.
+The existing controller therefore selects this mode explicitly and preserves
+its shared resource, publisher and final-deadline guards. The host route must
+bind this session choice to its exact forward operation; the old host route's
+two-session reply rule is not silently weakened.

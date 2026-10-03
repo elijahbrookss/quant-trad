@@ -8,12 +8,14 @@ commit/reconciliation. Never reconstruct authority from a serialized reply.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
+from datetime import date
 from copy import deepcopy
 import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 import select
 from time import monotonic, sleep
@@ -32,6 +34,7 @@ from scripts.db import fact_header_v2_online as online
 from scripts.db import fact_header_v2_online_proof as protection
 from scripts.db import fact_header_v2_handoff as handoff
 from scripts.db import fact_header_v2_cancel as cancellation
+from scripts.db import fact_header_forward_adoption as adoption
 from scripts.db import fact_header_v2_references as references
 from scripts.db import archive_reference_v2_placement as catalogs
 from scripts.db.archive_file_v2_proof import ArchiveFileProof
@@ -63,10 +66,19 @@ class OnlineController:
 
     def __init__(self, engine, *, placement, policy, resource_limits, source_root,
                  destination_root, expected_started_at, max_objects, max_bytes,
-                 max_page_bytes, page_rows=128, command_seconds=30):
+                 max_page_bytes, page_rows=128, command_seconds=30,
+                 forward_operation_sha256=None, forward_end_day=None):
         validate_copy_budget(command_seconds=command_seconds,page_rows=page_rows,max_page_bytes=max_page_bytes)
         if not isinstance(expected_started_at, str) or not expected_started_at:
             raise ValueError("storage_online_original_attempt_required")
+        if ((forward_operation_sha256 is None) != (forward_end_day is None)
+                or (forward_operation_sha256 is not None and (
+                    not isinstance(forward_operation_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", forward_operation_sha256)
+                    or type(forward_end_day) is not date))):
+            raise ValueError("storage_online_forward_intent_invalid")
+        self.forward_operation_sha256 = forward_operation_sha256
+        self.forward_end_day = forward_end_day
         self.engine, self.placement, self.policy = engine, placement, policy
         self._admitted_limits = deepcopy(_limits(resource_limits, migration=True))
         self.limits = deepcopy(self._admitted_limits)
@@ -119,19 +131,21 @@ class OnlineController:
                         "SELECT pg_try_advisory_lock(hashtextextended(:key,0))"), {"key": _LOCK}):
                     raise RuntimeError("storage_online_controller_busy")
                 self._pid = self._owner.scalar(text("SELECT pg_backend_pid()"))
-                with capture.migration_step(self._owner, 30):
-                    observed = capture.inspect_capture(self._owner)
-                    if observed["started_at"] != self.expected_started_at:
+                with self._operation_step(self._owner, 30) as (saved, owner_deadline):
+                    if self.forward_operation_sha256 is None:
+                        observed = capture.inspect_capture(self._owner)
+                        started_at = observed["started_at"]
+                        protection.inspect_protection(self._owner)
+                    else:
+                        started_at = adoption._state(self._owner)["started_at"].isoformat()
+                    if started_at != self.expected_started_at:
                         raise RuntimeError("storage_online_attempt_binding_changed")
-                    saved = headers._inspect_progress(self._owner)["placement"]
-                    if saved is None:
-                        raise RuntimeError("storage_online_fixed_placement_required")
                     if handoff.physical._restore(saved["plan"]) != self.placement:
                         raise RuntimeError("storage_online_placement_changed")
-                    protection.inspect_protection(self._owner)
-                    archive_online._inspect(self._owner, self.source_root, self.destination_root)
+                    archive_online._inspect(self._owner, self.source_root, self.destination_root,
+                        forward_operation_sha256=self.forward_operation_sha256, saved=saved)
                     self._capture = self._capture_row(self._owner)
-                    remaining = capture.capture_remaining_seconds(self._owner)
+                    remaining = owner_deadline - monotonic()
                     self._source_device = saved["recent_device"]
                     self._source = archives._root(self.source_root, self._source_device)[1]
             self.proof = self._stack.enter_context(ArchiveFileProof(
@@ -153,9 +167,36 @@ class OnlineController:
             finally:
                 self._owner.close()
 
-    @staticmethod
-    def _capture_row(conn):
-        return dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+    def _operation_step(self, conn, seconds, *, deadline=None):
+        return archives._operation_step(conn, seconds, deadline=deadline,
+            forward_operation_sha256=self.forward_operation_sha256)
+
+    def _capture_row(self, conn):
+        if self.forward_operation_sha256 is None:
+            return dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
+        state = adoption._state(conn)
+        if state is None:
+            raise RuntimeError("storage_online_forward_owner_missing")
+        # Progress, native references and terminal outcome change legitimately.
+        # Pin immutable intent/clocks/cancellation/placement, then validate the
+        # current proof separately under its actual owning session.
+        return {**{name: state[name] for name in
+                   ("operation_sha256", "started_at", "expires_at", "attempt_seconds")},
+                "cancellation": state["binding"]["terminal"],
+                "placement": state["binding"]["old_headers"]["placement"]}
+
+    def _inspect_forward_retained(self, conn):
+        state = adoption._state(conn)
+        if (state is None or state["terminal"] is not None
+                or self._capture_row(conn) != self._capture
+                or state["binding"] != adoption._snapshot(conn)):
+            raise RuntimeError("storage_online_forward_retained_binding_changed")
+        adoption._reference_states(conn, state)
+        saved = state["binding"]["old_headers"]["placement"]
+        handoff.physical.verify(conn, saved)
+        archive_online._inspect(conn, self.source_root, self.destination_root,
+            forward_operation_sha256=self.forward_operation_sha256, saved=saved)
+        return state
 
     def _ownership(self, *, deadline=None):
         if self._owner is None or self._owner.closed or self._owner.invalidated:
@@ -163,9 +204,15 @@ class OnlineController:
         seconds = 5 if deadline is None else min(5, deadline-monotonic())
         if seconds <= 0:
             raise RuntimeError("storage_online_sql_drain_deadline_expired")
-        with self._owner.begin():
-            self._owner.execute(text("SELECT set_config('statement_timeout',:value,true)"),
-                                {"value": str(max(1, math.floor(seconds*1000)))})
+        active = self._owner.in_transaction()
+        if active and self.forward_operation_sha256 is None:
+            raise RuntimeError("storage_online_controller_owner_transaction_unexpected")
+        with (nullcontext() if active else self._owner.begin()):
+            # A forward page/final/rollback transaction already owns its SQL
+            # ceiling. Do not widen or restore it with a nested ownership query.
+            if not active:
+                self._owner.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                                    {"value": str(max(1, math.floor(seconds*1000)))})
             if self._owner.scalar(text("SELECT pg_backend_pid()")) != self._pid:
                 raise RuntimeError("storage_online_controller_ownership_lost")
         if deadline is not None and monotonic() >= deadline:
@@ -208,7 +255,8 @@ class OnlineController:
         if not monotonic() < deadline <= self.proof.deadline:
             raise ValueError("storage_online_final_session_deadline_invalid")
         self._final_connection_entered = True
-        with self.engine.connect() as conn:
+        with (nullcontext(self._owner) if self.forward_operation_sha256 is not None
+              else self.engine.connect()) as conn:
             self._final_connection = conn
             try:
                 with conn.begin():
@@ -297,8 +345,8 @@ class OnlineController:
             raise RuntimeError("storage_online_builtin_job_admission_state_invalid")
         self._admit_attempt()
         with self._database_connection() as conn, conn.begin():
-            with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
-                                        deadline=self._final_deadline):
+            with self._operation_step(conn, self.limits["movement_timeout_seconds"],
+                                      deadline=self._final_deadline):
                 self._require_job_environment(conn, allow_connections=True)
                 current = self._supported_builtin_catalog(conn)
                 if self._builtin_catalog is not None and current != self._builtin_catalog:
@@ -381,6 +429,13 @@ class OnlineController:
 
     @contextmanager
     def _database_connection(self):
+        if self.forward_operation_sha256 is not None and not self._final_connection_entered:
+            conn = self._owner
+            if (conn is None or conn.closed or conn.invalidated or conn.in_transaction()
+                    or conn.connection.driver_connection.get_backend_pid() != self._pid):
+                raise RuntimeError("storage_online_controller_ownership_lost")
+            yield conn
+            return
         if not self._final_connection_entered:
             with self.engine.connect() as conn:
                 yield conn
@@ -394,13 +449,13 @@ class OnlineController:
     def _admit_attempt(self):
         self.check()
         with self._database_connection() as conn, conn.begin():
-            with capture.migration_step(conn, 30, deadline=self._final_deadline):
+            with self._operation_step(conn, 30, deadline=self._final_deadline) as (_, owner_deadline):
                 if self._capture_row(conn) != self._capture:
                     raise RuntimeError("storage_online_attempt_binding_changed")
                 # A later wall-clock adjustment can shrink but never extend the
                 # process's already admitted monotonic ceiling.
                 self.proof.deadline = min(self.proof.deadline,
-                                         monotonic()+capture.capture_remaining_seconds(conn))
+                                         owner_deadline)
 
     def status(self):
         return {"schema_version": "qt.storage_online_controller.v1",
@@ -419,7 +474,9 @@ class OnlineController:
         options = dict(family=family, source_root=self.source_root,
             destination_root=self.destination_root, page_rows=self.page_rows,
             max_page_bytes=self.max_page_bytes, policy=self.policy,
-            resource_limits=self.limits, file_proof=self.proof)
+            resource_limits=self.limits, file_proof=self.proof,
+            forward_operation_sha256=self.forward_operation_sha256,
+            **({"connection": self._owner} if self.forward_operation_sha256 is not None else {}))
         if reprove:
             report = archives.copy_archive_page(
                 self.engine, after_id=self._cursors[family], **options)
@@ -439,10 +496,18 @@ class OnlineController:
 
     def _reference_page(self, after):
         """Bounded discovery from the existing reference owner, no switch claim."""
-        with self.engine.begin() as conn:
+        with self._database_connection() as conn, conn.begin():
             conn.exec_driver_sql("SET TRANSACTION READ ONLY")
-            report = references.inspect_references(conn, timeout_seconds=min(10, self.limits["movement_timeout_seconds"]))
-        rows = [row for row in report["references"] if row["relation"] != references.PARENT]
+            seconds = min(10, self.limits["movement_timeout_seconds"])
+            if self.forward_operation_sha256 is None:
+                report = references.inspect_references(conn, timeout_seconds=seconds)
+                rows = [row for row in report["references"] if row["relation"] != references.PARENT]
+            else:
+                report = adoption.inspect_references(conn,
+                    operation_sha256=self.forward_operation_sha256, timeout_seconds=seconds)
+                rows = [{"relation": name, "prepared": value is not None,
+                         "validated": bool(value and value["convalidated"])}
+                        for name, value in sorted(report["references"].items()) if name != references.PARENT]
         if after is not None and after not in {row["relation"] for row in rows}:
             raise RuntimeError("storage_online_reference_discovery_changed")
         remaining = [row for row in rows if after is None or row["relation"] > after]
@@ -454,6 +519,8 @@ class OnlineController:
 
     def _catalog_step(self, relation, seconds):
         """Use the existing fixed mover under this worker's original binding."""
+        if self.forward_operation_sha256 is not None and relation == catalogs.RETAINED_LEGACY:
+            raise RuntimeError("storage_online_forward_obsolete_move_refused")
         if relation == catalogs.RETAINED_LEGACY:
             with self.engine.begin() as conn:
                 conn.exec_driver_sql("SET TRANSACTION READ ONLY")
@@ -464,8 +531,45 @@ class OnlineController:
         report = catalogs.move_reference_catalog(self.engine, relation=relation, policy=self.policy,
             resource_limits={**self._admitted_limits, "movement_timeout_seconds": seconds},
             expected_started_at=self.expected_started_at, placement=self.placement,
-            deadline=min(self.proof.deadline, monotonic()+seconds))
+            deadline=min(self.proof.deadline, monotonic()+seconds),
+            forward_operation_sha256=self.forward_operation_sha256,
+            connection=self._owner if self.forward_operation_sha256 is not None else None)
         return {key: report[key] for key in ("relation", "placement", "reused", "committed", "migration_ready")}
+
+    def _forward_step(self, step, *, relation=None, seconds=None, tail_only=False, deadline=None):
+        """Bounded adoption/reference work under the existing resource owner."""
+        seconds = min(seconds or self.limits["movement_timeout_seconds"],
+                      self._admitted_limits["movement_timeout_seconds"])
+        deadline = min(deadline or self.proof.deadline, self.proof.deadline, monotonic()+seconds)
+        limits = {**self._admitted_limits, "movement_timeout_seconds": seconds}
+        with handoff._staging_transaction(self.engine, placement=self.placement,
+                policy=self.policy, limits=limits, deadline=deadline, cancelled=None,
+                connection=self._owner, forward_operation_sha256=self.forward_operation_sha256) as (conn, _):
+            if self._capture_row(conn) != self._capture:
+                raise RuntimeError("storage_online_attempt_binding_changed")
+            args = dict(operation_sha256=self.forward_operation_sha256, timeout_seconds=seconds)
+            if step == "adoption":
+                if tail_only:
+                    report = adoption._report(adoption._state(conn), reused=True)
+                    if not report["retained_targets_verified"]:
+                        raise RuntimeError("storage_online_final_delta_sql_baseline_required")
+                else:
+                    report = adoption.adoption_page(conn, page_rows=self.sql_page_rows, **args)
+                complete = report["retained_targets_verified"]
+                return {"outcome": "both_tails_observed_empty" if complete else "page_budget_reached",
+                        "phase": "catch_up" if complete else "forward_adoption",
+                        "committed_pages": 0 if tail_only else 1,
+                        "verified_page_rows": report["verified_page_rows"]}
+            functions = {"reference_prepare": adoption.prepare_reference,
+                         "reference_validate": adoption.validate_reference,
+                         "reference_adopt": adoption.adopt_payload_references}
+            if step not in functions:
+                raise RuntimeError("storage_online_forward_obsolete_preparation_refused")
+            if step != "reference_adopt":
+                args["relation"] = relation
+            report = functions[step](conn, **args)
+        return {"committed": True, "migration_ready": False, "step": step,
+                **{key: report[key] for key in ("reused", "validated", "references_complete") if key in report}}
 
     def command(self, request):
         fields = {"controller_id", "sequence", "operation"}
@@ -569,10 +673,16 @@ class OnlineController:
                 # lock excludes foreign controllers without rejecting itself
                 # or opening a release/reacquire race between SQL sessions.
                 with self._owner.begin():
-                    cancellation.cancel_attempt(self._owner,
-                        expected_started_at=self.expected_started_at,
-                        source_root=self.source_root, destination_root=self.destination_root,
-                        timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
+                    if self.forward_operation_sha256 is not None:
+                        if self._capture_row(self._owner) != self._capture:
+                            raise RuntimeError("storage_online_attempt_binding_changed")
+                        adoption.retire_adoption(self._owner, operation_sha256=self.forward_operation_sha256,
+                            timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
+                    else:
+                        cancellation.cancel_attempt(self._owner,
+                            expected_started_at=self.expected_started_at,
+                            source_root=self.source_root, destination_root=self.destination_root,
+                            timeout_seconds=min(30, self.limits["movement_timeout_seconds"]))
                 self.state = "cancelled"
                 result = {"attempt_cancelled": True, "source_preserved": True}
             elif session:
@@ -629,6 +739,8 @@ class OnlineController:
                     result = self._reference_page(request["after"])
                 elif preparing and request["step"] == "catalog_history":
                     result = self._catalog_step(request["relation"], request["max_duration_seconds"])
+                elif operation == "sql_copy" and self.forward_operation_sha256 is not None:
+                    result = self._forward_step("adoption")
                 elif operation == "sql_copy":
                     report = online.copy_pass(self.engine, placement=self.placement,
                         policy=self.policy, resource_limits=self.limits, page_rows=self.sql_page_rows,
@@ -637,6 +749,9 @@ class OnlineController:
                               ("outcome", "phase", "committed_pages", "verified_page_rows")}
                 elif operation in {"archive_copy", "reprove"}:
                     result = self._archive_page(operation == "reprove")
+                elif preparing and self.forward_operation_sha256 is not None:
+                    result = self._forward_step(request["step"], relation=request["relation"],
+                        seconds=request["max_duration_seconds"])
                 elif preparing:
                     # Explicit phase requests use their admitted allowance, never
                     # silently widen page/status commands or the original attempt.
@@ -719,26 +834,38 @@ class OnlineController:
             # checks repeat this under migration ownership, so no race can
             # silently fall back to a bulk copy or relocation.
             with self._database_connection() as conn, conn.begin():
-                with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
+                with self._operation_step(conn, self.limits["movement_timeout_seconds"],
                                             deadline=page_deadline):
                     if self._final_connection_entered:
                         self._require_external_sql_clients_absent(conn, deadline=page_deadline)
                     if self._capture_row(conn) != self._capture:
                         raise RuntimeError("storage_online_attempt_binding_changed")
-                    if online._phase(headers._inspect_progress(conn), handoff.raw._inspect(conn)) != "catch_up":
+                    if self.forward_operation_sha256 is None:
+                        complete = online._phase(headers._inspect_progress(conn), handoff.raw._inspect(conn)) == "catch_up"
+                        saved = None
+                    else:
+                        state = adoption._state(conn)
+                        complete = adoption._report(state, reused=True)["retained_targets_verified"]
+                        saved = state["binding"]["old_headers"]["placement"]
+                    if not complete:
                         raise RuntimeError("storage_online_final_delta_sql_baseline_required")
-                    archive_online._inspect(conn, self.source_root, self.destination_root)
-                    progress = conn.execute(text(f"SELECT family,baseline_complete FROM {archive_online.PROGRESS}")).mappings().all()
+                    archive_online._inspect(conn, self.source_root, self.destination_root,
+                        forward_operation_sha256=self.forward_operation_sha256, saved=saved)
+                    owner = archive_online._capture(self.forward_operation_sha256)
+                    progress = conn.execute(text(f"SELECT family,baseline_complete FROM {owner.progress}")).mappings().all()
                     if ({row["family"] for row in progress} != set(archives.FAMILIES)
                             or any(not row["baseline_complete"] for row in progress)):
                         raise RuntimeError("storage_online_final_delta_archive_baseline_required")
                     if self._reproved != set(archives.FAMILIES):
                         raise RuntimeError("storage_online_final_delta_background_reproof_required")
-            sql = online.copy_pass(self.engine, placement=self.placement,
-                policy=self.policy, resource_limits=self.limits, page_rows=self.page_rows,
-                max_pages=2, max_duration_seconds=self.limits["movement_timeout_seconds"],
-                tail_only=True, deadline=page_deadline,
-                **({"connection": self._final_connection} if self._final_connection_entered else {}))
+            if self.forward_operation_sha256 is not None:
+                sql = self._forward_step("adoption", tail_only=True, deadline=page_deadline)
+            else:
+                sql = online.copy_pass(self.engine, placement=self.placement,
+                    policy=self.policy, resource_limits=self.limits, page_rows=self.page_rows,
+                    max_pages=2, max_duration_seconds=self.limits["movement_timeout_seconds"],
+                    tail_only=True, deadline=page_deadline,
+                    **({"connection": self._final_connection} if self._final_connection_entered else {}))
             pages = []
             for family in archives.FAMILIES:
                 self.check()
@@ -747,12 +874,14 @@ class OnlineController:
                     page_rows=self.page_rows, max_page_bytes=self.max_page_bytes,
                     policy=self.policy, resource_limits=self.limits, file_proof=self.proof,
                     tail_only=True, deadline=page_deadline,
-                    **({"connection": self._final_connection} if self._final_connection_entered else {}))
+                    forward_operation_sha256=self.forward_operation_sha256,
+                    **({"connection": self._final_connection} if self._final_connection_entered
+                       else {"connection": self._owner} if self.forward_operation_sha256 is not None else {}))
                 pages.append({key: report[key] for key in ("family", "page_objects",
                     "verified_bytes", "captured_tail_empty_at_observation")})
             if self._final_connection_entered:
                 with self._database_connection() as conn, conn.begin():
-                    with capture.migration_step(conn, self.limits["movement_timeout_seconds"],
+                    with self._operation_step(conn, self.limits["movement_timeout_seconds"],
                                                 deadline=page_deadline):
                         self._require_external_sql_clients_absent(conn, deadline=page_deadline)
             self.check()
@@ -850,8 +979,10 @@ class OnlineController:
             destination_root=self.destination_root, max_objects=self.max_objects,
             max_bytes=self.max_bytes, page_rows=self.page_rows, file_proof=self.proof,
             deadline=deadline, publisher_check=self._require_external_sql_clients_absent,
-            connection=self._final_connection if self._final_connection_entered else None,
-            activate_policy=activate_policy)
+            connection=(self._final_connection if self._final_connection_entered else
+                        self._owner if self.forward_operation_sha256 is not None else None),
+            activate_policy=activate_policy, forward_operation_sha256=self.forward_operation_sha256,
+            forward_end_day=self.forward_end_day)
         self.state = "committed"
         return result
 
@@ -959,10 +1090,13 @@ class OnlineController:
                         "market.raw_archive_record_mappings IN ACCESS SHARE MODE NOWAIT")
                     if self._capture_row(conn) != self._capture:
                         raise RuntimeError("storage_online_attempt_binding_changed")
-                    capture.inspect_capture(conn)
-                    protection.inspect_protection(conn)
-                    handoff.raw._inspect(conn)
-                    archive_online._inspect(conn, self.source_root, self.destination_root)
+                    if self.forward_operation_sha256 is not None:
+                        self._inspect_forward_retained(conn)
+                    else:
+                        capture.inspect_capture(conn)
+                        protection.inspect_protection(conn)
+                        handoff.raw._inspect(conn)
+                        archive_online._inspect(conn, self.source_root, self.destination_root)
                     pid = conn.scalar(text("SELECT pg_backend_pid()"))
                     self.state = "resume_fenced"
 

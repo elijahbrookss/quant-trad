@@ -39,7 +39,8 @@ RECEIPT_VERSION = "qt.fact_header_preserving_handoff.v1"
 
 
 @contextmanager
-def _staging_transaction(engine, *, placement, policy, limits, deadline, cancelled, connection=None):
+def _staging_transaction(engine, *, placement, policy, limits, deadline, cancelled, connection=None,
+                         forward_operation_sha256=None):
     """Own a fixed staging transaction and its resource watch through commit."""
     deadline = min(deadline, monotonic()+limits["movement_timeout_seconds"])
     if connection is not None and (connection.engine is not engine or connection.closed
@@ -53,13 +54,20 @@ def _staging_transaction(engine, *, placement, policy, limits, deadline, cancell
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous:
                     deadline = min(deadline, monotonic()+previous/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
+                with (archives._operation_step(conn, limits["movement_timeout_seconds"], deadline=deadline,
+                        forward_operation_sha256=forward_operation_sha256) if forward_operation_sha256 is not None
+                        else migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline)) as owner:
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("fact_header_staging_storage_busy")
                     saved, _ = physical.observe(conn, placement)
                     targets = (placement.recent, placement.history)
-                    if conn.scalar(text("SELECT to_regclass(:name)"),
+                    if forward_operation_sha256 is not None:
+                        bound, owner_deadline = owner
+                        if bound != saved:
+                            raise RuntimeError("fact_header_staging_forward_placement_changed")
+                        deadline = min(deadline, owner_deadline)
+                    elif conn.scalar(text("SELECT to_regclass(:name)"),
                                    {"name": SCHEMA+".capture"}) is not None:
                         seconds = capture_remaining_seconds(conn)
                         deadline = min(deadline, monotonic()+float(seconds))

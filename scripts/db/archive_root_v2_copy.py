@@ -247,13 +247,14 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
 
 def copy_archive_page(engine, *, family, source_root, destination_root, after_id="",
                       page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None,
-                      forward_operation_sha256=None):
+                      forward_operation_sha256=None, connection=None):
     """Copy one cursor page; an online cursor alone is never completeness."""
     return _copy_archive_page(engine, select_page=_catalog_page,
         record_page=lambda conn, rows: {}, family=family, source_root=source_root,
         destination_root=destination_root, after_id=after_id, page_rows=page_rows,
         max_page_bytes=max_page_bytes, policy=policy, resource_limits=resource_limits,
-        cancelled=cancelled, file_proof=file_proof, forward_operation_sha256=forward_operation_sha256)
+        cancelled=cancelled, file_proof=file_proof, forward_operation_sha256=forward_operation_sha256,
+        connection=connection)
 
 
 @contextmanager

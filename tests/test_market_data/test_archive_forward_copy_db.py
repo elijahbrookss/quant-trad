@@ -40,7 +40,7 @@ def _original_archives(conn):
             for name in (online.STATE, online.PROGRESS, online.QUEUE)}
 
 
-def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage, tmp_path, monkeypatch):
+def _prepare_forward(storage, tmp_path, monkeypatch):
     engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
@@ -78,6 +78,13 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
         assert online.prepare(conn, **roots, forward_operation_sha256=OPERATION)["reused"]
         started = adoption._state(conn)["started_at"]
         expires = adoption._state(conn)["expires_at"]
+    return engine, options, source, original, old, old_archives, frozen, started, expires
+
+
+def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage, tmp_path, monkeypatch):
+    engine, options, source, original, old, old_archives, frozen, started, expires = _prepare_forward(
+        storage, tmp_path, monkeypatch)
+    roots = {name: options[name] for name in ("source_root", "destination_root")}
     owner = online._capture(OPERATION)
     forward = dict(options, forward_operation_sha256=OPERATION)
     for family in archives.FAMILIES:
@@ -231,6 +238,106 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
         assert conn.scalar(text("SELECT count(*) FROM " + owner.queue)) == 0
         assert conn.scalar(text("SELECT receipt FROM " + owner.closed))["source_retained"]
     assert _hashes(options["source_root"]) == _hashes(options["destination_root"])
+    restarted = Database(storage.dsn)
+    try:
+        assert restarted.ensure_schema(), str(restarted.last_error)
+    finally:
+        restarted._reset_engine()
+
+
+def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tmp_path, monkeypatch):
+    from time import monotonic
+    from sqlalchemy import event
+    from scripts.automation.storage_online_controller import OnlineController
+    from scripts.automation.storage_online_operation import prepare_background
+
+    engine, options, source, original, old, old_archives, frozen, started, expires = _prepare_forward(
+        storage, tmp_path, monkeypatch)
+    with engine.begin() as conn:
+        today = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
+    settings = dict(placement=storage.copy_plan, expected_started_at=started.isoformat(),
+        max_objects=1000, max_bytes=64*1024**2, forward_operation_sha256=OPERATION,
+        forward_end_day=today, **options)
+    # Background reentry retains its immutable intent and original clock.
+    with OnlineController(engine, **settings) as first:
+        with pytest.raises(RuntimeError, match="controller_busy"):
+            with OnlineController(engine, **settings):
+                pass
+        report = first.command(dict(controller_id=first.controller_id, sequence=1, operation="sql_copy"))
+        assert report["result"]["phase"] in {"forward_adoption", "catch_up"}
+        first_deadline = first.proof.deadline
+        with first.rollback_source_fence(deadline=monotonic()+15) as check:
+            assert check()["database_resume_fence_held"]
+            with engine.begin() as writer:
+                _synthetic_descriptor(writer, source, "!forward-rollback-" + uuid4().hex)
+            assert check()["database_handoff_committed"] is False
+        assert first.state == "aborted"
+    engine.dispose()
+    with OnlineController(engine, **settings) as worker:
+        assert worker.proof.deadline <= first_deadline + 0.1
+        assert worker.proof.hashed_bytes == 0
+        calls = []
+        def exchange(operation, **args):
+            calls.append((operation, args.get("step")))
+            assert len(calls) < 256, "small forward controller fixture did not converge"
+            return worker.command(dict(controller_id=worker.controller_id,
+                sequence=worker._sequence+1, operation=operation, **args))
+        prepared = prepare_background(exchange, preparation_seconds=30, forward=True)
+        assert not prepared["final_switch_authorized"]
+        assert not any(step in {"identity_history", "identity_order", "identity_capture", "raw_history"}
+                       for _, step in calls)
+        with worker._owner.begin():
+            assert _old(worker._owner) == old and _original_archives(worker._owner) == old_archives
+            assert adoption._state(worker._owner)["expires_at"] == expires
+            assert adoption._state(worker._owner)["started_at"] == started
+        # An uncaught foreign source session prevents COMMIT; its idle state
+        # cannot be treated as publisher retirement.
+        with engine.connect() as peer:
+            peer.exec_driver_sql("SELECT 1")
+            with pytest.raises(RuntimeError, match="sql_publishers_not_drained"):
+                worker.commit_database(deadline=monotonic()+30)
+            assert not worker.reconcile_database()["database_handoff_committed"]
+    engine.dispose()
+    with OnlineController(engine, **settings) as worker:
+        for _ in range(32):
+            reply = worker.command(dict(controller_id=worker.controller_id,
+                sequence=worker._sequence+1, operation="reprove"))
+            if set(reply["reproved_families_at_observation"]) == set(archives.FAMILIES):
+                break
+        else:
+            pytest.fail("forward controller reproof did not converge")
+        deadline = monotonic()+30
+        # Final delta cannot restart the finite adoption scan. The immutable
+        # mirrors already keep committed source writes in the adopted targets.
+        assert worker.final_delta(deadline=deadline)["sql"]["committed_pages"] == 0
+        with worker.final_database_session(deadline=deadline):
+            assert worker._final_connection is worker._owner
+            assert worker._final_pid == worker._pid
+            commit = Connection._commit_impl
+            switching = set()
+            def observe(conn, cursor, statement, parameters, context, executemany):
+                if "RENAME TO fact_versions_legacy" in statement:
+                    switching.add(id(conn))
+            def lost_reply(conn):
+                commit(conn)
+                if id(conn) in switching:
+                    raise RuntimeError("forward controller COMMIT reply lost")
+            event.listen(engine, "after_cursor_execute", observe)
+            try:
+                with monkeypatch.context() as lost:
+                    lost.setattr(Connection, "_commit_impl", lost_reply)
+                    with pytest.raises(RuntimeError, match="COMMIT reply lost"):
+                        worker.commit_database(deadline=deadline, activate_policy=True)
+            finally:
+                event.remove(engine, "after_cursor_execute", observe)
+            assert switching and worker.state == "commit_unknown"
+            observed = worker.inspect_outcome(deadline=min(deadline, monotonic()+4))
+            assert observed["database_handoff_committed"] and observed["initial_policy_activated"]
+            assert worker.reconcile_database()["database_handoff_committed"]
+            assert worker.state == "committed"
+    with engine.begin() as conn:
+        assert _old(conn) == old and _original_archives(conn) == old_archives
+        assert _frozen_records(conn) == frozen
     restarted = Database(storage.dsn)
     try:
         assert restarted.ensure_schema(), str(restarted.last_error)

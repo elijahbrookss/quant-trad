@@ -249,9 +249,11 @@ def test_sql_drain_expired_owner_deadline_never_touches_database():
 
 
 @pytest.mark.parametrize("fault", ["closed", "invalidated", "transaction", "identity", "absent"])
-def test_retained_final_session_loss_never_reconnects(fault):
+@pytest.mark.parametrize("forward", [None, "a" * 64])
+def test_retained_final_session_loss_never_reconnects(fault, forward):
     from scripts.automation.storage_online_controller import OnlineController
     controller = OnlineController.__new__(OnlineController)
+    controller.forward_operation_sha256 = forward
     controller._archive_namespace_check = None
     controller._builtin_catalog = None
     controller._final_connection_entered = True
