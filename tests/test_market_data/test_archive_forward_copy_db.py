@@ -40,7 +40,7 @@ def _original_archives(conn):
             for name in (online.STATE, online.PROGRESS, online.QUEUE)}
 
 
-def _prepare_forward(storage, tmp_path, monkeypatch):
+def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None):
     engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
@@ -69,7 +69,10 @@ def _prepare_forward(storage, tmp_path, monkeypatch):
             expected_started_at=capture.inspect_capture(conn)["started_at"], **roots)
     with engine.begin() as conn:
         _synthetic_descriptor(conn, source, "!uncaptured-" + uuid4().hex)
-    keys.prepare_keys(engine, expected_capture=original, intent_sha256=CANCEL)
+    if key_preparation is None:
+        keys.prepare_keys(engine, expected_capture=original, intent_sha256=CANCEL)
+    else:
+        key_preparation(engine, options, original)
     with engine.begin() as conn:
         old, old_archives, frozen = _old(conn), _original_archives(conn), _frozen_records(conn)
         adoption.prepare_adoption(conn, expected_capture=original, cancellation_intent_sha256=CANCEL,
@@ -343,3 +346,73 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
         assert restarted.ensure_schema(), str(restarted.last_error)
     finally:
         restarted._reset_engine()
+
+
+def test_forward_key_watch_cancels_same_session_and_preserves_committed_index(storage, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    from time import monotonic
+
+    def prepare(engine, options, original):
+        def run(**extra):
+            return keys.prepare_keys_supervised(engine, expected_capture=original, intent_sha256=CANCEL,
+                placement=storage.copy_plan, policy=options["policy"],
+                resource_limits=options["resource_limits"], max_duration_seconds=600, **extra)
+        stopped = {"cancel":False, "pid":None}
+        def interrupt(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith("CREATE UNIQUE INDEX CONCURRENTLY"):
+                stopped["pid"] = conn.connection.driver_connection.get_backend_pid()
+                stopped["cancel"] = True
+                # Native SQL on the exact build connection. The real watchdog
+                # must deliver cancellation here, rather than a pooled peer.
+                cursor.execute("SELECT pg_sleep(4)")
+        event.listen(engine, "before_cursor_execute", interrupt)
+        try:
+            with pytest.raises(RuntimeError, match="storage_move_cancelled") as error:
+                run(cancelled=lambda: stopped["cancel"])
+        finally:
+            event.remove(engine, "before_cursor_execute", interrupt)
+        assert stopped["pid"]
+        assert error.value.__cause__.pgcode == "57014"
+        with engine.begin() as conn:
+            partial = keys._read_state(conn)
+            assert partial and not partial["complete"]
+            assert not any(keys.inspect_keys(conn).values())
+            assert cancellation._capture_binding(conn) == original
+            # Both session locks have been released after the watcher stopped.
+            assert conn.scalar(text("SELECT pg_try_advisory_xact_lock("
+                "hashtextextended('qt.storage.management.v1',0))"))
+            assert conn.scalar(text("SELECT pg_try_advisory_xact_lock("
+                "hashtextextended('qt.storage.online.controller.v1',0))"))
+        first = next(iter(keys.KEYS))
+        reconnected = []
+        lost_session = [False]
+        def opened(driver, record):
+            if lost_session[0]:
+                reconnected.append(driver)
+        def lost(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith("CREATE UNIQUE INDEX CONCURRENTLY "+first):
+                lost_session[0] = True
+                conn.invalidate()
+                raise RuntimeError("supervised index COMMIT reply lost")
+        event.listen(engine, "connect", opened)
+        event.listen(engine, "after_cursor_execute", lost)
+        try:
+            with pytest.raises(RuntimeError, match="preparation_session_lost"):
+                run()
+        finally:
+            event.remove(engine, "after_cursor_execute", lost)
+            event.remove(engine, "connect", opened)
+        # Settings restoration and advisory unlock must not reconnect after
+        # losing the build session. The valid committed index remains reusable.
+        assert lost_session[0] and not reconnected
+        with engine.begin() as conn:
+            oid = keys.inspect_keys(conn)[first]
+            assert oid
+        assert run()["keys_prepared"]
+        with engine.begin() as conn:
+            complete = keys._read_state(conn)
+            assert complete["complete"] and complete["index_oids"][first] == oid
+            assert complete["started_at"] == partial["started_at"]
+            assert complete["expires_at"] == partial["expires_at"]
+        assert run()["reused"]
+    _prepare_forward(storage, tmp_path, monkeypatch, key_preparation=prepare)

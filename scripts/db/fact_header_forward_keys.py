@@ -6,6 +6,8 @@ The host still owns source/fleet/physical/resource admission and cancellation.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+import math
 import json
 import logging
 from time import monotonic
@@ -90,19 +92,27 @@ def _read_state(conn):
     return dict(rows[0])
 
 
-def prepare_keys(engine, *, expected_capture, intent_sha256, max_duration_seconds=600):
+def prepare_keys(engine, *, expected_capture, intent_sha256, max_duration_seconds=600,
+                 connection=None, deadline=None):
     """Build the two composite keys without copying the heap or search indexes.
 
     One durable database deadline covers both concurrent builds and all retries.
     A failed/invalid index is retained and refused, never silently dropped or
-    rebuilt. This primitive needs a host resource watch before production use.
+    rebuilt. Production callers use prepare_keys_supervised for the same-session
+    resource watch. A supplied connection/deadline can only narrow ownership.
     It does not make the old captured targets complete or authorize attachment.
     """
     cancellation._validate_intent(expected_capture, intent_sha256)
     if type(max_duration_seconds) is not int or not 30 <= max_duration_seconds <= 3600:
         raise ValueError("fact_header_forward_preparation_bound_invalid")
-    deadline = monotonic()+max_duration_seconds
-    with engine.connect() as conn:
+    if connection is not None and (connection.engine is not engine or connection.closed
+            or connection.invalidated or connection.in_transaction()):
+        raise ValueError("fact_header_forward_preparation_connection_invalid")
+    if deadline is not None and (type(deadline) not in (int, float)
+            or not math.isfinite(deadline) or deadline <= monotonic()):
+        raise ValueError("fact_header_forward_preparation_deadline_invalid")
+    deadline = min(deadline, monotonic()+max_duration_seconds) if deadline is not None else monotonic()+max_duration_seconds
+    with (nullcontext(connection) if connection is not None else engine.connect()) as conn:
         locked = conn.scalar(text("SELECT pg_try_advisory_lock(hashtextextended(:name,0))"),
                              {"name":CONTROLLER_LOCK})
         conn.commit()
@@ -167,6 +177,8 @@ def prepare_keys(engine, *, expected_capture, intent_sha256, max_duration_second
                             " ON market.fact_versions ("+", ".join(columns)+")")
                     finally:
                         conn.rollback()
+                        if conn.closed or conn.invalidated:
+                            raise RuntimeError("fact_header_forward_preparation_session_lost")
                         for setting,value in settings.items():
                             conn.execute(text("SELECT set_config(:setting,:value,false)"),
                                          {"setting":setting,"value":value})
@@ -193,6 +205,91 @@ def prepare_keys(engine, *, expected_capture, intent_sha256, max_duration_second
                         final_switch_authorized=False, source_retained=True)
         finally:
             conn.rollback()
+            if conn.closed or conn.invalidated:
+                raise RuntimeError("fact_header_forward_preparation_session_lost")
             conn.execute(text("SELECT pg_advisory_unlock(hashtextextended(:name,0))"),
                          {"name":CONTROLLER_LOCK})
             conn.commit()
+
+
+def prepare_keys_supervised(engine, *, expected_capture, intent_sha256, placement,
+                            policy, resource_limits, max_duration_seconds=600,
+                            deadline=None, cancelled=None):
+    """Admit fixed-drive resources and watch the actual concurrent-build session.
+
+    Explicit maintenance allowances cover the two indexes; observed net space,
+    temp/WAL/growth reserves and the original deadline remain enforced through
+    each AUTOCOMMIT build and its durable progress write. This does not predict
+    production index size, duration or collection impact.
+    """
+    from scripts.db import fact_header_v2_placement as physical
+    from scripts.db import archive_reference_v2_placement as reference_move
+    from portal.backend.service.storage.header_resource_claims import _limits
+    from portal.backend.service.storage.header_resources import observe_header_resources
+    from portal.backend.service.storage.header_movement import _MoveWatch
+
+    cancellation._validate_intent(expected_capture, intent_sha256)
+    limits = _limits(resource_limits, migration=True)
+    if (not isinstance(placement, physical.CopyPlacement)
+            or type(max_duration_seconds) is not int or not 30 <= max_duration_seconds <= 3600
+            or (cancelled is not None and not callable(cancelled))
+            or (deadline is not None and (type(deadline) not in (int, float)
+                or not math.isfinite(deadline) or deadline <= monotonic()))):
+        raise ValueError("fact_header_forward_supervision_invalid")
+    targets = (placement.recent, placement.history)
+    reference_move._fixed_inputs(policy, limits, targets)
+    bound = monotonic()+min(max_duration_seconds, limits["movement_timeout_seconds"])
+    deadline = min(deadline, bound) if deadline is not None else bound
+    if cancelled is not None and cancelled():
+        raise RuntimeError("storage_move_cancelled")
+    with engine.connect() as conn:
+        watch = None
+        locked = False
+        try:
+            with conn.begin():
+                previous = conn.scalar(text("SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
+                if previous:
+                    deadline = min(deadline, monotonic()+previous/1000)
+                with capture._bounded_step(conn, min(30, limits["movement_timeout_seconds"])):
+                    locked = conn.scalar(text("SELECT pg_try_advisory_lock("
+                        "hashtextextended('qt.storage.management.v1',0))"))
+                    if not locked:
+                        raise RuntimeError("fact_header_forward_storage_busy")
+                    _source_binding(conn, expected_capture, intent_sha256)
+                    saved, _ = physical.observe(conn, placement)
+                    retained = conn.scalar(text("SELECT placement FROM "+headers.STATE+" WHERE id=1"))
+                    if saved != retained:
+                        raise RuntimeError("fact_header_forward_preparation_placement_changed")
+                    state = _read_state(conn)
+                    if state is not None and not state["complete"]:
+                        remaining = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) "
+                            "FROM "+STATE+" WHERE id=1"))
+                        deadline = min(deadline, monotonic()+float(remaining))
+                    resources = observe_header_resources(conn, targets, pg_controldata=placement.pg_controldata,
+                        timeout_seconds=min(30, limits["movement_timeout_seconds"]))
+                    budget, floors = reference_move._budget(conn, observed={"bytes":0, "_binding":saved},
+                        policy=policy, limits=limits, targets=targets, resources=resources)
+                    watch = _MoveWatch(driver=conn.connection.driver_connection, targets=targets,
+                        capacity=resources.capacity, floors=floors, deadline=deadline,
+                        cancelled=cancelled, grace=limits["cancellation_grace_seconds"])
+                    watch.start()
+            result = prepare_keys(engine, expected_capture=expected_capture, intent_sha256=intent_sha256,
+                max_duration_seconds=max_duration_seconds, connection=conn, deadline=deadline)
+            watch.check()
+            return {**result, "resource_budget":budget}
+        except Exception as exc:
+            if watch is not None and watch.failure is not None:
+                raise RuntimeError(watch.failure) from exc
+            raise
+        finally:
+            # Join before returning the physical connection to its pool; a late
+            # cancel must never reach another borrower's SQL.
+            try:
+                if watch is not None:
+                    watch.stop(conn)
+            finally:
+                conn.rollback()
+                if locked and not conn.closed and not conn.invalidated:
+                    conn.execute(text("SELECT pg_advisory_unlock("
+                        "hashtextextended('qt.storage.management.v1',0))"))
+                    conn.commit()

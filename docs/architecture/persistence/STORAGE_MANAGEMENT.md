@@ -3535,3 +3535,16 @@ Rollback inspection preserves the original source guards, including after work
 expiry, without reauthorizing work. This internal mode does not yet supply the
 canonical forward host request, key/adoption preparation or login-gate authority;
 those owners must explicitly admit the same session and operation before use.
+
+
+Forward concurrent-key preparation now has a supervised entrypoint that retains
+the actual build connection. It admits the original physical placement and
+existing declared two-drive budgets, holds the storage session lock across
+AUTOCOMMIT, and keeps the existing filesystem/deadline watcher attached through
+both index builds and durable progress writes. A watcher cancellation targets
+that same driver. The watcher joins before connection reuse; a lost session is
+not reconnected to release an old lock. The durable key deadline is retained on
+reentry and a caller deadline can only shorten it. Completed indexes survive a
+lost reply and are verified before reuse. This is net filesystem supervision,
+not per-backend WAL attribution or a production size/timing estimate. The
+canonical forward host route still must invoke and qualify this boundary.

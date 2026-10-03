@@ -361,3 +361,13 @@ The existing controller therefore selects this mode explicitly and preserves
 its shared resource, publisher and final-deadline guards. The host route must
 bind this session choice to its exact forward operation; the old host route's
 two-session reply rule is not silently weakened.
+
+
+Concurrent key builds use the existing resource watcher on the actual owning
+SQL session, including AUTOCOMMIT and progress publication. Fixed physical
+placement, declared maintenance/temp/WAL/growth allowances and existing claims
+are freshly admitted under the storage session lock. Cancellation preserves
+completed indexes and original deadlines; invalid partial indexes still refuse
+without repair. The host route must select the supervised entrypoint and supply
+measured allowances. Disposable cancellation/reentry tests cannot establish
+production build duration or collection impact.
