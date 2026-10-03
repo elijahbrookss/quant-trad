@@ -284,7 +284,7 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
         production_capacity_admission=False, final_handoff=False)
 
 
-def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned, expired=False):
+def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned, expired=False, terminal_image=None):
     """Real confined worker/SQL cancellation; synthetic runtime preflight only."""
     from copy import deepcopy
     import time
@@ -332,7 +332,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
     plan["request"]=request;plan["inventory_path"]=str(kwargs["inventory_path"])
     path=state/"terminal-operation.json";host_boundary.save_receipt(path,plan,initial=True)
     manifest=dict(schema_version="qt.storage_online_terminal.v1",plan_sha256=amendment._sha(path.read_bytes()),
-        image=kwargs["image"],source_revision=request["source_revision"],source_tree_hash=request["source_tree_hash"])
+        image=terminal_image or kwargs["image"],source_revision=request["source_revision"],source_tree_hash=request["source_tree_hash"])
     manifest_path=state/"terminal-package.json";host_boundary.save_receipt(manifest_path,manifest,initial=True)
     original_files={p:p.read_bytes() for p in (path,state/amendment.REQUEST,state/launch._STATE,kwargs["inventory_path"])}
     if expired:
@@ -384,7 +384,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
     status=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",old["container_id"]))
     assert not status["Running"] and status["Pid"]==0 and not status["OOMKilled"]
     assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=old["container_id"]))==source
-    return dict(read_only_worker_mounts=True,partial_native_references_and_archives=True,
+    return dict(terminal_image=manifest["image"],read_only_worker_mounts=True,partial_native_references_and_archives=True,
         committed_reply_loss_reconciled=True,apply_dispatches=calls.count("apply"),
         original_inputs_and_clocks_preserved=True,old_worker_preserved=True,transient_workers_retired=True,
         source_clients_unchanged=True,production_runtime_preflight=False,production_cardinality=False,

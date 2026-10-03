@@ -21,6 +21,7 @@ parser.add_argument('--initial-capture',action='store_true',help='create placeme
 parser.add_argument('--replacement-package-image',help='qualify an actual new package and interrupted publication before header copying')
 parser.add_argument('--terminal-cancellation',action='store_true',help='qualify preserving cancellation through a read-only mounted worker and lost reply reconciliation')
 parser.add_argument('--terminal-cancellation-expired',action='store_true',help='wait for the original fixture capture to expire naturally before preserving cancellation')
+parser.add_argument('--terminal-image',help='use an independently attested production image for the fixed terminal worker')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
@@ -49,6 +50,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.terminal_image and not options.terminal_cancellation:
+ parser.error('--terminal-image requires --terminal-cancellation')
 if options.terminal_cancellation_expired and not options.terminal_cancellation:
  parser.error('--terminal-cancellation-expired requires --terminal-cancellation')
 if options.canonical_deployment_repository and not options.completion_observation:
@@ -551,7 +554,7 @@ os.chown(root,70,70)
    from scripts.ci.online_operation_fixture import rehearse_terminal_cancellation
    report['terminal_cancellation']=rehearse_terminal_cancellation(state=state,kwargs=kwargs,
      history_uuid=history_uuid,control=control,source=source,owned=owned,
-     expired=options.terminal_cancellation_expired)
+     expired=options.terminal_cancellation_expired,terminal_image=options.terminal_image)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()

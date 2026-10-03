@@ -43,6 +43,7 @@ COPY scripts/provenance/ /app/scripts/provenance/
 COPY scripts/db/archive_file_v2_proof.py \
      scripts/db/archive_root_v2_online.py \
      scripts/db/fact_header_v2_cancel.py \
+     scripts/db/fact_header_v2_deadline.py \
      scripts/db/fact_header_v2_online.py \
      scripts/db/fact_header_v2_online_proof.py \
      scripts/db/fact_header_v2_handoff.py \
@@ -58,6 +59,9 @@ COPY scripts/db/archive_file_v2_proof.py \
 # Fixed online worker and preserving recovery dependencies. The held worker
 # drops to the database UID before opening a connection.
 COPY scripts/automation/storage_online_controller.py \
+     scripts/automation/storage_online_terminal.py \
+     scripts/automation/storage_online_launch.py \
+     scripts/automation/storage_host_boundary.py \
      scripts/automation/storage_online_drain.py \
      scripts/automation/storage_online_worker.py \
      scripts/automation/storage_recovery_prepare.py \

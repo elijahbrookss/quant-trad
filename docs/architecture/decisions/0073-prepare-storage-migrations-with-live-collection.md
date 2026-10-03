@@ -2029,6 +2029,13 @@ journal keeps its existing 64 KiB bound. Recipe contents are never logged.
 
 ### Explicit preserving terminal operator
 
+The production runtime explicitly packages and attests the fixed terminal module,
+its existing launch/host boundary imports and the SQL controller-lock dependency.
+It does not depend on the test image's broad script copy. The native host rehearsal
+can select a separate production terminal image while its disposable publisher
+uses the test image; both retain source attestation and fixed-command admission.
+
+
 `qt storage migrate --operation-file <private-plan> --cancel-attempt-file
 <private-package>` inspects the original capture by default. `--execute` saves
 one private terminal intent before dispatching cancellation. The package has
