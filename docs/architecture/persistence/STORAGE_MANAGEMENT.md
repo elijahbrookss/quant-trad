@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/fact_header_forward_keys.py
+  - tests/test_market_data/test_fact_header_forward_keys_db.py
   - scripts/automation/storage_online_terminal.py
   - tests/test_storage_online_terminal.py
   - tests/test_terminal_placement.py
@@ -3350,3 +3352,28 @@ archive qualification before production use. Host fault injection and prior
 capture-only SQL tests do not prove that integration or production lock costs.
 It does not adopt copied targets, create a replacement capture, switch source,
 activate recovery or complete the storage release.
+
+## Explicit composite-key preparation after terminal cancellation
+
+The internal `scripts/db/fact_header_forward_keys.py` owner prepares the two
+composite keys needed to attach retained headers. It first reconciles the exact
+committed cancellation, admits the original v1 layout and preserved shadow
+shapes, and binds the source heap/search-index identities. The original
+capture, queues, targets and cancellation receipt are never changed.
+
+Both unique indexes use concurrent native PostgreSQL builds while the same SQL
+session retains controller exclusion. A separate preparation journal records
+one original deadline for both indexes and retries. Valid publication with a
+lost reply can be reconciled by exact index definition and OID; an invalid,
+foreign or replaced index refuses without automatic removal or rebuilding.
+Existing caller statement/lock limits are not weakened. No range check is
+installed early that could reject collection when the UTC date changes.
+
+This is an internal preparation primitive, not a production forward entrypoint.
+The host still needs a bound resource watch, original phase wall/boot/monotonic
+clocks and actual capacity/elapsed admission before using it. The retained
+identity/raw baseline is not made current by adding these indexes. Subsequent
+adoption must account explicitly for the uncaptured interval after terminal
+cancellation, then prove catch-up and the final live reference boundary. No new
+capture, header attachment, source switch, history placement or runtime/recovery
+activation is authorized by a `keys_prepared` result.

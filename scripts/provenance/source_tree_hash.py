@@ -32,6 +32,7 @@ OPERATOR_FILES = (
     "scripts/db/fact_header_v2_capture.py",
     "scripts/db/fact_header_v2_copy.py",
     "scripts/db/fact_header_v2_admission.py",
+    "scripts/db/fact_header_forward_keys.py",
     "scripts/db/fact_header_v2_placement.py",
     "scripts/db/fact_header_v2_references.py",
     "scripts/db/raw_mapping_v2_copy.py",

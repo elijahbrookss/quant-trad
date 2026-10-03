@@ -176,7 +176,7 @@ def _assert_guard_functions(conn, owner):
             raise RuntimeError("fact_header_source_function_changed: "+signature)
 
 
-def _assert_source_triggers(conn, *, identity_capture):
+def _assert_source_triggers(conn, *, identity_capture, capture_active=True):
     rows=_rows(conn,"""
         SELECT t.tgname,t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,
                t.tgnargs,t.tgqual IS NULL AS unfiltered,
@@ -193,6 +193,11 @@ def _assert_source_triggers(conn, *, identity_capture):
         "trg_qt_header_v2_capture":(5,False,SCHEMA+".capture_fact_insert()","A"),
         "trg_qt_header_v2_reject_change":(58,False,SCHEMA+".reject_fact_source_change()","A"),
     }
+    if not capture_active:
+        if identity_capture:
+            raise ValueError("fact_header_source_inactive_identity_capture")
+        del expected["trg_qt_header_v2_capture"]
+        del expected["trg_qt_header_v2_reject_change"]
     if identity_capture:
         expected["trg_qt_header_v2_capture_identity"]=(5,False,SCHEMA+".capture_fact_identity()","A")
     if {row["tgname"] for row in rows}!=set(expected):
@@ -296,6 +301,16 @@ def assert_v1_source_admission(conn, *, identity_capture=False):
     context=inspect_capture(conn)
     if identity_capture:
         inspect_identity_capture(conn)
+    return _assert_v1_source_layout(conn, context=context, identity_capture=identity_capture)
+
+
+def _assert_v1_source_layout(conn, *, context, identity_capture=False,
+                             capture_active=True, forward_keys=False):
+    """Shared layout checks; the phase owner first binds capture/cancellation.
+
+    Only the forward owner may admit its two independently checked preparation
+    indexes. Normal copy admission still requires the exact original index set.
+    """
     if conn.scalar(text("""
         SELECT to_regclass('market.fact_identities') IS NOT NULL
             OR to_regclass('market.fact_header_partitions') IS NOT NULL
@@ -343,10 +358,15 @@ def assert_v1_source_admission(conn, *, identity_capture=False):
             WHERE con.conrelid='market.fact_versions'::regclass AND con.contype IN('p','u')
               AND (NOT i.indisvalid OR NOT i.indisready OR NOT i.indisunique OR NOT i.indimmediate))
     """))
-    if invalid_unique or _secondary_indexes(conn,SOURCE)!=_secondary_indexes(conn,shadow):
+    indexes = _secondary_indexes(conn,SOURCE)
+    if forward_keys:
+        from scripts.db.fact_header_forward_keys import inspect_keys, KEYS
+        inspect_keys(conn)
+        indexes = [row for row in indexes if row["relname"] not in KEYS]
+    if invalid_unique or indexes!=_secondary_indexes(conn,shadow):
         raise RuntimeError("fact_header_source_indexes_changed")
     _assert_guard_functions(conn,source["owner"])
-    _assert_source_triggers(conn,identity_capture=identity_capture)
+    _assert_source_triggers(conn,identity_capture=identity_capture,capture_active=capture_active)
     references=_incoming_references(conn)
     views=_rows(conn,"""
         SELECT DISTINCT n.nspname||'.'||c.relname AS relation,c.relkind
