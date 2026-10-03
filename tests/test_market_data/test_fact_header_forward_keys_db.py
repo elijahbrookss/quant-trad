@@ -19,7 +19,7 @@ def cancelled(source):
     with engine.begin() as conn:
         copy.prepare_copy(conn)
         original = cancellation._capture_binding(conn)
-        cancellation.cancel_attempt(conn, expected_started_at=original["prepared_at"],
+        cancellation.cancel_attempt(conn, expected_started_at=capture.inspect_capture(conn)["started_at"],
             expected_capture=original, intent_sha256="a"*64)
     source.cancelled_capture = original
     return source
