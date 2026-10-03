@@ -167,6 +167,7 @@ def fetch_ohlcv_by_instrument(
     interval: str,
     *,
     frozen_alias: str | None = None,
+    include_runtime_features: bool = True,
 ) -> pd.DataFrame:
     """Read one canonical instrument series without provider/API fallback."""
 
@@ -217,7 +218,7 @@ def fetch_ohlcv_by_instrument(
                 or []
             ),
         )
-    enriched = _with_runtime_candle_features(frame)
+    enriched = _with_runtime_candle_features(frame) if include_runtime_features else frame
     if isinstance(scope, MarketDataReadScope):
         enriched.attrs["market_data_read_scope"] = {
             "schema_version": "market_data_read_scope.v2",
@@ -295,7 +296,9 @@ def preflight_candle_coverage_by_instrument(
         }
 
     try:
-        df = fetch_ohlcv_by_instrument(instrument_id, start, end, interval)
+        df = fetch_ohlcv_by_instrument(
+            instrument_id, start, end, interval, include_runtime_features=False
+        )
     except Exception as exc:  # noqa: BLE001 - preflight reports provider/storage failures as evidence.
         return {
             "schema_version": "candle_coverage_preflight.v1",
@@ -354,7 +357,9 @@ def preflight_candle_coverage_by_instrument(
     coverage_end = last_candle_start + interval_delta
     gap_classification = getattr(df, "attrs", {}).get("gap_classification") if hasattr(df, "attrs") else None
     continuity = summarize_candle_continuity(
-        [{"time": item.isoformat()} for item in times],
+        # Continuity accepts epoch seconds directly. Avoid allocating and then
+        # reparsing a timestamp string/dict for every candle in a long window.
+        (int(item.timestamp()) for item in times),
         expected_interval_seconds_value=expected_interval_seconds(timeframe=interval),
         gap_classification=gap_classification,
     ).to_dict()

@@ -1326,7 +1326,12 @@ class TestHubIntegration:
                 log_entries=[{"id": "log-1", "message": "test"}],
             )))
 
-            await asyncio.sleep(0.15)
+            # Delivery is asynchronous; assert its completion rather than a
+            # scheduler-dependent 150ms snapshot under the full-suite load.
+            expected = {"botlens_symbol_candle_delta", "botlens_symbol_diagnostic_delta"}
+            async with asyncio.timeout(1):
+                while not expected <= {m["type"] for m in ws.messages}:
+                    await asyncio.sleep(0.01)
 
             message_types = {m["type"] for m in ws.messages}
             assert "botlens_symbol_candle_delta" in message_types

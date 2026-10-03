@@ -21,6 +21,9 @@ code_paths:
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
+  - portal/backend/service/research/matched_origin_evaluator.py
+  - portal/backend/service/research/shared_landmark_evaluator.py
+  - portal/backend/service/research/forward_risk_evaluator.py
   - portal/backend/service/research/service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
@@ -227,7 +230,7 @@ outcome tail still resolve and freeze through the existing evidence boundary.
 No dummy reference feed or Strategy is required. Fact-snapshot sampling and
 unbound enriched features remain invalid without their typed inputs.
 
-New candle-only requests select v6; definitions v3/v4/v5 and their evaluator
+New candle-only requests without matched-origin attribution select v6; definitions v3/v4/v5 and their evaluator
 payloads remain unchanged. V6 adds a descriptive per-horizon outcome summary
 from eligible events before the feature complete-case filter: resolved and
 unresolved counts, positive counts, mean/median direction-signed returns and
@@ -237,6 +240,56 @@ from this population. Optional unresolved horizons are counted separately.
 Empty populations report null averages. Eligibility gates remain authoritative;
 a descriptive summary does not grant significance, independent samples,
 execution realism, profitability, or permission to create a validated claim.
+
+## Matched-Origin Descriptive Attribution
+
+Definition v7 (evaluator v6, result `event_fact_analysis_result.v6`) adds an
+explicit `outcomes.matched_origin` configuration to candle-only Indicator Checks.
+It uses the same admitted Indicator graph and public snapshot evidence for both
+origin and follow-up signals. It does not rerun the engine, ingest saved Check
+payloads as inputs, or create inferred price Facts. Existing definitions and their
+hashes/results remain unchanged.
+
+The configuration declares a distinct follow-up `detector` plus
+`origin_time_path`, `origin_event_key_path`, and `reference_path` metadata paths.
+For Market Profile confirmation these are `metadata.breakout_time`,
+`metadata.breakout_event_key`, and `metadata.reference`. Only bar horizons and
+descriptive sample/day eligibility are admitted initially; additional features,
+models, inferential tests, and fold/class thresholds are rejected rather than
+silently reinterpreted.
+
+Matching is exact within the request's single instrument/binding: Indicator ID,
+direction, origin event key/time, and the complete immutable reference must agree.
+Duplicate origins/follow-ups and missing identity fail loud. Changed references
+and absent origins are retained with reasons. Both arms use the original
+half-open evaluation window and unchanged outcome tail. An unmatched origin is
+not proof that it never confirms: follow-ups outside that window are not admitted.
+This is retrospective outcome classification, never a feature available at the
+origin decision.
+
+For each horizon the evaluator reports A (all eligible raw returns), B (raw
+returns on exact pairs), C (confirmed sample prices to the original raw endpoint),
+and D (confirmed prices to their own endpoints). B/C/D use the identical resolved
+pair set. C uses the already bound target candle close, not reconstruction from
+rounded summaries. The reported selection B-A, repricing C-B and extension D-C
+are descriptive accounting, not causal effects. A separate all-follow-up mean
+and its residual against D reconcile unmatched/ineligible confirmations; full
+population reconciliation is explicit. Empty pair means/differences are null.
+
+Per-pair output preserves event identities, open labels, entry close/known-at
+clocks, both endpoint closes, and inside/outside/at-boundary entry state. Positive
+finite prices and contemporaneously available post-decision samples are required
+for every contributing arm row, including unmatched rows. A follow-up sample
+after the common endpoint is unresolved. Existing outcome gap/eligibility rules
+remain in force; shortened-window excursions are not inferred from old extrema.
+
+Eligibility is checked for both arms and the common pairs at each required
+horizon, including distinct origin UTC days. A sufficient raw population cannot
+qualify an insufficient follow-up or paired population. Descriptive values remain
+visible with `insufficient_evidence`; neither replay nor sample thresholds grant
+independence, significance, out-of-sample generality or trading authority.
+The nested follow-up result and attribution are covered by the canonical result
+hash and existing frozen persistence/replay/Observation contract.
 
 ## Gap Ownership
 
@@ -305,7 +358,7 @@ payload semantics.
 | Preview | `qt research check preview --request-json ...` | `POST /api/research/checks/evaluate` | `preview_research_check` |
 | Prepare/freeze | `qt research check prepare --request-json ... [--freeze]` | `POST /api/research/checks/prepare` | `prepare_research_check_evidence` |
 | Evidence | `qt research check run --request-json ... --dataset-id ...` | `POST /api/research/checks/run` | `run_research_check_evidence` |
-| Async evidence | add `--dispatch`; inspect with `qt research jobs status/result` | `POST /api/research/jobs/checks/run`; job reads | dispatch/status/result tools |
+| Async evidence | add `--dispatch` (optional `--single-attempt`); inspect with `qt research jobs status/result` | `POST /api/research/jobs/checks/run`; job reads | dispatch/status/result tools |
 | Replay | `qt research check replay <check_id>` | `POST /api/research/checks/{id}/replay` | `replay_research_check` |
 | Observation | `qt research observe-from-check <check_id> ...` | `POST /api/research/checks/{id}/observations` | `create_observation_from_check` |
 | Trail | `qt research trail <item_id>` | `GET /api/research/items/{id}/trail` | resource/tool trail read |
@@ -364,3 +417,89 @@ Interrupted ranges remain recorded gaps, and unexplained intervals remain admiss
 failures. A missing sampled bucket still yields an unavailable sample; quiet
 coverage does not manufacture a value. Frozen replay uses its pinned classification
 and witnesses, preserving older Dataset and Check behavior.
+
+## Shared-Landmark Groups and Dependence
+
+Definition v8 (evaluator v7, result `event_fact_analysis_result.v7`) additionally
+requires `outcomes.shared_landmark`. Its fixed classification and later sample
+lags preserve each raw origin's original endpoint. The existing registered owner
+reuses the same canonical public Indicator outputs and candles; no engine rerun
+or saved-result analytical input is introduced. Earlier definitions are unchanged.
+
+The initial readiness contract is `market_profile.value_location.v1`: every
+classification bar must have available public context identifying the same opaque
+original profile. A confirmation must match the original reference and be known
+by the fixed cutoff. Complete observation with no such confirmation is a separate
+comparison group, not a claim of failure or no eventual confirmation. Missing or
+late evidence and right-edge censoring remain incomplete; profile/reference
+identity changes remain unresolved. Subsequent events cannot rewrite cutoff labels.
+Only reject-gap candle evidence is admitted. The later close sample must precede
+all original endpoints; known-at clocks and shortened holding durations are explicit.
+
+Outputs separate outside, inside, and boundary-equal samples relative to the
+original directional boundary, not full value-area membership. Each horizon
+includes group distributions, explicit group sample/day eligibility, profile/day
+contributions to means, and positive-duration outcome-window overlaps. Insufficient
+groups retain descriptive results and cannot inherit a sufficient raw-arm status.
+The declared `leave_one_original_profile_out.v1` sensitivity deletes a contributing
+original profile simultaneously from both groups, including its cross-day events.
+It reports undefined empty-group deletions; this is influence analysis, not a
+confidence interval or independence correction. Deterministic chronological,
+median-nearest, adverse, and largest-absolute episodes remain inspectable. The full
+analysis is included in the canonical result hash and provider-free replay.
+
+
+## Declared-window candle risk comparison
+
+Event-fact definition 10 / evaluator 9 is an explicit candle-only descriptive
+owner. `outcomes.forward_risk` selects `candle_risk_comparison.v1`; older
+versions reject that field. This version pins Candle Stats v1 defaults, 1m
+source candles, a 200-bar finite pre-period initialization and `reset_rewarm`.
+It supports one UTC calendar year or a bounded subwindow for qualification.
+It does not reconstruct an uninterrupted pre-seed EMA history.
+
+The collector optionally captures each public output's readiness from the
+canonical engine snapshot. Contiguous identical readiness and gap-segment
+states compress into half-open candle-open intervals. Missing candles are not
+invented. The optional material participates in the input hash only for Checks
+that request it; existing Check hash inputs remain unchanged.
+
+Every observable decision candle is assigned to emitted ATR shock crossing,
+ordinary current z-score at most 2, or persistent high without a crossing.
+Public metric and signal readiness are required; absence of a signal alone is
+not an ordinary observation. Output identity, pinned configuration, current
+source availability and the segment's accumulated known-at watermark are
+validated. Undetectable intervals, overlapping dependency flags, and mutually
+exclusive first-blocking reasons retain unknown event counts as unknown.
+
+The baseline uses 120 squared successive log-close increments from 121 exact
+closes strictly preceding the trigger candle, all known by decision. The first
+available close at or after decision is the price sample. Subsequent 30, 120
+and 360 elapsed minutes independently resolve mean squared log returns and
+high-low path range divided by sample price. The trigger/sample high and low
+are excluded. Raw risk requires valid closes; range additionally requires
+valid highs/lows. Complete retrospective paths retain late reports with explicit
+outcome known-at (maximum sample/path source availability), late-after-target
+counts and delay distributions by cohort and month. This label availability is
+never a decision feature. Missing/invalid paths remain unresolved independently
+of other horizons. Zero or
+unavailable prior risk censors only the ratio, preserving valid raw outcomes.
+
+The requirement declaration uses `outcome_boundary=evaluation_end_exclusive`:
+planning adds no future tail. Entry and target close must be strictly before
+the evaluation end; later candidates retain administrative censoring. This
+prevents a declared discovery window from reading a reserved next year.
+
+Source coverage uses candle-open time; cohort calendar strata and day/week
+contributions use decision known-at. Preceding observable context accompanies
+excluded intervals without imputing missing periods or assuming random missingness.
+Annual and monthly distributions and fixed month/six-hour/prior-RMS strata
+report shock-count-weighted contrasts, matched and unmatched coverage, whole
+day/week deletion sensitivity, actual interval overlaps and connected episodes,
+reset segments, concentration, and first-per-nonoverlapping-six-hour sensitivity.
+These are descriptive associations, with no IID, causal, effective-sample-size,
+trading or promotion claim. The owner persists an ordered all-clock-row digest
+and bounded chronological examples, not a second year-sized observation copy;
+exact frozen inputs, source version and result hashes own replay.
+
+See [ADR 0076](../decisions/0076-declare-candle-risk-observability-and-calendar-boundaries.md).

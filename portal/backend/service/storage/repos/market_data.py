@@ -73,7 +73,10 @@ from ....db import db
 from ....db.fact_storage_schema import current_fact_storage_day
 
 from .market_lifecycle import market_storage_lifecycle_repository
-from .fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, canonical_fact_storage_repository
+from .fact_storage import (
+    CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_RANGE_ROW_FROM,
+    canonical_fact_storage_repository,
+)
 
 
 _SERIES_IDENTITY_VERSION = "market_series.v1"
@@ -1794,6 +1797,7 @@ class PostgresMarketDataRepository:
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
         collection_fence: Optional[Mapping[str, Any]] = None,
+        require_same_source: bool = False,
     ) -> IngestionOutcome:
         """Persist schema-registered canonical Facts through the one writer."""
 
@@ -1853,6 +1857,7 @@ class PostgresMarketDataRepository:
                 rows=rows,
                 allow_corrections=bool(allow_corrections),
                 collection_fence=collection_fence,
+                require_same_source=require_same_source,
             )
         except Exception as exc:
             self._fail_ingestion_run(run_id, exc)
@@ -2601,6 +2606,7 @@ class PostgresMarketDataRepository:
         rows: Sequence[CanonicalFact],
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
+        require_same_source: bool = False,
     ) -> IngestionOutcome:
         with db.session() as session:
             return self._ingest_canonical_rows_with_session(
@@ -2610,6 +2616,7 @@ class PostgresMarketDataRepository:
                 rows=rows,
                 allow_corrections=allow_corrections,
                 collection_fence=collection_fence,
+                require_same_source=require_same_source,
             )
 
     def _ingest_canonical_rows_with_session(
@@ -2621,6 +2628,7 @@ class PostgresMarketDataRepository:
         rows: Sequence[CanonicalFact],
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
+        require_same_source: bool = False,
     ) -> IngestionOutcome:
         inserted_count = 0
         corrected_count = 0
@@ -2639,11 +2647,24 @@ class PostgresMarketDataRepository:
             collection_fence=collection_fence,
         )
         source_id, source = self._canonical_source_for_run(session, run_id)
-        latest_by_key = {row["observation_key"]: row for row in session.execute(text("""
-            SELECT DISTINCT ON (observation_key) observation_key,revision,row_hash,market_commit_seq
-            FROM market.fact_versions WHERE series_id=:series_id AND observation_key=ANY(:keys)
+        latest_identities = session.execute(text("""
+            SELECT DISTINCT ON (observation_key) id,storage_day,observation_key,revision
+            FROM market.fact_identities
+            WHERE series_id=:series_id AND observation_key=ANY(:keys)
             ORDER BY observation_key,revision DESC
-        """), {"series_id": series_id, "keys": [fact.observation_key for fact in rows]}).mappings()}
+        """), {"series_id": series_id, "keys": [fact.observation_key for fact in rows]}).mappings().all()
+        latest_by_key = {}
+        if latest_identities:
+            latest_headers = session.execute(text("""
+                SELECT id,observation_key,revision,row_hash,market_commit_seq,source_id
+                FROM market.fact_versions
+                WHERE id=ANY(:ids) AND storage_day=ANY(:days)
+            """), {"ids": [row["id"] for row in latest_identities],
+                   "days": sorted({row["storage_day"] for row in latest_identities})}).mappings().all()
+            if (len(latest_headers) != len(latest_identities)
+                    or {row["id"] for row in latest_headers} != {row["id"] for row in latest_identities}):
+                raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
+            latest_by_key = {row["observation_key"]: row for row in latest_headers}
         # A true no-op creates no reference and must remain envelope-only,
         # including after cold movement. Acquire a deterministic manifest-lock
         # set for the genuine writes before inserting any of their payloads.
@@ -2665,6 +2686,12 @@ class PostgresMarketDataRepository:
                 max_commit_seq = max(
                     max_commit_seq, int(latest["market_commit_seq"])
                 )
+                if require_same_source and int(latest["source_id"]) != source_id:
+                    raise RuntimeError(
+                        "market_data_source_conflict: immutable producer cannot reuse "
+                        f"another source series_id={series_id} "
+                        f"observation_key={fact.observation_key}"
+                    )
                 if str(latest["row_hash"]) == fact.row_hash:
                     noop_count += 1
                     continue
@@ -2765,7 +2792,7 @@ class PostgresMarketDataRepository:
                 "quality": _json_text(fact.quality),
             })
             max_commit_seq = max(max_commit_seq, commit_seq)
-            latest_by_key[fact.observation_key] = {"revision": revision, "row_hash": fact.row_hash,
+            latest_by_key[fact.observation_key] = {"source_id": source_id, "revision": revision, "row_hash": fact.row_hash,
                                                   "market_commit_seq": commit_seq}
             if latest is None:
                 inserted_count += 1
@@ -2855,7 +2882,7 @@ class PostgresMarketDataRepository:
                 WITH visible AS (
                     {select_prefix}
                            {CANONICAL_ROW_COLUMNS}
-                    {CANONICAL_ROW_FROM}
+                    {CANONICAL_RANGE_ROW_FROM}
                     WHERE {' AND '.join(predicates)}
                     ORDER BY {revision_order}
                 )

@@ -1,0 +1,40 @@
+# Disposable end-to-end storage fixture. No host paths, ports or credentials.
+services:
+  timescaledb:
+    # Match the server's database extension preload, retaining isolated telemetry.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements"]
+    environment:
+      PGDATA: /qt-source/pgdata
+    volumes:
+      - storage-demo-source:/qt-source
+      - storage-demo-history:/qt-history
+  test:
+    # Use production code/dependencies/tools; only test fixtures are added.
+    build:
+      dockerfile: portal/backend/Dockerfile
+      target: storage-test
+    # PostgreSQL in the pinned Alpine image runs as UID 70. Sharing its PID
+    # namespace and UID lets the real verifier inspect /proc/PID/root without
+    # privileged mode or substituting filesystem evidence.
+    user: "70:70"
+    pid: "service:timescaledb"
+    environment:
+      QT_STORAGE_DEMO: "1"
+    volumes:
+      - storage-demo-source:/qt-source
+      - storage-demo-history:/qt-history
+      # Model the real app's separate SSD working mount path on the same
+      # filesystem. PGDATA already exists before the dependent test starts.
+      - type: volume
+        source: storage-demo-source
+        target: /qt-working
+        volume:
+          subpath: pgdata
+volumes:
+  storage-demo-source:
+  storage-demo-history:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=268435456,uid=70,gid=70,mode=0700"

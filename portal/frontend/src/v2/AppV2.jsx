@@ -1,11 +1,13 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { Activity, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react'
+import { Activity, HardDrive, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react'
 import { ChartStateProvider } from '../contexts/ChartStateContext.jsx'
 import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from '../contexts/AccentColorContext.jsx'
 import { pingApi } from '../adapters/health.adapter.js'
 import { RoomLoadingFrame } from './components/RoomLoadingFrame.jsx'
+
+const StorageRoom = lazy(() => import('./rooms/StorageRoom.jsx').then((module) => ({ default: module.StorageRoom })))
 
 const OverviewRoom = lazy(() =>
   import('./rooms/OverviewRoom.jsx').then((module) => ({ default: module.OverviewRoom })),
@@ -137,6 +139,7 @@ function AppV2Shell() {
         </div>
         <RoomNav collapsed={sidebarCollapsed} />
         <div className="qt2-sidebar-foot">
+          <NavLink to="/settings/storage" className="qt2-sidebar-toggle" title="Storage settings"><HardDrive size={17} /><span>Storage</span></NavLink>
           <StatusPill />
           <button
             type="button"
@@ -165,6 +168,7 @@ function AppV2Shell() {
       <main className="qt2-main">
         <Routes>
           <Route path="/" element={<Navigate to="/overview" replace />} />
+          <Route path="/settings/storage" element={<Suspense fallback={<RoomFallback label="Storage" />}><StorageRoom /></Suspense>} />
           <Route path="/overview" element={<Suspense fallback={<RoomFallback label="Overview" />}><OverviewRoom /></Suspense>} />
           <Route path="/operations" element={<Suspense fallback={<RoomFallback label="Operations" />}><OperationsRoom /></Suspense>} />
           <Route path="/operations/runs/:runId" element={<Suspense fallback={<RoomFallback label="BotLens" />}><BotLensRoom /></Suspense>} />

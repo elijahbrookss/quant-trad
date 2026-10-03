@@ -22,7 +22,7 @@ class ResearchItemRequest(BaseModel):
     kind: str
     title: str
     status: str = "draft"
-    body: Optional[str] = None
+    body: Optional[str] = Field(default=None, max_length=8192)
     instrument_id: Optional[str] = None
     symbol: Optional[str] = None
     timeframe: Optional[str] = None
@@ -68,7 +68,7 @@ class ResearchCheckRunRequest(BaseModel):
 
 class ResearchObservationFromCheckRequest(BaseModel):
     title: Optional[str] = None
-    body: Optional[str] = None
+    body: Optional[str] = Field(default=None, max_length=8192)
     status: str = "active"
     tags: List[str] = Field(default_factory=list)
 
@@ -406,6 +406,21 @@ def sweep_research_checks(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
 def dispatch_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
     try:
         return research_async_dispatch.dispatch_research_check_run(_model_payload(body))
+    except research_async_dispatch.ResearchJobDispatchReceiptError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/jobs/checks/run-once", status_code=202)
+def dispatch_research_check_once(body: ResearchCheckRunRequest) -> Dict[str, Any]:
+    # A distinct route makes older servers reject this policy before enqueueing.
+    try:
+        return research_async_dispatch.dispatch_research_check_run(
+            _model_payload(body), max_attempts=1
+        )
+    except research_async_dispatch.ResearchJobDispatchReceiptError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -414,6 +429,8 @@ def dispatch_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
 def dispatch_research_check_sweep(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
     try:
         return research_async_dispatch.dispatch_research_check_sweep(_model_payload(body))
+    except research_async_dispatch.ResearchJobDispatchReceiptError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
