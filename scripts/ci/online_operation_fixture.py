@@ -392,7 +392,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
 
 
 
-def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False):
+def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False):
     """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
     from datetime import datetime, timezone, timedelta
     from scripts.automation import storage_online_forward as forward
@@ -414,7 +414,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         plan_sha256=publication._sha(path.read_bytes()),image=candidate,
         source_revision=environment["QT_IMAGE_SOURCE_REVISION"],source_tree_hash=environment["QT_IMAGE_SOURCE_TREE_HASH"],
         forward_plan_path=str(state/"forward-operation.json"),
-        end_day=(datetime.now(timezone.utc).date()+timedelta(days=1)).isoformat())
+        end_day=(datetime.now(timezone.utc).date()+timedelta(days=0 if operation_route else 1)).isoformat())
     package=state/"forward-package.json";host_boundary.save_receipt(package,manifest,initial=True)
     recipe=dict(name=kwargs["project"],services={name:dict(image=kwargs["image"]) for name in runtime._APPLICATIONS})
     recipe["services"]["tsdb"]=dict(image="unchanged-disposable-database")
@@ -480,31 +480,73 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         created=intent["pending_worker"]["container_id"]
         actual=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",created))
         assert actual["Status"]=="created" and actual["Pid"]==0 and not actual["Running"]
-        with launch.launched_online_worker(state,**arguments) as (worker,receipt):
-            assert receipt["container_id"]==created
-            channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt["deadline"]-time.time())
-            with host_boundary.docker_deadline(time.monotonic()+30):
-                bound,_,rows,limits=final._observe(state,project=kwargs["project"],source_revision=kwargs["source_revision"],
-                    controller_id=channel.greeting["controller_id"],worker_id=created)
-            ready=forward.load_launch(state)
-            from scripts.automation.storage_online_forward_worker import capture_binding
-            assert ready["pending_worker"] is None and capture_binding(ready["capture"])==bound["capture"]
-            assert ready["forward"]==bound["forward"] and ready["deadline"]==limits["capture_deadline"]
-            for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic","key_deadline_boot"):
-                assert ready[key]==intent[key]
-            assert host_boundary.source_clients_serving(rows)
-            if retire_worker:
-                channel.exchange("close")
-            else:
-                canceled_forward=channel.exchange("cancel")
-                assert canceled_forward["state"]=="cancelled"
-                try: forward.observe_adoption(rows["tsdb"]["id"])
-                except RuntimeError as exc: assert str(exc)=="storage_forward_active_adoption_required"
-                else: raise AssertionError("retired forward adoption admitted")
-            launched=dict(forward_worker_started=True,interrupted_launch_reused_created_worker=True,
-                actual_confined_entrypoint=True,actual_host_adoption_observation=True,
-                original_launch_and_sql_clocks_preserved=True,forward_retirement_via_controller=not retire_worker,
-                canonical_failure_retirement=False,login_closure=False)
+        if operation_route:
+            assert retire_worker, "canonical operation fixture requires preserving failure retirement"
+            actual_stop = final.stop_online_source_locked
+            operation_preflights = []
+            def operation_preflight(state_root, **options):
+                launch.inspect_candidate_image(options["image"], options["request"])
+                operation_preflights.append(options.get("operator_id"))
+                return initial.admit_serving_source(state_root, project=kwargs["project"],
+                    source_revision=kwargs["source_revision"], operator_id=options.get("operator_id", created))
+            def refuse_before_stop(state_root, **options):
+                nonlocal rows, launched
+                assert options["worker_id"] == created
+                with host_boundary.docker_deadline(time.monotonic()+30):
+                    bound, _, rows, limits = final._observe(state_root, **{k:options[k] for k in
+                        ("project", "source_revision", "controller_id", "worker_id")})
+                ready = forward.load_launch(state_root)
+                from scripts.automation.storage_online_forward_worker import capture_binding
+                assert ready["pending_worker"] is None and capture_binding(ready["capture"]) == bound["capture"]
+                assert ready["forward"] == bound["forward"] and ready["deadline"] == limits["capture_deadline"]
+                for key in ("started_at", "started_monotonic", "started_boot", "key_deadline", "key_deadline_monotonic", "key_deadline_boot"):
+                    assert ready[key] == intent[key]
+                assert host_boundary.source_clients_serving(rows)
+                assert operation_preflights == [None, None, created]
+                assert not (state/final.STATE).exists()
+                launched = dict(forward_worker_started=True, interrupted_launch_reused_created_worker=True,
+                    actual_confined_entrypoint=True, actual_host_adoption_observation=True,
+                    original_launch_and_sql_clocks_preserved=True, forward_retirement_via_controller=False,
+                    canonical_normal_dispatch=True, real_forward_background_prepared=True,
+                    injected_pre_stop_refusal=True, canonical_failure_retirement=False, login_closure=False)
+                raise RuntimeError("fixture refusal before forward source stop")
+            operation.inspect_prepared_operation = operation_preflight
+            final.stop_online_source_locked = refuse_before_stop
+            try:
+                operation.run_operation_plan(Path(manifest["forward_plan_path"]), execute=True)
+                raise AssertionError("missing canonical forward pre-stop refusal")
+            except RuntimeError as exc:
+                assert str(exc) == "fixture refusal before forward source stop"
+            finally:
+                operation.inspect_prepared_operation = actual_preflight
+                final.stop_online_source_locked = actual_stop
+            assert launched.get("canonical_normal_dispatch") and not (state/final.STATE).exists()
+        else:
+            with launch.launched_online_worker(state,**arguments) as (worker,receipt):
+                assert receipt["container_id"]==created
+                channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt["deadline"]-time.time())
+                with host_boundary.docker_deadline(time.monotonic()+30):
+                    bound,_,rows,limits=final._observe(state,project=kwargs["project"],source_revision=kwargs["source_revision"],
+                        controller_id=channel.greeting["controller_id"],worker_id=created)
+                ready=forward.load_launch(state)
+                from scripts.automation.storage_online_forward_worker import capture_binding
+                assert ready["pending_worker"] is None and capture_binding(ready["capture"])==bound["capture"]
+                assert ready["forward"]==bound["forward"] and ready["deadline"]==limits["capture_deadline"]
+                for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic","key_deadline_boot"):
+                    assert ready[key]==intent[key]
+                assert host_boundary.source_clients_serving(rows)
+                if retire_worker:
+                    channel.exchange("close")
+                else:
+                    canceled_forward=channel.exchange("cancel")
+                    assert canceled_forward["state"]=="cancelled"
+                    try: forward.observe_adoption(rows["tsdb"]["id"])
+                    except RuntimeError as exc: assert str(exc)=="storage_forward_active_adoption_required"
+                    else: raise AssertionError("retired forward adoption admitted")
+                launched=dict(forward_worker_started=True,interrupted_launch_reused_created_worker=True,
+                    actual_confined_entrypoint=True,actual_host_adoption_observation=True,
+                    original_launch_and_sql_clocks_preserved=True,forward_retirement_via_controller=not retire_worker,
+                    canonical_failure_retirement=False,login_closure=False)
         if retire_worker:
             # A stopped reader alone leaves adoption mirrors active. Exercise
             # the actual canonical terminal command, then lose its COMMIT reply.

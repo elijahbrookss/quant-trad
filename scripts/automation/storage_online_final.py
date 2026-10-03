@@ -412,6 +412,7 @@ def stop_online_source_locked(state_root, *, project, source_revision, controlle
             if saved["binding"] is not None and result[0] != saved["binding"]:
                 raise RuntimeError("storage_online_final_binding_changed")
             if (max_duration_seconds > result[3]["seconds"]
+                    or ("forward" in result[0] and max_duration_seconds > 600)
                     or saved["deadline"] > result[3]["capture_deadline"]):
                 raise RuntimeError("storage_online_final_window_not_admitted")
             return result

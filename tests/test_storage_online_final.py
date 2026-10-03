@@ -1026,3 +1026,13 @@ def test_final_session_requires_exact_preadmitted_owner(forward, fault):
         with pytest.raises(RuntimeError, match="login_worker_reply_invalid"):
             final._final_session_reply(reply, operation="final_session_check", binding=binding,
                 deadline=20., sequence=1)
+
+
+def test_forward_final_limit_refuses_before_journal_or_source_mutation(pause_setup):
+    path, rows, clock, state, stop = pause_setup
+    state.update(limit=900, capture_deadline=2000.)
+    state["binding"]["forward"] = {"verified": True}
+    with pytest.raises(RuntimeError, match="window_not_admitted"):
+        stop(max_duration_seconds=601)
+    assert not state["stops"] and not (path/final.STATE).exists()
+    assert stop(max_duration_seconds=600)["deadline"] == 1600.

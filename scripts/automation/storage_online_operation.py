@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import logging
 import json
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -249,6 +249,61 @@ def validate_operation_arguments(state_root, *, limits, request, source_image):
     return state_root
 
 
+def _forward_cutover_day(intent, *, final_seconds):
+    """Bound the selected UTC day without changing data or a phase clock."""
+    if type(final_seconds) is not int or not 1 <= final_seconds <= 600:
+        raise ValueError("storage_forward_final_window_invalid")
+    boundary = datetime.fromisoformat(intent["end_day"]).replace(tzinfo=timezone.utc).timestamp()
+    if datetime.fromtimestamp(time.time(), timezone.utc).date() > date.fromisoformat(intent["end_day"]):
+        raise RuntimeError("storage_forward_cutover_day_missed")
+    return boundary
+
+
+def _await_forward_boundary(exchange, *, intent, worker, deadline, capture_deadline, final_seconds):
+    """Keep collection serving and tails moving until a short UTC stop window.
+
+    No preparation or final deadline is minted here. The original adoption and
+    channel bounds own all waiting and copying. Complete background reference
+    preparation precedes this loop; final owners still prove the live state.
+    """
+    boundary = _forward_cutover_day(intent, final_seconds=final_seconds)
+    if boundary+final_seconds > capture_deadline:
+        raise RuntimeError("storage_forward_cutover_exceeds_adoption_deadline")
+    lead = min(30, final_seconds/2)
+    while boundary-time.time() > lead:
+        if worker.poll() is not None or time.monotonic() >= deadline or time.time() >= capture_deadline:
+            raise RuntimeError("storage_forward_boundary_owner_expired")
+        sql = exchange("sql_copy")["result"]
+        archive = exchange("archive_copy")["result"]
+        if (sql["phase"] not in {"forward_adoption", "catch_up"}
+                or sql["outcome"] not in {"page_budget_reached", "pass_time_budget_reached", "both_tails_observed_empty"}
+                or archive["family"] not in _FAMILIES):
+            raise RuntimeError("storage_forward_boundary_progress_changed")
+        _forward_cutover_day(intent, final_seconds=final_seconds)
+        if sql["outcome"] == "both_tails_observed_empty" and archive.get("captured_tail_empty_at_observation") is True:
+            wait = min(30, max(0, boundary-time.time()-lead), max(0, deadline-time.monotonic()))
+            if wait: time.sleep(wait)
+    _forward_cutover_day(intent, final_seconds=final_seconds)
+    return boundary
+
+
+def _admit_forward_stop(intent, *, final_seconds):
+    boundary = _forward_cutover_day(intent, final_seconds=final_seconds)
+    if boundary-time.time() > min(30, final_seconds/2):
+        raise RuntimeError("storage_forward_cutover_stop_too_early")
+    return boundary
+
+
+def _enter_forward_day(intent, paused):
+    """At most 30 seconds to UTC rollover, charged to the SAME final receipt."""
+    boundary = _admit_forward_stop(intent, final_seconds=paused["duration_seconds"])
+    while time.time() < boundary:
+        remaining = final._remaining(paused)
+        time.sleep(min(0.1, boundary-time.time(), remaining))
+    final._remaining(paused)
+    _forward_cutover_day(intent, final_seconds=paused["duration_seconds"])
+
+
 def run_prepared_operation_locked(state_root, *, project, source_revision, source_image,
         image, request, inventory_path, descriptor_limit, memory_bytes,
         limits, keys_root, socket_volume, spool_destination):
@@ -260,6 +315,12 @@ def run_prepared_operation_locked(state_root, *, project, source_revision, sourc
     Runtime readiness is not encrypted-pair completion or ordinary relaunch authority.
     """
     state_root=validate_operation_arguments(state_root,limits=limits,request=request,source_image=source_image)
+    from scripts.automation.storage_online_forward_worker import request_binding
+    from scripts.automation import storage_online_forward as forward_owner
+    intent = request_binding(request)
+    if intent is not None:
+        forward_owner.inspect_published_operation(state_root, request=request)
+        _forward_cutover_day(intent, final_seconds=limits.final_seconds)
     started = time.monotonic()
     try:
         with ExitStack() as holds:
@@ -272,23 +333,33 @@ def run_prepared_operation_locked(state_root, *, project, source_revision, sourc
                     source_revision=source_revision, image=image, request=request,
                     inventory_path=inventory_path, descriptor_limit=descriptor_limit,
                     memory_bytes=memory_bytes) as (worker, receipt):
+                channel_deadline = time.monotonic()+receipt["deadline"]-time.time()
                 channel = host.OnlineWorkerChannel(worker,
-                    deadline=time.monotonic()+receipt["deadline"]-time.time(),
+                    deadline=channel_deadline,
                     command_seconds=max(40, limits.preparation_seconds))
                 exchange = channel.exchange
-                prepared = prepare_background(exchange, preparation_seconds=limits.preparation_seconds)
+                prepared = prepare_background(exchange, preparation_seconds=limits.preparation_seconds,
+                    **({"forward": True} if intent is not None else {}))
+                if intent is not None:
+                    _await_forward_boundary(exchange, intent=intent, worker=worker,
+                        deadline=channel_deadline, capture_deadline=receipt["deadline"], final_seconds=limits.final_seconds)
                 current = inspect_prepared_operation(state_root, **plan,
                     deadline=min(time.monotonic()+limits.preparation_seconds,
                         time.monotonic()+receipt["deadline"]-time.time()),
                     operator_id=receipt["container_id"])
                 if current != before:
                     raise RuntimeError("storage_online_operation_preflight_changed")
+                if intent is not None:
+                    forward_owner.inspect_published_operation(state_root, request=request)
+                    _admit_forward_stop(intent, final_seconds=limits.final_seconds)
                 paused = final.stop_online_source_locked(state_root, project=project,
                     source_revision=source_revision, worker_id=receipt["container_id"],
                     controller_id=channel.greeting["controller_id"], max_duration_seconds=limits.final_seconds)
                 holds.enter_context(final.held_source_writers_locked(state_root, source_image=source_image))
                 final.observe_source_drain_locked(state_root, exchange=exchange,
                     max_entries=limits.spool_max_entries)
+                if intent is not None:
+                    _enter_forward_day(intent, paused)
                 deadline = time.monotonic()+final._remaining(paused)-0.1
                 final.copy_final_delta_locked(state_root, exchange=exchange, deadline=deadline, max_rounds=64)
                 final.record_switch_entry_locked(state_root, deadline=deadline,
@@ -457,8 +528,17 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     state_root=launch._canonical(plan["state_root"])
     limits=OperationLimits(**plan["limits"])
     with host.deployment_lock(state_root):
-        from scripts.automation.storage_online_deadline import require_settled
-        require_settled(state_root)
+        from scripts.automation.storage_online_deadline import require_settled, _retired
+        from scripts.automation import storage_online_forward as forward_owner
+        published = None
+        effective_request = plan["request"]
+        if os.path.lexists(state_root/forward_owner.STATE):
+            published = forward_owner.inspect_published_operation(state_root, operation_path=path)
+            if published["new_plan"] != plan:
+                raise RuntimeError("storage_forward_operation_plan_changed")
+            effective_request = published["new_request"]
+        else:
+            require_settled(state_root)
         if os.path.lexists(state_root/"storage-online-final.json"):
             saved = final._load(state_root/final.STATE)
             worker = host.load_receipt(state_root/launch._STATE)
@@ -467,7 +547,7 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
             if (saved["binding"]["project"] != plan["project"]
                     or saved["binding"]["source_revision"] != plan["source_revision"]
                     or saved.get("commit",{}).get("source_image") != plan["source_image"]
-                    or worker["binding"]["image"] != plan["image"] or request != plan["request"]
+                    or worker["binding"]["image"] != plan["image"] or request != effective_request
                     or saved.get("runtime_spool",{}).get("destination") != plan["spool_destination"]):
                 raise RuntimeError("storage_online_completion_plan_changed")
             if "release" in saved:
@@ -513,6 +593,25 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                     return final.publish_deployment_configuration_locked(state_root,
                         repository=plan["deployment_repository"], environment_path=plan["deployment_environment"])
             return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
+        if published is not None:
+            from scripts.automation import storage_online_terminal as terminal_owner
+            if os.path.lexists(state_root/terminal_owner.FORWARD_STATE):
+                raise RuntimeError("storage_forward_operation_retirement_requires_reconciliation")
+            _retired(published["old_worker"])
+            _forward_cutover_day(published["forward"], final_seconds=limits.final_seconds)
+            arguments = {k:plan[k] for k in ("project", "source_revision", "source_image", "image",
+                "inventory_path", "keys_root", "socket_volume", "spool_destination")}
+            observation = inspect_prepared_operation(state_root, **arguments, request=effective_request,
+                deadline=time.monotonic()+limits.preparation_seconds)
+            if (load_operation_plan(path) != plan
+                    or forward_owner.inspect_published_operation(state_root, operation_path=path) != published):
+                raise RuntimeError("storage_forward_operation_plan_changed")
+            if not execute:
+                return dict(phase="forward_inspected", configuration_sha256=host.digest(observation),
+                    storage_mutations_performed=False, final_switch_authorized=False)
+            result = run_prepared_operation_locked(state_root, **arguments, request=effective_request,
+                descriptor_limit=plan["descriptor_limit"], memory_bytes=plan["memory_bytes"], limits=limits)
+            return dict(phase="runtime_ready", forward=True, **result)
         prepared=initial._load(state_root) if os.path.lexists(state_root/initial.STATE) else None
         if prepared is None:
             observation=inspect_initial_operation(state_root,plan=plan,

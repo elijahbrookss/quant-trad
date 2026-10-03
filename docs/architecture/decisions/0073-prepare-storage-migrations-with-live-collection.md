@@ -2113,8 +2113,8 @@ publication. It pins original host wall/monotonic/boot clocks and exact worker
 preimages before Docker creation, then observes actual key and initialization
 receipts. Final observation uses the pinned adoption through the retained SQL
 session after logins close. Publication alone does not grant launch or source
-stop; canonical operation dispatch and preserving host failure retirement remain
-separate required integrations. See the storage component's durable forward
+stop; canonical operation dispatch and preserving host failure retirement use
+the separately verified routes described below. See the storage component's durable forward
 launch section for the current boundary and rehearsal scope.
 
 The forward launch journal uses the existing bounded 2 MiB metadata allowance
@@ -2152,5 +2152,33 @@ The disposable `--forward-retirement` rehearsal exercises the actual confined
 terminal command, lost COMMIT reply and read-only reconciliation without another
 dispatch. It checks original clocks and source/copy/queue row counts. Its
 synthetic runtime peers and small data do not qualify production capacity,
-final-pause duration, recovery or deployment. Ordinary forward operation
-dispatch remains gated.
+final-pause duration, recovery or deployment. Canonical operation dispatch is
+described below; its production final boundary still requires qualification.
+
+
+### Canonical forward operation and UTC cutover window
+
+`qt storage migrate --operation-file <forward-plan> --execute` derives the
+forward request only from the verified completed publication and its separate
+operation path. It retains the immutable base plan for reread comparison and
+checks the original retired worker. Legacy terminal admission is unchanged.
+The command reuses the durable launcher, observed key/initialization/adoption
+clocks, explicit forward background phases and both prepared-runtime preflights.
+It never invokes the canceled capture or renews its initial receipt.
+
+After background reference preparation, collection continues while bounded SQL
+and archive catch-up waits for the selected UTC boundary under the original
+adoption expiry. The command admits a stop only within 30 seconds of that
+boundary (or half the final allowance, if smaller). Any remaining wait after
+source drain is charged to the same final receipt. A missed day, insufficient
+adoption lifetime, expired worker or changed publication refuses. Both the
+command and the actual stop owner cap forward final work at 600 seconds.
+
+The native `--forward-operation` case uses an old-day disposable source and
+injects refusal immediately before source stop. It exercises canonical dispatch,
+real forward background work, interrupted created-worker reuse and subsequent
+preserving terminal retirement. It does not qualify actual login closure, gated
+rollback, final COMMIT, UTC rollover under live production writes or production
+range-scan duration. Those checks remain required before production use. The
+complete range CHECK, heap attachment and exact proof still belong to one final
+transaction and its original time bound; this route does not precommit a CHECK.
