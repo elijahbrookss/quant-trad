@@ -440,6 +440,58 @@ def inspect_references(conn, *, operation_sha256, timeout_seconds=30):
                     references=current, migration_ready=False, final_switch_authorized=False)
 
 
+@contextmanager
+def verified_adoption(conn, *, operation_sha256, timeout_seconds=30):
+    """Hold the exact completed adoption and references through an atomic switch.
+
+    The caller owns host admission, stopped publishers and final phase clocks.
+    No historical capture is resumed. An unfinished switch raises inside the
+    savepoint, so even a caller catching the error cannot commit partial DDL.
+    """
+    active = "qt.forward_adoption.final_context"
+    metadata = conn.info
+    if metadata.get(active) is not None:
+        raise RuntimeError("fact_header_forward_nested_switch")
+    with _step(conn, timeout_seconds) as limit:
+        relations = [relation for family in FAMILIES.values() for relation in family[:2]]
+        relations += [references.PARENT, "market.fact_archive_material_aliases",
+                      "market.fact_archive_canonical_dependencies", STATE]
+        conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN ACCESS EXCLUSIVE MODE NOWAIT")
+        state = _inspect(conn, operation_sha256, limit)
+        if not _report(state, reused=True)["retained_targets_verified"]:
+            raise RuntimeError("fact_header_forward_adoption_incomplete")
+        _, current = _reference_states(conn, state)
+        if not all(item and item["convalidated"] for item in current.values()):
+            raise RuntimeError("fact_header_forward_references_incomplete")
+        context = dict(state=state, transaction=conn.scalar(text("SELECT txid_current()")), switched=False)
+        metadata[active] = context
+        try:
+            yield context
+            if (not context["switched"] or
+                    context["transaction"] != conn.scalar(text("SELECT txid_current()"))):
+                raise RuntimeError("fact_header_forward_atomic_switch_required")
+        finally:
+            metadata.pop(active, None)
+
+
+def release_for_switch(conn):
+    """Remove exactly the admitted mirrors inside the live final transaction."""
+    context = conn.info.get("qt.forward_adoption.final_context")
+    if (context is None or context["switched"] or
+            context["transaction"] != conn.scalar(text("SELECT txid_current()"))):
+        raise RuntimeError("fact_header_forward_live_switch_required")
+    state = context["state"]
+    if state["binding"] != _snapshot(conn):
+        raise RuntimeError("fact_header_forward_adoption_binding_changed")
+    _reference_states(conn, state)
+    for family, (source, target, _, _) in FAMILIES.items():
+        for relation, suffix in ((target, "validate"), (source, "mirror"),
+                                 (source, "source_seal"), (target, "target_seal")):
+            trigger = conn.dialect.identifier_preparer.quote(_trigger_name(family, suffix))
+            conn.exec_driver_sql("DROP TRIGGER " + trigger + " ON " + relation)
+    return context
+
+
 def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
     """Retire this phase's exact mirrors without deleting any retained rows.
 
@@ -451,6 +503,8 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
         state = _state(conn)
         if state is None or state["operation_sha256"] != operation_sha256:
             raise RuntimeError("fact_header_forward_adoption_intent_changed")
+        if state["terminal"] is not None and state["terminal"].get("kind") == "switched":
+            raise RuntimeError("fact_header_forward_adoption_already_switched")
         relations = [relation for family in FAMILIES.values() for relation in family[:2]]
         conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         if state["terminal"] is not None:

@@ -15,6 +15,7 @@ code_paths:
   - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
+  - tests/test_market_data/test_fact_header_forward_handoff_db.py
   - portal/backend/db/fact_header_legacy_schema.py
   - portal/backend/db/fact_identity_schema.py
   - portal/backend/db/fact_series_day_schema.py
@@ -85,13 +86,18 @@ The diagnostic still timed out that read while the legacy heap was locked.
 Large legacy movement therefore needs explicit measured read-impact admission;
 this change is not a zero-interruption movement certificate.
 
-The range boundary must match stored data. The simplest candidate is a future
-UTC storage-day boundary: prepare and validate the old range while collecting,
-then drain writers for a bounded switch before admitting the new day. Existing
-storage days and market clocks must never be rewritten to force attachment.
-Missing that boundary requires a qualified abort, not a longer unbounded pause.
-The disposable tests use controlled placement dates; they do not prove the
-wall-clock handoff or its failure behavior.
+The range boundary must match stored data and the actual current UTC date.
+The selected SQL handoff validates the native range CHECK and attaches the
+retained table inside the same final transaction. No early committed CHECK can
+outlive its controller and reject collection at rollover. Any failure rolls back
+the CHECK, temporary-trigger removal, reference promotion and table renames.
+Publishers must drain before the boundary; an already-written new-day row refuses
+this operation. Existing storage days and market clocks are never rewritten.
+
+This choice puts the native range validation scan inside the final pause. Its
+actual physical cost must fit the existing final phase bound before production;
+a small fixture does not establish that admission. If it cannot fit, this route
+is not qualified and must not be stretched into an unbounded pause.
 
 ## Implemented binding and read boundary
 
@@ -301,3 +307,17 @@ repeats are not throughput evidence. The new physical scan and key-only coverage
 still require native correctness, actual physical access/visibility and insertion
 cost qualification before production admission. No cache flush, unproved saving,
 extra worker speedup or weaker proof is assumed.
+
+## Atomic retained-table SQL handoff
+
+`stage_forward_tables` is an internal SQL phase under the live verified adoption
+context. It holds the fixed source/target/reference fences, verifies completed
+coverage and native references, and permits trigger removal only in that same
+transaction. An unfinished context raises inside its savepoint even when an
+outer caller catches the error. It promotes the retained identity/raw targets,
+attaches the original header heap, reuses its search-index files, installs the
+canonical v2 contracts and records a terminal switch receipt atomically.
+Previously copied private headers, catalogues, raw source and journals remain.
+A switched adoption refuses preserving retirement instead of addressing obsolete
+relation names. This is not yet the canonical host operation or its commit
+reconciliation, physical admission, recovery activation or deployment receipt.

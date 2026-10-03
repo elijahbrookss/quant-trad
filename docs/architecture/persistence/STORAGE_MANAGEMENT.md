@@ -14,6 +14,7 @@ code_paths:
   - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
+  - tests/test_market_data/test_fact_header_forward_handoff_db.py
   - scripts/automation/storage_online_terminal.py
   - tests/test_storage_online_terminal.py
   - tests/test_terminal_placement.py
@@ -3452,3 +3453,17 @@ refuse resume under the new protocol; explicit preserving retirement remains.
 This addresses observed 10.7–10.9s disjoint 2,048-row comparisons on the existing
 drives, but does not yet establish production elapsed time or admission. See
 [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md).
+
+
+### Atomic forward SQL handoff
+
+The internal `stage_forward_tables` phase retains the original header heap and
+search-index files under the dated parent. It requires the live completed
+adoption/reference proof and exact actual UTC boundary under fixed writer fences.
+Native range validation, guard removal, reference promotion, attachment and the
+terminal receipt share one transaction; interruption rolls them back together.
+There is no committed early range CHECK that can strand collection at rollover.
+The original private copied headers/catalogues and raw source remain preserved.
+The native range scan is part of the final pause and needs measured production
+admission within the existing deadline. The host entrypoint, durable COMMIT
+reconciliation, full physical qualification, recovery and deployment remain open.

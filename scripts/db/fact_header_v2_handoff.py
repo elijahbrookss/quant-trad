@@ -333,6 +333,138 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
             "database_handoff_staged":True}
 
 
+def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_seconds=30):
+    """Atomically retain the header heap and promote fully adopted native targets.
+
+    Internal SQL phase only: a qualified host must stop/drain publishers, admit
+    physical resources and own the original final deadline. The native range
+    scan happens here, never as a committed early CHECK that could outlive its
+    controller. It must be measured and fit the final pause before production.
+    """
+    from datetime import date
+    from scripts.db import fact_header_forward_adoption as adoption
+    from portal.backend.db import (MarketFactHeaderLegacyRecord, MarketFactHeaderPartitionRecord,
+                                   MarketFactHeaderSeriesDayRecord, MarketFactVersionRecord)
+    from portal.backend.db.fact_storage_schema import install_fact_storage_functions
+    from portal.backend.db.fact_header_legacy_schema import assert_fact_header_legacy_contract
+
+    if type(end_day) is not date or not isinstance(evidence, dict):
+        raise ValueError("fact_header_forward_switch_request_invalid")
+    with adoption.verified_adoption(conn, operation_sha256=operation_sha256,
+                                   timeout_seconds=timeout_seconds) as context:
+        # No fake placement date or day-long stopped interval. Publishers must
+        # have drained before this actual UTC boundary; a new-day row refuses.
+        today = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
+        if end_day != today:
+            raise RuntimeError("fact_header_forward_utc_boundary_not_current")
+        if conn.scalar(text("SELECT EXISTS(SELECT 1 FROM market.fact_versions WHERE storage_day>=:day)"),
+                       {"day": end_day}):
+            raise RuntimeError("fact_header_forward_new_day_already_written")
+        if (conn.scalar(text("SELECT to_regnamespace(:name)"), {"name": RETAINED}) is not None
+                or any(_oid(conn, "market." + name) is not None for name in
+                       ("fact_versions_legacy", "fact_identities", "fact_header_legacy",
+                        "fact_header_partitions", "fact_header_series_days"))):
+            raise RuntimeError("fact_header_forward_unowned_destination")
+        source_oid = _oid(conn, headers.SOURCE)
+        raw_oid = _oid(conn, raw.SOURCE)
+        search_files = [dict(row) for row in conn.execute(text(
+            "SELECT c.oid::bigint,c.relfilenode::bigint FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+            "WHERE i.indrelid='market.fact_versions'::regclass AND NOT i.indisunique ORDER BY c.oid")).mappings()]
+        heap_file = conn.scalar(text("SELECT relfilenode::bigint FROM pg_class WHERE oid=:oid"), {"oid":source_oid})
+        incoming = conn.execute(text("SELECT conrelid::regclass::text AS relation,conname "
+            "FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass "
+            "AND conparentid=0 ORDER BY conrelid,conname")).mappings().all()
+        owners = {references.PARENT, "market.fact_archive_material_aliases",
+                  "market.fact_archive_canonical_dependencies"}
+        if len(incoming) != 3 or {row["relation"] for row in incoming} != owners:
+            raise RuntimeError("fact_header_forward_reference_inventory_changed")
+        # Native validation scans once under the final fence. Any failure or
+        # disconnect rolls this constraint back with every rename/attachment.
+        adoption.release_for_switch(conn)
+        bound = "qt_forward_legacy_bound"
+        conn.exec_driver_sql("ALTER TABLE market.fact_versions ADD CONSTRAINT " + bound +
+                            " CHECK(storage_day < DATE '" + end_day.isoformat() + "')")
+        conn.exec_driver_sql("CREATE SCHEMA " + RETAINED)
+        conn.exec_driver_sql("REVOKE ALL ON SCHEMA " + RETAINED + " FROM PUBLIC")
+        conn.exec_driver_sql("CREATE TABLE " + RETAINED + ".fact_storage_state AS SELECT * FROM market.fact_storage_state "
+                            "WHERE layout_version='market.fact_storage_tiers.v1'")
+        conn.exec_driver_sql("DROP VIEW market.fact_rows")
+        conn.exec_driver_sql("DROP TRIGGER trg_assert_fact_hot_payload_valid ON market.fact_hot_payloads")
+        quote = conn.dialect.identifier_preparer.quote
+        for row in incoming:
+            conn.exec_driver_sql("ALTER TABLE " + row["relation"] + " DROP CONSTRAINT " + quote(row["conname"]))
+        # Source admission and the live binding pin all these original guards.
+        triggers = conn.execute(text("SELECT tgname FROM pg_trigger WHERE tgrelid=:oid AND NOT tgisinternal"),
+                                {"oid":source_oid}).scalars().all()
+        for name in triggers:
+            conn.exec_driver_sql("DROP TRIGGER " + quote(name) + " ON market.fact_versions")
+        conn.exec_driver_sql("ALTER TABLE market.fact_versions SET SCHEMA " + RETAINED)
+        old = RETAINED + ".fact_versions"
+        primary = conn.scalar(text("SELECT conname FROM pg_constraint WHERE conrelid=:oid AND contype='p'"),
+                              {"oid":source_oid})
+        conn.exec_driver_sql("ALTER TABLE " + old + " DROP CONSTRAINT " + quote(primary))
+        conn.exec_driver_sql("ALTER TABLE " + old + " ADD PRIMARY KEY USING INDEX qt_header_forward_day_pk")
+        conn.exec_driver_sql("ALTER TABLE " + old + " ADD UNIQUE USING INDEX qt_header_forward_revision_day")
+        conn.exec_driver_sql("ALTER TABLE " + adoption.IDENTITY + " SET SCHEMA market")
+        # Old private header copies and catalogues remain intact, including rows.
+        # The new parent owns no heap; ATTACH reuses the retained search indexes.
+        for model in (MarketFactHeaderLegacyRecord, MarketFactHeaderPartitionRecord,
+                      MarketFactHeaderSeriesDayRecord, MarketFactVersionRecord):
+            model.__table__.create(conn)
+        indexes = conn.execute(text("SELECT c.oid::bigint,c.relname FROM pg_index i JOIN pg_class c "
+            "ON c.oid=i.indexrelid WHERE i.indrelid=:oid ORDER BY c.oid"), {"oid":source_oid}).all()
+        for oid, name in indexes:
+            conn.exec_driver_sql("ALTER INDEX " + RETAINED + "." + quote(name) +
+                                " RENAME TO qt_legacy_header_" + str(oid))
+        conn.exec_driver_sql("ALTER TABLE " + old + " RENAME TO fact_versions_legacy")
+        conn.exec_driver_sql("ALTER TABLE " + RETAINED + ".fact_versions_legacy SET SCHEMA market")
+        conn.exec_driver_sql("ALTER TABLE market.fact_versions ATTACH PARTITION market.fact_versions_legacy "
+                            "FOR VALUES FROM(MINVALUE) TO ('" + end_day.isoformat() + "')")
+        for row in incoming:
+            conn.exec_driver_sql("ALTER TABLE " + row["relation"] + " RENAME CONSTRAINT " + references.STAGED +
+                                " TO " + quote(row["conname"]))
+        conn.exec_driver_sql("ALTER TABLE " + raw.SOURCE + " SET SCHEMA " + RETAINED)
+        conn.exec_driver_sql("CREATE TRIGGER trg_retained_raw_source_closed BEFORE INSERT ON " + RETAINED + "." + raw.NAME +
+                            " FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()")
+        conn.exec_driver_sql("ALTER TABLE " + RETAINED + "." + raw.NAME +
+                            " ENABLE ALWAYS TRIGGER trg_retained_raw_source_closed")
+        conn.exec_driver_sql("ALTER TABLE " + raw.TARGET + " SET SCHEMA market")
+        conn.exec_driver_sql("CREATE TRIGGER trg_assert_fact_version_valid BEFORE INSERT ON market.fact_versions "
+                            "FOR EACH ROW EXECUTE FUNCTION market.assert_fact_version_valid()")
+        install_fact_storage_functions(conn)
+        for name in ("fact_versions", "fact_identities", "fact_header_partitions", raw.NAME):
+            conn.exec_driver_sql("CREATE TRIGGER trg_reject_mutation_" + name + " BEFORE UPDATE OR DELETE ON market." + name +
+                                " FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()")
+        for suffix, events, scope in (("", "INSERT OR UPDATE OR DELETE", "ROW"), ("_truncate", "TRUNCATE", "STATEMENT")):
+            trigger = "trg_seal_fact_versions_legacy" + suffix
+            conn.exec_driver_sql("CREATE TRIGGER " + trigger + " BEFORE " + events +
+                " ON market.fact_versions_legacy FOR EACH " + scope + " EXECUTE FUNCTION market.reject_fact_header_legacy_mutation()")
+            conn.exec_driver_sql("ALTER TABLE market.fact_versions_legacy ENABLE ALWAYS TRIGGER " + trigger)
+        conn.execute(text("INSERT INTO market.fact_header_legacy(id,end_day,relation_oid) VALUES(1,:day,:oid)"),
+                     {"day":end_day,"oid":source_oid})
+        conn.exec_driver_sql("DELETE FROM market.fact_storage_state WHERE layout_version='market.fact_storage_tiers.v1'")
+        conn.execute(text("INSERT INTO market.fact_storage_state(layout_version,state,completed_at,evidence) "
+            "VALUES('market.fact_storage_tiers.v2','ready',clock_timestamp(),CAST(:evidence AS jsonb))"),
+            {"evidence":json.dumps(evidence)})
+        assert_fact_storage_contract(conn)
+        if (assert_fact_header_legacy_contract(conn) != end_day
+                or _oid(conn,"market.fact_versions_legacy") != source_oid
+                or conn.scalar(text("SELECT relfilenode::bigint FROM pg_class WHERE oid=:oid"), {"oid":source_oid}) != heap_file
+                or any(conn.scalar(text("SELECT relfilenode::bigint FROM pg_class WHERE oid=:oid"), row) != row["relfilenode"]
+                       for row in search_files)):
+            raise RuntimeError("fact_header_forward_retained_files_changed")
+        receipt = dict(kind="switched",operation_sha256=operation_sha256,end_day=end_day.isoformat(),
+                       legacy_oid=source_oid,retained_raw_oid=raw_oid,legacy_heap_file=heap_file,
+                       search_files=search_files,switched_at=conn.scalar(text("SELECT clock_timestamp()")).isoformat())
+        conn.execute(text("UPDATE " + adoption.STATE + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
+                     {"terminal":json.dumps(receipt)})
+        context["switched"] = True
+        logger.info("fact_header_forward_tables_staged | operation=%s legacy_oid=%s end_day=%s",
+                    operation_sha256,source_oid,end_day)
+        return dict(database_handoff_staged=True,source_preserved=True,receipt=receipt,
+                    migration_ready=False,collection_resume_authorized=False)
+
+
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
                    max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None,
                    deadline=None, publisher_check=None, connection=None, activate_policy=False):
