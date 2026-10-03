@@ -268,3 +268,170 @@ def _verify_published(root, new_path, journal):
         host.load_receipt(path, max_bytes=max(65536, len(expected)))
         if path.read_bytes() != expected:
             raise RuntimeError("storage_forward_published_file_changed")
+
+
+
+def inspect_published_operation(root, *, request=None, operation_path=None):
+    """Admit immutable publication evidence; no launch, SQL or clock renewal.
+
+    A completed publication outlives its publication window. Execution must own
+    separate original phase receipts and fresh source/runtime/resource admission.
+    The canonical worker's mutable lifecycle is deliberately checked by its
+    launcher, against the immutable new binding returned here.
+    """
+    from scripts.automation.storage_online_forward_worker import request_binding
+
+    root = launch._canonical(root)
+    journal = host.load_receipt(root/STATE, max_bytes=_MAX_BYTES)
+    immutable = {k:v for k,v in journal.items() if k not in {"intent_sha256", "phase"}}
+    if journal.get("phase") != "complete" or host.digest(immutable) != journal.get("intent_sha256"):
+        raise RuntimeError("storage_forward_completed_publication_required")
+    canceled = host.load_receipt(root/terminal.STATE, max_bytes=524288)
+    original_path = launch._canonical(canceled["operation_path"])
+    canceled = _terminal(root, original_path)
+    package = journal["package"]
+    new_path = _new_plan_path(package["forward_plan_path"], original_path)
+    if operation_path is not None and launch._canonical(operation_path) != new_path:
+        raise RuntimeError("storage_forward_operation_path_changed")
+    expected = journal["new_request"]
+    intent = request_binding(expected)
+    original = json.loads(journal["original_plan_bytes"])
+    candidate = deepcopy(original)
+    candidate["image"] = package["image"]
+    candidate["request"].update({k:package[k] for k in ("source_revision", "source_tree_hash")})
+    old_request = json.loads(journal["old_request_bytes"])
+    expected_runtime = json.loads(journal["old_runtime_bytes"])
+    for name in runtime._APPLICATIONS:
+        if expected_runtime["services"][name].get("image") != original["image"]:
+            raise RuntimeError("storage_forward_original_runtime_changed")
+        expected_runtime["services"][name]["image"] = package["image"]
+    expected_worker = deepcopy(journal["old_worker"])
+    expected_worker.pop("capture", None)
+    expected_worker.update(container_id=None, contract=None, deadline=None)
+    environment = journal["new_worker"]["binding"].get("environment_sha256")
+    if not isinstance(environment, str) or not re.fullmatch(r"[0-9a-f]{64}", environment):
+        raise RuntimeError("storage_forward_published_environment_invalid")
+    expected_worker["binding"].update(image=package["image"],
+        request_sha256=publication._sha(publication.request_bytes(expected)), environment_sha256=environment)
+    if (intent is None or intent != journal["forward"]
+            or journal["original_plan_bytes"] != original_path.read_text()
+            or publication._sha(original_path.read_bytes()) != package["plan_sha256"]
+            or publication._sha((root/terminal.STATE).read_bytes()) != journal["terminal_sha256"]
+            or journal["old_worker"] != canceled["worker"]
+            or publication._sha(journal["old_worker_bytes"].encode()) != canceled["worker_sha256"]
+            or json.loads(journal["old_worker_bytes"]) != canceled["worker"]
+            or publication._sha(journal["old_request_bytes"].encode()) != canceled["worker"]["binding"]["request_sha256"]
+            or intent["original_plan_sha256"] != package["plan_sha256"]
+            or intent["original_capture"] != canceled["original_capture"]
+            or intent["cancellation_intent_sha256"] != canceled["intent_sha256"]
+            or intent["end_day"] != package["end_day"]
+            or expected != {**candidate["request"], "forward":intent}
+            or journal["new_plan"] != candidate
+            or {k:v for k,v in old_request.items() if k != "capture_preparation"} != original["request"]
+            or journal["new_runtime"] != expected_runtime
+            or journal["new_worker"] != expected_worker
+            or (request is not None and request != expected)):
+        raise RuntimeError("storage_forward_publication_binding_changed")
+    for path, data in ((root/publication.REQUEST, publication.request_bytes(expected)),
+            (root/runtime.RUNTIME_RECIPE, (json.dumps(journal["new_runtime"], sort_keys=True)+"\n").encode()),
+            (new_path, (json.dumps(candidate, sort_keys=True)+"\n").encode())):
+        host.load_receipt(path, max_bytes=max(65536, len(data)))
+        if path.read_bytes() != data:
+            raise RuntimeError("storage_forward_published_file_changed")
+    if (publication._sha(launch._canonical(candidate["inventory_path"]).read_bytes())
+            != journal["old_worker"]["binding"]["inventory_sha256"]):
+        raise RuntimeError("storage_forward_inventory_changed")
+    for name in (publication.STATE, publication.PACKAGE_STATE):
+        if os.path.lexists(root/name) and host.load_receipt(root/name, max_bytes=_MAX_BYTES).get("phase") != "complete":
+            raise RuntimeError("storage_forward_prior_publication_unresolved")
+    return journal
+
+
+def admit_adoption_observation(request, *, initialization, capture, now):
+    """Bind actual SQL clocks to the published request, never the old expiry.
+
+    This read-only validator is shared by host launch and final observations.
+    It confers no publication, launch, source-stop, COMMIT or replay authority.
+    """
+    from datetime import datetime, timedelta
+    import math
+    from scripts.automation.storage_online_forward_worker import request_binding
+
+    intent = request_binding(request)
+    if intent is None or type(now) not in (int, float) or not math.isfinite(now):
+        raise ValueError("storage_forward_observation_inputs_invalid")
+    def instant(value):
+        if not isinstance(value, str):
+            raise RuntimeError("storage_forward_observation_clock_invalid")
+        result = datetime.fromisoformat(value)
+        if result.utcoffset() != timedelta(0):
+            raise RuntimeError("storage_forward_observation_clock_invalid")
+        return result
+    if (not isinstance(initialization, dict)
+            or set(initialization) != {"binding", "started_at", "expires_at", "duration_seconds", "complete"}
+            or initialization["complete"] is not True
+            or type(initialization["duration_seconds"]) is not int
+            or initialization["duration_seconds"] != 600):
+        raise RuntimeError("storage_forward_initialization_observation_invalid")
+    seconds = intent["original_capture"].get("attempt_seconds")
+    expected = dict(request_sha256=host.digest(request), operation_sha256=intent["operation_sha256"],
+        cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=3600,
+        initial_seconds=600, attempt_seconds=seconds)
+    start, end = instant(initialization["started_at"]), instant(initialization["expires_at"])
+    if (initialization["binding"] != expected
+            or any(type(initialization["binding"][k]) is not int for k in ("key_seconds", "initial_seconds", "attempt_seconds"))
+            or end != start+timedelta(seconds=600)):
+        raise RuntimeError("storage_forward_initialization_binding_changed")
+    if (not isinstance(capture, dict)
+            or set(capture) != {"operation_sha256", "started_at", "expires_at", "attempt_seconds", "cancellation", "placement"}
+            or capture["operation_sha256"] != intent["operation_sha256"]
+            or type(seconds) is not int or not 30 <= seconds <= 345600
+            or type(capture["attempt_seconds"]) is not int or capture["attempt_seconds"] != seconds
+            or not isinstance(capture["cancellation"], dict)
+            or not isinstance(capture["placement"], dict) or not capture["placement"]):
+        raise RuntimeError("storage_forward_adoption_observation_invalid")
+    canceled = capture["cancellation"]
+    receipt = canceled.get("receipt", {})
+    if (receipt.get("schema_version") != "qt.fact_header_cancel.v2"
+            or receipt.get("capture") != intent["original_capture"]
+            or receipt.get("intent_sha256") != intent["cancellation_intent_sha256"]
+            or any(receipt.get(k) is not True for k in ("source_retained", "partial_copies_retained"))
+            or any(receipt.get(k) is not False for k in ("migration_ready", "final_switch_authorized"))):
+        raise RuntimeError("storage_forward_cancellation_observation_changed")
+    adopted, expiry = instant(capture["started_at"]), instant(capture["expires_at"])
+    if (not start <= adopted <= end or expiry != adopted+timedelta(seconds=seconds)
+            or not adopted.timestamp() <= now < expiry.timestamp()):
+        raise RuntimeError("storage_forward_adoption_original_clock_invalid")
+    owner = dict(schema_version="qt.storage_online_forward_session.v1",
+        operation_sha256=intent["operation_sha256"], cancellation_intent_sha256=intent["cancellation_intent_sha256"],
+        started_at=adopted.isoformat(), expires_at=expiry.isoformat(), attempt_seconds=seconds, end_day=intent["end_day"])
+    return owner, expiry.timestamp()
+
+
+def observe_adoption(database_id):
+    """Read both atomic initialization/adoption receipts in one SQL snapshot.
+
+    A missing or retired adoption fails closed. The caller must separately admit
+    the published request, owned worker and source before using this observation.
+    This query neither runs the expensive proof scan nor changes database state.
+    """
+    names = ("qt_fact_header_forward_v2.initialization", "qt_fact_header_forward_v2.adoption")
+    present = json.loads(host.database_query(database_id,
+        "SELECT json_build_array(to_regclass('"+names[0]+"') IS NOT NULL,"
+        "to_regclass('"+names[1]+"') IS NOT NULL)::text", read_only_seconds=5))
+    if present != [True, True]:
+        raise RuntimeError("storage_forward_active_adoption_required")
+    rows = json.loads(host.database_query(database_id,
+        "SELECT json_build_object('initialization',(SELECT json_agg(i) FROM ("
+        "SELECT id,binding,started_at,expires_at,duration_seconds,complete FROM "+names[0]+" LIMIT 2) i),"
+        "'adoption',(SELECT json_agg(a) FROM (SELECT id,operation_sha256,started_at,expires_at,"
+        "attempt_seconds,terminal,binding->'terminal' AS cancellation,"
+        "binding->'old_headers'->'placement' AS placement FROM "+names[1]+" LIMIT 2) a))::text", read_only_seconds=5))
+    if (not isinstance(rows, dict) or set(rows) != {"initialization", "adoption"}
+            or any(not isinstance(rows[k], list) or len(rows[k]) != 1
+                or type(rows[k][0].get("id")) is not int or rows[k][0]["id"] != 1 for k in rows)
+            or rows["adoption"][0].get("terminal") is not None):
+        raise RuntimeError("storage_forward_active_adoption_required")
+    initialization = {k:v for k,v in rows["initialization"][0].items() if k != "id"}
+    capture = {k:v for k,v in rows["adoption"][0].items() if k not in {"id", "terminal"}}
+    return initialization, capture

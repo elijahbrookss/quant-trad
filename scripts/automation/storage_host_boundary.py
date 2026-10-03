@@ -295,8 +295,12 @@ def same_database_networks(details: dict, expected: dict, *, network_ids=None) -
     return True
 
 
-def database_query(container: str, sql: str) -> str:
-    return docker("exec", container, "sh", "-ec",
+def database_query(container: str, sql: str, *, read_only_seconds: int | None = None) -> str:
+    if read_only_seconds is not None and (type(read_only_seconds) is not int or not 1 <= read_only_seconds <= 30):
+        raise ValueError("storage_database_read_bound_invalid")
+    options = ([] if read_only_seconds is None else ["--env",
+        "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout="+str(read_only_seconds*1000)])
+    return docker("exec", *options, container, "sh", "-ec",
         'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" '
         '-v ON_ERROR_STOP=1 -Atc "$1"', "storage-preparation", sql).strip()
 

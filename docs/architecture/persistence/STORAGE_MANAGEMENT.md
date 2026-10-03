@@ -13,6 +13,7 @@ code_paths:
   - tests/test_storage_online_forward_worker.py
   - scripts/automation/storage_online_forward.py
   - tests/test_storage_online_forward.py
+  - tests/test_storage_forward_observation.py
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
@@ -3620,3 +3621,20 @@ the completed publication/cancellation, original retired worker, actual new phas
 clocks and login-gate authority remains required, as do production physical and
 pause qualification, recovery and deployment. A direct worker or small disposable
 fixture result cannot grant those authorities or establish production performance.
+
+
+The host publication inspector reconstructs the effective forward request from
+its completed publication, original operation and committed cancellation. It
+checks exact published request/runtime/plan bytes, retained inventory, and the
+permitted worker-binding changes. The original plan remains immutable; a
+recomputed journal digest cannot substitute foreign runtime or source bindings.
+Worker lifecycle progression still belongs to the launcher and is not granted
+by this read-only inspection.
+
+The host can read initialization and adoption together in one database snapshot,
+without scanning historical rows. It rejects absent, ambiguous or retired
+adoption. Request/cancellation identity and actual initialization/adoption clocks
+must match exactly. Completed initialization need not remain unexpired; the
+original active adoption expiry controls subsequent work. This observer does
+not renew either clock or implement canonical host launch, login closure or
+preserving terminal invocation. Those lifecycle integrations remain required.

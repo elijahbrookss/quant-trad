@@ -216,3 +216,62 @@ def test_forward_preserves_large_private_runtime_configuration(prepared):
     after=host.load_receipt(path,max_bytes=524288)
     assert after["services"]["backend"]["environment"]==recipe["services"]["backend"]["environment"]
     assert after["services"]["backend"]["image"]==a.manifest["image"]
+
+
+
+def test_completed_forward_publication_inspection_binds_original_and_effective_request(prepared):
+    a = prepared
+    a.run()
+    journal = assert_complete(a)
+    paths = [a.path, a.root/terminal.STATE, a.root/forward.STATE,
+             a.root/publication.REQUEST, a.root/launch._STATE,
+             a.root/publication.runtime.RUNTIME_RECIPE, Path(a.manifest["forward_plan_path"])]
+    before = {p:p.read_bytes() for p in paths}
+    observed = forward.inspect_published_operation(a.root, request=journal["new_request"],
+        operation_path=a.manifest["forward_plan_path"])
+    assert observed == journal
+    assert all(p.read_bytes() == value for p,value in before.items())
+    with pytest.raises(RuntimeError, match="operation_path_changed"):
+        forward.inspect_published_operation(a.root, operation_path=a.path)
+    with pytest.raises(RuntimeError, match="publication_binding_changed"):
+        forward.inspect_published_operation(a.root, request=journal["new_plan"]["request"])
+
+
+@pytest.mark.parametrize("fault", ["request", "plan", "runtime", "original", "terminal", "inventory", "journal"])
+def test_completed_forward_inspection_refuses_foreign_files_without_writes(prepared, fault):
+    a = prepared
+    a.run()
+    paths = dict(request=a.root/publication.REQUEST, plan=Path(a.manifest["forward_plan_path"]),
+        runtime=a.root/publication.runtime.RUNTIME_RECIPE, original=a.path,
+        terminal=a.root/terminal.STATE, inventory=Path(a.plan["inventory_path"]), journal=a.root/forward.STATE)
+    paths[fault].write_text(paths[fault].read_text()+" ")
+    # JSON whitespace is also a foreign preimage except inventory, which has a
+    # separate exact digest. Publication journals pin their content digest.
+    if fault == "journal":
+        value=host.load_receipt(paths[fault], max_bytes=forward._MAX_BYTES)
+        value["phase"]="publishing"
+        write(paths[fault],value)
+    before={name:p.read_bytes() for name,p in paths.items()}
+    with pytest.raises(RuntimeError):
+        forward.inspect_published_operation(a.root)
+    assert before == {name:p.read_bytes() for name,p in paths.items()}
+
+
+@pytest.mark.parametrize("fault", ["runtime", "worker", "old_request"])
+def test_forward_inspection_refuses_rehashed_journal_with_changed_original_binding(prepared, fault):
+    a=prepared
+    a.run()
+    journal=host.load_receipt(a.root/forward.STATE, max_bytes=forward._MAX_BYTES)
+    if fault=="runtime":
+        journal["new_runtime"]["services"]["backend"]["image"]="sha256:"+"d"*64
+        write(a.root/publication.runtime.RUNTIME_RECIPE, journal["new_runtime"])
+    elif fault=="worker":
+        journal["new_worker"]["binding"]["memory_bytes"]=123
+    else:
+        original=json.loads(journal["old_request_bytes"])
+        original["source_inode"]=123
+        journal["old_request_bytes"]=publication.request_bytes(original).decode()
+    journal["intent_sha256"]=host.digest({k:v for k,v in journal.items() if k not in {"intent_sha256","phase"}})
+    write(a.root/forward.STATE,journal)
+    with pytest.raises(RuntimeError, match="publication_binding_changed"):
+        forward.inspect_published_operation(a.root)

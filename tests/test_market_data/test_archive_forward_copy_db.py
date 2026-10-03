@@ -452,10 +452,25 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     request["forward"]["cancellation_intent_sha256"] = CANCEL
     request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
     operation = request["forward"]["operation_sha256"]
+    from scripts.automation import storage_online_forward as host_forward
+    queries = []
+    def database_query(database_id, sql, *, read_only_seconds):
+        assert read_only_seconds == 5
+        assert database_id == "disposable-forward-host"
+        queries.append(sql)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            conn.exec_driver_sql("SET LOCAL statement_timeout='5s'")
+            return conn.scalar(text(sql))
+    monkeypatch.setattr(host_forward.host, "database_query", database_query)
+    def observed():
+        phase, capture = host_forward.observe_adoption("disposable-forward-host")
+        return host_forward.admit_adoption_observation(request, initialization=phase,
+            capture=capture, now=time.time())
     kwargs = dict(targets=(storage.copy_plan.recent, storage.copy_plan.history),
         policy=options["policy"], limits=options["resource_limits"],
         source=options["source_root"], destination=options["destination_root"],
-        key_seconds=600, initial_seconds=30 if outcome == "expire" else 600)
+        key_seconds=3600, initial_seconds=30 if outcome == "expire" else 600)
     with engine.begin() as conn:
         old, archives_before = _old(conn), _original_archives(conn)
     prepare = online.prepare
@@ -475,6 +490,8 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         assert _old(conn) == old and _original_archives(conn) == archives_before
         # Source remains writable after rolled-back guards and archive capture.
         _synthetic_descriptor(conn, source, "!worker-interrupted-"+uuid4().hex)
+    with pytest.raises(RuntimeError, match="active_adoption_required"):
+        observed()
     def never_rebuild(*args, **kwargs):
         pytest.fail("initialization retry attempted key phase again")
     monkeypatch.setattr(keys, "prepare_keys_supervised", never_rebuild)
@@ -515,6 +532,11 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         assert worker._initial(conn) == complete and adoption._state(conn) == adopted
         assert keys._read_state(conn) == key_state
         assert _old(conn) == old
+    owner, deadline = observed()
+    assert owner["operation_sha256"] == operation
+    assert owner["started_at"] == adopted["started_at"].isoformat()
+    assert deadline == adopted["expires_at"].timestamp()
+    assert queries and all(query.startswith("SELECT ") for query in queries)
     changed = dict(request, source_inode=request["source_inode"]+1)
     with pytest.raises(RuntimeError, match="initialization_binding_changed"):
         worker.prepare_forward(engine, changed, **kwargs)
@@ -524,3 +546,5 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         adoption.retire_adoption(conn, operation_sha256=operation)
     with pytest.raises(RuntimeError, match="adoption_retired"):
         worker.prepare_forward(engine, request, **kwargs)
+    with pytest.raises(RuntimeError, match="active_adoption_required"):
+        observed()
