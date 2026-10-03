@@ -26,6 +26,7 @@ parser.add_argument('--forward-package-image',help='qualify separate interrupted
 parser.add_argument('--forward-worker',action='store_true',help='qualify interrupted durable forward launch, actual confined worker and host observation')
 parser.add_argument('--forward-retirement',action='store_true',help='qualify canonical stopped-forward-worker retirement and lost COMMIT reconciliation')
 parser.add_argument('--forward-operation',action='store_true',help='qualify canonical forward background dispatch and injected pre-stop failure retirement')
+parser.add_argument('--forward-final',choices=('commit','rollback'),help='qualify real forward final owners with synthetic guarded source peers')
 parser.add_argument('--terminal-image',help='use an independently attested production image for the fixed terminal worker')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
@@ -55,6 +56,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.forward_final and (not options.forward_worker or not options.guarded_source_image or options.forward_operation or options.forward_retirement):
+ parser.error('--forward-final requires forward worker and guarded source; excludes pre-stop operation/retirement modes')
 if options.forward_operation and not options.forward_retirement:
  parser.error('--forward-operation requires --forward-retirement')
 if options.forward_retirement and not options.forward_worker:
@@ -100,7 +103,7 @@ if options.recovery_mounts and not options.commit_switch:
 if options.commit_switch and (options.close_logins!='success' or not options.guarded_source_image
     or options.abort_resume or options.worker_shutdown or options.worker_attach_loss):
  parser.error('--commit-switch requires confirmed gate and guarded fixture image, without abort/signal/attach faults')
-if options.guarded_source_image and not options.commit_switch:
+if options.guarded_source_image and not (options.commit_switch or options.forward_final):
  parser.error('--guarded-source-image is only admitted with --commit-switch')
 if options.abort_restore_lost_reply and (not options.abort_resume or options.close_logins!='success' or options.abort_resume_fence_loss or options.abort_resume_lost_end):
  parser.error('--abort-restore-lost-reply requires confirmed gated abort without other faults')
@@ -256,7 +259,7 @@ os.chown(root,70,70)
    extra=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN=postgresql+psycopg2://fixture:'+password+'@tsdb:5432/'+dbname]
    command_text="trap 'exit 0' TERM; while :; do printf x >> /app/logs/market-structure/objects/native-intake; sleep 1 & wait $!; done"
   from scripts.automation.storage_online_final import _SOURCE_WRITERS
-  if options.commit_switch and service in _SOURCE_WRITERS:
+  if (options.commit_switch or options.forward_final) and service in _SOURCE_WRITERS:
    target='/app/logs/market-structure'
    canonical_mounts=[]
    if canonical:
@@ -288,7 +291,7 @@ os.chown(root,70,70)
    run(['run','-d','--name',name,'--pull','never','--network',network,
      '--user','70:70','--read-only','--memory','32m','--cpus','0.1',
      '--pids-limit','32',*labels(service),*extra,'--entrypoint','sh',image,'-c',command_text])
- if options.commit_switch:
+ if options.commit_switch or options.forward_final:
   source_ready=time.monotonic()+15
   while (not (working/'objects'/'native-intake').exists()
          or run(['inspect',project+'-initialize','--format','{{.State.Status}}']).stdout.strip()!='exited'):
@@ -568,7 +571,8 @@ os.chown(root,70,70)
    from scripts.ci.online_operation_fixture import rehearse_terminal_cancellation
    report['terminal_cancellation']=rehearse_terminal_cancellation(state=state,kwargs=kwargs,
      history_uuid=history_uuid,control=control,source=source,owned=owned,
-     expired=options.terminal_cancellation_expired,terminal_image=options.terminal_image)
+     expired=options.terminal_cancellation_expired,terminal_image=options.terminal_image,
+     source_image=source_image,final_seconds=60 if options.forward_final else 30)
    if options.forward_worker:
     # Retire the SQL-writing fixture before admitting the actual worker's
     # complete mount/namespace inventory; preserve its post-cancel records.
@@ -577,7 +581,7 @@ os.chown(root,70,70)
    if options.forward_package_image:
     from scripts.ci.online_operation_fixture import rehearse_forward_package
     report['forward_package']=rehearse_forward_package(state=state,kwargs=kwargs,
-      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement,operation_route=options.forward_operation)
+      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement,operation_route=options.forward_operation,final_mode=options.forward_final)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()
@@ -1554,6 +1558,8 @@ finally:
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()
  report['cleanup_failures']=cleanup_failures
+ if options.forward_final and report.get('forward_package',{}).get('actual_forward_final_mode') != options.forward_final:
+  report['forward_final_not_qualified']=True
  if options.forward_operation and not report.get('forward_package',{}).get('canonical_normal_dispatch'):
   report['forward_operation_not_qualified']=True
  if options.forward_retirement and not report.get('forward_package',{}).get('canonical_failure_retirement'):
@@ -1575,3 +1581,4 @@ finally:
 
  if report.get('forward_retirement_not_qualified'):raise RuntimeError('owned_forward_retirement_not_qualified')
  if report.get('forward_operation_not_qualified'):raise RuntimeError('owned_forward_operation_not_qualified')
+ if report.get('forward_final_not_qualified'):raise RuntimeError('owned_forward_final_not_qualified')

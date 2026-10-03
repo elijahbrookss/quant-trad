@@ -3746,3 +3746,17 @@ rollback, final COMMIT, UTC rollover under live production writes or production
 range-scan duration. Those checks remain required before production use. The
 complete range CHECK, heap attachment and exact proof still belong to one final
 transaction and its original time bound; this route does not precommit a CHECK.
+
+
+The separate `--forward-final commit|rollback` disposable modes use the existing
+source lifetime-guard fixture. Its immutable image is bound in the original
+operation plan before cancellation or forward publication, and its final limit
+is declared once. The commit case runs the canonical operation through source
+stop, namespace hold, drain, login closure and COMMIT, replaces only the worker's
+acknowledgement certainty, and requires the host to inspect the durable outcome.
+It stops after reader retirement and before recovery mounts. The rollback case
+uses the same phase owners, releases the source namespace while logins remain
+closed, and lets the retained SQL rollback fence own login restoration and every
+source restart. Neither case changes a saved date, clock, or production input.
+These synthetic source peers and old-day records do not establish production
+source-runtime admission, UTC rollover, throughput, or range-scan duration.

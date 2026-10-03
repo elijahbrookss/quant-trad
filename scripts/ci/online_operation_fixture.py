@@ -284,7 +284,7 @@ def rehearse_package_amendment(*, state, kwargs, replacement_image, history_uuid
         production_capacity_admission=False, final_handoff=False)
 
 
-def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned, expired=False, terminal_image=None):
+def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, source, owned, expired=False, terminal_image=None, source_image=None, final_seconds=30):
     """Real confined worker/SQL cancellation; synthetic runtime preflight only."""
     from copy import deepcopy
     import time
@@ -322,11 +322,11 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
     request=deepcopy(kwargs["request"]);capture_plan=request.pop("capture_preparation")
     keys=state/"terminal-fixture-keys";keys.mkdir(mode=0o700)
     spool=state/"terminal-fixture-spool";spool.mkdir(mode=0o700)
-    limits=operation.OperationLimits(preparation_seconds=30,final_seconds=30,recovery_seconds=30,
+    limits=operation.OperationLimits(preparation_seconds=30,final_seconds=final_seconds,recovery_seconds=30,
         runtime_seconds=30,spool_max_bytes=1024**2,spool_max_entries=128,spool_reserve_bytes=1024**2,
         repository_max_bytes=256*1024**2,repository_reserve_bytes=1024**2,recent_free_bytes=1024**2)
     plan=dict(schema_version="qt.storage_online_operation.v1",state_root=str(state),**kwargs,
-        source_image=kwargs["image"],history_uuid=history_uuid,history_before=capture_plan["history_before"],
+        source_image=source_image or kwargs["image"],history_uuid=history_uuid,history_before=capture_plan["history_before"],
         attempt_seconds=old["capture"]["seconds"],limits=vars(limits),keys_root=str(keys),
         socket_volume=kwargs["project"]+"-unused-socket",spool_destination=str(spool))
     plan["request"]=request;plan["inventory_path"]=str(kwargs["inventory_path"])
@@ -392,7 +392,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
 
 
 
-def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False):
+def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False, final_mode=None):
     """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
     from datetime import datetime, timezone, timedelta
     from scripts.automation import storage_online_forward as forward
@@ -414,7 +414,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         plan_sha256=publication._sha(path.read_bytes()),image=candidate,
         source_revision=environment["QT_IMAGE_SOURCE_REVISION"],source_tree_hash=environment["QT_IMAGE_SOURCE_TREE_HASH"],
         forward_plan_path=str(state/"forward-operation.json"),
-        end_day=(datetime.now(timezone.utc).date()+timedelta(days=0 if operation_route else 1)).isoformat())
+        end_day=(datetime.now(timezone.utc).date()+timedelta(days=0 if operation_route or final_mode else 1)).isoformat())
     package=state/"forward-package.json";host_boundary.save_receipt(package,manifest,initial=True)
     recipe=dict(name=kwargs["project"],services={name:dict(image=kwargs["image"]) for name in runtime._APPLICATIONS})
     recipe["services"]["tsdb"]=dict(image="unchanged-disposable-database")
@@ -480,7 +480,11 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         created=intent["pending_worker"]["container_id"]
         actual=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",created))
         assert actual["Status"]=="created" and actual["Pid"]==0 and not actual["Running"]
-        if operation_route:
+        if final_mode:
+            assert not retire_worker and not operation_route
+            launched = _rehearse_forward_final(state=state, arguments=arguments, created=created,
+                launch_intent=intent, plan_path=Path(manifest["forward_plan_path"]), mode=final_mode)
+        elif operation_route:
             assert retire_worker, "canonical operation fixture requires preserving failure retirement"
             actual_stop = final.stop_online_source_locked
             operation_preflights = []
@@ -610,6 +614,141 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=created))==source
     return dict(candidate_image=candidate,interrupted_publication_reconciled=True,
         actual_cancellation_reconciled_with_original_request=True,original_plan_terminal_and_inventory_preserved=True,
-        original_publication_clocks_preserved=True,old_worker_preserved=True,source_clients_unchanged=True,
-        production_runtime_preflight=False,production_cardinality=False,final_handoff=False,
+        original_publication_clocks_preserved=True,old_worker_preserved=True,source_clients_unchanged=final_mode != "commit",
+        production_runtime_preflight=False,production_cardinality=False,final_handoff=final_mode == "commit",
         **({"forward_worker_started":False}|launched))
+
+
+def _rehearse_forward_final(*, state, arguments, created, launch_intent, plan_path, mode):
+    """Real final owners; synthetic guarded source/runtime peers and old-day rows."""
+    import time
+    from copy import deepcopy
+    from scripts.automation import storage_online_final as final
+    from scripts.automation import storage_online_forward as forward
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_prepare as initial
+    assert mode in {"commit", "rollback"}
+    plan = operation.load_operation_plan(plan_path)
+    assert plan["limits"]["final_seconds"] == 60
+    request = forward.inspect_published_operation(state, operation_path=plan_path)["new_request"]
+    phases = {}
+    preflights = []
+    def preflight(root, **kw):
+        launch.inspect_candidate_image(kw["image"], kw["request"])
+        preflights.append(kw.get("operator_id"))
+        return initial.admit_serving_source(root, project=arguments["project"],
+            source_revision=arguments["source_revision"], operator_id=kw.get("operator_id", created))
+    actual_preflight = operation.inspect_prepared_operation
+    actual_gate = final.close_database_logins_locked
+    actual_commit = final.commit_online_handoff_locked
+    actual_recovery = final.prepare_recovery_database_locked
+    def gate(root, *, exchange):
+        phases["pause"] = final._load(root/final.STATE)
+        result = actual_gate(root, exchange=exchange)
+        saved = final._load(root/final.STATE)
+        assert saved["phase"] == "login_closed" and result["new_logins_closed"]
+        assert saved["deadline"] == phases["pause"]["deadline"]
+        assert saved["deadline_boot"] == phases["pause"]["deadline_boot"]
+        with host_boundary.docker_deadline(saved["switch"]["deadline_monotonic"]):
+            rows = host_boundary.inventory(arguments["project"], operator_id=created)
+            observed = json.loads(host_boundary.maintenance_query(rows["tsdb"]["id"], final._GATE_OBSERVE))
+            assert observed == {**saved["login_gate"]["database"], "allow_connections":False}
+            try:
+                host_boundary.database_query(rows["tsdb"]["id"], "SELECT 1")
+                raise AssertionError("closed target accepted new login")
+            except RuntimeError as exc:
+                assert str(exc).startswith("storage_pause_docker_failed")
+        phases["gate"] = saved
+        return result
+    def commit(root, *, exchange):
+        calls = []
+        def uncertain(operation_name, **kw):
+            reply = exchange(operation_name, **kw)
+            calls.append(operation_name)
+            if operation_name == "commit_database":
+                # Actual SQL committed; remove acknowledgement certainty only.
+                # The unchanged host must inspect the durable SQL certificate.
+                assert reply["state"] == "committed"
+                reply = deepcopy(reply)
+                reply["state"] = "commit_unknown"
+                reply["result"]["database_handoff_committed"] = None
+                reply["result"]["initial_policy_activated"] = None
+            return reply
+        result = actual_commit(root, exchange=uncertain)
+        assert calls.count("commit_database") == 1 and calls[-1] == "inspect_outcome"
+        assert result["outcome"] == "committed" and result["initial_policy_activated"]
+        phases["commit"] = result
+        return result
+    def before_recovery(root, *, worker_process, **kw):
+        assert worker_process.poll() is not None
+        status = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", created))
+        assert not status["Running"] and status["Pid"] == 0
+        saved = final._load(root/final.STATE)
+        assert saved["phase"] == "committed"
+        assert saved["deadline"] == phases["pause"]["deadline"] and saved["deadline_boot"] == phases["pause"]["deadline_boot"]
+        phases["reader_retired"] = True
+        raise RuntimeError("fixture stopped before recovery mount transition")
+    operation.inspect_prepared_operation = preflight
+    final.close_database_logins_locked = gate
+    final.commit_online_handoff_locked = commit
+    final.prepare_recovery_database_locked = before_recovery
+    try:
+        if mode == "commit":
+            try:
+                operation.run_operation_plan(plan_path, execute=True)
+                raise AssertionError("fixture crossed recovery boundary")
+            except RuntimeError as exc:
+                assert str(exc) == "fixture stopped before recovery mount transition"
+            assert preflights == [None, None, created] and phases["reader_retired"]
+        else:
+            with host_boundary.deployment_lock(state):
+                with launch.launched_online_worker_locked(state, **arguments) as (worker, receipt):
+                    assert receipt["container_id"] == created
+                    channel = host_boundary.OnlineWorkerChannel(worker, deadline=time.monotonic()+receipt["deadline"]-time.time())
+                    exchange = channel.exchange
+                    operation.prepare_background(exchange, preparation_seconds=30, forward=True)
+                    paused = final.stop_online_source_locked(state, project=arguments["project"],
+                        source_revision=arguments["source_revision"], controller_id=channel.greeting["controller_id"],
+                        worker_id=created, max_duration_seconds=60)
+                    with final.held_source_writers_locked(state, source_image=plan["source_image"]):
+                        final.observe_source_drain_locked(state, exchange=exchange, max_entries=plan["limits"]["spool_max_entries"])
+                        operation._enter_forward_day(request["forward"], paused)
+                        deadline = time.monotonic()+final._remaining(paused)-0.1
+                        final.copy_final_delta_locked(state, exchange=exchange, deadline=deadline, max_rounds=64)
+                        final.record_switch_entry_locked(state, deadline=deadline,
+                            observe_worker=lambda **kw:exchange("status",response_deadline=kw["deadline"]))
+                        gate(state, exchange=exchange)
+                        final.copy_final_delta_locked(state, exchange=exchange, deadline=deadline, max_rounds=64)
+                    # Release the source namespace hold while logins are still
+                    # closed, then the existing live SQL fence owns all starts.
+                    final.resume_online_source_locked(state, exchange=exchange)
+                    saved = final._load(state/final.STATE)
+                    assert saved["phase"] == "source_resumed"
+                    assert saved["deadline"] == paused["deadline"] and saved["deadline_boot"] == paused["deadline_boot"]
+                    rows = host_boundary.inventory(arguments["project"], operator_id=created)
+                    assert host_boundary.source_clients_serving(rows)
+                    phases["rollback"] = True
+                    exchange("close")
+                assert worker.poll() is not None
+                phases["reader_retired"] = True
+    finally:
+        operation.inspect_prepared_operation = actual_preflight
+        final.close_database_logins_locked = actual_gate
+        final.commit_online_handoff_locked = actual_commit
+        final.prepare_recovery_database_locked = actual_recovery
+    ready = forward.load_launch(state)
+    assert ready["pending_worker"] is None and ready["worker"]["container_id"] == created
+    for key in ("started_at", "started_monotonic", "started_boot", "key_deadline", "key_deadline_monotonic", "key_deadline_boot"):
+        assert ready[key] == launch_intent[key]
+    saved = final._load(state/final.STATE)
+    elapsed = time.time()-saved["started_at"]
+    assert elapsed < saved["duration_seconds"] == 60
+    return dict(forward_worker_started=True, interrupted_launch_reused_created_worker=True,
+        actual_confined_entrypoint=True, actual_host_adoption_observation=True,
+        original_launch_and_sql_clocks_preserved=True, actual_forward_final_mode=mode,
+        canonical_normal_dispatch=mode=="commit", login_closure=True, source_kernel_hold=True,
+        gated_rollback=mode=="rollback", exact_commit_reconciled=mode=="commit",
+        uncertain_worker_acknowledgement=mode=="commit", reader_retired=True,
+        original_final_clocks_preserved=True, measured_fixture_final_seconds=elapsed,
+        production_pause_qualified=False, recovery_mount_transition=False)
