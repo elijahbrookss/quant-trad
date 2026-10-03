@@ -34,11 +34,14 @@ def _inventory(conn, *, read_only_namespace=False):
     return _native_inventory(conn)
 
 
-def _native_inventory(conn):
+def _native_inventory(conn, *, forward_header=False):
     """Fixed native source slots; the caller owns active-copy or forward admission."""
     rows=_incoming_references(conn)
-    result={row["relation"]:{"relation":row["relation"],"column":row["columns"][0],
-                             "original_name":row["conname"]} for row in rows}
+    result={row["relation"]:{"relation":row["relation"],"columns":row["columns"],
+                             "references":["id"],"original_name":row["conname"]} for row in rows}
+    if forward_header:
+        result[SOURCE] = {"relation":SOURCE, "columns":["id","storage_day"],
+                          "references":["id","storage_day"], "original_name":None}
     # The private header FK is part of the trusted shadow model. Any other
     # incoming reference must be one of these known staged source slots.
     incoming=conn.execute(text("""
@@ -75,7 +78,7 @@ def _existing(conn, slot):
     if row is None:
         return None
     if (row["contype"]!="f" or not row["target_matches"]
-            or row["columns"]!=[slot["column"]] or row["references"]!=["id"]
+            or row["columns"]!=slot["columns"] or row["references"]!=slot["references"]
             or row["condeferrable"] or row["condeferred"]
             or (row["confmatchtype"],row["confupdtype"],row["confdeltype"])!=("s","a","r")):
         raise RuntimeError("fact_header_reference_definition_changed: "+slot["relation"])
@@ -117,9 +120,11 @@ def _prepare_reference(conn, slots, relation):
     slot=_slot(slots,relation)
     existing=_states(conn,slots)[relation]
     if existing is None:
-        column=conn.dialect.identifier_preparer.quote(slot["column"])
+        quote=conn.dialect.identifier_preparer.quote
+        columns=",".join(quote(name) for name in slot["columns"])
+        target_columns=",".join(quote(name) for name in slot["references"])
         conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} ADD CONSTRAINT {STAGED} "
-                            f"FOREIGN KEY({column}) REFERENCES {TARGET}(id) ON DELETE RESTRICT NOT VALID")
+                            f"FOREIGN KEY({columns}) REFERENCES {TARGET}({target_columns}) ON DELETE RESTRICT NOT VALID")
         existing=_existing(conn,slot)
         reused=False
     else:

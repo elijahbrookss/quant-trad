@@ -24,11 +24,21 @@ from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK
 
 STATE = keys.SCHEMA + ".adoption"
 IDENTITY = capture.SCHEMA + ".fact_identities"
+# Native FK AFTER triggers are named RI_ConstraintTrigger_*. This quoted
+# uppercase name mirrors identities first, without deferring FK enforcement.
+IDENTITY_MIRROR = "AAA_qt_forward_identity_mirror"
+
 FAMILIES = {
     "identity": (headers.SOURCE, IDENTITY, headers.IDENTITY_COLUMNS, ("id",)),
     "raw": (raw.SOURCE, raw.TARGET, raw.COLUMNS, raw.KEYS),
 }
 logger = logging.getLogger(__name__)
+
+
+def _trigger_name(family, suffix):
+    if (family, suffix) == ("identity", "mirror"):
+        return IDENTITY_MIRROR
+    return "trg_qt_forward_" + family + "_" + suffix
 
 
 def _json_row(conn, relation):
@@ -113,7 +123,7 @@ def _install_family(conn, family):
         (source, "source_seal", "BEFORE", "UPDATE OR DELETE OR TRUNCATE", "STATEMENT", "immutable"),
         (target, "target_seal", "BEFORE", "UPDATE OR DELETE OR TRUNCATE", "STATEMENT", "immutable"),
     ):
-        trigger = "trg_qt_forward_" + family + "_" + suffix
+        trigger = conn.dialect.identifier_preparer.quote(_trigger_name(family, suffix))
         conn.exec_driver_sql(f"CREATE TRIGGER {trigger} {when} {events} ON {relation} FOR EACH {scope} "
                             f"EXECUTE FUNCTION {keys.SCHEMA}.{family}_{action}()")
         conn.exec_driver_sql(f"ALTER TABLE {relation} ENABLE ALWAYS TRIGGER {trigger}")
@@ -190,7 +200,7 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
             "attempt_seconds integer NOT NULL CHECK(attempt_seconds BETWEEN 30 AND 345600),"
             "binding jsonb NOT NULL,progress jsonb NOT NULL,terminal jsonb,reference_progress jsonb NOT NULL,"
             "CHECK(expires_at=started_at+attempt_seconds*interval '1 second'))")
-        if any(references._states(conn, references._native_inventory(conn)).values()):
+        if any(references._states(conn, references._native_inventory(conn, forward_header=True)).values()):
             raise RuntimeError("fact_header_forward_unowned_reference")
         progress = {}
         for family, (source, target, _, primary) in FAMILIES.items():
@@ -262,7 +272,7 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
 
 
 def _reference_states(conn, state):
-    slots = references._native_inventory(conn)
+    slots = references._native_inventory(conn, forward_header=True)
     current = references._states(conn, slots)
     saved = state["reference_progress"]
     if not isinstance(saved, dict):
@@ -290,6 +300,14 @@ def _advance_references(conn, state, before, slots):
         [item for item in expected["functions"] if item["constraint_oid"] not in changed]
         + [item for item in actual["functions"] if item["constraint_oid"] in changed],
         key=lambda item: (item["relation"], item["tgname"]))
+    if after.get(headers.SOURCE) is not None:
+        # Only the fixed composite FK may change the retained header shape.
+        # Its columns, native enforcement and OID were checked by _states.
+        shape = expected["shapes"][headers.SOURCE]
+        shape[5] = sorted(
+            [item for item in shape[5] if item[0] != references.STAGED]
+            + [item for item in actual["shapes"][headers.SOURCE][5]
+               if item[0] == references.STAGED], key=lambda item: item[0])
     if expected != actual:
         raise RuntimeError("fact_header_forward_reference_publication_changed")
     progress = {name: item for name, item in after.items() if item is not None}
@@ -360,7 +378,7 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
         if state["terminal"] is not None:
             terminal = state["terminal"]
             if (terminal["operation_sha256"] != operation_sha256 or terminal["binding"] != _snapshot(conn)
-                    or any(references._states(conn, references._native_inventory(conn)).values())):
+                    or any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())):
                 raise RuntimeError("fact_header_forward_adoption_terminal_changed")
             return dict(retired=True, reused=True, source_authoritative=True,
                         migration_ready=False, final_switch_authorized=False)
@@ -379,15 +397,15 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
         for name in roots:
             conn.exec_driver_sql("ALTER TABLE " + references._qualified(conn, name) +
                                 " DROP CONSTRAINT " + references.STAGED)
-        if any(references._states(conn, references._native_inventory(conn)).values()):
+        if any(references._states(conn, references._native_inventory(conn, forward_header=True)).values()):
             raise RuntimeError("fact_header_forward_reference_retirement_incomplete")
         removed_reference_oids = {item["oid"] for item in staged.values() if item}
         removed = []
         for family, (source, target, _, _) in FAMILIES.items():
             for relation, suffix in ((target, "validate"), (source, "mirror"),
                                      (source, "source_seal"), (target, "target_seal")):
-                trigger = "trg_qt_forward_" + family + "_" + suffix
-                conn.exec_driver_sql("DROP TRIGGER " + trigger + " ON " + relation)
+                trigger = _trigger_name(family, suffix)
+                conn.exec_driver_sql("DROP TRIGGER " + conn.dialect.identifier_preparer.quote(trigger) + " ON " + relation)
                 removed.append([relation, trigger])
         expected = deepcopy(state["binding"])
         admitted_removed = [entry for entry in expected["functions"]
@@ -395,6 +413,9 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
         expected["functions"] = [entry for entry in expected["functions"]
             if [entry["relation"], entry["tgname"]] not in removed
             and entry["constraint_oid"] not in removed_reference_oids]
+        if staged.get(headers.SOURCE) is not None:
+            shape = expected["shapes"][headers.SOURCE]
+            shape[5] = [item for item in shape[5] if item[0] != references.STAGED]
         if len(admitted_removed) != len(removed) or expected != _snapshot(conn):
             raise RuntimeError("fact_header_forward_adoption_retirement_changed")
         terminal = dict(operation_sha256=operation_sha256, binding=expected,

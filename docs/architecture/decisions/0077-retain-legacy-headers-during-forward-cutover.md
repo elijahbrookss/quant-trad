@@ -273,3 +273,13 @@ writes; rollback therefore restores the whole pre-retirement state. Original
 source constraints, all records, old queues and both operations' clocks survive.
 These internal steps still require the host's physical/resource admission and do
 not implement final attachment, runtime activation or recovery publication.
+
+The forward inventory also includes the retained header's composite
+(id, storage_day) reference to the identity registry. Validating this native
+constraint before attachment avoids scheduling its full history validation inside
+the final switch. Its key, referenced key and immediate native enforcement remain
+the final model's contract. The source identity mirror has an explicitly quoted
+name that runs before PostgreSQL's native AFTER FK triggers; source and target
+validation still occur within the same transaction. No constraint is deferred or
+disabled to make source publication succeed. Forward cancellation removes this
+staged header FK along with the external references before retiring mirroring.

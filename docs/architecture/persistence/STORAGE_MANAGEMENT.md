@@ -3434,3 +3434,9 @@ with exact commit reconciliation. This preserves source publication after failur
 or expiry. These are internal database preparation operations; the canonical host
 entrypoint, live final proof, bounded retained-table attachment, measured HDD
 placement and complete encrypted recovery/deployment are still required.
+
+The forward reference inventory additionally prepares the retained header's native
+composite identity reference. An explicitly ordered source mirror publishes the
+identity before the immediate native FK check; both changes roll back together.
+The journal binds this single allowed header-shape change. Retirement restores the
+original header constraint shape while preserving the heap and all rows.

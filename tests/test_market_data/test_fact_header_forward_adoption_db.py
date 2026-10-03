@@ -193,6 +193,9 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
     with engine.begin() as conn:
         current = adoption.inspect_references(conn, operation_sha256=OPERATION)
         assert current["references_complete"] and current["references"][inherited_leaf]["convalidated"]
+        header_fk = current["references"][headers.SOURCE]
+        assert header_fk["columns"] == ["id", "storage_day"]
+        assert header_fk["references"] == ["id", "storage_day"] and not header_fk["condeferrable"]
         assert not current["migration_ready"] and not current["final_switch_authorized"]
         assert all(row["oid"] == originals[row["relation"]] for row in references._incoming_references(conn)
                    if row["relation"] in originals)
@@ -221,7 +224,7 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         native_disable = "ALTER TABLE " + adoption.IDENTITY + " DISABLE TRIGGER " + conn.dialect.identifier_preparer.quote(native_trigger)
     for sql, expected in (
         (native_disable, "binding_changed"),
-        ("ALTER TABLE " + headers.SOURCE + " DISABLE TRIGGER trg_qt_forward_identity_mirror", "binding_changed"),
+        ("ALTER TABLE " + headers.SOURCE + ' DISABLE TRIGGER "' + adoption.IDENTITY_MIRROR + '"', "binding_changed"),
         ("ALTER TABLE " + adoption.IDENTITY + " DISABLE TRIGGER trg_qt_forward_identity_target_seal", "binding_changed"),
         ("UPDATE " + adoption.STATE + " SET started_at=started_at-interval '1 hour',expires_at=expires_at-interval '1 hour'", "adoption_expired"),
     ):
@@ -264,9 +267,9 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         assert terminal["started_at"] == final["started_at"] and terminal["expires_at"] == final["expires_at"]
         assert len(terminal["terminal"]["removed_triggers"]) == 8
         assert set(terminal["terminal"]["removed_reference_roots"]) == {
-            references.PARENT, "market.fact_archive_material_aliases",
+            headers.SOURCE, references.PARENT, "market.fact_archive_material_aliases",
             "market.fact_archive_canonical_dependencies"}
-        assert not any(references._states(conn, references._native_inventory(conn)).values())
+        assert not any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())
         assert all(row["oid"] == originals[row["relation"]] for row in references._incoming_references(conn)
                    if row["relation"] in originals)
         preserved_raw = _rows(conn, raw.TARGET)
@@ -307,7 +310,7 @@ def test_adoption_naturally_expired_phase_can_only_retire(retained):
         adoption.prepare_adoption(conn, **args)
     _finish(engine)
     with engine.begin() as conn:
-        relation = next(name for name in references._native_inventory(conn)
+        relation = next(name for name in references._native_inventory(conn, forward_header=True)
                         if name.startswith(references.PARENT + "_"))
         adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=relation)
         prepared = adoption._state(conn)
@@ -325,6 +328,6 @@ def test_adoption_naturally_expired_phase_can_only_retire(retained):
         assert terminal["expires_at"] == prepared["expires_at"]
         assert terminal["progress"] == prepared["progress"]
         assert terminal["terminal"]["removed_reference_roots"] == [relation]
-        assert not any(references._states(conn, references._native_inventory(conn)).values())
+        assert not any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())
         assert _old(conn) == original
         _insert(conn, retained, "after-expired-adoption-retirement")
