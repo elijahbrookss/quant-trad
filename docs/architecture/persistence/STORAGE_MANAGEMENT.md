@@ -15,6 +15,7 @@ code_paths:
   - tests/test_storage_online_forward.py
   - tests/test_storage_forward_observation.py
   - tests/test_storage_forward_launch.py
+  - tests/test_storage_forward_retirement.py
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
@@ -3679,3 +3680,39 @@ confined entrypoint preparation and host adoption observation. Controller
 retirement preserves source clients and rows. This is not canonical host failure
 retirement, login closure, final COMMIT, production capacity or pause admission.
 The canonical operation gate remains closed until those integrations are ready.
+
+
+### Preserving forward retirement through the canonical terminal route
+
+After forward publication, `qt storage migrate --operation-file <forward-plan>
+--cancel-attempt-file <package>` selects a separate forward terminal owner.
+Inspection is read-only by default. Execution requires the exact completed
+publication, canonical request, durable launch and stopped worker, preserved
+original worker, prepared runtime and serving source fleet. A final-switch intent
+refuses this route; the retained-session rollback owner handles that boundary.
+
+The forward terminal journal and confined probe have separate filenames and
+container names. The original canceled operation, terminal receipt, worker,
+request lineage and source/copy rows remain intact. The existing fixed terminal
+command uses read-only filesystem mounts and validates the database, image and
+request before selecting the existing SQL adoption retirement owner.
+
+One durable 300-second intent precedes dispatch. A lost COMMIT reply permits only
+read-only reconciliation against the exact adoption identity, original clocks,
+committed retirement and current trigger/reference/archive post-state. Missing
+or changed outcomes refuse; retries never repeat dispatch. Reconciliation may
+occur after expiry or reboot without renewing the saved dispatch deadline.
+Forward SQL retirement removes only its owned temporary guards and references;
+it preserves every retained row and grants no new capture, switch or deployment.
+
+The disposable `--forward-retirement` rehearsal exercises the actual confined
+terminal command, lost COMMIT reply and read-only reconciliation without another
+dispatch. It checks original clocks and source/copy/queue row counts. Its
+synthetic runtime peers and small data do not qualify production capacity,
+final-pause duration, recovery or deployment. Ordinary forward operation
+dispatch remains gated.
+
+The confined forward terminal uses the same explicit read-only local mount
+verification as original cancellation. The archive retirement owner retains
+exact placement identity and independently requires PostgreSQL's own PGDATA
+and history directory to remain writable; worker mounts never gain write access.

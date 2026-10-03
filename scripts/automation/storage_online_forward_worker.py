@@ -45,6 +45,14 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def capture_observation(state):
+    """The immutable adoption identity shared by live and terminal observers."""
+    return {**{name: state[name] for name in
+        ("operation_sha256", "started_at", "expires_at", "attempt_seconds")},
+        "cancellation": state["binding"]["terminal"],
+        "placement": state["binding"]["old_headers"]["placement"]}
+
+
 def capture_binding(value):
     """Compact exact proof identity for the bounded host/worker control pipe.
 

@@ -492,7 +492,37 @@ def release_for_switch(conn):
     return context
 
 
-def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
+def inspect_retirement(conn, *, operation_sha256, timeout_seconds=10):
+    """Reconcile one committed preserving retirement without replaying it.
+
+    ACCESS SHARE protects the observed relation identities while source writes
+    continue. The controller fence also excludes an idle owning worker. Absence
+    is uncertainty, never permission to redispatch an earlier terminal intent.
+    """
+    from scripts.db import archive_root_v2_online as archives
+    with _step(conn, timeout_seconds):
+        state = _state(conn)
+        if state is None or state["operation_sha256"] != operation_sha256:
+            raise RuntimeError("fact_header_forward_adoption_intent_changed")
+        relations = [relation for family in FAMILIES.values() for relation in family[:2]]
+        conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN ACCESS SHARE MODE NOWAIT")
+        terminal = state["terminal"]
+        if terminal is None:
+            if state["binding"] != _snapshot(conn):
+                raise RuntimeError("fact_header_forward_adoption_binding_changed")
+            return None
+        if (terminal.get("kind") == "switched"
+                or terminal.get("operation_sha256") != operation_sha256
+                or terminal.get("rows_preserved") is not True
+                or terminal.get("binding") != _snapshot(conn)
+                or any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())):
+            raise RuntimeError("fact_header_forward_adoption_terminal_changed")
+        archives._inspect_forward_cancellation(conn, operation_sha256=operation_sha256,
+                                               receipt=terminal.get("archive_capture"))
+        return deepcopy(terminal)
+
+
+def retire_adoption(conn, *, operation_sha256, timeout_seconds=30, read_only_namespace=False):
     """Retire this phase's exact mirrors without deleting any retained rows.
 
     A separate bounded terminal transaction may run after the work deadline.
@@ -500,6 +530,8 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
     lost commit reply against the durable terminal receipt and exact post-state.
     """
     from scripts.db import archive_root_v2_online as archives
+    if type(read_only_namespace) is not bool:
+        raise ValueError("fact_header_forward_retirement_namespace_mode_invalid")
     with _step(conn, timeout_seconds):
         state = _state(conn)
         if state is None or state["operation_sha256"] != operation_sha256:
@@ -509,17 +541,13 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
         relations = [relation for family in FAMILIES.values() for relation in family[:2]]
         conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         if state["terminal"] is not None:
-            terminal = state["terminal"]
-            if (terminal["operation_sha256"] != operation_sha256 or terminal["binding"] != _snapshot(conn)
-                    or any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())):
-                raise RuntimeError("fact_header_forward_adoption_terminal_changed")
-            archives._inspect_forward_cancellation(conn, operation_sha256=operation_sha256,
-                                                   receipt=terminal.get("archive_capture"))
+            inspect_retirement(conn, operation_sha256=operation_sha256, timeout_seconds=timeout_seconds)
             return dict(retired=True, reused=True, source_authoritative=True,
                         migration_ready=False, final_switch_authorized=False)
         if state["binding"] != _snapshot(conn):
             raise RuntimeError("fact_header_forward_adoption_binding_changed")
-        archive_capture = archives._cancel_forward_capture(conn, state=state)
+        archive_capture = archives._cancel_forward_capture(conn, state=state,
+            **({"read_only_namespace": True} if read_only_namespace else {}))
         slots, staged = _reference_states(conn, state)
         roots = [name for name, item in staged.items() if item and not item["parent_oid"]]
         for name in sorted(roots):

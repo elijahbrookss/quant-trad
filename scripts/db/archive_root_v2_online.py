@@ -333,12 +333,15 @@ def _close(conn, owner, receipt):
                  {"receipt": json.dumps(receipt)})
 
 
-def _cancel_forward_capture(conn, *, state):
+def _cancel_forward_capture(conn, *, state, read_only_namespace=False):
     """Part of the adoption owner's bounded, preserving terminal transaction.
 
     No inventory or empty queue is required for cancellation. Every queued row,
     copied file and journal survives; only this owner's admitted triggers stop.
     """
+    if type(read_only_namespace) is not bool:
+        raise ValueError("archive_forward_terminal_namespace_mode_invalid")
+    placement_options = {"read_only_namespace": True} if read_only_namespace else {}
     operation = state["operation_sha256"]
     owner = _capture(operation)
     if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.state}) is None:
@@ -346,10 +349,10 @@ def _cancel_forward_capture(conn, *, state):
     conn.exec_driver_sql("LOCK TABLE " + ",".join("market." + name for name in archives.FAMILIES)
                          + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
     saved = state["binding"]["old_headers"]["placement"]
-    archives.physical.verify(conn, saved)
+    archives.physical.verify(conn, saved, **placement_options)
     row = conn.execute(text(f"SELECT * FROM {owner.state} WHERE id=1")).mappings().one()
     source, destination = row["roots"]["source"][0], row["roots"]["destination"][0]
-    _inspect(conn, source, destination, forward_operation_sha256=operation, saved=saved)
+    _inspect(conn, source, destination, forward_operation_sha256=operation, saved=saved, **placement_options)
     receipt = dict(kind="cancelled", operation_sha256=operation, capture=dict(row),
                    source_retained=True, queued_rows_retained=True, root_activation_authorized=False)
     _close(conn, owner, receipt)

@@ -24,6 +24,7 @@ parser.add_argument('--terminal-cancellation',action='store_true',help='qualify 
 parser.add_argument('--terminal-cancellation-expired',action='store_true',help='wait for the original fixture capture to expire naturally before preserving cancellation')
 parser.add_argument('--forward-package-image',help='qualify separate interrupted forward package publication after preserving fixture cancellation')
 parser.add_argument('--forward-worker',action='store_true',help='qualify interrupted durable forward launch, actual confined worker and host observation')
+parser.add_argument('--forward-retirement',action='store_true',help='qualify canonical stopped-forward-worker retirement and lost COMMIT reconciliation')
 parser.add_argument('--terminal-image',help='use an independently attested production image for the fixed terminal worker')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
@@ -53,6 +54,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.forward_retirement and not options.forward_worker:
+ parser.error('--forward-retirement requires --forward-worker')
 if options.forward_worker and not options.forward_package_image:
  parser.error('--forward-worker requires --forward-package-image')
 if options.forward_package_image and not options.terminal_cancellation:
@@ -571,7 +574,7 @@ os.chown(root,70,70)
    if options.forward_package_image:
     from scripts.ci.online_operation_fixture import rehearse_forward_package
     report['forward_package']=rehearse_forward_package(state=state,kwargs=kwargs,
-      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker)
+      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()
@@ -1483,11 +1486,11 @@ finally:
  cleanup_failures=[]
  if canonical:
   owned.extend(run(['ps','-aq','--filter','label=com.docker.compose.project='+project]).stdout.split())
- if options.terminal_cancellation and (state/'storage-online-terminal-worker.json').exists():
-  from scripts.automation import storage_online_terminal as terminal
-  saved_terminal=host_boundary.load_receipt(state/terminal.PROBE)
-  if saved_terminal.get('container_id'):
-   owned.append(saved_terminal['container_id'])
+ for terminal_path in (terminal.PROBE,terminal.FORWARD_PROBE):
+  if options.terminal_cancellation and (state/terminal_path).exists():
+   saved_terminal=host_boundary.load_receipt(state/terminal_path)
+   if saved_terminal.get('container_id'):
+    owned.append(saved_terminal['container_id'])
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue
@@ -1520,12 +1523,13 @@ finally:
        and original_saved['binding']['project']==project):
     launch._admit(name,original_saved['binding'],original_saved['contract'])
     mine=True
-  if options.terminal_cancellation and (state/'storage-online-terminal-worker.json').exists():
-   terminal_saved=host_boundary.load_receipt(state/'storage-online-terminal-worker.json')
-   if (name==terminal_saved['container_id']==details['Id']
-       and terminal_saved['binding']['project']==project):
-    launch._admit(name,terminal_saved['binding'],terminal_saved['contract'],command=terminal.COMMAND)
-    mine=True
+  for terminal_path in (terminal.PROBE,terminal.FORWARD_PROBE):
+   if options.terminal_cancellation and (state/terminal_path).exists():
+    terminal_saved=host_boundary.load_receipt(state/terminal_path)
+    if (name==terminal_saved['container_id']==details['Id']
+        and terminal_saved['binding']['project']==project):
+     launch._admit(name,terminal_saved['binding'],terminal_saved['contract'],command=terminal.COMMAND)
+     mine=True
   if name==project+'-storage-spool-prepare':
    mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
   if name==project+'-storage-repository-prepare':
@@ -1547,6 +1551,9 @@ finally:
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()
  report['cleanup_failures']=cleanup_failures
+ if options.forward_retirement and not report.get('forward_package',{}).get('canonical_failure_retirement'):
+  report['forward_retirement_not_qualified']=True
+  report['passed']=False
  if options.forward_worker and not report.get('forward_package',{}).get('forward_worker_started'):
   report['forward_worker_not_qualified']=True
   report['passed']=False
@@ -1560,3 +1567,5 @@ finally:
  if report.get('forward_publication_not_qualified'):raise RuntimeError('owned_forward_publication_not_qualified')
 
  if report.get('forward_worker_not_qualified'):raise RuntimeError('owned_forward_worker_not_qualified')
+
+ if report.get('forward_retirement_not_qualified'):raise RuntimeError('owned_forward_retirement_not_qualified')

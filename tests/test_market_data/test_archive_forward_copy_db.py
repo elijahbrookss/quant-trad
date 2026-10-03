@@ -550,6 +550,10 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     # cannot manufacture a replacement operation or delete retained evidence.
     with engine.begin() as conn:
         adoption.retire_adoption(conn, operation_sha256=operation)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        retired=adoption.inspect_retirement(conn, operation_sha256=operation)
+        assert retired["rows_preserved"] and retired["operation_sha256"]==operation
     with pytest.raises(RuntimeError, match="adoption_retired"):
         worker.prepare_forward(engine, request, **kwargs)
     with pytest.raises(RuntimeError, match="active_adoption_required"):

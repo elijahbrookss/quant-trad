@@ -186,10 +186,8 @@ class OnlineController:
         # Progress, native references and terminal outcome change legitimately.
         # Pin immutable intent/clocks/cancellation/placement, then validate the
         # current proof separately under its actual owning session.
-        return {**{name: state[name] for name in
-                   ("operation_sha256", "started_at", "expires_at", "attempt_seconds")},
-                "cancellation": state["binding"]["terminal"],
-                "placement": state["binding"]["old_headers"]["placement"]}
+        from scripts.automation.storage_online_forward_worker import capture_observation
+        return capture_observation(state)
 
     def _inspect_forward_retained(self, conn):
         state = adoption._state(conn)

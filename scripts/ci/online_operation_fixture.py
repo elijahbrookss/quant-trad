@@ -392,7 +392,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
 
 
 
-def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False):
+def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False):
     """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
     from datetime import datetime, timezone, timedelta
     from scripts.automation import storage_online_forward as forward
@@ -493,15 +493,77 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic","key_deadline_boot"):
                 assert ready[key]==intent[key]
             assert host_boundary.source_clients_serving(rows)
-            canceled_forward=channel.exchange("cancel")
-            assert canceled_forward["state"]=="cancelled"
-            try: forward.observe_adoption(rows["tsdb"]["id"])
-            except RuntimeError as exc: assert str(exc)=="storage_forward_active_adoption_required"
-            else: raise AssertionError("retired forward adoption admitted")
+            if retire_worker:
+                channel.exchange("close")
+            else:
+                canceled_forward=channel.exchange("cancel")
+                assert canceled_forward["state"]=="cancelled"
+                try: forward.observe_adoption(rows["tsdb"]["id"])
+                except RuntimeError as exc: assert str(exc)=="storage_forward_active_adoption_required"
+                else: raise AssertionError("retired forward adoption admitted")
             launched=dict(forward_worker_started=True,interrupted_launch_reused_created_worker=True,
                 actual_confined_entrypoint=True,actual_host_adoption_observation=True,
-                original_launch_and_sql_clocks_preserved=True,forward_retirement_via_controller=True,
+                original_launch_and_sql_clocks_preserved=True,forward_retirement_via_controller=not retire_worker,
                 canonical_failure_retirement=False,login_closure=False)
+        if retire_worker:
+            # A stopped reader alone leaves adoption mirrors active. Exercise
+            # the actual canonical terminal command, then lose its COMMIT reply.
+            forward.observe_adoption(rows["tsdb"]["id"])
+            from scripts.db import fact_header_v2_copy as header_copy, raw_mapping_v2_copy as raw_copy
+            from scripts.db import fact_header_v2_capture as original_capture
+            relations=sorted({header_copy.SOURCE,header_copy.SCHEMA+".fact_versions",original_capture.SCHEMA+".fact_identities",
+                raw_copy.SOURCE,raw_copy.TARGET,raw_copy.QUEUE,original_capture.QUEUE})
+            def retained_counts():
+                with host_boundary.docker_deadline(time.monotonic()+20):
+                    return host_boundary.database_query(rows["tsdb"]["id"],
+                        "SELECT json_build_array("+",".join("(SELECT count(*) FROM "+r+")" for r in relations)+")::text",
+                        read_only_seconds=5)
+            counts_before=retained_counts()
+            plan_path=Path(manifest["forward_plan_path"])
+            retirement_package = dict(schema_version="qt.storage_online_terminal.v1",
+                plan_sha256=publication._sha(plan_path.read_bytes()), image=candidate,
+                source_revision=manifest["source_revision"], source_tree_hash=manifest["source_tree_hash"])
+            retirement_path=state/"forward-retirement-package.json"
+            host_boundary.save_receipt(retirement_path,retirement_package,initial=True)
+            from scripts.automation import storage_online_operation as operation
+            actual_probe=terminal._probe
+            calls=[]
+            def lost_retirement(*args,**options):
+                calls.append(options["action"])
+                value=actual_probe(*args,**options)
+                if options["action"]=="apply":raise TimeoutError("forward retirement COMMIT reply lost")
+                return value
+            def retirement_preflight(state_root,**arguments):
+                launch.inspect_candidate_image(arguments["image"],arguments["request"])
+                return initial.admit_serving_source(state_root,project=kwargs["project"],
+                    source_revision=kwargs["source_revision"],operator_id=arguments["operator_id"])
+            operation.inspect_prepared_operation=retirement_preflight
+            terminal._probe=lost_retirement
+            try:
+                operation.run_operation_plan(plan_path,cancel_attempt_file=retirement_path,execute=True)
+                raise AssertionError("missing forward retirement reply interruption")
+            except TimeoutError as exc:assert str(exc)=="forward retirement COMMIT reply lost"
+            finally:
+                terminal._probe=actual_probe
+                operation.inspect_prepared_operation=actual_preflight
+            interrupted=host_boundary.load_receipt(state/terminal.FORWARD_STATE,max_bytes=524288)
+            assert interrupted["phase"]=="dispatched" and calls.count("apply")==1
+            operation.inspect_prepared_operation=retirement_preflight
+            try:result=operation.run_operation_plan(plan_path,cancel_attempt_file=retirement_path)
+            finally:operation.inspect_prepared_operation=actual_preflight
+            assert result["phase"]=="forward_retired"
+            complete=host_boundary.load_receipt(state/terminal.FORWARD_STATE,max_bytes=524288)
+            assert complete["phase"]=="complete"
+            assert all(complete[k]==interrupted[k] for k in ("wall_deadline","monotonic_deadline","boot_id","intent_sha256"))
+            probe=host_boundary.load_receipt(state/terminal.FORWARD_PROBE)
+            assert probe["retired"] and not host_boundary.docker("ps","-aq","--filter","id="+probe["container_id"]).strip()
+            try:forward.observe_adoption(rows["tsdb"]["id"])
+            except RuntimeError as exc:assert str(exc)=="storage_forward_active_adoption_required"
+            else:raise AssertionError("host retired adoption still admitted")
+            assert retained_counts()==counts_before
+            launched.update(canonical_failure_retirement=True,actual_forward_terminal_command=True,
+                retirement_lost_commit_reconciled_without_dispatch=True,original_terminal_preserved=True,
+                fixture_source_copy_and_queue_counts_preserved=True)
         assert all(p.read_bytes()==data for p,data in original.items())
         assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=created))==source
     return dict(candidate_image=candidate,interrupted_publication_reconciled=True,

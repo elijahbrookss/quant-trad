@@ -2123,3 +2123,34 @@ for full cancellation and placement evidence. A native invocation produced a
 reads and writes now enforce the larger bound; bounded control replies identify
 the complete canonical proof by digest instead of repeating it. This preserves
 exact comparison during login closure without enlarging the control pipe.
+
+
+### Preserving forward retirement through the canonical terminal route
+
+After forward publication, `qt storage migrate --operation-file <forward-plan>
+--cancel-attempt-file <package>` selects a separate forward terminal owner.
+Inspection is read-only by default. Execution requires the exact completed
+publication, canonical request, durable launch and stopped worker, preserved
+original worker, prepared runtime and serving source fleet. A final-switch intent
+refuses this route; the retained-session rollback owner handles that boundary.
+
+The forward terminal journal and confined probe have separate filenames and
+container names. The original canceled operation, terminal receipt, worker,
+request lineage and source/copy rows remain intact. The existing fixed terminal
+command uses read-only filesystem mounts and validates the database, image and
+request before selecting the existing SQL adoption retirement owner.
+
+One durable 300-second intent precedes dispatch. A lost COMMIT reply permits only
+read-only reconciliation against the exact adoption identity, original clocks,
+committed retirement and current trigger/reference/archive post-state. Missing
+or changed outcomes refuse; retries never repeat dispatch. Reconciliation may
+occur after expiry or reboot without renewing the saved dispatch deadline.
+Forward SQL retirement removes only its owned temporary guards and references;
+it preserves every retained row and grants no new capture, switch or deployment.
+
+The disposable `--forward-retirement` rehearsal exercises the actual confined
+terminal command, lost COMMIT reply and read-only reconciliation without another
+dispatch. It checks original clocks and source/copy/queue row counts. Its
+synthetic runtime peers and small data do not qualify production capacity,
+final-pause duration, recovery or deployment. Ordinary forward operation
+dispatch remains gated.
