@@ -31,6 +31,11 @@ def _inventory(conn, *, read_only_namespace=False):
     if not state["identity_capture"]:
         raise RuntimeError("fact_header_reference_identity_capture_required")
     assert_v1_source_admission(conn,identity_capture=True)
+    return _native_inventory(conn)
+
+
+def _native_inventory(conn):
+    """Fixed native source slots; the caller owns active-copy or forward admission."""
     rows=_incoming_references(conn)
     result={row["relation"]:{"relation":row["relation"],"column":row["columns"][0],
                              "original_name":row["conname"]} for row in rows}
@@ -108,41 +113,63 @@ def _slot(slots, relation):
     return slots[relation]
 
 
+def _prepare_reference(conn, slots, relation):
+    slot=_slot(slots,relation)
+    existing=_states(conn,slots)[relation]
+    if existing is None:
+        column=conn.dialect.identifier_preparer.quote(slot["column"])
+        conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} ADD CONSTRAINT {STAGED} "
+                            f"FOREIGN KEY({column}) REFERENCES {TARGET}(id) ON DELETE RESTRICT NOT VALID")
+        existing=_existing(conn,slot)
+        reused=False
+    else:
+        reused=True
+    logger.info("fact_header_reference_prepared | relation=%s reused=%s",relation,reused)
+    return {"relation":relation,"constraint_oid":existing["oid"],
+            "validated":existing["convalidated"],"reused":reused,"migration_ready":False}
+
+
+def _validate_reference(conn, slots, relation):
+    slot=_slot(slots,relation)
+    before=_states(conn,slots)[relation]
+    if before is None:
+        raise RuntimeError("fact_header_reference_not_prepared: "+relation)
+    conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} VALIDATE CONSTRAINT {STAGED}")
+    after=_existing(conn,slot)
+    if after["oid"]!=before["oid"] or not after["convalidated"]:
+        raise RuntimeError("fact_header_reference_validation_changed")
+    logger.info("fact_header_reference_validated | relation=%s",relation)
+    return {"relation":relation,"constraint_oid":after["oid"],
+            "validated":True,"reused":before["convalidated"],"migration_ready":False}
+
+
+def _adopt_payload_references(conn, slots):
+    before=_states(conn,slots)
+    if any(state is None or not state["convalidated"] for name,state in before.items() if name!=PARENT):
+        raise RuntimeError("fact_header_reference_prevalidation_incomplete")
+    reused=before[PARENT] is not None
+    if not reused:
+        conn.exec_driver_sql(f"ALTER TABLE {PARENT} ADD CONSTRAINT {STAGED} "
+                            f"FOREIGN KEY(id) REFERENCES {TARGET}(id) ON DELETE RESTRICT")
+    after=_states(conn,slots)
+    if (any(state is None or not state["convalidated"] for state in after.values())
+            or any(after[name]["oid"]!=state["oid"] for name,state in before.items() if name!=PARENT)):
+        raise RuntimeError("fact_header_reference_adoption_did_not_reuse_validation")
+    logger.info("fact_header_payload_references_adopted | reused=%s",reused)
+    return {"references_complete":True,"reused":reused,"migration_ready":False}
+
+
 def prepare_reference(conn, *, relation, timeout_seconds=10):
     """Add one unvalidated FK under a brief writer fence, then caller commits."""
     with _step(conn,timeout_seconds):
         conn.exec_driver_sql(f"LOCK TABLE {SOURCE} IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-        slots=_inventory(conn)
-        slot=_slot(slots,relation)
-        existing=_states(conn,slots)[relation]
-        if existing is None:
-            column=conn.dialect.identifier_preparer.quote(slot["column"])
-            conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} ADD CONSTRAINT {STAGED} "
-                                f"FOREIGN KEY({column}) REFERENCES {TARGET}(id) ON DELETE RESTRICT NOT VALID")
-            existing=_existing(conn,slot)
-            reused=False
-        else:
-            reused=True
-        logger.info("fact_header_reference_prepared | relation=%s reused=%s",relation,reused)
-        return {"relation":relation,"constraint_oid":existing["oid"],
-                "validated":existing["convalidated"],"reused":reused,"migration_ready":False}
+        return _prepare_reference(conn,_inventory(conn),relation)
 
 
 def validate_reference(conn, *, relation, timeout_seconds=60):
     """Validate one prepared ordinary FK without taking the source writer fence."""
     with _step(conn,timeout_seconds):
-        slots=_inventory(conn)
-        slot=_slot(slots,relation)
-        before=_states(conn,slots)[relation]
-        if before is None:
-            raise RuntimeError("fact_header_reference_not_prepared: "+relation)
-        conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} VALIDATE CONSTRAINT {STAGED}")
-        after=_existing(conn,slot)
-        if after["oid"]!=before["oid"] or not after["convalidated"]:
-            raise RuntimeError("fact_header_reference_validation_changed")
-        logger.info("fact_header_reference_validated | relation=%s",relation)
-        return {"relation":relation,"constraint_oid":after["oid"],
-                "validated":True,"reused":before["convalidated"],"migration_ready":False}
+        return _validate_reference(conn,_inventory(conn),relation)
 
 
 def inspect_references(conn, *, timeout_seconds=10):
@@ -162,17 +189,4 @@ def adopt_payload_references(conn, *, timeout_seconds=10):
     """Attach prevalidated leaf FKs; retain all original source references."""
     with _step(conn,timeout_seconds):
         conn.exec_driver_sql(f"LOCK TABLE {SOURCE},ONLY {PARENT} IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-        slots=_inventory(conn)
-        before=_states(conn,slots)
-        if any(state is None or not state["convalidated"] for name,state in before.items() if name!=PARENT):
-            raise RuntimeError("fact_header_reference_prevalidation_incomplete")
-        reused=before[PARENT] is not None
-        if not reused:
-            conn.exec_driver_sql(f"ALTER TABLE {PARENT} ADD CONSTRAINT {STAGED} "
-                                f"FOREIGN KEY(id) REFERENCES {TARGET}(id) ON DELETE RESTRICT")
-        after=_states(conn,slots)
-        if (any(state is None or not state["convalidated"] for state in after.values())
-                or any(after[name]["oid"]!=state["oid"] for name,state in before.items() if name!=PARENT)):
-            raise RuntimeError("fact_header_reference_adoption_did_not_reuse_validation")
-        logger.info("fact_header_payload_references_adopted | reused=%s",reused)
-        return {"references_complete":True,"reused":reused,"migration_ready":False}
+        return _adopt_payload_references(conn,_inventory(conn))

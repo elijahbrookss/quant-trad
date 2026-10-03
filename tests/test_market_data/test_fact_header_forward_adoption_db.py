@@ -14,6 +14,8 @@ from sqlalchemy.exc import DBAPIError
 from market_data.canonical import build_fact_version_id
 from scripts.db import fact_header_forward_adoption as adoption
 from scripts.db import fact_header_forward_keys as keys
+from scripts.db import fact_header_v2_references as references
+from tests.test_market_data.tiered_v1_fixture import ensure_v1_payload_partition
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_capture as capture
 from scripts.db import fact_header_v2_cancel as cancellation, raw_mapping_v2_copy as raw
 from tests.test_market_data.test_fact_header_copy_placement_db import placed, source
@@ -134,6 +136,83 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         final = adoption._state(conn)
         assert final["started_at"] == prepared["started_at"] and final["expires_at"] == prepared["expires_at"]
         assert conn.scalar(text("SELECT to_regclass('market.fact_header_legacy')")) is None
+    # Stage references under the new owner after the old capture is canceled.
+    # A lost ADD reply reuses its durable OID; old native source FKs survive.
+    with engine.begin() as conn:
+        originals = {row["relation"]: row["oid"] for row in references._incoming_references(conn)}
+        initial = adoption.inspect_references(conn, operation_sha256=OPERATION)
+        assert not initial["references_complete"]
+    ordinary = [name for name in initial["references"] if name != references.PARENT]
+    with monkeypatch.context() as lost:
+        lost.setattr(Connection, "_commit_impl", lose_reply)
+        with pytest.raises(RuntimeError, match="lost adoption prepare commit reply"), engine.begin() as conn:
+            adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=ordinary[0])
+    for relation in ordinary:
+        with engine.begin() as conn:
+            adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=relation)
+    with engine.begin() as conn:
+        staged = adoption._state(conn)
+        assert adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=ordinary[0])["reused"]
+        assert adoption._state(conn) == staged
+    # Rollback validation together with its progress; earlier staging survives.
+    with pytest.raises(RuntimeError, match="interrupt forward validation"), engine.begin() as conn:
+        adoption.validate_reference(conn, operation_sha256=OPERATION, relation=ordinary[0])
+        raise RuntimeError("interrupt forward validation")
+    with engine.begin() as conn:
+        assert adoption._state(conn) == staged
+    # Both an uncommitted writer and a newly committed writer coexist with
+    # native validation locks, including synchronous identity mirroring.
+    with engine.begin() as early:
+        _insert(early, retained, "forward-reference-inflight")
+        with engine.begin() as validator:
+            for relation in ordinary:
+                assert adoption.validate_reference(validator, operation_sha256=OPERATION, relation=relation)["validated"]
+            with engine.begin() as writer:
+                writer.exec_driver_sql("SET LOCAL statement_timeout='2s'")
+                _insert(writer, retained, "forward-reference-concurrent")
+    retained.open_day += timedelta(days=3)
+    with engine.begin() as conn:
+        late_leaf = ensure_v1_payload_partition(conn, retained.open_day)
+        _insert(conn, retained, "forward-reference-new-before-parent")
+    with pytest.raises(RuntimeError, match="prevalidation_incomplete"), engine.begin() as conn:
+        adoption.adopt_payload_references(conn, operation_sha256=OPERATION)
+    with engine.begin() as conn:
+        adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=late_leaf)
+    with engine.begin() as conn:
+        adoption.validate_reference(conn, operation_sha256=OPERATION, relation=late_leaf)
+        leaves = adoption._state(conn)["reference_progress"]
+    with engine.begin() as conn:
+        assert adoption.adopt_payload_references(conn, operation_sha256=OPERATION)["references_complete"]
+        assert adoption.adopt_payload_references(conn, operation_sha256=OPERATION)["reused"]
+        after = adoption.inspect_references(conn, operation_sha256=OPERATION)["references"]
+        assert all(after[name]["oid"] == previous["oid"] for name, previous in leaves.items())
+    retained.open_day += timedelta(days=1)
+    with engine.begin() as conn:
+        inherited_leaf = ensure_v1_payload_partition(conn, retained.open_day)
+        _insert(conn, retained, "forward-reference-new-after-parent")
+    with engine.begin() as conn:
+        current = adoption.inspect_references(conn, operation_sha256=OPERATION)
+        assert current["references_complete"] and current["references"][inherited_leaf]["convalidated"]
+        assert not current["migration_ready"] and not current["final_switch_authorized"]
+        assert all(row["oid"] == originals[row["relation"]] for row in references._incoming_references(conn)
+                   if row["relation"] in originals)
+        assert _old(conn) == original and _frozen_records(conn) == frozen
+        final = adoption._state(conn)
+        assert final["started_at"] == prepared["started_at"] and final["expires_at"] == prepared["expires_at"]
+    # Referencing-side enforcement is checked even outside the mirrored tables.
+    with engine.connect() as conn:
+        tx = conn.begin()
+        try:
+            trigger = conn.scalar(text("SELECT t.tgname FROM pg_trigger t JOIN pg_constraint c ON c.oid=t.tgconstraint "
+                "JOIN pg_proc p ON p.oid=t.tgfoid WHERE c.conrelid=to_regclass(:leaf) "
+                "AND c.conname=:name AND p.proname='RI_FKey_check_ins'"),
+                {"leaf": inherited_leaf, "name": references.STAGED})
+            conn.exec_driver_sql("ALTER TABLE " + inherited_leaf + " DISABLE TRIGGER " +
+                                conn.dialect.identifier_preparer.quote(trigger))
+            with pytest.raises(RuntimeError, match="enforcement_changed"):
+                adoption.inspect_references(conn, operation_sha256=OPERATION)
+        finally:
+            tx.rollback()
     # Changed ownership, native protection or clocks cannot become a new pass.
     with engine.begin() as conn:
         native_trigger = conn.scalar(text("SELECT tgname FROM pg_trigger WHERE tgrelid=to_regclass(:name) "
@@ -184,6 +263,12 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         assert terminal["progress"] == final["progress"]
         assert terminal["started_at"] == final["started_at"] and terminal["expires_at"] == final["expires_at"]
         assert len(terminal["terminal"]["removed_triggers"]) == 8
+        assert set(terminal["terminal"]["removed_reference_roots"]) == {
+            references.PARENT, "market.fact_archive_material_aliases",
+            "market.fact_archive_canonical_dependencies"}
+        assert not any(references._states(conn, references._native_inventory(conn)).values())
+        assert all(row["oid"] == originals[row["relation"]] for row in references._incoming_references(conn)
+                   if row["relation"] in originals)
         preserved_raw = _rows(conn, raw.TARGET)
         preserved_identity = conn.execute(text("SELECT * FROM " + adoption.IDENTITY + " ORDER BY id")).all()
         _insert(conn, retained, "after-adoption-retirement")
@@ -216,11 +301,17 @@ def test_adoption_reverse_scan_refuses_preexisting_foreign_target(retained):
 def test_adoption_naturally_expired_phase_can_only_retire(retained):
     import time
     engine = retained.database._engine
-    args = {**retained.adoption_args, "attempt_seconds": 30}
+    args = {**retained.adoption_args, "attempt_seconds": 45}
     with engine.begin() as conn:
         original = _old(conn)
         adoption.prepare_adoption(conn, **args)
+    _finish(engine)
+    with engine.begin() as conn:
+        relation = next(name for name in references._native_inventory(conn)
+                        if name.startswith(references.PARENT + "_"))
+        adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=relation)
         prepared = adoption._state(conn)
+        assert not prepared["reference_progress"][relation]["convalidated"]
         remaining = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) FROM " + adoption.STATE))
     time.sleep(float(remaining) + 0.1)
     with pytest.raises(RuntimeError, match="adoption_expired"), engine.begin() as conn:
@@ -233,5 +324,7 @@ def test_adoption_naturally_expired_phase_can_only_retire(retained):
         assert terminal["started_at"] == prepared["started_at"]
         assert terminal["expires_at"] == prepared["expires_at"]
         assert terminal["progress"] == prepared["progress"]
+        assert terminal["terminal"]["removed_reference_roots"] == [relation]
+        assert not any(references._states(conn, references._native_inventory(conn)).values())
         assert _old(conn) == original
         _insert(conn, retained, "after-expired-adoption-retirement")

@@ -11,6 +11,7 @@ tags:
 code_paths:
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
+  - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
   - scripts/automation/storage_online_terminal.py
@@ -3416,3 +3417,20 @@ terminal receipt commit together; an interrupted transaction rolls back and a
 lost commit reply reconciles the exact post-state. Retired work cannot resume.
 This database primitive still requires the separately qualified host owner and
 physical/resource admission; it is not a production operation by itself.
+
+### Forward reference preparation
+
+After retained identity/raw adoption verifies both directions, the forward owner
+can stage the fixed payload and archive foreign keys through the shared native
+reference mechanics. Its own intent, deadline and physical/catalog binding govern
+each transaction; the canceled capture is never reopened. Original source FKs
+remain authoritative until final handoff. Validation permits ordinary collection,
+and native parent adoption retains the prevalidated leaf constraint identities.
+New partitions before adoption require validation; later partitions inherit the
+admitted parent reference.
+
+Forward retirement removes staged dependencies before its mirrors, atomically and
+with exact commit reconciliation. This preserves source publication after failure
+or expiry. These are internal database preparation operations; the canonical host
+entrypoint, live final proof, bounded retained-table attachment, measured HDD
+placement and complete encrypted recovery/deployment are still required.

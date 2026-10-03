@@ -12,6 +12,7 @@ tags:
 code_paths:
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
+  - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
   - portal/backend/db/fact_header_legacy_schema.py
@@ -247,3 +248,28 @@ terminal receipt commit together; an interrupted transaction rolls back and a
 lost commit reply reconciles the exact post-state. Retired work cannot resume.
 This database primitive still requires the separately qualified host owner and
 physical/resource admission; it is not a production operation by itself.
+
+## Native references under the forward operation
+
+The same fixed native foreign-key mechanics serve the active-copy and forward
+owners. The former still requires its live original capture; the latter requires
+its own unexpired adoption intent, exact binding and complete bidirectional
+identity/raw verification. Neither owner can borrow the other's authority.
+Each ordinary payload/archive reference is added unvalidated under a brief
+nonwaiting writer fence, then validated in a separate transaction without that
+fence. Original source references remain in place throughout preparation.
+
+The forward journal records each staged native constraint identity and advances
+only the exact target-side trigger changes caused by native reference publication.
+The payload parent reuses validated leaf constraints. New payload partitions must
+be independently validated before parent adoption; afterward they inherit its
+validated reference and are admitted only through the normal native inventory.
+Changed native enforcement, a foreign dependency or a replaced constraint refuses.
+
+Preserving retirement first removes the exact staged reference roots and inherited
+children, then removes the forward mirrors and guards in the same transaction.
+Stopping mirrors while staged dependencies remain would strand future source
+writes; rollback therefore restores the whole pre-retirement state. Original
+source constraints, all records, old queues and both operations' clocks survive.
+These internal steps still require the host's physical/resource admission and do
+not implement final attachment, runtime activation or recovery publication.
