@@ -392,7 +392,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
 
 
 
-def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False, final_mode=None):
+def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False, final_mode=None, prepare_keys=False):
     """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
     from datetime import datetime, timezone, timedelta
     from scripts.automation import storage_online_forward as forward
@@ -431,7 +431,62 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         actual_replace(target,before,after)
         if target.name==publication.REQUEST: raise TimeoutError("forward request publication reply lost")
     operation.inspect_prepared_operation=synthetic_preflight
+    key_report = {}
     try:
+        if prepare_keys:
+            from scripts.automation import storage_online_keys as key_owner
+            key_original = {p:p.read_bytes() for p in (path,state/terminal.STATE,state/publication.REQUEST,
+                                                      state/launch._STATE,state/runtime.RUNTIME_RECIPE)}
+            inspected_keys = operation.run_operation_plan(path,prepare_forward_keys_file=package)
+            assert not inspected_keys["keys_prepared"] and not (state/key_owner.STATE).exists()
+            actual_save, actual_probe = host_boundary.save_receipt, terminal._probe
+            def lose_key_create(target,value,**options):
+                actual_save(target,value,**options)
+                if (target.name==terminal.KEY_PROBE and value.get("container_id")
+                        and (state/key_owner.STATE).exists()
+                        and host_boundary.load_receipt(state/key_owner.STATE)["phase"]=="dispatched"):
+                    raise TimeoutError("key worker create reply lost")
+            host_boundary.save_receipt=lose_key_create
+            try:
+                operation.run_operation_plan(path,prepare_forward_keys_file=package,execute=True)
+                raise AssertionError("missing key create interruption")
+            except TimeoutError as exc: assert str(exc)=="key worker create reply lost"
+            finally: host_boundary.save_receipt=actual_save
+            key_intent=host_boundary.load_receipt(state/key_owner.STATE)
+            key_created=host_boundary.load_receipt(state/terminal.KEY_PROBE)["container_id"]
+            key_status=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",key_created))
+            assert key_status["Status"]=="created" and key_status["Pid"]==0
+            key_actions=[]
+            def lose_key_reply(*args,**options):
+                key_actions.append(options["action"])
+                value=actual_probe(*args,**options)
+                if options["action"]=="prepare_keys":raise TimeoutError("key preparation acknowledgement lost")
+                return value
+            terminal._probe=lose_key_reply
+            try:
+                operation.run_operation_plan(path,prepare_forward_keys_file=package,execute=True)
+                raise AssertionError("missing key acknowledgement interruption")
+            except TimeoutError as exc: assert str(exc)=="key preparation acknowledgement lost"
+            finally: terminal._probe=actual_probe
+            assert key_actions.count("prepare_keys")==1
+            assert not host_boundary.docker("ps","-aq","--filter","id="+key_created).strip()
+            reconciled=operation.run_operation_plan(path,prepare_forward_keys_file=package)
+            key_complete=host_boundary.load_receipt(state/key_owner.STATE)
+            assert reconciled["keys_prepared"] and key_complete["phase"]=="complete"
+            assert key_owner._immutable(key_complete)==key_owner._immutable(key_intent)
+            assert all(p.read_bytes()==data for p,data in key_original.items())
+            assert not (state/forward.STATE).exists() and not Path(manifest["forward_plan_path"]).exists()
+            probe=host_boundary.load_receipt(state/terminal.KEY_PROBE)
+            assert probe["retired"] and not host_boundary.docker("ps","-aq","--filter","id="+probe["container_id"]).strip()
+            observed=json.loads(host_boundary.database_query(old_worker["binding"]["database_id"],
+                "SELECT json_build_object('initialization',to_regclass('qt_fact_header_forward_v2.initialization'),"
+                "'adoption',to_regclass('qt_fact_header_forward_v2.adoption'))::text",read_only_seconds=5))
+            assert observed==dict(initialization=None,adoption=None)
+            assert preflights==[kwargs["image"],candidate]*4
+            preflights.clear()
+            key_report=dict(canonical_key_only_preparation=True,actual_key_confined_entrypoint=True,
+                key_create_interruption_retired=True,key_acknowledgement_reconciled_without_redispatch=True,
+                key_original_clocks_preserved=True,key_only_no_initialization_or_adoption=True)
         inspected=operation.run_operation_plan(path,forward_package_file=package)
         assert not inspected["storage_mutations_performed"] and not (state/forward.STATE).exists()
         publication._replace=lose_reply
@@ -616,7 +671,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         actual_cancellation_reconciled_with_original_request=True,original_plan_terminal_and_inventory_preserved=True,
         original_publication_clocks_preserved=True,old_worker_preserved=True,source_clients_unchanged=final_mode != "commit",
         production_runtime_preflight=False,production_cardinality=False,final_handoff=final_mode == "commit",
-        **({"forward_worker_started":False}|launched))
+        **key_report, **({"forward_worker_started":False}|launched))
 
 
 def _rehearse_forward_final(*, state, arguments, created, launch_intent, plan_path, mode):

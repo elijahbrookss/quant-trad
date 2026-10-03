@@ -9,6 +9,8 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_keys.py
+  - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward.py
   - tests/test_storage_online_forward.py
   - scripts/automation/storage_online_terminal.py
@@ -2182,3 +2184,30 @@ rollback, final COMMIT, UTC rollover under live production writes or production
 range-scan duration. Those checks remain required before production use. The
 complete range CHECK, heap attachment and exact proof still belong to one final
 transaction and its original time bound; this route does not precommit a CHECK.
+
+
+### Measure forward keys before selecting a cutover
+
+`qt storage migrate --operation-file <original-plan> --prepare-forward-keys-file
+<candidate-package>` inspects the canceled source and candidate using both existing
+prepared-runtime preflights. `--execute` runs only the existing supervised two-key
+preparation in a confined source-read worker. It does not publish the candidate,
+create adoption or archive capture, stop clients, change the runtime, or select a
+UTC cutover. The candidate proposal's date and separate plan remain unpublished.
+
+The host records one 3600-second wall/boot/monotonic intent before dispatch. The
+native key receipt retains its original 3600-second start, expiry and index OIDs;
+reentry narrows to both original clocks. Valid committed indexes may be reconciled
+and reused, while invalid or foreign indexes fail without automatic deletion.
+The transport independently retires the worker before a fresh read-only SQL proof
+can complete the host journal. Lost acknowledgements do not make a new clock.
+An expired or rebooted host may inspect a completed result but cannot dispatch.
+Normal forward publication refuses an unresolved key-preparation journal or
+unretired reader. Later adoption verifies and reuses the completed key receipt.
+
+This explicit preparation boundary addresses production cost uncertainty without
+coupling the measurement to automatic adoption and a premature cutover date. It
+adds no new data-copy algorithm, recovery format, policy or recurring process.
+Host unit checks and native SQL fixtures have different scopes; production use
+also requires qualification of the actual confined command, dynamic capacity and
+collection/read impact. Merely exposing this command is not deployment admission.

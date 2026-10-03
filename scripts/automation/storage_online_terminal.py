@@ -24,6 +24,7 @@ STATE = "storage-online-terminal.json"
 PROBE = "storage-online-terminal-worker.json"
 FORWARD_STATE = "storage-online-forward-terminal.json"
 FORWARD_PROBE = "storage-online-forward-terminal-worker.json"
+KEY_PROBE = "storage-online-key-preparation-worker.json"
 COMMAND = ["-m", "scripts.automation.storage_online_terminal", "--worker"]
 
 
@@ -37,14 +38,14 @@ def _check_clock(journal):
         raise RuntimeError("storage_online_terminal_expired_or_rebooted_no_dispatch")
 
 
-def _retire_previous_probe(root, original, package, *, forward=False):
+def _retire_previous_probe(root, original, package, *, forward=False, keys=False):
     """Recover create/start/stop uncertainty for this exact confined worker only."""
-    path = root/(FORWARD_PROBE if forward else PROBE)
+    path = root/(KEY_PROBE if keys else FORWARD_PROBE if forward else PROBE)
     if not os.path.lexists(path):
         return
     saved = host.load_receipt(path)
     if (saved.get("owner") != dict(root=str(root), worker=original["container_id"], package=package)
-            or saved.get("name") != original["binding"]["project"]+("-storage-forward-terminal" if forward else "-storage-terminal")):
+            or saved.get("name") != original["binding"]["project"]+("-storage-key-preparation" if keys else "-storage-forward-terminal" if forward else "-storage-terminal")):
         raise RuntimeError("storage_online_terminal_probe_owner_changed")
     with host.docker_deadline(time.monotonic()+35):
         found = host.docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+saved["name"]+"$").split()
@@ -74,7 +75,7 @@ def _retire_previous_probe(root, original, package, *, forward=False):
 
 
 def _probe(root, plan, original, package, *, action, wall_deadline, expected_capture=None, intent_sha256=None, original_request=None):
-    """One fixed command, explicit read-only mounts, exact post-exit retirement."""
+    """One fixed command, exact declared mounts and post-exit retirement."""
     from scripts.automation import storage_online_deadline as amendment
     request = (host.load_receipt(root/amendment.REQUEST) if original_request is None else original_request)
     if original_request is not None and (action != "reconcile"
@@ -82,8 +83,11 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
         raise RuntimeError("storage_online_terminal_original_request_changed")
     from scripts.automation.storage_online_forward_worker import request_binding
     is_forward = request_binding(request) is not None
-    probe_options = {"forward":True} if is_forward else {}
-    probe_path = root/(FORWARD_PROBE if is_forward else PROBE)
+    is_keys = action in {"inspect_keys", "prepare_keys"}
+    if is_keys and is_forward:
+        raise RuntimeError("storage_key_preparation_before_publication_required")
+    probe_options = {"keys":True} if is_keys else {"forward":True} if is_forward else {}
+    probe_path = root/(KEY_PROBE if is_keys else FORWARD_PROBE if is_forward else PROBE)
     _retire_previous_probe(root, original, package, **probe_options)
     payload = dict(action=action, request=request, package=package, wall_deadline=wall_deadline,
                    expected_capture=expected_capture, intent_sha256=intent_sha256)
@@ -104,9 +108,10 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
         QT_ONLINE_REQUEST_SHA256=digest, QT_STORAGE_UDEV_ROOT="/run/qt-online/udev")
     binding.update(image=package["image"], request_sha256=digest,
         environment_sha256=host.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
-    for mount in binding["mounts"].values():
-        mount["readonly"] = True
-    name = plan["project"]+("-storage-forward-terminal" if is_forward else "-storage-terminal")
+    if not is_keys:
+        for mount in binding["mounts"].values():
+            mount["readonly"] = True
+    name = plan["project"]+("-storage-key-preparation" if is_keys else "-storage-forward-terminal" if is_forward else "-storage-terminal")
     saved = dict(name=name, binding=binding, container_id=None, contract=None, retired=False,
                  owner=dict(root=str(root),worker=original["container_id"],package=package))
     host.save_receipt(probe_path, saved, initial=not os.path.lexists(probe_path))
@@ -117,7 +122,7 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
     saved.update(container_id=identity, contract=contract)
     host.save_receipt(probe_path, saved, initial=False)
     monotonic_deadline = host._DOCKER_DEADLINE.get()
-    remaining = min(60, wall_deadline-time.time()-70,
+    remaining = min(3600 if action == "prepare_keys" else 60, wall_deadline-time.time()-70,
                     monotonic_deadline-time.monotonic()-70 if monotonic_deadline is not None else 60)
     if remaining <= 0:
         _retire_previous_probe(root, original, package, **probe_options)
@@ -442,9 +447,9 @@ def worker_main():
         raise RuntimeError("storage_online_terminal_input_changed")
     payload = json.loads(data)
     if (set(payload) != {"action", "request", "package", "wall_deadline", "expected_capture", "intent_sha256"}
-            or payload["action"] not in {"inspect", "apply", "reconcile"}
+            or payload["action"] not in {"inspect", "apply", "reconcile", "inspect_keys", "prepare_keys"}
             or type(payload["wall_deadline"]) not in (int, float)
-            or not math.isfinite(payload["wall_deadline"]) or not 0 < payload["wall_deadline"]-time.time() <= 300):
+            or not math.isfinite(payload["wall_deadline"]) or not 0 < payload["wall_deadline"]-time.time() <= (3600 if payload["action"] == "prepare_keys" else 300)):
         raise ValueError("storage_online_terminal_input_invalid")
     package, request = payload["package"], payload["request"]
     for name, variable in (("source_revision", "QT_IMAGE_SOURCE_REVISION"), ("source_tree_hash", "QT_IMAGE_SOURCE_TREE_HASH")):
@@ -455,45 +460,55 @@ def worker_main():
     source = Path("/app/logs/market-structure/objects")
     enter_source_read_identity(source, expected_device=request["source_device"], expected_inode=request["source_inode"])
     with contextlib.redirect_stdout(sys.stderr):
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import create_engine
         from sqlalchemy.pool import NullPool
-        from scripts.db import fact_header_v2_cancel as cancellation
-        from scripts.db import fact_header_v2_capture as capture
-        from scripts.automation.storage_online_controller import OnlineController
         engine = create_engine(os.environ["PG_DSN"], poolclass=NullPool, connect_args={"connect_timeout":5})
         try:
-            with engine.begin() as conn:
-                if payload["action"] != "apply":
-                    conn.exec_driver_sql("SET TRANSACTION READ ONLY")
-                remaining = min(30, int(payload["wall_deadline"]-time.time()))
-                if remaining < 1:
-                    raise RuntimeError("storage_online_terminal_worker_expired")
-                with capture._bounded_step(conn, remaining):
-                    identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
-                    if identity != request["database_identity"]:
-                        raise RuntimeError("storage_online_terminal_database_changed")
-                    OnlineController._require_job_environment(conn, allow_connections=True)
-                    OnlineController._supported_builtin_catalog(conn)
-                    from scripts.automation.storage_online_forward_worker import request_binding
-                    if request_binding(request) is not None:
-                        result = _forward_sql(conn, payload, timeout_seconds=remaining)
-                    elif payload["action"] == "inspect":
-                        cancellation._require_retired_controller(conn)
-                        capture.require_not_cancelled(conn)
-                        capture.inspect_capture(conn)
-                        result = cancellation._capture_binding(conn)
-                    elif payload["action"] == "apply":
-                        expected = payload["expected_capture"]
-                        result = cancellation.cancel_attempt(conn,
-                            expected_started_at=datetime.fromisoformat(expected["prepared_at"]).isoformat(),
-                            source_root=source, destination_root=Path("/qt-history/archives/objects"),
-                            expected_capture=expected, intent_sha256=payload["intent_sha256"], timeout_seconds=remaining, read_only_namespace=True)
-                    else:
-                        result = cancellation.inspect_cancellation(conn, expected_capture=payload["expected_capture"],
-                            intent_sha256=payload["intent_sha256"], timeout_seconds=remaining)
+            if payload["action"] in {"inspect_keys", "prepare_keys"}:
+                from scripts.automation.storage_online_keys import worker_keys
+                result = worker_keys(engine, payload)
+            else:
+                result = _terminal_sql(engine, payload, request, source)
         finally:
             engine.dispose()
     print(json.dumps(result), flush=True)
+
+
+def _terminal_sql(engine, payload, request, source):
+    from sqlalchemy import text
+    from scripts.db import fact_header_v2_cancel as cancellation
+    from scripts.db import fact_header_v2_capture as capture
+    from scripts.automation.storage_online_controller import OnlineController
+    with engine.begin() as conn:
+        if payload["action"] != "apply":
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        remaining = min(30, int(payload["wall_deadline"]-time.time()))
+        if remaining < 1:
+            raise RuntimeError("storage_online_terminal_worker_expired")
+        with capture._bounded_step(conn, remaining):
+            identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
+            if identity != request["database_identity"]:
+                raise RuntimeError("storage_online_terminal_database_changed")
+            OnlineController._require_job_environment(conn, allow_connections=True)
+            OnlineController._supported_builtin_catalog(conn)
+            from scripts.automation.storage_online_forward_worker import request_binding
+            if request_binding(request) is not None:
+                result = _forward_sql(conn, payload, timeout_seconds=remaining)
+            elif payload["action"] == "inspect":
+                cancellation._require_retired_controller(conn)
+                capture.require_not_cancelled(conn)
+                capture.inspect_capture(conn)
+                result = cancellation._capture_binding(conn)
+            elif payload["action"] == "apply":
+                expected = payload["expected_capture"]
+                result = cancellation.cancel_attempt(conn,
+                    expected_started_at=datetime.fromisoformat(expected["prepared_at"]).isoformat(),
+                    source_root=source, destination_root=Path("/qt-history/archives/objects"),
+                    expected_capture=expected, intent_sha256=payload["intent_sha256"], timeout_seconds=remaining, read_only_namespace=True)
+            else:
+                result = cancellation.inspect_cancellation(conn, expected_capture=payload["expected_capture"],
+                    intent_sha256=payload["intent_sha256"], timeout_seconds=remaining)
+    return result
 
 
 if __name__ == "__main__":

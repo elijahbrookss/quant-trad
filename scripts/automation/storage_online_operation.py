@@ -494,7 +494,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -504,6 +504,11 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     """
     if type(execute) is not bool:
         raise ValueError("storage_online_operation_execute_invalid")
+    if prepare_forward_keys_file is not None:
+        if any(v is not None for v in (forward_package_file, cancel_attempt_file, replacement_package_file, extend_attempt_seconds, capacity_file)):
+            raise ValueError("storage_key_preparation_must_be_separate")
+        from scripts.automation.storage_online_keys import prepare_operation
+        return prepare_operation(path, package_file=prepare_forward_keys_file, execute=execute)
     if forward_package_file is not None:
         if any(value is not None for value in (extend_attempt_seconds, capacity_file, replacement_package_file, cancel_attempt_file)):
             raise ValueError("storage_forward_publication_must_be_separate")

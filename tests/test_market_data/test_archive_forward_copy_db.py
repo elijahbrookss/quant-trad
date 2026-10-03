@@ -600,3 +600,74 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         worker.prepare_forward(engine, request, **kwargs)
     with pytest.raises(RuntimeError, match="active_adoption_required"):
         observed()
+
+
+def test_key_only_worker_keeps_original_clock_and_never_initializes_adoption(storage, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    import time
+    from scripts.automation import storage_online_keys as key_worker
+    from scripts.automation import storage_online_worker as source_worker
+    from scripts.automation import storage_online_forward_worker as worker
+    from scripts.automation.storage_host_boundary import digest
+    from tests.test_storage_online_forward_worker import _request
+
+    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
+    budgets = _phase_budget_regression(monkeypatch, options, key_seconds=3600)
+    targets = (storage.copy_plan.recent, storage.copy_plan.history)
+    # Inventory transport is an adapter here; actual SQL, placement, capacity,
+    # watchdog and concurrent index creation use the disposable native owners.
+    monkeypatch.setattr(source_worker, "request_configuration",
+        lambda request,path:(options["policy"], options["resource_limits"], targets))
+    with engine.begin() as conn:
+        identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
+        before, archives_before = _old(conn), _original_archives(conn)
+    request = _request(original)
+    del request["forward"]
+    request["database_identity"] = identity
+    payload = dict(action="inspect_keys", request=request, expected_capture=original,
+        intent_sha256=CANCEL, wall_deadline=time.time()+300)
+    assert key_worker.worker_keys(engine,payload) is None
+    payload.update(action="prepare_keys",wall_deadline=time.time()+3600)
+    def lose(conn,cursor,statement,parameters,context,executemany):
+        if statement.startswith("CREATE UNIQUE INDEX CONCURRENTLY "+next(iter(keys.KEYS))):
+            raise RuntimeError("key-only index acknowledgement lost")
+    event.listen(engine,"after_cursor_execute",lose)
+    try:
+        with pytest.raises(RuntimeError,match="acknowledgement lost"):
+            key_worker.worker_keys(engine,payload)
+    finally:
+        event.remove(engine,"after_cursor_execute",lose)
+    with engine.begin() as conn:
+        partial = keys._read_state(conn)
+        first_oid = keys.inspect_keys(conn)[next(iter(keys.KEYS))]
+        assert first_oid and not partial["complete"]
+    observed = key_worker.worker_keys(engine,{**payload,"action":"inspect_keys","wall_deadline":time.time()+300})
+    assert not observed["complete"]
+    result = key_worker.worker_keys(engine,payload)
+    assert result["complete"] and result["index_oids"][next(iter(keys.KEYS))] == first_oid
+    assert result["started_at"] == partial["started_at"].isoformat()
+    assert result["expires_at"] == partial["expires_at"].isoformat()
+    assert key_worker.worker_keys(engine,{**payload,"action":"inspect_keys","wall_deadline":time.time()+300}) == result
+    with engine.begin() as conn:
+        assert keys._read_state(conn)["duration_seconds"] == 3600
+        assert _old(conn) == before and _original_archives(conn) == archives_before
+        assert worker._initial(conn) is None and adoption._state(conn) is None
+    assert budgets and all(not initial for initial,_ in budgets)
+    # A later separately bound adoption reuses completed keys, without another
+    # CREATE INDEX or renewal of their SQL start/expiry.
+    later = _request(original)
+    later["forward"]["cancellation_intent_sha256"] = CANCEL
+    later["forward"]["operation_sha256"] = digest({k:v for k,v in later["forward"].items() if k != "operation_sha256"})
+    def never_build(conn,cursor,statement,parameters,context,executemany):
+        if statement.startswith("CREATE UNIQUE INDEX CONCURRENTLY"):
+            pytest.fail("completed keys rebuilt during separately owned adoption")
+    event.listen(engine,"before_cursor_execute",never_build)
+    try:
+        worker.prepare_forward(engine,later,targets=targets,policy=options["policy"],limits=options["resource_limits"],
+            source=options["source_root"],destination=options["destination_root"],key_seconds=3600,initial_seconds=600)
+    finally:
+        event.remove(engine,"before_cursor_execute",never_build)
+    with engine.begin() as conn:
+        complete = keys._read_state(conn)
+        assert complete["started_at"] == partial["started_at"] and complete["expires_at"] == partial["expires_at"]
+        assert worker._initial(conn)["complete"]

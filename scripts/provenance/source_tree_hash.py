@@ -15,6 +15,7 @@ ROOTS = ("config", "src", "cli", "portal", "scripts/provenance")
 OPERATOR_FILES = (
     "scripts/automation/storage_online_controller.py",
     "scripts/automation/storage_online_terminal.py",
+    "scripts/automation/storage_online_keys.py",
     "scripts/automation/storage_online_launch.py",
     "scripts/automation/storage_host_boundary.py",
     "scripts/automation/storage_online_drain.py",

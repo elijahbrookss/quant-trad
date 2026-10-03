@@ -23,6 +23,7 @@ parser.add_argument('--replacement-package-image',help='qualify an actual new pa
 parser.add_argument('--terminal-cancellation',action='store_true',help='qualify preserving cancellation through a read-only mounted worker and lost reply reconciliation')
 parser.add_argument('--terminal-cancellation-expired',action='store_true',help='wait for the original fixture capture to expire naturally before preserving cancellation')
 parser.add_argument('--forward-package-image',help='qualify separate interrupted forward package publication after preserving fixture cancellation')
+parser.add_argument('--forward-keys',action='store_true',help='qualify explicit key-only host preparation and interrupted confined worker recovery before publication')
 parser.add_argument('--forward-worker',action='store_true',help='qualify interrupted durable forward launch, actual confined worker and host observation')
 parser.add_argument('--forward-retirement',action='store_true',help='qualify canonical stopped-forward-worker retirement and lost COMMIT reconciliation')
 parser.add_argument('--forward-operation',action='store_true',help='qualify canonical forward background dispatch and injected pre-stop failure retirement')
@@ -56,6 +57,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.forward_keys and not options.forward_worker:
+ parser.error('--forward-keys requires --forward-worker for separate subsequent adoption reuse')
 if options.forward_final and (not options.forward_worker or not options.guarded_source_image or options.forward_operation or options.forward_retirement):
  parser.error('--forward-final requires forward worker and guarded source; excludes pre-stop operation/retirement modes')
 if options.forward_operation and not options.forward_retirement:
@@ -581,7 +584,7 @@ os.chown(root,70,70)
    if options.forward_package_image:
     from scripts.ci.online_operation_fixture import rehearse_forward_package
     report['forward_package']=rehearse_forward_package(state=state,kwargs=kwargs,
-      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement,operation_route=options.forward_operation,final_mode=options.forward_final)
+      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement,operation_route=options.forward_operation,final_mode=options.forward_final,prepare_keys=options.forward_keys)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()
@@ -1493,7 +1496,7 @@ finally:
  cleanup_failures=[]
  if canonical:
   owned.extend(run(['ps','-aq','--filter','label=com.docker.compose.project='+project]).stdout.split())
- for terminal_path in (terminal.PROBE,terminal.FORWARD_PROBE):
+ for terminal_path in (terminal.PROBE,terminal.FORWARD_PROBE,terminal.KEY_PROBE):
   if options.terminal_cancellation and (state/terminal_path).exists():
    saved_terminal=host_boundary.load_receipt(state/terminal_path)
    if saved_terminal.get('container_id'):
@@ -1530,7 +1533,7 @@ finally:
        and original_saved['binding']['project']==project):
     launch._admit(name,original_saved['binding'],original_saved['contract'])
     mine=True
-  for terminal_path in (terminal.PROBE,terminal.FORWARD_PROBE):
+  for terminal_path in (terminal.PROBE,terminal.FORWARD_PROBE,terminal.KEY_PROBE):
    if options.terminal_cancellation and (state/terminal_path).exists():
     terminal_saved=host_boundary.load_receipt(state/terminal_path)
     if (name==terminal_saved['container_id']==details['Id']
@@ -1558,6 +1561,9 @@ finally:
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()
  report['cleanup_failures']=cleanup_failures
+ if options.forward_keys and not report.get('forward_package',{}).get('canonical_key_only_preparation'):
+  report['forward_keys_not_qualified']=True
+  report['passed']=False
  if options.forward_final and report.get('forward_package',{}).get('actual_forward_final_mode') != options.forward_final:
   report['forward_final_not_qualified']=True
  if options.forward_operation and not report.get('forward_package',{}).get('canonical_normal_dispatch'):
@@ -1582,3 +1588,5 @@ finally:
  if report.get('forward_retirement_not_qualified'):raise RuntimeError('owned_forward_retirement_not_qualified')
  if report.get('forward_operation_not_qualified'):raise RuntimeError('owned_forward_operation_not_qualified')
  if report.get('forward_final_not_qualified'):raise RuntimeError('owned_forward_final_not_qualified')
+
+ if report.get('forward_keys_not_qualified'):raise RuntimeError('owned_forward_keys_not_qualified')

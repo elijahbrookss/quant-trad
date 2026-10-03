@@ -62,6 +62,7 @@ COPY scripts/db/archive_file_v2_proof.py \
 # drops to the database UID before opening a connection.
 COPY scripts/automation/storage_online_controller.py \
      scripts/automation/storage_online_terminal.py \
+     scripts/automation/storage_online_keys.py \
      scripts/automation/storage_online_launch.py \
      scripts/automation/storage_host_boundary.py \
      scripts/automation/storage_online_drain.py \

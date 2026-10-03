@@ -116,6 +116,9 @@ def publish_package(path, *, package_file, execute=False):
     operator = publication._sha(b"".join(Path(module.__file__).read_bytes() for module in
         (publication, terminal, launch, operation, host, runtime)) + Path(__file__).read_bytes())
     with host.deployment_lock(root):
+        if execute:
+            from scripts.automation.storage_online_keys import require_finished
+            require_finished(root)
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
             if os.path.lexists(root/name):
                 raise RuntimeError("storage_forward_pre_final_source_required")
