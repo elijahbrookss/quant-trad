@@ -50,7 +50,19 @@ def _json_row(conn, relation):
     return rows[0]
 
 
+def _require_identity_heap(conn):
+    # A CTID is local to one physical heap. Ordinary inheritance would make
+    # SELECT include other heaps whose CTIDs overlap the saved parent cursor.
+    if not conn.scalar(text("SELECT c.relkind='r' AND c.relpersistence='p' "
+        "AND a.amname='heap' AND NOT EXISTS(SELECT 1 FROM pg_inherits i "
+        "WHERE i.inhparent=c.oid OR i.inhrelid=c.oid) "
+        "FROM pg_class c JOIN pg_am a ON a.oid=c.relam "
+        "WHERE c.oid=CAST(:relation AS regclass)"), {"relation": IDENTITY}):
+        raise RuntimeError("fact_header_forward_identity_heap_required")
+
+
 def _snapshot(conn):
+    _require_identity_heap(conn)
     # Fixed objects only. The old journals and queues remain evidence. Target
     # contents may gain missing source rows; their definitions/files may not drift.
     relations = (headers.SOURCE, IDENTITY, raw.SOURCE, raw.TARGET,
@@ -211,10 +223,7 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
             _install_family(conn, family)
             for direction, relation in (("source", source), ("target", target)):
                 if (family, direction) == ("identity", "target"):
-                    if not conn.scalar(text("SELECT c.relkind='r' AND c.relpersistence='p' "
-                        "AND a.amname='heap' FROM pg_class c JOIN pg_am a ON a.oid=c.relam "
-                        "WHERE c.oid=CAST(:relation AS regclass)"), {"relation": target}):
-                        raise RuntimeError("fact_header_forward_identity_heap_required")
+                    _require_identity_heap(conn)
                     blocks = conn.scalar(text("SELECT pg_relation_size(CAST(:relation AS regclass)) / "
                         "current_setting('block_size')::bigint"), {"relation": target})
                     progress["identity_target"] = dict(scan=IDENTITY_HEAP_SCAN, high_block=blocks,

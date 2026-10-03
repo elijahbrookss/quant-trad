@@ -3388,7 +3388,7 @@ forward operation intent to the exact committed cancellation, prepared keys and
 retained identity/raw targets. It never resumes the expired attempt, rewrites its
 journals or consumes its queues. Under a short nonwaiting writer fence it adds
 native source-to-target mirrors and mutation guards, then records one original
-adoption deadline. Existing native uniqueness and foreign keys remain enforced. Admission binds both application guards and internal foreign-key trigger definitions and enablement.
+adoption deadline. Existing native uniqueness and foreign keys remain enforced. Admission binds both application guards and internal foreign-key trigger definitions and enablement. The retained identity must remain one persistent native heap with no inheritance parent or child; preparation, page reentry and retirement reject a changed heap topology before trusting its physical cursor.
 
 A bounded primary-key scan compares existing target rows and inserts only missing
 source rows, using batch lookups rather than a database round trip per retained

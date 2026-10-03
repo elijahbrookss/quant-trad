@@ -83,6 +83,11 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         for _ in range(64):
             adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
         pytest.fail("changed retained identity was accepted")
+    child_sql = "CREATE TABLE " + keys.SCHEMA + ".unowned_identity_child () INHERITS (" + adoption.IDENTITY + ")"
+    # No inherited child may be silently folded into a single-heap cursor.
+    with pytest.raises(RuntimeError, match="identity_heap_required"), engine.begin() as conn:
+        conn.exec_driver_sql(child_sql)
+        adoption.prepare_adoption(conn, **retained.adoption_args)
     original_commit = Connection._commit_impl
     def lose_reply(conn):
         original_commit(conn)
@@ -115,6 +120,11 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         assert physical["progress"]["identity_target"]["after_tid"] is not None
         assert physical["progress"]["identity_target"]["verified"] == 1
         assert physical["progress"]["identity_source"]["after"] is None
+    with pytest.raises(RuntimeError, match="identity_heap_required"), engine.begin() as conn:
+        conn.exec_driver_sql(child_sql)
+        adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+    with engine.begin() as conn:
+        assert adoption._state(conn) == physical
     # Native heap rewrite invalidates a physical cursor even with identical rows.
     # This tiny owned rewrite rolls back; production never repairs it implicitly.
     with pytest.raises(RuntimeError, match="adoption_binding_changed"), engine.begin() as conn:
