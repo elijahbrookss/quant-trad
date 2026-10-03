@@ -71,11 +71,14 @@ def _retire_previous_probe(root, original, package):
         host.docker("rm", identity)
 
 
-def _probe(root, plan, original, package, *, action, wall_deadline, expected_capture=None, intent_sha256=None):
+def _probe(root, plan, original, package, *, action, wall_deadline, expected_capture=None, intent_sha256=None, original_request=None):
     """One fixed command, explicit read-only mounts, exact post-exit retirement."""
     from scripts.automation import storage_online_deadline as amendment
+    request = (host.load_receipt(root/amendment.REQUEST) if original_request is None else original_request)
+    if original_request is not None and (action != "reconcile"
+            or amendment._sha(amendment.request_bytes(request)) != original["binding"]["request_sha256"]):
+        raise RuntimeError("storage_online_terminal_original_request_changed")
     _retire_previous_probe(root, original, package)
-    request = host.load_receipt(root/amendment.REQUEST)
     payload = dict(action=action, request=request, package=package, wall_deadline=wall_deadline,
                    expected_capture=expected_capture, intent_sha256=intent_sha256)
     data = amendment.request_bytes(payload)

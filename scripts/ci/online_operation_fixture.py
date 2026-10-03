@@ -389,3 +389,77 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
         original_inputs_and_clocks_preserved=True,old_worker_preserved=True,transient_workers_retired=True,
         source_clients_unchanged=True,production_runtime_preflight=False,production_cardinality=False,
         expired_host_attempt_qualified=expired,final_handoff=False)
+
+
+
+def rehearse_forward_package(*, state, kwargs, candidate_image, source):
+    """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
+    from datetime import datetime, timezone, timedelta
+    from scripts.automation import storage_online_forward as forward
+    from scripts.automation import storage_online_terminal as terminal
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_prepare as initial
+    from scripts.automation import storage_online_deadline as publication
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_runtime as runtime
+    path=state/"terminal-operation.json"
+    canceled=host_boundary.load_receipt(state/terminal.STATE,max_bytes=524288)
+    old_worker=canceled["worker"]
+    original={p:p.read_bytes() for p in (path,state/terminal.STATE,kwargs["inventory_path"])}
+    candidate=host_boundary.docker("image","inspect",candidate_image,"--format","{{.Id}}").strip()
+    assert candidate!=kwargs["image"], "fixture must change actual candidate provenance"
+    environment=dict(v.split("=",1) for v in json.loads(host_boundary.docker(
+        "image","inspect",candidate,"--format","{{json .Config.Env}}")))
+    manifest=dict(schema_version="qt.storage_online_forward_package.v1",
+        plan_sha256=publication._sha(path.read_bytes()),image=candidate,
+        source_revision=environment["QT_IMAGE_SOURCE_REVISION"],source_tree_hash=environment["QT_IMAGE_SOURCE_TREE_HASH"],
+        forward_plan_path=str(state/"forward-operation.json"),
+        end_day=(datetime.now(timezone.utc).date()+timedelta(days=1)).isoformat())
+    package=state/"forward-package.json";host_boundary.save_receipt(package,manifest,initial=True)
+    recipe=dict(name=kwargs["project"],services={name:dict(image=kwargs["image"]) for name in runtime._APPLICATIONS})
+    recipe["services"]["tsdb"]=dict(image="unchanged-disposable-database")
+    host_boundary.save_receipt(state/runtime.RUNTIME_RECIPE,recipe,initial=True)
+    actual_preflight,actual_replace=operation.inspect_prepared_operation,publication._replace
+    preflights=[]
+    def synthetic_preflight(state_root,**arguments):
+        launch.inspect_candidate_image(arguments["image"],arguments["request"])
+        assert arguments["proposed_runtime_recipe"]["services"]["backend"]["image"]==arguments["image"]
+        preflights.append(arguments["image"])
+        return initial.admit_serving_source(state_root,project=kwargs["project"],
+            source_revision=kwargs["source_revision"],operator_id=arguments["operator_id"])
+    def lose_reply(target,before,after):
+        actual_replace(target,before,after)
+        if target.name==publication.REQUEST: raise TimeoutError("forward request publication reply lost")
+    operation.inspect_prepared_operation=synthetic_preflight
+    try:
+        inspected=operation.run_operation_plan(path,forward_package_file=package)
+        assert not inspected["storage_mutations_performed"] and not (state/forward.STATE).exists()
+        publication._replace=lose_reply
+        try:
+            operation.run_operation_plan(path,forward_package_file=package,execute=True)
+            raise AssertionError("missing interrupted forward publication")
+        except TimeoutError as exc: assert str(exc)=="forward request publication reply lost"
+        finally: publication._replace=actual_replace
+        before=host_boundary.load_receipt(state/forward.STATE,max_bytes=forward._MAX_BYTES)
+        assert before["phase"]=="publishing"
+        assert host_boundary.load_receipt(state/publication.REQUEST)["forward"]==before["forward"]
+        completed=operation.run_operation_plan(path,forward_package_file=package,execute=True)
+        after=host_boundary.load_receipt(state/forward.STATE,max_bytes=forward._MAX_BYTES)
+        assert completed["phase"]=="forward_package_published" and not completed["forward_worker_authorized"]
+        assert {k:v for k,v in after.items() if k!="phase"}=={k:v for k,v in before.items() if k!="phase"}
+        assert preflights==[kwargs["image"],candidate]*3
+        assert all(p.read_bytes()==data for p,data in original.items())
+        try: publication.require_settled(state)
+        except RuntimeError as exc: assert str(exc)=="storage_online_terminal_intent_requires_terminal_owner"
+        else: raise AssertionError("metadata publication authorized legacy launch")
+    finally:
+        operation.inspect_prepared_operation=actual_preflight;publication._replace=actual_replace
+    status=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",old_worker["container_id"]))
+    assert not status["Running"] and status["Pid"]==0 and not status["OOMKilled"]
+    assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=old_worker["container_id"]))==source
+    probe=host_boundary.load_receipt(state/terminal.PROBE)
+    assert probe["retired"] and not host_boundary.docker("ps","-aq","--filter","id="+probe["container_id"]).strip()
+    return dict(candidate_image=candidate,interrupted_publication_reconciled=True,
+        actual_cancellation_reconciled_with_original_request=True,original_plan_terminal_and_inventory_preserved=True,
+        original_publication_clocks_preserved=True,old_worker_preserved=True,source_clients_unchanged=True,
+        forward_worker_started=False,production_runtime_preflight=False,production_cardinality=False,final_handoff=False)

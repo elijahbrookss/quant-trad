@@ -21,6 +21,7 @@ parser.add_argument('--initial-capture',action='store_true',help='create placeme
 parser.add_argument('--replacement-package-image',help='qualify an actual new package and interrupted publication before header copying')
 parser.add_argument('--terminal-cancellation',action='store_true',help='qualify preserving cancellation through a read-only mounted worker and lost reply reconciliation')
 parser.add_argument('--terminal-cancellation-expired',action='store_true',help='wait for the original fixture capture to expire naturally before preserving cancellation')
+parser.add_argument('--forward-package-image',help='qualify separate interrupted forward package publication after preserving fixture cancellation')
 parser.add_argument('--terminal-image',help='use an independently attested production image for the fixed terminal worker')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
@@ -50,6 +51,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.forward_package_image and not options.terminal_cancellation:
+ parser.error('--forward-package-image requires --terminal-cancellation')
 if options.terminal_image and not options.terminal_cancellation:
  parser.error('--terminal-image requires --terminal-cancellation')
 if options.terminal_cancellation_expired and not options.terminal_cancellation:
@@ -555,6 +558,10 @@ os.chown(root,70,70)
    report['terminal_cancellation']=rehearse_terminal_cancellation(state=state,kwargs=kwargs,
      history_uuid=history_uuid,control=control,source=source,owned=owned,
      expired=options.terminal_cancellation_expired,terminal_image=options.terminal_image)
+   if options.forward_package_image:
+    from scripts.ci.online_operation_fixture import rehearse_forward_package
+    report['forward_package']=rehearse_forward_package(state=state,kwargs=kwargs,
+      candidate_image=options.forward_package_image,source=source)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()
@@ -1492,7 +1499,9 @@ finally:
     if (name==proof['container_id']==details['Id'] and proof['binding']['project']==project
         and details['Config']['Labels'].get('qt.storage.online')==proof['binding']['request_sha256']):mine=True
   if options.terminal_cancellation and (state/launch._STATE).exists():
-   original_saved=host_boundary.load_receipt(state/launch._STATE)
+   original_saved=(host_boundary.load_receipt(state/terminal.STATE,max_bytes=524288)['worker']
+       if options.forward_package_image and (state/terminal.STATE).exists()
+       else host_boundary.load_receipt(state/launch._STATE))
    if (name==original_saved['container_id']==details['Id']
        and original_saved['binding']['project']==project):
     launch._admit(name,original_saved['binding'],original_saved['contract'])
@@ -1524,7 +1533,11 @@ finally:
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()
  report['cleanup_failures']=cleanup_failures
+ if options.forward_package_image and not report.get('forward_package',{}).get('interrupted_publication_reconciled'):
+  report['forward_publication_not_qualified']=True
+  report['passed']=False
  if cleanup_failures or report['remaining_containers'] or report.get('cleanup_exit_code',0):report['passed']=False
  (state/'outcome.json').write_text(json.dumps(report,indent=2))
  print('QT_PREPARED_HOST_OUTCOME='+json.dumps(report),flush=True)
  if cleanup_failures or report['remaining_containers'] or report.get('cleanup_exit_code',0):raise RuntimeError('owned_host_fixture_cleanup_failed')
+ if report.get('forward_publication_not_qualified'):raise RuntimeError('owned_forward_publication_not_qualified')

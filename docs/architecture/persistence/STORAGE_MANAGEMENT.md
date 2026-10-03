@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_online_forward.py
+  - tests/test_storage_online_forward.py
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
@@ -3558,3 +3560,34 @@ changed or malformed identities refuse. The original capture remains separate
 evidence and never supplies the forward work clock. This wire integration does
 not yet create the canonical forward publication/request/worker authority or
 admit a production source stop.
+
+
+### Separate forward package publication after cancellation
+
+`qt storage migrate --operation-file <original> --forward-package-file <package>`
+inspects a separate candidate publication after exact committed cancellation;
+`--execute` publishes that package. The manifest binds the original plan digest,
+immutable candidate image/revision/source digest, intended UTC end day, and a new
+sibling operation-file path. The original operation file and terminal receipt
+remain unchanged. This is metadata preparation, not permission to launch a
+worker, capture writes, stop collection, switch the database or deploy.
+
+The existing deployment lock encloses two complete prepared-runtime preflights
+(original and candidate) and actual read-only cancellation reconciliation using
+the attested original request. Exact source client identities, the retired worker,
+inventory and all file preimages are required. A private durable intent precedes
+publication of the four future application image references, canonical request,
+worker binding and separate operation plan. The original retired worker is
+retained under a name bound to that intent. Every incomplete retry accepts only
+recorded old/new bytes under the same original 300-second wall/boot/monotonic
+window. Foreign edits, reboot, expiry, proof drift or changed source clients
+refuse without overwriting the foreign state. Completion observation verifies
+published bytes without claiming fresh production admission.
+
+The expired capture remains evidence; its start and lifetime are never renewed.
+The new forward request binds its separate operation identity and committed
+cancellation, but does not invent key/adoption phase clocks. Ordinary launch
+remains blocked by the terminal owner until a separately verified canonical
+forward worker route owns those clocks and authority. Interrupted native
+publication and invocation must be qualified before production use; private-file
+unit tests do not establish full runtime, cardinality, pause or capacity admission.
