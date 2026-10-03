@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
   - scripts/db/fact_header_v2_references.py
@@ -3467,3 +3468,26 @@ The original private copied headers/catalogues and raw source remain preserved.
 The native range scan is part of the final pause and needs measured production
 admission within the existing deadline. The host entrypoint, durable COMMIT
 reconciliation, full physical qualification, recovery and deployment remain open.
+
+## Forward archive catch-up ownership
+
+The existing archive copier and complete inventory verifier also serve the fixed
+forward operation. This route requires the exact unexpired adoption intent,
+retained physical placement and original adoption deadline. It uses separate
+forward-schema capture/progress/queue records and triggers; the canceled
+operation's journals and queues remain unchanged. Both routes retain the same
+file hashes, path checks, resource watch, expiry fence and transaction bounds.
+
+Manifest IDs are not commit ordered. A forward catalog insert queue captures
+late arrivals behind the baseline cursor. File publication can survive a failed
+SQL page; retry verifies and reuses it before committing queue consumption.
+The final retained-header transaction retires this capture only inside the
+matching live complete-inventory context. Rollback restores capture and all
+renames together. Preserving adoption cancellation removes its archive triggers
+atomically while retaining every queued row, file and journal; an expired work
+clock is never renewed by that terminal path.
+
+These are internal database phases. The canonical host operation must still
+bind publisher drain, physical/capacity admission, final COMMIT reconciliation,
+worker retirement, recovery activation and deployment. Disposable correctness
+tests do not establish production copy throughput or final pause duration.

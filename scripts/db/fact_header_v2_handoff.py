@@ -343,6 +343,7 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
     """
     from datetime import date
     from scripts.db import fact_header_forward_adoption as adoption
+    from scripts.db import archive_root_v2_online as online_archives
     from portal.backend.db import (MarketFactHeaderLegacyRecord, MarketFactHeaderPartitionRecord,
                                    MarketFactHeaderSeriesDayRecord, MarketFactVersionRecord)
     from portal.backend.db.fact_storage_schema import install_fact_storage_functions
@@ -378,6 +379,18 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
                   "market.fact_archive_canonical_dependencies"}
         if len(incoming) != 3 or {row["relation"] for row in incoming} != owners:
             raise RuntimeError("fact_header_forward_reference_inventory_changed")
+        # Forward archive capture has its own original owner and journals.
+        # It may close only under the matching live inventory, never by borrowing
+        # the canceled attempt's preserved state or an earlier verification dict.
+        forward_archives = online_archives._capture(operation_sha256)
+        archive_receipt = None
+        if _oid(conn, forward_archives.state) is not None:
+            inventory = conn.info.get("qt.archive_inventory_context.v2")
+            if inventory is None or inventory.get("forward_operation_sha256") != operation_sha256:
+                raise RuntimeError("fact_header_forward_live_archive_inventory_required")
+            archive_receipt = online_archives.retire_capture(conn,
+                source_root=inventory["source_root"], destination_root=inventory["destination_root"],
+                timeout_seconds=timeout_seconds, forward_operation_sha256=operation_sha256)
         # Native validation scans once under the final fence. Any failure or
         # disconnect rolls this constraint back with every rename/attachment.
         adoption.release_for_switch(conn)
@@ -455,7 +468,9 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
             raise RuntimeError("fact_header_forward_retained_files_changed")
         receipt = dict(kind="switched",operation_sha256=operation_sha256,end_day=end_day.isoformat(),
                        legacy_oid=source_oid,retained_raw_oid=raw_oid,legacy_heap_file=heap_file,
-                       search_files=search_files,switched_at=conn.scalar(text("SELECT clock_timestamp()")).isoformat())
+                       search_files=search_files,switched_at=conn.scalar(text("SELECT clock_timestamp()")).isoformat(),
+                       archive_inventory_sha256=(archive_receipt["inventory"]["inventory_sha256"]
+                                                 if archive_receipt else None))
         conn.execute(text("UPDATE " + adoption.STATE + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
                      {"terminal":json.dumps(receipt)})
         context["switched"] = True

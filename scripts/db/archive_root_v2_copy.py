@@ -34,6 +34,34 @@ logger = logging.getLogger(__name__)
 FAMILIES = dict(_FAMILIES)
 
 
+@contextmanager
+def _operation_step(conn, timeout_seconds, *, deadline=None, forward_operation_sha256=None):
+    """Admit one of the two fixed operation owners without borrowing its clock."""
+    if forward_operation_sha256 is None:
+        with migration_step(conn, timeout_seconds, deadline=deadline):
+            saved = headers._inspect_progress(conn)["placement"]
+            if saved is None:
+                raise RuntimeError("archive_copy_fixed_placement_required")
+            yield saved, monotonic() + float(capture_remaining_seconds(conn))
+        return
+    if (not isinstance(forward_operation_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", forward_operation_sha256)):
+        raise ValueError("archive_forward_operation_invalid")
+    from scripts.db import fact_header_forward_adoption as adoption
+    with adoption._step(conn, timeout_seconds) as limit:
+        if deadline is not None:
+            limit(deadline - monotonic())
+        state = adoption._inspect(conn, forward_operation_sha256, limit)
+        saved = state["binding"]["old_headers"]["placement"]
+        if saved is None:
+            raise RuntimeError("archive_copy_fixed_placement_required")
+        physical.verify(conn, saved)
+        seconds = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) "
+                                   "FROM " + adoption.STATE + " WHERE id=1"))
+        limit(float(seconds))
+        yield saved, monotonic() + float(seconds)
+
+
 def _root(path, device):
     path = Path(path)
     if not path.is_absolute() or path.resolve(strict=True) != path:
@@ -90,7 +118,8 @@ def _validate_descriptors(rows):
 
 
 def _copy_archive_page(engine, *, select_page, record_page, family, source_root, destination_root, after_id="",
-                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None, deadline=None, connection=None):
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None, deadline=None, connection=None,
+                      forward_operation_sha256=None):
     """Copy one known catalog page; retry re-verifies and reuses completed files.
 
     Owns the existing storage lock, expiry fence, clock and capacity watcher.
@@ -126,7 +155,8 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous:
                     deadline = min(deadline, started + previous/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
+                with _operation_step(conn, limits["movement_timeout_seconds"], deadline=deadline,
+                        forward_operation_sha256=forward_operation_sha256) as (saved, owner_deadline):
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("archive_copy_storage_busy")
@@ -135,10 +165,6 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                                        {"name": _LIFECYCLE_LOCK_NAME}):
                         raise RuntimeError("archive_copy_expiry_busy")
                     conn.exec_driver_sql(f"LOCK TABLE {headers.SOURCE} IN ACCESS SHARE MODE NOWAIT")
-                    state = headers._inspect_progress(conn)
-                    saved = state["placement"]
-                    if saved is None:
-                        raise RuntimeError("archive_copy_fixed_placement_required")
                     plan = physical._restore(saved["plan"])
                     targets = (plan.recent, plan.history)
                     reference_move._fixed_inputs(policy, limits, targets)
@@ -153,8 +179,7 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                     destination, destination_identity = _root(destination_root, saved["history_device"])
                     if not destination.is_relative_to(Path(plan.history.root)):
                         raise RuntimeError("archive_copy_destination_outside_history_target")
-                    seconds = capture_remaining_seconds(conn)
-                    deadline = min(deadline, monotonic()+float(seconds))
+                    deadline = min(deadline, owner_deadline)
                     rows = select_page(conn, family, after_id, page_rows)
                     byte_count = sum(row["byte_count"] for row in rows)
                     if byte_count > max_page_bytes:
@@ -221,19 +246,20 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                 watch.stop(conn)
 
 def copy_archive_page(engine, *, family, source_root, destination_root, after_id="",
-                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None):
+                      page_rows=128, max_page_bytes, policy, resource_limits, cancelled=None, file_proof=None,
+                      forward_operation_sha256=None):
     """Copy one cursor page; an online cursor alone is never completeness."""
     return _copy_archive_page(engine, select_page=_catalog_page,
         record_page=lambda conn, rows: {}, family=family, source_root=source_root,
         destination_root=destination_root, after_id=after_id, page_rows=page_rows,
         max_page_bytes=max_page_bytes, policy=policy, resource_limits=resource_limits,
-        cancelled=cancelled, file_proof=file_proof)
+        cancelled=cancelled, file_proof=file_proof, forward_operation_sha256=forward_operation_sha256)
 
 
 @contextmanager
 def verified_archive_inventory(conn, *, source_root, destination_root, max_objects,
                                max_bytes, policy, resource_limits, page_rows=128,
-                               cancelled=None, file_proof=None):
+                               cancelled=None, file_proof=None, forward_operation_sha256=None):
     """Verify the complete committed catalog while its publication is fenced.
 
     The caller owns the transaction and must drain in-flight file publishers
@@ -254,7 +280,8 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
     started = monotonic()
     deadline = started + limits["movement_timeout_seconds"]
     watch = None
-    with migration_step(conn, limits["movement_timeout_seconds"]):
+    with _operation_step(conn, limits["movement_timeout_seconds"], deadline=deadline,
+            forward_operation_sha256=forward_operation_sha256) as (saved, owner_deadline):
         try:
             previous = conn.scalar(text(
                 "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
@@ -272,10 +299,6 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
             conn.exec_driver_sql("LOCK TABLE "+",".join("market."+name for name in FAMILIES)
                                  +" IN SHARE ROW EXCLUSIVE MODE NOWAIT")
             conn.exec_driver_sql(f"LOCK TABLE {headers.SOURCE} IN ACCESS SHARE MODE NOWAIT")
-            state = headers._inspect_progress(conn)
-            saved = state["placement"]
-            if saved is None:
-                raise RuntimeError("archive_copy_fixed_placement_required")
             plan = physical._restore(saved["plan"])
             targets = (plan.recent, plan.history)
             reference_move._fixed_inputs(policy, limits, targets)
@@ -290,8 +313,7 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
             destination, destination_identity = _root(destination_root, saved["history_device"])
             if not destination.is_relative_to(Path(plan.history.root)):
                 raise RuntimeError("archive_copy_destination_outside_history_target")
-            seconds = capture_remaining_seconds(conn)
-            deadline = min(deadline, monotonic()+float(seconds))
+            deadline = min(deadline, owner_deadline)
             resources = observe_header_resources(conn, targets, pg_controldata=plan.pg_controldata,
                 timeout_seconds=min(30, limits["movement_timeout_seconds"]))
             budget, floors = reference_move._budget(conn,
@@ -358,7 +380,8 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
             if key in metadata:
                 raise RuntimeError("archive_inventory_context_already_active")
             context = {"transaction": conn.get_transaction(), "report": report,
-                       "source_root": str(source), "destination_root": str(destination)}
+                       "source_root": str(source), "destination_root": str(destination),
+                       "forward_operation_sha256": forward_operation_sha256}
             metadata[key] = context
             try:
                 yield report

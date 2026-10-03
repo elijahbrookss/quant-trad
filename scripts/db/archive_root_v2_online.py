@@ -5,14 +5,16 @@ publisher drain, root activation or switch authority. Original deadlines apply.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
+import re
 import logging
 
 from sqlalchemy import text
 
 from scripts.db import archive_root_v2_copy as archives, fact_header_v2_copy as headers
 from scripts.db import raw_mapping_v2_copy as raw
-from scripts.db.fact_header_v2_capture import SCHEMA, migration_step
+from scripts.db.fact_header_v2_capture import SCHEMA
 
 logger = logging.getLogger(__name__)
 STATE = SCHEMA + ".archive_online_capture"
@@ -24,8 +26,50 @@ GUARD = "trg_qt_archive_v2_reject_change"
 _FUNCTION = SCHEMA + ".capture_archive_insert"
 
 
-def _roots(conn, source_root, destination_root, *, read_only_namespace=False):
-    saved = headers._inspect_progress(conn, **({"read_only_namespace":True} if read_only_namespace else {}))["placement"]
+@dataclass(frozen=True)
+class _Capture:
+    schema: str
+    trigger: str
+    guard: str
+
+    @property
+    def state(self):
+        return self.schema + ".archive_online_capture"
+
+    @property
+    def progress(self):
+        return self.schema + ".archive_online_progress"
+
+    @property
+    def queue(self):
+        return self.schema + ".pending_archive_objects"
+
+    @property
+    def closed(self):
+        return self.schema + ".archive_online_closed"
+
+    @property
+    def function(self):
+        return self.schema + ".capture_archive_insert"
+
+    @property
+    def reject_function(self):
+        return self.schema + ".reject_fact_source_change"
+
+
+def _capture(forward_operation_sha256=None):
+    if forward_operation_sha256 is None:
+        return _Capture(SCHEMA, TRIGGER, GUARD)
+    if (not isinstance(forward_operation_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", forward_operation_sha256)):
+        raise ValueError("archive_forward_operation_invalid")
+    from scripts.db.fact_header_forward_keys import SCHEMA as forward_schema
+    return _Capture(forward_schema, "trg_qt_forward_archive_capture", "trg_qt_forward_archive_reject_change")
+
+
+def _roots(conn, source_root, destination_root, *, read_only_namespace=False, saved=None):
+    if saved is None:
+        saved = headers._inspect_progress(conn, **({"read_only_namespace":True} if read_only_namespace else {}))["placement"]
     if saved is None:
         raise RuntimeError("archive_online_fixed_placement_required")
     source, source_id = archives._root(source_root, saved["recent_device"])
@@ -33,10 +77,20 @@ def _roots(conn, source_root, destination_root, *, read_only_namespace=False):
     return {"source": [str(source), *source_id], "destination": [str(destination), *destination_id]}
 
 
-def _binding(conn):
-    result = {"capture_oid": conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
-                                         {"name": SCHEMA+".capture"}),
-              "prepared_at": str(conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1")))}
+def _binding(conn, forward_operation_sha256=None):
+    owner = _capture(forward_operation_sha256)
+    if forward_operation_sha256 is None:
+        result = {"capture_oid": conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                                             {"name": SCHEMA + ".capture"}),
+                  "prepared_at": str(conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1")))}
+    else:
+        from scripts.db import fact_header_forward_adoption as adoption
+        state = adoption._state(conn)
+        result = {"operation_sha256": state["operation_sha256"],
+                  "adoption_oid": conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                                               {"name": adoption.STATE}),
+                  "started_at": state["started_at"].isoformat(),
+                  "expires_at": state["expires_at"].isoformat()}
     for family in archives.FAMILIES:
         relation = "market."+family
         properties = raw._relation(conn, relation)
@@ -54,49 +108,58 @@ def _binding(conn):
         result[family] = {"shape": headers._shape(conn, family, schema="market"),
                           "properties": properties, "triggers": [list(row) for row in triggers]}
     result["private_shapes"] = {
-        name: headers._shape(conn, name.split(".")[1]) for name in (STATE, PROGRESS, QUEUE)}
+        name: headers._shape(conn, name.split(".")[1], schema=owner.schema)
+        for name in (owner.state, owner.progress, owner.queue)}
     return json.loads(json.dumps(result))
 
 
-def _require_open(conn):
-    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": CLOSED}) is not None:
+def _require_open(conn, owner):
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.closed}) is not None:
         raise RuntimeError("archive_online_capture_closed")
 
 
-def _inspect(conn, source_root, destination_root, *, read_only_namespace=False):
-    _require_open(conn)
-    row = conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one()
-    if row["roots"] != _roots(conn, source_root, destination_root, **({"read_only_namespace":True} if read_only_namespace else {})) or row["binding"] != _binding(conn):
+def _inspect(conn, source_root, destination_root, *, read_only_namespace=False,
+             forward_operation_sha256=None, saved=None):
+    owner = _capture(forward_operation_sha256)
+    if forward_operation_sha256 is not None and saved is None:
+        raise RuntimeError("archive_forward_admitted_placement_required")
+    _require_open(conn, owner)
+    row = conn.execute(text(f"SELECT * FROM {owner.state} WHERE id=1")).mappings().one()
+    if row["roots"] != _roots(conn, source_root, destination_root, read_only_namespace=read_only_namespace, saved=saved) or row["binding"] != _binding(conn, forward_operation_sha256):
         raise RuntimeError("archive_online_capture_binding_changed")
-    if set(conn.execute(text(f"SELECT family FROM {PROGRESS}")).scalars()) != set(archives.FAMILIES):
+    if set(conn.execute(text(f"SELECT family FROM {owner.progress}")).scalars()) != set(archives.FAMILIES):
         raise RuntimeError("archive_online_progress_families_changed")
     return row
 
 
-def prepare(conn, *, source_root, destination_root, timeout_seconds=30):
+def prepare(conn, *, source_root, destination_root, timeout_seconds=30, forward_operation_sha256=None):
     """Install capture and a finite baseline at one short catalog writer fence."""
-    with migration_step(conn, timeout_seconds):
-        _require_open(conn)
-        if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
-            _inspect(conn, source_root, destination_root)
+    owner = _capture(forward_operation_sha256)
+    with archives._operation_step(conn, timeout_seconds,
+            forward_operation_sha256=forward_operation_sha256) as (saved, _):
+        _require_open(conn, owner)
+        if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.state}) is not None:
+            _inspect(conn, source_root, destination_root,
+                     forward_operation_sha256=forward_operation_sha256, saved=saved)
             return {"reused": True, "migration_ready": False}
         # The raw shadow's FK installs internal triggers on its manifest
         # catalog. Prepare that dependency before sealing the exact trigger set.
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name": raw.STATE}) is None:
             raise RuntimeError("archive_online_raw_shadow_preparation_required")
-        raw._inspect(conn)
+        if forward_operation_sha256 is None:
+            raw._inspect(conn)
         relations = ",".join("market."+name for name in archives.FAMILIES)
         conn.exec_driver_sql("LOCK TABLE "+relations+" IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-        roots = _roots(conn, source_root, destination_root)
+        roots = _roots(conn, source_root, destination_root, saved=saved)
         if any(conn.scalar(text("SELECT to_regclass(:name)"), {"name": name}) is not None
-               for name in (PROGRESS, QUEUE)):
+               for name in (owner.progress, owner.queue)):
             raise RuntimeError("archive_online_unregistered_capture")
-        conn.exec_driver_sql(f"CREATE TABLE {STATE}(id integer PRIMARY KEY CHECK(id=1),"
+        conn.exec_driver_sql(f"CREATE TABLE {owner.state}(id integer PRIMARY KEY CHECK(id=1),"
                              "roots jsonb NOT NULL,binding jsonb NOT NULL)")
-        conn.exec_driver_sql(f"CREATE TABLE {PROGRESS}(family text PRIMARY KEY,high_id text,"
+        conn.exec_driver_sql(f"CREATE TABLE {owner.progress}(family text PRIMARY KEY,high_id text,"
             "after_id text NOT NULL DEFAULT '',baseline_complete boolean NOT NULL,"
             "verified_objects bigint NOT NULL DEFAULT 0 CHECK(verified_objects>=0))")
-        conn.exec_driver_sql(f"CREATE TABLE {QUEUE}(family text NOT NULL,id text NOT NULL,"
+        conn.exec_driver_sql(f"CREATE TABLE {owner.queue}(family text NOT NULL,id text NOT NULL,"
                              "PRIMARY KEY(family,id))")
         cases = []
         for family in archives.FAMILIES:
@@ -104,7 +167,7 @@ def prepare(conn, *, source_root, destination_root, timeout_seconds=30):
                               {"name": "market."+family})
             cases.append(f"WHEN {oid}::oid THEN '{family}'")
         conn.exec_driver_sql(f"""
-            CREATE FUNCTION {_FUNCTION}() RETURNS trigger
+            CREATE FUNCTION {owner.function}() RETURNS trigger
             LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $qt$
             DECLARE family text;
             BEGIN
@@ -112,33 +175,40 @@ def prepare(conn, *, source_root, destination_root, timeout_seconds=30):
                 IF family IS NULL OR TG_OP <> 'INSERT' THEN
                     RAISE EXCEPTION 'archive_online_unexpected_source';
                 END IF;
-                INSERT INTO {QUEUE}(family,id) VALUES(family,NEW.id)
+                INSERT INTO {owner.queue}(family,id) VALUES(family,NEW.id)
                     ON CONFLICT DO NOTHING;
                 RETURN NULL;
             END;
             $qt$
         """)
-        conn.exec_driver_sql(f"REVOKE ALL ON FUNCTION {_FUNCTION}() FROM PUBLIC")
+        conn.exec_driver_sql(f"REVOKE ALL ON FUNCTION {owner.function}() FROM PUBLIC")
+        if forward_operation_sha256 is not None:
+            from scripts.db.fact_header_v2_capture import _REJECT_BODY
+            conn.exec_driver_sql(f"CREATE FUNCTION {owner.reject_function}() RETURNS trigger "
+                "LANGUAGE plpgsql SET search_path=pg_catalog AS $qt$" + _REJECT_BODY + "$qt$")
+            conn.exec_driver_sql(f"REVOKE ALL ON FUNCTION {owner.reject_function}() FROM PUBLIC")
         for family in archives.FAMILIES:
             relation = "market."+family
-            conn.exec_driver_sql(f"CREATE TRIGGER {TRIGGER} AFTER INSERT ON {relation} "
-                                f"FOR EACH ROW EXECUTE FUNCTION {_FUNCTION}()")
-            conn.exec_driver_sql(f"CREATE TRIGGER {GUARD} BEFORE UPDATE OR DELETE OR TRUNCATE ON {relation} "
-                                f"FOR EACH STATEMENT EXECUTE FUNCTION {SCHEMA}.reject_fact_source_change()")
-            for trigger in (TRIGGER, GUARD):
+            conn.exec_driver_sql(f"CREATE TRIGGER {owner.trigger} AFTER INSERT ON {relation} "
+                                f"FOR EACH ROW EXECUTE FUNCTION {owner.function}()")
+            conn.exec_driver_sql(f"CREATE TRIGGER {owner.guard} BEFORE UPDATE OR DELETE OR TRUNCATE ON {relation} "
+                                f"FOR EACH STATEMENT EXECUTE FUNCTION {owner.reject_function}()")
+            for trigger in (owner.trigger, owner.guard):
                 conn.exec_driver_sql(f"ALTER TABLE {relation} ENABLE ALWAYS TRIGGER {trigger}")
             high = conn.scalar(text(f"SELECT id FROM {relation} ORDER BY id DESC LIMIT 1"))
-            conn.execute(text(f"INSERT INTO {PROGRESS}(family,high_id,baseline_complete) "
+            conn.execute(text(f"INSERT INTO {owner.progress}(family,high_id,baseline_complete) "
                               "VALUES(:family,:high,:empty)"),
                          {"family": family, "high": high, "empty": high is None})
-        conn.execute(text(f"INSERT INTO {STATE} VALUES(1,CAST(:roots AS jsonb),CAST(:binding AS jsonb))"),
-                     {"roots": json.dumps(roots), "binding": json.dumps(_binding(conn))})
-        _inspect(conn, source_root, destination_root)
+        conn.execute(text(f"INSERT INTO {owner.state} VALUES(1,CAST(:roots AS jsonb),CAST(:binding AS jsonb))"),
+                     {"roots": json.dumps(roots), "binding": json.dumps(_binding(conn, forward_operation_sha256))})
+        _inspect(conn, source_root, destination_root,
+                     forward_operation_sha256=forward_operation_sha256, saved=saved)
         logger.info("archive_online_capture_prepared | families=%s", len(archives.FAMILIES))
         return {"reused": False, "migration_ready": False}
 
 
-def copy_page(engine, *, family, source_root, destination_root, page_rows=128, tail_only=False, **kwargs):
+def copy_page(engine, *, family, source_root, destination_root, page_rows=128, tail_only=False,
+              forward_operation_sha256=None, **kwargs):
     """Copy one finite baseline/tail page and commit queue retirement with it.
 
     Uses the existing capacity/WAL/expiry/deadline/cancellation guards and exact
@@ -150,16 +220,22 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, t
         raise ValueError("archive_copy_known_family_required")
     if type(tail_only) is not bool:
         raise ValueError("archive_online_tail_mode_invalid")
+    owner = _capture(forward_operation_sha256)
     selection = {}
 
     def select(conn, selected_family, unused_after, limit):
-        _inspect(conn, source_root, destination_root)
-        state = dict(conn.execute(text(f"SELECT * FROM {PROGRESS} WHERE family=:family"),
+        saved = None
+        if forward_operation_sha256 is not None:
+            from scripts.db import fact_header_forward_adoption as adoption
+            saved = adoption._state(conn)["binding"]["old_headers"]["placement"]
+        _inspect(conn, source_root, destination_root,
+                 forward_operation_sha256=forward_operation_sha256, saved=saved)
+        state = dict(conn.execute(text(f"SELECT * FROM {owner.progress} WHERE family=:family"),
                                   {"family": family}).mappings().one())
         if tail_only and not state["baseline_complete"]:
             raise RuntimeError("archive_online_tail_requires_completed_baseline")
         if state["baseline_complete"]:
-            ids = conn.execute(text(f"SELECT id FROM {QUEUE} WHERE family=:family "
+            ids = conn.execute(text(f"SELECT id FROM {owner.queue} WHERE family=:family "
                                     "ORDER BY id LIMIT :limit FOR UPDATE"),
                                {"family": family, "limit": limit}).scalars().all()
         else:
@@ -185,18 +261,18 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, t
 
     def record(conn, rows):
         state, ids = selection["state"], selection["ids"]
-        conn.execute(text(f"DELETE FROM {QUEUE} WHERE family=:family AND id=ANY(:ids)"),
+        conn.execute(text(f"DELETE FROM {owner.queue} WHERE family=:family AND id=ANY(:ids)"),
                      {"family": family, "ids": ids})
         if not state["baseline_complete"]:
-            conn.execute(text(f"UPDATE {PROGRESS} SET after_id=:after,baseline_complete=:complete "
+            conn.execute(text(f"UPDATE {owner.progress} SET after_id=:after,baseline_complete=:complete "
                               "WHERE family=:family"),
                          {"after": ids[-1] if ids else state["after_id"],
                           "complete": not ids, "family": family})
-        conn.execute(text(f"UPDATE {PROGRESS} SET verified_objects=verified_objects+:count "
+        conn.execute(text(f"UPDATE {owner.progress} SET verified_objects=verified_objects+:count "
                           "WHERE family=:family"), {"count": len(rows), "family": family})
-        current = conn.execute(text(f"SELECT * FROM {PROGRESS} WHERE family=:family"),
+        current = conn.execute(text(f"SELECT * FROM {owner.progress} WHERE family=:family"),
                                {"family": family}).mappings().one()
-        empty = not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE} WHERE family=:family)"),
+        empty = not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {owner.queue} WHERE family=:family)"),
                                 {"family": family})
         return {"selected_catalog_rows": len(ids), "expired_catalog_rows": selection["expired"],
                 "baseline_complete": current["baseline_complete"],
@@ -206,10 +282,10 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, t
 
     return archives._copy_archive_page(engine, select_page=select, record_page=record,
         family=family, source_root=source_root, destination_root=destination_root,
-        page_rows=page_rows, **kwargs)
+        page_rows=page_rows, forward_operation_sha256=forward_operation_sha256, **kwargs)
 
 
-def retire_capture(conn, *, source_root, destination_root, timeout_seconds=30):
+def retire_capture(conn, *, source_root, destination_root, timeout_seconds=30, forward_operation_sha256=None):
     """Remove temporary triggers inside the live verified inventory transaction.
 
     The caller must include this in the final switch transaction. Any abort
@@ -217,33 +293,79 @@ def retire_capture(conn, *, source_root, destination_root, timeout_seconds=30):
     terminal receipt, refusing preparation/copy retries of the closed attempt.
     This is neither publisher drain, root activation nor collection permission.
     """
+    owner = _capture(forward_operation_sha256)
     context = conn.info.get("qt.archive_inventory_context.v2")
     if (context is None or context["transaction"] is not conn.get_transaction()
             or not context["transaction"].is_active
+            or context.get("forward_operation_sha256") != forward_operation_sha256
             or str(source_root) != context["source_root"]
             or str(destination_root) != context["destination_root"]):
         raise RuntimeError("archive_online_live_inventory_context_required")
-    with migration_step(conn, timeout_seconds):
-        state = dict(_inspect(conn, source_root, destination_root))
+    with archives._operation_step(conn, timeout_seconds,
+            forward_operation_sha256=forward_operation_sha256) as (saved, _):
+        state = dict(_inspect(conn, source_root, destination_root,
+                     forward_operation_sha256=forward_operation_sha256, saved=saved))
         progress = [dict(row) for row in conn.execute(
-            text(f"SELECT * FROM {PROGRESS} ORDER BY family")).mappings()]
+            text(f"SELECT * FROM {owner.progress} ORDER BY family")).mappings()]
         if (any(not row["baseline_complete"] for row in progress)
-                or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))):
+                or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {owner.queue})"))):
             raise RuntimeError("archive_online_capture_not_closed")
         # Exact inventory holds all catalog publication locks until caller
         # commit. No queued late commit can race trigger removal.
         receipt = {"capture": state, "progress": progress,
                    "inventory": dict(context["report"]),
                    "source_retained": True, "root_activation_authorized": False}
-        conn.exec_driver_sql(f"CREATE TABLE {CLOSED}(id integer PRIMARY KEY CHECK(id=1),"
-                             "closed_at timestamptz NOT NULL DEFAULT clock_timestamp(),"
-                             "receipt jsonb NOT NULL)")
-        conn.execute(text(f"INSERT INTO {CLOSED}(id,receipt) VALUES(1,CAST(:receipt AS jsonb))"),
-                     {"receipt": json.dumps(receipt)})
-        for family in archives.FAMILIES:
-            for trigger in (TRIGGER, GUARD):
-                conn.exec_driver_sql(f"DROP TRIGGER {trigger} ON market.{family}")
-        conn.exec_driver_sql(f"DROP FUNCTION {_FUNCTION}()")
+        _close(conn, owner, receipt)
         logger.info("archive_online_capture_retired | families=%s source_retained=true",
                     len(archives.FAMILIES))
         return receipt
+
+
+def _close(conn, owner, receipt):
+    conn.exec_driver_sql(f"CREATE TABLE {owner.closed}(id integer PRIMARY KEY CHECK(id=1),"
+                         "closed_at timestamptz NOT NULL DEFAULT clock_timestamp(),"
+                         "receipt jsonb NOT NULL)")
+    for family in archives.FAMILIES:
+        for trigger in (owner.trigger, owner.guard):
+            conn.exec_driver_sql(f"DROP TRIGGER {trigger} ON market.{family}")
+    conn.exec_driver_sql(f"DROP FUNCTION {owner.function}()")
+    conn.execute(text(f"INSERT INTO {owner.closed}(id,receipt) VALUES(1,CAST(:receipt AS jsonb))"),
+                 {"receipt": json.dumps(receipt)})
+
+
+def _cancel_forward_capture(conn, *, state):
+    """Part of the adoption owner's bounded, preserving terminal transaction.
+
+    No inventory or empty queue is required for cancellation. Every queued row,
+    copied file and journal survives; only this owner's admitted triggers stop.
+    """
+    operation = state["operation_sha256"]
+    owner = _capture(operation)
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.state}) is None:
+        return None
+    conn.exec_driver_sql("LOCK TABLE " + ",".join("market." + name for name in archives.FAMILIES)
+                         + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+    saved = state["binding"]["old_headers"]["placement"]
+    archives.physical.verify(conn, saved)
+    row = conn.execute(text(f"SELECT * FROM {owner.state} WHERE id=1")).mappings().one()
+    source, destination = row["roots"]["source"][0], row["roots"]["destination"][0]
+    _inspect(conn, source, destination, forward_operation_sha256=operation, saved=saved)
+    receipt = dict(kind="cancelled", operation_sha256=operation, capture=dict(row),
+                   source_retained=True, queued_rows_retained=True, root_activation_authorized=False)
+    _close(conn, owner, receipt)
+    # Bind only changes made under the exact catalog writer fence above.
+    receipt["post_binding"] = _binding(conn, operation)
+    conn.execute(text(f"UPDATE {owner.closed} SET receipt=CAST(:receipt AS jsonb) WHERE id=1"),
+                 {"receipt": json.dumps(receipt)})
+    return receipt
+
+
+def _inspect_forward_cancellation(conn, *, operation_sha256, receipt):
+    owner = _capture(operation_sha256)
+    if receipt is None:
+        if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.state}) is not None:
+            raise RuntimeError("archive_forward_terminal_changed")
+        return
+    actual = conn.execute(text(f"SELECT receipt FROM {owner.closed} WHERE id=1")).scalar_one()
+    if actual != receipt or _binding(conn, operation_sha256) != receipt["post_binding"]:
+        raise RuntimeError("archive_forward_terminal_changed")

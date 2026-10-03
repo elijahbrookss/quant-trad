@@ -321,3 +321,16 @@ Previously copied private headers, catalogues, raw source and journals remain.
 A switched adoption refuses preserving retirement instead of addressing obsolete
 relation names. This is not yet the canonical host operation or its commit
 reconciliation, physical admission, recovery activation or deployment receipt.
+
+## Archive interval proof for forward adoption
+
+Forward preparation reuses the existing bounded archive page and inventory
+mechanisms with fixed separate journal and queue names. It binds the forward
+adoption intent and its original deadline, not the retired capture. A catalog
+insert trigger covers records that commit behind an earlier ID cursor. Original
+canceled queues and completed files remain evidence, never fresh copy authority.
+Final capture retirement requires the same transaction's live inventory for
+that exact forward operation. Preserving cancellation also stops archive capture
+without consuming its queued rows or deleting any files. This lifecycle belongs
+to the same adoption terminal transaction, including rollback and reentry.
+The host integration and production performance qualification remain outstanding.

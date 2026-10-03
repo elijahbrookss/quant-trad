@@ -499,6 +499,7 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
     It never renews that deadline or authorizes another adoption. Reconcile a
     lost commit reply against the durable terminal receipt and exact post-state.
     """
+    from scripts.db import archive_root_v2_online as archives
     with _step(conn, timeout_seconds):
         state = _state(conn)
         if state is None or state["operation_sha256"] != operation_sha256:
@@ -512,10 +513,13 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
             if (terminal["operation_sha256"] != operation_sha256 or terminal["binding"] != _snapshot(conn)
                     or any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())):
                 raise RuntimeError("fact_header_forward_adoption_terminal_changed")
+            archives._inspect_forward_cancellation(conn, operation_sha256=operation_sha256,
+                                                   receipt=terminal.get("archive_capture"))
             return dict(retired=True, reused=True, source_authoritative=True,
                         migration_ready=False, final_switch_authorized=False)
         if state["binding"] != _snapshot(conn):
             raise RuntimeError("fact_header_forward_adoption_binding_changed")
+        archive_capture = archives._cancel_forward_capture(conn, state=state)
         slots, staged = _reference_states(conn, state)
         roots = [name for name, item in staged.items() if item and not item["parent_oid"]]
         for name in sorted(roots):
@@ -552,7 +556,8 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30):
             raise RuntimeError("fact_header_forward_adoption_retirement_changed")
         terminal = dict(operation_sha256=operation_sha256, binding=expected,
                         retired_at=conn.scalar(text("SELECT clock_timestamp()" )).isoformat(),
-                        removed_triggers=removed, removed_reference_roots=roots, rows_preserved=True)
+                        removed_triggers=removed, removed_reference_roots=roots, rows_preserved=True,
+                        archive_capture=archive_capture)
         conn.execute(text("UPDATE " + STATE + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
                      {"terminal": json.dumps(terminal)})
         logger.info("fact_header_forward_adoption_retired | operation=%s triggers=%s", operation_sha256, len(removed))
