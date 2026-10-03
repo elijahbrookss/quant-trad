@@ -6,6 +6,8 @@ and preserves table identity and every logical definition. V1 stays active.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import logging
 import math
 from time import monotonic
@@ -21,7 +23,7 @@ from portal.backend.service.storage.header_resources import observe_header_resou
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
 from scripts.db import fact_header_v2_references as references
 from scripts.db.fact_header_v2_admission import _columns, _constraints, _secondary_indexes
-from scripts.db.fact_header_v2_capture import SCHEMA, migration_step, capture_remaining_seconds, inspect_capture
+from scripts.db.fact_header_v2_capture import SCHEMA, inspect_capture
 
 RELATIONS = ("market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies")
 RETAINED_LEGACY = "qt_fact_storage_cutover_v1.fact_versions"
@@ -86,9 +88,18 @@ def _assert_retained_source(conn):
         raise RuntimeError("retained_source_move_unexpected_dependency")
 
 
-def inspect_reference_catalog(conn, *, relation):
-    """Read current placement, including after expiry; never authorize a move."""
+def inspect_reference_catalog(conn, *, relation, forward_operation_sha256=None):
+    """Read this fixed owner's catalog placement; never authorize a move."""
     _known(relation)
+    if forward_operation_sha256 is not None:
+        from scripts.db import archive_root_v2_copy as archives
+        from scripts.db import fact_header_forward_adoption as adoption
+        if relation not in RELATIONS:
+            raise ValueError("archive_reference_forward_catalog_required")
+        with archives._operation_step(conn, 30,
+                forward_operation_sha256=forward_operation_sha256) as (saved, _):
+            adoption._reference_states(conn, adoption._state(conn))
+            return _reference_placement(conn, relation, saved, physical.verify(conn, saved))
     state = headers._inspect_progress(conn)
     if state["placement"] is None:
         raise RuntimeError("archive_reference_move_physical_placement_required")
@@ -96,8 +107,11 @@ def inspect_reference_catalog(conn, *, relation):
         _assert_retained_source(conn)
     else:
         references._inventory(conn)
+    return _reference_placement(conn, relation, state["placement"], state["_placement_pid"])
+
+
+def _reference_placement(conn, relation, saved, pid):
     definition = _definition(conn, relation)
-    saved = state["placement"]
     spaces = conn.execute(text("""
         WITH heap AS (SELECT oid,reltoastrelid FROM pg_class WHERE oid=to_regclass(:relation)),
         heaps AS (SELECT oid FROM heap UNION ALL SELECT reltoastrelid FROM heap WHERE reltoastrelid<>0),
@@ -112,7 +126,7 @@ def inspect_reference_catalog(conn, *, relation):
         history = True
     else:
         raise RuntimeError("archive_reference_move_mixed_or_unknown_placement")
-    physical.verify_group(conn, relation, history=history, saved=saved, pid=state["_placement_pid"])
+    physical.verify_group(conn, relation, history=history, saved=saved, pid=pid)
     return {"relation": relation, "relation_oid": definition[0][0],
             "placement": "history" if history else "recent",
             "bytes": conn.scalar(text("SELECT pg_total_relation_size(to_regclass(:relation))"),
@@ -190,7 +204,8 @@ def _budget(conn, *, observed, policy, limits, targets, resources):
 
 
 def move_reference_catalog(engine, *, relation, policy, resource_limits, cancelled=None,
-                           expected_started_at=None, placement=None, deadline=None):
+                           expected_started_at=None, placement=None, deadline=None,
+                           forward_operation_sha256=None, connection=None):
     """Move one known catalog+indexes atomically; preserve source semantics.
 
     An online caller may additionally bind the exact capture/placement and an
@@ -201,7 +216,14 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
     A lost commit response is reconciled by inspecting actual placement and,
     while the original attempt is still valid, retrying: a verified already-HDD catalog is acknowledged without rewriting.
     """
+    from scripts.db import archive_root_v2_copy as archives
+    from scripts.db import fact_header_forward_adoption as adoption
     _known(relation)
+    if forward_operation_sha256 is not None and relation not in RELATIONS:
+        raise ValueError("archive_reference_forward_catalog_required")
+    if connection is not None and (connection.engine is not engine or connection.closed
+            or connection.invalidated or connection.in_transaction()):
+        raise ValueError("archive_reference_move_connection_not_available")
     if ((expected_started_at is None) != (placement is None)
             or (placement is not None and (not isinstance(placement, physical.CopyPlacement)
                 or not isinstance(expected_started_at, str) or not expected_started_at))
@@ -215,7 +237,7 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
         raise RuntimeError("storage_move_cancelled")
     started = monotonic()
     deadline = min(deadline, started+limits["movement_timeout_seconds"]) if deadline is not None else started+limits["movement_timeout_seconds"]
-    with engine.connect() as conn:
+    with (nullcontext(connection) if connection is not None else engine.connect()) as conn:
         watch = None
         try:
             with conn.begin():
@@ -223,7 +245,8 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous_ms:
                     deadline = min(deadline, started+previous_ms/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
+                with archives._operation_step(conn, limits["movement_timeout_seconds"], deadline=deadline,
+                        forward_operation_sha256=forward_operation_sha256) as (_, owner_deadline):
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("archive_reference_move_storage_busy")
@@ -231,21 +254,21 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                     # source INSERTs. Only the selected catalog is fenced.
                     conn.exec_driver_sql(f"LOCK TABLE {headers.SOURCE} IN ACCESS SHARE MODE NOWAIT")
                     conn.exec_driver_sql(f"LOCK TABLE {relation} IN ACCESS EXCLUSIVE MODE NOWAIT")
-                    observed = inspect_reference_catalog(conn, relation=relation)
+                    observed = inspect_reference_catalog(conn, relation=relation,
+                        forward_operation_sha256=forward_operation_sha256)
                     saved = observed["_binding"]
                     plan = physical._restore(saved["plan"])
-                    if (placement is not None and (plan != placement
-                            or inspect_capture(conn)["started_at"] != expected_started_at)):
+                    started_at = (adoption._state(conn)["started_at"].isoformat()
+                                  if forward_operation_sha256 is not None else inspect_capture(conn)["started_at"])
+                    if (placement is not None and (plan != placement or started_at != expected_started_at)):
                         raise RuntimeError("archive_reference_move_attempt_binding_changed")
-                    deadline = min(deadline, monotonic()+float(capture_remaining_seconds(conn)))
+                    deadline = min(deadline, owner_deadline)
                     targets = (plan.recent, plan.history)
                     _fixed_inputs(policy, limits, targets)
                     if observed["placement"] == "history":
                         receipt = {"relation": relation, "relation_oid": observed["relation_oid"],
                                    "placement": "history", "reused": True, "migration_ready": False}
                     else:
-                        remaining = capture_remaining_seconds(conn)
-                        deadline = min(deadline, monotonic()+float(remaining))
                         resources = observe_header_resources(conn, targets,
                             pg_controldata=plan.pg_controldata, timeout_seconds=min(30,limits["movement_timeout_seconds"]))
                         budget, floors = _budget(conn, observed=observed, policy=policy, limits=limits,
@@ -265,7 +288,8 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                         for name in indexes:
                             conn.exec_driver_sql(f"ALTER INDEX {quote(relation.split('.', 1)[0])}.{quote(name)} SET TABLESPACE {destination}")
                             watch.check()
-                        after = inspect_reference_catalog(conn, relation=relation)
+                        after = inspect_reference_catalog(conn, relation=relation,
+                            forward_operation_sha256=forward_operation_sha256)
                         if after["placement"] != "history" or after["_definition"] != observed["_definition"]:
                             raise RuntimeError("archive_reference_move_logical_definition_changed")
                         watch.check()

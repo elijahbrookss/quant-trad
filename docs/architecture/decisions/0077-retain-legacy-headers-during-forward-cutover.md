@@ -334,3 +334,21 @@ that exact forward operation. Preserving cancellation also stops archive capture
 without consuming its queued rows or deleting any files. This lifecycle belongs
 to the same adoption terminal transaction, including rollback and reentry.
 The host integration and production performance qualification remain outstanding.
+
+
+## Durable outcome under the existing final owner
+
+Forward adoption uses the existing supervised commit/certificate and initial
+policy boundaries. The exact parent/catalog identities are known only after the
+atomic attachment, so their certificate is published later in that same SQL
+transaction, before COMMIT. An unfinished switch has no externally visible ready
+state. The receipt binds the retained heap, archive proof and original adoption
+journal digest; finite baseline counters are not advertised as current row totals.
+
+The existing outcome inspector validates this explicit receipt form, native
+legacy seal and archive retirement while retaining the original ownership fence.
+It can reconcile a lost reply after the work deadline without restarting work.
+Source file identities are switch-time evidence, not a ban on later policy-owned
+historical HDD relocation. The fixed catalog mover accepts the same forward
+intent and actual owning connection. Canonical host/controller wiring and physical
+admission are still required before this internal boundary can be deployed.

@@ -480,13 +480,69 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
                     migration_ready=False,collection_resume_authorized=False)
 
 
+
+def _forward_adoption_digest(state):
+    """Bind durable proof journals without exporting their row cursors."""
+    value = {name: state[name] for name in
+             ("operation_sha256", "attempt_seconds", "binding", "progress", "reference_progress")}
+    value.update(started_at=state["started_at"].isoformat(), expires_at=state["expires_at"].isoformat())
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _stage_forward_certificate(conn, *, policy, saved, source_root, destination_root,
+                               inventory, operation_sha256, end_day, timeout_seconds):
+    from scripts.db import fact_header_forward_adoption as adoption
+    from scripts.db import archive_root_v2_online as online_archives
+
+    owner = online_archives._capture(operation_sha256)
+    if _oid(conn, owner.state) is None:
+        raise RuntimeError("fact_header_forward_archive_capture_required")
+    state = adoption._state(conn)
+    proof_digest = _forward_adoption_digest(state)
+    pid = physical.verify(conn, saved)
+    for relation in (adoption.IDENTITY, raw.TARGET, *reference_move.RELATIONS):
+        physical.verify_group(conn, relation, history=True, saved=saved, pid=pid)
+    switched = stage_forward_tables(conn, operation_sha256=operation_sha256, end_day=end_day,
+        evidence={"source_retained": True}, timeout_seconds=timeout_seconds)
+    terminal = switched["receipt"]
+    if terminal["archive_inventory_sha256"] != inventory["inventory_sha256"]:
+        raise RuntimeError("fact_header_forward_archive_receipt_changed")
+    source_path, source_identity = archives._root(source_root, saved["recent_device"])
+    destination_path, destination_identity = archives._root(destination_root, saved["history_device"])
+    receipt = {
+        "schema_version": RECEIPT_VERSION, "binding": saved,
+        "policy_fingerprint": policy.fingerprint,
+        "active_relation_oids": {name: _oid(conn, "market." + name)
+                                 for name in (*headers.TABLE_NAMES, raw.NAME)},
+        "retained_relation_oids": {"fact_versions": terminal["legacy_oid"],
+                                   raw.NAME: terminal["retained_raw_oid"]},
+        "source_root": str(source_path), "destination_root": str(destination_path),
+        "source_root_identity": list(source_identity), "destination_root_identity": list(destination_identity),
+        "archive_inventory_sha256": inventory["inventory_sha256"],
+        "verified_archive_objects": inventory["verified_catalog_objects"],
+        "verified_archive_bytes": inventory["verified_catalog_bytes"],
+        "forward_header": terminal, "forward_adoption_sha256": proof_digest,
+    }
+    # The parent/catalog OIDs only exist after attachment. Publish their exact
+    # certificate before the SAME transaction can commit; no temporary ready
+    # state or incomplete certificate is externally visible.
+    conn.execute(text("UPDATE market.fact_storage_state SET evidence=CAST(:evidence AS jsonb) "
+        "WHERE layout_version='market.fact_storage_tiers.v2'"),
+        {"evidence": json.dumps({"source_retained": True, "handoff": receipt})})
+    _verify_handoff_relations(conn, receipt, pid=pid)
+    return receipt
+
+
 def commit_handoff(engine, *, policy, resource_limits, source_root, destination_root,
                    max_objects, max_bytes, page_rows=128, cancelled=None, file_proof=None,
-                   deadline=None, publisher_check=None, connection=None, activate_policy=False):
+                   deadline=None, publisher_check=None, connection=None, activate_policy=False,
+                   forward_operation_sha256=None, forward_end_day=None):
     """Commit one fully verified fixed handoff; sources remain retained.
 
-    Rechecks every copied header, identity, lookup and archive object under
-    fences, requires already validated references on HDD, and supervises the
+    The copied route rechecks headers/identities/lookups; the explicit forward
+    route holds the complete adoption proof and retains the original header
+    heap. Both verify the full archive inventory under fences, require native
+    validated references on HDD, and supervise the
     original attempt deadline and resource budget through commit. On any
     uncertain response, use inspect_handoff; never blindly replay the switch.
     An optional absolute monotonic deadline only shortens these existing ceilings;
@@ -494,6 +550,13 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
     drain or authorize collection to resume. When activate_policy is true, the
     existing first policy/target registry is staged in this same transaction.
     """
+    from datetime import date
+    if ((forward_operation_sha256 is None) != (forward_end_day is None)
+            or (forward_operation_sha256 is not None and (
+                not isinstance(forward_operation_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", forward_operation_sha256)
+                or type(forward_end_day) is not date))):
+        raise ValueError("fact_header_forward_handoff_request_invalid")
     if type(activate_policy) is not bool:
         raise ValueError("fact_header_handoff_policy_flag_invalid")
     limits = _limits(resource_limits, migration=True)
@@ -520,21 +583,17 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                     "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous:
                     deadline = min(deadline, started+previous/1000)
-                with migration_step(conn, limits["movement_timeout_seconds"], deadline=deadline):
+                with archives._operation_step(conn, limits["movement_timeout_seconds"], deadline=deadline,
+                        forward_operation_sha256=forward_operation_sha256) as (saved, owner_deadline):
                     if publisher_check is not None:
                         publisher_check(conn, deadline=deadline)
                     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
                                             "hashtextextended('qt.storage.management.v1',0))")):
                         raise RuntimeError("fact_header_handoff_storage_busy")
-                    state = headers._inspect_progress(conn)
-                    saved = state["placement"]
-                    if saved is None:
-                        raise RuntimeError("fact_header_handoff_fixed_placement_required")
                     plan = physical._restore(saved["plan"])
                     targets = (plan.recent, plan.history)
                     reference_move._fixed_inputs(policy, limits, targets)
-                    seconds = capture_remaining_seconds(conn)
-                    deadline = min(deadline, monotonic()+float(seconds))
+                    deadline = min(deadline, owner_deadline)
                     resources = observe_header_resources(conn, targets,
                         pg_controldata=plan.pg_controldata,
                         timeout_seconds=min(30, limits["movement_timeout_seconds"]))
@@ -551,43 +610,57 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                             destination_root=destination_root, max_objects=max_objects,
                             max_bytes=max_bytes, page_rows=min(page_rows, 256), policy=policy,
                             resource_limits=limits, cancelled=cancelled,
-                            file_proof=file_proof) as inventory:
-                        with headers.verified_copy(conn, page_rows=page_rows,
-                                timeout_seconds=limits["movement_timeout_seconds"]) as verified:
-                            with raw.verified_copy(conn, page_rows=page_rows,
-                                    timeout_seconds=limits["movement_timeout_seconds"]) as lookup:
-                                if not references.inspect_references(conn)["references_complete"]:
-                                    raise RuntimeError("fact_header_handoff_references_incomplete")
-                                for relation in reference_move.RELATIONS:
-                                    if reference_move.inspect_reference_catalog(
-                                            conn, relation=relation)["placement"] != "history":
-                                        raise RuntimeError("fact_header_handoff_reference_not_on_hdd")
-                                active = {name: _oid(conn, SCHEMA+"."+name)
-                                          for name in (*headers.TABLE_NAMES, raw.NAME)}
-                                retained = {"fact_versions": _oid(conn, headers.SOURCE),
-                                            raw.NAME: _oid(conn, raw.SOURCE)}
-                                source_path, source_identity = archives._root(
-                                    source_root, saved["recent_device"])
-                                destination_path, destination_identity = archives._root(
-                                    destination_root, saved["history_device"])
-                                receipt = {
-                                    "schema_version": RECEIPT_VERSION,
-                                    "binding": saved, "policy_fingerprint": policy.fingerprint,
-                                    "active_relation_oids": active, "retained_relation_oids": retained,
-                                    "source_root": str(source_path), "destination_root": str(destination_path),
-                                    "source_root_identity": list(source_identity),
-                                    "destination_root_identity": list(destination_identity),
-                                    "archive_inventory_sha256": inventory["inventory_sha256"],
-                                    "verified_archive_objects": inventory["verified_catalog_objects"],
-                                    "verified_archive_bytes": inventory["verified_catalog_bytes"],
-                                    "verified_header_rows": verified["verified_header_rows"],
-                                    "verified_lookup_rows": lookup["verified_lookup_rows"],
-                                }
-                                if activate_policy:
-                                    receipt["initial_policy_required"] = True
-                                _switch_verified_tables(conn, verified, prevalidated=True,
-                                    raw_mapping=True, evidence={"source_retained": True, "handoff": receipt})
-                                watch.check()
+                            file_proof=file_proof,
+                            forward_operation_sha256=forward_operation_sha256) as inventory:
+                        if forward_operation_sha256 is not None:
+                            receipt = _stage_forward_certificate(conn, policy=policy, saved=saved,
+                                source_root=source_root, destination_root=destination_root,
+                                inventory=inventory, operation_sha256=forward_operation_sha256,
+                                end_day=forward_end_day, timeout_seconds=limits["movement_timeout_seconds"])
+                            if activate_policy:
+                                receipt["initial_policy_required"] = True
+                                conn.execute(text("UPDATE market.fact_storage_state "
+                                    "SET evidence=CAST(:evidence AS jsonb) "
+                                    "WHERE layout_version='market.fact_storage_tiers.v2'"),
+                                    {"evidence": json.dumps({"source_retained": True, "handoff": receipt})})
+                            watch.check()
+                        else:
+                            with headers.verified_copy(conn, page_rows=page_rows,
+                                    timeout_seconds=limits["movement_timeout_seconds"]) as verified:
+                                with raw.verified_copy(conn, page_rows=page_rows,
+                                        timeout_seconds=limits["movement_timeout_seconds"]) as lookup:
+                                    if not references.inspect_references(conn)["references_complete"]:
+                                        raise RuntimeError("fact_header_handoff_references_incomplete")
+                                    for relation in reference_move.RELATIONS:
+                                        if reference_move.inspect_reference_catalog(
+                                                conn, relation=relation)["placement"] != "history":
+                                            raise RuntimeError("fact_header_handoff_reference_not_on_hdd")
+                                    active = {name: _oid(conn, SCHEMA+"."+name)
+                                              for name in (*headers.TABLE_NAMES, raw.NAME)}
+                                    retained = {"fact_versions": _oid(conn, headers.SOURCE),
+                                                raw.NAME: _oid(conn, raw.SOURCE)}
+                                    source_path, source_identity = archives._root(
+                                        source_root, saved["recent_device"])
+                                    destination_path, destination_identity = archives._root(
+                                        destination_root, saved["history_device"])
+                                    receipt = {
+                                        "schema_version": RECEIPT_VERSION,
+                                        "binding": saved, "policy_fingerprint": policy.fingerprint,
+                                        "active_relation_oids": active, "retained_relation_oids": retained,
+                                        "source_root": str(source_path), "destination_root": str(destination_path),
+                                        "source_root_identity": list(source_identity),
+                                        "destination_root_identity": list(destination_identity),
+                                        "archive_inventory_sha256": inventory["inventory_sha256"],
+                                        "verified_archive_objects": inventory["verified_catalog_objects"],
+                                        "verified_archive_bytes": inventory["verified_catalog_bytes"],
+                                        "verified_header_rows": verified["verified_header_rows"],
+                                        "verified_lookup_rows": lookup["verified_lookup_rows"],
+                                    }
+                                    if activate_policy:
+                                        receipt["initial_policy_required"] = True
+                                    _switch_verified_tables(conn, verified, prevalidated=True,
+                                        raw_mapping=True, evidence={"source_retained": True, "handoff": receipt})
+                                    watch.check()
                     if activate_policy:
                         _stage_initial_policy(conn, policy=policy, receipt=receipt,
                             placement=plan, deadline=deadline, check=watch.check)
@@ -607,8 +680,8 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
             watch.check()
             if file_proof is not None:
                 file_proof.check()
-            logger.info("fact_header_preserving_handoff_committed | rows=%s duration_seconds=%s",
-                        receipt["verified_header_rows"], monotonic()-started)
+            logger.info("fact_header_preserving_handoff_committed | mode=%s duration_seconds=%s",
+                        "forward" if forward_operation_sha256 is not None else "copied", monotonic()-started)
             return {"database_handoff_committed": True, "source_preserved": True,
                     "collection_resume_authorized": False, "root_activation_required": True,
                     "receipt": receipt, "resource_budget": budget,
@@ -676,12 +749,21 @@ def _verify_handoff_relations(conn, receipt, *, pid):
     if (set(receipt["active_relation_oids"]) != expected_names
             or set(receipt["retained_relation_oids"]) != {"fact_versions", raw.NAME}):
         raise RuntimeError("fact_header_handoff_receipt_inventory_invalid")
-    for schema, key in (("market", "active_relation_oids"), (RETAINED, "retained_relation_oids")):
-        for name, expected in receipt[key].items():
-            if _oid(conn, schema+"."+name) != expected:
-                raise RuntimeError("fact_header_handoff_relation_identity_changed")
-    for name, trigger in (("fact_versions", "trg_retained_source_closed"),
-                          (raw.NAME, "trg_retained_raw_source_closed")):
+    forward = receipt.get("forward_header")
+    for name, expected in receipt["active_relation_oids"].items():
+        if _oid(conn, "market." + name) != expected:
+            raise RuntimeError("fact_header_handoff_relation_identity_changed")
+    for name, expected in receipt["retained_relation_oids"].items():
+        relation = ("market.fact_versions_legacy" if forward is not None and name == "fact_versions"
+                    else RETAINED + "." + name)
+        if _oid(conn, relation) != expected:
+            raise RuntimeError("fact_header_handoff_relation_identity_changed")
+    retained_guards = [(raw.NAME, "trg_retained_raw_source_closed")]
+    if forward is not None:
+        _verify_forward_certificate(conn, receipt)
+    else:
+        retained_guards.append(("fact_versions", "trg_retained_source_closed"))
+    for name, trigger in retained_guards:
         closed = conn.scalar(text("""
             SELECT count(*) FROM pg_trigger
             WHERE tgrelid=to_regclass(:relation) AND tgname=:trigger
@@ -693,6 +775,42 @@ def _verify_handoff_relations(conn, receipt, *, pid):
     for relation in ("market.fact_identities", raw.SOURCE, *reference_move.RELATIONS):
         physical.verify_group(conn, relation, history=True, saved=saved, pid=pid)
     assert_fact_storage_contract(conn)
+
+
+def _verify_forward_certificate(conn, receipt):
+    from scripts.db import fact_header_forward_adoption as adoption
+    from scripts.db import archive_root_v2_online as online_archives
+    from portal.backend.db.fact_header_legacy_schema import assert_fact_header_legacy_contract
+
+    forward = receipt["forward_header"]
+    if (not isinstance(forward, dict) or forward.get("kind") != "switched"
+            or not isinstance(forward.get("operation_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", forward["operation_sha256"])
+            or forward.get("legacy_oid") != receipt["retained_relation_oids"]["fact_versions"]
+            or forward.get("retained_raw_oid") != receipt["retained_relation_oids"][raw.NAME]
+            or forward.get("archive_inventory_sha256") != receipt["archive_inventory_sha256"]):
+        raise RuntimeError("fact_header_forward_certificate_changed")
+    state = adoption._state(conn)
+    if (state is None or state["terminal"] != forward
+            or state["operation_sha256"] != forward["operation_sha256"]
+            or _forward_adoption_digest(state) != receipt.get("forward_adoption_sha256")):
+        raise RuntimeError("fact_header_forward_certificate_changed")
+    owner = online_archives._capture(forward["operation_sha256"])
+    if _oid(conn, owner.closed) is None:
+        raise RuntimeError("fact_header_forward_archive_receipt_changed")
+    closed = conn.execute(text("SELECT receipt FROM " + owner.closed + " WHERE id=1")).scalar_one()
+    if (closed.get("source_retained") is not True
+            or closed.get("inventory", {}).get("inventory_sha256") != receipt["archive_inventory_sha256"]
+            or closed.get("capture", {}).get("binding", {}).get("operation_sha256") != forward["operation_sha256"]
+            or conn.scalar(text("SELECT EXISTS(SELECT 1 FROM " + owner.queue + ")"))):
+        raise RuntimeError("fact_header_forward_archive_receipt_changed")
+    end_day = assert_fact_header_legacy_contract(conn)
+    if end_day is None or end_day.isoformat() != forward.get("end_day"):
+        raise RuntimeError("fact_header_forward_legacy_contract_changed")
+    # Physical file identities were checked during attachment and remain in
+    # the immutable receipt. Reconciliation verifies the native sealed relation;
+    # it does not rehash data or prohibit later policy-owned HDD relocation.
+
 
 POLICY_OPERATION = "qt.storage_preserving_handoff_policy.v1"
 

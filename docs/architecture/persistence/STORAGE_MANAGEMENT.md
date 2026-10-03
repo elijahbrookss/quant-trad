@@ -3491,3 +3491,30 @@ These are internal database phases. The canonical host operation must still
 bind publisher drain, physical/capacity admission, final COMMIT reconciliation,
 worker retirement, recovery activation and deployment. Disposable correctness
 tests do not establish production copy throughput or final pause duration.
+
+
+### Forward durable handoff certificate
+
+The existing fixed catalog relocation and `commit_handoff` boundaries accept an
+explicit forward adoption intent. They retain the original adoption deadline,
+physical placement/resource checks and the caller's owning SQL session. A pooled
+second session cannot borrow the controller lock. Forward catalog relocation
+admits only the two existing reference catalogues; it does not reopen the
+canceled capture or move arbitrary relations.
+
+The supervised final transaction holds the complete archive inventory through
+retained-header attachment and publishes the existing handoff certificate with
+exact newly created parent/catalog OIDs, retained legacy/raw OIDs, archive digest,
+forward terminal receipt and a digest of the original adoption journals. It does
+not label finite baseline counters as a current full-row count. Initial policy
+publication can join that same transaction. Any failure before COMMIT rolls back
+the switch, archive retirement, certificate and policy together.
+
+Outcome inspection uses the existing transaction ownership fence, exact forward
+terminal/journal binding, archive retirement and the native legacy seal/partition
+contract. It remains available after the work deadline and grants no replay,
+collection restart or source-read capability. Original file identities remain
+switch-time evidence; normal policy-owned historical relocation is not prohibited
+by treating those file numbers as permanent. Inspection is not a fresh full data
+hash proof. Canonical host request/controller integration and production physical,
+capacity, pause, recovery and fleet qualification remain separate requirements.

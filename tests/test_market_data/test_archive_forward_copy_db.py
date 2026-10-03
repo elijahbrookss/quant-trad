@@ -16,6 +16,8 @@ from scripts.db import archive_root_v2_online as online, archive_root_v2_copy as
 from scripts.db import fact_header_forward_adoption as adoption, fact_header_forward_keys as keys
 from scripts.db import fact_header_v2_capture as capture, fact_header_v2_cancel as cancellation
 from scripts.db import fact_header_v2_handoff as handoff, fact_header_v2_references as references
+from scripts.db import archive_reference_v2_placement as catalogs, fact_header_v2_copy as headers
+from scripts.db import raw_mapping_v2_copy as raw
 from tests.test_market_data.test_fact_storage_tiers_db import storage as native_storage, _placement
 from tests.test_market_data.test_archive_online_copy_db import _prepare, _drain, _synthetic_descriptor
 from tests.test_market_data.test_archive_root_copy_db import _hashes
@@ -39,12 +41,34 @@ def _original_archives(conn):
 
 
 def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage, tmp_path, monkeypatch):
-    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch)
+    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
+    with engine.begin() as conn:
+        headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
+        raw.prepare_copy(conn)
+        online.prepare(conn, source_root=options["source_root"], destination_root=options["destination_root"])
+    for _ in range(64):
+        with engine.begin() as conn:
+            if raw._inspect(conn)["baseline_complete"]:
+                raw.place_on_history(conn)
+                break
+            raw.copy_page(conn, page_rows=128)
+    else:
+        pytest.fail("raw fixture baseline did not converge")
+    for _ in range(64):
+        with engine.begin() as conn:
+            if headers._inspect_progress(conn)["identity_baseline_complete"]:
+                headers.place_identity_on_history(conn)
+                break
+            headers.copy_identity_page(conn, page_rows=128)
+    else:
+        pytest.fail("identity fixture baseline did not converge")
     roots = {name: options[name] for name in ("source_root", "destination_root")}
     with engine.begin() as conn:
         original = cancellation._capture_binding(conn)
         cancellation.cancel_attempt(conn, expected_capture=original, intent_sha256=CANCEL,
             expected_started_at=capture.inspect_capture(conn)["started_at"], **roots)
+    with engine.begin() as conn:
+        _synthetic_descriptor(conn, source, "!uncaptured-" + uuid4().hex)
     keys.prepare_keys(engine, expected_capture=original, intent_sha256=CANCEL)
     with engine.begin() as conn:
         old, old_archives, frozen = _old(conn), _original_archives(conn), _frozen_records(conn)
@@ -139,12 +163,68 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
                 online.retire_capture(conn, **roots)
             handoff.stage_forward_tables(conn, **switch)
             raise RuntimeError("rollback archive switch")
-    with engine.begin() as conn:
-        assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":owner.closed}) is None
-        assert _old(conn) == old and _original_archives(conn) == old_archives
-        with archives.verified_archive_inventory(conn, max_objects=1000, max_bytes=64*1024**2, **verification) as proof:
-            switched = handoff.stage_forward_tables(conn, **switch)
-            assert switched["receipt"]["archive_inventory_sha256"] == proof["inventory_sha256"]
+    from time import monotonic
+    from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK
+    # Use the real owning SQL session throughout relocation, switch and lost
+    # reply reconciliation; a pooled second session must not borrow its lock.
+    with engine.connect() as owning:
+        with owning.begin():
+            assert owning.scalar(text("SELECT pg_try_advisory_lock(hashtextextended(:name,0))"),
+                                 {"name": CONTROLLER_LOCK})
+            pid = owning.scalar(text("SELECT pg_backend_pid()"))
+        try:
+            with pytest.raises(RuntimeError, match="controller_active"), engine.begin() as other:
+                adoption.inspect_references(other, operation_sha256=OPERATION)
+            for relation in catalogs.RELATIONS:
+                move = dict(relation=relation, policy=options["policy"], resource_limits=options["resource_limits"],
+                            expected_started_at=started.isoformat(), placement=storage.copy_plan,
+                            forward_operation_sha256=OPERATION, connection=owning)
+                assert not catalogs.move_reference_catalog(engine, **move)["reused"]
+                assert catalogs.move_reference_catalog(engine, **move)["reused"]
+            with owning.begin():
+                assert owning.scalar(text("SELECT to_regclass(:name)"), {"name":owner.closed}) is None
+                assert _old(owning) == old and _original_archives(owning) == old_archives
+            finish = {k: v for k, v in options.items() if k != "max_page_bytes"}
+            finish.update(max_objects=1000, max_bytes=64*1024**2,
+                          forward_operation_sha256=OPERATION, forward_end_day=today,
+                          connection=owning, deadline=monotonic()+30, activate_policy=True)
+            checks = []
+            def publisher_check(conn, *, deadline):
+                checks.append(conn.scalar(text("SELECT pg_backend_pid()")))
+                assert conn is owning and checks[-1] == pid
+                if len(checks) == 2:
+                    raise RuntimeError("interrupt after forward certificate publication")
+            with pytest.raises(RuntimeError, match="after forward certificate"):
+                handoff.commit_handoff(engine, publisher_check=publisher_check, **finish)
+            with owning.begin():
+                assert not handoff.inspect_handoff(owning, policy=options["policy"], **roots)["database_handoff_committed"]
+                assert owning.scalar(text("SELECT to_regclass(:name)"), {"name":owner.closed}) is None
+            def lost_final_reply(conn):
+                commit(conn)
+                raise RuntimeError("lost final forward commit reply")
+            with monkeypatch.context() as lost:
+                lost.setattr(Connection, "_commit_impl", lost_final_reply)
+                with pytest.raises(RuntimeError, match="lost final forward commit reply"):
+                    handoff.commit_handoff(engine, publisher_check=publisher_check, **finish)
+            assert checks == [pid]*4
+            with owning.begin():
+                observed = handoff.inspect_handoff(owning, policy=options["policy"], **roots)
+                assert observed["database_handoff_committed"]
+                assert observed["receipt"]["forward_header"]["operation_sha256"] == OPERATION
+                assert handoff.inspect_handoff_policy(owning, policy=options["policy"], **roots)["policy_current"]
+                with owning.begin_nested() as changed:
+                    owning.exec_driver_sql("ALTER TABLE market.fact_versions_legacy DISABLE TRIGGER trg_seal_fact_versions_legacy")
+                    with pytest.raises(RuntimeError):
+                        handoff.inspect_handoff(owning, policy=options["policy"], **roots)
+                    changed.rollback()
+                with owning.begin_nested() as changed:
+                    owning.execute(text("UPDATE " + adoption.STATE + " SET progress='{}'::jsonb WHERE id=1"))
+                    with pytest.raises(RuntimeError, match="certificate_changed"):
+                        handoff.inspect_handoff(owning, policy=options["policy"], **roots)
+                    changed.rollback()
+        finally:
+            # Do not return a session-level owner lock to the pool.
+            owning.invalidate()
     with engine.begin() as conn:
         assert _old(conn) == old and _original_archives(conn) == old_archives
         assert _frozen_records(conn) == frozen
