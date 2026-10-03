@@ -272,6 +272,25 @@ class OnlineController:
                 finally:
                     self._final_connection = None
 
+    def _forward_session_binding(self):
+        """Immutable live-owner identity for the host login and rollback fence.
+
+        The original capture remains evidence; it is never this phase's clock.
+        Ownership checks precede callers of this serializer. This observation
+        cannot grant launch, publication, source-stop or database-switch authority.
+        """
+        if self.forward_operation_sha256 is None:
+            return {}
+        return {"forward": {
+            "schema_version": "qt.storage_online_forward_session.v1",
+            "operation_sha256": self.forward_operation_sha256,
+            "cancellation_intent_sha256": self._capture["cancellation"]["receipt"]["intent_sha256"],
+            "started_at": self._capture["started_at"].isoformat(),
+            "expires_at": self._capture["expires_at"].isoformat(),
+            "attempt_seconds": self._capture["attempt_seconds"],
+            "end_day": self.forward_end_day.isoformat(),
+        }}
+
     def final_session_observation(self, *, deadline):
         """Fresh retained-session identity/capture only; no gate or COMMIT authority."""
         if (not self._final_connection_entered or deadline != self._final_deadline
@@ -289,7 +308,8 @@ class OnlineController:
                 captured = conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1"))
                 self._check_builtin_jobs(conn)
         self._ownership(deadline=deadline)
-        return {"database": observed, "capture": captured, "backend_pid": self._final_pid,
+        return {**self._forward_session_binding(),
+                "database": observed, "capture": captured, "backend_pid": self._final_pid,
                 "builtin_jobs_admitted": self._builtin_catalog is not None,
                 "owner_pid": self._pid, "database_switch_authorized": False,
                 "collection_resume_authorized": False, "runtime_activation_authorized": False}
@@ -1124,7 +1144,7 @@ class OnlineController:
                                 self._check_builtin_jobs(conn)
                                 if self._job_catalog(conn) != self._jobs_catalog:
                                     raise RuntimeError("storage_online_job_definitions_changed")
-                                session = {"database": database,
+                                session = {**self._forward_session_binding(), "database": database,
                                     "capture": conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1")),
                                     "backend_pid": pid, "owner_pid": self._pid,
                                     "builtin_jobs_admitted": self._builtin_catalog is not None,

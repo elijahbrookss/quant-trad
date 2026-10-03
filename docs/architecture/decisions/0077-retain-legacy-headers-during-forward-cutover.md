@@ -371,3 +371,13 @@ completed indexes and original deadlines; invalid partial indexes still refuse
 without repair. The host route must select the supervised entrypoint and supply
 measured allowances. Disposable cancellation/reentry tests cannot establish
 production build duration or collection impact.
+
+The final-session wire observation now includes the exact forward intent,
+committed cancellation intent, original adoption start/expiry/duration and UTC
+end day. The host login and gated rollback verifier permits equal owner/backend
+PIDs only when its already-admitted binding contains that exact, valid forward
+identity. A reply cannot opt a legacy host binding into forward mode; absent,
+changed or malformed identities refuse. The original capture remains separate
+evidence and never supplies the forward work clock. This wire integration does
+not yet create the canonical forward publication/request/worker authority or
+admit a production source stop.

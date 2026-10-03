@@ -309,6 +309,7 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
                 break
         else:
             pytest.fail("forward controller reproof did not converge")
+        worker.admit_builtin_database_jobs()
         deadline = monotonic()+30
         # Final delta cannot restart the finite adoption scan. The immutable
         # mirrors already keep committed source writes in the adopted targets.
@@ -316,6 +317,20 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
         with worker.final_database_session(deadline=deadline):
             assert worker._final_connection is worker._owner
             assert worker._final_pid == worker._pid
+            from scripts.automation import storage_online_final as host_final
+            session = worker.final_session_observation(deadline=deadline)
+            forward_binding = session["forward"]
+            assert forward_binding["operation_sha256"] == OPERATION
+            assert forward_binding["started_at"] == started.isoformat()
+            assert forward_binding["expires_at"] == expires.isoformat()
+            assert forward_binding["end_day"] == today.isoformat()
+            assert host_final._valid_forward_session(forward_binding)
+            binding = dict(controller_id=worker.controller_id, capture=session["capture"], forward=forward_binding)
+            reply = dict(controller_id=worker.controller_id, operation="final_session_check", state="background",
+                bound_final_deadline=deadline, last_sequence=2, final_switch_authorized=False,
+                collection_resume_authorized=False, result=session)
+            assert host_final._final_session_reply(reply, operation="final_session_check", binding=binding,
+                deadline=deadline, sequence=1)[0] == session
             commit = Connection._commit_impl
             switching = set()
             def observe(conn, cursor, statement, parameters, context, executemany):

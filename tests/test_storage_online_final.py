@@ -982,3 +982,47 @@ def test_host_commit_intent_is_once_only_and_never_grants_runtime(guarded_source
             assert (path/final.STATE).read_bytes() == before
         assert calls.count("commit_database") == (0 if fault == "gate" else 1)
         assert calls.count("inspect_outcome") == (0 if fault in {"lost_reply", "bad_reply", "gate"} else 1)
+
+
+@pytest.mark.parametrize("forward", [False, True])
+@pytest.mark.parametrize("fault", [None, "wrong_pid", "boolean_pid", "reply_only", "missing_reply",
+    "operation", "cancellation", "started_at", "expires_at", "attempt_seconds", "end_day", "malformed_binding"])
+def test_final_session_requires_exact_preadmitted_owner(forward, fault):
+    from copy import deepcopy
+    owner = dict(schema_version="qt.storage_online_forward_session.v1",
+        operation_sha256="a"*64, cancellation_intent_sha256="b"*64,
+        started_at="2026-10-03T00:00:00+00:00", expires_at="2026-10-03T01:00:00+00:00",
+        attempt_seconds=3600, end_day="2026-10-04")
+    binding = dict(controller_id=CONTROLLER, capture={"original": "capture"})
+    result = dict(database=dict(cluster="1234", oid=123, name="owned", allow_connections=True),
+        capture=binding["capture"], backend_pid=1 if forward else 2, owner_pid=1,
+        builtin_jobs_admitted=True, database_switch_authorized=False,
+        collection_resume_authorized=False, runtime_activation_authorized=False)
+    if forward:
+        binding["forward"] = deepcopy(owner)
+        result["forward"] = deepcopy(owner)
+    if fault == "wrong_pid": result["backend_pid"] = 2 if forward else 1
+    elif fault == "boolean_pid": result["backend_pid"] = True
+    elif fault == "reply_only":
+        binding.pop("forward", None)
+        result.update(forward=deepcopy(owner), backend_pid=1)
+    elif fault == "missing_reply":
+        binding["forward"] = deepcopy(owner)
+        result.pop("forward", None)
+    elif fault == "malformed_binding":
+        binding["forward"] = {**owner, "attempt_seconds": True}
+        result.update(forward=deepcopy(binding["forward"]), backend_pid=1)
+    elif fault is not None:
+        result["forward"] = deepcopy(owner)
+        key = {"operation": "operation_sha256", "cancellation": "cancellation_intent_sha256"}.get(fault, fault)
+        result["forward"][key] = 3599 if key == "attempt_seconds" else "changed"
+    reply = dict(controller_id=CONTROLLER, operation="final_session_check", state="background",
+        bound_final_deadline=20., last_sequence=2, final_switch_authorized=False,
+        collection_resume_authorized=False, result=result)
+    if fault is None:
+        assert final._final_session_reply(reply, operation="final_session_check", binding=binding,
+            deadline=20., sequence=1) == (result, 2)
+    else:
+        with pytest.raises(RuntimeError, match="login_worker_reply_invalid"):
+            final._final_session_reply(reply, operation="final_session_check", binding=binding,
+                deadline=20., sequence=1)

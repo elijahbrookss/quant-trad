@@ -3548,3 +3548,13 @@ reentry and a caller deadline can only shorten it. Completed indexes survive a
 lost reply and are verified before reuse. This is net filesystem supervision,
 not per-backend WAL attribution or a production size/timing estimate. The
 canonical forward host route still must invoke and qualify this boundary.
+
+The final-session wire observation now includes the exact forward intent,
+committed cancellation intent, original adoption start/expiry/duration and UTC
+end day. The host login and gated rollback verifier permits equal owner/backend
+PIDs only when its already-admitted binding contains that exact, valid forward
+identity. A reply cannot opt a legacy host binding into forward mode; absent,
+changed or malformed identities refuse. The original capture remains separate
+evidence and never supplies the forward work clock. This wire integration does
+not yet create the canonical forward publication/request/worker authority or
+admit a production source stop.

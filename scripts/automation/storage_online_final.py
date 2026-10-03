@@ -5,7 +5,7 @@ Internal source abort requires the live SQL fence; intent survives every outcome
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
@@ -941,6 +941,44 @@ _GATE_OBSERVE = """SELECT json_build_object(
 """
 
 
+def _valid_forward_session(value):
+    """Validate only wire identity; never infer forward authority from a reply.
+
+    A host owner must have admitted and persisted this exact identity before
+    login closure. Legacy bindings retain their distinct-session requirement.
+    Fresh request/publication and actual SQL admission remain separate owners.
+    """
+    if (not isinstance(value, dict) or set(value) != {
+            "schema_version", "operation_sha256", "cancellation_intent_sha256",
+            "started_at", "expires_at", "attempt_seconds", "end_day"}
+            or value["schema_version"] != "qt.storage_online_forward_session.v1"
+            or any(not isinstance(value[k], str) or not re.fullmatch(r"[0-9a-f]{64}", value[k])
+                   for k in ("operation_sha256", "cancellation_intent_sha256"))
+            or value["operation_sha256"] == value["cancellation_intent_sha256"]
+            or type(value["attempt_seconds"]) is not int
+            or not 30 <= value["attempt_seconds"] <= 96*3600
+            or any(not isinstance(value[k], str) for k in ("started_at", "expires_at", "end_day"))):
+        return False
+    try:
+        start, end = (datetime.fromisoformat(value[k]) for k in ("started_at", "expires_at"))
+        return (start.tzinfo is not None and end.tzinfo is not None
+                and end-start == timedelta(seconds=value["attempt_seconds"])
+                and date.fromisoformat(value["end_day"]).isoformat() == value["end_day"])
+    except ValueError:
+        return False
+
+
+def _session_owner_matches(result, binding):
+    """Same PID is allowed only by the exact pre-admitted forward binding."""
+    if any(type(result.get(k)) is not int or result[k] <= 0 for k in ("backend_pid", "owner_pid")):
+        return False
+    if "forward" not in binding:
+        return "forward" not in result and result["backend_pid"] != result["owner_pid"]
+    return (_valid_forward_session(binding["forward"])
+            and result.get("forward") == binding["forward"]
+            and result["backend_pid"] == result["owner_pid"])
+
+
 def _final_session_reply(reply, *, operation, binding, deadline, sequence, state="background"):
     """Validate a fresh same-worker session observation, without granting authority."""
     result = reply.get("result") if isinstance(reply, dict) else None
@@ -954,8 +992,7 @@ def _final_session_reply(reply, *, operation, binding, deadline, sequence, state
             or not _valid_database_gate(result["database"])
             or result.get("builtin_jobs_admitted") is not True
             or result.get("capture") != binding["capture"]
-            or any(type(result.get(k)) is not int or result[k] <= 0 for k in ("backend_pid", "owner_pid"))
-            or result["backend_pid"] == result["owner_pid"]
+            or not _session_owner_matches(result, binding)
             or any(result.get(k) is not False for k in ("database_switch_authorized",
                 "collection_resume_authorized", "runtime_activation_authorized"))):
         raise RuntimeError("storage_online_login_worker_reply_invalid")
