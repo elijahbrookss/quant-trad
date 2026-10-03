@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/automation/storage_online_forward_worker.py
+  - tests/test_storage_online_forward_worker.py
   - scripts/automation/storage_online_forward.py
   - tests/test_storage_online_forward.py
   - tests/test_market_data/test_archive_forward_copy_db.py
@@ -3591,3 +3593,30 @@ remains blocked by the terminal owner until a separately verified canonical
 forward worker route owns those clocks and authority. Interrupted native
 publication and invocation must be qualified before production use; private-file
 unit tests do not establish full runtime, cardinality, pause or capacity admission.
+
+
+### Confined worker preparation clocks
+
+The fixed worker entrypoint explicitly selects the forward request after its
+existing image, source-read identity and database checks. It calls supervised
+composite-key preparation under one persisted background deadline (at most
+3600 seconds). Only after verifying the complete keys and their exact OIDs does
+it persist a separate initialization receipt (at most 600 seconds), before
+installing adoption or archive guards. It never calls expired capture preparation
+or changes the original capture/initial receipt.
+
+The initializer retains its actual SQL session and storage/controller exclusion.
+The existing physical inventory and resource watcher bound that same session.
+Adoption, archive interval capture and the complete initialization receipt commit
+in one transaction. Interruption rolls them back while retaining the initial
+intent and completed keys; reentry keeps their original clocks. A lost COMMIT
+reply reconciles the same complete record. A complete initializer verifies the
+original active adoption instead of building keys or starting another clock.
+Foreign requests, changed keys, expired incomplete initialization and retired
+adoption refuse. Source/copy/queue rows and original cancellation remain intact.
+
+This connection does not admit the canonical host launch. Host verification of
+the completed publication/cancellation, original retired worker, actual new phase
+clocks and login-gate authority remains required, as do production physical and
+pause qualification, recovery and deployment. A direct worker or small disposable
+fixture result cannot grant those authorities or establish production performance.

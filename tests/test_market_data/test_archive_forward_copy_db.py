@@ -40,7 +40,7 @@ def _original_archives(conn):
             for name in (online.STATE, online.PROGRESS, online.QUEUE)}
 
 
-def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None):
+def _prepare_canceled(storage, tmp_path, monkeypatch):
     engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
@@ -69,6 +69,12 @@ def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None):
             expected_started_at=capture.inspect_capture(conn)["started_at"], **roots)
     with engine.begin() as conn:
         _synthetic_descriptor(conn, source, "!uncaptured-" + uuid4().hex)
+    return engine, options, source, original
+
+
+def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None):
+    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
+    roots = {name: options[name] for name in ("source_root", "destination_root")}
     if key_preparation is None:
         keys.prepare_keys(engine, expected_capture=original, intent_sha256=CANCEL)
     else:
@@ -431,3 +437,90 @@ def test_forward_key_watch_cancels_same_session_and_preserves_committed_index(st
             assert complete["expires_at"] == partial["expires_at"]
         assert run()["reused"]
     _prepare_forward(storage, tmp_path, monkeypatch, key_preparation=prepare)
+
+
+@pytest.mark.parametrize("outcome", ["recover", "expire"])
+def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp_path, monkeypatch, outcome):
+    from datetime import datetime, timezone
+    import time
+    from scripts.automation import storage_online_forward_worker as worker
+    from scripts.automation.storage_host_boundary import digest
+    from tests.test_storage_online_forward_worker import _request
+
+    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
+    request = _request(original)
+    request["forward"]["cancellation_intent_sha256"] = CANCEL
+    request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
+    operation = request["forward"]["operation_sha256"]
+    kwargs = dict(targets=(storage.copy_plan.recent, storage.copy_plan.history),
+        policy=options["policy"], limits=options["resource_limits"],
+        source=options["source_root"], destination=options["destination_root"],
+        key_seconds=600, initial_seconds=30 if outcome == "expire" else 600)
+    with engine.begin() as conn:
+        old, archives_before = _old(conn), _original_archives(conn)
+    prepare = online.prepare
+    def interrupted(conn, **args):
+        prepare(conn, **args)
+        raise RuntimeError("interrupt after forward archive initialization")
+    with monkeypatch.context() as failing:
+        failing.setattr(online, "prepare", interrupted)
+        with pytest.raises(RuntimeError, match="interrupt after forward"):
+            worker.prepare_forward(engine, request, **kwargs)
+    with engine.begin() as conn:
+        initial = worker._initial(conn)
+        key_state = keys._read_state(conn)
+        assert not initial["complete"] and key_state["complete"]
+        assert adoption._state(conn) is None
+        assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":online._capture(operation).state}) is None
+        assert _old(conn) == old and _original_archives(conn) == archives_before
+        # Source remains writable after rolled-back guards and archive capture.
+        _synthetic_descriptor(conn, source, "!worker-interrupted-"+uuid4().hex)
+    def never_rebuild(*args, **kwargs):
+        pytest.fail("initialization retry attempted key phase again")
+    monkeypatch.setattr(keys, "prepare_keys_supervised", never_rebuild)
+    if outcome == "expire":
+        time.sleep(max(0, (initial["expires_at"]-datetime.now(timezone.utc)).total_seconds())+0.1)
+        with pytest.raises(RuntimeError, match="initialization_expired"):
+            worker.prepare_forward(engine, request, **kwargs)
+        with engine.begin() as conn:
+            assert worker._initial(conn) == initial and keys._read_state(conn) == key_state
+            assert adoption._state(conn) is None
+            assert _old(conn) == old
+        return
+    commit = Connection._commit_impl
+    lost = [False]
+    def lost_commit(conn):
+        # Lose only the initialization COMMIT reply, after both SQL owners and
+        # the complete receipt became durable in the same transaction.
+        state = worker._initial(conn)
+        complete = state is not None and state["complete"]
+        commit(conn)
+        if complete and not lost[0]:
+            lost[0] = True
+            raise RuntimeError("lost forward initialization COMMIT")
+    with monkeypatch.context() as failing:
+        failing.setattr(Connection, "_commit_impl", lost_commit)
+        with pytest.raises(RuntimeError, match="lost forward initialization COMMIT"):
+            worker.prepare_forward(engine, request, **kwargs)
+    assert lost[0]
+    with engine.begin() as conn:
+        complete = worker._initial(conn)
+        adopted = adoption._state(conn)
+        assert complete == {**initial, "complete":True}
+        assert keys._read_state(conn) == key_state
+        assert _old(conn) == old
+    placement, started = worker.prepare_forward(engine, request, **kwargs)
+    assert placement == storage.copy_plan and started == adopted["started_at"].isoformat()
+    with engine.begin() as conn:
+        assert worker._initial(conn) == complete and adoption._state(conn) == adopted
+        assert keys._read_state(conn) == key_state
+        assert _old(conn) == old
+    changed = dict(request, source_inode=request["source_inode"]+1)
+    with pytest.raises(RuntimeError, match="initialization_binding_changed"):
+        worker.prepare_forward(engine, changed, **kwargs)
+    # A completed initializer still rejects an expired/retired adoption; it
+    # cannot manufacture a replacement operation or delete retained evidence.
+    with engine.begin() as conn:
+        adoption.retire_adoption(conn, operation_sha256=operation)
+    with pytest.raises(RuntimeError, match="adoption_retired"):
+        worker.prepare_forward(engine, request, **kwargs)

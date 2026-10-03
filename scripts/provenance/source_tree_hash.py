@@ -19,6 +19,7 @@ OPERATOR_FILES = (
     "scripts/automation/storage_host_boundary.py",
     "scripts/automation/storage_online_drain.py",
     "scripts/automation/storage_online_worker.py",
+    "scripts/automation/storage_online_forward_worker.py",
     "scripts/db/archive_file_v2_proof.py",
     "scripts/db/archive_root_v2_online.py",
     "scripts/db/fact_header_v2_cancel.py",

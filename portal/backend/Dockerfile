@@ -66,6 +66,7 @@ COPY scripts/automation/storage_online_controller.py \
      scripts/automation/storage_host_boundary.py \
      scripts/automation/storage_online_drain.py \
      scripts/automation/storage_online_worker.py \
+     scripts/automation/storage_online_forward_worker.py \
      scripts/automation/storage_recovery_prepare.py \
      scripts/automation/storage_host_prepare.py \
      scripts/automation/storage_device_audit.py /app/scripts/automation/

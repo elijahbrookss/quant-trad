@@ -248,15 +248,17 @@ def prepare_capture(engine, request, *, targets, policy, limits, source):
 
 
 def validate_request_shape(request):
-    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id", "capture_preparation"} != {
+    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id", "capture_preparation", "forward"} != {
             "schema_version", "source_revision", "source_tree_hash", "database_identity",
             "source_device", "source_inode", "expected_started_at", "policy",
             "resource_limits", "max_page_bytes", "max_objects", "max_bytes",
             "page_rows", "command_seconds"}
             or request["schema_version"] != "qt.storage_online_worker.v1"):
         raise ValueError("storage_online_request_invalid")
+    from scripts.automation.storage_online_forward_worker import request_binding
     archive_group_override(request)
     capture_preparation(request)
+    request_binding(request)
 
 
 def request_configuration(request, inventory_path):
@@ -394,15 +396,26 @@ def prepared_controller_main():
                         "WHERE d.datname=current_database()"))
                     if identity != request["database_identity"]:
                         raise RuntimeError("storage_online_database_binding_changed")
-                placement, started = prepare_capture(engine, request, targets=targets,
-                    policy=policy, limits=limits, source=source)
+                from scripts.automation.storage_online_forward_worker import request_binding, prepare_forward
+                forward = request_binding(request)
+                controller_options = {}
+                if forward is None:
+                    placement, started = prepare_capture(engine, request, targets=targets,
+                        policy=policy, limits=limits, source=source)
+                else:
+                    from datetime import date
+                    placement, started = prepare_forward(engine, request, targets=targets,
+                        policy=policy, limits=limits, source=source,
+                        destination=Path("/qt-history/archives/objects"))
+                    controller_options = dict(forward_operation_sha256=forward["operation_sha256"],
+                        forward_end_day=date.fromisoformat(forward["end_day"]))
                 if {t.target_id: t for t in targets} != {
                         t.target_id: t for t in (placement.recent, placement.history)}:
                     raise RuntimeError("storage_online_inventory_binding_changed")
                 with OnlineController(engine, placement=placement, policy=policy,
                         resource_limits=limits, source_root=source,
                         destination_root=Path("/qt-history/archives/objects"), expected_started_at=started,
-                        **{key: request[key] for key in (
+                        **controller_options, **{key: request[key] for key in (
                             "max_page_bytes", "max_objects",
                             "max_bytes", "page_rows", "command_seconds")}) as controller:
                     controller.admit_builtin_database_jobs()
