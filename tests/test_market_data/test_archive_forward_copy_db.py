@@ -325,6 +325,12 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
             assert worker._final_pid == worker._pid
             from scripts.automation import storage_online_final as host_final
             session = worker.final_session_observation(deadline=deadline)
+            assert session["capture"]["operation_sha256"] == OPERATION
+            assert session["capture"]["started_at"] == started.isoformat()
+            assert session["capture"]["expires_at"] == expires.isoformat()
+            assert "prepared_at" not in session["capture"]
+            from scripts.automation.storage_online_forward_worker import capture_binding
+            assert session["capture"] == capture_binding(worker._capture)
             forward_binding = session["forward"]
             assert forward_binding["operation_sha256"] == OPERATION
             assert forward_binding["started_at"] == started.isoformat()

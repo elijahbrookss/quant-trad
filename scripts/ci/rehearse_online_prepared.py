@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"src"))
 from scripts.automation import storage_host_boundary as host_boundary
+from scripts.automation import storage_online_terminal as terminal
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image',required=True)
 parser.add_argument('--database-image',required=True)
@@ -22,6 +23,7 @@ parser.add_argument('--replacement-package-image',help='qualify an actual new pa
 parser.add_argument('--terminal-cancellation',action='store_true',help='qualify preserving cancellation through a read-only mounted worker and lost reply reconciliation')
 parser.add_argument('--terminal-cancellation-expired',action='store_true',help='wait for the original fixture capture to expire naturally before preserving cancellation')
 parser.add_argument('--forward-package-image',help='qualify separate interrupted forward package publication after preserving fixture cancellation')
+parser.add_argument('--forward-worker',action='store_true',help='qualify interrupted durable forward launch, actual confined worker and host observation')
 parser.add_argument('--terminal-image',help='use an independently attested production image for the fixed terminal worker')
 parser.add_argument('--deadline-amendment',action='store_true',help='qualify stopped-worker deadline amendment and actual reentry without a final handoff')
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
@@ -51,6 +53,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.forward_worker and not options.forward_package_image:
+ parser.error('--forward-worker requires --forward-package-image')
 if options.forward_package_image and not options.terminal_cancellation:
  parser.error('--forward-package-image requires --terminal-cancellation')
 if options.terminal_image and not options.terminal_cancellation:
@@ -311,6 +315,7 @@ os.chown(root,70,70)
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
    '--env','QT_ONLINE_TERMINAL_FIXTURE='+str(int(options.terminal_cancellation)),
+   '--env','QT_ONLINE_FORWARD_FIXTURE='+str(int(options.forward_worker)),
    '--env','QT_ONLINE_TERMINAL_EXPIRED='+str(int(options.terminal_cancellation_expired)),
    '--env','QT_ONLINE_FULL_OPERATION='+str(int(options.full_operation)),
    '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
@@ -558,10 +563,15 @@ os.chown(root,70,70)
    report['terminal_cancellation']=rehearse_terminal_cancellation(state=state,kwargs=kwargs,
      history_uuid=history_uuid,control=control,source=source,owned=owned,
      expired=options.terminal_cancellation_expired,terminal_image=options.terminal_image)
+   if options.forward_worker:
+    # Retire the SQL-writing fixture before admitting the actual worker's
+    # complete mount/namespace inventory; preserve its post-cancel records.
+    (control/'finished').write_text('finished');fixture.wait(timeout=30)
+    assert fixture.returncode==0 and (control/'terminal-verified').exists()
    if options.forward_package_image:
     from scripts.ci.online_operation_fixture import rehearse_forward_package
     report['forward_package']=rehearse_forward_package(state=state,kwargs=kwargs,
-      candidate_image=options.forward_package_image,source=source)
+      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()
@@ -1485,7 +1495,11 @@ finally:
   mine=details['Config']['Labels'].get('qt.disposable')==project
   if canonical and details['Config']['Labels'].get('com.docker.compose.project')==project:mine=True
   if name==project+'-storage-online' and (state/launch._STATE).exists():
-   mine=json.loads((state/launch._STATE).read_text())['container_id']==details['Id']
+   created=host_boundary.load_receipt(state/launch._STATE)
+   mine=(created['container_id']==details['Id'] or (created['container_id'] is None
+       and details['State']['Status']=='created' and details['State']['Pid']==0
+       and details['Image']==created['binding']['image']
+       and details['Config']['Labels'].get('qt.storage.online')==created['binding']['request_sha256']))
   if options.deadline_amendment and (state/'storage-online-deadline-amendment.json').exists():
    amendment_saved=host_boundary.load_receipt(state/'storage-online-deadline-amendment.json')
    launch_saved=host_boundary.load_receipt(state/launch._STATE)
@@ -1533,6 +1547,9 @@ finally:
   if r.returncode==0:history.rmdir()
  report['remaining_containers']=run(['ps','-aq','--filter','name='+project]).stdout.strip()
  report['cleanup_failures']=cleanup_failures
+ if options.forward_worker and not report.get('forward_package',{}).get('forward_worker_started'):
+  report['forward_worker_not_qualified']=True
+  report['passed']=False
  if options.forward_package_image and not report.get('forward_package',{}).get('interrupted_publication_reconciled'):
   report['forward_publication_not_qualified']=True
   report['passed']=False
@@ -1541,3 +1558,5 @@ finally:
  print('QT_PREPARED_HOST_OUTCOME='+json.dumps(report),flush=True)
  if cleanup_failures or report['remaining_containers'] or report.get('cleanup_exit_code',0):raise RuntimeError('owned_host_fixture_cleanup_failed')
  if report.get('forward_publication_not_qualified'):raise RuntimeError('owned_forward_publication_not_qualified')
+
+ if report.get('forward_worker_not_qualified'):raise RuntimeError('owned_forward_worker_not_qualified')

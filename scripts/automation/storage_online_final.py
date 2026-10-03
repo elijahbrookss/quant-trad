@@ -332,13 +332,31 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id, 
     rows = initial._admit_source(state_root, preparation, require_running=False, operator_id=worker_id,
         **({"maintenance": True} if session is not None else {}))
     _admit_mount_writers(rows, operator_id=worker_id)
-    capture = (session["capture"] if session is not None else json.loads(host_boundary.database_query(rows["tsdb"]["id"],
-        "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1")))
-    observed = {"started_at": capture["prepared_at"], "seconds": capture.get("attempt_seconds", 86400)}
-    deadline = launch.admit_capture(request, observed)
-    if (deadline != worker["deadline"]
-            or (launch.capture_preparation(request) is not None and worker.get("capture") != observed)):
-        raise RuntimeError("storage_online_final_original_capture_changed")
+    forward_owner = None
+    from scripts.automation.storage_online_forward_worker import request_binding, capture_binding
+    if request_binding(request) is not None:
+        from scripts.automation import storage_online_forward as forward
+        # Publication and durable launch precede any authority carried by the
+        # owning SQL session. Closed logins must never force a reconnect.
+        forward.inspect_published_operation(state_root, request=request)
+        if session is None:
+            initialization, capture = forward.observe_adoption(rows["tsdb"]["id"])
+        else:
+            pinned = forward.load_launch(state_root)
+            initialization, capture = pinned["initialization"], pinned["capture"]
+            if session["capture"] != capture_binding(capture):
+                raise RuntimeError("storage_forward_retained_session_proof_changed")
+        forward_owner, deadline = forward.admit_launched_adoption(state_root, request, worker,
+            initialization=initialization, capture=capture)
+        capture = capture_binding(capture)
+    else:
+        capture = (session["capture"] if session is not None else json.loads(host_boundary.database_query(rows["tsdb"]["id"],
+            "SELECT to_jsonb(c)::text FROM qt_fact_header_cutover_v2.capture c WHERE id=1")))
+        observed = {"started_at": capture["prepared_at"], "seconds": capture.get("attempt_seconds", 86400)}
+        deadline = launch.admit_capture(request, observed)
+        if (deadline != worker["deadline"]
+                or (launch.capture_preparation(request) is not None and worker.get("capture") != observed)):
+            raise RuntimeError("storage_online_final_original_capture_changed")
     allowance = request["resource_limits"]["movement_timeout_seconds"]
     if type(allowance) is not int or not 1 <= allowance <= 96*3600:
         raise RuntimeError("storage_online_final_resource_bound_invalid")
@@ -346,6 +364,8 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id, 
         worker_id=worker_id, worker_started_at=runtime["StartedAt"], worker_pid=runtime["Pid"],
         preparation_sha256=host_boundary.digest(preparation), worker_sha256=host_boundary.digest(worker),
         request_sha256=digest, capture=capture)
+    if forward_owner is not None:
+        binding["forward"] = forward_owner
     return binding, preparation, rows, {"seconds": allowance, "capture_deadline": worker["deadline"]}
 
 

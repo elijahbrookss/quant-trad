@@ -1,8 +1,8 @@
 """Preserving package publication for a separately owned forward operation.
 
-This canonical host phase publishes metadata only. The canceled plan/capture,
-terminal receipt and retired worker remain evidence. It grants no worker start,
-new capture, source stop, database switch, recovery or deployment authority.
+Package publication preserves the canceled plan/capture, terminal receipt and
+retired worker as evidence. Separate launch intent owns worker progression and
+actual preparation clocks; publication alone grants no launch or source stop.
 """
 from __future__ import annotations
 
@@ -434,4 +434,239 @@ def observe_adoption(database_id):
         raise RuntimeError("storage_forward_active_adoption_required")
     initialization = {k:v for k,v in rows["initialization"][0].items() if k != "id"}
     capture = {k:v for k,v in rows["adoption"][0].items() if k not in {"id", "terminal"}}
-    return initialization, capture
+    return _clock_row(initialization), _clock_row(capture)
+
+
+LAUNCH_STATE = "storage-online-forward-launch.json"
+
+
+def load_launch(root):
+    return host.load_receipt(root/LAUNCH_STATE, max_bytes=_MAX_BYTES)
+
+
+def save_launch(root, saved, *, initial=False):
+    # Full proof metadata is intentionally larger than the ordinary 64KiB hold.
+    # Refuse BEFORE publication if the existing 2MiB metadata budget is exceeded.
+    if len(json.dumps(saved, sort_keys=True, allow_nan=False).encode())+1 > _MAX_BYTES:
+        raise RuntimeError("storage_forward_launch_receipt_budget_exceeded")
+    host.save_receipt(root/LAUNCH_STATE, saved, initial=initial)
+
+
+def _launch_clock(saved):
+    import math
+    wall, mono, boot = time.time(), time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
+    fields = ("started_at", "started_monotonic", "started_boot", "key_deadline", "key_deadline_monotonic", "key_deadline_boot")
+    if (saved.get("boot_id") != terminal._boot()
+            or any(type(saved.get(k)) not in (int, float) or not math.isfinite(saved[k]) for k in fields)
+            or saved["key_deadline"] != saved["started_at"]+3600
+            or saved["key_deadline_monotonic"] != saved["started_monotonic"]+3600
+            or saved["key_deadline_boot"] != saved["started_boot"]+3600
+            or wall < saved["started_at"] or mono < saved["started_monotonic"] or boot < saved["started_boot"]):
+        raise RuntimeError("storage_forward_launch_clock_changed")
+    return wall, mono, boot
+
+
+def _launch_remaining(saved, deadline):
+    wall, mono, boot = _launch_clock(saved)
+    elapsed_limit = deadline-saved["started_at"]
+    remaining = min(deadline-wall, saved["started_monotonic"]+elapsed_limit-mono,
+        saved["started_boot"]+elapsed_limit-boot)
+    if remaining <= 0:
+        raise RuntimeError("storage_forward_launch_original_phase_expired")
+    return remaining
+
+
+def _worker_transition(before, after, saved):
+    fields = {"binding", "container_id", "contract", "deadline"}
+    if (set(before) != fields or set(after) != fields or before["binding"] != after["binding"]
+            or any(before[k] is not None and before[k] != after[k] for k in ("container_id", "contract", "deadline"))
+            or (after["container_id"] is None) != (after["contract"] is None)
+            or after["deadline"] != (saved["deadline"] if saved["capture"] is not None else None)):
+        raise RuntimeError("storage_forward_worker_progress_changed")
+
+
+def launch_intent(root, published, worker_binding):
+    """Own the exact published worker preimage before any container creation.
+
+    Caller retains the deployment lock and fresh source/runtime admission. Lost
+    worker-file publication accepts only durable old/new preimages; no restart,
+    source mutation or renewal is inferred from this receipt.
+    """
+    root = launch._canonical(root)
+    if inspect_published_operation(root) != published or worker_binding != published["new_worker"]["binding"]:
+        raise RuntimeError("storage_forward_launch_publication_changed")
+    publication._retired(published["old_worker"])
+    path = root/LAUNCH_STATE
+    current = host.load_receipt(root/launch._STATE)
+    owner = dict(publication_sha256=published["intent_sha256"],
+        request_sha256=worker_binding["request_sha256"], worker_binding_sha256=host.digest(worker_binding),
+        operation_sha256=published["forward"]["operation_sha256"])
+    if not os.path.lexists(path):
+        if current != published["new_worker"]:
+            raise RuntimeError("storage_forward_launch_preimage_changed")
+        wall, mono, boot = time.time(), time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
+        saved = dict(schema_version="qt.storage_online_forward_launch.v1", binding=owner,
+            boot_id=terminal._boot(), started_at=wall, started_monotonic=mono, started_boot=boot,
+            key_deadline=wall+3600, key_deadline_monotonic=mono+3600, key_deadline_boot=boot+3600,
+            keys=None, initialization=None, capture=None, forward=None, deadline=None,
+            worker=current, pending_worker=None)
+        save_launch(root, saved, initial=True)
+    saved = load_launch(root)
+    fields = {"schema_version", "binding", "boot_id", "started_at", "started_monotonic", "started_boot",
+        "key_deadline", "key_deadline_monotonic", "key_deadline_boot", "keys", "initialization",
+        "capture", "forward", "deadline", "worker", "pending_worker"}
+    if (set(saved) != fields or saved["schema_version"] != "qt.storage_online_forward_launch.v1"
+            or saved["binding"] != owner or saved["worker"]["binding"] != worker_binding
+            or current not in (saved["worker"], saved["pending_worker"])):
+        raise RuntimeError("storage_forward_launch_intent_changed")
+    _launch_clock(saved)
+    if saved["pending_worker"] is not None:
+        _worker_transition(saved["worker"], saved["pending_worker"], saved)
+        host.save_receipt(root/launch._STATE, saved["pending_worker"], initial=False)
+        saved["worker"], saved["pending_worker"] = saved["pending_worker"], None
+        save_launch(root, saved)
+    return saved
+
+
+def save_launched_worker(root, saved, worker):
+    """Journal the exact next worker file before publishing that progression."""
+    path = root/LAUNCH_STATE
+    if (load_launch(root) != saved or saved["pending_worker"] is not None
+            or host.load_receipt(root/launch._STATE) != saved["worker"]):
+        raise RuntimeError("storage_forward_worker_preimage_changed")
+    _worker_transition(saved["worker"], worker, saved)
+    saved["pending_worker"] = deepcopy(worker)
+    save_launch(root, saved)
+    host.save_receipt(root/launch._STATE, worker, initial=False)
+    saved["worker"], saved["pending_worker"] = deepcopy(worker), None
+    save_launch(root, saved)
+
+
+def observe_preparation(database_id):
+    """Read fixed preparation rows; absence is only a startup observation."""
+    names = ("qt_fact_header_forward_v2.key_preparation", "qt_fact_header_forward_v2.initialization")
+    present = json.loads(host.database_query(database_id,
+        "SELECT json_build_array(to_regclass('"+names[0]+"') IS NOT NULL,"
+        "to_regclass('"+names[1]+"') IS NOT NULL)::text", read_only_seconds=5))
+    if not isinstance(present, list) or len(present) != 2 or any(type(v) is not bool for v in present):
+        raise RuntimeError("storage_forward_preparation_observation_invalid")
+    expressions = ["(SELECT json_agg(r) FROM (SELECT * FROM "+name+" LIMIT 2) r)" if exists else "NULL"
+        for name, exists in zip(names, present)]
+    values = json.loads(host.database_query(database_id,
+        "SELECT json_build_array("+",".join(expressions)+")::text", read_only_seconds=5))
+    if not isinstance(values, list) or len(values) != 2:
+        raise RuntimeError("storage_forward_preparation_observation_invalid")
+    result = []
+    for exists, rows in zip(present, values):
+        if not exists and rows is None:
+            result.append(None)
+        elif (isinstance(rows, list) and len(rows) == 1 and type(rows[0].get("id")) is int and rows[0]["id"] == 1):
+            result.append(_clock_row({k:v for k,v in rows[0].items() if k != "id"}))
+        else:
+            raise RuntimeError("storage_forward_preparation_observation_invalid")
+    return tuple(result)
+
+
+def admit_startup(root, saved, request, *, keys, initialization, capture=None):
+    """Pin actual SQL phase receipts under the original host launch clock.
+
+    A completed adoption can outlive initialization. An unfinished initializer
+    cannot, and neither worker retry nor a delayed host observation creates time.
+    """
+    from datetime import datetime, timedelta
+    from scripts.automation.storage_online_forward_worker import request_binding
+    intent = request_binding(request)
+    if (intent is None or saved["binding"]["operation_sha256"] != intent["operation_sha256"]
+            or saved["binding"]["request_sha256"] != publication._sha(publication.request_bytes(request))
+            or load_launch(root) != saved):
+        raise RuntimeError("storage_forward_startup_request_changed")
+    before = deepcopy(saved)
+    wall, _, _ = _launch_clock(saved)
+    def epoch(value):
+        stamp = datetime.fromisoformat(value)
+        if stamp.utcoffset() != timedelta(0):
+            raise RuntimeError("storage_forward_startup_clock_invalid")
+        return stamp.timestamp()
+    deadline = saved["key_deadline"]
+    if keys is not None:
+        if (set(keys) != {"binding", "started_at", "expires_at", "duration_seconds", "index_oids", "complete"}
+                or type(keys["duration_seconds"]) is not int or keys["duration_seconds"] != 3600
+                or type(keys["complete"]) is not bool
+                or keys["binding"].get("capture") != intent["original_capture"]
+                or keys["binding"].get("cancellation_intent_sha256") != intent["cancellation_intent_sha256"]
+                or epoch(keys["expires_at"]) != epoch(keys["started_at"])+3600
+                or epoch(keys["started_at"]) > wall):
+            raise RuntimeError("storage_forward_key_observation_changed")
+        if saved["keys"] is not None and keys != saved["keys"]:
+            raise RuntimeError("storage_forward_completed_keys_changed")
+        deadline = min(deadline, epoch(keys["expires_at"]))
+        if keys["complete"]:
+            if (not isinstance(keys["index_oids"], dict)
+                    or set(keys["index_oids"]) != {"qt_header_forward_day_pk", "qt_header_forward_revision_day"}
+                    or any(type(oid) is not int or oid <= 0 for oid in keys["index_oids"].values())):
+                raise RuntimeError("storage_forward_completed_keys_changed")
+            saved["keys"] = deepcopy(keys)
+    elif saved["keys"] is not None or initialization is not None:
+        raise RuntimeError("storage_forward_completed_keys_missing")
+    if initialization is not None:
+        expected = dict(request_sha256=host.digest(request), operation_sha256=intent["operation_sha256"],
+            cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=3600,
+            initial_seconds=600, attempt_seconds=intent["original_capture"]["attempt_seconds"])
+        if (saved["keys"] is None or set(initialization) != {"binding", "started_at", "expires_at", "duration_seconds", "complete"}
+                or initialization["binding"] != expected
+                or any(type(initialization["binding"][k]) is not int for k in ("key_seconds", "initial_seconds", "attempt_seconds"))
+                or type(initialization["complete"]) is not bool
+                or type(initialization["duration_seconds"]) is not int or initialization["duration_seconds"] != 600
+                or epoch(initialization["expires_at"]) != epoch(initialization["started_at"])+600
+                or not epoch(keys["started_at"]) <= epoch(initialization["started_at"]) <= saved["key_deadline"]
+                or epoch(initialization["started_at"]) > wall):
+            raise RuntimeError("storage_forward_initialization_clock_changed")
+        old = saved["initialization"]
+        if old is not None and (any(initialization[k] != old[k] for k in old if k != "complete")
+                or old["complete"] and not initialization["complete"]):
+            raise RuntimeError("storage_forward_initialization_clock_changed")
+        saved["initialization"] = deepcopy(initialization)
+        deadline = epoch(initialization["expires_at"])
+        if initialization["complete"]:
+            owner, deadline = admit_adoption_observation(request, initialization=initialization, capture=capture, now=wall)
+            if saved["capture"] is not None and (saved["capture"] != capture or saved["forward"] != owner or saved["deadline"] != deadline):
+                raise RuntimeError("storage_forward_original_adoption_changed")
+            saved.update(capture=deepcopy(capture), forward=owner, deadline=deadline)
+        elif capture is not None:
+            raise RuntimeError("storage_forward_uncommitted_adoption")
+    elif saved["initialization"] is not None or capture is not None:
+        raise RuntimeError("storage_forward_initialization_missing")
+    remaining = _launch_remaining(saved, deadline)
+    if saved != before:
+        save_launch(root, saved)
+    return remaining
+
+
+def _clock_row(row):
+    from datetime import datetime
+    return {**row, **{key:datetime.fromisoformat(row[key]).isoformat() for key in ("started_at", "expires_at")}}
+
+
+def admit_launched_adoption(root, request, worker, *, initialization, capture):
+    """Read-only final admission of a ready, durably published worker/adoption."""
+    published = inspect_published_operation(root, request=request)
+    saved = load_launch(root)
+    expected = dict(publication_sha256=published["intent_sha256"],
+        request_sha256=worker["binding"]["request_sha256"],
+        worker_binding_sha256=host.digest(worker["binding"]), operation_sha256=published["forward"]["operation_sha256"])
+    if (saved.get("schema_version") != "qt.storage_online_forward_launch.v1"
+            or saved["binding"] != expected or saved["worker"] != worker or saved["pending_worker"] is not None
+            or worker["binding"] != published["new_worker"]["binding"]
+            or worker["container_id"] is None or worker["contract"] is None
+            or saved["initialization"] != initialization or saved["capture"] != capture):
+        raise RuntimeError("storage_forward_launched_adoption_changed")
+    owner, deadline = admit_adoption_observation(request, initialization=initialization, capture=capture, now=time.time())
+    if saved["forward"] != owner or saved["deadline"] != deadline or worker["deadline"] != deadline:
+        raise RuntimeError("storage_forward_launched_clock_changed")
+    # Reuse startup admission read-only: every phase is already pinned, so
+    # any new or missing proof is refused before it could publish progression.
+    if saved["keys"] is None or saved["initialization"]["complete"] is not True:
+        raise RuntimeError("storage_forward_launched_preparation_missing")
+    admit_startup(root, deepcopy(saved), request, keys=saved["keys"],
+        initialization=initialization, capture=capture)
+    return owner, deadline

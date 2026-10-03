@@ -171,6 +171,12 @@ class OnlineController:
         return archives._operation_step(conn, seconds, deadline=deadline,
             forward_operation_sha256=self.forward_operation_sha256)
 
+    def _capture_wire(self, conn):
+        if self.forward_operation_sha256 is None:
+            return conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1"))
+        from scripts.automation.storage_online_forward_worker import capture_binding
+        return capture_binding(self._capture_row(conn))
+
     def _capture_row(self, conn):
         if self.forward_operation_sha256 is None:
             return dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
@@ -305,7 +311,7 @@ class OnlineController:
                     "'cluster',(SELECT system_identifier::text FROM pg_control_system()),"
                     "'oid',d.oid::bigint,'name',d.datname,'allow_connections',d.datallowconn) "
                     "FROM pg_database d WHERE datname=current_database()"))
-                captured = conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1"))
+                captured = self._capture_wire(conn)
                 self._check_builtin_jobs(conn)
         self._ownership(deadline=deadline)
         return {**self._forward_session_binding(),
@@ -1145,7 +1151,7 @@ class OnlineController:
                                 if self._job_catalog(conn) != self._jobs_catalog:
                                     raise RuntimeError("storage_online_job_definitions_changed")
                                 session = {**self._forward_session_binding(), "database": database,
-                                    "capture": conn.scalar(text(f"SELECT to_jsonb(c) FROM {capture.STATE} c WHERE id=1")),
+                                    "capture": self._capture_wire(conn),
                                     "backend_pid": pid, "owner_pid": self._pid,
                                     "builtin_jobs_admitted": self._builtin_catalog is not None,
                                     "database_switch_authorized": False}

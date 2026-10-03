@@ -392,7 +392,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
 
 
 
-def rehearse_forward_package(*, state, kwargs, candidate_image, source):
+def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False):
     """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
     from datetime import datetime, timezone, timedelta
     from scripts.automation import storage_online_forward as forward
@@ -459,7 +459,53 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source):
     assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=old_worker["container_id"]))==source
     probe=host_boundary.load_receipt(state/terminal.PROBE)
     assert probe["retired"] and not host_boundary.docker("ps","-aq","--filter","id="+probe["container_id"]).strip()
+    launched = {}
+    if launch_worker:
+        import time
+        from scripts.automation import storage_online_final as final
+        published=forward.inspect_published_operation(state)
+        arguments={**kwargs,"image":candidate,"request":published["new_request"]}
+        actual_save=host_boundary.save_receipt
+        def lose_worker_reply(target,value,**options):
+            actual_save(target,value,**options)
+            if target.name==launch._STATE and value.get("container_id"):
+                raise TimeoutError("forward worker publication reply lost")
+        host_boundary.save_receipt=lose_worker_reply
+        try:
+            with launch.launched_online_worker(state,**arguments):
+                raise AssertionError("missing interrupted forward launch")
+        except TimeoutError as exc: assert str(exc)=="forward worker publication reply lost"
+        finally: host_boundary.save_receipt=actual_save
+        intent=forward.load_launch(state)
+        created=intent["pending_worker"]["container_id"]
+        actual=json.loads(host_boundary.docker("inspect","--format","{{json .State}}",created))
+        assert actual["Status"]=="created" and actual["Pid"]==0 and not actual["Running"]
+        with launch.launched_online_worker(state,**arguments) as (worker,receipt):
+            assert receipt["container_id"]==created
+            channel=host_boundary.OnlineWorkerChannel(worker,deadline=time.monotonic()+receipt["deadline"]-time.time())
+            with host_boundary.docker_deadline(time.monotonic()+30):
+                bound,_,rows,limits=final._observe(state,project=kwargs["project"],source_revision=kwargs["source_revision"],
+                    controller_id=channel.greeting["controller_id"],worker_id=created)
+            ready=forward.load_launch(state)
+            from scripts.automation.storage_online_forward_worker import capture_binding
+            assert ready["pending_worker"] is None and capture_binding(ready["capture"])==bound["capture"]
+            assert ready["forward"]==bound["forward"] and ready["deadline"]==limits["capture_deadline"]
+            for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic","key_deadline_boot"):
+                assert ready[key]==intent[key]
+            assert host_boundary.source_clients_serving(rows)
+            canceled_forward=channel.exchange("cancel")
+            assert canceled_forward["state"]=="cancelled"
+            try: forward.observe_adoption(rows["tsdb"]["id"])
+            except RuntimeError as exc: assert str(exc)=="storage_forward_active_adoption_required"
+            else: raise AssertionError("retired forward adoption admitted")
+            launched=dict(forward_worker_started=True,interrupted_launch_reused_created_worker=True,
+                actual_confined_entrypoint=True,actual_host_adoption_observation=True,
+                original_launch_and_sql_clocks_preserved=True,forward_retirement_via_controller=True,
+                canonical_failure_retirement=False,login_closure=False)
+        assert all(p.read_bytes()==data for p,data in original.items())
+        assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=created))==source
     return dict(candidate_image=candidate,interrupted_publication_reconciled=True,
         actual_cancellation_reconciled_with_original_request=True,original_plan_terminal_and_inventory_preserved=True,
         original_publication_clocks_preserved=True,old_worker_preserved=True,source_clients_unchanged=True,
-        forward_worker_started=False,production_runtime_preflight=False,production_cardinality=False,final_handoff=False)
+        production_runtime_preflight=False,production_cardinality=False,final_handoff=False,
+        **({"forward_worker_started":False}|launched))

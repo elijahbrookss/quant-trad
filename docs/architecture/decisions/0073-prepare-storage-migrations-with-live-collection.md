@@ -2106,3 +2106,20 @@ remains blocked by the terminal owner until a separately verified canonical
 forward worker route owns those clocks and authority. Interrupted native
 publication and invocation must be qualified before production use; private-file
 unit tests do not establish full runtime, cardinality, pause or capacity admission.
+
+
+Forward launch now has a separate durable intent after completed package
+publication. It pins original host wall/monotonic/boot clocks and exact worker
+preimages before Docker creation, then observes actual key and initialization
+receipts. Final observation uses the pinned adoption through the retained SQL
+session after logins close. Publication alone does not grant launch or source
+stop; canonical operation dispatch and preserving host failure retirement remain
+separate required integrations. See the storage component's durable forward
+launch section for the current boundary and rehearsal scope.
+
+The forward launch journal uses the existing bounded 2 MiB metadata allowance
+for full cancellation and placement evidence. A native invocation produced a
+100876-byte receipt, exceeding the ordinary 64 KiB hold reader. Both journal
+reads and writes now enforce the larger bound; bounded control replies identify
+the complete canonical proof by digest instead of repeating it. This preserves
+exact comparison during login closure without enlarging the control pipe.

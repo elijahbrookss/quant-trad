@@ -14,6 +14,7 @@ code_paths:
   - scripts/automation/storage_online_forward.py
   - tests/test_storage_online_forward.py
   - tests/test_storage_forward_observation.py
+  - tests/test_storage_forward_launch.py
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
@@ -3616,11 +3617,11 @@ original active adoption instead of building keys or starting another clock.
 Foreign requests, changed keys, expired incomplete initialization and retired
 adoption refuse. Source/copy/queue rows and original cancellation remain intact.
 
-This connection does not admit the canonical host launch. Host verification of
-the completed publication/cancellation, original retired worker, actual new phase
-clocks and login-gate authority remains required, as do production physical and
-pause qualification, recovery and deployment. A direct worker or small disposable
-fixture result cannot grant those authorities or establish production performance.
+The launcher separately verifies publication/cancellation, the retired original
+worker and actual phase clocks as described below. Canonical operation dispatch
+and preserving host failure retirement remain required before production launch,
+alongside physical and pause qualification, recovery and deployment. A direct
+worker or disposable fixture cannot establish production performance.
 
 
 The host publication inspector reconstructs the effective forward request from
@@ -3636,5 +3637,45 @@ without scanning historical rows. It rejects absent, ambiguous or retired
 adoption. Request/cancellation identity and actual initialization/adoption clocks
 must match exactly. Completed initialization need not remain unexpired; the
 original active adoption expiry controls subsequent work. This observer does
-not renew either clock or implement canonical host launch, login closure or
-preserving terminal invocation. Those lifecycle integrations remain required.
+not renew either clock or grant source-stop or preserving terminal authority.
+Those lifecycle integrations require their own exact owners.
+
+
+### Durable forward launch and final observation
+
+The existing confined launcher selects forward preparation only from a verified
+completed publication. Before Docker creation it persists one launch intent with
+the publication, request and worker-binding digests, original wall/monotonic/boot
+clocks and fixed 3600-second key deadline. Worker container, contract and eventual
+adoption deadline progress through durable old/new preimages. Interrupted
+publication reconciles only those preimages and reuses the exact created worker;
+missing or changed owned containers refuse. Neither reentry nor observation
+creates another preparation clock.
+
+The launch journal retains full cancellation and placement proofs within the
+existing 2 MiB metadata budget, enforced before writes and on reads. Control
+replies carry the canonical digest of that complete proof and its operation and
+clock fields, keeping the existing small control-message bound. The host compares
+that digest against its pinned full proof while logins are closed; it neither
+truncates metadata nor opens another database session.
+
+Startup observes the actual SQL key and initialization receipts. Complete keys
+pin their index OIDs. Initialization uses its own once-persisted 600-second
+window after the keys, while completed initialization yields to the original
+active adoption expiry. A bounded read can reconcile a phase already committed
+before the prior deadline; it cannot extend unfinished work. Reboot, changed
+request, changed pinned clocks, missing receipts and expired phases refuse.
+
+Before final-session admission the host requires the verified publication and
+ready launch receipt, exact live worker and pinned initialization/adoption. With
+logins closed, it compares the retained owning-session capture to that receipt;
+it does not reconnect. Forward controller replies carry the actual adoption
+identity and clock, not the canceled capture. The existing same-PID rule applies
+only after this host admission; legacy PID rules remain unchanged.
+
+The disposable `--forward-worker` rehearsal extends interrupted package
+publication with interruption after actual Docker creation, exact worker reuse,
+confined entrypoint preparation and host adoption observation. Controller
+retirement preserves source clients and rows. This is not canonical host failure
+retirement, login closure, final COMMIT, production capacity or pause admission.
+The canonical operation gate remains closed until those integrations are ready.

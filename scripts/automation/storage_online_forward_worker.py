@@ -5,7 +5,7 @@ canceled attempt; actual database receipts own the separate preparation clocks.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 import logging
@@ -43,6 +43,32 @@ def request_binding(request):
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def capture_binding(value):
+    """Compact exact proof identity for the bounded host/worker control pipe.
+
+    Full cancellation and placement metadata stay in SQL and the bounded host
+    launch journal. Hash the complete observation; never truncate its proof.
+    """
+    fields = {"operation_sha256", "started_at", "expires_at", "attempt_seconds", "cancellation", "placement"}
+    if (not isinstance(value, dict) or set(value) != fields
+            or not isinstance(value["operation_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["operation_sha256"])
+            or type(value["attempt_seconds"]) is not int
+            or not 30 <= value["attempt_seconds"] <= 345600
+            or any(not isinstance(value[k], dict) or not value[k] for k in ("cancellation", "placement"))):
+        raise ValueError("storage_forward_capture_binding_invalid")
+    normalized = dict(value)
+    for key in ("started_at", "expires_at"):
+        stamp = value[key] if isinstance(value[key], datetime) else datetime.fromisoformat(value[key])
+        if stamp.utcoffset() != timedelta(0):
+            raise ValueError("storage_forward_capture_binding_clock_invalid")
+        normalized[key] = stamp.isoformat()
+    return dict(schema_version="qt.storage_online_forward_capture.v1",
+        operation_sha256=value["operation_sha256"], started_at=normalized["started_at"],
+        expires_at=normalized["expires_at"], attempt_seconds=value["attempt_seconds"],
+        proof_sha256=_digest(normalized))
 
 
 def _initial(conn):

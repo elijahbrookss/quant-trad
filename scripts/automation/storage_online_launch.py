@@ -6,7 +6,8 @@ bounded worker pipe. Interrupted background work retains its original attempt.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from copy import deepcopy
 from datetime import datetime
 import hashlib
 import json
@@ -275,7 +276,12 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
     """
     state_root, inventory_path = _canonical(state_root), _canonical(inventory_path)
     from scripts.automation.storage_online_deadline import require_settled
-    require_settled(state_root)
+    from scripts.automation import storage_online_forward as forward
+    from scripts.automation.storage_online_forward_worker import request_binding
+    forward_request = request_binding(request)
+    published = forward.inspect_published_operation(state_root, request=request) if forward_request else None
+    if published is None:
+        require_settled(state_root)
     validate_launch_inputs(project=project,source_revision=source_revision,image=image,
         request=request,descriptor_limit=descriptor_limit,memory_bytes=memory_bytes)
     archive_group = archive_group_override(request)
@@ -328,7 +334,9 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
         raise RuntimeError("storage_online_source_root_changed")
     # The optional first capture stays inside the ORIGINAL initial preparation
     # window. The capture itself owns the later cumulative migration clock.
-    if capture_plan is not None:
+    if published is not None:
+        observed, deadline = None, None
+    elif capture_plan is not None:
         from scripts.automation.storage_online_prepare import admit_serving_source
         preparation = admit_serving_source(state_root, project=project,
             source_revision=source_revision, operator_id=found[0] if found else None)
@@ -360,7 +368,20 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
         request_sha256=digest, inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
         mounts=mounts, descriptor_limit=descriptor_limit, memory_bytes=memory_bytes,
         environment_sha256=host_boundary.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
-    if saved:
+    forward_launch = None
+    if published is not None:
+        key_observation, initialization = forward.observe_preparation(database_id)
+        if not os.path.lexists(state_root/forward.LAUNCH_STATE) and initialization is not None:
+            raise RuntimeError("storage_forward_unowned_initialization")
+        forward_launch = forward.launch_intent(state_root, published, binding)
+        saved = deepcopy(forward_launch["worker"])
+        capture = None
+        if initialization is not None and initialization["complete"]:
+            initialization, capture = forward.observe_adoption(database_id)
+        forward.admit_startup(state_root, forward_launch, request,
+            keys=key_observation, initialization=initialization, capture=capture)
+        deadline = forward_launch["deadline"]
+    elif saved:
         expected_fields = {"binding", "container_id", "contract", "deadline"}
         if capture_plan is not None:
             expected_fields.add("capture")
@@ -375,12 +396,25 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
             saved["capture"] = None
         # This is the existing durable worker intent, before any Docker start.
         host_boundary.save_receipt(state_path, saved, initial=True)
+    def save_worker():
+        if forward_launch is not None:
+            forward.save_launched_worker(state_root, forward_launch, saved)
+        else:
+            host_boundary.save_receipt(state_path, saved, initial=False)
+    if forward_launch is not None:
+        if saved["container_id"] is not None and found != [saved["container_id"]]:
+            raise RuntimeError("storage_online_saved_launch_changed")
+        phase_deadline = forward_launch["deadline"] or (forward_launch["initialization"] and
+            datetime.fromisoformat(forward_launch["initialization"]["expires_at"]).timestamp()) or forward_launch["key_deadline"]
     if not found:
-        found = [host_boundary.docker(*_arguments(name, image, database_id, mounts, overrides,
-                 descriptor_limit, memory_bytes, digest), env={**os.environ,"PG_DSN":dsn}).strip()]
+        with host_boundary.docker_deadline(time.monotonic()+forward._launch_remaining(forward_launch, phase_deadline)) if forward_launch is not None else nullcontext():
+            found = [host_boundary.docker(*_arguments(name, image, database_id, mounts, overrides,
+                     descriptor_limit, memory_bytes, digest), env={**os.environ,"PG_DSN":dsn}).strip()]
     contract = _admit(found[0], binding, saved["contract"])
     saved.update(container_id=found[0], contract=contract)
-    host_boundary.save_receipt(state_path, saved, initial=False)
+    if forward_launch is not None and deadline is not None:
+        saved["deadline"] = deadline
+    save_worker()
     current = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", found[0]))
     if current["Running"] or current["Paused"] or current["Restarting"] or current["OOMKilled"]:
         raise RuntimeError("storage_online_existing_worker_requires_reconciliation")
@@ -389,11 +423,41 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
         raise RuntimeError("storage_online_source_changed_before_start")
     # The private DSN exists only in Docker's environment; command arguments
     # and durable receipts contain hashes, never the resolved secret.
+    if forward_launch is not None:
+        phase_deadline = forward_launch["deadline"] or (forward_launch["initialization"] and
+            datetime.fromisoformat(forward_launch["initialization"]["expires_at"]).timestamp()) or forward_launch["key_deadline"]
+        forward._launch_remaining(forward_launch, phase_deadline)
     process = subprocess.Popen(["docker", "start", "--attach", "--interactive", found[0]],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=None, bufsize=0)
     try:
-        if capture_plan is not None:
+        if forward_launch is not None:
+            while True:
+                if process.poll() is not None:
+                    raise RuntimeError("storage_forward_startup_worker_exited")
+                # A bounded read may reconcile a completed next phase after a
+                # prior phase expired. It never grants more time to that phase.
+                forward._launch_clock(forward_launch)
+                with host_boundary.docker_deadline(time.monotonic()+20):
+                    key_observation, initialization = forward.observe_preparation(database_id)
+                    capture = None
+                    if initialization is not None and initialization["complete"]:
+                        initialization, capture = forward.observe_adoption(database_id)
+                remaining = forward.admit_startup(state_root, forward_launch, request,
+                    keys=key_observation, initialization=initialization, capture=capture)
+                with host_boundary.docker_deadline(time.monotonic()+remaining):
+                    from scripts.automation.storage_online_prepare import admit_serving_source
+                    admit_serving_source(state_root, project=project, source_revision=source_revision, operator_id=found[0])
+                    _admit(found[0], binding, contract)
+                if forward_launch["capture"] is not None:
+                    deadline = forward_launch["deadline"]
+                    saved["deadline"] = deadline
+                    save_worker()
+                    break
+                phase_deadline = (datetime.fromisoformat(initialization["expires_at"]).timestamp()
+                    if initialization is not None else forward_launch["key_deadline"])
+                time.sleep(min(1., remaining))
+        elif capture_plan is not None:
             startup_deadline = time.monotonic()+max(0, capture_plan["deadline"]-time.time())
             while observed is None:
                 if process.poll() is not None:
