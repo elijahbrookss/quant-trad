@@ -74,6 +74,15 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         frozen = _frozen_records(conn)
         _insert(conn, retained, "uncaptured-before-forward-adoption")
     _raw_book_fixture(retained, tmp_path, monkeypatch, definition_id="forward-gap")
+    # Existing IDs alone are insufficient: the reverse physical scan must catch
+    # a retained value that disagrees with its source before key-only coverage.
+    with pytest.raises(RuntimeError, match="content_mismatch: identity:target"), engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE " + adoption.IDENTITY + " SET observation_key=observation_key||'-changed' "
+            "WHERE id=(SELECT id FROM " + adoption.IDENTITY + " ORDER BY id LIMIT 1)")
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+        for _ in range(64):
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+        pytest.fail("changed retained identity was accepted")
     original_commit = Connection._commit_impl
     def lose_reply(conn):
         original_commit(conn)
@@ -86,6 +95,35 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
         prepared = adoption._state(conn)
         assert adoption.prepare_adoption(conn, **retained.adoption_args)["reused"]
         assert adoption._state(conn) == prepared
+        assert prepared["progress"]["identity_target"]["scan"] == adoption.IDENTITY_HEAP_SCAN
+        assert prepared["progress"]["identity_target"]["high_block"] > 0
+    # A physical row cursor commits with its exact comparison. Losing that
+    # transaction neither skips a retained row nor advances source coverage.
+    def interrupt_heap(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE " + adoption.STATE + " SET progress="):
+            raise RuntimeError("interrupt identity heap cursor")
+    event.listen(engine, "after_cursor_execute", interrupt_heap)
+    try:
+        with pytest.raises(RuntimeError, match="interrupt identity heap cursor"), engine.begin() as conn:
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+    finally:
+        event.remove(engine, "after_cursor_execute", interrupt_heap)
+    with engine.begin() as conn:
+        assert adoption._state(conn) == prepared
+        adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+        physical = adoption._state(conn)
+        assert physical["progress"]["identity_target"]["after_tid"] is not None
+        assert physical["progress"]["identity_target"]["verified"] == 1
+        assert physical["progress"]["identity_source"]["after"] is None
+    # Native heap rewrite invalidates a physical cursor even with identical rows.
+    # This tiny owned rewrite rolls back; production never repairs it implicitly.
+    with pytest.raises(RuntimeError, match="adoption_binding_changed"), engine.begin() as conn:
+        primary = conn.scalar(text("SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+            "WHERE i.indrelid=CAST(:relation AS regclass) AND i.indisprimary"), {"relation":adoption.IDENTITY})
+        conn.exec_driver_sql("CLUSTER " + adoption.IDENTITY + " USING " + conn.dialect.identifier_preparer.quote(primary))
+        adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+    with engine.begin() as conn:
+        assert adoption._state(conn) == physical
     failed = []
     def interrupt(conn, cursor, statement, parameters, context, executemany):
         if statement.startswith("INSERT INTO " + adoption.IDENTITY) and "SELECT" in statement:
@@ -110,6 +148,8 @@ def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained,
             break
     else:
         pytest.fail("identity source scan did not finish")
+    assert current["progress"]["identity_target"]["complete"]
+    assert current["progress"]["identity_target"]["next_block"] == current["progress"]["identity_target"]["high_block"]
     high = current["progress"]["identity_source"]["high"][0]
     for number in range(10000):
         key = "late-forward-key-" + str(number)

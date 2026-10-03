@@ -221,9 +221,17 @@ journals or consumes its queues. Under a short nonwaiting writer fence it adds
 native source-to-target mirrors and mutation guards, then records one original
 adoption deadline. Existing native uniqueness and foreign keys remain enforced. Admission binds both application guards and internal foreign-key trigger definitions and enablement.
 
-A bounded primary-key scan compares existing target rows and inserts only missing
-source rows, using batch lookups rather than a database round trip per retained
-row. A reverse scan rejects preexisting extra target rows. Native target insertion
+Retained identities are first read in bounded physical heap ranges and compared
+exactly against source primary keys. The original heap extent and physical cursor
+are journaled atomically; the existing OID/file/guard binding refuses table rewrites.
+Each range covers at most 128 heap blocks and returns at most the configured page
+row bound. This avoids fetching historical target heap rows in random ID order.
+Once that reverse proof completes, source coverage reads only target IDs and
+inserts missing exact source rows. Native insertion validation and immutable seals
+preserve the earlier content proof, including concurrent inserts behind a cursor.
+Missing-row insertion still gets an exact full-row recheck. Raw mapping scans keep
+their existing primary-key comparison algorithm. Older scan journals cannot be
+resumed as this protocol; preserving retirement remains available. Native target insertion
 guards require an exact matching source row; mirrors cover subsequent inserts,
 including keys behind a committed scan cursor. This covers the post-cancellation
 gap without assuming timestamps or allocated sequences are commit ordered. Page
@@ -283,3 +291,13 @@ name that runs before PostgreSQL's native AFTER FK triggers; source and target
 validation still occur within the same transaction. No constraint is deferred or
 disabled to make source publication succeed. Forward cancellation removes this
 staged header FK along with the external references before retiring mirroring.
+
+The selected access-path change follows an actual read-only diagnostic on the
+existing drives: three disjoint canonical-ID bands of 2,048 rows each took about
+10.7–10.9 seconds and exposed missing retained identities after cancellation.
+This was aggregate-only sampling, not a full runtime estimate. The earlier probe
+used incorrect lexical anchors and repeated one warm leading range; those fast
+repeats are not throughput evidence. The new physical scan and key-only coverage
+still require native correctness, actual physical access/visibility and insertion
+cost qualification before production admission. No cache flush, unproved saving,
+extra worker speedup or weaker proof is assumed.

@@ -23,6 +23,8 @@ from scripts.db import fact_header_v2_references as references
 from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK
 
 STATE = keys.SCHEMA + ".adoption"
+IDENTITY_HEAP_SCAN = "identity_heap_v1"
+IDENTITY_BLOCKS_PER_PAGE = 128
 IDENTITY = capture.SCHEMA + ".fact_identities"
 # Native FK AFTER triggers are named RI_ConstraintTrigger_*. This quoted
 # uppercase name mirrors identities first, without deferring FK enforcement.
@@ -160,6 +162,8 @@ def _inspect(conn, operation_sha256, limit):
     if state["binding"] != _snapshot(conn):
         raise RuntimeError("fact_header_forward_adoption_binding_changed")
     _reference_states(conn, state)
+    if state["progress"]["identity_target"].get("scan") != IDENTITY_HEAP_SCAN:
+        raise RuntimeError("fact_header_forward_adoption_scan_protocol_changed")
     return state
 
 
@@ -206,6 +210,16 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
         for family, (source, target, _, primary) in FAMILIES.items():
             _install_family(conn, family)
             for direction, relation in (("source", source), ("target", target)):
+                if (family, direction) == ("identity", "target"):
+                    if not conn.scalar(text("SELECT c.relkind='r' AND c.relpersistence='p' "
+                        "AND a.amname='heap' FROM pg_class c JOIN pg_am a ON a.oid=c.relam "
+                        "WHERE c.oid=CAST(:relation AS regclass)"), {"relation": target}):
+                        raise RuntimeError("fact_header_forward_identity_heap_required")
+                    blocks = conn.scalar(text("SELECT pg_relation_size(CAST(:relation AS regclass)) / "
+                        "current_setting('block_size')::bigint"), {"relation": target})
+                    progress["identity_target"] = dict(scan=IDENTITY_HEAP_SCAN, high_block=blocks,
+                        next_block=0, after_tid=None, complete=blocks == 0, verified=0)
+                    continue
                 high = conn.execute(text("SELECT " + ",".join(primary) + " FROM " + relation +
                     " ORDER BY " + ",".join(name + " DESC" for name in primary) + " LIMIT 1")).one_or_none()
                 progress[family + "_" + direction] = dict(high=list(high) if high else None,
@@ -221,7 +235,7 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
 
 
 def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30):
-    """Verify existing rows, insert only missing rows, then check reverse coverage.
+    """Verify retained identities in physical order, then fill source coverage.
 
     Source guards and synchronous mirrors cover inserts behind a committed scan
     cursor, including low sequence values. Cursors and target inserts commit in
@@ -232,10 +246,18 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
     with _step(conn, timeout_seconds) as limit:
         state = _inspect(conn, operation_sha256, limit)
         for family, (source, target, columns, primary) in FAMILIES.items():
-            for direction in ("source", "target"):
+            # Exact target content is established first. Its native insertion
+            # guard and immutable seal preserve that proof while source coverage
+            # uses only the target's ID index, not random historical heap reads.
+            directions = ("target", "source") if family == "identity" else ("source", "target")
+            for direction in directions:
                 progress = state["progress"][family + "_" + direction]
                 if progress["complete"]:
                     continue
+                if (family, direction) == ("identity", "target"):
+                    rows = _identity_heap_page(conn, progress, page_rows)
+                    _save_page(conn, state, family, direction, len(rows))
+                    return _report(state, reused=True, verified=len(rows))
                 relation, peer = (source, target) if direction == "source" else (target, source)
                 names = ",".join(primary)
                 params = {"limit": page_rows, **{"high" + str(i): v for i, v in enumerate(progress["high"])}}
@@ -246,7 +268,13 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
                 rows = [dict(row) for row in conn.execute(text("SELECT " + ",".join(columns) +
                     " FROM " + relation + " WHERE " + bound + " ORDER BY " + names + " LIMIT :limit"), params).mappings()]
                 wanted = [tuple(row[name] for name in primary) for row in rows]
-                actual = _read_rows(conn, family, peer, wanted) if wanted else {}
+                identity_coverage = family == "identity" and direction == "source"
+                if identity_coverage:
+                    actual = {(value,): None for value in conn.execute(text(
+                        "SELECT id FROM " + IDENTITY + " WHERE id=ANY(:ids)"),
+                        {"ids": [key[0] for key in wanted]}).scalars()} if wanted else {}
+                else:
+                    actual = _read_rows(conn, family, peer, wanted) if wanted else {}
                 missing = [key for key in wanted if key not in actual]
                 if missing and direction == "source":
                     if family == "identity":
@@ -257,18 +285,59 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
                     conn.execute(text("INSERT INTO " + target + "(" + ",".join(columns) + ") SELECT " +
                         ",".join(columns) + " FROM " + source + " WHERE " + selection + " ON CONFLICT DO NOTHING"), parameters)
                     actual.update(_read_rows(conn, family, peer, missing))
-                if any(actual.get(tuple(row[name] for name in primary)) != row for row in rows):
+                missing_keys = set(missing)
+                compared = [row for row in rows if (row["id"],) in missing_keys] if identity_coverage else rows
+                if any(actual.get(tuple(row[name] for name in primary)) != row for row in compared):
                     raise RuntimeError("fact_header_forward_adoption_content_mismatch: " + family + ":" + direction)
                 if rows:
                     progress["after"] = [rows[-1][name] for name in primary]
                     progress["verified"] += len(rows)
                 else:
                     progress["complete"] = True
-                conn.execute(text("UPDATE " + STATE + " SET progress=CAST(:progress AS jsonb) WHERE id=1"),
-                             {"progress": json.dumps(state["progress"])})
-                logger.info("fact_header_forward_adoption_page | family=%s direction=%s rows=%s", family, direction, len(rows))
+                _save_page(conn, state, family, direction, len(rows))
                 return _report(state, reused=True, verified=len(rows))
         return _report(state, reused=True)
+
+
+def _save_page(conn, state, family, direction, rows):
+    conn.execute(text("UPDATE " + STATE + " SET progress=CAST(:progress AS jsonb) WHERE id=1"),
+                 {"progress": json.dumps(state["progress"])})
+    logger.info("fact_header_forward_adoption_page | family=%s direction=%s rows=%s", family, direction, rows)
+
+
+def _identity_heap_page(conn, progress, page_rows):
+    """Read a bounded physical range; exact source lookups stay on its SSD key.
+
+    The original heap extent and row cursor belong to the same atomic journal.
+    The outer binding pins the heap OID/file and always-enabled guards before
+    every page. Updates/deletes and table rewrites cannot preserve this proof.
+    Later inserts, including free slots behind the cursor, already pass the
+    exact-source native insertion guard and need no second baseline scan.
+    """
+    first = progress["next_block"]
+    last = min(first + IDENTITY_BLOCKS_PER_PAGE, progress["high_block"])
+    parameters = dict(lower=f"({first},0)", upper=f"({last},0)", limit=page_rows)
+    bound = "ctid>=CAST(:lower AS tid) AND ctid<CAST(:upper AS tid)"
+    if progress["after_tid"] is not None:
+        parameters["after"] = progress["after_tid"]
+        bound += " AND ctid>CAST(:after AS tid)"
+    rows = [dict(row) for row in conn.execute(text("SELECT ctid::text AS tuple_id," +
+        ",".join(headers.IDENTITY_COLUMNS) + " FROM " + IDENTITY + " WHERE " + bound +
+        " ORDER BY ctid LIMIT :limit"), parameters).mappings()]
+    after = rows[-1]["tuple_id"] if rows else None
+    for row in rows:
+        row.pop("tuple_id")
+    actual = _read_rows(conn, "identity", headers.SOURCE, [(row["id"],) for row in rows]) if rows else {}
+    if any(actual.get((row["id"],)) != row for row in rows):
+        raise RuntimeError("fact_header_forward_adoption_content_mismatch: identity:target")
+    progress["verified"] += len(rows)
+    if len(rows) < page_rows:
+        progress["next_block"] = last
+        progress["after_tid"] = None
+        progress["complete"] = last == progress["high_block"]
+    else:
+        progress["after_tid"] = after
+    return rows
 
 
 def _reference_states(conn, state):

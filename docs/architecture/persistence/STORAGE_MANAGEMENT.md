@@ -3440,3 +3440,15 @@ composite identity reference. An explicitly ordered source mirror publishes the
 identity before the immediate native FK check; both changes roll back together.
 The journal binds this single allowed header-shape change. Retirement restores the
 original header constraint shape while preserving the heap and all rows.
+
+Forward retained-identity verification now reads bounded physical heap ranges
+before source coverage: at most 128 blocks and the existing row bound per page,
+with the original extent and physical row cursor committed atomically. Exact
+source lookups establish every retained row; subsequent key-only target lookups
+avoid repeating historical heap reads while filling missing source identities.
+Native insertion validation, immutable seals and OID/file bindings preserve the
+proof and reject rewrites. Raw mapping scans are unchanged. Old scan journals
+refuse resume under the new protocol; explicit preserving retirement remains.
+This addresses observed 10.7–10.9s disjoint 2,048-row comparisons on the existing
+drives, but does not yet establish production elapsed time or admission. See
+[ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md).
