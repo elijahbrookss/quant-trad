@@ -10,7 +10,9 @@ tags:
   - recovery
 code_paths:
   - scripts/db/fact_header_forward_keys.py
+  - scripts/db/fact_header_forward_adoption.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
+  - tests/test_market_data/test_fact_header_forward_adoption_db.py
   - scripts/automation/storage_online_terminal.py
   - tests/test_storage_online_terminal.py
   - tests/test_terminal_placement.py
@@ -3377,3 +3379,40 @@ adoption must account explicitly for the uncaptured interval after terminal
 cancellation, then prove catch-up and the final live reference boundary. No new
 capture, header attachment, source switch, history placement or runtime/recovery
 activation is authorized by a `keys_prepared` result.
+
+## Retained-target adoption after an uncaptured interval
+
+The internal `fact_header_forward_adoption.py` phase binds a separately supplied
+forward operation intent to the exact committed cancellation, prepared keys and
+retained identity/raw targets. It never resumes the expired attempt, rewrites its
+journals or consumes its queues. Under a short nonwaiting writer fence it adds
+native source-to-target mirrors and mutation guards, then records one original
+adoption deadline. Existing native uniqueness and foreign keys remain enforced. Admission binds both application guards and internal foreign-key trigger definitions and enablement.
+
+A bounded primary-key scan compares existing target rows and inserts only missing
+source rows, using batch lookups rather than a database round trip per retained
+row. A reverse scan rejects preexisting extra target rows. Native target insertion
+guards require an exact matching source row; mirrors cover subsequent inserts,
+including keys behind a committed scan cursor. This covers the post-cancellation
+gap without assuming timestamps or allocated sequences are commit ordered. Page
+inserts and cursor advancement commit together; reentry retains the same intent,
+clock and physical/catalog bindings. Header contents and search indexes are not
+copied by this phase. Original source/copy/queue data and frozen references remain.
+
+This is database preparation, not an executable production forward operation or
+a final proof token. Synchronous writes to retained HDD targets require measured
+collection/latency and capacity admission. The host must own physical/resource
+checks, wall/boot/monotonic bounds and a preserving terminal transition on failure
+or expiry; controller exit alone does not remove native mirrors/guards. Qualified
+reference staging, live final proof, UTC range preparation/abort, table attachment,
+historical placement and complete recovery/deployment remain required. Tests of
+tiny owned two-filesystem fixtures do not establish those production properties.
+
+The internal preserving terminal transaction `retire_adoption` removes only the
+exact eight admitted mirror/validation/seal triggers, retaining all source,
+target and original queue rows, functions and journals. It can retire an expired
+phase without changing its start or deadline. Trigger removal and the durable
+terminal receipt commit together; an interrupted transaction rolls back and a
+lost commit reply reconciles the exact post-state. Retired work cannot resume.
+This database primitive still requires the separately qualified host owner and
+physical/resource admission; it is not a production operation by itself.
