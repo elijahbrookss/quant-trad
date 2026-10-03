@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 import hashlib
 import json
 import logging
+import math
 import re
 from time import monotonic
 
@@ -179,8 +180,12 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
                         raise RuntimeError("storage_forward_initialization_placement_changed")
                     reference_move._fixed_inputs(policy, limits, targets)
                     resources = observe_header_resources(conn, targets, pg_controldata=placement.pg_controldata, timeout_seconds=10)
+                    remaining = deadline-monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("storage_forward_initialization_expired")
                     _, floors = reference_move._budget(conn, observed={"bytes":0,"_binding":saved},
-                        policy=policy, limits=limits, targets=targets, resources=resources)
+                        policy=policy, limits={**limits, "movement_timeout_seconds":math.ceil(remaining)},
+                        targets=targets, resources=resources)
                     watch = _MoveWatch(driver=conn.connection.driver_connection, targets=targets,
                         capacity=resources.capacity, floors=floors, deadline=deadline,
                         cancelled=None, grace=limits["cancellation_grace_seconds"])

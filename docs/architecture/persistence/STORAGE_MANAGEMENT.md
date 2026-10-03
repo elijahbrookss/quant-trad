@@ -3609,6 +3609,14 @@ it persist a separate initialization receipt (at most 600 seconds), before
 installing adoption or archive guards. It never calls expired capture preparation
 or changes the original capture/initial receipt.
 
+Resource admission for each preparation phase uses the rounded-up time left on
+that phase's actual deadline, including a shorter caller bound or saved retry
+expiry. It retains the request's growth rates, cancellation grace, maintenance,
+WAL, temporary-space and policy reserves. The longer migration horizon is not
+charged again to a one-hour key build or ten-minute initialization; neither the
+request nor a durable deadline is rewritten to perform this calculation. Each
+later phase still requires its own fresh capacity admission.
+
 The initializer retains its actual SQL session and storage/controller exclusion.
 The existing physical inventory and resource watcher bound that same session.
 Adoption, archive interval capture and the complete initialization receipt commit

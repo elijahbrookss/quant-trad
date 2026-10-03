@@ -267,8 +267,12 @@ def prepare_keys_supervised(engine, *, expected_capture, intent_sha256, placemen
                         deadline = min(deadline, monotonic()+float(remaining))
                     resources = observe_header_resources(conn, targets, pg_controldata=placement.pg_controldata,
                         timeout_seconds=min(30, limits["movement_timeout_seconds"]))
+                    remaining = deadline-monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("fact_header_forward_preparation_expired")
                     budget, floors = reference_move._budget(conn, observed={"bytes":0, "_binding":saved},
-                        policy=policy, limits=limits, targets=targets, resources=resources)
+                        policy=policy, limits={**limits, "movement_timeout_seconds":math.ceil(remaining)},
+                        targets=targets, resources=resources)
                     watch = _MoveWatch(driver=conn.connection.driver_connection, targets=targets,
                         capacity=resources.capacity, floors=floors, deadline=deadline,
                         cancelled=cancelled, grace=limits["cancellation_grace_seconds"])

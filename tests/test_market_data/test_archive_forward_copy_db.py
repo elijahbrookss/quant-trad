@@ -375,11 +375,48 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
         restarted._reset_engine()
 
 
+def _phase_budget_regression(monkeypatch, options, *, key_seconds, initial_seconds=None):
+    """Exercise real capacity admission with a longer immutable migration limit."""
+    from copy import deepcopy
+    from math import ceil
+    from scripts.automation import storage_online_forward_worker as worker
+
+    limits = options["resource_limits"]
+    limits["movement_timeout_seconds"] = 216000
+    limits["growth_bytes_per_second"] = {key:1024 for key in limits["growth_bytes_per_second"]}
+    original = deepcopy(limits)
+    budget = catalogs._budget
+    observations = []
+    def checked(conn, **kwargs):
+        initial = worker._initial(conn) if initial_seconds is not None else None
+        key_state = keys._read_state(conn)
+        phase = initial or (key_state if key_state and not key_state["complete"] else None)
+        bound = initial_seconds if initial is not None else key_seconds
+        if phase is not None:
+            remaining = (phase["expires_at"]-conn.scalar(text("SELECT clock_timestamp()"))).total_seconds()
+            # Admission is sampled just before this observer; allow one rounded
+            # second for the metadata read, never a new phase on reentry.
+            bound = min(bound, ceil(remaining)+1)
+        selected = kwargs["limits"]
+        assert 0 < selected["movement_timeout_seconds"] <= bound
+        assert {**selected, "movement_timeout_seconds":216000} == original
+        assert limits == original
+        result, floors = budget(conn, **kwargs)
+        assert result["movement_timeout_seconds"] == selected["movement_timeout_seconds"]
+        for row in result["filesystems"]:
+            assert row["ingestion_and_other_growth_bytes"] == 1024*result["growth_window_seconds"]
+        observations.append((initial is not None, result["movement_timeout_seconds"]))
+        return result, floors
+    monkeypatch.setattr(catalogs, "_budget", checked)
+    return observations
+
+
 def test_forward_key_watch_cancels_same_session_and_preserves_committed_index(storage, tmp_path, monkeypatch):
     from sqlalchemy import event
     from time import monotonic
 
     def prepare(engine, options, original):
+        budgets = _phase_budget_regression(monkeypatch, options, key_seconds=600)
         def run(**extra):
             return keys.prepare_keys_supervised(engine, expected_capture=original, intent_sha256=CANCEL,
                 placement=storage.copy_plan, policy=options["policy"],
@@ -442,6 +479,7 @@ def test_forward_key_watch_cancels_same_session_and_preserves_committed_index(st
             assert complete["started_at"] == partial["started_at"]
             assert complete["expires_at"] == partial["expires_at"]
         assert run()["reused"]
+        assert len(budgets) == 4 and all(not initial for initial, _ in budgets)
     _prepare_forward(storage, tmp_path, monkeypatch, key_preparation=prepare)
 
 
@@ -454,6 +492,8 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     from tests.test_storage_online_forward_worker import _request
 
     engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
+    budgets = _phase_budget_regression(monkeypatch, options, key_seconds=3600,
+        initial_seconds=30 if outcome == "expire" else 600)
     request = _request(original)
     request["forward"]["cancellation_intent_sha256"] = CANCEL
     request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
@@ -491,6 +531,7 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         initial = worker._initial(conn)
         key_state = keys._read_state(conn)
         assert not initial["complete"] and key_state["complete"]
+        assert [is_initial for is_initial, _ in budgets] == [False, True]
         assert adoption._state(conn) is None
         assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":online._capture(operation).state}) is None
         assert _old(conn) == old and _original_archives(conn) == archives_before
@@ -526,6 +567,7 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         with pytest.raises(RuntimeError, match="lost forward initialization COMMIT"):
             worker.prepare_forward(engine, request, **kwargs)
     assert lost[0]
+    assert [is_initial for is_initial, _ in budgets] == [False, True, True]
     with engine.begin() as conn:
         complete = worker._initial(conn)
         adopted = adoption._state(conn)
