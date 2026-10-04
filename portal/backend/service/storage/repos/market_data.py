@@ -3780,6 +3780,14 @@ class PostgresMarketDataRepository:
                     raise RuntimeError(
                         f"market_dataset_unsupported_fact: series_id={item.series_id} fact_type={fact_type}"
                     )
+                # Ingestion serializes sequence allocation/commit per series.
+                # A global MAX alone can admit an earlier allocated, still
+                # uncommitted row after a different series commits a larger seq.
+                # Pin this series' visible high-water mark in the same snapshot.
+                series_watermark = int(session.execute(text(
+                    "SELECT COALESCE(MAX(market_commit_seq), 0) "
+                    "FROM market.fact_versions WHERE series_id=:series_id"
+                ), {"series_id": item.series_id}).scalar_one())
                 if fact_type in {
                     CANDLE_FACT_TYPE,
                     OPEN_INTEREST_FACT_TYPE,
@@ -3793,7 +3801,7 @@ class PostgresMarketDataRepository:
                         series_id=item.series_id,
                         start=item.start,
                         end=item.end,
-                        as_of_commit_seq=watermark,
+                        as_of_commit_seq=series_watermark,
                         known_at_lte=None,
                         latest_only=not preserve_revisions,
                         include_invalidated=preserve_revisions,
@@ -3814,7 +3822,7 @@ class PostgresMarketDataRepository:
                         series_id=item.series_id,
                         start=item.start,
                         end=item.end,
-                        as_of_commit_seq=watermark,
+                        as_of_commit_seq=series_watermark,
                         known_at_lte=None,
                         latest_only=False,
                         include_invalidated=True,
@@ -3827,7 +3835,7 @@ class PostgresMarketDataRepository:
                         series_id=item.series_id,
                         start=item.start,
                         end=item.end,
-                        as_of_commit_seq=watermark,
+                        as_of_commit_seq=series_watermark,
                         known_at_lte=None,
                     )
                 if not records:
@@ -4113,7 +4121,7 @@ class PostgresMarketDataRepository:
                         "series_id": item.series_id,
                         "range_start": _iso(item.start),
                         "range_end": _iso(item.end),
-                        "max_commit_seq": watermark,
+                        "max_commit_seq": series_watermark,
                         "row_count": len(records),
                         "material_hash": _build_material_hash(
                             fact_type=fact_type,
@@ -4130,6 +4138,7 @@ class PostgresMarketDataRepository:
                             else build_provenance_hash(records)
                         ),
                         "source_summary": {
+                            "commit_selection": "per_series_committed.v1",
                             "counts": dict(sorted(source_counts.items())),
                             "sources": {key: source_details[key] for key in sorted(source_details)},
                             **(

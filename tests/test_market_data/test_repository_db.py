@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import uuid
 
 import pytest
@@ -227,6 +229,55 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
             series_id=series_id,
             start=_BASE - timedelta(hours=1),
         )
+
+
+@pytest.mark.parametrize("correction", [False, True])
+def test_freeze_excludes_late_cross_series_commit(canonical_series, monkeypatch, correction):
+    """A sequence allocated before freeze is not necessarily visible at freeze."""
+    series_id = int(canonical_series["series_id"])
+    _ingest(canonical_series, [_fact(0), _fact(1)], source_revision="before-freeze")
+    other_series = market_data_repo.register_series(
+        instrument_id=str(canonical_series["instrument_id"]),
+        fact_type=OPEN_INTEREST_FACT_TYPE, timeframe_seconds=None,
+        contract_version=OPEN_INTEREST_FACT_VERSION,
+    )
+    pending, release = threading.Event(), threading.Event()
+    original = market_data_repo._ingest_canonical_rows_with_session
+
+    def delayed(session, **kwargs):
+        result = original(session, **kwargs)
+        if kwargs["series_id"] == series_id:
+            pending.set()
+            assert release.wait(30), "late transaction was not released"
+        return result
+
+    monkeypatch.setattr(market_data_repo, "_ingest_canonical_rows_with_session", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        late = pool.submit(_ingest, canonical_series,
+                           [_fact(0, close=101.75) if correction else _fact(2)],
+                           source_revision="late-commit")
+        try:
+            assert pending.wait(15)
+            # A different series commits a larger global sequence first.
+            market_data_repo.ingest_open_interest(
+                series_id=other_series, source_id=int(canonical_series["source_id"]),
+                facts=[OpenInterestFact(sample_time=_BASE, value=1000,
+                    received_at=_BASE, accepted_at=_BASE, known_at=_BASE,
+                    known_at_method="platform_acceptance")],
+                source_revision="higher-sequence-first",
+            )
+            frozen = market_data_repo.freeze_dataset([_request(series_id)])
+            before = market_data_repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id)
+        finally:
+            release.set()
+        late.result(timeout=15)
+    after = market_data_repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id)
+    # Reproduce the old global-watermark predicate, demonstrating why it is
+    # insufficient without calling the delayed transaction a pre-freeze commit.
+    global_selection = market_data_repo.read_candles(series_id=series_id,
+        start=_BASE, end=_BASE+timedelta(hours=3), as_of_commit_seq=frozen.max_commit_seq)
+    assert [(r.revision, r.fact.row_hash) for r in global_selection] != [(r.revision, r.fact.row_hash) for r in before]
+    assert [(r.revision, r.fact.row_hash) for r in after] == [(r.revision, r.fact.row_hash) for r in before]
 
 
 def test_series_catalog_preserves_exact_counts_and_bounds_across_corrections(
