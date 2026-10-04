@@ -145,3 +145,18 @@ def test_confirmed_publication_does_not_fail_on_a_later_deadline():
     with controlled_execution(control, check_on_exit=False):
         # Models a confirmed commit whose return path crosses the deadline.
         control.stop(ExecutionBudgetExceededError("after confirmed commit"))
+
+
+def test_uncertain_interrupt_thread_is_not_reported_as_stopped(monkeypatch):
+    from core import execution_control as module
+    class StuckThread:
+        ident = 1
+        def __init__(self, **kwargs): pass
+        def start(self): pass
+        def join(self, **kwargs): pass
+        def is_alive(self): return True
+    monkeypatch.setattr(module, "Thread", StuckThread)
+    with pytest.raises(module.ExecutionStopUncertainError):
+        with controlled_execution(ExecutionControl()):
+            pass
+    assert module.current_execution_control() is None

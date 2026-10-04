@@ -162,7 +162,11 @@ before commit; an acknowledged successful commit remains successful if time
 expires on return. An uncertain commit requires reading durable state before
 retrying. A dead owner with requested cancellation remains unresolved until an
 operator proves its process and database statements have stopped; stale time
-alone cannot release it. No automated dead-process recovery is added here.
+alone cannot release it. No automated dead-process recovery is added here. If heartbeat/interrupt-thread
+shutdown is uncertain, the worker records a cancellation request where possible
+and parks until operator shutdown. It neither acknowledges stopped execution nor
+claims more work; it does not exit and trigger the shared supervisor's other-child
+termination policy.
 
 ## CLI Boundary
 

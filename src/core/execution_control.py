@@ -20,6 +20,10 @@ class ExecutionCancelledError(RuntimeError):
     """Execution must unwind before its owner acknowledges cancellation."""
 
 
+class ExecutionStopUncertainError(RuntimeError):
+    """An execution helper has not proved that it stopped."""
+
+
 class ExecutionBudgetExceededError(RuntimeError):
     """An admitted operation exhausted a declared resource budget."""
 
@@ -197,4 +201,4 @@ def controlled_execution(control: ExecutionControl, *, check_on_exit: bool = Tru
             watcher.join(timeout=5)
         _CURRENT.reset(token)
         if watcher.is_alive():
-            raise RuntimeError("execution_interrupt_shutdown_uncertain")
+            raise ExecutionStopUncertainError("execution_interrupt_shutdown_uncertain")

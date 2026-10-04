@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from core.settings import get_settings
-from core.execution_control import ExecutionCancelledError, ExecutionControl, controlled_execution
+from core.execution_control import ExecutionCancelledError, ExecutionStopUncertainError, ExecutionControl, controlled_execution
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -117,8 +117,8 @@ class ClaimHeartbeat:
             self._thread.join(
                 timeout=max(1.0, min(5.0, self._interval_seconds * 2.0))
             )
-            if self._thread.is_alive() and self._error is None:
-                self._error = RuntimeError(
+            if self._thread.is_alive():
+                raise ExecutionStopUncertainError(
                     f"async_job_heartbeat_shutdown_timeout: {self._job.id}"
                 )
         if self._error is not None:

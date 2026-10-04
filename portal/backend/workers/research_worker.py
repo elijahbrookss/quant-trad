@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from typing import Any, Dict
 
 from core.settings import get_settings
-from core.execution_control import ExecutionCancelledError, ExecutionBudgetExceededError, controlled_execution
+from core.execution_control import ExecutionCancelledError, ExecutionStopUncertainError, ExecutionBudgetExceededError, controlled_execution
 import indicators  # noqa: F401
 from overlays.builtins import ensure_builtin_overlays_registered
 
@@ -23,6 +23,7 @@ from portal.backend.service.async_jobs import (
     maintain_job_heartbeat,
     wait_for_database_ready,
     acknowledge_job_cancellation,
+    request_job_cancellation,
 )
 from portal.backend.service.research import service as research_service
 from portal.backend.service.research.async_dispatch import (
@@ -176,6 +177,18 @@ def main() -> int:
                 job.job_type,
                 int((time.monotonic() - started) * 1000),
             )
+        except ExecutionStopUncertainError:
+            # Do not acknowledge stop, free the request identity or let this
+            # process claim more work while a helper may still be executing.
+            # Park rather than exit: the shared supervisor treats child exit
+            # as a reason to terminate the other backend children.
+            logger.exception("research_worker_execution_stop_uncertain | job_id=%s", job.id)
+            try:
+                request_job_cancellation(job.id, job_types=[job.job_type])
+            except Exception:
+                logger.exception("research_worker_uncertain_stop_receipt_failed | job_id=%s", job.id)
+            while not _STOP:
+                time.sleep(max(0.05, idle_sleep_max))
         except ExecutionCancelledError:
             try:
                 acknowledge_job_cancellation(job)

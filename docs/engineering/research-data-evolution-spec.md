@@ -377,7 +377,7 @@ estimates or interpret a timeout as measured successful latency:
 | Frozen L02 replay in the same research receipts | BTC 12.0 s; ETH 14.8 s. | Identical-source repeat, cold/hot split and resource use. |
 | Synthetic annual H04; `year-scale-20260929/H04-qualification.json` | Engine 383.7 s; total 428.8 s; peak RSS 2,332,000 KiB. | Database selection, hydration, freezing and persistence; comparable streamed execution. |
 
-The implementation's default resource ceilings are conservative configuration,
+The implementation's default resource ceilings are starting configuration,
 not measured performance acceptance targets or proof that every historical request
 fits. Qualify each representative workload against its actual declared limits
 before admitting autonomous execution; never silently expand a budget to finish.
