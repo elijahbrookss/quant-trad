@@ -12,15 +12,23 @@ import re
 
 from sqlalchemy import inspect, text
 
+from .fact_identity_schema import (
+    IDENTITY_TABLES, assert_fact_identity_contract, assert_fact_identity_references, ensure_fact_header_partition,
+    install_fact_identity_functions,
+)
+from .fact_series_day_schema import (
+    SERIES_DAY_TABLES, assert_fact_series_day_contract, install_fact_series_day_functions,
+)
 from .market_storage_models import MarketFactHotPayloadRecord
 from .market_data_models import MarketFactVersionRecord
 
 logger = logging.getLogger(__name__)
 
-FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v1"
+FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v2"
 FACT_BOOK_PREFIX_TABLES = ("fact_book_prefix_chunks", "fact_book_prefix_dependencies")
 FACT_CANONICAL_DEPENDENCY_TABLES = ("fact_archive_canonical_dependencies",)
 FACT_STORAGE_TABLES = (
+    *IDENTITY_TABLES, *SERIES_DAY_TABLES, "fact_header_legacy",
     "fact_hot_payloads", "fact_retention_partitions", "fact_archive_manifests",
     "fact_archive_series", "fact_archive_dependencies", "fact_archive_material_aliases",
     "fact_archive_verifications", "fact_storage_state",
@@ -28,6 +36,7 @@ FACT_STORAGE_TABLES = (
     *FACT_CANONICAL_DEPENDENCY_TABLES,
 )
 FACT_STORAGE_IMMUTABLE_TABLES = (
+    *IDENTITY_TABLES,
     "fact_hot_payloads", "fact_archive_manifests", "fact_archive_series", "fact_archive_dependencies",
     "fact_archive_material_aliases",
     "fact_archive_verifications",
@@ -42,8 +51,11 @@ DECLARE
     revision_row market.fact_versions%ROWTYPE;
     partition_state text;
 BEGIN
-    SELECT * INTO revision_row FROM market.fact_versions WHERE id = NEW.id;
-    IF NOT FOUND OR
+    -- EXECUTE replans with this row's day even after a connection would otherwise
+    -- choose a generic plan that locks unrelated historical partitions.
+    EXECUTE 'SELECT * FROM market.fact_versions WHERE id = $1 AND storage_day = $2'
+        INTO revision_row USING NEW.id, NEW.storage_day;
+    IF revision_row.id IS NULL OR
        (NEW.storage_day, NEW.series_id, NEW.payload_schema_id, NEW.observation_time)
        IS DISTINCT FROM
        (revision_row.storage_day, revision_row.series_id, revision_row.payload_schema_id, revision_row.observation_time)
@@ -106,6 +118,8 @@ def _view_signature(sql: str) -> str:
 
 def install_fact_storage_functions(conn) -> None:
     """Install clean-layout enforcement. Called by clean bootstrap or explicit cutover only."""
+    install_fact_identity_functions(conn)
+    install_fact_series_day_functions(conn)
     conn.execute(text(
         "CREATE OR REPLACE FUNCTION market.assert_fact_hot_payload_valid() RETURNS trigger "
         "LANGUAGE plpgsql AS $qt$" + HOT_PAYLOAD_VALIDATION_BODY + "$qt$"
@@ -145,6 +159,7 @@ def fact_partition_name(storage_day: date) -> str:
 
 def ensure_fact_payload_partition(conn, storage_day: date) -> str:
     """Provision an empty, deterministic daily table once; never adopt unknown data."""
+    ensure_fact_header_partition(conn, storage_day)
     name = fact_partition_name(storage_day)
     relation = "market." + name
     state = conn.execute(text(
@@ -194,6 +209,7 @@ def assert_fact_storage_contract(
     conn, *, allow_missing_book_prefix_tables=False, allow_missing_canonical_dependency_tables=False,
 ) -> None:
     """Refuse an old, partial, or incompatible layout without altering it."""
+    assert_fact_identity_contract(conn)
     inspector = inspect(conn)
     columns = {item["name"] for item in inspector.get_columns("fact_versions", schema="market")}
     if "storage_day" not in columns or columns & {"payload", "provenance", "quality"}:
@@ -204,6 +220,38 @@ def assert_fact_storage_contract(
     header_indexes = {item["name"] for item in inspector.get_indexes("fact_versions", schema="market")}
     if "ix_market_fact_storage_page" not in header_indexes:
         raise RuntimeError(f"Canonical storage page index is missing. Run {FACT_STORAGE_CUTOVER}")
+    for index_name, keys, operator_script in (
+        ("ix_market_fact_storage_family", ["storage_day", "fact_type"],
+         "scripts/db/manual_add_fact_storage_family_index_v1.sql"),
+        ("ix_market_fact_series_accepted", ["series_id", "accepted_at", "market_commit_seq"],
+         "scripts/db/manual_add_fact_series_accepted_index_v1.sql"),
+    ):
+        compatible = conn.execute(text("""
+            SELECT i.indisvalid AND i.indisready AND NOT i.indisunique
+                   AND i.indpred IS NULL AND i.indexprs IS NULL
+                   AND i.indnkeyatts = :key_count
+                   AND i.indoption::text = :options
+                   AND ARRAY(
+                       SELECT pg_get_indexdef(i.indexrelid, position, true)
+                       FROM generate_series(1, i.indnkeyatts) AS position
+                       ORDER BY position
+                   ) = CAST(:keys AS text[])
+                   AND am.amname = 'btree'
+            FROM pg_index i
+            JOIN pg_class idx ON idx.oid = i.indexrelid
+            JOIN pg_am am ON am.oid = idx.relam
+            WHERE i.indexrelid = to_regclass(:relation)
+              AND i.indrelid = 'market.fact_versions'::regclass
+        """), {
+            "relation": "market." + index_name, "keys": keys, "key_count": len(keys),
+            "options": " ".join("0" for _ in keys),
+        }).scalar_one_or_none()
+        if compatible is not True:
+            raise RuntimeError(
+                f"Canonical operational index {index_name} is missing, invalid, or "
+                f"incompatible. See docs/engineering/fact-header-layout-v2.md. "
+                f"The historical helper {operator_script} is for the unpartitioned v1 layout only."
+            )
     for name in FACT_STORAGE_TABLES:
         if conn.execute(text("SELECT to_regclass(:relation)"), {"relation": "market." + name}).scalar_one_or_none() is None:
             # Only the explicit offline metadata cutover may inspect the older
@@ -213,6 +261,10 @@ def assert_fact_storage_contract(
             if allow_missing_canonical_dependency_tables and name in FACT_CANONICAL_DEPENDENCY_TABLES:
                 continue
             raise RuntimeError(f"Canonical Fact storage is missing market.{name}. Run {FACT_STORAGE_CUTOVER}")
+    assert_fact_series_day_contract(conn)
+    assert_fact_identity_references(
+        conn, allow_missing_canonical_dependencies=allow_missing_canonical_dependency_tables,
+    )
     ready = conn.execute(text(
         "SELECT state FROM market.fact_storage_state WHERE layout_version = :version"
     ), {"version": FACT_STORAGE_LAYOUT_VERSION}).scalar_one_or_none()

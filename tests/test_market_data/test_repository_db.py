@@ -692,3 +692,20 @@ def test_structured_canonical_fact_freezes_and_replays_with_schema_contract() ->
     assert listed["version_count"] == 1
     assert listed["fact_count"] == 1
     assert listed["funding_rate_count"] == 1
+
+
+def test_metadata_discovery_never_queries_facts_or_claims_coverage(canonical_series):
+    from sqlalchemy import event
+    statements = []
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    event.listen(db._engine, "before_cursor_execute", record)
+    try:
+        rows = market_data_repo.list_series_metadata(
+            instrument_id=str(canonical_series["instrument_id"]))
+    finally:
+        event.remove(db._engine, "before_cursor_execute", record)
+    assert len(rows) == 1
+    assert rows[0]["id"] == canonical_series["series_id"]
+    assert "fact_count" not in rows[0] and "first_fact_time" not in rows[0]
+    assert all("fact_versions" not in sql for sql in statements)

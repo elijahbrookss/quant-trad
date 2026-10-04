@@ -33,6 +33,7 @@ code_paths:
   - portal/backend/service/providers
   - portal/backend/service/market
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/book_range_evidence.py
   - portal/backend/service/storage/repos/market_collection.py
   - portal/backend/workers/market_data_collector.py
   - cli/main.py
@@ -46,6 +47,31 @@ code_paths:
   - docs/architecture/data/diagrams/candle-continuity-flow.mmd
 ---
 # Data Boundary
+
+## Explicit frozen candle derivation
+
+`qt data derive-candles` delegates to the canonical data producer described in
+[ADR 0074](../decisions/0074-derive-candles-from-frozen-source-snapshots.md).
+It verifies a frozen source series and writes exact complete coarser buckets
+through the existing Fact writer. It retains source timing and lineage, rejects
+source collisions without corrections, and never acquires or silently fills gaps.
+Checks continue to consume separately frozen, explicitly bound inputs.
+
+## Candle coverage preflight cost
+
+Candle coverage uses the same canonical candle reader, including frozen/preview
+scope selection and recorded gap evidence. It omits runtime TR/ATR enrichment
+and supplies epoch seconds directly to the existing continuity summarizer.
+Coverage counts, boundary ranges, duplicate handling and gap classifications are
+unchanged; the optimization does not infer completeness from row density or
+bypass Fact validation, source selection, revision selection or frozen custody.
+
+This remains a full canonical read, not a metadata-only database query. Large
+windows can take longer than the client request timeout. A client timeout does
+not cancel server work; operators must reconcile completion before retrying or
+releasing a reservation. Set request-specific timeouts from measured duration,
+within the owner's bounded interval, without narrowing the declared research
+period merely to fit the request.
 
 ## Scientific protocol allocation
 
@@ -433,3 +459,23 @@ replacing source provenance and quality.
 - [Market Structure Data Plane](MARKET_STRUCTURE_DATA_PLANE.md)
 - [Historical market-structure trade-capture record](MARKET_STRUCTURE_PHASE_1_TRADES.md)
 - [Accepted ADR 0053: Tiered market-structure archive and replay](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
+
+## Sparse Book Range Evidence
+
+Book BBO/depth production is event-driven within one-second buckets. Research
+coverage consumes producer-owned range evidence; it must not treat bucket width
+as proof of dense sampling. A quiet range requires exact source lineage, a valid
+book on both sides, archived contiguous transport with heartbeats, no book event
+in the range, and successful segment-processing receipts. Missing or contradictory
+witnesses remain unresolved. A real validity interruption is retained separately
+from quiet coverage, including partial edge seconds.
+
+The existing range-quality surface carries versioned producer evidence. A
+`complete` producer range is not a consumer gap; `interrupted` is. Dataset
+quality hashes pin both. Neither changes exact bucket matching, adds forward-filled
+book observations, or certifies a Check's scientific eligibility. Existing candle
+and trade-flow contracts remain unchanged.
+
+Normalization treats complete range evidence as quality proof, not an input gap.
+Interruptions retain their evidence hash, commit watermark and known-at clock
+when propagating invalid-input status to derived output.

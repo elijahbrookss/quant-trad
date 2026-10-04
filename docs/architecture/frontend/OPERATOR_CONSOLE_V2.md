@@ -435,3 +435,14 @@ failed; invalid means evidence explicitly failed a validity contract.
 - [ADR 0055: Bounded BotLens hot state and durable inspection](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md)
 - [Research memory boundary](../research-memory/RESEARCH_MEMORY_BOUNDARY.md)
 - [Data boundary](../data/DATA_BOUNDARY.md)
+
+## System storage settings
+
+The sidebar Storage entry opens a separately owned settings surface. Compact
+drive rows show backend capacity and availability; role selectors and collapsed
+advanced controls produce a durable backend review. Enrollment selects a
+host-prepared target ID. The page does not accept filesystem paths or execute
+storage work itself. Missing status and blocked plans stay explicit.
+
+Physical policy activation remains unavailable until its executor and migration
+are implemented. See [storage management](../persistence/STORAGE_MANAGEMENT.md).

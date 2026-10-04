@@ -202,7 +202,7 @@ def test_preparation_accepts_repository_series_id_projection() -> None:
         def current_commit_seq(self):
             return 77
 
-        def list_series(self, *, instrument_id=None):
+        def list_series_metadata(self, *, instrument_id=None):
             return [
                 {
                     "id": 9,

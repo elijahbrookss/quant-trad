@@ -20,6 +20,7 @@ code_paths:
   - portal/backend/run_backend.py
   - src/core/settings.py
   - cli/main.py
+  - cli/research_operations.py
 ---
 # Research Async Job Boundary
 
@@ -100,3 +101,29 @@ qt research jobs result <job_id> --format table
 The default dispatch output is human-readable and intentionally short. Use
 `qt research jobs status <job_id> --json` or `qt research jobs result <job_id>
 --format json` when automation needs the raw contract.
+
+
+## Explicit single-attempt evidence dispatch
+
+`qt research check run --request-json request.json --dispatch --single-attempt`
+uses `POST /api/research/jobs/checks/run-once` and the existing queue's
+`max_attempts=1`. A distinct route makes an older server reject the operation
+before enqueueing instead of silently ignoring an unknown policy field. The
+ordinary route retains two attempts; synchronous runs reject the CLI flag.
+
+Scientific request/result semantics and request fingerprints do not change.
+The dispatcher reads back the actual persisted attempt limit and claim count
+for its receipt. If an identical in-flight job has a different limit, it fails
+with that job's identity: it neither mutates the existing policy nor creates a
+parallel scientific duplicate to evade deduplication. Reconcile that job before
+another action. A missing dispatch readback is also an uncertain enqueue, not
+permission to retry.
+
+One winning transactional Check is not proof of one physical computation.
+Claim counts are conservative budget evidence, not CPU-start instrumentation.
+One attempt prevents automatic retry/reclaim; it does not implement a compute
+window deadline, cancellation, or a lifetime ban on manual redispatch. A new
+explicit job after terminal failure consumes a new budgeted attempt. Preserve
+actual job IDs, failures and counters; a polling/client timeout never proves
+that a worker stopped. Existing fencing, heartbeats and atomic effects remain
+unchanged.

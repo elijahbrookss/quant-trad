@@ -28,6 +28,169 @@ def test_collector_recent_facts_survive_physical_reclamation(storage, tmp_path, 
     assert operations.recent_facts(series_ids=[storage.series_id], limit=1) == before
 
 
+
+def test_collector_recent_facts_rank_latest_active_revisions_across_series(storage, monkeypatch):
+    monkeypatch.setattr(collector_operations, "db", storage.database)
+    operations = collector_operations.PostgresCollectorOperationsRepository()
+    _ingest(storage)
+    revised = replace(storage.fact, payload={**storage.fact.payload, "rate": "0.2", "raw_rate": "0.2"},
+                      accepted_at=BASE + timedelta(seconds=30), known_at=BASE + timedelta(seconds=30))
+    _ingest(storage, revised)
+    dropped = replace(storage.fact, observation_key="removed",
+                      accepted_at=BASE + timedelta(seconds=40), known_at=BASE + timedelta(seconds=40))
+    _ingest(storage, dropped)
+    _ingest(storage, replace(dropped, state="invalidated",
+                            accepted_at=BASE + timedelta(seconds=50), known_at=BASE + timedelta(seconds=50)))
+    from portal.backend.db import InstrumentRecord
+
+    with storage.database.session() as session:
+        session.add(InstrumentRecord(
+            id="storage-fixture-other", datasource="TEST", exchange="ISOLATED",
+            symbol="ETH-TEST", instrument_type="spot", can_short=False,
+            short_requires_borrow=False, has_funding=False, extra_metadata={},
+        ))
+    other = storage.repo.register_series(
+        instrument_id="storage-fixture-other", fact_type=storage.fact.fact_type,
+        timeframe_seconds=None, contract_version="derivatives.funding_rate.v2",
+    )
+    for seconds in (10, 20):
+        storage.repo.ingest_facts(
+            series_id=other, source_id=storage.source_id,
+            facts=[replace(storage.fact, observation_key=f"other-{seconds}",
+                           accepted_at=BASE + timedelta(seconds=seconds),
+                           known_at=BASE + timedelta(seconds=seconds))],
+        )
+    rows = operations.recent_facts(series_ids=[other, storage.series_id, other], limit=2)
+    assert [row["observation_key"] for row in rows] == ["funding-fixture", "other-20"]
+    assert rows[0]["revision"] == 2
+    assert rows[0]["payload"]["rate"] == "0.2"
+    assert [row["observation_key"] for row in operations.recent_facts(
+        series_ids=[storage.series_id, other], limit=500,
+    )] == ["funding-fixture", "other-20", "other-10"]
+    assert operations.recent_facts(series_ids=[]) == []
+
+
+def test_collector_recent_fact_plan_seeks_short_suffix(storage):
+    # The exact production header query runs against a disposable large relation.
+    # Hydration is separately covered by the hot/cold reclamation regression.
+    _ingest(storage)
+    query = collector_operations.RECENT_FACTS_SQL.replace(
+        "market.fact_versions", "recent_facts_fixture"
+    )
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE recent_facts_fixture ON COMMIT DROP AS
+            SELECT versions.* FROM market.fact_versions versions CROSS JOIN generate_series(1, 100000)
+        """))
+        session.execute(text("""
+            UPDATE recent_facts_fixture SET observation_key=ctid::text
+        """))
+        session.execute(text("""
+            CREATE INDEX recent_facts_fixture_accepted
+            ON recent_facts_fixture(series_id, accepted_at, market_commit_seq)
+        """))
+        session.execute(text("""
+            CREATE INDEX recent_facts_fixture_revision
+            ON recent_facts_fixture(series_id, observation_key, revision)
+        """))
+        session.execute(text("ANALYZE recent_facts_fixture"))
+        params = {"series_ids": [storage.series_id], "limit": 10}
+        assert len(session.execute(text(query), params).all()) == 10
+        plan = session.execute(
+            text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query), params,
+        ).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        scans = [node for node in nodes(plan[0]["Plan"])
+                 if node.get("Relation Name") == "recent_facts_fixture"]
+        assert scans and all("Index" in node["Node Type"] for node in scans)
+        assert sum(node["Actual Rows"] * node["Actual Loops"] for node in scans) < 100
+
+def test_collector_telemetry_preserves_active_revision_semantics(storage, monkeypatch):
+    monkeypatch.setattr(collector_operations, "db", storage.database)
+    operations = collector_operations.PostgresCollectorOperationsRepository()
+    assert operations.fact_series_telemetry(series_ids=[]) == {}
+    assert operations.fact_series_telemetry(series_ids=[storage.series_id]) == {}
+    _ingest(storage)
+    _ingest(storage, replace(storage.fact, state="invalidated",
+                            accepted_at=BASE + timedelta(seconds=50),
+                            known_at=BASE + timedelta(seconds=50)))
+    result = operations.fact_series_telemetry(series_ids=[storage.series_id] * 2)
+    assert len(result) == 1
+    # Later invalidation does not erase the earlier active revision's telemetry.
+    assert result[storage.series_id]["last_observation_time"] == BASE.isoformat()
+    assert result[storage.series_id]["last_accepted_at"] == storage.fact.accepted_at.isoformat()
+    assert result[storage.series_id]["accepted_last_minute"] == 0
+    assert result[storage.series_id]["accepted_last_five_minutes"] == 0
+
+
+def test_collector_telemetry_window_boundaries_and_indexed_history(storage):
+    query = collector_operations.FACT_SERIES_TELEMETRY_SQL.replace(
+        "market.fact_versions", "telemetry_fixture"
+    )
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE telemetry_fixture (
+                series_id bigint NOT NULL, observation_time timestamptz NOT NULL,
+                accepted_at timestamptz NOT NULL, state text NOT NULL
+            ) ON COMMIT DROP;
+            INSERT INTO telemetry_fixture
+            SELECT 1, now() - interval '30 days', now() - interval '30 days', 'active'
+            FROM generate_series(1, 10000);
+            INSERT INTO telemetry_fixture VALUES
+                (1, now() - interval '2 days', now(), 'active'),
+                (1, now() - interval '2 days', now() + interval '1 second', 'active'),
+                (1, now() - interval '2 days', now() + interval '2 seconds', 'invalidated'),
+                (1, now() - interval '1 day', now() - interval '1 minute', 'active'),
+                (1, now(), now() - interval '5 minutes', 'active'),
+                (1, now() + interval '1 day', now() + interval '1 day', 'invalidated'),
+                (2, now(), now(), 'invalidated'),
+                (3, now() - interval '1 day', now() - interval '1 day', 'active');
+            CREATE INDEX telemetry_fixture_observation
+                ON telemetry_fixture(series_id, observation_time DESC);
+            CREATE INDEX telemetry_fixture_acceptance
+                ON telemetry_fixture(series_id, accepted_at);
+            ANALYZE telemetry_fixture;
+        """))
+        params = {"series_ids": [1, 2, 3, 4]}
+        actual = session.execute(text(query), params).mappings().all()
+        expected = session.execute(text("""
+            SELECT series_id,
+                max(observation_time) FILTER (WHERE state = 'active') AS last_observation_time,
+                max(accepted_at) FILTER (WHERE state = 'active') AS last_accepted_at,
+                count(*) FILTER (WHERE state = 'active' AND accepted_at >= now() - interval '1 minute') AS accepted_last_minute,
+                count(*) FILTER (WHERE state = 'active' AND accepted_at >= now() - interval '5 minutes') AS accepted_last_five_minutes
+            FROM telemetry_fixture WHERE series_id = ANY(:series_ids) GROUP BY series_id
+        """), params).mappings().all()
+        assert {row["series_id"]: dict(row) for row in actual} == {
+            row["series_id"]: dict(row) for row in expected
+        }
+        by_id = {row["series_id"]: row for row in actual}
+        assert by_id[1]["accepted_last_minute"] == 3
+        assert by_id[1]["accepted_last_five_minutes"] == 4
+        assert by_id[2]["last_accepted_at"] is None
+        assert by_id[2]["accepted_last_five_minutes"] == 0
+        assert by_id[3]["last_accepted_at"] is not None
+        assert by_id[3]["accepted_last_five_minutes"] == 0
+        assert 4 not in by_id
+        plan = session.execute(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query), params).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        scans = [node for node in nodes(plan[0]["Plan"])
+                 if node.get("Relation Name") == "telemetry_fixture"]
+        assert scans and all("Index" in node["Node Type"] for node in scans)
+        assert sum((node["Actual Rows"] + node.get("Rows Removed by Filter", 0))
+                   * node["Actual Loops"] for node in scans) < 100
+
+
 def _normalization_spec():
     return NormalizationSpec(
         feature_name="cold_funding", semantic_version="1.0.0",
@@ -117,6 +280,10 @@ def test_legacy_witness_and_referenced_spec_guard_survive_cooling(storage, tmp_p
             reader = market_data.canonical_fact_storage_repository
             assert reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="b" * 64)
             assert reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="7" * 64)
+            assert reader.material_witness_exists(session, series_ids=[storage.series_id],
+                material_hash="b" * 64, evidence_key="custom_old_key", include_canonical=False)
+            assert reader.material_witness_exists(session, series_ids=[storage.series_id],
+                material_hash="7" * 64, evidence_key="numeric_old_key", include_canonical=False)
             assert not reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="c" * 64)
             assert not reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="b" * 64,
                                                       evidence_key="_qt_bbo_evidence", include_canonical=False)
@@ -231,7 +398,9 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
     assert before[0]["complete_bucket_count"] == 0
     assert before[0]["incomplete_bucket_count"] == 1
     replay_args = dict(definition_id=position["definition_id"], session_id=position["session_id"],
-                       snapshot_ids=[snapshot.snapshot_id], batch_ids=[], final_state_hash=None)
+                       snapshot_ids=[snapshot.snapshot_id], batch_ids=[], final_state_hash=snapshot.state_hash)
+    with pytest.raises(RuntimeError, match="market_book_replay_reconciliation_failed"):
+        repo.reconcile_book_replay(**{**replay_args, "final_state_hash": None})
     replay_before = repo.reconcile_book_replay(**replay_args)
     _verified_cold_fixture(storage, tmp_path, monkeypatch)
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", market_data.canonical_fact_storage_repository)
@@ -248,3 +417,69 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
     _persist_reader_fixture(storage, flow_series, [canonicalize_trade_flow(newest, source=storage.fact.source)])
     after = check_sources()[0]
     assert (after["bucket_count"], after["complete_bucket_count"], after["incomplete_bucket_count"]) == (1, 1, 0)
+
+
+def test_keyed_hot_material_witness_seeks_provenance_index(storage, monkeypatch):
+    """Exercise the repository's exact fast query against a large disposable fixture."""
+    import hashlib
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+
+    wanted = hashlib.md5(b"7777").hexdigest()
+    reader = PostgresCanonicalFactStorageRepository()
+    monkeypatch.setattr(reader, "read_rows_by_ids", lambda _session, ids: {
+        identity: {"id": identity, "series_id": 1, "material_hash": "other",
+                   "provenance": {"_qt_test_evidence": {"legacy_material_hash": wanted}}}
+        for identity in ids
+    })
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE witness_headers ON COMMIT DROP AS
+            SELECT n::text AS id, current_date AS storage_day, 1 AS series_id
+            FROM generate_series(1, 10000) n
+        """))
+        session.execute(text("CREATE UNIQUE INDEX witness_headers_id ON witness_headers(id)"))
+        session.execute(text("""
+            CREATE TEMP TABLE witness_payloads ON COMMIT DROP AS
+            SELECT id, storage_day, jsonb_build_object('_qt_test_evidence',
+                jsonb_build_object('legacy_material_hash',md5(id))) AS provenance
+            FROM witness_headers
+        """))
+        # Containment can admit structural supersets. The residual exact-text
+        # predicate must exclude arrays before the candidate is hydrated.
+        session.execute(text("""
+            UPDATE witness_payloads SET provenance=jsonb_build_object('_qt_test_evidence',
+                jsonb_build_object('legacy_material_hash',jsonb_build_array(:wanted)))
+            WHERE id='1'
+        """), {"wanted": wanted})
+        session.execute(text("""
+            CREATE INDEX witness_provenance_gin ON witness_payloads
+            USING gin(provenance jsonb_path_ops)
+        """))
+        session.execute(text("ANALYZE witness_headers"))
+        session.execute(text("ANALYZE witness_payloads"))
+        executed = []
+
+        class FixtureSession:
+            def execute(self, statement, params):
+                query = str(statement).replace("market.fact_hot_payloads", "witness_payloads")
+                query = query.replace("market.fact_versions", "witness_headers")
+                executed.append((query, dict(params)))
+                return session.execute(text(query), params)
+
+        assert reader.material_witness_exists(FixtureSession(), series_ids=[1],
+            material_hash=wanted, evidence_key="_qt_test_evidence", include_canonical=False)
+        assert len(executed) == 1
+        query, params = executed[0]
+        assert session.execute(text(query), params).scalars().all() == ["7777"]
+        plan = session.execute(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query),
+                               params).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        observed = list(nodes(plan[0]["Plan"]))
+        assert any(node.get("Index Name") == "witness_provenance_gin" for node in observed)
+        scans = [node for node in observed if node.get("Relation Name") == "witness_payloads"]
+        assert scans and sum(node["Actual Rows"] * node["Actual Loops"] for node in scans) < 10

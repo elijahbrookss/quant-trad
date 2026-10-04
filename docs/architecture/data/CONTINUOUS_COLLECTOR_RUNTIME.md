@@ -14,6 +14,9 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - src/core/storage_writer_fence.py
+  - portal/backend/run_backend.py
+  - tests/test_market_data/test_storage_writer_fence.py
   - portal/backend/service/market/canonical_retention.py
   - src/core/settings.py
   - src/data_providers/structured_facts.py
@@ -23,6 +26,9 @@ code_paths:
   - src/core/market_storage_lifecycle.py
   - src/market_data/archive.py
   - portal/backend/service/market/collector_supervisor.py
+  - tests/test_market_data/test_continuous_collector_supervisor.py
+  - tests/test_market_data/test_collector_shutdown_signal.py
+  - tests/test_market_data/test_storage_online_collector_drain_db.py
   - portal/backend/service/market/collector_safety.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/continuous_stream_collector.py
@@ -150,6 +156,17 @@ off-thread scan detects drift; its result replaces the ledger only when no
 tracked filesystem mutation overlapped the scan. Corrected drift is logged, and
 uncertain accounting fails closed until a clean reconciliation succeeds.
 
+Supervisor shutdown must propagate an incomplete collector drain. Task exceptions,
+cancellations, drain timeouts and unresolved failures during restart backoff are
+retained by definition and leave the supervisor failed. A later successful run
+that drains normally clears that definition's failure. Unsupported definitions
+remain quarantined independently; their registration errors do not turn healthy
+collector shutdown into a publication failure. A failed supervisor thread also
+causes stop() to raise, including repeated stop calls after the thread has ended.
+The worker still stops lifecycle maintenance and its heartbeat, then reports its
+existing shutdown-failed exit code 5 instead of clean exit 0. It never deletes WAL
+in response to this failure. A process exit is not storage-switch authority.
+
 Reconnect creates a new connection epoch on the same logical session. The
 disconnect budget resets only after a provider message arrives, not after a
 successful socket handshake. Sequence, subscription, heartbeat, snapshot, and
@@ -167,7 +184,11 @@ invalidates the affected flow-coverage interval, and acknowledges the segment.
 It never guesses a side, drops the raw record, or terminates the generic stream
 runtime on that known provider sentinel. Retained-spool recovery applies the
 same rule idempotently, so one semantically unusable trade cannot become a
-permanent restart loop.
+permanent restart loop. A projection-invalidated coverage revision is closed at
+the last mapped receive ordinal and effective time even when the spool segment
+is nonterminal. Its closing evidence records `projection_invalidated`; it does
+not invent a transport-disconnect event. The epoch state stays until its terminal
+segment, so a later valid batch cannot erase the earlier invalidation.
 
 After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's
@@ -261,7 +282,8 @@ capture-to-canonicalization lag and bounded spool growth, not merely free disk.
 
 ## Storage Lifecycle
 
-The collector worker also owns a provider-independent storage-lifecycle
+With the default `storage.maintenance_owner=collector`, the collector worker
+also owns a provider-independent storage-lifecycle
 supervisor. It plans bounded work on an hourly default cadence and never blocks
 the acquisition loop. Planning and execution share one typed policy; the safe
 default is `execution_enabled: false`, so deployment produces plans without
@@ -422,3 +444,132 @@ The actual-core disposable rehearsal verifies clean collector stop and renewed
 heartbeat with enrollment disabled. It does not certify active provider-stream
 continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
+
+The container health probe reads the latest live heartbeat for its own hostname
+through a bounded, read-only `PG_DSN` connection. The returned row retains both
+start and heartbeat timestamps so restart verification can distinguish a new
+worker from the prior process. It does not initialize or provision
+schema; the worker retains startup schema validation. Missing/stale heartbeats and
+a failed continuous supervisor fail the probe. Maintenance readiness separately
+requires its completed outcomes and recovery-copy evidence.
+
+
+The existing storage-lifecycle supervisor accepts optional history-movement and
+local-recovery runners after retention releases its transaction/fence. They use
+the same recurring thread, in that order; no second timer is introduced. History
+handles at most one eligible day per pass so recovery has a turn between moves.
+An exception or busy retention phase does not suppress these attempts, and a
+history failure does not suppress recovery. Each phase has a separate outcome in
+the worker's lifecycle snapshot. Configured phases publish in-progress state before
+calling their runner and timestamp their returned outcome afterward. The
+existing collector heartbeat persists these observations for Storage settings;
+an active heartbeat alone is not evidence of a successful maintenance pass.
+Failures returned by retention remain degraded even if the following phases
+succeed. Shutdown cancellation reaches active work
+and skips later phases. A maintenance-only configuration never executes disabled
+retention.
+
+The collector entrypoint supplies these runners only when the optional central
+storage.maintenance_limits_path setting names an explicit operating-limits file
+(QT_STORAGE_MAINTENANCE_LIMITS_PATH). Default configuration leaves the connection
+absent. The file contains resource limits only; placement and enablement remain
+in the saved Storage policy. Invalid configured files fail startup instead of
+silently selecting fallback budgets. Both runners receive the same database,
+archive root and shutdown callback used by the existing loop.
+
+The configured worker must run in the verified PostgreSQL storage namespace
+with qualified resource limits and PostgreSQL 15 tools. The runtime image
+provides PostgreSQL 15 utilities, but the ordinary server collector mounts and
+permissions are not yet qualified for this layout and cannot substitute
+similar-looking filesystem paths. This is local implementation and disposable
+validation, not activation of backups or storage policy on a server.
+
+With explicit storage-maintenance limits, the same lifecycle service binds
+canonical payload archival to the saved Storage recent-days window and movement
+switch. Legacy canonical per-type hot windows do not override that saved window.
+The existing deployment execution gates still apply. Archive/reclaim transactions
+recheck the policy under the storage-management lock, so a pause or revision
+change after planning prevents mutation under stale authority. This connection
+does not change raw-object expiry rules or add a timer.
+
+### Live working files and finished archives
+
+The continuous runtime and bounded stream-capture path can keep live spool and
+raw and book-checkpoint encoding scratch on SSD while publishing immutable
+objects to HDD.
+MARKET_STRUCTURE_WORKING_ROOT selects the existing live working directory;
+QT_MARKET_DATA_WORKING_EXPECTED_UUID identifies its filesystem. Archive root and
+identity remain MARKET_STRUCTURE_STORAGE_ROOT and QT_MARKET_DATA_EXPECTED_UUID.
+These filesystem settings remain owned by core.storage_mounts, alongside the
+existing archive mount configuration; they are not additional portal placement
+controls.
+
+Without an explicit working root, spool/scratch paths and archive admission
+retain their existing behavior. In dedicated archive mode, an explicit working
+root requires its own UUID. Startup checks both mounts; spool creation and reads
+(including crash-tail repair) enforce the working boundary. A missing/wrong mount
+never creates a fallback directory. Raw and book-checkpoint publication admit staging on the
+configured working filesystem or the archive filesystem; a failed working-mount
+check cannot fall back to archive admission. Canonical historical staging and
+existing raw compaction placement remain unchanged.
+
+For a preserving cutover, retain the old working-root path and move/verify only
+the intended archived objects before changing the archive root. Existing spool
+paths and raw record identities remain valid. Private file ownership must also
+be qualified across API, initializer and collector processes; the root separation
+does not itself establish production permissions or authorize a server change.
+
+
+The opt-in storage collector-drain fixture additionally crosses the explicit
+v1-to-v2 database/archive switch with retained trade WAL, both before and after
+canonical commit with a lost acknowledgement. Recovery retains the SSD spool
+root and uses the HDD object root, then accepts a new frame through candidate
+v2 ingestion. This fixture checks preservation and idempotent recovery, not host
+switch authorization or recovery compatibility for every projection. See
+[ADR0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md).
+
+
+### Explicit maintenance process ownership
+
+For the preserving SSD/HDD transition, `storage.maintenance_owner=dedicated`
+omits the storage supervisor from the collector. The internal database-owned
+`storage_maintenance` worker hosts that same supervisor, runners and cancellation
+path. Collection retains its original private SSD owner and publishes an explicit
+external-maintenance context instead of a second maintenance schedule. Storage
+reads the dedicated worker heartbeat through its existing status projection;
+collector health excludes maintenance-role heartbeats. The default composition
+and provider/stream shutdown contracts are unchanged. See
+[Storage Management](../persistence/STORAGE_MANAGEMENT.md#database-owned-maintenance-composition)
+for the ownership requirements and unfinished deployment/recovery qualification.
+
+## Explicit source storage preparation interlock
+
+The existing backend, collector and initializer entrypoints accept the internal
+operator input `QT_STORAGE_SOURCE_FENCE_ROOT` for the current co-located archive
+and working directory. They acquire a nonblocking shared Linux directory lock
+before publishing or spawning work and keep it until process exit. Backend
+children inherit the same open descriptor, so an orphan cannot silently release
+the source interlock when its supervisor exits. The guarded backend also uses
+the existing database-readiness check before spawning children.
+
+An operator can acquire the exclusive side only after admitted source publishers
+retire. A missing, aliased, split or changed root and an exclusive hold refuse
+startup. This does not create a marker, change permissions, move data, migrate
+schema, or authorize a switch. Without the explicit input, ordinary startup is
+unchanged. This cooperative boundary must be combined with exact source-image,
+fleet, mount and database admission; arbitrary external processes and Docker
+bot containers are not covered by this process descriptor.
+
+This backport preserves the deployed research revision and v1 storage layout.
+Its activation requires a separately qualified preserving release; no production
+recipe, collector state or storage data is changed by adding the code. See
+[ADR0074](../decisions/0074-retain-source-writer-interlock-during-storage-preparation.md).
+
+
+The existing release script also refuses every mutating action when a storage
+hold, preparation, request, worker or final marker exists, including a corrupt
+file, expired/canceled receipt, directory or dangling symlink. Process death or
+loss of the deployment flock cannot erase this durable refusal. Read-only
+release status reports the hold without printing private receipt contents.
+This reuses the migration branch's existing refusal; it does not introduce a
+new state file, parse a receipt into authority, or enable the new storage layout.

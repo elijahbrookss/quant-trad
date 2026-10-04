@@ -53,6 +53,10 @@ class MarketDataStore(Protocol):
     def current_commit_seq(self) -> int:
         ...
 
+    def list_series_metadata(self, *, instrument_id: Optional[str] = None) -> list[Mapping[str, Any]]:
+        """Registered series identities only; not counts or coverage."""
+        ...
+
     def list_series(self, *, instrument_id: Optional[str] = None) -> list[Mapping[str, Any]]:
         ...
 
@@ -125,6 +129,7 @@ class MarketDataStore(Protocol):
         source_revision: Optional[str] = None,
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
+        require_same_source: bool = False,
         collection_fence: Optional[Mapping[str, Any]] = None,
     ) -> IngestionOutcome:
         ...

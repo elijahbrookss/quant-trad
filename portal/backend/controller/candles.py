@@ -58,6 +58,29 @@ class CandleIngestionRequest(BaseModel):
     source_revision: Optional[str] = None
 
 
+class CandleDerivationRequest(BaseModel):
+    dataset_id: str
+    source_series_id: int
+    start: str
+    end: str
+    timeframe: str
+
+
+@router.post("/derive")
+def derive_candle_dataset(req: CandleDerivationRequest) -> Dict[str, Any]:
+    from ..service.market.candle_derivation_service import derive_candles
+
+    try:
+        return derive_candles(store=market_data_repo, dataset_id=req.dataset_id,
+            source_series_id=req.source_series_id, start=_normalize_time(req.start),
+            end=_normalize_time(req.end),
+            target_seconds=int(interval_to_timedelta(req.timeframe).total_seconds()))
+    except (KeyError, ValueError, RuntimeError) as exc:
+        logger.warning("candle_derivation_rejected | dataset_id=%s series_id=%s error=%s",
+                       req.dataset_id, req.source_series_id, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class CandleDatasetSeriesRequest(BaseModel):
     series_id: Optional[int] = None
     instrument_id: Optional[str] = None
@@ -117,6 +140,14 @@ def ingest_candles(req: CandleIngestionRequest) -> Dict[str, Any]:
         "series_id": result.series_id,
         "gap_evidence_count": result.gap_evidence_count,
         "outcome": asdict(result.outcome),
+    }
+
+
+@router.get("/series/metadata")
+def list_market_data_series_metadata(instrument_id: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "schema_version": "market_series_metadata.v1",
+        "series": market_data_repo.list_series_metadata(instrument_id=instrument_id),
     }
 
 

@@ -88,6 +88,7 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
     manifest = get_indicator_manifest(type_id)
     definition = get_indicator_definition(type_id)
     details = serialize_indicator_manifest(manifest)
+    details["supported_versions"] = sorted(getattr(definition, "MANIFEST_VERSIONS", {manifest.version: manifest}))
     details["runtime_supported"] = definition_supports_runtime(definition)
     details["compute_supported"] = definition_supports_compute(definition)
     return details
@@ -194,9 +195,10 @@ def create_instance(
     color_palette: Optional[str] = None,
     *,
     ctx: IndicatorServiceContext = _context,
+    version: str | None = None,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.create(type_str, name, params, dependencies, color, color_palette)
+    return creator.create(type_str, name, params, dependencies, color, color_palette, version=version)
 
 
 def validate_instance_config(
@@ -208,9 +210,10 @@ def validate_instance_config(
     color_palette: Optional[str] = None,
     *,
     ctx: IndicatorServiceContext = _context,
+    version: str | None = None,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.validate(type_str, name, params, dependencies, color, color_palette)
+    return creator.validate(type_str, name, params, dependencies, color, color_palette, version=version)
 
 
 def update_instance(
@@ -288,7 +291,7 @@ def _resolve_logged_source_timeframe(meta: Mapping[str, Any], interval: str) -> 
     indicator_type = str(meta.get("type") or "").strip()
     if not indicator_type:
         return str(interval or "")
-    manifest = get_indicator_manifest(indicator_type)
+    manifest = get_indicator_manifest(indicator_type, meta.get("version"))
     if not manifest.runtime_inputs:
         return str(interval or "")
     runtime_input = manifest.runtime_inputs[0]
@@ -588,8 +591,9 @@ class IndicatorService:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
+        *, version: str | None = None,
     ) -> Dict[str, Any]:
-        return create_instance(type_str, name, params, dependencies, color, color_palette, ctx=self._ctx)
+        return create_instance(type_str, name, params, dependencies, color, color_palette, ctx=self._ctx, version=version)
 
     def validate_instance_config(
         self,
@@ -599,6 +603,7 @@ class IndicatorService:
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
         color_palette: Optional[str] = None,
+        *, version: str | None = None,
     ) -> Dict[str, Any]:
         return validate_instance_config(
             type_str,
@@ -608,6 +613,7 @@ class IndicatorService:
             color,
             color_palette,
             ctx=self._ctx,
+            version=version,
         )
 
     def update_instance(

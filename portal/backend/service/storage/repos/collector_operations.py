@@ -20,6 +20,44 @@ from ....db import db
 from .fact_storage import canonical_fact_storage_repository
 
 
+RECENT_FACTS_SQL = """
+WITH latest AS (
+    SELECT candidate.*
+    FROM unnest(CAST(:series_ids AS bigint[])) AS requested(series_id)
+    CROSS JOIN LATERAL (
+        SELECT id, series_id, observation_key, revision,
+               market_commit_seq, source_id, ingestion_run_id,
+               fact_type, payload_schema_id, observation_time,
+               source_published_at, received_at, accepted_at,
+               known_at, transformation_id, external_event_key,
+               external_event_group_key, state,
+               provenance_schema_id, quality_schema_id
+        FROM market.fact_versions AS versions
+        WHERE versions.series_id = requested.series_id
+          AND versions.state = 'active'
+          AND NOT EXISTS (
+              SELECT 1 FROM market.fact_versions AS newer
+              WHERE newer.series_id = versions.series_id
+                AND newer.observation_key = versions.observation_key
+                AND newer.revision > versions.revision
+          )
+        ORDER BY accepted_at DESC, market_commit_seq DESC
+        LIMIT :limit
+    ) AS candidate
+    ORDER BY candidate.accepted_at DESC,
+             candidate.market_commit_seq DESC
+    LIMIT :limit
+)
+SELECT latest.*, sources.provider, sources.venue,
+       sources.source_kind, sources.adapter_version,
+       series.instrument_id
+FROM latest
+JOIN market.sources AS sources ON sources.id = latest.source_id
+JOIN market.series AS series ON series.id = latest.series_id
+ORDER BY latest.accepted_at DESC, latest.market_commit_seq DESC
+"""
+
+
 class CollectorOperationRequestConflict(RuntimeError):
     """Raised when an idempotency key is reused for different intent."""
 
@@ -62,6 +100,44 @@ def _prior_state(row: Mapping[str, Any]) -> dict[str, Any]:
         "control_requested_by": row.get("control_requested_by"),
         "control_request_id": row.get("control_request_id"),
     }
+
+
+# Keep one statement snapshot and independent observation/acceptance clocks.
+# Telemetry counts active revisions, including superseded active revisions.
+FACT_SERIES_TELEMETRY_SQL = """
+SELECT wanted.series_id,
+       observation.observation_time AS last_observation_time,
+       acceptance.accepted_at AS last_accepted_at,
+       recent.accepted_last_minute,
+       recent.accepted_last_five_minutes
+FROM unnest(CAST(:series_ids AS bigint[])) AS wanted(series_id)
+LEFT JOIN LATERAL (
+    SELECT observation_time
+    FROM market.fact_versions
+    WHERE series_id = wanted.series_id AND state = 'active'
+    ORDER BY observation_time DESC
+    LIMIT 1
+) observation ON true
+LEFT JOIN LATERAL (
+    SELECT accepted_at
+    FROM market.fact_versions
+    WHERE series_id = wanted.series_id AND state = 'active'
+    ORDER BY accepted_at DESC
+    LIMIT 1
+) acceptance ON true
+CROSS JOIN LATERAL (
+    SELECT count(*) FILTER (
+               WHERE accepted_at >= now() - interval '1 minute'
+           ) AS accepted_last_minute,
+           count(*) AS accepted_last_five_minutes
+    FROM market.fact_versions
+    WHERE series_id = wanted.series_id AND state = 'active'
+      AND accepted_at >= now() - interval '5 minutes'
+) recent
+WHERE EXISTS (
+    SELECT 1 FROM market.fact_versions WHERE series_id = wanted.series_id
+)
+"""
 
 
 class PostgresCollectorOperationsRepository:
@@ -343,26 +419,7 @@ class PostgresCollectorOperationsRepository:
             return {}
         with db.session() as session:
             rows = session.execute(
-                text(
-                    """
-                    SELECT series_id,
-                           max(observation_time) FILTER (WHERE state = 'active')
-                               AS last_observation_time,
-                           max(accepted_at) FILTER (WHERE state = 'active')
-                               AS last_accepted_at,
-                           count(*) FILTER (
-                               WHERE state = 'active'
-                                 AND accepted_at >= now() - interval '1 minute'
-                           ) AS accepted_last_minute,
-                           count(*) FILTER (
-                               WHERE state = 'active'
-                                 AND accepted_at >= now() - interval '5 minutes'
-                           ) AS accepted_last_five_minutes
-                    FROM market.fact_versions
-                    WHERE series_id = ANY(:series_ids)
-                    GROUP BY series_id
-                    """
-                ),
+                text(FACT_SERIES_TELEMETRY_SQL),
                 {"series_ids": normalized_ids},
             ).mappings().all()
         return {int(row["series_id"]): _public_row(row) for row in rows}
@@ -417,32 +474,7 @@ class PostgresCollectorOperationsRepository:
         bounded_limit = max(1, min(int(limit), 500))
         with db.session() as session:
             rows = session.execute(
-                text(
-                    """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (series_id, observation_key)
-                               id, series_id, observation_key, revision,
-                               market_commit_seq, source_id, ingestion_run_id,
-                               fact_type, payload_schema_id, observation_time,
-                               source_published_at, received_at, accepted_at,
-                               known_at, transformation_id, external_event_key,
-                               external_event_group_key, state,
-                               provenance_schema_id, quality_schema_id
-                        FROM market.fact_versions
-                        WHERE series_id = ANY(:series_ids)
-                        ORDER BY series_id, observation_key, revision DESC
-                    )
-                    SELECT latest.*, sources.provider, sources.venue,
-                           sources.source_kind, sources.adapter_version,
-                           series.instrument_id
-                    FROM latest
-                    JOIN market.sources AS sources ON sources.id = latest.source_id
-                    JOIN market.series AS series ON series.id = latest.series_id
-                    WHERE latest.state = 'active'
-                    ORDER BY latest.accepted_at DESC, latest.market_commit_seq DESC
-                    LIMIT :limit
-                    """
-                ),
+                text(RECENT_FACTS_SQL),
                 {"series_ids": normalized_ids, "limit": bounded_limit},
             ).mappings().all()
             payloads = canonical_fact_storage_repository.read_rows_by_ids(session, [row["id"] for row in rows])

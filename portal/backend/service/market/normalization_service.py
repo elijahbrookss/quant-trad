@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
+from market_data.range_evidence import is_complete_range_evidence
 from market_data.contracts import TypedFeatureRecord, record_effective_time
 from market_data.normalization import (
     NormalizationFormula,
@@ -332,6 +333,7 @@ class MarketNormalizationService:
             as_of_commit_seq=selection_watermark,
             known_at_lte=decision_at,
         )
+        gaps = [row for row in gaps if not is_complete_range_evidence(row)]
         inputs: list[NormalizationInput] = []
         value_field = str(spec.parameters.get("value_field") or "value")
         denominator_field = spec.parameters.get("denominator_field")
@@ -388,7 +390,7 @@ class MarketNormalizationService:
                     + [
                         _utc(
                             datetime.fromisoformat(
-                                str(gap.get("detected_at")).replace(
+                                str(gap.get("known_at") or gap.get("detected_at")).replace(
                                     "Z", "+00:00"
                                 )
                             ),
@@ -412,14 +414,14 @@ class MarketNormalizationService:
                     "invalid_reason": invalid_reason,
                     "gap_evidence": [
                         {
-                            "evidence_hash": gap.get("evidence_hash"),
+                            "evidence_hash": gap.get("range_evidence_hash") or gap.get("evidence_hash"),
                             "classification": gap.get("classification"),
                             "start": gap.get("start") or gap.get("start_time"),
                             "end": gap.get("end") or gap.get("end_time"),
                             "detected_as_of_commit_seq": gap.get(
                                 "detected_as_of_commit_seq"
                             ),
-                            "detected_at": gap.get("detected_at"),
+                            "detected_at": gap.get("known_at") or gap.get("detected_at"),
                         }
                         for gap in overlapping_gaps
                     ],

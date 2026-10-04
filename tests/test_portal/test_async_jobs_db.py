@@ -494,3 +494,39 @@ def test_research_artifacts_rollback_with_owned_job_completion(
         fail_job(claim, error="expected rollback test cleanup")
     finally:
         _delete_jobs(job_id)
+
+
+def test_single_attempt_research_dispatch_reuses_safely_and_never_retries(monkeypatch):
+    from portal.backend.service.research import async_dispatch as dispatch
+    job_type = _job_type("research_attempt_policy")
+    monkeypatch.setattr(dispatch, "JOB_TYPE_RESEARCH_CHECK_RUN", job_type)
+    monkeypatch.setattr(dispatch, "RESEARCH_JOB_TYPES", {job_type})
+    request = {"mode":"evidence", "scope":{"instrument_id":"test-attempt-policy"}, "detector":{}}
+    ids=[]
+    try:
+        original=dispatch.dispatch_research_check_run(request)
+        ids.append(original["job_id"])
+        with pytest.raises(ValueError,match="attempt_policy_mismatch"):
+            dispatch.dispatch_research_check_run(request,max_attempts=1)
+        with db.session() as session:
+            assert session.scalar(select(func.count()).select_from(AsyncJobRecord).where(AsyncJobRecord.job_type==job_type)) == 1
+        assert get_job(ids[0])["max_attempts"] == 2
+        _delete_jobs(ids.pop())
+        first=dispatch.dispatch_research_check_run(request,max_attempts=1)
+        ids.append(first["job_id"])
+        reused=dispatch.dispatch_research_check_run(request,max_attempts=1)
+        assert reused["reused"] and reused["job_id"] == ids[0] and reused["max_attempts"] == 1
+        claim=claim_next_job(worker_id="attempt-policy-1",job_types=[job_type])
+        assert claim.id == ids[0] and claim.attempts == claim.max_attempts == 1
+        fail_job(claim,error="synthetic controlled failure",retry_delay_seconds=0)
+        assert get_job(ids[0])["status"] == "failed"
+        assert claim_next_job(worker_id="must-not-retry",job_types=[job_type]) is None
+        # A later explicit dispatch is a separate budgeted attempt, never replay.
+        second=dispatch.dispatch_research_check_run(request,max_attempts=1)
+        ids.append(second["job_id"])
+        assert not second["reused"] and ids[1] != ids[0]
+        claim=claim_next_job(worker_id="attempt-policy-2",job_types=[job_type])
+        fail_job(claim,error="second explicit attempt",retry_delay_seconds=0)
+        assert [get_job(i)["attempts"] for i in ids] == [1,1]
+    finally:
+        _delete_jobs(*ids)

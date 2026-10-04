@@ -1,6 +1,6 @@
 """Storage placement and immutable cold-page catalog for canonical Facts.
 
-Fact identity remains in market.fact_versions. These relations describe where
+Global Fact identity remains in market.fact_identities. These relations describe where
 its large JSON documents live; they never create a new market revision.
 """
 
@@ -11,6 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .models import Base
+from .market_data_models import MarketFactVersionRecord
 
 
 class MarketFactStorageStateRecord(Base):
@@ -45,7 +46,7 @@ class MarketFactHotPayloadRecord(Base):
     )
 
     storage_day = Column(Date, primary_key=True)
-    id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    id = Column(String(64), ForeignKey("market.fact_identities.id", ondelete="RESTRICT"), primary_key=True)
     series_id = Column(BigInteger, nullable=False)
     payload_schema_id = Column(String(128), nullable=False)
     observation_time = Column(DateTime(timezone=True), nullable=False)
@@ -53,6 +54,10 @@ class MarketFactHotPayloadRecord(Base):
     provenance = Column(JSONB, nullable=False)
     quality = Column(JSONB, nullable=False)
 
+
+# Payload CHECK functions are installed with the header schema; this ordering
+# remains necessary after ID foreign keys move to the global registry.
+MarketFactHotPayloadRecord.__table__.add_is_dependent_on(MarketFactVersionRecord.__table__)
 
 Index("ix_market_fact_payload_gin", MarketFactHotPayloadRecord.payload,
       postgresql_using="gin", postgresql_ops={"payload": "jsonb_path_ops"})
@@ -215,7 +220,7 @@ class MarketFactArchiveCanonicalDependencyRecord(Base):
     )
 
     manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
-    fact_version_id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_identities.id", ondelete="RESTRICT"), primary_key=True)
     row_hash = Column(String(64), nullable=False)
 
 
@@ -314,7 +319,7 @@ class MarketFactArchiveMaterialAliasRecord(Base):
     )
 
     manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
-    fact_version_id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_identities.id", ondelete="RESTRICT"), primary_key=True)
     evidence_key = Column(String(64), primary_key=True)
     series_id = Column(BigInteger, ForeignKey("market.series.id", ondelete="RESTRICT"), nullable=False)
     material_hash = Column(String(64), nullable=False)

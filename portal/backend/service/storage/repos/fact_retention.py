@@ -42,6 +42,26 @@ def archive_admission_blockers(*, policy, filesystem, publication=True):
     return blockers
 
 
+# One indexed seek per distinct family, including one overflow witness.
+# LIMIT after DISTINCT would still inspect every Fact in a storage day.
+FACT_STORAGE_FAMILIES_SQL = """
+    WITH RECURSIVE families(fact_type, ordinal) AS (
+        (SELECT fact_type, 1 FROM market.fact_versions
+         WHERE storage_day=:day ORDER BY fact_type LIMIT 1)
+        UNION ALL
+        SELECT next_family.fact_type, families.ordinal + 1
+        FROM families
+        CROSS JOIN LATERAL (
+            SELECT fact_type FROM market.fact_versions
+            WHERE storage_day=:day AND fact_type > families.fact_type
+            ORDER BY fact_type LIMIT 1
+        ) AS next_family
+        WHERE families.ordinal < 257
+    )
+    SELECT fact_type FROM families ORDER BY fact_type
+"""
+
+
 class PostgresCanonicalFactRetentionRepository:
     def __init__(self, *, database=db):
         self.database = database
@@ -64,9 +84,22 @@ class PostgresCanonicalFactRetentionRepository:
             sizes = dict(query(text("""
                 SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date AS database_day,
                        pg_database_size(current_database()) AS database_bytes,
-                       pg_total_relation_size('market.fact_versions') AS canonical_header_bytes,
+                       pg_total_relation_size('market.fact_identities') AS global_identity_bytes,
+                       pg_total_relation_size('market.fact_header_series_days') AS series_day_directory_bytes,
                        pg_total_relation_size('market.raw_archive_record_mappings') AS raw_mapping_bytes
             """)).mappings().one())
+            # A partitioned parent has no heap or index storage of its own.
+            # Include every node once; each physical relation total includes its
+            # indexes and TOAST. Header history survives hot-payload reclamation.
+            headers = list(query(text("""
+                SELECT tree.relid, pg_total_relation_size(tree.relid) AS bytes
+                FROM pg_partition_tree('market.fact_versions'::regclass) AS tree
+                LIMIT :limit
+            """), {"limit": policy.max_inventory_partitions + 2}).mappings())
+            # The tree includes its root in addition to the configured children.
+            if len(headers) > policy.max_inventory_partitions + 1:
+                raise RuntimeError("canonical_retention_inventory_budget_exceeded: no partial storage total is reported")
+            sizes["canonical_header_bytes"] = sum(int(row["bytes"]) for row in headers)
             partitions = [dict(row) for row in query(text("""
                 SELECT storage_day,state,expected_rows,manifest_set_hash FROM market.fact_retention_partitions
                 WHERE state <> 'reclaimed' ORDER BY storage_day LIMIT :limit
@@ -91,10 +124,9 @@ class PostgresCanonicalFactRetentionRepository:
             deferred = len(candidates) > policy.max_candidate_partitions
             candidates = candidates[:policy.max_candidate_partitions]
             for row in candidates:
-                row["fact_types"] = list(query(text("""
-                    SELECT DISTINCT fact_type FROM market.fact_versions
-                    WHERE storage_day=:day ORDER BY fact_type LIMIT 257
-                """), {"day": row["storage_day"]}).scalars())
+                row["fact_types"] = list(query(
+                    text(FACT_STORAGE_FAMILIES_SQL), {"day": row["storage_day"]}
+                ).scalars())
                 if len(row["fact_types"]) > 256:
                     raise RuntimeError(f"canonical_retention_family_budget_exceeded: storage_day={row['storage_day']}")
                 row.update(query(text("""
@@ -202,7 +234,7 @@ class PostgresCanonicalFactRetentionRepository:
             "execution_enabled": policy.execution_enabled,
             "execution_blockers": [] if policy.execution_enabled else ["canonical_retention_execution_disabled"],
             "inventory": {name: inventory[name] for name in (
-                "database_bytes", "canonical_header_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
+                "database_bytes", "canonical_header_bytes", "global_identity_bytes", "series_day_directory_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
             "archive_filesystem": filesystem,
             "pressure": {"hot_payload_excess_bytes": hot_excess,
                          "hot_payload_budget_reached": hot_pressure,
@@ -226,9 +258,9 @@ def require_hot_window_elapsed(session, partition, *, policy: CanonicalFactReten
     """Repeat family/window admission under the partition owner's row lock."""
     day = partition["storage_day"]
     today = session.execute(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date")).scalar_one()
-    families = session.execute(text(
-        "SELECT DISTINCT fact_type FROM market.fact_versions WHERE storage_day=:day ORDER BY fact_type LIMIT 257"
-    ), {"day": day}).scalars().all()
+    families = session.execute(
+        text(FACT_STORAGE_FAMILIES_SQL), {"day": day}
+    ).scalars().all()
     if len(families) > 256:
         raise RuntimeError(f"canonical_retention_family_budget_exceeded: storage_day={day}")
     unsupported = unproven_reclamation_fact_types(families)

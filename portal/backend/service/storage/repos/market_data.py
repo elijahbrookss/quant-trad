@@ -73,7 +73,10 @@ from ....db import db
 from ....db.fact_storage_schema import current_fact_storage_day
 
 from .market_lifecycle import market_storage_lifecycle_repository
-from .fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, canonical_fact_storage_repository
+from .fact_storage import (
+    CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_RANGE_ROW_FROM,
+    canonical_fact_storage_repository,
+)
 
 
 _SERIES_IDENTITY_VERSION = "market_series.v1"
@@ -1344,6 +1347,29 @@ class PostgresMarketDataRepository:
             ).scalar_one()
         )
 
+    def list_series_metadata(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """Discover registered identities without scanning accepted facts.
+
+        Registration is not coverage evidence. Counts, bounds and availability
+        are deliberately absent; consumers must preflight their exact window.
+        """
+        params: dict[str, Any] = {}
+        predicate = ""
+        if instrument_id is not None:
+            normalized = str(instrument_id or "").strip()
+            if not normalized:
+                raise ValueError("market_data_series_invalid: instrument_id is empty")
+            params["instrument_id"] = normalized
+            predicate = "WHERE instrument_id=:instrument_id"
+        with db.session() as session:
+            rows = session.execute(text(f"""
+                SELECT id, identity_key, instrument_id, fact_type,
+                       timeframe_seconds, contract_version, dimensions
+                FROM market.series {predicate}
+                ORDER BY instrument_id, fact_type, timeframe_seconds NULLS FIRST, id
+            """), params).mappings().all()
+        return [dict(row) for row in rows]
+
     def list_series(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
         """Return canonical logical series and accepted-version counts."""
 
@@ -1771,6 +1797,7 @@ class PostgresMarketDataRepository:
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
         collection_fence: Optional[Mapping[str, Any]] = None,
+        require_same_source: bool = False,
     ) -> IngestionOutcome:
         """Persist schema-registered canonical Facts through the one writer."""
 
@@ -1830,6 +1857,7 @@ class PostgresMarketDataRepository:
                 rows=rows,
                 allow_corrections=bool(allow_corrections),
                 collection_fence=collection_fence,
+                require_same_source=require_same_source,
             )
         except Exception as exc:
             self._fail_ingestion_run(run_id, exc)
@@ -2578,6 +2606,7 @@ class PostgresMarketDataRepository:
         rows: Sequence[CanonicalFact],
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
+        require_same_source: bool = False,
     ) -> IngestionOutcome:
         with db.session() as session:
             return self._ingest_canonical_rows_with_session(
@@ -2587,6 +2616,7 @@ class PostgresMarketDataRepository:
                 rows=rows,
                 allow_corrections=allow_corrections,
                 collection_fence=collection_fence,
+                require_same_source=require_same_source,
             )
 
     def _ingest_canonical_rows_with_session(
@@ -2598,6 +2628,7 @@ class PostgresMarketDataRepository:
         rows: Sequence[CanonicalFact],
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
+        require_same_source: bool = False,
     ) -> IngestionOutcome:
         inserted_count = 0
         corrected_count = 0
@@ -2616,11 +2647,24 @@ class PostgresMarketDataRepository:
             collection_fence=collection_fence,
         )
         source_id, source = self._canonical_source_for_run(session, run_id)
-        latest_by_key = {row["observation_key"]: row for row in session.execute(text("""
-            SELECT DISTINCT ON (observation_key) observation_key,revision,row_hash,market_commit_seq
-            FROM market.fact_versions WHERE series_id=:series_id AND observation_key=ANY(:keys)
+        latest_identities = session.execute(text("""
+            SELECT DISTINCT ON (observation_key) id,storage_day,observation_key,revision
+            FROM market.fact_identities
+            WHERE series_id=:series_id AND observation_key=ANY(:keys)
             ORDER BY observation_key,revision DESC
-        """), {"series_id": series_id, "keys": [fact.observation_key for fact in rows]}).mappings()}
+        """), {"series_id": series_id, "keys": [fact.observation_key for fact in rows]}).mappings().all()
+        latest_by_key = {}
+        if latest_identities:
+            latest_headers = session.execute(text("""
+                SELECT id,observation_key,revision,row_hash,market_commit_seq,source_id
+                FROM market.fact_versions
+                WHERE id=ANY(:ids) AND storage_day=ANY(:days)
+            """), {"ids": [row["id"] for row in latest_identities],
+                   "days": sorted({row["storage_day"] for row in latest_identities})}).mappings().all()
+            if (len(latest_headers) != len(latest_identities)
+                    or {row["id"] for row in latest_headers} != {row["id"] for row in latest_identities}):
+                raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
+            latest_by_key = {row["observation_key"]: row for row in latest_headers}
         # A true no-op creates no reference and must remain envelope-only,
         # including after cold movement. Acquire a deterministic manifest-lock
         # set for the genuine writes before inserting any of their payloads.
@@ -2642,6 +2686,12 @@ class PostgresMarketDataRepository:
                 max_commit_seq = max(
                     max_commit_seq, int(latest["market_commit_seq"])
                 )
+                if require_same_source and int(latest["source_id"]) != source_id:
+                    raise RuntimeError(
+                        "market_data_source_conflict: immutable producer cannot reuse "
+                        f"another source series_id={series_id} "
+                        f"observation_key={fact.observation_key}"
+                    )
                 if str(latest["row_hash"]) == fact.row_hash:
                     noop_count += 1
                     continue
@@ -2742,7 +2792,7 @@ class PostgresMarketDataRepository:
                 "quality": _json_text(fact.quality),
             })
             max_commit_seq = max(max_commit_seq, commit_seq)
-            latest_by_key[fact.observation_key] = {"revision": revision, "row_hash": fact.row_hash,
+            latest_by_key[fact.observation_key] = {"source_id": source_id, "revision": revision, "row_hash": fact.row_hash,
                                                   "market_commit_seq": commit_seq}
             if latest is None:
                 inserted_count += 1
@@ -2832,7 +2882,7 @@ class PostgresMarketDataRepository:
                 WITH visible AS (
                     {select_prefix}
                            {CANONICAL_ROW_COLUMNS}
-                    {CANONICAL_ROW_FROM}
+                    {CANONICAL_RANGE_ROW_FROM}
                     WHERE {' AND '.join(predicates)}
                     ORDER BY {revision_order}
                 )
@@ -3212,6 +3262,34 @@ class PostgresMarketDataRepository:
                 )
         return projected
 
+    def _range_evidence_with_session(
+        self, session, *, series_id, start, end, as_of_commit_seq,
+        known_at_lte=None, include_source_identity=False,
+    ):
+        quality = self._gap_evidence_with_session(
+            session, series_id=series_id, start=start, end=end,
+            as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,
+            include_source_identity=include_source_identity,
+        )
+        fact_type = session.execute(
+            text("SELECT fact_type FROM market.series WHERE id=:series_id"),
+            {"series_id": series_id},
+        ).scalar_one_or_none()
+        if fact_type is None:
+            return quality
+        owner = get_fact_contract(str(fact_type)).range_evidence_owner
+        if owner is not None:
+            from .book_range_evidence import read_book_range_evidence
+            producers = {"book_event_buckets.v1": read_book_range_evidence}
+            if owner not in producers:
+                raise RuntimeError(f"market_range_evidence_owner_unavailable: owner={owner}")
+            quality.extend(producers[owner](
+                session, repository=self, series_id=series_id, start=start, end=end,
+                watermark=as_of_commit_seq, known_at_lte=known_at_lte,
+                object_store=canonical_fact_storage_repository.object_store_factory(),
+            ))
+        return quality
+
     def list_gap_evidence(
         self,
         *,
@@ -3227,7 +3305,7 @@ class PostgresMarketDataRepository:
             watermark = as_of_commit_seq
             if watermark is None:
                 watermark = self._current_commit_seq_with_session(session)
-            return self._gap_evidence_with_session(
+            return self._range_evidence_with_session(
                 session,
                 series_id=request.series_id,
                 start=request.start,
@@ -3761,7 +3839,7 @@ class PostgresMarketDataRepository:
                 series_identity = dict(identity)
                 if not dict(series_identity.get("dimensions") or {}):
                     series_identity.pop("dimensions", None)
-                quality = self._gap_evidence_with_session(
+                quality = self._range_evidence_with_session(
                     session,
                     series_id=item.series_id,
                     start=item.start,
@@ -3769,6 +3847,13 @@ class PostgresMarketDataRepository:
                     as_of_commit_seq=watermark,
                     include_source_identity=True,
                 )
+                for range_row in quality:
+                    for raw_ref in (range_row.get("evidence") or {}).get("archives", []):
+                        archive_refs[str(raw_ref["manifest_id"])] = {
+                            key: str(raw_ref[key]) for key in (
+                                "object_sha256", "content_fingerprint", "object_key", "object_uri"
+                            )
+                        }
                 canonical_trade_history = fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE} and all(
                     isinstance(record, CanonicalFactRecord) for record in records)
                 trade_records = records

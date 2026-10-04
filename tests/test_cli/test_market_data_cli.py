@@ -922,3 +922,30 @@ def test_market_storage_lifecycle_cli_is_dry_run_first(monkeypatch) -> None:
             "body": None,
         },
     ]
+
+
+def test_series_metadata_discovery_uses_explicit_count_free_contract(monkeypatch):
+    observed = []
+    def fake_urlopen(request, timeout):
+        observed.append(urllib.parse.urlparse(request.full_url).path)
+        return _Response({"schema_version": "market_series_metadata.v1", "series": []})
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(["--no-audit-log", "data", "series", "--metadata-only"]) == 0
+    assert observed == ["/api/candles/series/metadata"]
+    assert main(["--no-audit-log", "data", "series"]) == 0
+    assert observed[-1] == "/api/candles/series"
+
+
+def test_data_derive_candles_is_explicit_frozen_source_command(monkeypatch):
+    observed = {}
+    def fake_urlopen(request, timeout):
+        observed.update(path=urllib.parse.urlparse(request.full_url).path,
+                        body=json.loads(request.data.decode("utf-8")))
+        return _Response({"provider_call_performed": False})
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(["--no-audit-log", "data", "derive-candles", "--dataset-id", "frozen",
+                 "--source-series-id", "1", "--start", "2022-10-01T00:00:00Z",
+                 "--end", "2022-10-02T00:00:00Z", "--timeframe", "5m"]) == 0
+    assert observed["path"] == "/api/candles/derive"
+    assert observed["body"]["source_series_id"] == 1
+    assert observed["body"]["dataset_id"] == "frozen"

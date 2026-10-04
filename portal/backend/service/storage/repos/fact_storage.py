@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
+import json
 import logging
 from typing import Any
 
@@ -30,16 +31,20 @@ CANONICAL_ENVELOPE_COLUMNS = """
     sources.source_kind, sources.adapter_version AS source_adapter_version,
     series.dimensions AS series_dimensions
 """
-CANONICAL_ENVELOPE_FROM = """
-    FROM market.fact_versions AS versions
+_CANONICAL_ENVELOPE_JOINS = """
     JOIN market.sources AS sources ON sources.id = versions.source_id
     JOIN market.series AS series ON series.id = versions.series_id
 """
+CANONICAL_ENVELOPE_FROM = "\n    FROM market.fact_versions AS versions" + _CANONICAL_ENVELOPE_JOINS
 CANONICAL_ROW_COLUMNS = CANONICAL_ENVELOPE_COLUMNS + ", hot.payload, hot.provenance, hot.quality"
-CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + """
+_CANONICAL_HOT_JOIN = """
     LEFT JOIN market.fact_hot_payloads AS hot
       ON hot.storage_day = versions.storage_day AND hot.id = versions.id
 """
+CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + _CANONICAL_HOT_JOIN
+CANONICAL_RANGE_ROW_FROM = """
+    FROM market.read_fact_headers_in_range(:series_id, :start, :end) AS versions
+""" + _CANONICAL_ENVELOPE_JOINS + _CANONICAL_HOT_JOIN
 _DOCUMENTS = frozenset(("payload", "provenance", "quality"))
 logger = logging.getLogger(__name__)
 
@@ -187,7 +192,27 @@ class PostgresCanonicalFactStorageRepository:
             WHERE series_id=ANY(:series_ids) AND material_hash=:material_hash
             UNION ALL
         """ if include_canonical else ""
-        selected = session.execute(text(f"""
+        # The keyed hot case can use the existing provenance GIN index. Keep
+        # the legacy scan below for numeric witnesses, arbitrary keys, and cold
+        # aliases; candidate selection still requires payload verification.
+        selected = None
+        if evidence_key is not None:
+            params["hot_witness"] = json.dumps({
+                str(evidence_key): {"legacy_material_hash": material_hash},
+            })
+            selected = session.execute(text("""
+                SELECT versions.id
+                FROM market.fact_hot_payloads AS hot
+                JOIN market.fact_versions AS versions
+                  ON versions.storage_day=hot.storage_day AND versions.id=hot.id
+                WHERE hot.provenance @> CAST(:hot_witness AS jsonb)
+                  AND versions.series_id=ANY(:series_ids)
+                  AND jsonb_typeof(hot.provenance->:evidence_key)='object'
+                  AND hot.provenance->:evidence_key->>'legacy_material_hash'=:material_hash
+                ORDER BY versions.id LIMIT 1
+            """), params).scalar_one_or_none()
+        if selected is None:
+            selected = session.execute(text(f"""
             SELECT DISTINCT id FROM (
                 {direct}
                 SELECT versions.id FROM market.fact_versions AS versions
@@ -208,7 +233,7 @@ class PostgresCanonicalFactStorageRepository:
                   AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
                                   WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
             ) AS candidates ORDER BY id LIMIT 1
-        """), params).scalar_one_or_none()
+            """), params).scalar_one_or_none()
 
         def matches(row):
             if int(row["series_id"]) not in ids:
@@ -257,10 +282,19 @@ class PostgresCanonicalFactStorageRepository:
         result = {}
         for offset in range(0, len(identities), 1000):
             batch = identities[offset:offset + 1000]
+            locations = session.execute(text(
+                "SELECT id,storage_day FROM market.fact_identities WHERE id = ANY(:fact_ids)"
+            ), {"fact_ids": batch}).mappings().all()
+            if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+                raise RuntimeError("canonical_selected_identity_coverage_invalid")
+            # Resolve dates before issuing the header query. An ARRAY subquery
+            # became an InitPlan on PG15 and did not prune unrelated partitions.
             rows = session.execute(text(f"""
                 SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
                 WHERE versions.id = ANY(:fact_ids)
-            """), {"fact_ids": batch}).mappings().all()
+                  AND versions.storage_day = ANY(:storage_days)
+            """), {"fact_ids": batch,
+                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all()
             found = {row["id"] for row in rows}
             if found != set(batch) or len(rows) != len(found):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
@@ -313,8 +347,11 @@ class PostgresCanonicalFactStorageRepository:
                  AND (manifests.last_commit_seq, manifests.last_id)
                      >= (requested.market_commit_seq, requested.id)
                 WHERE requested.id = ANY(:fact_ids)
+                  AND requested.storage_day = ANY(:storage_days)
                 ORDER BY requested.id, manifests.page_ordinal
-            """), {"fact_ids": ids[offset:offset + 1000]}).mappings().all()
+            """), {"fact_ids": ids[offset:offset + 1000],
+                   "storage_days": sorted({cold[identity]["storage_day"]
+                                           for identity in ids[offset:offset + 1000]})}).mappings().all()
             for item in matches:
                 identity = str(item["requested_id"])
                 if identity not in cold:

@@ -27,6 +27,10 @@ from research_science.check import (
 )
 
 from . import checks
+from .matched_origin_evaluator import MatchedOriginEvaluator, normalize_matched_origin
+from .shared_landmark_evaluator import SharedLandmarkEvaluator, normalize_shared_landmark
+from .first_return_evaluator import FirstReturnEvaluator, normalize_first_return
+from .forward_risk_evaluator import ForwardRiskEvaluator, normalize_forward_risk
 from .event_fact_evaluator import (
     EVENT_FACT_ANALYSIS,
     EVENT_FACT_EVALUATOR_VERSION,
@@ -272,6 +276,89 @@ def _register_event_fact_family() -> None:
         availability_trigger_enabled=True,
     )
     CHECK_REGISTRY.register_evaluator(availability_evaluator)
+    candle_evaluator = EventFactEvaluator(
+        version="5",
+        result_schema_version="event_fact_analysis_result.v5",
+        descriptive_outcomes_enabled=True,
+    )
+    CHECK_REGISTRY.register_evaluator(candle_evaluator)
+    forward_risk_evaluator = ForwardRiskEvaluator()
+    CHECK_REGISTRY.register_evaluator(forward_risk_evaluator)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=EVENT_FACT_ANALYSIS,
+        definition_version="10", evaluator_id=forward_risk_evaluator.evaluator_id,
+        evaluator_version=forward_risk_evaluator.version,
+        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION, result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={"family": EVENT_FACT_ANALYSIS, "event_ownership": "check_candle_snapshot",
+            "input_policy": "candle_only_indicator.v1", "operator_model": "candle_risk_comparison.v1",
+            "outcome_boundary": "evaluation_end_exclusive", "inference": "descriptive_only"},
+    ))
+    first_return_evaluator = FirstReturnEvaluator()
+    CHECK_REGISTRY.register_evaluator(first_return_evaluator)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=EVENT_FACT_ANALYSIS,
+        definition_version="9", evaluator_id=first_return_evaluator.evaluator_id,
+        evaluator_version=first_return_evaluator.version,
+        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION, result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={"family": EVENT_FACT_ANALYSIS, "event_ownership": "indicator",
+            "input_policy": "candle_only_indicator.v1", "operator_model": "first_return_comparison.v1",
+            "outcome_summary": "eligible_population_descriptive.v1"},
+    ))
+    landmark_evaluator = SharedLandmarkEvaluator()
+    CHECK_REGISTRY.register_evaluator(landmark_evaluator)
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="8",
+            evaluator_id=landmark_evaluator.evaluator_id,
+            evaluator_version=landmark_evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={"family": EVENT_FACT_ANALYSIS, "event_ownership": "indicator",
+                "input_policy": "candle_only_indicator.v1", "operator_model": "shared_landmark_comparison.v1",
+                "followup_scope": "same_evaluation_window.v1", "outcome_summary": "eligible_population_descriptive.v1"},
+        )
+    )
+    matched_evaluator = MatchedOriginEvaluator()
+    CHECK_REGISTRY.register_evaluator(matched_evaluator)
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="7",
+            evaluator_id=matched_evaluator.evaluator_id,
+            evaluator_version=matched_evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={
+                "family": EVENT_FACT_ANALYSIS,
+                "event_ownership": "indicator",
+                "input_policy": "candle_only_indicator.v1",
+                "operator_model": "matched_origin_attribution.v1",
+                "followup_scope": "same_evaluation_window.v1",
+                "outcome_summary": "eligible_population_descriptive.v1",
+            },
+        )
+    )
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="6",
+            evaluator_id=candle_evaluator.evaluator_id,
+            evaluator_version=candle_evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={
+                "family": EVENT_FACT_ANALYSIS,
+                "event_ownership": "indicator",
+                "operator_model": "registered_event_fact_operators.v5",
+                "input_policy": "candle_only_indicator.v1",
+                "outcome_summary": "eligible_population_descriptive.v1",
+            },
+        )
+    )
     CHECK_REGISTRY.register_definition(
         CheckDefinition(
             schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
@@ -664,7 +751,17 @@ def materialize_check_definition(
         _mapping(payload.get("detector"), field="detector").get("evaluation_trigger")
         == "required_facts_available"
     )
-    default_version = "5" if availability_trigger else "4"
+    candle_only = (
+        family == EVENT_FACT_ANALYSIS
+        and _mapping(payload.get("detector"), field="detector").get("type")
+        == "indicator_event"
+        and not payload.get("inputs")
+    )
+    matched_origin = _mapping(payload.get("outcomes"), field="outcomes").get("matched_origin")
+    shared_landmark = _mapping(payload.get("outcomes"), field="outcomes").get("shared_landmark")
+    first_return = _mapping(payload.get("outcomes"), field="outcomes").get("first_return")
+    forward_risk = _mapping(payload.get("outcomes"), field="outcomes").get("forward_risk")
+    default_version = "10" if forward_risk is not None else "9" if first_return is not None else "8" if shared_landmark is not None else "7" if matched_origin is not None else "5" if availability_trigger else "6" if candle_only else "4"
     resolved_base_version = str(
         base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
     )
@@ -672,6 +769,15 @@ def materialize_check_definition(
         raise ValueError(
             "event_fact_check_invalid: required_facts_available requires definition version 5"
         )
+    if matched_origin is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version not in {"7", "8"}):
+        raise ValueError("matched_origin_invalid: requires event_fact_analysis definition version 7 or 8")
+    if shared_landmark is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "8" or matched_origin is None):
+        raise ValueError("shared_landmark_invalid: requires matched_origin and definition version 8")
+    if first_return is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "9" or matched_origin is not None or shared_landmark is not None):
+        raise ValueError("first_return_invalid: requires standalone definition version 9")
+    if forward_risk is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "10"
+            or any(v is not None for v in (matched_origin, shared_landmark, first_return))):
+        raise ValueError("forward_risk_invalid: requires standalone definition version 10")
     base = CHECK_REGISTRY.resolve_definition(family, resolved_base_version)
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")
@@ -686,7 +792,27 @@ def materialize_check_definition(
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
-    if family == EVENT_FACT_ANALYSIS and not inputs:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10"} and (
+        inputs or detector.get("type") != "indicator_event"
+    ):
+        raise ValueError(
+            f"event_fact_check_invalid: definition version {resolved_base_version} requires a candle-only indicator_event"
+        )
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"7", "8"}:
+        outcomes["matched_origin"] = normalize_matched_origin(
+            matched_origin, detector=detector, outcomes=outcomes, statistics=statistics,
+        )
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "8":
+        outcomes["shared_landmark"] = normalize_shared_landmark(
+            shared_landmark, outcomes=outcomes, gap_policy=str(payload.get("gap_policy") or ""),
+        )
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "10":
+        outcomes["forward_risk"] = normalize_forward_risk(forward_risk, detector=detector,
+            outcomes=outcomes, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "9":
+        outcomes["first_return"] = normalize_first_return(first_return, outcomes=outcomes,
+            detector=detector, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
+    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10"}:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
     if family == EVENT_FACT_ANALYSIS:
         detector, statistics, inputs = _validate_event_fact_bindings(

@@ -301,6 +301,14 @@ inspection, archive status, and replay reconciliation acquire the lifecycle
 fence before establishing their repeatable snapshot. Replay inspects retained
 canonical events; it does not introduce another book reconstruction engine.
 
+Keyed hot legacy-material witnesses first use JSON containment against the
+existing provenance GIN index, followed by the exact key/value predicate and
+normal payload verification. An unsuccessful fast lookup retains the original
+numeric/other legacy predicate and verified cold lookup; an absent index match
+does not establish missing source evidence. This removes repeated whole-series
+JSON inspection from common typed-feature admission without adding an index,
+changing source scope, or trusting an archive alias alone.
+
 Material-alias indexes are candidate locators, not evidence: the reader verifies
 the selected archived row and its actual source witness before admission. The
 existing generic object-valued legacy witness predicate still applies. If no
@@ -367,6 +375,17 @@ in pressure/budget reporting. This design does not promise a hard cap on all
 PostgreSQL bytes.
 
 ### Canonical Retention Planning
+
+Storage totals include all dated header relations and their indexes/TOAST,
+including headers whose hot payloads have already been reclaimed. The global
+identity registry and its indexes are reported separately as
+`global_identity_bytes`; they are neither hot payloads nor reclaimable header
+bytes. Header inventory uses the same partition-count budget independently of
+the hot inventory and fails rather than reporting a partial total. These
+relation totals are components of `database_bytes`, not additional bytes to
+add to the whole database size. They do not replace filesystem or backup
+capacity accounting. The series/day lookup directory is separately reported as
+`series_day_directory_bytes` and grows with series/day combinations.
 
 `market_data_lifecycle.canonical_retention` is the typed policy for generalized
 hot payloads. The default hot window is 30 complete UTC placement days, with
@@ -1274,6 +1293,29 @@ and retry/backoff measurements before enabling unattended retention. Expensive
 file reads stay outside the exclusive phase; no freshness checks are removed to
 make the benchmark pass.
 
+### Retention family discovery
+
+Retention discovers the Fact families present on a storage day with successive
+indexed seeks on `market.fact_versions(storage_day, fact_type)`. It performs one
+seek per distinct family rather than aggregating every Fact in the day. The
+257th family remains an explicit overflow witness for the 256-family budget;
+families are read from the current database snapshot, never a cached registry.
+The planner and the execution-time hot-window guard use the same discovery
+query. Existing statement and total planning budgets remain in force.
+
+Clean schemas include `ix_market_fact_storage_family`. Existing deployments
+must apply `scripts/db/manual_add_fact_storage_family_index_v1.sql` outside a
+transaction before starting this application version. Startup verifies the
+index is valid, ready, nonpartial, and has the expected B-tree keys; it does not
+create or repair an index on an existing store. The operator script uses
+concurrent creation so writers can continue, but disk/WAL headroom and build
+load still require an operator check. An interrupted or incompatible same-name
+index fails verification and requires explicit investigation.
+
+This bounds family discovery only. Archive staging, dependency verification,
+reclamation, and permanent-header growth still need independent capacity and
+throughput measurements before enabling execution.
+
 ### Explicit Storage Cutover
 
 `scripts/db/manual_migration_fact_storage_tiers_v1.py` is an offline operator
@@ -1476,3 +1518,51 @@ See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
 [Chainlink Structured Facts](CHAINLINK_STRUCTURED_FACTS.md),
 [Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
 and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).
+
+### Saved Storage policy and canonical archival
+
+In a worker configured with explicit storage-maintenance limits, canonical
+payload archival and historical-header movement use the same saved recent-days
+window. Paused or missing saved policy cannot execute canonical archival, and
+the saved policy cannot override disabled deployment execution gates. The archive
+transaction and final reclamation handoff fence and recheck the policy revision,
+movement switch and assigned archive filesystem. Policy changes require replanning;
+they do not change Fact identity, causal selection or frozen Dataset binding.
+Unconfigured/manual canonical retention retains its existing explicit policy.
+
+### Historical book replay and disposable current state
+
+Book replay reconciliation reads retained canonical snapshot/update identities
+through the same hot/cold reader and lifecycle snapshot. Its terminal hash comes
+from the last accepted canonical event in source-position order. The latest
+immutable validity revision for that event's interval distinguishes a clean
+close from invalidation: a matching clean close retains the last accepted replay
+hash, while a matching invalidated close requires no valid terminal state.
+Closure scope, last position/hash and closing position must agree with retained
+canonical evidence. Incorrect hashes, missing event identities or inconsistent
+terminal evidence fail reconciliation.
+
+The mutable book_reconstruction_state row remains a current per-series
+projection. A later collector session replaces it, and clean shutdown may clear
+its live hash. Neither event changes the authority or readability of an older
+session's immutable history. Replay no longer uses this disposable projection
+as the historical terminal reference. No new history table, alternate reducer,
+schema migration, hash rule or weakened archive verification is introduced.
+
+Disposable coverage includes actual lease release and same-series session
+rollover with later event times; preserved cold history and frozen results;
+loss of the current projection; clean and invalidated terminal intervals; and
+rejection of incorrect hashes, missing events and mismatched terminal evidence.
+
+
+### Registered series discovery
+
+`MarketDataStore.list_series_metadata` and `GET /api/candles/series/metadata`
+return `market_series_metadata.v1`: registered series identities, types,
+intervals, versions and dimensions only. They never scan accepted Fact rows or
+claim counts, bounds, completeness or availability. Check requirement planning
+and frozen-dataset resolution use this discovery method before their existing
+source-bound window reads and gap checks. Registration alone never admits data.
+The existing exact-count `/series` catalog remains compatible and explicit.
+`qt data series --metadata-only` and `quanttrad://data/series` delegate to this
+same backend contract; MCP does not maintain its own catalog or count cache.

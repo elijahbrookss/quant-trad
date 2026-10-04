@@ -506,7 +506,9 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
             with engine.connect() as conn:
                 with pytest.raises(
                     RuntimeError,
-                    match="invalid canonical Fact lookup index definitions",
+                    # The historical full-row migration is no longer a current
+                    # startup layout; its later index repair is still verified below.
+                    match="requires primary key",
                 ):
                     database._assert_canonical_fact_migration(conn)
         finally:

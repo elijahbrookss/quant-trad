@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from .range_evidence import is_complete_range_evidence
+
 
 def _utc(value: Any) -> datetime:
     if isinstance(value, datetime):
@@ -44,6 +46,8 @@ def recorded_gaps_cover_interval(
 ) -> bool:
     """Return true only when the union of recorded ranges covers all of [start, end)."""
 
+    for row in evidence:
+        is_complete_range_evidence(row)  # Validate new evidence before trusting its range.
     cursor = start
     ranges = sorted(
         (

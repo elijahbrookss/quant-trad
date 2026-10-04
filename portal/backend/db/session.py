@@ -249,6 +249,12 @@ _ASYNC_JOB_INDEX_DEFINITIONS = {
                 "(((status)=any((array['queued','running','retry'])[]))"
                 "and(request_fingerprintisnotnull))"
             ),
+            # pg_dump/pg_restore moves the array-wide text cast onto each
+            # varchar element. Admit only this observed equivalent spelling.
+            (
+                "(((status)=any(array[('queued'),('running'),('retry')]))"
+                "and(request_fingerprintisnotnull))"
+            ),
         },
     },
 }
@@ -292,6 +298,10 @@ def _redact_dsn_for_log(dsn: Optional[str]) -> str:
     if redacted_query != query:
         url = url.set(query=redacted_query)
     return url.render_as_string(hide_password=True)
+
+
+class DatabaseSnapshotBusyError(RuntimeError):
+    """A nonwaiting reader did not acquire the shared snapshot fence."""
 
 
 class Database:
@@ -385,7 +395,8 @@ class Database:
             session.close()
 
     @contextmanager
-    def locked_snapshot_session(self, *, shared_lock_name: str) -> Iterator[Session]:
+    def locked_snapshot_session(self, *, shared_lock_name: str,
+                                wait_for_lock: bool = True) -> Iterator[Session]:
         """Take a session fence before the repeatable snapshot, on one connection.
 
         A blocking advisory-lock SELECT inside REPEATABLE READ establishes its
@@ -394,13 +405,20 @@ class Database:
         """
         if not shared_lock_name:
             raise ValueError("database_snapshot_lock_name_required")
+        if type(wait_for_lock) is not bool:
+            raise ValueError("database_snapshot_wait_flag_invalid")
         if not self.ensure_schema():
             raise RuntimeError("Portal database is not available")
         assert self._engine is not None
         params = {"name": shared_lock_name}
         with self._engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             try:
-                connection.execute(text("SELECT pg_advisory_lock_shared(hashtextextended(:name, 0))"), params)
+                if wait_for_lock:
+                    connection.execute(text("SELECT pg_advisory_lock_shared(hashtextextended(:name, 0))"), params)
+                elif not connection.execute(text(
+                    "SELECT pg_try_advisory_lock_shared(hashtextextended(:name, 0))"
+                ), params).scalar_one():
+                    raise DatabaseSnapshotBusyError("database_snapshot_busy")
                 connection.commit()
             except BaseException:
                 connection.invalidate()
@@ -1496,7 +1514,10 @@ class Database:
                 or int(row["indnkeyatts"]) != len(expected_columns)
                 or int(row["indnatts"]) != len(expected_columns)
                 or actual_columns != expected_columns
-                or str(row["definition"]) != expected_definition
+                or str(row["definition"]) not in (
+                    {expected_definition, expected_definition.replace(" ON market.fact_versions ", " ON ONLY market.fact_versions ")}
+                    if table_name == "fact_versions" else {expected_definition}
+                )
             ):
                 definition = str(row["definition"]) if row else "<missing>"
                 mismatches.append(
@@ -1659,10 +1680,10 @@ class Database:
 
         inspector = inspect(conn)
         primary_key = inspector.get_pk_constraint("fact_versions", schema="market")
-        if tuple(primary_key.get("constrained_columns") or ()) != ("id",):
+        if tuple(primary_key.get("constrained_columns") or ()) != ("id", "storage_day"):
             raise RuntimeError(
-                "Table 'market.fact_versions' must use canonical primary key (id). "
-                "Run scripts/db/manual_migration_canonical_fact_store_v1.sql."
+                "Table 'market.fact_versions' requires primary key (id, storage_day). "
+                "See docs/engineering/fact-header-layout-v2.md; explicit cutover required."
             )
         indexes = {
             str(item.get("name") or "")

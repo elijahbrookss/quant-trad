@@ -1,6 +1,6 @@
 # Bounded Storage Migrations and Research Compatibility
 
-**Status: proposed implementation; documentation only. Updated 2026-10-03.**
+**Status: implementation authorized; qualification in progress. Updated 2026-10-04.**
 Decision: [ADR 0078](../architecture/decisions/0078-evolve-research-within-existing-data-boundaries.md).
 This revision replaces this document's earlier H04-first implementation plan.
 It does not resume a migration, clear an operational hold, deploy a release or
@@ -22,9 +22,15 @@ Migration work can legitimately scale with the amount of affected data. The aim
 is to reduce that affected scope and bound the final interruption. No design can
 promise that every future canonical identity or schema change will be local.
 
-The first milestone is a qualified decision and implementation path for the
+The storage milestone is a qualified decision and implementation path for the
 smallest necessary storage transition. It is not a new research engine, a general
 migration framework, or completion of a particular scientific experiment.
+
+The separately authorized research workstream adds bounded historical streaming
+and safe cancellation of individual research jobs. These improve resource use and
+control of existing capabilities; they do not introduce another research engine.
+Both workstreams are in scope for implementation. Neither authorizes production
+operations, deployment, migration execution or restarting paused automations.
 
 ## Current state and why the original migration was large
 
@@ -279,16 +285,95 @@ under a different version.
 Nothing here clears current holds or launches work. Existing research authority
 remains necessary, independently of a storage gate passing.
 
+## Bounded research execution
+
+Implement R0 -> R1 -> R2 alongside M0–M4. Passing research tests does not qualify a
+physical migration, and unfinished historical placement does not block a release
+whose exact runtime/schema pair is independently compatible. Reuse the research
+changes already included in storage candidate S; preserve R as evidence for the
+independent research release. Do not weaken S's layout guards to pretend that its
+combined package supports the serving schema.
+
+### R0 — Individual job cancellation in the existing queue
+
+Extend `portal_async_jobs`, the research worker and `qt research jobs`. Before:
+a CLI timeout or shutdown signal can leave a long computation running. After:
+an explicit cancellation request stops the individual job at execution checkpoints,
+cancels that job's active database statement, and refuses result publication.
+
+Queued jobs can finish cancelled immediately. Running jobs retain their claim and
+in-flight request identity until the worker acknowledges that computation and its
+database work have stopped. A stale heartbeat is not proof of stopped execution;
+report uncertainty and prevent automatic retry of a cancellation request. Under
+the existing row lock, completion and cancellation have one definitive winner.
+Never terminate the shared backend supervisor to cancel one research job.
+
+Own this in `service/async_jobs`, `workers/research_worker.py`, research dispatch,
+controller and CLI. Keep requests immutable and reuse existing job metadata where
+possible; no new queue or scheduler. Cancellation does not publish partial Checks,
+refund scientific attempts, resume checkpoints, remove source data or cancel
+another job. Retrying is an explicit new request with the same pinned semantics.
+
+Validate queued/running/terminal cancellation, duplicate cancellation, concurrent
+completion, lost ownership, worker failure, blocked SQL, shutdown and CLI/API
+contracts. Measure acknowledgement latency separately from request latency.
+An old worker must be drained before enabling the new cancellation surface;
+request acceptance must not imply that an unqualified worker can stop.
+
+### R1 — Stream historical input through existing boundaries
+
+Replace unnecessary complete input lists at the repository, hydration and runtime
+driver boundaries with bounded pages. One engine instance consumes the ordered
+stream using `initialize -> apply_bar -> snapshot`; a page boundary never resets
+warmup, gaps, indicator commit clocks or known-at selection. Preserve exact input
+hashes and correction choice across page sizes and hot/cold/retained layouts.
+
+Select series, range, revisions and fields before hydration. Bound each page and
+close readers on error or cancellation. Preserve materializing APIs for consumers
+that need them, but apply explicit total admission limits before unbounded work.
+Algorithms and outputs that intrinsically retain history still consume memory:
+declare and enforce their bounds rather than claiming constant-memory research.
+
+Owners are `storage/repos/market_data.py`, frozen Dataset validation, runtime
+market-data resolution, Indicator runtime validation and Check execution. No
+second canonical store, generic artifact platform or read-triggered conversion.
+Incomplete computation publishes no durable evidence; retry starts from its
+pinned request. Old evidence hashes and exact replay remain compatible.
+
+Validate multiple page sizes, empty ranges, corrections crossing page boundaries,
+recorded gaps, late availability, cold corruption and cancellation during reads
+and engine work. Add a disposable concurrency test for the suspected frozen
+watermark race; describe it as a failure only if reproduced. Repair a confirmed
+gap in the existing frozen-input boundary before qualifying affected evidence.
+
+### R2 — End-to-end limits and qualification
+
+Use the existing research execution boundary to enforce declared row, byte,
+elapsed-time and output limits, including synchronous preview/replay paths.
+Cancellation and limit failures are explicit failures, never truncated successful
+evidence. Keep worker concurrency separate from ownership and per-job budgets.
+No cross-service priority scheduler, persistent result cache or automatic research
+launch is included.
+
+The representative workload set is: recent series/time selection; long frozen
+input preparation; cold history; the recorded expensive provenance lookup; and
+year-scale H04 plus an identical repeat. Use existing receipts first. Record
+selection, hydration, decoding, engine, evaluator and persistence time separately,
+with peak memory, rows/bytes read and written, archive verification/reuse and
+collector lag/spool. Repeating a request is not assumed to be cached, and required
+scientific replay must still execute. Small fixtures establish semantics and
+limits; they do not establish year-scale speedups or production capacity.
+
+Research qualification requires: equal frozen inputs under concurrency; preserved
+known-at/gap/engine behavior; equal supported format reads; enforced limits;
+cancel/duplicate/stale-owner/publication tests; exact release compatibility; and
+unchanged protocols, holdouts and scientific budgets. Each requirement gates the
+affected capability only. Deployment and resumption remain separately authorized.
+
 ## Separate follow-ups, outside this implementation
 
 These are recorded findings, not mandatory additions to the migration:
 
-- **Frozen-selection concurrency:** the global sequence watermark plus later
-  range reselection may admit a delayed cross-series commit. This is code-derived,
-  not reproduced (Q `market_data.py:1337,2609,3678,4330` under
-  `portal/backend/service/storage/repos/`). Use a small disposable barrier test;
-  fix only a demonstrated gap in the owning boundary. A confirmed problem gates
-  affected evidence, not an unrelated storage rollout.
 - **Query and hydration performance:** the saved provenance lookup averaged
   2,354.83 ms over 25 calls (S `artifacts/storage-implementation/bip-delay-statement-deltas-20260924.json`).
   Optimize only relevant measured paths; no blanket index removal or new index
@@ -296,8 +381,8 @@ These are recorded findings, not mandatory additions to the migration:
 - **Repeated replay and reuse:** Q `portal/backend/service/research/result_reference.py:192`
   executes replay while resolving scientific result evidence. Account for that
   work before proposing caching; preserve required scientific verification.
-- **Research cancellation, broader streaming and persistent computation caches:**
-  separate improvements justified by actual workloads. Do not introduce a general
+- **Persistent computation caches:** require evidence of worthwhile repeated
+  computation and preserved scientific verification. Do not introduce a general
   scheduler, feature store, artifact catalog or new research service here.
 
 ## Documentation and handoff
@@ -312,5 +397,6 @@ This documentation change requires index generation, `make validate-docs`,
 `make sync-docs` and `git diff --check`. Later implementation requires focused
 tests and the applicable [normal validation matrix](developer-workflow.md),
 including disposable DB and recovery tests for affected persistence boundaries.
-Unavailable or skipped evidence is not a pass. No runtime changes, migration,
-deployment, transfer, cleanup or automation restart are authorized in this task.
+Unavailable or skipped evidence is not a pass. Runtime implementation and local
+disposable validation are now authorized. Production migration, deployment,
+transfer, cleanup and automation restart remain outside this task's authority.

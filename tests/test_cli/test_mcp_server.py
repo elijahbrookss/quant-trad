@@ -656,3 +656,14 @@ def test_mcp_summarize_experiment_routes_to_qt(tmp_path):
     payload = server.call_tool("summarize_experiment", {"ref": "exp-1", "out_path": "summary.json"})
 
     assert payload["args"] == ["experiments", "summarize", "exp-1", "--out", "summary.json"]
+
+
+def test_series_resource_delegates_to_metadata_api_without_local_counts():
+    class Client:
+        def request_json(self, method, path, *, params=None, payload=None):
+            assert (method, path, params) == (
+                "GET", "/api/candles/series/metadata", {"instrument_id": "btc"})
+            return {"schema_version": "market_series_metadata.v1", "series": [{"id": 1}]}
+    server = QuantTradMcpServer(client_factory=Client)
+    result = server.read_resource("quanttrad://data/series?instrument_id=btc")
+    assert result == {"schema_version": "market_series_metadata.v1", "series": [{"id": 1}]}

@@ -412,3 +412,14 @@ returns unsupported/failed rather than inventing a metric.
 - Agent mutation and research promotion have partial guards but no uniform,
   durable enforcement contract yet.
 - Email/SMS notification sinks are deferred; the current sinks are console/file.
+
+
+### Bounded catalog discovery
+
+Use `qt data series --metadata-only` or the MCP resource
+`quanttrad://data/series?instrument_id=<id>` to discover registered series.
+Both use the backend metadata contract and avoid full-history counting.
+Requirements and frozen-input resolution use the same store method, then
+retain exact window/source/quality admission. The presence of a series is not
+proof of usable research coverage. The existing `qt data series` count catalog
+remains available when exact accepted-history statistics are explicitly needed.

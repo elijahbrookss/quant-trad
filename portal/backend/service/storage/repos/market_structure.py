@@ -2991,6 +2991,7 @@ class PostgresMarketStructureRepository:
     ) -> dict[str, Any]:
         with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             ordered = {"snapshot": [], "update": []}
+            terminal = None
             # Canonical L2 observation keys carry this exact source prefix.
             # Check the hydrated provenance too; the key is a lookup bound,
             # never substitute evidence for another definition/session.
@@ -3007,15 +3008,42 @@ class PostgresMarketStructureRepository:
                     if event_type in ordered:
                         position = tuple(int(evidence[key]) for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
                         ordered[event_type].append((position, str(row["external_event_component_key"])))
+                        if terminal is None or position > terminal["position"]:
+                            terminal = {
+                                "position": position, "series_id": row["series_id"],
+                                "interval_id": row["payload"]["validity_interval_id"],
+                                "state_hash": row["payload"]["after_state_hash"],
+                            }
             stored_snapshots = tuple(identity for _position, identity in sorted(ordered["snapshot"], key=lambda item: item[0]))
             stored_batches = tuple(identity for _position, identity in sorted(ordered["update"], key=lambda item: item[0]))
-            stored_final_hash = session.execute(
-                text(
-                    "SELECT state_hash FROM market.book_reconstruction_state "
-                    "WHERE definition_id = :definition_id AND session_id = :session_id"
-                ),
-                {"definition_id": definition_id, "session_id": session_id},
-            ).scalar_one_or_none()
+            # The current projection is disposable and may belong to a later
+            # session. Retained canonical state and terminal validity are the
+            # authority for this session, including after hot payload reclaim.
+            stored_final_hash = terminal["state_hash"] if terminal is not None else None
+            if terminal is not None:
+                validity = session.execute(text("""
+                    SELECT status,last_session_id,last_connection_epoch,last_receive_ordinal,
+                           last_event_ordinal,last_state_hash,closing_session_id,
+                           closing_connection_epoch,closing_receive_ordinal,closing_event_ordinal
+                    FROM market.book_validity_interval_versions
+                    WHERE series_id=:series_id AND interval_id=:interval_id
+                      AND opening_session_id=:session_id
+                    ORDER BY revision DESC LIMIT 1
+                """), {**terminal, "session_id": session_id}).mappings().one_or_none()
+                if validity is not None and validity["status"] != "open_valid":
+                    last = tuple(validity["last_"+key] for key in
+                                 ("connection_epoch", "receive_ordinal", "event_ordinal"))
+                    closing = tuple(validity["closing_"+key] for key in
+                                    ("connection_epoch", "receive_ordinal", "event_ordinal"))
+                    if (validity["last_session_id"] != session_id
+                            or validity["closing_session_id"] != session_id
+                            or last != terminal["position"]
+                            or validity["last_state_hash"] != terminal["state_hash"]
+                            or any(value is None for value in closing)
+                            or closing < last):
+                        raise RuntimeError("market_book_replay_reconciliation_failed: terminal validity mismatch")
+                    if validity["status"] == "closed_invalidated":
+                        stored_final_hash = None
         requested_snapshots = tuple(snapshot_ids)
         requested_batches = tuple(batch_ids)
         equal = (

@@ -1245,6 +1245,13 @@ def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_derive_candles(args: argparse.Namespace) -> int:
+    payload = {"dataset_id": args.dataset_id, "source_series_id": args.source_series_id,
+               "start": args.start, "end": args.end, "timeframe": args.timeframe}
+    _print_json(_client(args).request_json("POST", "/api/candles/derive", payload=payload))
+    return 0
+
+
 def _cmd_data_acquire_numeric_facts(args: argparse.Namespace) -> int:
     """Explicitly authorize one bounded manifest-driven numeric acquisition."""
 
@@ -1280,7 +1287,7 @@ def _cmd_data_series(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
             "GET",
-            "/api/candles/series",
+            "/api/candles/series/metadata" if args.metadata_only else "/api/candles/series",
             params={"instrument_id": args.instrument_id},
         )
     )
@@ -2056,9 +2063,11 @@ def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
 def _cmd_research_check_run(args: argparse.Namespace) -> int:
     operations = ResearchOperations(_client(args))
     request = _canonical_research_request(args)
+    if args.single_attempt and not args.dispatch:
+        raise ValueError("--single-attempt requires --dispatch")
     if args.dispatch:
         result = operations.dispatch_evidence(
-            request, dataset_id=args.dataset_id
+            request, dataset_id=args.dataset_id, single_attempt=args.single_attempt
         )
         _print_research_job_dispatch(result)
     else:
@@ -3261,6 +3270,34 @@ def _add_global_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-audit-log", action="store_true", help="Disable the per-command CLI audit JSON log.")
 
 
+def _cmd_storage(args: argparse.Namespace) -> int:
+    if args.storage_command == "migrate":
+        from scripts.automation.storage_online_operation import run_operation_plan
+
+        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file")
+                   if getattr(args, name, None) is not None}
+        _print_json(run_operation_plan(args.operation_file, execute=args.execute, **options))
+        return 0
+    client = _client(args)
+    if args.storage_command == "status":
+        result = client.request_json("GET", "/api/storage")
+    elif args.storage_command == "enroll":
+        result = client.request_json("POST", "/api/storage/targets",
+                                     payload={"target_id": args.target_id})
+    elif args.storage_command == "review":
+        result = client.request_json("POST", "/api/storage/plans", payload={
+            "policy": _read_json_object(args.policy_file),
+            "base_revision": args.base_revision, "request_id": args.request_id,
+        })
+    elif args.storage_command == "plan":
+        result = client.request_json("GET", f"/api/storage/plans/{quote(args.plan_id, safe='')}")
+    else:
+        result = client.request_json("POST", f"/api/storage/plans/{quote(args.plan_id, safe='')}/apply",
+                                     payload={"policy_hash": args.policy_hash})
+    _print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Quant-Trad API-backed research CLI.")
     _add_global_args(parser)
@@ -3750,6 +3787,14 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest.add_argument("--timeframe", required=True)
     data_ingest.add_argument("--source-revision")
     data_ingest.set_defaults(func=_cmd_data_ingest_candles)
+    data_derive = data_sub.add_parser("derive-candles",
+        help="Coarsen exact frozen candles without provider access or gap filling.")
+    data_derive.add_argument("--dataset-id", required=True)
+    data_derive.add_argument("--source-series-id", type=int, required=True)
+    data_derive.add_argument("--start", required=True)
+    data_derive.add_argument("--end", required=True)
+    data_derive.add_argument("--timeframe", required=True)
+    data_derive.set_defaults(func=_cmd_data_derive_candles)
     data_numeric = data_sub.add_parser(
         "acquire-numeric-facts",
         help=(
@@ -3777,6 +3822,8 @@ def build_parser() -> argparse.ArgumentParser:
         "series", help="Inspect canonical logical market-data series."
     )
     data_series.add_argument("--instrument-id")
+    data_series.add_argument("--metadata-only", action="store_true",
+                             help="List registered identities without full-history counts; check coverage separately.")
     data_series.set_defaults(func=_cmd_data_series)
     data_prepare = data_sub.add_parser(
         "prepare-backtest-dataset",
@@ -4401,6 +4448,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_run.add_argument(
         "--dispatch", action="store_true", help="Queue evidence execution and return the research job id."
     )
+    research_check_run.add_argument(
+        "--single-attempt", action="store_true",
+        help="Require one async claim attempt, with no automatic retry; requires --dispatch."
+    )
     research_check_run.set_defaults(func=_cmd_research_check_run)
 
     research_check_replay = research_check_sub.add_parser(
@@ -4838,6 +4889,36 @@ def build_parser() -> argparse.ArgumentParser:
     run_bot.add_argument("--no-golden", action="store_true")
     run_bot.add_argument("--require-golden", action="store_true")
     run_bot.set_defaults(func=_cmd_experiments_run_bot)
+
+    storage = subparsers.add_parser("storage", help="Inspect drives and review server-owned storage policy.")
+    storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    migration = storage_sub.add_parser("migrate", help="Inspect or execute a prepared local host migration plan; final release checks remain separate.")
+    migration.add_argument("--operation-file", required=True, help="Private fixed SSD/HDD operation JSON on this Linux host.")
+    migration.add_argument("--execute", action="store_true", help="Perform the admitted preserving migration; default is read-only inspection.")
+    migration.add_argument("--extend-attempt-seconds", type=int, help="Explicit total capture budget amendment, at most 96 hours; requires a retired background worker and fresh capacity evidence.")
+    migration.add_argument("--capacity-file", help="Private measured capacity forecast bound to the original plan and amended absolute horizon.")
+    migration.add_argument("--replacement-package-file", help="Explicit qualified package replacement for a retired worker before its first header page; preserves capture, clocks, source fleet and budgets.")
+    migration.add_argument("--cancel-attempt-file", help="Inspect or execute preserving terminal cancellation with an attested package; retains the original attempt and all copied data, including after expiry.")
+    migration.add_argument("--forward-package-file", help="Inspect or publish a separate forward package after verified cancellation; preserves the original plan and grants no worker start or source stop.")
+    migration.add_argument("--prepare-forward-keys-file", help="Inspect or prepare only the two forward keys using a qualified candidate package; no publication, adoption or source stop.")
+    migration.set_defaults(func=_cmd_storage)
+    storage_status = storage_sub.add_parser("status")
+    storage_status.set_defaults(func=_cmd_storage)
+    storage_enroll = storage_sub.add_parser("enroll", help="Enroll a host-prepared target by ID.")
+    storage_enroll.add_argument("target_id")
+    storage_enroll.set_defaults(func=_cmd_storage)
+    storage_review = storage_sub.add_parser("review", help="Create a durable plan without activating it.")
+    storage_review.add_argument("--policy-file", required=True)
+    storage_review.add_argument("--base-revision", required=True, type=int)
+    storage_review.add_argument("--request-id", required=True)
+    storage_review.set_defaults(func=_cmd_storage)
+    storage_plan = storage_sub.add_parser("plan")
+    storage_plan.add_argument("plan_id")
+    storage_plan.set_defaults(func=_cmd_storage)
+    storage_apply = storage_sub.add_parser("apply", help="Apply a reviewed plan when execution is available.")
+    storage_apply.add_argument("plan_id")
+    storage_apply.add_argument("--policy-hash", required=True)
+    storage_apply.set_defaults(func=_cmd_storage)
 
     mcp = subparsers.add_parser("mcp", help="MCP server entrypoint for agent/tool hosts.")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)

@@ -3,7 +3,7 @@ component: adr-research-data-evolution
 subsystem: system
 layer: decision
 doc_type: adr
-status: draft
+status: accepted
 tags:
   - adr
   - storage
@@ -26,9 +26,9 @@ code_paths:
 
 ## Status
 
-Proposed on 2026-10-03; narrowed after review to storage migration scope and
-research compatibility. This replaces the earlier research-hardening direction
-in this ADR. Implementation and release qualification remain incomplete.
+Accepted direction on 2026-10-04 after review narrowed the storage problem and
+separately authorized bounded research streaming and individual job cancellation.
+Implementation and release qualification remain incomplete.
 The [implementation specification](../../engineering/research-data-evolution-spec.md)
 owns the concrete route, slices and acceptance evidence. Neither document
 authorizes migration, deployment, cleanup or restarting paused work.
@@ -79,6 +79,11 @@ runtime/schema pair, affected reads or resource limits require coupling. Preserv
 pinned inputs, corrections, provenance, known-at meaning and producing code
 identity. Existing scientific budgets, holdouts and authority remain unchanged.
 
+Bound research reads and computation at their existing owners. Streaming keeps
+one canonical engine timeline; explicit individual cancellation fences publication
+and distinguishes a request from stopped execution. These are separate release
+slices, not prerequisites for every storage operation or a new orchestration layer.
+
 ## Consequences and limits
 
 Migration cost may scale with affected data. The objective is to avoid routinely
@@ -105,8 +110,8 @@ a safe rollback plan for a system accepting new writes.
 - Promise that date partitioning eliminates future schema migrations.
 - Add a migration framework, second data authority, feature store or resource
   scheduler before a concrete requirement exceeds existing owners.
-- Make H04, general caching, streaming or research cancellation projects part of
-  this storage transition by default.
+- Make H04 or general caching prerequisites for this storage transition, or couple
+  separately authorized streaming/cancellation to physical cutover by default.
 
 ## Enforcement and references
 
