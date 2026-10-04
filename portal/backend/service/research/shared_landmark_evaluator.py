@@ -1,6 +1,8 @@
 """Fixed-landmark descriptive groups and profile influence on canonical snapshots."""
 from __future__ import annotations
 
+from core.execution_control import execution_checkpoint
+
 from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
@@ -84,6 +86,7 @@ def _overlap(rows: list[dict[str, Any]], horizon: str) -> dict[str, Any]:
 def _summaries(rows: list[dict[str, Any]], horizons: list[int], criteria: Mapping[str, Any]) -> dict[str, Any]:
     summaries = {}
     for h in map(str, horizons):
+        execution_checkpoint()
         clusters = sorted({row["profile_cluster"] for row in rows if row["classification"] in (_CONFIRMED, _COMPLEMENT) and row["outcomes"][h]["status"] == "resolved"})
         contrasts = {state: _contrast(rows, h, state) for state in _STATES}
         groups = []
@@ -178,6 +181,7 @@ class SharedLandmarkEvaluator(MatchedOriginEvaluator):
         matching = outcomes["matched_origin"]
         unmatched = result["matched_origin_attribution"]["unmatched_followups"]
         for index, (origin, sample, pair) in enumerate(zip(result["events"], delayed["events"], result["matched_origin_attribution"]["origins"])):
+            execution_checkpoint()
             if (origin["event_time"], origin["event_key"]) != (sample["event_time"], sample["event_key"]):
                 raise ValueError("shared_landmark_invalid: origin ordering changed")
             ref = _reference(origin, matching)

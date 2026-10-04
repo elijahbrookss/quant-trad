@@ -2403,6 +2403,9 @@ def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = Tru
     status = str(payload.get("status") or "")
     print(f"Research job: {job_id}", flush=True)
     print(f"Status: {status}", flush=True)
+    if payload.get("cancellation"):
+        stopped = payload["cancellation"].get("execution_stopped") is True
+        print("Cancellation: stopped" if stopped else "Cancellation: requested; stop not yet acknowledged", flush=True)
     print(f"Type: {payload.get('job_type') or ''}", flush=True)
     print(f"Attempts: {payload.get('attempts')}/{payload.get('max_attempts')}", flush=True)
     for label, key in (("Created", "created_at"), ("Started", "started_at"), ("Finished", "finished_at")):
@@ -2434,6 +2437,15 @@ def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = Tru
 
 def _cmd_research_job_status(args: argparse.Namespace) -> int:
     payload = ResearchOperations(_client(args)).job_status(args.job_id)
+    if getattr(args, "json", False):
+        _print_json(payload)
+    else:
+        _print_research_job_status(payload)
+    return 0
+
+
+def _cmd_research_job_cancel(args: argparse.Namespace) -> int:
+    payload = ResearchOperations(_client(args)).cancel_job(args.job_id)
     if getattr(args, "json", False):
         _print_json(payload)
     else:
@@ -4367,6 +4379,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_jobs_status.add_argument("job_id")
     research_jobs_status.add_argument("--json", action="store_true", help="Print the machine-readable status payload.")
     research_jobs_status.set_defaults(func=_cmd_research_job_status)
+    research_jobs_cancel = research_jobs_sub.add_parser("cancel", help="Request an individual job stop; running work must acknowledge cancellation.")
+    research_jobs_cancel.add_argument("job_id")
+    research_jobs_cancel.add_argument("--json", action="store_true")
+    research_jobs_cancel.set_defaults(func=_cmd_research_job_cancel)
     research_jobs_result = research_jobs_sub.add_parser("result", help="Print a completed research job result.")
     research_jobs_result.add_argument("job_id")
     research_jobs_result.add_argument("--format", choices=["auto", "json", "table", "summary"], default="auto")

@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict
 
 from core.settings import get_settings
+from core.execution_control import ExecutionCancelledError
 import indicators  # noqa: F401
 from overlays.builtins import ensure_builtin_overlays_registered
 
@@ -20,6 +21,7 @@ from portal.backend.service.async_jobs import (
     fail_job,
     maintain_job_heartbeat,
     wait_for_database_ready,
+    acknowledge_job_cancellation,
 )
 from portal.backend.service.research import service as research_service
 from portal.backend.service.research.async_dispatch import (
@@ -73,7 +75,7 @@ def execute_claimed_research_job(job: ClaimedJob) -> Dict[str, Any]:
     if not isinstance(request, dict):
         raise ValueError("research async job payload requires request object")
 
-    with maintain_job_heartbeat(job):
+    with maintain_job_heartbeat(job, interval_seconds=1.0, stop_requested=lambda: _STOP):
         if job.job_type != JOB_TYPE_RESEARCH_CHECK_RUN:
             result = process_research_job(job.job_type, job.payload)
         else:
@@ -167,6 +169,11 @@ def main() -> int:
                 job.job_type,
                 int((time.monotonic() - started) * 1000),
             )
+        except ExecutionCancelledError:
+            try:
+                acknowledge_job_cancellation(job)
+            except Exception:
+                logger.exception("research_worker_cancellation_unacknowledged | job_id=%s", job.id)
         except AsyncJobOwnershipError:
             logger.exception(
                 "research_worker_job_ownership_lost | worker_id=%s job_id=%s job_type=%s generation=%s duration_ms=%s",

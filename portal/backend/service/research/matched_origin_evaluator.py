@@ -1,6 +1,8 @@
 """Check-owned descriptive attribution on one canonical Indicator timeline."""
 from __future__ import annotations
 
+from core.execution_control import execution_checkpoint
+
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -161,6 +163,7 @@ def _attribute(
     seen_followups: set[tuple[Any, ...]] = set()
     unmatched = []
     for index, row in enumerate(confirmations):
+        execution_checkpoint()
         key = _identity(row, config, followup=True)
         ref = _reference(row, config)
         if key in seen_followups:
@@ -182,6 +185,7 @@ def _attribute(
             pairs[origin_index_value] = index
     records = []
     for index, origin in enumerate(origins):
+        execution_checkpoint()
         record: dict[str, Any] = {
             "origin_index": index, "origin_time": origin["event_time"],
             "origin_entry_state": _entry_state(origin, _reference(origin, config)),
@@ -229,6 +233,7 @@ def _attribute(
             }
     summaries = {}
     for horizon in outcomes["horizons"]:
+        execution_checkpoint()
         h = str(horizon)
         raw_values = [_number(row["outcomes"][h]["direction_signed_forward_return"], field="origin.return") for row in origins if row["population_eligible"] and row["outcomes"][h]["status"] == "resolved"]
         followup_values = [_number(row["outcomes"][h]["direction_signed_forward_return"], field="followup.return") for row in confirmations if row["population_eligible"] and row["outcomes"][h]["status"] == "resolved"]

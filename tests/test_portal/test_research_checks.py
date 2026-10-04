@@ -482,7 +482,7 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
     monkeypatch.setattr(
         research_worker,
         "maintain_job_heartbeat",
-        lambda claimed: nullcontext(),
+        lambda claimed, **kwargs: nullcontext(),
     )
     def fake_build(request):
         observed["request"] = request

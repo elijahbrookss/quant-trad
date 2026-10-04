@@ -34,6 +34,7 @@ from .models import (
     REQUIRED_RESEARCH_AUTHORITY_INDEXES,
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
+from . import execution_control as _execution_control  # noqa: F401 - scoped SQL hooks
 from .fact_storage_schema import (
     FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES, FACT_STORAGE_LAYOUT_VERSION,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,

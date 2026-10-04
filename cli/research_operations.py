@@ -100,6 +100,12 @@ class ResearchOperations:
             "GET", f"/api/research/jobs/{normalized}/result"
         )
 
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        normalized = str(job_id or "").strip()
+        if not normalized:
+            raise ValueError("job_id is required")
+        return self._client.request_json("POST", f"/api/research/jobs/{normalized}/cancel")
+
     def evaluate_pass_gates(
         self, request: Mapping[str, Any]
     ) -> dict[str, Any]:

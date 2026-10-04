@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 import time
 from typing import Any, Deque, Dict, Iterable, Mapping
+from core.execution_control import execution_checkpoint
 
 from .contracts import (
     DetailDefinition,
@@ -128,6 +129,7 @@ class IndicatorExecutionEngine:
         include_details: bool = True,
         market_data_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> EngineFrame:
+        execution_checkpoint()
         resolved_market_inputs = dict(market_data_inputs or {})
         unknown_consumers = sorted(
             set(resolved_market_inputs) - set(self._indicators_by_id)

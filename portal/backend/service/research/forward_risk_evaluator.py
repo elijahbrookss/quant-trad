@@ -1,6 +1,8 @@
 """Versioned, descriptive candle-risk comparison over canonical snapshot evidence."""
 from __future__ import annotations
 
+from core.execution_control import execution_checkpoint
+
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -210,6 +212,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         close = np.full(n, np.nan); high = close.copy(); low = close.copy(); known = close.copy()
         present = np.zeros(n, dtype=bool)
         for candle in _candle_rows(evidence.get("candles") or [], field="indicator_evidence.candles"):
+            execution_checkpoint()
             stamp = _seconds(candle["open_time"])
             if stamp < begin or stamp >= stop or (stamp-begin) % 60:
                 raise ValueError("forward_risk_invalid: candle outside pinned range or off-grid")
@@ -239,6 +242,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             raise ValueError("forward_risk_invalid: readiness evidence invents a missing candle")
         metric = np.full(n, np.nan); shock = np.zeros(n, dtype=bool); metric_seen = shock.copy()
         for output in evidence.get("outputs") or []:
+            execution_checkpoint()
             if output.get("indicator_id") != indicator["id"]:
                 raise ValueError("forward_risk_invalid: output Indicator identity mismatch")
             stamp = _seconds(output["time"])
@@ -264,6 +268,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         state_known = np.full(n, np.inf)
         watermark = -np.inf; prior_segment = -2
         for i in range(n):
+            execution_checkpoint()
             if not present[i]:
                 watermark = -np.inf; prior_segment = -2
                 continue
@@ -321,6 +326,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         sample_times[sample_ok] = times[sample[sample_ok]]+60
         outcome_values: dict[str, np.ndarray] = {}; outcome_ranges: dict[str, np.ndarray] = {}; outcome_reasons: dict[str, np.ndarray] = {}; range_reasons: dict[str, np.ndarray] = {}; outcome_known: dict[str, np.ndarray] = {}
         for seconds in (1800, 7200, 21600):
+            execution_checkpoint()
             width = seconds//60
             values = np.full(n, np.nan); ranges = values.copy()
             why = np.full(n, "entry_sample_unavailable", dtype=object)
@@ -356,6 +362,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         # year-sized copy of candles/results. Frozen inputs and versions own replay.
         digest = hashlib.sha256(); examples = {name: [] for name in GROUPS}
         for i in np.flatnonzero(in_period):
+            execution_checkpoint()
             row = [int(times[i]), int(cohort[i]), str(reasons[i]), int(segment[i]),
                    float(baseline[i]) if np.isfinite(baseline[i]) else None,
                    int(sample_times[i]) if sample_ok[i] else None]
@@ -372,6 +379,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         outcome_ratios: dict[str, np.ndarray] = {}; ratio_reasons: dict[str, np.ndarray] = {}
         nonoverlapping = _take_nonoverlapping(cohort, sample_times, sample_ok)
         for horizon, values in outcome_values.items():
+            execution_checkpoint()
             ratios = np.full(n, np.nan); valid_ratio = np.isfinite(values) & np.isfinite(baseline) & (baseline > 0)
             ratios[valid_ratio] = values[valid_ratio] / baseline[valid_ratio]
             ratio_why = outcome_reasons[horizon].copy()
@@ -404,6 +412,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
                 "risk_ratio_stratified_comparison": _stratified(ratios, cohort, stratum, days, weeks)}
         month_rows = []
         for month in sorted(set(source_months[in_period])):
+            execution_checkpoint()
             source_mask = in_period & (source_months == month)
             mask = observable & (months == month)
             row = {"month": str(month), "expected_minutes": int(source_mask.sum()),

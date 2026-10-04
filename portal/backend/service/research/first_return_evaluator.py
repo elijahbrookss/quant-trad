@@ -1,6 +1,8 @@
 """Check-owned original-POC outcomes for public first-return events at a fixed clock."""
 from __future__ import annotations
 
+from core.execution_control import execution_checkpoint
+
 from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
@@ -124,6 +126,7 @@ class FirstReturnEvaluator(EventFactEvaluator):
         step = timedelta(seconds=int(plan.warmup["timeframe_seconds"]))
         records = []
         for index, (origin, sample) in enumerate(zip(result["events"], sampled["events"])):
+            execution_checkpoint()
             if (origin["event_time"], origin["event_key"]) != (sample["event_time"], sample["event_key"]):
                 raise ValueError("first_return_invalid: changed origin ordering")
             indicator, opened = origin["indicator_id"], _time(origin["event_time"])
