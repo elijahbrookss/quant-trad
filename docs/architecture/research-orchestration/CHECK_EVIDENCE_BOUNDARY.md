@@ -23,6 +23,7 @@ code_paths:
   - portal/backend/service/research/event_fact_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
+  - portal/backend/service/research/forward_risk_evaluator.py
   - portal/backend/service/research/service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
@@ -446,3 +447,59 @@ It reports undefined empty-group deletions; this is influence analysis, not a
 confidence interval or independence correction. Deterministic chronological,
 median-nearest, adverse, and largest-absolute episodes remain inspectable. The full
 analysis is included in the canonical result hash and provider-free replay.
+
+
+## Declared-window candle risk comparison
+
+Event-fact definition 10 / evaluator 9 is an explicit candle-only descriptive
+owner. `outcomes.forward_risk` selects `candle_risk_comparison.v1`; older
+versions reject that field. This version pins Candle Stats v1 defaults, 1m
+source candles, a 200-bar finite pre-period initialization and `reset_rewarm`.
+It supports one UTC calendar year or a bounded subwindow for qualification.
+It does not reconstruct an uninterrupted pre-seed EMA history.
+
+The collector optionally captures each public output's readiness from the
+canonical engine snapshot. Contiguous identical readiness and gap-segment
+states compress into half-open candle-open intervals. Missing candles are not
+invented. The optional material participates in the input hash only for Checks
+that request it; existing Check hash inputs remain unchanged.
+
+Every observable decision candle is assigned to emitted ATR shock crossing,
+ordinary current z-score at most 2, or persistent high without a crossing.
+Public metric and signal readiness are required; absence of a signal alone is
+not an ordinary observation. Output identity, pinned configuration, current
+source availability and the segment's accumulated known-at watermark are
+validated. Undetectable intervals, overlapping dependency flags, and mutually
+exclusive first-blocking reasons retain unknown event counts as unknown.
+
+The baseline uses 120 squared successive log-close increments from 121 exact
+closes strictly preceding the trigger candle, all known by decision. The first
+available close at or after decision is the price sample. Subsequent 30, 120
+and 360 elapsed minutes independently resolve mean squared log returns and
+high-low path range divided by sample price. The trigger/sample high and low
+are excluded. Raw risk requires valid closes; range additionally requires
+valid highs/lows. Complete retrospective paths retain late reports with explicit
+outcome known-at (maximum sample/path source availability), late-after-target
+counts and delay distributions by cohort and month. This label availability is
+never a decision feature. Missing/invalid paths remain unresolved independently
+of other horizons. Zero or
+unavailable prior risk censors only the ratio, preserving valid raw outcomes.
+
+The requirement declaration uses `outcome_boundary=evaluation_end_exclusive`:
+planning adds no future tail. Entry and target close must be strictly before
+the evaluation end; later candidates retain administrative censoring. This
+prevents a declared discovery window from reading a reserved next year.
+
+Source coverage uses candle-open time; cohort calendar strata and day/week
+contributions use decision known-at. Preceding observable context accompanies
+excluded intervals without imputing missing periods or assuming random missingness.
+Annual and monthly distributions and fixed month/six-hour/prior-RMS strata
+report shock-count-weighted contrasts, matched and unmatched coverage, whole
+day/week deletion sensitivity, actual interval overlaps and connected episodes,
+reset segments, concentration, and first-per-nonoverlapping-six-hour sensitivity.
+These are descriptive associations, with no IID, causal, effective-sample-size,
+trading or promotion claim. The owner persists an ordered all-clock-row digest
+and bounded chronological examples, not a second year-sized observation copy;
+exact frozen inputs, source version and result hashes own replay.
+
+See [ADR 0076](../decisions/0076-declare-candle-risk-observability-and-calendar-boundaries.md).

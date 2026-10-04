@@ -57,6 +57,22 @@ through the existing Fact writer. It retains source timing and lineage, rejects
 source collisions without corrections, and never acquires or silently fills gaps.
 Checks continue to consume separately frozen, explicitly bound inputs.
 
+## Candle coverage preflight cost
+
+Candle coverage uses the same canonical candle reader, including frozen/preview
+scope selection and recorded gap evidence. It omits runtime TR/ATR enrichment
+and supplies epoch seconds directly to the existing continuity summarizer.
+Coverage counts, boundary ranges, duplicate handling and gap classifications are
+unchanged; the optimization does not infer completeness from row density or
+bypass Fact validation, source selection, revision selection or frozen custody.
+
+This remains a full canonical read, not a metadata-only database query. Large
+windows can take longer than the client request timeout. A client timeout does
+not cancel server work; operators must reconcile completion before retrying or
+releasing a reservation. Set request-specific timeouts from measured duration,
+within the owner's bounded interval, without narrowing the declared research
+period merely to fit the request.
+
 ## Scientific protocol allocation
 
 Scientific protocols reference only existing frozen `market_dataset.v1`

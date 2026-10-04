@@ -504,6 +504,11 @@ def plan_research_check(
     )
     decision_price_tail_bars = int(declaration.get("decision_price_tail_bars") or 0)
     outcome_tail_seconds += decision_price_tail_bars * timeframe_seconds
+    outcome_boundary = str(declaration.get("outcome_boundary") or "extend")
+    if outcome_boundary not in {"extend", "evaluation_end_exclusive"}:
+        raise ValueError("check_requirement_plan_invalid: unsupported outcome boundary")
+    if outcome_boundary == "evaluation_end_exclusive":
+        outcome_tail_seconds = 0
     configured_warmup = int(scope.get("warmup_bars") or 0)
     feature_lookback = int(declaration.get("feature_lookback_bars") or 0)
     warmup_bars = max(
@@ -729,6 +734,7 @@ def plan_research_check(
         },
         outcome_tail={
             "horizons": horizons,
+            **({"boundary": outcome_boundary} if outcome_boundary != "extend" else {}),
             "required_horizons": list(
                 declaration.get("required_outcome_horizons") or horizons
             ),
