@@ -721,3 +721,16 @@ def test_canonical_research_check_cli_uses_shared_operation_routes(monkeypatch):
     assert calls[3][2]["mode"] == "evidence"
     assert calls[3][2]["dataset_id"] == "mds_1"
     assert calls[5][2] == {"title": "Evidence-backed"}
+
+
+def test_single_attempt_cli_uses_distinct_fail_closed_route(monkeypatch):
+    observed = _capture_request(monkeypatch, b'{"job_id":"job-1","status":"queued","attempts":0,"max_attempts":1}')
+    request = {"scope":{},"detector":{},"dataset_id":"mds_1"}
+    assert main(["--no-audit-log","research","check","run","--request-json",json.dumps(request),"--dispatch","--single-attempt"]) == 0
+    assert observed["path"] == "/api/research/jobs/checks/run-once"
+    assert observed["body"] == {**request,"mode":"evidence"}
+
+
+def test_single_attempt_without_dispatch_fails_before_network(monkeypatch):
+    monkeypatch.setattr(urllib.request,"urlopen",lambda *a,**kw: (_ for _ in ()).throw(AssertionError("network must not be called")))
+    assert main(["--no-audit-log","research","check","run","--request-json",'{"scope":{},"detector":{}}',"--single-attempt"]) != 0

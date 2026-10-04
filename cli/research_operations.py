@@ -73,12 +73,15 @@ class ResearchOperations:
         request: Mapping[str, Any],
         *,
         dataset_id: str | None = None,
+        single_attempt: bool = False,
     ) -> dict[str, Any]:
         payload = {**self._payload(request), "mode": "evidence"}
         if dataset_id:
             payload["dataset_id"] = str(dataset_id)
         return self._client.request_json(
-            "POST", "/api/research/jobs/checks/run", payload=payload
+            "POST",
+            "/api/research/jobs/checks/run-once" if single_attempt else "/api/research/jobs/checks/run",
+            payload=payload
         )
 
     def job_status(self, job_id: str) -> dict[str, Any]:
