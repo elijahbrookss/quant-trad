@@ -32,6 +32,12 @@ code_paths:
 ---
 # Check Evidence Boundary
 
+Proposed work on reproducible frozen selection, bounded research and selective
+reuse is scoped in [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+and the [implementation specification](../../engineering/research-data-evolution-spec.md).
+Its gates are not yet a resumption receipt and do not change this boundary's
+current scientific or execution authority.
+
 ## Purpose
 
 A Check is QT's bounded analytical operation. It may calculate analytical

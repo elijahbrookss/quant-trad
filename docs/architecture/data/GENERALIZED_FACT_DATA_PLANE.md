@@ -65,6 +65,11 @@ code_paths:
 ---
 # Generalized Fact Data Plane
 
+Proposed evolution is tracked in [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+and the [research/data implementation specification](../../engineering/research-data-evolution-spec.md).
+Those documents qualify frozen selection and bounded reads before adding physical
+migration dependencies; they do not describe completed changes to this boundary.
+
 ## Status
 
 ADR 0063 is accepted and this is the active contract. The schema registry,
