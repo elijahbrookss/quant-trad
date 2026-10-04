@@ -28,7 +28,8 @@ code_paths:
 
 Accepted direction on 2026-10-04 after review narrowed the storage problem and
 separately authorized bounded research streaming and individual job cancellation.
-Implementation and release qualification remain incomplete.
+Storage candidate integration and the bounded research implementation are local
+source changes; release and physical qualification remain incomplete.
 The [implementation specification](../../engineering/research-data-evolution-spec.md)
 owns the concrete route, slices and acceptance evidence. Neither document
 authorizes migration, deployment, cleanup or restarting paused work.
@@ -83,6 +84,10 @@ Bound research reads and computation at their existing owners. Streaming keeps
 one canonical engine timeline; explicit individual cancellation fences publication
 and distinguishes a request from stopped execution. These are separate release
 slices, not prerequisites for every storage operation or a new orchestration layer.
+The execution-local stop/budget token lives in core and is shared by the existing
+queue, SQL boundary and engine; it is not a persisted job authority. Existing
+queue rows own cancellation and publication. Budget exhaustion fails explicitly,
+and uncertain shutdown retains ownership instead of claiming stopped execution.
 
 ## Consequences and limits
 

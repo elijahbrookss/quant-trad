@@ -419,14 +419,35 @@ unapproved history, deploy, move/delete storage or restart operations. This task
 launches none of that work. Full historical conversion and unrelated cleanup are
 not research prerequisites.
 
+### Research acceptance matrix
+
+| Requirement / owner | Exact pass criterion and evidence | Current evidence | Capability affected / present limit |
+| --- | --- | --- | --- |
+| Frozen selection / data | Delayed cross-series append and correction cannot change a new freeze; the regression fixture must also demonstrate the old global predicate changing. `test_repository_db.py::test_freeze_excludes_late_cross_series_commit`. | Passed native concurrency fixtures. | Stronger guarantees apply to new per-series freezes. Existing manifests remain immutable and validated. |
+| Temporal/engine equivalence / research | Equal evidence and hashes for page sizes 1, 37 and 512, with warmup, gaps and delayed availability; real freeze/replay workflows pass in `test_forward_risk_check.py` and `test_candle_only_check_workflow_db.py`. | Passed engine equivalence and native workflows. | Admits the tested Indicator/read paths, not arbitrary new algorithms. |
+| Supported physical reads / storage | Equal pinned records across hot/cold and retained/new headers; missing/corrupt archive fails. `test_cold_consumers_db.py`, `test_fact_header_legacy_db.py` and repository fixtures. | Targeted hot/cold tests passed; retained/new qualification recorded below. | A reader/format must qualify before that format is used; full-history conversion is unnecessary. |
+| Stop and publication / queue | Queued cancellation is terminal; running request retains identity until acknowledgement; blocked SQL unwinds; completion and cancellation have one row-lock winner; stale owner cannot publish; uncertain helper stop is retained. `test_research_cancellation*.py`, `test_async_jobs_db.py` and heartbeat tests. | Unit and native race/interruption tests passed. | Enabling cancel requires compatible workers. Dead-owner reconciliation remains explicit operator work. |
+| Resource bounds / research | Nested calls cannot reset totals; deadline interrupts SQL without relaxing an existing shorter timeout; byte/row failures publish no Check and do not auto-retry; synchronous capacity refuses excess work. Cancellation/limits tests. | Enforcement passed; workload sizing remains open. | These prove enforcement, not a safe annual workload size or a hard process-memory cap. |
+| Release composition / release | Exact source passes against its intended clean schema and supported archives. Combined S needs the new layout; independent research composition must retain the old reader/guards and be separately tested. | Separate local compositions; no deployment qualified here. | Blocks deployment of an incompatible package; does not make physical cutover a research prerequisite. |
+| Workload admission / research + operator | Record each representative workload's latency, peak RSS, logical and physical I/O, repeated work and collector lag/spool; all must fit the explicitly admitted machine/workload budgets. No fabricated numeric acceptance target. | Open: no new year-scale or production measurement. | Still open for annual H04 and production coexistence. Limits must not be silently increased to obtain a pass. |
+| Scientific authority / research | Existing protocol, holdout, family-budget and exact-code replay tests remain passing; execution limits are outside scientific identity and do not refund attempts. | Existing contracts pass; holds unchanged. | Passing engineering tests never starts an experiment or clears an existing scientific hold. |
+
+Small database and engine fixtures support only their tested source and scenario.
+Storage-demo filesystem and recovery topology requirements are separate evidence;
+a skip is unavailable validation, not a pass. Test commands, revisions and final
+results are recorded below rather than spread across operational handoffs.
+
 ## Separate follow-ups, outside this implementation
 
 These are recorded findings, not mandatory additions to the migration:
 
 - **Query and hydration performance:** the saved provenance lookup averaged
   2,354.83 ms over 25 calls (S `artifacts/storage-implementation/bip-delay-statement-deltas-20260924.json`).
-  Optimize only relevant measured paths; no blanket index removal or new index
-  policy follows from that aggregate.
+  S already contributes the keyed hot-provenance indexed witness path in
+  `storage/repos/fact_storage.py::material_witness_exists`, retaining exact
+  payload verification and legacy/cold fallbacks. This is reused code, not a
+  newly demonstrated latency gain. Measure it against the saved workload before
+  attributing improvement; no blanket index removal follows from the aggregate.
 - **Repeated replay and reuse:** Q `portal/backend/service/research/result_reference.py:192`
   executes replay while resolving scientific result evidence. Account for that
   work before proposing caching; preserve required scientific verification.
@@ -442,10 +463,58 @@ contracts only if product meaning changes; mark implemented, tested and deployed
 states separately. The earlier broader plan remains in Git history, not as a
 parallel active implementation mandate.
 
-This documentation change requires index generation, `make validate-docs`,
-`make sync-docs` and `git diff --check`. Later implementation requires focused
-tests and the applicable [normal validation matrix](developer-workflow.md),
+Documentation changes require index generation, `make validate-docs`,
+`make sync-docs` and `git diff --check`. Implementation validation follows the applicable [normal validation matrix](developer-workflow.md),
 including disposable DB and recovery tests for affected persistence boundaries.
 Unavailable or skipped evidence is not a pass. Runtime implementation and local
 disposable validation are now authorized. Production migration, deployment,
 transfer, cleanup and automation restart remain outside this task's authority.
+
+## Local validation record — 2026-10-04
+
+Runtime implementation source is `7354cb58ae2b6c2591cd8e55e63db8d3346e5860`.
+Later documentation commits do not change that runtime. Validation logs, including
+failed attempts, are preserved under
+`logs/research-data-evolution/20261004-7354cb58/` in the main checkout.
+
+- `make backend-check`: **4,482 passed, 5 skipped** on the final runtime.
+- Frontend: **240 Node tests and 50 JSX tests passed**, plus a successful Vite
+  production build using the available isolated Node 22 image and a temporary
+  output directory. Host Node 12 cannot run these tests; the first ordinary build
+  could not clear existing output permissions. No permissions were changed.
+- Final combined-layout targeted DB run: **38 passed**, covering cancellation,
+  deadlines, pool reuse, ownership, frozen concurrency, bounded hydration,
+  hot/cold reads and the canonical migration fixture. The earlier retained-header,
+  frozen and cold run passed **43** tests at `7464d7f9`. The final runtime also
+  passed `test_real_qt_legacy_attach_read_compatibility` (**1** native test),
+  exercising reads across retained history and new daily headers.
+- The attempted complete DB suite was **not completed**: **17 passed, 22 skipped,
+  one failed** before stopping. That failure was the disposable migration database
+  cleanup's 15-second timeout, after its test assertions. Its serialized retry
+  passed in the 38-test run. Do not present this as a full-suite pass or extend an
+  operational timeout from this test result. Topology-dependent storage-demo
+  skips do not qualify real filesystem movement or recovery.
+- Deployment scripts passed `bash -n`; server Compose configuration rendered
+  successfully with generated disposable values, without loading real credentials
+  or deploying.
+- `make sync-docs` reports **skipped** because no destination is configured on this
+  machine. `make validate-docs` passed **10** tests; `git diff --check` passed.
+  The intended implementation and documentation are committed; unrelated candidate
+  checkouts remain unchanged.
+
+The independent research composition starts at R `a0458169`, with the research,
+frozen-visibility and execution-control commits applied while retaining R's old
+SQL reader and startup guards. Its only runtime conflict resolution preserves
+`CANONICAL_ROW_FROM` at the existing query boundary instead of S's
+`CANONICAL_RANGE_ROW_FROM`. No layout guards were relaxed and no historical
+conversion was performed. This is a qualification snapshot, not a permanently
+maintained second application. At `9da4f8ab`, **41 native DB tests** passed,
+including real freeze/replay and cold reads, with **145 focused unit tests**.
+The final connection hardening is applied at `e3eb4402`; its focused unit checks
+passed **96** tests and its final native cancellation/deadline/pool suite passed
+**8** tests. The exact snapshot is preserved by local branch
+`verification/research-layout-compat-20261004`, with its disposable qualification
+checkout at `/tmp/qt-research-layout-compat-e9cbez_7/checkout`. The original R and S
+checkouts are unchanged. This proves a concrete independent implementation path;
+it does not authorize deployment, clear scientific holds or demonstrate workload
+capacity.
