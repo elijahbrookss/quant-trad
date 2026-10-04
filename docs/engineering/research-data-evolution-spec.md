@@ -813,18 +813,21 @@ automations remain unchanged.
 ## C1/C2 local qualification — 2026-10-04
 
 [PR #223](https://github.com/elijahbrookss/quant-trad/pull/223) targets the preserved
-consolidation branch. Runtime source: `c6ff52fb6c55ad3755937166194287f3df7021a4`.
+consolidation branch. Runtime source: `e8003eafa48d11bea3d58207fb8844fe59e2f2d8`
+(including the ownership-observation hardening).
 Local receipts, including failed attempts, are under
 `artifacts/storage-implementation/history-read-cache/`.
 
-- Final `make backend-check`: **4,523 passed, 5 skipped**.
+- Final `make backend-check`: **4,524 passed, 5 skipped**.
 - **28** cache tests cover codec equivalence, source preservation, bounds, active
   readers across processes, crash before/after publication, cancellation, replaced
-  roots and corrupt-copy fallback. **8** global-admission tests include uncertain
+  roots and corrupt-copy fallback. **9** global-admission tests include stale
+  ownership observations during a stuck probe, uncertain
   helper termination and ownership through successful/failed worker publication.
 - **4** disposable PostgreSQL tests passed: storage-owner exclusion, reserved
   capacity, shared research admission and actual admission-connection termination.
-  The existing native research cancellation suite also passed **8** tests.
+  The existing native research cancellation suite also passed **8** tests; the
+  combined final-source run passed all **12**.
 - Frontend **240 Node + 50 JSX** tests passed with installed Node 22; a fresh-output
   Vite build passed. Ordinary `make frontend-check` was blocked first by host Node
   12 and then existing `dist` ownership. No permissions or existing output changed.
