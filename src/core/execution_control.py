@@ -36,6 +36,7 @@ class ExecutionControl:
         self._lock = RLock()
         self._error: Exception | None = None
         self._interrupts: dict[object, Callable[[], None]] = {}
+        self._checks: dict[object, Callable[[], None]] = {}
         self._started = monotonic()
         self._deadline: float | None = None
         self._limits: dict[str, int] = {}
@@ -96,6 +97,13 @@ class ExecutionControl:
         with self._lock:
             if self._error is None and self._deadline is not None and monotonic() >= self._deadline:
                 self._error = ExecutionBudgetExceededError("research_execution_budget_exceeded: resource=elapsed_seconds")
+            if self._error is None:
+                for check in tuple(self._checks.values()):
+                    try:
+                        check()
+                    except Exception as error:
+                        self._error = error
+                        break
             error = self._error
         if error is not None:
             raise error
@@ -108,6 +116,20 @@ class ExecutionControl:
                 self._error = error
             for interrupt in tuple(self._interrupts.values()):
                 interrupt()
+
+    def register_check(self, key: object, check: Callable[[], None]) -> None:
+        """Add a nonblocking observation check to checkpoints and the stop watcher.
+
+        Callers own observed state; checks must not perform I/O or wait on locks.
+        This lets an admission connection stall without stalling cancellation.
+        """
+        with self._lock:
+            self.check()
+            self._checks[key] = check
+
+    def unregister_check(self, key: object) -> None:
+        with self._lock:
+            self._checks.pop(key, None)
 
     def register(self, key: object, interrupt: Callable[[], None]) -> None:
         with self._lock:

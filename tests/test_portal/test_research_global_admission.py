@@ -165,3 +165,28 @@ def test_worker_keeps_global_admission_through_publication(admission, monkeypatc
     else:
         assert worker.execute_claimed_research_job(job)["evidence"]
     assert len(sessions) == 1 and sessions[0].closed
+
+
+def test_stalled_ownership_probe_stops_work_before_connection_returns(admission):
+    from core.execution_control import controlled_execution
+    factory, sessions = admission
+    control = ExecutionControl()
+    entered, release, interrupted = Event(), Event(), Event()
+    try:
+        with pytest.raises(limits.ResearchAdmissionError, match="ownership_probe_stale"):
+            with controlled_execution(control), limits._global_admission(control, session_factory=factory):
+                control.register("fixture-io", interrupted.set)
+                original = sessions[0].scalar
+                def stalled(statement, params):
+                    entered.set()
+                    assert release.wait(10)
+                    return original(statement, params)
+                sessions[0].scalar = stalled
+                assert entered.wait(3)
+                stopped = interrupted.wait(4)
+                release.set()
+                control.unregister("fixture-io")
+                assert stopped, "work continued while ownership observation was stale"
+                control.check()
+    finally:
+        release.set()

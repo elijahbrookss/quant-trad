@@ -58,6 +58,14 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
         session_factory = db.session
     ready, finished = Event(), Event()
     errors = []
+    last_observed = [monotonic()]
+    check_key = object()
+
+    def check_observation():
+        # Three seconds includes the one-second SQL timeout and normal polling
+        # slack, but cannot rely on a stalled connection returning an error.
+        if monotonic() - last_observed[0] > 3:
+            raise ResearchAdmissionError("research_execution_ownership_probe_stale")
 
     def own():
         admitted = False
@@ -68,6 +76,7 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
                                     {"name": _GLOBAL_LOCK}):
                     raise ResearchAdmissionError("research_execution_busy: global capacity occupied")
                 admitted = True
+                last_observed[0] = monotonic()
                 ready.set()
                 while not finished.wait(0.25):
                     if not owner.scalar(text("""
@@ -78,6 +87,7 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
                           AND objid::bigint=(key.value&4294967295))
                     """), {"name": _GLOBAL_LOCK}):
                         raise ResearchAdmissionError("research_execution_owner_lost")
+                    last_observed[0] = monotonic()
         except Exception as error:
             errors.append(error)
             if admitted:
@@ -101,6 +111,7 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
         if errors:
             raise errors[0]
         control.check()
+        control.register_check(check_key, check_observation)
         token = _GLOBAL_ADMITTED.set(True)
         yield
         if check_on_exit:
@@ -110,6 +121,7 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
             _GLOBAL_ADMITTED.reset(token)
         finished.set()
         helper.join(timeout=3)
+        control.unregister_check(check_key)
         if helper.is_alive():
             raise ExecutionStopUncertainError("research_execution_admission_shutdown_uncertain")
         if errors and token is not None:

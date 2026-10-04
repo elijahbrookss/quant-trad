@@ -244,3 +244,11 @@ traffic. Keep collector lag, physical disk activity and per-process RSS in the
 measurement receipt; do not infer them from these counters. Preserve the H04
 one-Check/one-replay budget and frozen/holdout rules when measuring the first
 workload. Check/replay totals alone do not isolate cache speedup.
+
+The shared admission helper reports successful ownership observations into the
+existing `ExecutionControl`. A nonblocking check at execution checkpoints and its
+existing stop watcher fails when that observation is over three seconds old,
+even if the database call is still stuck. The helper still exclusively owns its
+connection; failure to join it is uncertain termination, not a released slot.
+This extends the execution-control boundary because a SQL timeout alone cannot
+bound client-side connection stalls; it adds no scheduler or persisted lease.
