@@ -182,6 +182,16 @@ Clean schemas include `ix_market_fact_series_accepted` on
 before deployment. Startup rejects a missing, invalid, partial, or differently
 ordered index instead of repairing it at runtime.
 
+Fleet Fact telemetry uses the existing per-series observation and acceptance
+indexes to seek the latest active timestamps separately, and scans only the
+five-minute acceptance suffix for throughput. All reads share one SQL statement
+snapshot. Counts remain counts of active revisions (including earlier active
+revisions of a corrected or later-invalidated observation), not a latest-state
+Fact count. A series with only invalidations retains null timestamps and zero
+counts; a series with no revisions remains absent. Backfills keep their distinct
+observation and acceptance clocks. This avoids routine full-history aggregation;
+an invalidation-only history can still require scanning to prove no active row.
+
 Operation results are separate immutable audit records. They never replace
 runtime attempts, session events, gaps, or Facts.
 
