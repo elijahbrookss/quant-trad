@@ -160,3 +160,18 @@ def test_uncertain_interrupt_thread_is_not_reported_as_stopped(monkeypatch):
         with controlled_execution(ExecutionControl()):
             pass
     assert module.current_execution_control() is None
+
+
+def test_heartbeat_shutdown_uncertainty_is_not_masked_by_cancellation(monkeypatch):
+    from portal.backend.service.async_jobs import repository as jobs
+    from core.execution_control import ExecutionStopUncertainError
+    from types import SimpleNamespace
+    monkeypatch.setattr(jobs, "heartbeat_job", lambda job: False)
+    heartbeat = jobs.ClaimHeartbeat(SimpleNamespace(id="job-1"), interval_seconds=0)
+    class StuckHeartbeat:
+        def join(self, **kwargs): pass
+        def is_alive(self): return True
+    with pytest.raises(ExecutionStopUncertainError):
+        with heartbeat:
+            heartbeat._thread = StuckHeartbeat()
+            heartbeat.control.stop(ExecutionCancelledError("cancel requested"))

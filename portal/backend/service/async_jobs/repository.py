@@ -107,9 +107,13 @@ class ClaimHeartbeat:
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         try:
-            return self._finish(exc_type, exc, traceback)
-        finally:
-            self._execution_scope.__exit__(exc_type, exc, traceback)
+            self._finish(exc_type, exc, traceback)
+        except BaseException as finish_error:
+            # Pass the actual shutdown error through the scope so its final
+            # checkpoint cannot replace uncertainty with a normal stop signal.
+            self._execution_scope.__exit__(type(finish_error), finish_error, finish_error.__traceback__)
+            raise
+        return self._execution_scope.__exit__(exc_type, exc, traceback)
 
     def _finish(self, exc_type, exc, traceback) -> bool:
         self._stop.set()
