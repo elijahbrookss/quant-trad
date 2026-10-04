@@ -43,7 +43,7 @@ class ExecutionControl:
         self._stage_seconds: dict[str, float] = {}
 
     @property
-    def stopped(self) -> bool:
+    def stop_requested(self) -> bool:
         with self._lock:
             return self._error is not None
 

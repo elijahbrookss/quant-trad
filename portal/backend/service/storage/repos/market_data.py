@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from portal.backend.db.execution_control import owned_connection_cancel
 from core.execution_control import current_execution_control, execution_checkpoint, measure_execution_stage
 
 from market_data.canonical import (
@@ -2911,7 +2912,7 @@ class PostgresMarketDataRepository:
         eligible = []
         try:
             if control is not None:
-                control.register(result, session.connection().connection.driver_connection.cancel)
+                control.register(result, owned_connection_cancel(session.connection()))
             pages = iter(result.partitions(batch_rows))
             while True:
                 with measure_execution_stage("selection"):

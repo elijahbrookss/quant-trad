@@ -116,7 +116,7 @@ def test_running_sql_is_interrupted_before_acknowledgement(monkeypatch):
 
 def test_total_deadline_interrupts_sql_and_budget_failure_never_retries():
     control = ExecutionControl()
-    control.limit(seconds=0.2)
+    control.limit(seconds=1.0)
     with pytest.raises(ExecutionBudgetExceededError):
         with controlled_execution(control), db.session() as session:
             driver = session.connection().connection.driver_connection
@@ -155,3 +155,14 @@ def test_budget_supports_named_cursor_and_refuses_commit_after_cancellation():
             session.flush()
             control.stop(ExecutionCancelledError("cancel before commit"))
     assert jobs.get_job(job_id)["status"] == "queued"
+
+
+def test_inner_control_scope_also_discards_its_cancelled_pool_connection():
+    with pytest.raises(ExecutionBudgetExceededError):
+        with db.session() as session:
+            driver = session.connection().connection.driver_connection
+            control = ExecutionControl()
+            control.limit(seconds=1.0)
+            with controlled_execution(control):
+                session.execute(text("SELECT pg_sleep(20)"))
+    assert driver.closed, "scope exit must not erase the pool's cancellation mark"

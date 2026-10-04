@@ -392,7 +392,7 @@ class Database:
             session.commit()
         except Exception:  # noqa: BLE001 - commit/rollback guard
             control = current_execution_control()
-            if control is not None and control.stopped:
+            if control is not None and control.stop_requested:
                 # A libpq cancel packet can arrive after the owned query returns.
                 # Retire this socket rather than expose a subsequent pool user
                 # to that packet. This also rolls back the interrupted session.
