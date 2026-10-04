@@ -3801,6 +3801,20 @@ preparation in a confined source-read worker. It does not publish the candidate,
 create adoption or archive capture, stop clients, change the runtime, or select a
 UTC cutover. The candidate proposal's date and separate plan remain unpublished.
 
+Before key preparation has an intent, another candidate may repeat inspection of
+the same original operation. The previous key probe must be positively retired
+and absent under both its exact container ID and name. Its exact receipt bytes
+are retained in a digest-named sibling before the active probe receipt is
+replaced. An interrupted handoff reuses that retained receipt. Foreign owners,
+changed original plans, unresolved containers and any existing key-preparation
+journal still refuse the handoff; terminal cancellation and forward-retirement
+receipts cannot use it. This remains within the existing operator's private
+receipts, with no schema, migration-clock or data-authority change.
+The deployment CI job runs this candidate change through real disposable
+containers, distinct disposable filesystems and PostgreSQL before interrupted key
+preparation and subsequent adoption/retirement. Synthetic service peers qualify the ownership transition;
+they do not establish production duration, hardware capacity or collector impact.
+
 The host records one 3600-second wall/boot/monotonic intent before dispatch. The
 native key receipt retains its original 3600-second start, expiry and index OIDs;
 reentry narrows to both original clocks. Valid committed indexes may be reconciled

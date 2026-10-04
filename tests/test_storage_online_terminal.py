@@ -198,3 +198,95 @@ def test_exact_transient_retirement_never_removes_a_live_or_foreign_worker(termi
     else:
         terminal._retire_previous_probe(a.root,a.worker,a.package)
         assert actions[-1]=="rm"
+
+
+def test_retired_key_inspection_can_admit_another_candidate_without_losing_evidence(tmp_path, monkeypatch):
+    original = {"container_id": "a" * 64, "binding": {"project": "qt-test"}}
+    old_package = {"schema_version": "qt.storage_online_forward_package.v1", "plan_sha256": "b" * 64,
+                   "image": "sha256:" + "c" * 64}
+    new_package = {**old_package, "image": "sha256:" + "d" * 64}
+    saved = dict(name="qt-test-storage-key-preparation", container_id="e" * 64,
+                 retired=True, owner=dict(root=str(tmp_path), worker=original["container_id"], package=old_package))
+    path = tmp_path / terminal.KEY_PROBE
+    write(path, saved)
+    before = path.read_bytes()
+    calls = []
+    def absent(*args, **kwargs):
+        calls.append(args)
+        assert args[0] == "ps"
+        return ""
+    monkeypatch.setattr(host, "docker", absent)
+    terminal._retire_previous_probe(tmp_path, original, new_package, keys=True)
+    assert path.read_bytes() == before
+    retained = list(tmp_path.glob("storage-online-key-preparation-worker.retired-*.json"))
+    assert len(retained) == 1 and retained[0].read_bytes() == before
+    assert any("id=" + saved["container_id"] in args for args in calls)
+    # Interruption before the next probe publishes its receipt is retryable.
+    terminal._retire_previous_probe(tmp_path, original, new_package, keys=True)
+    assert len(list(tmp_path.glob("storage-online-key-preparation-worker.retired-*.json"))) == 1
+    host.save_receipt(path, {**saved, "owner": {**saved["owner"], "package": new_package}}, initial=False)
+    assert retained[0].read_bytes() == before and path.read_bytes() != before
+
+
+@pytest.mark.parametrize("drift", ["worker", "root", "name", "plan", "schema", "unretired", "missing_id",
+                                   "key_intent", "same_name_container", "renamed_container", "terminal", "forward"])
+def test_key_candidate_change_never_adopts_uncertain_or_foreign_ownership(tmp_path, monkeypatch, drift):
+    from scripts.automation.storage_online_keys import STATE
+    original = {"container_id": "a" * 64, "binding": {"project": "qt-test"}}
+    previous = {"schema_version": "qt.storage_online_forward_package.v1", "plan_sha256": "b" * 64,
+                "image": "sha256:" + "c" * 64}
+    proposed = {**previous, "image": "sha256:" + "d" * 64}
+    saved = dict(name="qt-test-storage-key-preparation", container_id="e" * 64, retired=True,
+                 owner=dict(root=str(tmp_path), worker=original["container_id"], package=previous))
+    options = {"keys": True}
+    name = terminal.KEY_PROBE
+    if drift == "worker": saved["owner"]["worker"] = "f" * 64
+    elif drift == "root": saved["owner"]["root"] = str(tmp_path / "foreign")
+    elif drift == "name": saved["name"] = "foreign"
+    elif drift == "plan": proposed["plan_sha256"] = "f" * 64
+    elif drift == "schema": previous["schema_version"] = "foreign"
+    elif drift == "unretired": saved["retired"] = False
+    elif drift == "missing_id": saved["container_id"] = None
+    elif drift == "key_intent": write(tmp_path / STATE, {"phase": "prepared"})
+    elif drift == "terminal":
+        options = {}; name = terminal.PROBE; saved["name"] = "qt-test-storage-terminal"
+    elif drift == "forward":
+        options = {"forward": True}; name = terminal.FORWARD_PROBE; saved["name"] = "qt-test-storage-forward-terminal"
+    path = tmp_path / name
+    write(path, saved)
+    before = path.read_bytes()
+    def docker(*args, **kwargs):
+        assert drift in {"same_name_container", "renamed_container"} and args[0] == "ps"
+        return saved["container_id"] if drift == "same_name_container" or args[-1].startswith("id=") else ""
+    monkeypatch.setattr(host, "docker", docker)
+    with pytest.raises(RuntimeError, match="probe_owner_changed|retirement_unproven"):
+        terminal._retire_previous_probe(tmp_path, original, proposed, **options)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.retired-*.json"))
+
+
+@pytest.mark.parametrize("failure", ["after_link", "conflicting_receipt"])
+def test_retired_key_receipt_publication_failure_preserves_active_owner(tmp_path, monkeypatch, failure):
+    original = {"container_id": "a" * 64, "binding": {"project": "qt-test"}}
+    previous = {"schema_version": "qt.storage_online_forward_package.v1", "plan_sha256": "b" * 64,
+                "image": "sha256:" + "c" * 64}
+    proposed = {**previous, "image": "sha256:" + "d" * 64}
+    saved = dict(name="qt-test-storage-key-preparation", container_id="e" * 64, retired=True,
+                 owner=dict(root=str(tmp_path), worker=original["container_id"], package=previous))
+    path = tmp_path / terminal.KEY_PROBE
+    write(path, saved); before = path.read_bytes()
+    retained = path.with_name(path.stem + ".retired-" + host.digest(saved) + ".json")
+    monkeypatch.setattr(host, "docker", lambda *args, **kw: "")
+    if failure == "conflicting_receipt":
+        write(retained, {"foreign": True})
+        with pytest.raises(RuntimeError, match="retained_receipt_changed"):
+            terminal._retire_previous_probe(tmp_path, original, proposed, keys=True)
+    else:
+        with monkeypatch.context() as patch:
+            def interrupted(_): raise TimeoutError("after durable receipt link")
+            patch.setattr(host, "sync_directory", interrupted)
+            with pytest.raises(TimeoutError):
+                terminal._retire_previous_probe(tmp_path, original, proposed, keys=True)
+        assert retained.read_bytes() == before
+        terminal._retire_previous_probe(tmp_path, original, proposed, keys=True)
+    assert path.read_bytes() == before
