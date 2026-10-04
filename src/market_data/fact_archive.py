@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import io
+import logging
 import os
 import struct
 import tempfile
@@ -22,6 +24,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.storage_mounts import require_configured_archive_mount
+from core.execution_control import execution_checkpoint, consume_execution_resource, measure_execution_stage
 from .archive import RawArchiveObjectStore
 from .canonical_storage import record_from_storage_row
 
@@ -322,18 +325,81 @@ def verify_canonical_fact_archive_rows(
         raise RuntimeError(f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}")
 
 
+class ArchiveChecksumMismatch(RuntimeError):
+    """The selected object's bytes disagree with its immutable manifest."""
+
+
+class _MeteredArchiveFile(io.RawIOBase):
+    def __init__(self, source, *, tier):
+        self.source = source
+        self.tier = tier
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.source.tell()
+
+    def seek(self, offset, whence=0):
+        execution_checkpoint()
+        return self.source.seek(offset, whence)
+
+    def read(self, size=-1):
+        execution_checkpoint()
+        with measure_execution_stage("archive_read"):
+            value = self.source.read(size)
+        consume_execution_resource("archive_read_bytes", len(value))
+        consume_execution_resource("archive_cache_bytes" if self.tier == "cache" else "archive_source_bytes", len(value))
+        return value
+
+    def readinto(self, buffer):
+        value = self.read(len(buffer))
+        buffer[:len(value)] = value
+        return len(value)
+
+    # Closing this wrapper leaves ownership of the underlying file with its
+    # source/cache context, including the active-reader eviction lock.
+
+
 def read_canonical_fact_archive(
     path: Path, *, expected: FactArchiveManifest,
-    limits: FactArchiveLimits = FactArchiveLimits(),
+    limits: FactArchiveLimits = FactArchiveLimits(), cache=None,
 ) -> tuple[dict[str, Any], ...]:
-    """Return rows only after whole-object, schema, content, and envelope verification."""
+    """Verify manifest-bound bytes and contents, optionally from a disposable copy.
+
+    Lifecycle/recovery callers omit cache and always inspect the durable object.
+    A cache hit is never evidence that the HDD source passed a recovery check.
+    """
     require_configured_archive_mount(path, require_writable=False)
+    if expected.byte_count > limits.max_file_bytes:
+        raise ValueError("canonical_archive_file_limit_exceeded: manifest bytes")
+    if cache is not None:
+        corrupt = False
+        with cache.open_copy(path, digest=expected.object_sha256, size=expected.byte_count) as handle:
+            if handle is not None:
+                try:
+                    return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="cache")
+                except ArchiveChecksumMismatch:
+                    corrupt = True
+        if corrupt:
+            logging.getLogger(__name__).warning(
+                "history_cache_corrupt | object_sha256=%s fallback=authoritative_archive", expected.object_sha256)
+            cache.invalidate(expected.object_sha256)
+    with Path(path).open("rb") as handle:
+        return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="source")
+
+
+def _read_canonical_fact_archive_handle(source, *, expected, limits, tier):
     contents = _Contents(limits)
     rows = []
-    with Path(path).open("rb") as handle:
-        sha256, byte_count = _hash_handle(handle, max_bytes=limits.max_file_bytes)
+    with _MeteredArchiveFile(source, tier=tier) as handle:
+        with measure_execution_stage("archive_verify"):
+            sha256, byte_count = _hash_handle(handle, max_bytes=limits.max_file_bytes)
         if sha256 != expected.object_sha256 or byte_count != expected.byte_count:
-            raise RuntimeError(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
+            raise ArchiveChecksumMismatch(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
         handle.seek(0)
         parquet = pq.ParquetFile(handle, page_checksum_verification=True,
                                  thrift_string_size_limit=8 * 1024**2, thrift_container_size_limit=100_000)
@@ -352,12 +418,14 @@ def read_canonical_fact_archive(
                 uncompressed_bytes += info.total_uncompressed_size
         if uncompressed_bytes > limits.max_file_bytes:
             raise ValueError("canonical_archive_limit_exceeded: footer uncompressed bytes")
-        for batch in parquet.iter_batches(batch_size=limits.row_group_size):
-            for row in batch.to_pylist():
-                for name in _JSON_COLUMNS:
-                    row[name] = json.loads(row[name])
-                contents.add(row)
-                rows.append(row)
+        with measure_execution_stage("archive_decode"):
+            for batch in parquet.iter_batches(batch_size=limits.row_group_size):
+                execution_checkpoint()
+                for row in batch.to_pylist():
+                    for name in _JSON_COLUMNS:
+                        row[name] = json.loads(row[name])
+                    contents.add(row)
+                    rows.append(row)
         if contents.rows != metadata.num_rows:
             raise RuntimeError("canonical_archive_incomplete: footer/content row count disagreement")
     observed = contents.manifest(sha256=sha256, byte_count=byte_count)

@@ -20,6 +20,7 @@ code_paths:
   - src/market_data/canonical.py
   - src/market_data/canonical_storage.py
   - src/market_data/fact_archive.py
+  - src/market_data/history_read_cache.py
   - src/market_data/archive.py
   - src/market_data/archive_verification.py
   - src/market_data/book_archive.py
@@ -286,6 +287,46 @@ page is fully checked before use and every selected envelope/source field must
 equal its archived copy. Missing, corrupt, overlapping, or inconsistent evidence
 fails loud. Hot-only reads do not open or create the archive root. Indexed
 metadata/dedupe/watermark queries stay on the permanent envelope.
+
+Canonical hydration can use an explicitly enabled disposable SSD copy cache.
+`QT_HISTORY_READ_CACHE_BYTES=0` keeps the original reader. A positive budget
+requires `QT_HISTORY_READ_CACHE_MIN_FREE_BYTES`, an explicit working root/UUID,
+and an operator-prepared private `history-read-cache` directory (runtime owner,
+mode 0700) beneath that SSD root. Runtime never creates or repairs that root.
+The cache is not an archive, SQL table, backup dependency or source of Dataset
+identity; lifecycle/recovery verification always bypasses it.
+
+Copies are named by immutable object SHA-256. The canonical codec verifies the
+whole chosen copy, schema, contents and requested envelopes exactly as on HDD.
+A corrupt SSD checksum is logged and the original HDD object is read normally;
+corrupt source data still fails. A cache hit does not attest HDD source health.
+The shared filesystem implementation bounds cache bytes (including allocation
+rounding), entries (8,192), fill time (30 seconds) and per-operation fill bytes.
+It prunes inactive copies by last use, with a 14-day inactivity expiry and earlier
+quota/headroom eviction. These clocks are independent of Fact placement age.
+
+A directory flock serializes fills and accounting across processes; active
+readers hold shared file locks, so eviction can skip them. Contention, oversized
+objects or exhausted fill budget bypass caching explicitly instead of queuing
+another fill. Publication uses a checksummed partial and atomic rename. Under
+exclusive directory ownership, abandoned partials can be removed; archive/spool
+paths, aliases, hardlinks and unexpected files are never cleanup candidates.
+Disabling the cache restores direct reads and leaves durable data untouched.
+
+New fills take the existing storage-management transaction lock in a fresh
+READ COMMITTED session. They respect saved SSD identity, policy reserve and
+reserved/auxiliary claims plus the explicit minimum-free floor. Each bounded
+copy step checks ownership, free space and execution cancellation. Cache hits
+do not allocate a new copy or hold a storage-management transaction. Lost
+admission aborts copying; failed optional-cache admission remains observable.
+
+Archive reads report application-level source/cache read bytes, cache write
+bytes, hits/misses/fills/evictions/bypasses through existing execution metrics.
+These byte counts include verification/repeated reads, not physical disk reads
+through the OS cache. Research separately bounds archive-read and cache-write
+bytes using its configured input-byte ceiling. Read timing is nested inside
+hydration, and fill timing includes its source read; do not sum nested timings.
+An object cache does not cache SQL headers/indexes or research computation.
 
 Mixed pages can include spec-bound normalized features that were not selected by
 the caller. Before decoding, the reader reloads every such page schema from the
@@ -1583,3 +1624,11 @@ source-bound window reads and gap checks. Registration alone never admits data.
 The existing exact-count `/series` catalog remains compatible and explicit.
 `qt data series --metadata-only` and `quanttrad://data/series` delegate to this
 same backend contract; MCP does not maintain its own catalog or count cache.
+
+
+Cache read instrumentation records application bytes by source/cache, copied
+bytes, fills/hits/bypasses/evictions and `archive_cache_fill`, `archive_verify`,
+`archive_decode`, and `archive_read` elapsed stages through the existing execution
+control. These stages are nested: do not sum them as independent wall time.
+Application read bytes are not physical disk I/O; OS cache and device counters
+must be measured separately. Cache-hit reads still verify content and semantics.

@@ -136,9 +136,11 @@ class PostgresCanonicalFactStorageRepository:
     def __init__(
         self, *, object_store_factory: Callable[[], RawArchiveObjectStore] = _read_only_store,
         limits: FactArchiveLimits = FactArchiveLimits(),
+        read_cache_factory=None,
     ):
         self.object_store_factory = object_store_factory
         self.limits = limits
+        self.read_cache_factory = read_cache_factory
 
     @contextmanager
     def stream_rows_by_ids(self, session, statement, params=None, *, batch_size=128):
@@ -384,6 +386,11 @@ class PostgresCanonicalFactStorageRepository:
             grouped[manifest.manifest_id].append(row)
 
         store = self.object_store_factory()
+        if self.read_cache_factory is None:
+            from portal.backend.service.storage.history_policy import configured_history_read_cache
+            cache = configured_history_read_cache()
+        else:
+            cache = self.read_cache_factory()
         for manifest_id, wanted in grouped.items():
             execution_checkpoint()
             manifest = manifests[manifest_id]
@@ -391,7 +398,7 @@ class PostgresCanonicalFactStorageRepository:
                 contract for bounds in manifest.series for contract in bounds.payload_contracts
             ])
             archive_rows = read_canonical_fact_archive(
-                store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+                store.local_path(manifest.object_key), expected=manifest, limits=self.limits, cache=cache,
             )
             indexed = {str(row["id"]): row for row in archive_rows}
             for envelope in wanted:

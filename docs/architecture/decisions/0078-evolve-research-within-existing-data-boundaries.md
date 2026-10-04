@@ -92,6 +92,16 @@ queue, SQL boundary and engine; it is not a persisted job authority. Existing
 queue rows own cancellation and publication. Budget exhaustion fails explicitly,
 and uncertain shutdown retains ownership instead of claiming stopped execution.
 
+On October 4 the user additionally selected a 14-day recent-data SSD window and
+a bounded, disposable SSD read cache for immutable historical archive objects.
+HDD archives remain durable; cache eviction never writes back or expires Facts.
+The existing reader, storage admission and research execution boundaries own
+this addition. It creates no schema, independent catalog or computation cache.
+A shared research admission guard qualifies one heavy operation across worker
+and synchronous API processes; cache usefulness is measured with existing
+protocols before expanding its budget. These are authorized source changes,
+not a claim of deployment or measured performance.
+
 ## Consequences and limits
 
 Migration cost may scale with affected data. The objective is to avoid routinely

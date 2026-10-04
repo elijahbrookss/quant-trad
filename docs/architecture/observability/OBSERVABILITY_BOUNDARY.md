@@ -427,3 +427,15 @@ consequence warrants the additional service and ownership.
 - [ADR 0033: Use Promtail as Runtime Loki Ingress](../decisions/0033-use-promtail-as-runtime-loki-ingress.md)
 - [Grafana dashboard provisioning](../../../docker/grafana/provisioning/dashboards/README.md)
 - [Operator email alerting](../../operators/alerting.md)
+
+
+### Research archive-cache measurements
+
+Existing research execution metrics include `archive_read_bytes`,
+`archive_source_bytes`, `archive_cache_bytes`, `archive_cache_write_bytes` and
+cache hits/misses/fills/evictions/bypasses. Synchronous outer operations log one
+`research_execution_metrics` summary; async results retain their original
+execution metrics. These are application-level byte counters, not physical
+reads after OS caching. Compare them with existing filesystem/database growth,
+collector lag/spool, RSS and disk I/O evidence. Read/fill stage timers are nested
+within hydration and must not be added as independent end-to-end costs.
