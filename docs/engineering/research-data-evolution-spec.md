@@ -187,10 +187,11 @@ all metadata at day 14. Eligibility follows the saved policy and whole-group
 boundaries; verified publication and explicit maintenance precede reclamation.
 Fourteen days is neither a research lookback limit nor permission to expire data.
 
-Long-range research uses the existing bounded historical readers without copying
-all selected history back onto SSD or introducing another cache layer. First
-reads and scattered historical lookups may cost more on HDD; a repeated request
-is not assumed to hit a cache. PostgreSQL documents the distinction between
+Long-range research uses the existing bounded historical readers. The later C1
+follow-up permits a bounded disposable SSD copy of requested archive objects; it
+does not stage an entire selected historical range. First reads and scattered
+historical lookups may cost more on HDD; a repeated request is not assumed to hit
+a cache. PostgreSQL documents the distinction between
 sequential and random reads and the limits of cache assumptions in its
 [planner cost guidance](https://www.postgresql.org/docs/current/runtime-config-query.html#RUNTIME-CONFIG-QUERY-CONSTANTS).
 This supports the tradeoff, not a QT-specific latency estimate.
@@ -507,6 +508,69 @@ No historical cleanup is implied by successful movement. Reclamation is separate
 authorized work after reader, pin and backup checks. If the goal requires a large
 legacy move and it cannot fit the limits, report the capacity goal unmet.
 
+## Authorized target-state follow-up: history cache and measured research
+
+On October 4 the user authorized implementation toward the selected target,
+including a bounded SSD history cache and controlled research measurements. This
+extends the prior deployment package; it does not revive any cancelled operation,
+relax physical admission, or restart paused automations. Implementation and
+qualification status must remain distinct from deployment and observed benefit.
+
+### C1 — Disposable immutable archive copies on SSD
+
+Extend the canonical archive reader and existing storage admission boundary.
+HDD objects and PostgreSQL manifests remain authoritative. For example, a frozen
+2022 read may populate a verified SSD copy; another read can reuse it without
+changing Dataset identity. Eviction removes only that disposable copy: there is
+no write-back, Fact deletion, schema migration, historical conversion or result
+cache. The 14-day recent-Fact placement policy remains independent of cache use.
+
+Use an explicitly enabled byte/object quota beneath collection/maintenance
+headroom. Admission respects the saved policy, filesystem identity and existing
+claims; a conflicting maintenance owner prevents new fills. Cache entries use
+immutable content hashes. Check current manifest/schema/envelope semantics on
+all reads, including hits. Least-recently-used inactive objects are eviction
+candidates; market observation age is irrelevant. Expire inactive cache copies
+after 14 days when the cache is maintained, with earlier eviction under pressure.
+Bound scan/fill work and check cancellation. An oversized request can read HDD
+without filling SSD. No read may recursively stage its whole historical range.
+
+Use the existing reader owner, filesystem locks and execution metrics. The new
+cache directory contains replaceable bytes and recency metadata only; it is not
+a second archive catalog, backup dependency or data authority. Publish complete
+verified copies atomically, exclude active readers from eviction, serialize
+conflicting fills and recover abandoned partials without touching archive/spool
+paths. Cache errors must be explicit; unavailable cache uses the admitted HDD
+reader, while invalid authoritative data still fails. Rollback disables caching
+and retains durable HDD objects and original frozen references.
+
+Required validation: identical hot/cold/cache outputs and correction visibility;
+concurrent same-object fill and active-read eviction; cancellation/crash during
+fill/publication; stale partial recovery; quota/reserve/claim and wrong-mount
+refusal; corrupt-cache handling; bounded I/O and no source mutation. No latency
+benefit is claimed from these correctness fixtures.
+
+### C2 — One measured research operation, across processes
+
+Use the existing research execution and PostgreSQL ownership boundaries to admit
+one heavy preparation/Check/replay operation globally during qualification.
+Worker count and API-local semaphores alone are not a global resource limit.
+Nested operations share admission; owner loss cancels execution, and completion
+or cancellation releases ownership only after the operation unwinds. Keep this
+separate from scientific attempt accounting and storage-maintenance ownership.
+
+The first admitted workload is the existing H04 BTC 2022 protocol, retaining its
+one Check and one replay allocations, exact inputs, gap policy and holdouts.
+Record collector-only baseline, then phase timing, physical/read-cache bytes,
+RSS, collector lag/spool and disk headroom during preparation, Check and replay.
+Check and replay totals are different workflows, not a clean cache A/B. Use an
+identical bounded read for isolated cold/repeated-read comparison; never flush
+production OS caches. Cache bypass does not establish an OS-cold disk read.
+Agenticks' four unvalidated drafts are later candidates after source/protocol
+admission. Review/gap-handling chats are supporting work, not additional workers.
+Increase concurrency or allocate more scientific attempts only through existing
+explicit budgets and demonstrated collector/resource limits.
+
 ## Evidence required before an operation is admitted
 
 No row below is a new universal research gate. Each applies to the storage phase,
@@ -675,12 +739,14 @@ local source, not a deployed release. Original candidate checkouts are preserved
 | R0 | Individual queue/API/CLI/MCP cancellation, owned SQL interruption and publication fencing in `6b04b9dc`. | Worker drain/version compatibility before enabling the surface. Dead-owner cancellation stays uncertain pending explicit proof of stopped execution. |
 | R1 | Paged SQL hydration and candle windows into one continuous engine; incremental semantic hashing. | Frozen validation and statistical outputs still retain admitted history. Year-scale RSS and cold decode costs require measurement. |
 | R2 | Shared total limits, per-process synchronous admission, terminal budget failures and phase accounting. | Default ceilings are not demonstrated H04 capacity. No throughput or speedup claim until the representative workload comparison. |
+| C1 | Implemented on `feature/history-read-cache`: immutable object copies, private bounded namespace, shared active-reader locks, atomic publication, policy/reserve admission and existing execution accounting. | Disabled until explicit cache bytes/free-space floor and an operator-prepared SSD directory are selected. Local fault/compatibility checks passed; aggregate release qualification remains pending. No deployment or observed speedup. |
+| C2 | Implemented on that branch: optional shared PostgreSQL admission across API/worker processes, retained through worker publication. Server composition selects one worker and global serialization. | Disposable PostgreSQL ownership/exclusion/loss tests passed; aggregate release qualification remains pending. Cooperative cancellation is not a hard CPU/RSS limit; one slot does not establish collector headroom. |
 
 Storage allocations retained for recovery, source/target overlap and temporary
 migration copies receive **zero assumed reclamation credit**. No route is admitted
 merely by merging code or passing small fixtures. Resource ceilings control one
-execution and per-process concurrency; they do not prove combined collector and
-maintenance headroom or provide a global scheduler.
+execution; C2 adds one shared research slot in the server composition. Neither
+proves combined collector and maintenance headroom or provides a global scheduler.
 
 For autonomous research, require the applicable semantic/concurrency, supported
 read-format, cancellation/ownership and deployment-compatibility tests, then a
@@ -739,12 +805,42 @@ Documentation changes require index generation, `make validate-docs`,
 `make sync-docs` and `git diff --check`. Implementation validation follows the applicable [normal validation matrix](developer-workflow.md),
 including disposable DB and recovery tests for affected persistence boundaries.
 Unavailable or skipped evidence is not a pass. Runtime implementation and local
-disposable validation are now authorized. Production migration, deployment,
-transfer, cleanup and automation restart remain outside this task's authority.
+disposable validation are authorized. The later target-state goal includes release
+qualification and deployment, subject to concrete operational authorization and
+admission. This document grants neither; cancelled operations and paused
+automations remain unchanged.
 
-## Local validation record — 2026-10-04
+## C1/C2 local qualification — 2026-10-04
 
-Runtime implementation source is `7354cb58ae2b6c2591cd8e55e63db8d3346e5860`.
+[PR #223](https://github.com/elijahbrookss/quant-trad/pull/223) targets the preserved
+consolidation branch. Runtime source: `e8003eafa48d11bea3d58207fb8844fe59e2f2d8`
+(including the ownership-observation hardening).
+Local receipts, including failed attempts, are under
+`artifacts/storage-implementation/history-read-cache/`.
+
+- Final `make backend-check`: **4,524 passed, 5 skipped**.
+- **28** cache tests cover codec equivalence, source preservation, bounds, active
+  readers across processes, crash before/after publication, cancellation, replaced
+  roots and corrupt-copy fallback. **9** global-admission tests include stale
+  ownership observations during a stuck probe, uncertain
+  helper termination and ownership through successful/failed worker publication.
+- **4** disposable PostgreSQL tests passed: storage-owner exclusion, reserved
+  capacity, shared research admission and actual admission-connection termination.
+  The existing native research cancellation suite also passed **8** tests; the
+  combined final-source run passed all **12**.
+- Frontend **240 Node + 50 JSX** tests passed with installed Node 22; a fresh-output
+  Vite build passed. Ordinary `make frontend-check` was blocked first by host Node
+  12 and then existing `dist` ownership. No permissions or existing output changed.
+- Shell syntax, disposable base/storage Compose rendering, documentation/index
+  checks passed. `make sync-docs` has no configured destination and was skipped.
+
+These checks qualify tested behavior only. Aggregate CI, production migration
+admission, exact-package deployment, cache sizing and measured collector/research
+coexistence remain open. No production mutation or research run occurred.
+
+## Earlier R0–R2 local validation — 2026-10-04
+
+That research implementation source is `7354cb58ae2b6c2591cd8e55e63db8d3346e5860`.
 Later documentation commits do not change that runtime. Validation logs, including
 failed attempts, are preserved under
 `logs/research-data-evolution/20261004-7354cb58/` in the main checkout.

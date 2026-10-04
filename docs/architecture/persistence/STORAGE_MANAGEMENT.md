@@ -1206,6 +1206,26 @@ files, common writer ownership, source-disk scratch peaks and failure recovery.
 The server Compose mount/user integration remains an explicit release blocker;
 this code does not activate or move live storage.
 
+### Disposable SSD history cache admission
+
+The canonical reader may retain immutable HDD objects in a bounded SSD cache.
+The data boundary documents its copy/eviction contract. `history_policy.py`
+composes it with existing saved targets, reserves and storage-management locking;
+there is no new database schema or independent capacity authority. A cache fill
+is optional and cannot proceed through a conflicting maintenance transaction.
+The fill holds that lock for at most its configured 30-second cooperative work
+budget and checks actual free space/ownership during copying. Ordinary cache
+hits keep only an active-file lock. OS I/O stalls remain subject to host-level
+qualification, not a hard real-time guarantee from Python checkpoints.
+
+The fixed server overlay enables global research serialization and one research
+worker. It leaves cache size zero until capacity qualification supplies an
+explicit cache byte budget, minimum-free floor and private runtime-owned
+`history-read-cache` directory beneath the existing SSD working root. Count
+cache occupancy and in-progress fills in SSD space; do not grant recovery or
+migration reclamation credit for copies that have not actually been evicted.
+The 14-day recent-data policy does not authorize deleting unarchived collection.
+
 ### Runtime access to archived history
 
 The server backend receives the existing host QT_MARKET_DATA_ROOT assignment

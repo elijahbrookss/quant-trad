@@ -212,3 +212,43 @@ explicit job after terminal failure consumes a new budgeted attempt. Preserve
 actual job IDs, failures and counters; a polling/client timeout never proves
 that a worker stopped. Existing fencing, heartbeats and atomic effects remain
 unchanged.
+
+
+## Controlled concurrency and history-cache measurement
+
+`QT_RESEARCH_GLOBAL_SERIALIZATION` optionally admits one cooperating heavy
+research operation across synchronous API processes and workers, through the
+existing execution boundary and one PostgreSQL advisory transaction lock. The
+coordinated SSD/HDD server overlay enables it with one research worker; the
+ordinary configuration default remains disabled. This is resource admission,
+not a replacement for job claim/fencing or scientific attempt accounting.
+Nested operations share ownership. A contending request fails explicitly as
+busy; it is not silently retried or counted as completed science. Queue claims
+remain subject to their original attempt budget, including a claim that finds
+resource admission busy.
+
+A connection-owning helper holds the lock until operation unwinding, including
+worker publication. It checks the live lock every 250 ms under a one-second SQL
+statement limit; losing admission stops the existing execution control. Startup
+wait is bounded to five seconds and uncertain helper shutdown is explicit. The
+helper exclusively owns its connection and closes it on exit; another thread
+never returns it to the pool. Cooperative checkpoints and host resource limits
+still matter: this is not a hard CPU/memory cap or a zero-overlap guarantee under
+arbitrary network/OS stalls. No new queue, lease row or scheduler is introduced.
+
+Synchronous outer research operations emit one `research_execution_metrics`
+summary through normal logging; async jobs retain execution metrics with their
+existing result. Archive source/cache read bytes, cache writes and cache events
+join existing stage timing. They count application reads, not cache-miss disk
+traffic. Keep collector lag, physical disk activity and per-process RSS in the
+measurement receipt; do not infer them from these counters. Preserve the H04
+one-Check/one-replay budget and frozen/holdout rules when measuring the first
+workload. Check/replay totals alone do not isolate cache speedup.
+
+The shared admission helper reports successful ownership observations into the
+existing `ExecutionControl`. A nonblocking check at execution checkpoints and its
+existing stop watcher fails when that observation is over three seconds old,
+even if the database call is still stuck. The helper still exclusively owns its
+connection; failure to join it is uncertain termination, not a released slot.
+This extends the execution-control boundary because a SQL timeout alone cannot
+bound client-side connection stalls; it adds no scheduler or persisted lease.

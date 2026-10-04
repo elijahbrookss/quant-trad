@@ -158,3 +158,18 @@ def test_storage_maintenance_limits_are_optional_and_explicit(monkeypatch, reque
     assert get_settings(force_reload=True).storage.maintenance_limits_path == "/run/quanttrad/measured-storage-limits.json"
     monkeypatch.setenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", "")
     assert get_settings(force_reload=True).storage.maintenance_limits_path is None
+
+
+def test_history_cache_requires_explicit_headroom_and_global_gate(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    monkeypatch.setenv("QT_HISTORY_READ_CACHE_BYTES", "1048576")
+    settings_module.clear_settings_cache()
+    with pytest.raises(ValueError, match="minimum free bytes"):
+        get_settings()
+    monkeypatch.setenv("QT_HISTORY_READ_CACHE_MIN_FREE_BYTES", "2097152")
+    monkeypatch.setenv("QT_RESEARCH_GLOBAL_SERIALIZATION", "true")
+    settings_module.clear_settings_cache()
+    settings=get_settings()
+    assert settings.storage.history_cache_bytes==1048576
+    assert settings.storage.history_cache_min_free_bytes==2097152
+    assert settings.async_jobs.research_global_serialization is True

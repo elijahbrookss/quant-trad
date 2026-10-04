@@ -19,6 +19,9 @@ backend:
     - http://127.0.0.1:5174
 
 storage:
+  # Disabled until a prepared SSD cache root and measured headroom are admitted.
+  history_cache_bytes: 0
+  history_cache_min_free_bytes: 0
   maintenance_owner: collector
   archive_shared_group_id: null
   inventory_path: /run/quanttrad/storage-inventory.json
@@ -60,6 +63,7 @@ observability:
 async_jobs:
   # Execution safety ceilings, not measured production performance targets.
   research_execution_seconds: 3600
+  research_global_serialization: false
   research_input_rows: 5000000
   research_input_bytes: 2147483648
   research_evidence_bytes: 268435456

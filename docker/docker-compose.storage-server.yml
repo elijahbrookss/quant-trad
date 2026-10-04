@@ -78,6 +78,11 @@ services:
       # existing runner. This host path must equal QT_STORAGE_HDD_ROOT/archives.
       QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:?HDD archive host path is required}
       QT_BOT_RUNTIME_NETWORK: ${QT_STORAGE_NETWORK:?Existing application network is required}
+      # Optional disposable history cache; the SSD root must be prepared separately.
+      QT_RESEARCH_GLOBAL_SERIALIZATION: "true"
+      QT_WORKERS_RESEARCH_PROCESSES: "1"
+      QT_HISTORY_READ_CACHE_BYTES: ${QT_HISTORY_READ_CACHE_BYTES:-0}
+      QT_HISTORY_READ_CACHE_MIN_FREE_BYTES: ${QT_HISTORY_READ_CACHE_MIN_FREE_BYTES:-0}
     # Capacity status uses the registered SSD mount. UID1000 cannot traverse
     # its private UID70 PostgreSQL directories; physical inspection is maintenance-only.
     volumes:
