@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 import time
 from typing import Any, Deque, Dict, Iterable, Mapping
-from core.execution_control import execution_checkpoint
+from core.execution_control import execution_checkpoint, measured_execution
 
 from .contracts import (
     DetailDefinition,
@@ -120,6 +120,7 @@ class IndicatorExecutionEngine:
     def output_types(self) -> Dict[str, OutputType]:
         return dict(self._flat_output_types)
 
+    @measured_execution("engine")
     def step(
         self,
         *,

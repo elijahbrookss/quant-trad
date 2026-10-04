@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import text
 
 from core.storage_mounts import configured_archive_root
+from core.execution_control import execution_checkpoint, consume_execution_json, consume_execution_resource, measured_execution
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
 from market_data.fact_archive import FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
@@ -301,6 +302,7 @@ class PostgresCanonicalFactStorageRepository:
             result.update((row["id"], row) for row in self.hydrate_rows(session, rows))
         return result
 
+    @measured_execution("hydration")
     def hydrate_rows(self, session, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Preserve SQL order and validate every cold page before supplying payloads.
 
@@ -309,6 +311,8 @@ class PostgresCanonicalFactStorageRepository:
         must hold the lifecycle shared fence before establishing their snapshot.
         The caller owns causal filtering; hydration never selects or drops rows.
         """
+        execution_checkpoint()
+        consume_execution_resource("input_rows", len(rows))
         result = [dict(row) for row in rows]
         ensure_payload_contracts(session, [
             (row["payload_schema_id"], row["payload_contract_hash"]) for row in result
@@ -327,6 +331,7 @@ class PostgresCanonicalFactStorageRepository:
                 raise RuntimeError(f"canonical_cold_identity_duplicate: fact_version_id={identity}")
             cold[identity] = row
         if not cold:
+            consume_execution_json("input_bytes", result)
             return result
 
         # Bound the SQL parameter set independently of the overall requested
@@ -380,6 +385,7 @@ class PostgresCanonicalFactStorageRepository:
 
         store = self.object_store_factory()
         for manifest_id, wanted in grouped.items():
+            execution_checkpoint()
             manifest = manifests[manifest_id]
             ensure_payload_contracts(session, [
                 contract for bounds in manifest.series for contract in bounds.payload_contracts
@@ -397,6 +403,7 @@ class PostgresCanonicalFactStorageRepository:
                 # copy, not just ID or row_hash. storage_day is not market truth.
                 verify_archived_envelope(envelope, archived)
                 envelope.update({name: archived[name] for name in _DOCUMENTS})
+        consume_execution_json("input_bytes", result)
         return result
 
 

@@ -13,6 +13,7 @@ tags:
 code_paths:
   - portal/backend/controller/research.py
   - portal/backend/service/research/async_dispatch.py
+  - portal/backend/service/research/execution_limits.py
   - portal/backend/workers/research_worker.py
   - portal/backend/service/async_jobs
   - portal/backend/db/models.py
@@ -114,6 +115,54 @@ Existing databases use
 worker processes are stopped. The migration refuses concurrent client
 sessions, requeues old running claims only on first installation, and is safe
 to apply repeatedly.
+
+## Execution admission and limits
+
+`async_jobs.research_*` settings declare the total execution clock, cumulative
+input row visits and logical UTF-8 input bytes, retained Indicator evidence bytes,
+and result-envelope bytes. Defaults are safety ceilings, not measured production
+capacity: 3,600 seconds; 5,000,000 row visits; 2 GiB input; 256 MiB evidence;
+16 MiB result. Count repeated reads and processing rather than silently resetting
+the budget at each phase. These are logical work limits, not a hard process-RSS
+limit or a promise that every year-scale Check fits. Native evaluator arrays,
+bounded archive decoding and Python object overhead still require workload and
+collector-impact qualification before increasing admitted concurrency or limits.
+
+Dispatch pins these limits outside the immutable scientific request. Workers
+honor the tighter of the pinned and current deployment limits. Old queued jobs
+without a limit receipt use current limits. Synchronous requirements, preparation,
+preview, replay and sweep use the same service boundary; nested operations share
+one clock and counters. Input is checked while pages are hydrated; retained
+evidence is checked before append and result envelopes before publication.
+SQL timeout never exceeds either the remaining execution budget or an already
+stricter statement timeout. Budget exhaustion fails explicitly without automatic
+job retry. Preparation may retain valid facts or a completed frozen Dataset from
+an earlier admitted step; it never deletes them because a later limit fails.
+
+Synchronous capacity per API process is capped at `workers.research.processes`,
+separately from the supervisor's worker pool. With one API process and the default
+two workers, up to four research executions can compete. This is a declared
+deployment bound, not a distributed resource scheduler. Scaling API processes or
+changing worker counts requires fresh combined-resource admission. Busy synchronous
+requests fail with HTTP 503; exhausted budgets return HTTP 422. Cancellation and
+status remain available while that capacity is occupied.
+
+Successful queued results expose `research_execution_metrics.v1` outside the
+scientific result: cumulative row visits, logical JSON bytes and stage seconds
+for selection (including cursor fetch), hydration, decoding, engine, evaluation
+and persistence. Stage timers can nest and must not be summed as exclusive wall
+time. Persistence excludes the final commit round trip. Logical bytes are not
+physical disk/archive reads, WAL, Python heap size or peak RSS; qualification
+must measure those separately. Frozen manifest validation and evaluators can
+still materialize their admitted history, so this is not constant-memory research.
+
+Synchronous evidence computation and publication share one admission slot and
+deadline. Check and links use one transaction. Cancellation/deadline checks run
+before commit; an acknowledged successful commit remains successful if time
+expires on return. An uncertain commit requires reading durable state before
+retrying. A dead owner with requested cancellation remains unresolved until an
+operator proves its process and database statements have stopped; stale time
+alone cannot release it. No automated dead-process recovery is added here.
 
 ## CLI Boundary
 

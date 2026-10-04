@@ -280,6 +280,27 @@ def test_freeze_excludes_late_cross_series_commit(canonical_series, monkeypatch,
     assert [(r.revision, r.fact.row_hash) for r in after] == [(r.revision, r.fact.row_hash) for r in before]
 
 
+def test_canonical_cursor_hydrates_bounded_pages_and_preserves_revision_choice(canonical_series, monkeypatch):
+    from portal.backend.service.storage.repos.fact_storage import canonical_fact_storage_repository
+    _ingest(canonical_series, [_fact(i) for i in range(7)], source_revision="initial")
+    _ingest(canonical_series, [_fact(0, close=101.5)], source_revision="corrected")
+    selection = dict(series_id=int(canonical_series["series_id"]), start=_BASE,
+                     end=_BASE+timedelta(hours=7), as_of_commit_seq=None, known_at_lte=None)
+    original = canonical_fact_storage_repository.hydrate_rows
+    sizes = []
+    def hydrate(session, rows):
+        sizes.append(len(rows))
+        return original(session, rows)
+    monkeypatch.setattr(canonical_fact_storage_repository, "hydrate_rows", hydrate)
+    with db.session() as session:
+        streamed = list(market_data_repo._iter_canonical_rows_with_session(session, **selection, batch_rows=2))
+    assert max(sizes) <= 2 and len(sizes) == 4
+    assert streamed[0]["revision"] == 2
+    with db.session() as session:
+        whole = market_data_repo._read_canonical_rows_with_session(session, **selection)
+    assert streamed == whole
+
+
 def test_series_catalog_preserves_exact_counts_and_bounds_across_corrections(
     canonical_series: dict[str, int | str],
 ) -> None:

@@ -880,6 +880,7 @@ def fail_job(
     *,
     error: str,
     retry_delay_seconds: float = 0.0,
+    retryable: bool = True,
 ) -> None:
     if not db.available:
         raise RuntimeError("async_jobs_unavailable: database unavailable")
@@ -891,7 +892,7 @@ def fail_job(
             return
         attempts = int(record.attempts or 0)
         max_attempts = int(record.max_attempts or 0)
-        exhausted = attempts >= max_attempts
+        exhausted = not retryable or attempts >= max_attempts
         if exhausted:
             record.status = STATUS_FAILED
             record.finished_at = now

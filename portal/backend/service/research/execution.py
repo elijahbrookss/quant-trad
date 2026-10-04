@@ -1,6 +1,7 @@
 """Canonical preview and frozen-evidence execution for registered Checks."""
 
 from __future__ import annotations
+from core.execution_control import measured_execution
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -160,7 +161,11 @@ def _load_market_inputs(
         if str(row.get("alias") or "") == "primary_bars"
     )
     instrument_id = str(primary_requirement["instrument_id"])
-    candles = candle_service.fetch_ohlcv_by_instrument(
+    candle_reader = (
+        candle_service.iter_ohlcv_by_instrument if plan.indicator_graph
+        else candle_service.fetch_ohlcv_by_instrument
+    )
+    candles = candle_reader(
         instrument_id,
         start,
         end,
@@ -174,7 +179,7 @@ def _load_market_inputs(
         evidence=(resolver.dataset_binding if resolver.dataset_binding is not None else None),
     )
     inputs: dict[str, Any] = {
-        "candles": candles,
+        "candles": None if plan.indicator_graph else candles,
         "detector": dict(request.parameters.get("detector") or {}),
         "outcomes": dict(request.parameters.get("outcomes") or {}),
         "statistics": dict(request.parameters.get("statistics") or {}),
@@ -212,7 +217,7 @@ def _load_market_inputs(
                 instrument_id=instrument_id,
                 instrument_snapshot=subject_snapshot,
                 indicator_param_overrides=scope.get("indicator_param_overrides"),
-                candle_frame=candles,
+                candle_frames=candles,
                 market_data_resolver=resolver,
                 market_data_requirements_by_consumer=_indicator_requirements_by_consumer(
                     plan
@@ -281,6 +286,7 @@ def _load_market_inputs(
     return inputs
 
 
+@measured_execution("evaluation")
 def _evaluate(
     definition: CheckDefinition,
     request: CheckRequest,
@@ -340,13 +346,13 @@ def _execution_input_hashes(
             "not_ready_counts": dict(indicator.get("not_ready_counts") or {}),
             **({"output_readiness": indicator["output_readiness"]}
                if "output_readiness" in indicator else {}),
-            "outputs": list(indicator.get("outputs") or []),
+            "outputs": indicator.get("outputs") or [],
         }
     )
     histories = {
-        str(alias): [
+        str(alias): (
             _numeric_record_material(record) for record in records
-        ]
+        )
         for alias, records in sorted(
             dict(inputs.get("fact_records_by_alias") or {}).items()
         )

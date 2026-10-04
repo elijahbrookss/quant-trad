@@ -5,10 +5,11 @@ import os
 import signal
 import socket
 import time
+from contextlib import nullcontext
 from typing import Any, Dict
 
 from core.settings import get_settings
-from core.execution_control import ExecutionCancelledError
+from core.execution_control import ExecutionCancelledError, ExecutionBudgetExceededError, controlled_execution
 import indicators  # noqa: F401
 from overlays.builtins import ensure_builtin_overlays_registered
 
@@ -28,6 +29,7 @@ from portal.backend.service.research.async_dispatch import (
     JOB_TYPE_RESEARCH_CHECK_RUN,
     JOB_TYPE_RESEARCH_CHECK_SWEEP,
 )
+from portal.backend.service.research.execution_limits import research_execution_limits
 
 
 logger = logging.getLogger(__name__)
@@ -75,25 +77,30 @@ def execute_claimed_research_job(job: ClaimedJob) -> Dict[str, Any]:
     if not isinstance(request, dict):
         raise ValueError("research async job payload requires request object")
 
-    with maintain_job_heartbeat(job, interval_seconds=1.0, stop_requested=lambda: _STOP):
+    with maintain_job_heartbeat(job, interval_seconds=1.0, stop_requested=lambda: _STOP) as heartbeat:
+        if heartbeat is not None:
+            heartbeat.control.limit(**dict(job.payload.get("execution_limits") or research_execution_limits()))
         if job.job_type != JOB_TYPE_RESEARCH_CHECK_RUN:
             result = process_research_job(job.job_type, job.payload)
         else:
             result = research_service.build_research_check_evidence(request)
 
-    if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
-        return complete_job_with_owned_effect(
-            job,
-            lambda session: research_service.persist_built_research_check_evidence(
-                result, session=session
-            ),
-        )
-
-    normalized_result = (
-        result if isinstance(result, dict) else {"result": result}
-    )
-    complete_job(job, result=normalized_result)
-    return normalized_result
+    # Stop the heartbeat before taking its publication row lock, while keeping
+    # the original execution deadline through the database commit.
+    publication_scope = controlled_execution(heartbeat.control, check_on_exit=False) if heartbeat is not None else nullcontext()
+    with publication_scope:
+        if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
+            def publish(session):
+                published = research_service.persist_built_research_check_evidence(result, session=session)
+                return {**published, "execution_metrics": heartbeat.control.snapshot()} if heartbeat is not None else published
+            return complete_job_with_owned_effect(
+                job, publish,
+            )
+        normalized_result = result if isinstance(result, dict) else {"result": result}
+        if heartbeat is not None:
+            normalized_result = {**normalized_result, "execution_metrics": heartbeat.control.snapshot()}
+        complete_job(job, result=normalized_result)
+        return normalized_result
 
 
 def main() -> int:
@@ -189,6 +196,7 @@ def main() -> int:
                     job,
                     error=f"{exc.__class__.__name__}: {exc}",
                     retry_delay_seconds=0.5,
+                    retryable=not isinstance(exc, ExecutionBudgetExceededError),
                 )
             except AsyncJobOwnershipError:
                 logger.exception(

@@ -542,6 +542,11 @@ class AsyncJobSettings:
     quantlab_job_poll_interval_seconds: float
     quantlab_result_cache_ttl_seconds: float
     reclaim_interval_seconds: float
+    research_execution_seconds: float = 3600.0
+    research_input_rows: int = 5000000
+    research_input_bytes: int = 2147483648
+    research_evidence_bytes: int = 268435456
+    research_result_bytes: int = 16777216
 
 
 @dataclass(frozen=True)
@@ -931,6 +936,11 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             reclaim_interval_seconds=_coerce_float(
                 async_jobs_payload.get("reclaim_interval_seconds"), 30.0, minimum=0.0
             ),
+            research_execution_seconds=_coerce_float(async_jobs_payload.get("research_execution_seconds"), 3600.0, minimum=0.1),
+            research_input_rows=_coerce_int(async_jobs_payload.get("research_input_rows"), 5000000, minimum=1),
+            research_input_bytes=_coerce_int(async_jobs_payload.get("research_input_bytes"), 2147483648, minimum=1),
+            research_evidence_bytes=_coerce_int(async_jobs_payload.get("research_evidence_bytes"), 268435456, minimum=1),
+            research_result_bytes=_coerce_int(async_jobs_payload.get("research_result_bytes"), 16777216, minimum=1),
         ),
         workers=WorkersSettings(
             indicators=WorkerGroupSettings(

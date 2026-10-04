@@ -56,6 +56,7 @@ Common agent/tool workflow commands:
 - `qt research check sweep --check-family <family> --indicator-id <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe> --detector-json '<json>' --variant <id[:key=value]> --rank-by <metric.path> --rank-direction <asc|desc>`
 - `qt research check sweep ... --dispatch`
 - `qt research jobs status <job_id>`
+- `qt research jobs cancel <job_id>`
 - `qt research jobs result <job_id> --format table`
 - `qt instruments list`
 - `qt instruments profile <instrument_id> --execution-semantics proxy_derivative`

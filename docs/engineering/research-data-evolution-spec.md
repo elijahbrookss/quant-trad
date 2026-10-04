@@ -342,9 +342,12 @@ pinned request. Old evidence hashes and exact replay remain compatible.
 
 Validate multiple page sizes, empty ranges, corrections crossing page boundaries,
 recorded gaps, late availability, cold corruption and cancellation during reads
-and engine work. Add a disposable concurrency test for the suspected frozen
-watermark race; describe it as a failure only if reproduced. Repair a confirmed
-gap in the existing frozen-input boundary before qualifying affected evidence.
+and engine work. Disposable concurrency fixtures now reproduce delayed append and correction
+leaking through a database-global watermark. New freezes select and store each
+series' committed watermark under the canonical writer's existing series lock
+ordering, and carry `per_series_committed.v1` selection identity. Existing hashes
+are unchanged; re-freeze is required for the stronger guarantee. Both regression
+cases passed on the isolated PostgreSQL stack.
 
 ### R2 — End-to-end limits and qualification
 
@@ -364,11 +367,57 @@ collector lag/spool. Repeating a request is not assumed to be cached, and requir
 scientific replay must still execute. Small fixtures establish semantics and
 limits; they do not establish year-scale speedups or production capacity.
 
+Existing research receipts provide these baselines; do not replace them with
+estimates or interpret a timeout as measured successful latency:
+
+| Workload / receipt in R `artifacts/five-year-research/` | Existing evidence | Still missing |
+| --- | --- | --- |
+| Annual coverage; `year-scale-20260929/calendar-coverage-packet.json` | Client timeout at 46.5 s; server terminated around 125 s without a recovered result. | Successful selection, hydration and decoding measurements. |
+| L02; `landmark-dependence-20260924/L02-preparation-progress-20260929.json` | BTC source freeze 48.2 s; 5m/30m derivation 38.1/29.4 s; final preparation/freeze 85.5 s. | Phase costs and input/output byte counts. |
+| Frozen L02 replay in the same research receipts | BTC 12.0 s; ETH 14.8 s. | Identical-source repeat, cold/hot split and resource use. |
+| Synthetic annual H04; `year-scale-20260929/H04-qualification.json` | Engine 383.7 s; total 428.8 s; peak RSS 2,332,000 KiB. | Database selection, hydration, freezing and persistence; comparable streamed execution. |
+
+The implementation's default resource ceilings are conservative configuration,
+not measured performance acceptance targets or proof that every historical request
+fits. Qualify each representative workload against its actual declared limits
+before admitting autonomous execution; never silently expand a budget to finish.
+
 Research qualification requires: equal frozen inputs under concurrency; preserved
 known-at/gap/engine behavior; equal supported format reads; enforced limits;
 cancel/duplicate/stale-owner/publication tests; exact release compatibility; and
 unchanged protocols, holdouts and scientific budgets. Each requirement gates the
 affected capability only. Deployment and resumption remain separately authorized.
+
+## Implementation and release ledger
+
+The main candidate integrates S (including its R ancestor) in `89a6ba0f`; it is
+local source, not a deployed release. Original candidate checkouts are preserved.
+
+| Slice | Implemented/reused now | Remaining qualification; capability blocked |
+| --- | --- | --- |
+| M0 | Existing inventory/admission commands and retained-history route; source headers 316,197,470,208 bytes including indexes and raw lookup 130,259,869,696 bytes remain separate allocations, not additions to database totals. | Fresh growth horizon, incremental identity/key/WAL/temp/backup overlap and numeric physical limits remain unmeasured. Blocks production storage admission, not compatible research development. |
+| M1 | S's retained/daily headers, identity/references and supported hot/cold readers; frozen series concurrency repair in `7464d7f9`. | Exact release/schema compatibility and required old/new/cold cases must pass. Does not grant old-schema support to the combined candidate. |
+| M2 | S's transactional capture, bounded pages/catch-up, fenced ownership, cancellation and resource claims reused unchanged. | Collector-shaped physical qualification and actual lag/space tolerances remain necessary before running maintenance. |
+| M3 | S's forward adoption and durable outcome/recovery mechanics retained; no alternative cutover controller. | Native final constraint/attachment scans still need admitted pause and recovery proof on the selected physical route. No cutover performed. |
+| M4 | Existing placement owners and recovery receipts retained. | Deferred until the measured capacity goal requires movement. Retained SSD history is not reclaimed capacity. |
+| R0 | Individual queue/API/CLI/MCP cancellation, owned SQL interruption and publication fencing in `6b04b9dc`. | Worker drain/version compatibility before enabling the surface. Dead-owner cancellation stays uncertain pending explicit proof of stopped execution. |
+| R1 | Paged SQL hydration and candle windows into one continuous engine; incremental semantic hashing. | Frozen validation and statistical outputs still retain admitted history. Year-scale RSS and cold decode costs require measurement. |
+| R2 | Shared total limits, per-process synchronous admission, terminal budget failures and phase accounting. | Default ceilings are not demonstrated H04 capacity. No throughput or speedup claim until the representative workload comparison. |
+
+Storage allocations retained for recovery, source/target overlap and temporary
+migration copies receive **zero assumed reclamation credit**. No route is admitted
+merely by merging code or passing small fixtures. Resource ceilings control one
+execution and per-process concurrency; they do not prove combined collector and
+maintenance headroom or provide a global scheduler.
+
+For autonomous research, require the applicable semantic/concurrency, supported
+read-format, cancellation/ownership and deployment-compatibility tests, then a
+successful representative workload within its declared scientific and resource
+budgets. It may submit bounded previews, frozen Checks and replay under existing
+protocol/holdout authority. It may not change schema, expand budgets, acquire
+unapproved history, deploy, move/delete storage or restart operations. This task
+launches none of that work. Full historical conversion and unrelated cleanup are
+not research prerequisites.
 
 ## Separate follow-ups, outside this implementation
 

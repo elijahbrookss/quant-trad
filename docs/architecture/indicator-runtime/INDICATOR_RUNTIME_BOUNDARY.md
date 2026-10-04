@@ -220,6 +220,18 @@ Indicator truth. See [ADR 0075](../decisions/0075-pin-first-return-to-original-r
 for original-range memory, expiry, gap and strictly prior ATR semantics.
 
 
+### Bounded research source pages
+
+Output evidence can consume an ordered `candle_frames` iterator. Page boundaries
+never reinitialize the engine or reset readiness, gaps, event availability or
+indicator commit clocks. Evidence retains its existing schema and exact ordering.
+The collector no longer builds a second complete list of Candle objects beside
+the source frames. It configures one bar of render history because this consumer
+never requests overlays; algorithm warmup and typed outputs remain unchanged.
+Output/candle evidence required by evaluators still occupies memory and needs
+the research execution budget. This is not a constant-memory claim for arbitrary
+Indicator algorithms or complete research results.
+
 ### Optional research readiness evidence
 
 The Check evidence collector may request `capture_output_readiness`. It reads

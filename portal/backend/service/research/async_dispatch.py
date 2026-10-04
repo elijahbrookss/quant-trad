@@ -10,6 +10,7 @@ from portal.backend.service.async_jobs import (
     get_job,
     request_job_cancellation,
 )
+from .execution_limits import research_execution_limits
 
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,7 @@ def _job_payload(job: Mapping[str, Any], *, include_result: bool = False) -> dic
         "finished_at": job.get("finished_at"),
         "error": job.get("error"),
         "result_available": status == "succeeded" and isinstance(result, Mapping),
+        "execution_limits": dict((job.get("payload") or {}).get("execution_limits") or {}),
     }
     if isinstance(result, Mapping) and result.get("schema_version") == "async_job_cancellation.v1":
         payload["cancellation"] = dict(result)
@@ -171,6 +173,7 @@ def dispatch_research_job(
             "schema_version": "research_async_job_request.v1",
             "request": normalized_request,
             "request_fingerprint": request_fingerprint,
+            "execution_limits": research_execution_limits(),
         },
         partition_key=partition_key,
         request_fingerprint=request_fingerprint,

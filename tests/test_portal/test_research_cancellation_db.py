@@ -8,7 +8,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from core.execution_control import ExecutionCancelledError
+from core.execution_control import ExecutionCancelledError, ExecutionBudgetExceededError, ExecutionControl, controlled_execution
 from portal.backend.db import AsyncJobRecord, db
 from portal.backend.service.async_jobs import repository as jobs
 from portal.backend.service.research import service
@@ -112,3 +112,44 @@ def test_running_sql_is_interrupted_before_acknowledgement(monkeypatch):
     assert jobs.get_job(job_id)["result"]["execution_stopped"] is True
     with db.session() as session:
         assert session.execute(text("SELECT 42")).scalar_one() == 42
+
+
+def test_total_deadline_interrupts_sql_and_budget_failure_never_retries():
+    control = ExecutionControl()
+    control.limit(seconds=0.2)
+    with pytest.raises(ExecutionBudgetExceededError):
+        with controlled_execution(control), db.session() as session:
+            session.execute(text("SELECT pg_sleep(20)"))
+    kind, job_id = _enqueued()
+    claim = jobs.claim_next_job(worker_id="budget-test", job_types=[kind])
+    jobs.fail_job(claim, error="budget exhausted", retryable=False)
+    assert jobs.get_job(job_id)["status"] == "failed"
+    assert jobs.claim_next_job(worker_id="never-retry", job_types=[kind]) is None
+
+
+def test_existing_stricter_statement_timeout_is_preserved():
+    control = ExecutionControl()
+    control.limit(seconds=60)
+    with db.session() as session:
+        session.execute(text("SET LOCAL statement_timeout = 100"))
+        with controlled_execution(control):
+            assert session.execute(text("SELECT setting FROM pg_settings WHERE name='statement_timeout'")).scalar_one() == "100"
+
+
+def test_budget_supports_named_cursor_and_refuses_commit_after_cancellation():
+    control = ExecutionControl()
+    control.limit(seconds=60)
+    with controlled_execution(control), db.session() as session:
+        result = session.execute(text("SELECT n FROM generate_series(1, 9) n").execution_options(yield_per=2))
+        try:
+            assert [row[0] for page in result.partitions(2) for row in page] == list(range(1, 10))
+        finally:
+            result.close()
+    kind, job_id = _enqueued()
+    control = ExecutionControl()
+    with pytest.raises(ExecutionCancelledError):
+        with controlled_execution(control), db.session() as session:
+            session.get(AsyncJobRecord, job_id).status = "succeeded"
+            session.flush()
+            control.stop(ExecutionCancelledError("cancel before commit"))
+    assert jobs.get_job(job_id)["status"] == "queued"
