@@ -119,7 +119,9 @@ def test_total_deadline_interrupts_sql_and_budget_failure_never_retries():
     control.limit(seconds=0.2)
     with pytest.raises(ExecutionBudgetExceededError):
         with controlled_execution(control), db.session() as session:
+            driver = session.connection().connection.driver_connection
             session.execute(text("SELECT pg_sleep(20)"))
+    assert driver.closed, "cancelled connections must not be returned to the pool"
     kind, job_id = _enqueued()
     claim = jobs.claim_next_job(worker_id="budget-test", job_types=[kind])
     jobs.fail_job(claim, error="budget exhausted", retryable=False)

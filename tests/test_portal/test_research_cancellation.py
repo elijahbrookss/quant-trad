@@ -175,3 +175,22 @@ def test_heartbeat_shutdown_uncertainty_is_not_masked_by_cancellation(monkeypatc
         with heartbeat:
             heartbeat._thread = StuckHeartbeat()
             heartbeat.control.stop(ExecutionCancelledError("cancel requested"))
+
+
+def test_interrupted_session_is_discarded_before_another_pool_user(monkeypatch):
+    from portal.backend.db import db
+    class OwnedSession:
+        invalidated = False
+        closed = False
+        def invalidate(self): self.invalidated = True
+        def rollback(self): pytest.fail("cancelled socket must not return to the pool")
+        def close(self): self.closed = True
+    owned = OwnedSession()
+    monkeypatch.setattr(db, "ensure_schema", lambda: True)
+    monkeypatch.setattr(db, "_session_factory", lambda: owned)
+    control = ExecutionControl()
+    with pytest.raises(ExecutionCancelledError):
+        with controlled_execution(control), db.session():
+            control.stop(ExecutionCancelledError("stopped"))
+            control.check()
+    assert owned.invalidated and owned.closed

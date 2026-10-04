@@ -156,6 +156,9 @@ physical disk/archive reads, WAL, Python heap size or peak RSS; qualification
 must measure those separately. Frozen manifest validation and evaluators can
 still materialize their admitted history, so this is not constant-memory research.
 
+Interrupted database sessions discard their connection before pool reuse, so a
+late cancellation packet cannot interrupt the next borrower.
+
 Synchronous evidence computation and publication share one admission slot and
 deadline. Check and links use one transaction. Cancellation/deadline checks run
 before commit; an acknowledged successful commit remains successful if time

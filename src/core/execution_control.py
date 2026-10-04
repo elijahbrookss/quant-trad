@@ -42,6 +42,11 @@ class ExecutionControl:
         self._used: dict[str, int] = {}
         self._stage_seconds: dict[str, float] = {}
 
+    @property
+    def stopped(self) -> bool:
+        with self._lock:
+            return self._error is not None
+
     def record_time(self, stage: str, seconds: float) -> None:
         with self._lock:
             self._stage_seconds[stage] = self._stage_seconds.get(stage, 0.0) + seconds
