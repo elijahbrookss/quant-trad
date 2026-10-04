@@ -331,8 +331,10 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
         socket_volume=kwargs["project"]+"-unused-socket",spool_destination=str(spool))
     plan["request"]=request;plan["inventory_path"]=str(kwargs["inventory_path"])
     path=state/"terminal-operation.json";host_boundary.save_receipt(path,plan,initial=True)
+    terminal_identity = host_boundary.docker("image", "inspect", terminal_image or kwargs["image"],
+        "--format", "{{.Id}}").strip()
     manifest=dict(schema_version="qt.storage_online_terminal.v1",plan_sha256=amendment._sha(path.read_bytes()),
-        image=terminal_image or kwargs["image"],source_revision=request["source_revision"],source_tree_hash=request["source_tree_hash"])
+        image=terminal_identity,source_revision=request["source_revision"],source_tree_hash=request["source_tree_hash"])
     manifest_path=state/"terminal-package.json";host_boundary.save_receipt(manifest_path,manifest,initial=True)
     original_files={p:p.read_bytes() for p in (path,state/amendment.REQUEST,state/launch._STATE,kwargs["inventory_path"])}
     if expired:
