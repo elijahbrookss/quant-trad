@@ -28,8 +28,11 @@ code_paths:
 
 Accepted direction on 2026-10-04 after review narrowed the storage problem and
 separately authorized bounded research streaming and individual job cancellation.
-Storage candidate integration and the bounded research implementation are local
-source changes; release and physical qualification remain incomplete.
+Storage candidate integration and the bounded research implementation are source
+changes; release and physical qualification remain incomplete. The user selected
+one coordinated storage/research deployment on 2026-10-04. The combined candidate
+therefore waits for its physical-layout gates; this release choice does not make
+storage cutover an intrinsic research dependency.
 The [implementation specification](../../engineering/research-data-evolution-spec.md)
 owns the concrete route, slices and acceptance evidence. Neither document
 authorizes migration, deployment, cleanup or restarting paused work.

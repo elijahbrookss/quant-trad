@@ -265,6 +265,23 @@ external-order submission.
 Record unavailable prerequisites honestly. A skipped database, frontend, or
 configuration row is an unavailable validation result, not a passing result.
 
+## Branch Naming and Integration
+
+- Work branches must use only `feature/<description>` or
+  `hotfix/<description>`. Use `feature/` for planned features, documentation,
+  integration and qualification work; use `hotfix/` for corrective fixes.
+- Never create `codex/`, `feat/`, `feats/`, `fix/`, `docs/` or
+  `verification/` work branches. Agent identity is not a branch category.
+  Existing long-lived `main`, `develop` and `test` branches are unchanged.
+- For a coordinated release, target component PRs at the designated
+  `feature/` integration branch. Preserve component commits and branches with
+  merge commits; do not squash, rebase or auto-delete them.
+- An integration merge is not deployment approval. Qualify the complete release
+  against its intended schema and recovery plan before deployment. The user
+  owns the final integration PR to `develop` when explicitly reserved.
+- See [Developer Workflow](docs/engineering/developer-workflow.md) for the
+  integration and validation sequence.
+
 ## Commit Hygiene
 
 - Commit coherent slices as they become reviewable instead of saving every

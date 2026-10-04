@@ -32,6 +32,65 @@ control of existing capabilities; they do not introduce another research engine.
 Both workstreams are in scope for implementation. Neither authorizes production
 operations, deployment, migration execution or restarting paused automations.
 
+## Coordinated release decision — 2026-10-04
+
+The user selected one integrated release, replacing the earlier proposed
+research-first deployment sequence. Component histories are preserved through
+PRs and merge commits into `feature/storage-research-consolidation`; the user
+will raise the final PR to `develop`. Work branches use only `feature/` or
+`hotfix/` as specified in the [developer workflow](developer-workflow.md).
+Historical branch names in immutable receipts remain historical evidence.
+
+The six original PRs were closed by GitHub's head-branch rename and replaced
+with linked component PRs. Their commits and discussions are retained:
+
+| Original PR | Integration PR | Preserved component branch |
+| --- | --- | --- |
+| [#208](https://github.com/elijahbrookss/quant-trad/pull/208) | [#213](https://github.com/elijahbrookss/quant-trad/pull/213) | `feature/research-matched-origin-attribution` |
+| [#210](https://github.com/elijahbrookss/quant-trad/pull/210) | [#214](https://github.com/elijahbrookss/quant-trad/pull/214) | `feature/research-first-return` |
+| [#209](https://github.com/elijahbrookss/quant-trad/pull/209) | [#215](https://github.com/elijahbrookss/quant-trad/pull/215) | `hotfix/storage-source-preparation` |
+| [#211](https://github.com/elijahbrookss/quant-trad/pull/211) | [#216](https://github.com/elijahbrookss/quant-trad/pull/216) | `feature/research-forward-risk` |
+| [#212](https://github.com/elijahbrookss/quant-trad/pull/212) | [#217](https://github.com/elijahbrookss/quant-trad/pull/217) | `feature/research-single-attempt-jobs` |
+| [#202](https://github.com/elijahbrookss/quant-trad/pull/202) | [#218](https://github.com/elijahbrookss/quant-trad/pull/218) | `feature/storage-target-management` |
+
+The local implementation at `fd6a7985` remains in
+`feature/research-data-evolution-spec`, supplying bounded research execution,
+frozen visibility and the reconciled specification. Storage merge reconciliation
+`26683956` preserves the exact `3f4c55c6` file tree; it only records the
+component merge ancestry. Source branch deletion is disabled.
+
+The integrated source includes both storage and research work. Its startup
+guards require the new header/identity layout, so this chosen release waits for
+the storage transition and exact combined-package qualification. This is a
+release choice, not a new semantic dependency of research. The separately
+qualified old-layout composition is retained as evidence, not a second planned
+deployment or permanent application fork.
+
+One release still has ordered operations. Before production execution:
+
+1. Confirm the actual serving revision/schema and refresh the capacity horizon,
+   peak index/identity/WAL/temp/recovery overlap, collection lag and pause limits
+   through the existing M0 owners. Do not count retained copies as free space.
+2. Qualify and admit the retained-header route: prepare the two composite keys,
+   reconcile identities/references and archive bindings, and catch up concurrent
+   writes using the existing owned operations. Do not revive the cancelled
+   migration or silently renew its clocks.
+3. Prove the selected final constraint/attachment transaction, uncertain-commit
+   reconciliation and applicable database/archive recovery fit the admitted
+   limits. Historical fixture success is not a production pause measurement.
+4. Qualify the exact aggregate package, drain incompatible workers, perform the
+   explicitly approved bounded switch/promotion, and verify collectors,
+   hot/cold/frozen reads and research cancellation on the resulting layout.
+5. Admit representative research workloads within their scientific and resource
+   budgets before separately resuming execution. Move legacy history only if
+   the measured capacity goal requires it; no cleanup is implied.
+
+The migration remains required for this combined candidate. Retaining historical
+headers avoids rebuilding their heap and search indexes, but does not eliminate
+key/identity/reference work or prove SSD relief. Production capacity, final
+pause/recovery admission and workload measurements remain open. Branch
+consolidation does not satisfy or authorize those operations.
+
 ## Current state and why the original migration was large
 
 Evidence comes from the prior audit and these inspected checkouts:
@@ -214,8 +273,8 @@ actual schema and any new writes. Retaining an old image or table alone does not
 make rollback safe; never restore a DB over newer collection automatically.
 
 Qualify the exact runtime/schema pair, preserved archives and usable recovery
-dependencies. Separate an independently compatible research release from physical
-cutover where possible. This slice does not authorize any deployment or automatic
+dependencies. Keep the technical ability to qualify research independently from physical
+cutover; the current coordinated release decision above elects one deployment. This slice does not authorize any deployment or automatic
 research restart. Its costs include rehearsals and retained recovery material.
 
 ### M4 — Place historical groups only where capacity requires it
@@ -513,7 +572,8 @@ including real freeze/replay and cold reads, with **145 focused unit tests**.
 The final connection hardening is applied at `e3eb4402`; its focused unit checks
 passed **96** tests and its final native cancellation/deadline/pool suite passed
 **8** tests. The exact snapshot is preserved by local branch
-`verification/research-layout-compat-20261004`, with its disposable qualification
+`feature/research-layout-compat-20261004` (renamed from the original
+`verification/` reference without changing its commit), with its disposable qualification
 checkout at `/tmp/qt-research-layout-compat-e9cbez_7/checkout`. The original R and S
 checkouts are unchanged. This proves a concrete independent implementation path;
 it does not authorize deployment, clear scientific holds or demonstrate workload

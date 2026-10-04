@@ -220,6 +220,38 @@ This is the useful automation boundary: `qt` operates the system through the
 backend API, Make supports local diagnostics, and Codex still chooses the next
 diagnostic path instead of being funneled through a single rigid script.
 
+## Branch Naming and Coordinated Releases
+
+Every work branch uses `feature/<description>` or `hotfix/<description>`.
+Use `feature/` for planned capabilities, documentation, integration and
+qualification; use `hotfix/` for corrective fixes. Do not use agent names or
+alternative prefixes such as `codex/`, `feat/`, `feats/`, `fix/`, `docs/`
+or `verification/`. Long-lived `main`, `develop` and `test` are not work
+branches and retain their names.
+
+For a coordinated release:
+
+1. Create one `feature/` integration branch from the intended `develop`
+   revision. Component PRs target that branch in dependency order.
+2. Preserve original commits through merge commits. Keep component branches and
+   old PR discussions; leave automatic source-branch deletion disabled.
+   Renaming a GitHub PR source closes that PR, so link its replacement instead
+   of rewriting or discarding its evidence.
+3. Reconcile overlaps before merging. A component already included by another
+   branch is not another implementation to copy. Prior exact-source tests remain
+   evidence within their tested scope; they do not certify the aggregate.
+4. Validate the final integrated tree. The normal CI suite runs on pushes to
+   `feature/**` and `hotfix/**`, including integration merges. Superseded work
+   branch runs may be cancelled; the latest aggregate still needs its result.
+5. Raise the final integration PR to `develop` only when authorized. For the
+   current storage/research consolidation the user will raise that PR.
+   Deployment approval and PR approval are separate decisions.
+
+One coordinated deployment can still require ordered preparation, a bounded
+schema cutover and application promotion. Merging code does not run those
+operations, retire recovery material or restart research. Exact schema/runtime
+compatibility, resource admission and recovery evidence remain release gates.
+
 ## Commit Helper
 
 Use:
