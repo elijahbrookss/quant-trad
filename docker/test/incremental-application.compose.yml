@@ -1,0 +1,43 @@
+# One-shot full QT recovery fixture, no host data, ports or external network.
+services:
+  timescaledb:
+    image: qt-incremental-test-postgres:${SOURCE_REVISION:?required}
+    build:
+      context: ..
+      dockerfile: docker/postgres/Dockerfile
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "archive_mode=on"]
+    volumes:
+      - incremental-secrets:/qt-incremental-secrets
+      - incremental-socket:/var/run/postgresql
+  restored:
+    image: qt-incremental-test-postgres:${SOURCE_REVISION:?required}
+    user: "70:70"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while [ ! -f /qt-restore/start ]; do sleep 1; done
+        exec postgres -D /qt-restore/pgdata -c archive_mode=off -c timescaledb.telemetry_level=off -c shared_preload_libraries=timescaledb,pg_stat_statements
+    volumes:
+      - incremental-restore:/qt-restore
+    environment:
+      PGDATA: /qt-restore/pgdata
+  test:
+    environment:
+      QT_INCREMENTAL_APPLICATION_TEST: "1"
+    depends_on:
+      restored:
+        condition: service_started
+    volumes:
+      - incremental-secrets:/qt-incremental-secrets
+      - incremental-socket:/var/run/postgresql
+      - incremental-restore:/qt-restore
+volumes:
+  incremental-secrets:
+    driver: local
+    driver_opts: {type: tmpfs, device: tmpfs, o: "size=1048576,uid=70,gid=70,mode=0700"}
+  incremental-socket:
+    driver: local
+    driver_opts: {type: tmpfs, device: tmpfs, o: "size=1048576,uid=70,gid=70,mode=0775"}
+  incremental-restore:
+    driver: local
+    driver_opts: {type: tmpfs, device: tmpfs, o: "size=1073741824,uid=70,gid=70,mode=0700"}

@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 from core.settings import get_settings
 from core.storage_writer_fence import retain_source_writer_fence, source_writer_fds
-from core.storage_mounts import require_configured_archive_mount
+from core.storage_mounts import require_configured_archive_mount, require_configured_working_mount
 
 _SETTINGS = get_settings()
 
@@ -82,6 +82,7 @@ def main() -> int:
     _configure_logging()
     require_configured_archive_mount()
     source_fence = retain_source_writer_fence()
+    require_configured_working_mount()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)

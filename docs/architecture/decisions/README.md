@@ -93,3 +93,4 @@ respect.
 | [0065](0065-use-explicit-frozen-check-admission-for-new-research-observations.md) | Use explicit frozen-Check admission for new Research Observations | Accepted |
 | [0066](0066-scale-validation-to-consequence-and-trust-boundaries.md) | Scale validation to consequence and trust boundaries | Accepted |
 | [0074](0074-derive-candles-from-frozen-source-snapshots.md) | Derive coarser candles from explicit frozen source snapshots | Accepted |
+| [0077](0077-retain-legacy-headers-during-forward-cutover.md) | Retain legacy headers during a forward cutover | Draft; implementation and production qualification pending |

@@ -308,3 +308,11 @@ See [ADR 0064](../decisions/0064-use-one-code-owned-collector-operations-contrac
 and the [discovery report](../../engineering/collector-operations-discovery.md).
 Operator commands, action guards, and failure procedures are documented in the
 [collector operations guide](../../guides/collector-operations.md).
+
+
+Storage maintenance may publish role `market_storage_maintenance` through the
+existing worker-state table. Collector fleet selection excludes that role before
+choosing an alive worker or continuous-runtime snapshot: maintenance liveness
+cannot make a missing collector healthy. Storage consumes that role separately
+through its existing maintenance outcome/freshness contract; no new collection
+state or operator action is introduced.

@@ -7,6 +7,7 @@ from sqlalchemy import text
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
+from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, _ingest
 
@@ -33,7 +34,21 @@ def test_real_retention_inventory_is_read_only_bounded_and_resumes_after_cursor(
     assert first["database_day"] == storage.today.isoformat()
     assert first["inventory"]["hot_partition_count"] == len(before) == 4
     assert first["inventory"]["database_bytes"] > first["inventory"]["hot_payload_bytes"] > 0
-    assert first["inventory"]["canonical_header_bytes"] > 0
+    with storage.database.session() as session:
+        # Independently sum physical child heaps, indexes and TOAST. Sizing the
+        # empty partitioned parent alone used to make this inventory report zero.
+        header_sizes = session.execute(text("""
+            SELECT sum(pg_table_size(inhrelid)) AS tables,
+                   sum(pg_indexes_size(inhrelid)) AS indexes
+            FROM pg_inherits WHERE inhparent='market.fact_versions'::regclass
+        """)).mappings().one()
+        identity_bytes = session.execute(text(
+            "SELECT pg_total_relation_size('market.fact_identities')"
+        )).scalar_one()
+    assert header_sizes["tables"] > 0 and header_sizes["indexes"] > 0
+    assert first["inventory"]["canonical_header_bytes"] == header_sizes["tables"] + header_sizes["indexes"]
+    assert first["inventory"]["global_identity_bytes"] == identity_bytes > 0
+    assert first["inventory"]["series_day_directory_bytes"] > 0
     assert first["inventory"]["raw_mapping_bytes"] > 0
     assert first["actions"][0]["storage_day"] == days[0].isoformat()
     assert first["actions"][0]["eligible"] is True
@@ -69,6 +84,16 @@ def test_real_retention_inventory_is_read_only_bounded_and_resumes_after_cursor(
     assert final["metadata_eligible_reclaim_bytes"] > 0
     assert final["execution_available"] is True and final["execution_enabled"] is False
     assert _state(storage)[0]["state"] == "verified"  # Not reclaimed by planning.
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    reclaimer.reclaim_partition(days[0], eligible_before=storage.today, execute=True)
+    after_reclaim = repository.plan(policy=policy, storage_root=tmp_path)
+    assert after_reclaim["inventory"]["hot_partition_count"] == 3
+    assert after_reclaim["inventory"]["canonical_header_bytes"] == first["inventory"]["canonical_header_bytes"]
+    # Four header partitions remain after one payload partition is reclaimed.
+    # Bound header inventory independently of the three remaining hot partitions.
+    with pytest.raises(RuntimeError, match="inventory_budget_exceeded"):
+        repository.plan(policy=replace(policy, max_inventory_partitions=3), storage_root=tmp_path)
+
 
 
 def test_family_inventory_seeks_past_duplicate_facts_and_bounds_overflow(storage):

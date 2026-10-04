@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import date
 import json
 
 import pytest
@@ -89,7 +90,8 @@ def test_low_level_writer_admits_return_to_original_hash_in_batch_order(monkeypa
     repo = PostgresMarketDataRepository()
     first = SimpleNamespace(observation_key="key", row_hash="hash-a")
     correction = SimpleNamespace(observation_key="key", row_hash="hash-b")
-    session = _Session([{"observation_key": "key", "row_hash": "hash-a"}])
+    session = _Session([{"id": "identity-a", "storage_day": date(2026, 9, 16),
+                         "observation_key": "key", "revision": 1, "row_hash": "hash-a"}])
     monkeypatch.setattr(repo, "_assert_collection_fence", lambda *args, **kwargs: None)
     monkeypatch.setattr(repo, "_canonical_source_for_run", lambda *args: (1, None))
     admitted = []

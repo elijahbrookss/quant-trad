@@ -78,7 +78,9 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+        # The image uses a socket-only server during first initialization.
+        # Wait for the TCP server used by application clients.
+        - pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
       interval: 5s
       timeout: 5s
       retries: 24
@@ -106,6 +108,7 @@ services:
     environment:
       <<: *runtime-environment
       QT_BOT_RUNTIME_IMAGE: quanttrad-backend:${QT_RELEASE_REVISION}
+      QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
       QT_BOT_RUNTIME_NETWORK: ${QT_COMPOSE_PROJECT_NAME:-quant-trad-single-node}_quanttrad
       SOURCE_REVISION: ${QT_RELEASE_REVISION}
       SOURCE_TREE_HASH: ${QT_SOURCE_TREE_HASH}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import logging
 import threading
@@ -250,6 +249,12 @@ class ContinuousCollectorSupervisor:
                 f"owner_id={self.owner_id}"
             )
 
+        if self.snapshot()["state"] != "stopped":
+            raise RuntimeError(
+                "continuous_collector_supervisor_stop_failed: "
+                f"owner_id={self.owner_id}"
+            )
+
     def snapshot(self) -> dict[str, Any]:
         with self._snapshot_lock:
             return {
@@ -304,6 +309,7 @@ class ContinuousCollectorSupervisor:
         restart_after: dict[str, float] = {}
         restart_count: dict[str, int] = {}
         task_errors: dict[str, str] = {}
+        failed_tasks: set[str] = set()
         self._publish_snapshot(state="running", tasks=tasks, errors=task_errors)
         while not self._stop.is_set():
             definitions = self.repository.list_stream_definitions()
@@ -406,6 +412,7 @@ class ContinuousCollectorSupervisor:
                 try:
                     result = state.task.result()
                     if expected_stop:
+                        failed_tasks.discard(definition_id)
                         logger.info(
                             "continuous_collector_task_stopped | definition_id=%s "
                             "adapter_id=%s control_generation=%s result=%s",
@@ -415,6 +422,7 @@ class ContinuousCollectorSupervisor:
                             dict(result),
                         )
                     else:
+                        failed_tasks.add(definition_id)
                         state.last_error = "continuous_collector_stopped_unexpectedly"
                         task_errors[definition_id] = state.last_error
                         count = restart_count.get(definition_id, 0) + 1
@@ -431,7 +439,8 @@ class ContinuousCollectorSupervisor:
                             count,
                             dict(result),
                         )
-                except Exception as exc:
+                except (asyncio.CancelledError, Exception) as exc:
+                    failed_tasks.add(definition_id)
                     state.last_error = f"{type(exc).__name__}: {exc}"
                     task_errors[definition_id] = state.last_error
                     if expected_stop:
@@ -518,14 +527,36 @@ class ContinuousCollectorSupervisor:
                 [state.task for state in tasks.values()],
                 timeout=30.0,
             )
-            for task in pending:
-                task.cancel()
+            for definition_id, state in tasks.items():
+                if state.task in pending:
+                    failed_tasks.add(definition_id)
+                    task_errors[definition_id] = "continuous_collector_finalizer_drain_timeout"
+                    logger.error(
+                        "continuous_collector_task_stop_timeout | owner_id=%s "
+                        "definition_id=%s adapter_id=%s",
+                        self.owner_id, definition_id, state.adapter_id,
+                    )
+                    state.task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            for task in done:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    task.result()
-        self._publish_snapshot(state="stopped", tasks={}, errors=task_errors)
+            for definition_id, state in tasks.items():
+                if state.task not in done:
+                    continue
+                try:
+                    state.task.result()
+                    failed_tasks.discard(definition_id)
+                except (asyncio.CancelledError, Exception) as exc:
+                    failed_tasks.add(definition_id)
+                    task_errors[definition_id] = f"{type(exc).__name__}: {exc}"
+                    logger.error(
+                        "continuous_collector_task_stop_failed | owner_id=%s "
+                        "definition_id=%s adapter_id=%s error=%s",
+                        self.owner_id, definition_id, state.adapter_id, exc,
+                        exc_info=True,
+                    )
+        self._publish_snapshot(
+            state="failed" if failed_tasks else "stopped", tasks={}, errors=task_errors
+        )
 
 
 MarketStructureTradeAdapter = CoinbaseMarketTradeCollectorAdapter

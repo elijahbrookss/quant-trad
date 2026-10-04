@@ -110,9 +110,18 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     )
     assert "Prove clean current-schema bootstrap" in bootstrap_steps
     assert "Run PostgreSQL-backed contract tests" in bootstrap_steps
+    assert "Verify PostgreSQL filesystem namespace" in bootstrap_steps
     assert bootstrap_steps.index("Prove clean current-schema bootstrap") < bootstrap_steps.index(
         "Run PostgreSQL-backed contract tests"
     )
+
+    assert bootstrap_steps.index("Prove clean current-schema bootstrap") < bootstrap_steps.index(
+        "Verify PostgreSQL filesystem namespace"
+    ) < bootstrap_steps.index("Run PostgreSQL-backed contract tests")
+    commands = {step["name"]: step.get("run", "") for step in jobs["clean-database-bootstrap"]["steps"]}
+    namespace_test = "tests/test_market_data/test_header_namespace_db.py"
+    assert f"./scripts/ci/run_test_suite.sh db {namespace_test}" in commands["Verify PostgreSQL filesystem namespace"]
+    assert f"--ignore={namespace_test}" in commands["Run PostgreSQL-backed contract tests"]
 
     topology = _read("docs/engineering/testing/ci-test-topology.md")
     documented_jobs = tuple(
@@ -121,7 +130,7 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     assert documented_jobs == expected_jobs
     normalized = _squash(topology)
     assert "the workflow defines exactly five jobs" in normalized
-    assert "two sequential steps in this fourth job" in normalized
+    assert "three sequential steps in this fourth job" in normalized
     assert "they are not separate workflow jobs" in normalized
 
 

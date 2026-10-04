@@ -17,7 +17,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from core.storage_mounts import configured_archive_root, require_configured_archive_mount
+from core.storage_mounts import (
+    configured_archive_root, configured_working_root,
+    require_configured_archive_mount, require_configured_working_mount,
+)
 from data_providers.providers.factory import get_provider
 from data_providers.streams.coinbase import (
     CoinbaseAdvancedTradeStream,
@@ -1193,9 +1196,11 @@ class MarketStructureService:
             raise ValueError("market_structure_capture_invalid: unsupported provider/venue")
         storage = Path(storage_root).expanduser().resolve()
         require_configured_archive_mount(storage)
-        spool_root = storage / "spool"
+        working = configured_working_root(storage).expanduser().resolve()
+        require_configured_working_mount(working)
+        spool_root = working / "spool"
         object_store = FilesystemRawArchiveObjectStore(storage / "objects")
-        temporary_root = storage / "tmp"
+        temporary_root = working / "tmp"
         temporary_root.mkdir(parents=True, exist_ok=True)
         backlog_tracker = await asyncio.to_thread(
             SpoolBacklogTracker.from_disk,

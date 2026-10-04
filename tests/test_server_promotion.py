@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -191,10 +192,135 @@ def test_read_only_release_reports_online_intent_without_parsing_private_receipt
     state.mkdir()
     marker = state / marker_name
     marker.write_text('{"private":"DO_NOT_PRINT"')
+    (state / "storage-handoff.json").write_text('{"private":"DO_NOT_PRINT"')
     result = subprocess.run(["bash", str(SCRIPT), "release"], capture_output=True, text=True, timeout=10,
                             env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state)})
     assert result.returncode == 0, result.stderr
-    assert "Storage online intent: unresolved" in result.stdout
+    assert "Storage online receipts retained" in result.stdout
+    assert "Receipt presence alone does not confirm migration or fleet health" in result.stdout
+    assert "Initial preparation receipt retained" in result.stdout
+    assert "Storage handoff hold: active" not in result.stdout
     assert "No successful release" in result.stdout
     assert "DO_NOT_PRINT" not in result.stdout + result.stderr
     assert marker.exists()
+
+
+def fixed_state(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "release.env").write_text(
+        f"current_revision={'a' * 40}\nstorage_layout=ssd-hdd-v1\n"
+    )
+    return state
+
+
+def test_recorded_layout_survives_release_record_and_environment_override(tmp_path):
+    state = fixed_state(tmp_path)
+    result = shell(tmp_path, r'''
+QT_RELEASE_REVISION=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+QT_SOURCE_TREE_HASH=fixture
+record_release
+show_release
+''', env={"QT_STORAGE_LAYOUT": "", "QT_SINGLE_NODE_ENV_FILE": str(tmp_path / "unused.env")})
+    assert result.returncode == 0, result.stderr
+    assert "storage layout: ssd-hdd-v1" in result.stdout
+    assert "storage_layout=ssd-hdd-v1" in (state / "release.env").read_text()
+
+
+@pytest.mark.parametrize("invoke", ["compose config", "if compose config; then echo INCORRECT_SUCCESS; fi"])
+def test_fixed_layout_refuses_missing_candidate_overlay_even_in_conditional(tmp_path, invoke):
+    fixed_state(tmp_path)
+    result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; docker() { echo INCORRECT_DOCKER; }; ' + invoke,
+                   env={"FIXTURE_ROOT": str(tmp_path)})
+    assert "not supported by this checkout" in result.stderr
+    assert "INCORRECT" not in result.stdout
+
+
+@pytest.mark.parametrize("inherited_recovery", ["false", "true"])
+def test_normal_compose_selects_recorded_storage_overlay(tmp_path, inherited_recovery):
+    fixed_state(tmp_path)
+    docker = tmp_path / "docker"
+    docker.mkdir()
+    overlay = docker / "docker-compose.storage-server.yml"
+    overlay.write_text("services: {}\n")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    executable = binary / "docker"
+    executable.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    executable.chmod(0o700)
+    result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; compose config',
+                   env={"FIXTURE_ROOT": str(tmp_path), "recovery_config_frozen": inherited_recovery, "QT_STORAGE_DATABASE_IMAGE": "sha256:"+"a"*64,
+                        "PATH": str(binary)+os.pathsep+os.environ["PATH"]})
+    assert result.returncode == 0, result.stderr
+    assert str(overlay) in result.stdout.splitlines()
+
+
+@pytest.mark.parametrize("fault", ["old_layout", "missing_hash", "changed_snapshot"])
+def test_fixed_recovery_refuses_incompatible_or_changed_snapshot_before_checkout(tmp_path, fault):
+    state = fixed_state(tmp_path)
+    snapshot = state / "recovery.compose.json"
+    snapshot.write_text('{"services": {}}')
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    marker = f"previous_revision={'a' * 40}\ncandidate_revision={'b' * 40}\nactivation_started=true\n"
+    if fault != "old_layout":
+        marker += "storage_layout=ssd-hdd-v1\n"
+    if fault != "missing_hash":
+        marker += f"recovery_compose_sha256={digest}\n"
+    (state / "promotion.env").write_text(marker)
+    if fault == "changed_snapshot":
+        snapshot.write_text("{}")
+    result = shell(tmp_path, "select_release() { echo INCORRECT_CHECKOUT; }; recover_promotion")
+    assert result.returncode != 0
+    assert "INCORRECT" not in result.stdout
+    assert (state / "promotion.env").exists()
+    assert "recovery" in result.stderr
+
+
+def test_fixed_recovery_uses_only_pinned_snapshot_despite_current_overrides(tmp_path):
+    state = fixed_state(tmp_path)
+    snapshot = state / "recovery.compose.json"
+    snapshot.write_text('{"services": {}}')
+    digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    (state / "promotion.env").write_text(
+        f"previous_revision={'a' * 40}\ncandidate_revision={'b' * 40}\nactivation_started=true\n"
+        f"storage_layout=ssd-hdd-v1\nrecovery_compose_sha256={digest}\n"
+    )
+    # No storage overlay exists in this synthetic checkout. Recovery must not
+    # load one or merge today's alert/storage values into the saved model.
+    result = shell(tmp_path, r'''
+alerts_enabled=true
+select_release() { :; }
+docker() { printf '%s\n' "$@"; }
+deploy_release() { compose config; }
+recover_promotion
+''')
+    assert result.returncode == 0, result.stderr
+    assert str(snapshot) in result.stdout.splitlines()
+    assert "docker-compose.storage-server" not in result.stdout
+    assert "docker-compose.alert-email" not in result.stdout
+    assert not (state / "promotion.env").exists()
+
+
+@pytest.mark.parametrize("entry", ["compose config", "compose_from_repo_root \"$repo_root\" '' config"])
+@pytest.mark.parametrize("source", ["ambient", "file", "empty", "exported-file", "absent"])
+def test_storage_deployment_refuses_a_retained_source_fence(tmp_path,entry,source):
+    binary=tmp_path/"bin";binary.mkdir()
+    docker=binary/"docker";docker.write_text("#!/bin/sh\necho COMPOSE_REACHED\n");docker.chmod(0o700)
+    private=tmp_path/"private.env"
+    private.write_text("" if source in {"ambient","absent"} else (
+        "export QT_STORAGE_SOURCE_FENCE_ROOT='/original'\n" if source=="exported-file" else
+        "QT_STORAGE_SOURCE_FENCE_ROOT="+("" if source=="empty" else "/original")+"\n"))
+    extra=dict(PATH=str(binary)+os.pathsep+os.environ['PATH'],FIXTURE_REPO=str(ROOT),
+               QT_SINGLE_NODE_ENV_FILE=str(private),QT_STORAGE_DATABASE_IMAGE="sha256:"+"a"*64)
+    if source=="ambient":extra['QT_STORAGE_SOURCE_FENCE_ROOT']='/original'
+    result=shell(tmp_path, '''
+repo_root="$FIXTURE_REPO"
+recorded_storage_layout() { printf 'ssd-hdd-v1'; }
+git() { printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; }
+python3() { printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'; }
+'''+entry,env=extra)
+    if source=="absent":assert result.returncode==0 and 'COMPOSE_REACHED' in result.stdout,result.stderr
+    else:
+        assert result.returncode!=0 and 'source-only storage fence' in result.stderr
+        assert 'COMPOSE_REACHED' not in result.stdout
+    assert private.exists()

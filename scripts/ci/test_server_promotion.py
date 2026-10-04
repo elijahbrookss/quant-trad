@@ -5,6 +5,8 @@ GitHub API responses are a local fixture. This does not prove QT schema or
 provider behavior; the production-image smoke and DB suites cover those seams.
 """
 from __future__ import annotations
+import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,7 +27,12 @@ def run(args, *, cwd=None, env=None, ok=True):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--storage-layout", action="store_true")
+    storage_layout = parser.parse_args().storage_layout
+    service_names = SERVICES + (("storage-maintenance",) if storage_layout else ())
     project = 'qt-promotion-rehearsal-' + uuid.uuid4().hex[:12]
+    print('Owned disposable project: ' + project, flush=True)
     tags, recovery_tags = set(), set()
     with tempfile.TemporaryDirectory(prefix='qt-promotion-rehearsal-') as directory:
         root = Path(directory)
@@ -37,6 +44,9 @@ def main():
             shutil.copyfile(ROOT / name, target)
         (repo / 'docker').mkdir()
         (root / 'archive').mkdir()
+        for role in ('history', 'working'):
+            (root / role).mkdir()
+            (root / role / 'sentinel').write_text(role + '-retained')
         (root / 'bin').mkdir()
         gh = root / 'bin/gh'
         gh.write_text(r'''#!/usr/bin/env python3
@@ -66,6 +76,10 @@ def stop(*_):
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, stop)
 record('started')
+if os.environ.get('FIXTURE_STORAGE') == 'true':
+    assert Path('/history/sentinel').read_text() == 'history-retained'
+    assert Path('/working/sentinel').read_text() == 'working-retained'
+    record('storage-retained')
 if name == 'initialize':
     raise SystemExit(0)
 if name != 'backend' or Path('/app/failure').read_text().strip() != 'unhealthy':
@@ -85,17 +99,35 @@ RUN chmod +x /app/scripts/qt
 CMD ["python", "/app/fixture.py"]
 ''')
         services = {}
-        for service in SERVICES:
+        for service in service_names:
             item = dict(image=f'{project}-{service}:${{QT_RELEASE_REVISION}}', build=dict(context='..', args=dict(QT_SOURCE_REVISION='${QT_RELEASE_REVISION}', QT_SOURCE_TREE_HASH='${QT_SOURCE_TREE_HASH}')), environment={'FIXTURE_SERVICE': service}, volumes=['proof:/proof'], stop_grace_period='10s', init=True)
             if service != 'initialize':
                 item['healthcheck'] = dict(test=['CMD', 'test', '-f', '/tmp/ready'], interval='1s', timeout='2s', start_period='30s', retries=10)
             services[service] = item
         for service in ('initialize', 'market-data-collector', 'docker-stats'):
             services[service]['image'] = services['backend']['image']
+        if storage_layout:
+            services['storage-maintenance']['image'] = services['backend']['image']
+            services['storage-maintenance'].pop('build')
         services['market-data-collector']['depends_on'] = {'initialize': {'condition': 'service_completed_successfully'}}
+        if storage_layout:
+            # One prebuilt disposable database stand-in, preserved across app revisions.
+            services['tsdb'].pop('build')
+            services['tsdb']['image']='${QT_STORAGE_DATABASE_IMAGE:?Fixture database image is required}'
+            services['tsdb']['pull_policy']='never'
         config = dict(name=project, services=services, volumes={'proof': {}}, networks={'default': {'internal': True}})
         compose_path = repo / 'docker/docker-compose.server.yml'
         compose_path.write_text(json.dumps(config))
+        storage_path = repo / 'docker/docker-compose.storage-server.yml'
+        storage_model = {'services': {service: {
+            'environment': {'FIXTURE_STORAGE': 'true'},
+            'volumes': [
+                {'type': 'bind', 'source': '${QT_FIXTURE_HISTORY}', 'target': '/history', 'bind': {'create_host_path': False}},
+                {'type': 'bind', 'source': '${QT_FIXTURE_WORKING}', 'target': '/working', 'bind': {'create_host_path': False}},
+            ],
+        } for service in service_names}}
+        if storage_layout:
+            storage_path.write_text(json.dumps(storage_model))
         (repo / '.gitignore').write_text('*.pyc\n__pycache__/\n')
         (repo / 'failure').write_text('healthy')
         run(['git', 'init', '-b', 'develop'], cwd=repo)
@@ -108,6 +140,11 @@ CMD ["python", "/app/fixture.py"]
         first = commit('fixture initial')
         (repo / 'release-note').write_text('second')
         second = commit('fixture compatible update')
+        missing_overlay = None
+        if storage_layout:
+            storage_path.unlink()
+            missing_overlay = commit('fixture incompatible missing storage overlay')
+            storage_path.write_text(json.dumps(storage_model))
         (repo / 'failure').write_text('unhealthy')
         bad = commit('fixture unhealthy update')
         origin = root / 'origin.git'
@@ -117,8 +154,22 @@ CMD ["python", "/app/fixture.py"]
         run(['git', 'switch', '--detach', first], cwd=repo)
         env = {k: v for k, v in os.environ.items() if not k.startswith(('QT_', 'PG_', 'POSTGRES_', 'COMPOSE_'))}
         env.update(QT_SINGLE_NODE_ENV_FILE=str(root / 'secrets.env'), QT_SINGLE_NODE_STATE_ROOT=str(root / 'state'), QT_MARKET_DATA_ROOT=str(root / 'archive'), QT_DEPLOY_WAIT_SECONDS='90', QT_REBUILD_DATABASE_IMAGE='1', PATH=str(root / 'bin') + ':' + os.environ['PATH'])
+        if storage_layout:
+            database_tag=project+'-database:fixture'
+            tags.add(database_tag)
+            first_hash=run(['python3','scripts/provenance/source_tree_hash.py','--root',str(repo),
+                           '--git-revision',first],cwd=repo).stdout.strip()
+            run(['docker','build','--tag',database_tag,'--build-arg','QT_SOURCE_REVISION='+first,
+                 '--build-arg','QT_SOURCE_TREE_HASH='+first_hash,str(repo)])
+            database_image=run(['docker','image','inspect','--format','{{.Id}}',database_tag]).stdout.strip()
+            env.update(QT_FIXTURE_HISTORY=str(root / 'history'), QT_FIXTURE_WORKING=str(root / 'working'),
+                       QT_STORAGE_DATABASE_IMAGE=database_image,QT_REBUILD_DATABASE_IMAGE='0')
         deploy = ['bash', 'scripts/automation/server_deploy.sh']
         run(deploy + ['init-env'], cwd=repo, env=env)
+        if storage_layout:
+            # Only disposable fixture admission. Production first activation is
+            # still owned by the preserving operator, not this field alone.
+            (root / 'state/release.env').write_text('storage_layout=ssd-hdd-v1\n')
         compose = ['docker', 'compose', '--project-name', project, '--file', str(compose_path)]
         def state():
             return dict(line.split('=', 1) for line in (root / 'state/release.env').read_text().splitlines())
@@ -130,6 +181,8 @@ CMD ["python", "/app/fixture.py"]
             print('Rehearsal: initial deployment', flush=True)
             run(deploy + ['deploy', first], cwd=repo, env=env)
             assert state()['current_revision'] == first
+            database_id=run(['docker','ps','-q','--filter',f'label=com.docker.compose.project={project}',
+                             '--filter','label=com.docker.compose.service=tsdb']).stdout.strip()
             refused = run(deploy + ['promote', second, '--compatible-with', first], cwd=repo, env={**env, 'QT_FIXTURE_CI': 'failure'}, ok=False)
             assert refused.returncode and state()['current_revision'] == first
             assert run(['git', 'rev-parse', 'HEAD'], cwd=repo).stdout.strip() == first
@@ -137,6 +190,19 @@ CMD ["python", "/app/fixture.py"]
             success = run(deploy + ['promote', second, '--compatible-with', first], cwd=repo, env=env)
             assert 'event=promotion_succeeded' in success.stdout
             assert state()['current_revision'] == second and state()['previous_revision'] == first
+            if storage_layout:
+                assert run(['docker','ps','-q','--filter',f'label=com.docker.compose.project={project}',
+                            '--filter','label=com.docker.compose.service=tsdb']).stdout.strip()==database_id
+            collect_tags()  # retain this snapshot before the refusal probe replaces it
+            if storage_layout:
+                assert state()['storage_layout'] == 'ssd-hdd-v1'
+                print('Rehearsal: missing overlay rejected without restarting collectors', flush=True)
+                before = run(['docker', 'ps', '-q', '--filter', f'label=com.docker.compose.project={project}']).stdout
+                refused_layout = run(deploy + ['promote', missing_overlay, '--compatible-with', second], cwd=repo, env=env, ok=False)
+                assert refused_layout.returncode and 'not supported by this checkout' in refused_layout.stderr
+                assert state()['current_revision'] == second
+                assert before == run(['docker', 'ps', '-q', '--filter', f'label=com.docker.compose.project={project}']).stdout
+                assert not (root / 'state/promotion.env').exists()
             collect_tags()
             print('Rehearsal: unhealthy candidate and automatic recovery', flush=True)
             failed = run(deploy + ['promote', bad, '--compatible-with', second], cwd=repo, env=env, ok=False)
@@ -149,25 +215,53 @@ CMD ["python", "/app/fixture.py"]
             evidence = run(['docker', 'exec', container, 'cat', '/proof/events']).stdout
             assert f'market-data-collector {first} drained' in evidence
             assert evidence.count(f'market-data-collector {second} started') >= 2
+            if storage_layout:
+                assert evidence.count(f'market-data-collector {second} storage-retained') >= 2
+                assert state()['storage_layout'] == 'ssd-hdd-v1'
             assert run(['docker', 'inspect', '--format', '{{.State.Health.Status}}', container]).stdout.strip() == 'healthy'
             print('Rehearsal: interrupted recovery and unavailable local image', flush=True)
             # Simulate interrupted promotion and unavailable recovery artifact.
             # No network may be required to recover: make origin unreachable.
             run(['git', 'remote', 'set-url', 'origin', str(root / 'missing-origin')], cwd=repo)
             marker = root / 'state/promotion.env'
-            marker.write_text(f'previous_revision={second}\ncandidate_revision={bad}\nactivation_started=true\n')
-            marker.chmod(0o600)
             snapshot = root / 'state/recovery.compose.json'
             original = snapshot.read_text()
+            def record_interrupted_recovery():
+                digest = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+                layout = 'ssd-hdd-v1' if storage_layout else ''
+                marker.write_text(f'previous_revision={second}\ncandidate_revision={bad}\nactivation_started=true\nstorage_layout={layout}\nrecovery_compose_sha256={digest}\n')
+                marker.chmod(0o600)
+            record_interrupted_recovery()
+            if storage_layout:
+                snapshot.write_text('{}')
+                altered = run(deploy + ['recover'], cwd=repo, env=env, ok=False)
+                assert altered.returncode and 'snapshot changed' in altered.stderr and marker.exists()
+                snapshot.write_text(original)
+                # These current values cannot replace the frozen recovery mounts.
+                env.update(QT_FIXTURE_HISTORY=str(root / 'missing-history'), QT_FIXTURE_WORKING=str(root / 'missing-working'))
             broken = json.loads(original)
             broken['services']['frontend']['image'] = project + '-missing:recovery'
             snapshot.write_text(json.dumps(broken))
+            # Handcrafted coherent fixture: focus this attempt on missing cache,
+            # after separately proving that unrecorded snapshot changes refuse.
+            record_interrupted_recovery()
             unavailable = run(deploy + ['recover'], cwd=repo, env=env, ok=False)
             assert unavailable.returncode and marker.exists()
             assert 'recovery failed' in unavailable.stderr
             snapshot.write_text(original)
+            record_interrupted_recovery()
             run(deploy + ['recover'], cwd=repo, env=env)
             assert not marker.exists() and state()['current_revision'] == second
+            if storage_layout:
+                assert state()['storage_layout'] == 'ssd-hdd-v1'
+                # Frozen Compose recovery may recreate a service with the same
+                # pinned image/resources. Container identity is not cluster identity.
+                recovered_database=run(['docker','ps','-q','--filter',f'label=com.docker.compose.project={project}',
+                                        '--filter','label=com.docker.compose.service=tsdb']).stdout.strip()
+                assert run(['docker','inspect','--format','{{.Image}}',recovered_database]).stdout.strip()==database_image
+                for role in ('history', 'working'):
+                    assert (root / role / 'sentinel').read_text() == role + '-retained'
+                print('PASS: recorded storage mounts survive promotion and offline recovery; unsupported candidate and altered snapshot refused; current mount overrides ignored during pinned recovery', flush=True)
             print('PASS: CI rejection, compatible rollout, real Docker health failure, pinned-image recovery, synthetic collector drain/restart, durable volume continuity, failed recovery evidence, and offline recovery resume', flush=True)
         except BaseException:
             diagnostic_env = {**env, 'QT_RELEASE_REVISION': first, 'QT_SOURCE_TREE_HASH': 'diagnostic'}
@@ -181,7 +275,7 @@ CMD ["python", "/app/fixture.py"]
             if result.returncode:
                 raise RuntimeError('rehearsal cleanup failed: ' + result.stderr)
             for revision in (first, second, bad):
-                tags.update(f'{project}-{service}:{revision}' for service in SERVICES)
+                tags.update(f'{project}-{service}:{revision}' for service in service_names)
             existing = run(['docker', 'image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']).stdout.splitlines()
             owned = sorted((tags | recovery_tags).intersection(existing))
             if owned:
