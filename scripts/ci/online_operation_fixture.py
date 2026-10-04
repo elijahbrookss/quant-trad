@@ -437,8 +437,21 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             from scripts.automation import storage_online_keys as key_owner
             key_original = {p:p.read_bytes() for p in (path,state/terminal.STATE,state/publication.REQUEST,
                                                       state/launch._STATE,state/runtime.RUNTIME_RECIPE)}
+            earlier = {**manifest, "image": kwargs["image"],
+                       "source_revision": kwargs["request"]["source_revision"],
+                       "source_tree_hash": kwargs["request"]["source_tree_hash"]}
+            earlier_package = state/"earlier-key-inspection-package.json"
+            host_boundary.save_receipt(earlier_package, earlier, initial=True)
+            operation.run_operation_plan(path, prepare_forward_keys_file=earlier_package)
+            previous_probe = host_boundary.load_receipt(state/terminal.KEY_PROBE)
+            previous_bytes = (state/terminal.KEY_PROBE).read_bytes()
+            assert previous_probe["retired"] and not (state/key_owner.STATE).exists()
             inspected_keys = operation.run_operation_plan(path,prepare_forward_keys_file=package)
             assert not inspected_keys["keys_prepared"] and not (state/key_owner.STATE).exists()
+            retained = (state/terminal.KEY_PROBE).with_name(
+                Path(terminal.KEY_PROBE).stem+".retired-"+host_boundary.digest(previous_probe)+".json")
+            assert retained.read_bytes() == previous_bytes
+            assert host_boundary.load_receipt(state/terminal.KEY_PROBE)["owner"]["package"] == manifest
             actual_save, actual_probe = host_boundary.save_receipt, terminal._probe
             def lose_key_create(target,value,**options):
                 actual_save(target,value,**options)
@@ -482,9 +495,10 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
                 "SELECT json_build_object('initialization',to_regclass('qt_fact_header_forward_v2.initialization'),"
                 "'adoption',to_regclass('qt_fact_header_forward_v2.adoption'))::text",read_only_seconds=5))
             assert observed==dict(initialization=None,adoption=None)
-            assert preflights==[kwargs["image"],candidate]*4
+            assert preflights==[kwargs["image"],kwargs["image"]]+[kwargs["image"],candidate]*4
             preflights.clear()
             key_report=dict(canonical_key_only_preparation=True,actual_key_confined_entrypoint=True,
+                retired_key_inspection_candidate_change=True,previous_inspection_receipt_preserved=True,
                 key_create_interruption_retired=True,key_acknowledgement_reconciled_without_redispatch=True,
                 key_original_clocks_preserved=True,key_only_no_initialization_or_adoption=True)
         inspected=operation.run_operation_plan(path,forward_package_file=package)

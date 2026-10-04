@@ -9,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -44,9 +45,42 @@ def _retire_previous_probe(root, original, package, *, forward=False, keys=False
     if not os.path.lexists(path):
         return
     saved = host.load_receipt(path)
-    if (saved.get("owner") != dict(root=str(root), worker=original["container_id"], package=package)
-            or saved.get("name") != original["binding"]["project"]+("-storage-key-preparation" if keys else "-storage-forward-terminal" if forward else "-storage-terminal")):
+    if saved.get("name") != original["binding"]["project"]+("-storage-key-preparation" if keys else "-storage-forward-terminal" if forward else "-storage-terminal"):
         raise RuntimeError("storage_online_terminal_probe_owner_changed")
+    if saved.get("owner") != dict(root=str(root), worker=original["container_id"], package=package):
+        from scripts.automation.storage_online_keys import STATE as key_state
+        owner = saved.get("owner")
+        previous = owner.get("package") if isinstance(owner, dict) else None
+        # An inspection is not a key-preparation intent. A new candidate may
+        # replace only a positively retired inspection of this same operation.
+        # Once preparation has a journal, its package and clocks remain fixed.
+        if (not keys or forward or not isinstance(previous, dict)
+                or owner != dict(root=str(root), worker=original["container_id"], package=previous)
+                or previous.get("schema_version") != "qt.storage_online_forward_package.v1"
+                or package.get("schema_version") != previous["schema_version"]
+                or not re.fullmatch(r"[0-9a-f]{64}", str(previous.get("plan_sha256", "")))
+                or package.get("plan_sha256") != previous["plan_sha256"]
+                or saved.get("retired") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", str(saved.get("container_id", "")))
+                or os.path.lexists(root/key_state)):
+            raise RuntimeError("storage_online_terminal_probe_owner_changed")
+        with host.docker_deadline(time.monotonic()+35):
+            for selector in ("name=^/"+saved["name"]+"$", "id="+saved["container_id"]):
+                if host.docker("ps", "-aq", "--no-trunc", "--filter", selector).split():
+                    raise RuntimeError("storage_key_inspection_retirement_unproven")
+            retained = path.with_name(path.stem+".retired-"+host.digest(saved)+".json")
+            if os.path.lexists(retained):
+                if host.load_receipt(retained) != saved or retained.read_bytes() != path.read_bytes():
+                    raise RuntimeError("storage_key_inspection_retained_receipt_changed")
+            else:
+                # Preserve the exact bytes/inode before _probe atomically
+                # replaces the active receipt. A retry reuses this durable link.
+                os.link(path, retained, follow_symlinks=False)
+            host.sync_directory(root)
+        logging.getLogger(__name__).info(
+            "storage_key_inspection_receipt_retained | worker_id=%s receipt=%s",
+            saved["container_id"], retained.name)
+        return
     with host.docker_deadline(time.monotonic()+35):
         found = host.docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+saved["name"]+"$").split()
         if not found:
