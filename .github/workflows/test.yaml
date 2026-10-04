@@ -139,7 +139,12 @@ jobs:
         env:
           QT_DISABLE_DOTENV: "1"
         run: |
-          mkdir -p "$RUNNER_TEMP/qt-forward-keys" "$RUNNER_TEMP/qt-forward-keys-history"
+          mkdir -p "$RUNNER_TEMP/qt-forward-keys"
+          history_root="$(mktemp -d "$RUNNER_TEMP/qt-forward-keys-history.XXXXXX")"
+          # Separate disposable filesystem; the tiny fixture must exercise placement.
+          # This is a ceiling, not a reservation or a production capacity claim.
+          sudo mount -t tmpfs -o size=6G,nosuid,nodev tmpfs "$history_root"
+          trap 'sudo umount "$history_root"' EXIT
           python3 -m venv "$RUNNER_TEMP/qt-storage-operator-python"
           "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip install --no-deps -r requirements.lock
           "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip check
@@ -147,7 +152,7 @@ jobs:
             --image qt-incremental-runtime-proof \
             --database-image quanttrad-postgres:2.14.2-pg15 \
             --output-root "$RUNNER_TEMP/qt-forward-keys" \
-            --history-parent "$RUNNER_TEMP/qt-forward-keys-history" \
+            --history-parent "$history_root" --require-distinct-devices \
             --prepare-source --worker-phases --initial-capture \
             --terminal-cancellation --terminal-image qt-terminal-runtime-proof \
             --forward-package-image qt-terminal-runtime-proof \

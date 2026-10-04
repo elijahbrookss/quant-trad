@@ -330,7 +330,7 @@ os.chown(root,70,70)
    '--env','QT_ONLINE_FORWARD_FIXTURE='+str(int(options.forward_worker)),
    '--env','QT_ONLINE_TERMINAL_EXPIRED='+str(int(options.terminal_cancellation_expired)),
    '--env','QT_ONLINE_FULL_OPERATION='+str(int(options.full_operation)),
-   '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s',
+   '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s','--tb=short','--show-capture=no',
    '--basetemp','/qt-control/testtmp','-o','cache_dir=/tmp/qt-entry-pytest',
    'tests/test_market_data/test_storage_online_entrypoint_db.py']
  if canonical:

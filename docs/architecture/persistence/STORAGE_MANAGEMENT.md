@@ -3811,8 +3811,8 @@ journal still refuse the handoff; terminal cancellation and forward-retirement
 receipts cannot use it. This remains within the existing operator's private
 receipts, with no schema, migration-clock or data-authority change.
 The deployment CI job runs this candidate change through real disposable
-containers and PostgreSQL before interrupted key preparation and subsequent
-adoption/retirement. Synthetic service peers qualify the ownership transition;
+containers, distinct disposable filesystems and PostgreSQL before interrupted key
+preparation and subsequent adoption/retirement. Synthetic service peers qualify the ownership transition;
 they do not establish production duration, hardware capacity or collector impact.
 
 The host records one 3600-second wall/boot/monotonic intent before dispatch. The
