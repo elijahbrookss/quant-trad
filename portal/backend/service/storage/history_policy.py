@@ -141,3 +141,6 @@ def configured_history_read_cache():
                 return available
 
             yield capacity
+
+    return CanonicalArchiveReadCache(root, limits=HistoryCacheLimits(settings.history_cache_bytes),
+                                     capacity_scope=capacity_scope, check_mount=check_mount)

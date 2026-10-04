@@ -361,3 +361,17 @@ def test_manifest_over_codec_limit_does_not_populate_cache(cache, tmp_path):
         read_canonical_fact_archive(encoded.path, expected=encoded.manifest, cache=cache,
                                     limits=replace(FactArchiveLimits(), max_file_bytes=1))
     assert not list(cache.root.iterdir())
+
+
+def test_enabled_configuration_composes_cache_without_opening_database(tmp_path, monkeypatch):
+    import core.settings as settings_module
+    from portal.backend.service.storage.history_policy import configured_history_read_cache
+    settings = settings_module.get_settings()
+    monkeypatch.setattr(settings_module, "get_settings", lambda: replace(settings,
+        storage=replace(settings.storage, history_cache_bytes=1024**2, history_cache_min_free_bytes=100)))
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(tmp_path))
+    cache = configured_history_read_cache()
+    assert isinstance(cache, CanonicalArchiveReadCache)
+    assert cache.root == tmp_path / "history-read-cache"
+    assert cache.limits.max_bytes == 1024**2
+    assert not cache.root.exists()
