@@ -136,9 +136,14 @@ jobs:
         run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
 
       - name: Prove retired key inspection handoff and bounded preparation recovery
+        env:
+          QT_DISABLE_DOTENV: "1"
         run: |
           mkdir -p "$RUNNER_TEMP/qt-forward-keys" "$RUNNER_TEMP/qt-forward-keys-history"
-          python3 scripts/ci/rehearse_online_prepared.py \
+          python3 -m venv "$RUNNER_TEMP/qt-storage-operator-python"
+          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip install --no-deps -r requirements.lock
+          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip check
+          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" scripts/ci/rehearse_online_prepared.py \
             --image qt-incremental-runtime-proof \
             --database-image quanttrad-postgres:2.14.2-pg15 \
             --output-root "$RUNNER_TEMP/qt-forward-keys" \
