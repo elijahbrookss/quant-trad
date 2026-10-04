@@ -28,18 +28,178 @@
         "uid": "quanttrad-postgres"
       },
       "gridPos": {
-        "h": 4,
+        "h": 6,
         "w": 24,
         "x": 0,
         "y": 0
       },
       "id": 1,
       "options": {
-        "content": "## Capacity campaign control\nPostgreSQL logical schema/table snapshots run every **5 minutes** with **30-day** retention. Container CPU, memory, PIDs, and Docker engine-storage capacity run every **15 seconds** into Loki with **7-day** local retention.\n\n**Authority matters:** on native Linux the engine filesystem is the storage authority. On Docker Desktop/WSL it is only the virtual guest; run `scripts/reporting/host_capacity_sampler.ps1` on Windows for the physical backing-volume panels and projections. The agent discovers Docker's configured VHDX path—no drive is hardcoded.\n\nSuggested first alerts: authoritative free space below the reserve; projected days to reserve below the response horizon; sustained DB/table growth above budget; connections above 70%; cache hit below 95%; or a collector above its measured CPU envelope.",
+        "content": "## Storage growth decisions\n**Physical free space is the capacity authority.** Database/relation bytes explain part of that use; never add them to filesystem used bytes. Retained migration copies are not reclaimable space until explicitly retired.\n\nNative SSD/HDD panels below compare two fresh **2-minute windows, 24 hours apart**, matched by resource, filesystem UUID, device and size. They show net physical growth and a linear planning estimate to the existing **85% usage alert**, not the storage policy reserve or permission to run maintenance. Negative projected days mean the threshold is already exceeded. Flat/falling growth, missing UUID/history or unhealthy telemetry produces no runway estimate\u2014not infinite capacity. Shared-device resources must not be added together.\n\nDatabase snapshots: **5-minute cadence / 30-day retention**. Filesystem telemetry: **15-second cadence / 7-day Loki retention**. Top relations include indexes and TOAST; sizes and row estimates do not establish compression, reclaimability or future growth.\n\nExisting alerts: **70% warning / 85% critical / 92% emergency**, plus missing/failed physical telemetry. They notify only. Use the storage capacity plan before changing placement, retention or hardware.",
         "mode": "markdown"
       },
       "title": "How to use this dashboard",
       "type": "text"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "Insufficient / inapplicable evidence",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "id": 25,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "((max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, available_bytes | unwrap available_bytes | __error__=\"\" [2m] offset 24h)) - max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, available_bytes | unwrap available_bytes | __error__=\"\" [2m])))) and on (resource_id) (min by (resource_id) (min_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"storage_health\" | physical_host_visible=\"true\" | keep resource_id, available | unwrap available | __error__=\"\" [2m])) > 0)",
+          "legendFormat": "{{resource_id}} / {{filesystem_uuid}}",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Native storage: 24h net growth",
+      "type": "stat",
+      "description": "Net loss of physical available bytes between fresh endpoint windows 24h apart, including all users of that filesystem. Negative means net space gained; this is not a sustained growth guarantee."
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "noValue": "Insufficient / inapplicable evidence",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "id": 26,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "((0.85 * (max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, available_bytes | unwrap available_bytes | __error__=\"\" [2m])) + max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, used_bytes | unwrap used_bytes | __error__=\"\" [2m]))) - max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, used_bytes | unwrap used_bytes | __error__=\"\" [2m]))) / ((max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, available_bytes | unwrap available_bytes | __error__=\"\" [2m] offset 24h)) - max by (resource_id, filesystem_uuid, device_id, total_bytes) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | physical_host_visible=\"true\" | filesystem_uuid!=\"\" | keep resource_id, filesystem_uuid, device_id, total_bytes, available_bytes | unwrap available_bytes | __error__=\"\" [2m]))) > 0)) and on (resource_id) (min by (resource_id) (min_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"storage_health\" | physical_host_visible=\"true\" | keep resource_id, available | unwrap available | __error__=\"\" [2m])) > 0)",
+          "legendFormat": "{{resource_id}} / {{filesystem_uuid}}",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Native storage: days to 85% used",
+      "type": "stat",
+      "description": "Linear planning estimate to the existing 85% usage alert from positive 24h physical growth. Negative means already above the threshold. Missing, flat or falling growth is not infinite runway. This is not the policy reserve, a two-year forecast, or maintenance admission."
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No database capacity sample",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "id": 27,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time,EXTRACT(EPOCH FROM (now() AT TIME ZONE 'UTC' - max(sampled_at)))::double precision AS value FROM observability_metrics.database_capacity_samples;",
+          "refId": "A"
+        }
+      ],
+      "title": "Database capacity sample age",
+      "type": "stat",
+      "description": "Age of the latest database sample, independent of the selected historical range. Expected cadence is 300 seconds. Color bands show two/three missed cadences, not a storage capacity decision."
     },
     {
       "datasource": {
@@ -56,7 +216,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 4
+        "y": 12
       },
       "id": 2,
       "options": {
@@ -99,7 +259,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 4
+        "y": 12
       },
       "id": 3,
       "options": {
@@ -142,7 +302,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 4
+        "y": 12
       },
       "id": 4,
       "options": {
@@ -185,7 +345,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 4
+        "y": 12
       },
       "id": 5,
       "options": {
@@ -228,7 +388,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 17
       },
       "id": 6,
       "options": {
@@ -272,7 +432,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 17
       },
       "id": 7,
       "options": {
@@ -316,7 +476,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 17
+        "y": 25
       },
       "id": 8,
       "options": {
@@ -360,7 +520,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 17
+        "y": 25
       },
       "id": 9,
       "options": {
@@ -402,7 +562,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 34
       },
       "id": 10,
       "options": {
@@ -412,12 +572,13 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH l AS (SELECT max(sampled_at) sampled_at FROM observability_metrics.database_relation_capacity_samples WHERE $__timeFilter(sampled_at)) SELECT s.schema_name,s.relation_name,s.relation_kind,pg_size_pretty(s.total_bytes) total,pg_size_pretty(s.table_bytes) table_data,pg_size_pretty(s.index_bytes) indexes,s.estimated_live_rows,s.estimated_dead_rows FROM observability_metrics.database_relation_capacity_samples s JOIN l USING(sampled_at) WHERE s.schema_name ~ '${schema:regex}' AND s.relation_name ~ '${relation:regex}' ORDER BY s.total_bytes DESC LIMIT 50;",
+          "rawSql": "WITH l AS (SELECT max(sampled_at) sampled_at FROM observability_metrics.database_relation_capacity_samples WHERE $__timeFilter(sampled_at)) SELECT s.schema_name,s.relation_name,s.relation_kind,pg_size_pretty(s.total_bytes) total,pg_size_pretty(s.table_bytes) table_data,pg_size_pretty(s.index_bytes) indexes,pg_size_pretty(s.toast_bytes) toast,s.estimated_live_rows,s.estimated_dead_rows FROM observability_metrics.database_relation_capacity_samples s JOIN l USING(sampled_at) WHERE s.schema_name ~ '${schema:regex}' AND s.relation_name ~ '${relation:regex}' ORDER BY s.total_bytes DESC LIMIT 50;",
           "refId": "A"
         }
       ],
       "title": "Largest logical relations now",
-      "type": "table"
+      "type": "table",
+      "description": "Total includes table, indexes and TOAST. Estimated rows are not exact bytes-per-Fact measurements; retained migration namespaces are not automatically reclaimable."
     },
     {
       "datasource": {
@@ -432,7 +593,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 34
       },
       "id": 11,
       "options": {
@@ -464,7 +625,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 43
       },
       "id": 12,
       "options": {
@@ -508,7 +669,7 @@
         "h": 9,
         "w": 6,
         "x": 12,
-        "y": 35
+        "y": 43
       },
       "id": 13,
       "options": {
@@ -552,7 +713,7 @@
         "h": 9,
         "w": 6,
         "x": 18,
-        "y": 35
+        "y": 43
       },
       "id": 14,
       "options": {
@@ -596,7 +757,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 44
+        "y": 52
       },
       "id": 15,
       "options": {
@@ -640,7 +801,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 44
+        "y": 52
       },
       "id": 16,
       "options": {
@@ -683,7 +844,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 44
+        "y": 52
       },
       "id": 17,
       "options": {
@@ -726,7 +887,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 60
       },
       "id": 18,
       "options": {
@@ -782,7 +943,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 52
+        "y": 60
       },
       "id": 19,
       "options": {
@@ -826,7 +987,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 52
+        "y": 60
       },
       "id": 20,
       "options": {
@@ -870,12 +1031,15 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 60
+        "y": 68
       },
       "id": 21,
       "options": {
         "legend": {
-          "calcs": ["lastNotNull", "min"],
+          "calcs": [
+            "lastNotNull",
+            "min"
+          ],
           "displayMode": "table",
           "placement": "right",
           "showLegend": true
@@ -918,9 +1082,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "orange", "value": 7},
-              {"color": "green", "value": 30}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 7
+              },
+              {
+                "color": "green",
+                "value": 30
+              }
             ]
           },
           "unit": "d"
@@ -931,7 +1104,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 60
+        "y": 68
       },
       "id": 22,
       "options": {
@@ -940,7 +1113,9 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -954,8 +1129,9 @@
           "refId": "A"
         }
       ],
-      "title": "Projected days to host reserve",
-      "type": "stat"
+      "title": "Windows Docker Desktop: days to host reserve",
+      "type": "stat",
+      "description": "Windows-only host-capacity sampler projection; not the native server SSD/HDD forecast."
     },
     {
       "datasource": {
@@ -972,12 +1148,15 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 60
+        "y": 68
       },
       "id": 23,
       "options": {
         "legend": {
-          "calcs": ["lastNotNull", "max"],
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
           "displayMode": "table",
           "placement": "right",
           "showLegend": true
@@ -1013,7 +1192,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 76
       },
       "id": 24,
       "options": {
@@ -1130,6 +1309,6 @@
   "timezone": "browser",
   "title": "QuantTrad Capacity & Database Growth",
   "uid": "quanttrad-capacity-growth",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
