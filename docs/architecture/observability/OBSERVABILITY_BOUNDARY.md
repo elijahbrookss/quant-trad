@@ -243,6 +243,11 @@ produce no projection; flat/falling growth does not become infinite runway.
 The estimate is a dashboard planning aid, not the policy reserve or storage-job
 admission. Negative projected days mean usage is already above the threshold.
 Shared-device resource series must not be summed as independent capacity.
+The filesystem boundary discovers an available, unambiguous udev UUID even when
+the observer has no configured expected UUID, including the Docker engine disk.
+Missing or ambiguous optional identity stays unknown; configured UUID checks
+remain mandatory. Forecasts need matching identified samples 24 hours apart
+after rollout; older UUID-less samples cannot supply that baseline.
 
 A database-sample-age panel makes stale SQL telemetry explicit; the largest
 relations table includes TOAST alongside table/index bytes. These additions

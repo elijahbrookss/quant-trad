@@ -58,20 +58,24 @@ def inspect_filesystem(
         capacity = os.statvfs(root)
         device_id = f"{os.major(device)}:{os.minor(device)}"
         actual_uuid = None
-        if expected_uuid:
-            properties = (udev_root / f"b{device_id}").read_text(encoding="utf-8")
+        # Observers need actual identity even without an operator-pinned UUID.
+        # Missing optional udev evidence stays unknown; required identity remains strict.
+        record = udev_root / f"b{device_id}"
+        if expected_uuid or record.exists():
+            properties = record.read_text(encoding="utf-8")
             uuids = [
                 line.removeprefix("E:ID_FS_UUID=")
                 for line in properties.splitlines()
                 if line.startswith("E:ID_FS_UUID=")
             ]
-            if len(uuids) != 1 or uuids[0] != expected_uuid:
+            if expected_uuid and (len(uuids) != 1 or uuids[0] != expected_uuid):
                 raise StorageMountError(
                     "storage_mount_identity_mismatch: "
                     f"path={root} device={device_id} expected_uuid={expected_uuid} "
                     f"actual_uuid={uuids}"
                 )
-            actual_uuid = uuids[0]
+            if len(uuids) == 1 and re.fullmatch(r"[A-Za-z0-9-]{4,128}", uuids[0]):
+                actual_uuid = uuids[0]
         read_only = bool(capacity.f_flag & os.ST_RDONLY)
         if require_writable and (
             read_only or not os.access(root, os.W_OK | os.X_OK)

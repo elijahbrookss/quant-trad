@@ -43,6 +43,26 @@ def test_expected_uuid_uses_actual_path_device_and_does_not_write(mounted_archiv
     assert record.read_bytes() == before
 
 
+@pytest.mark.parametrize("properties,expected", [
+    ("E:ID_FS_UUID=observed-device-uuid\n", "observed-device-uuid"),
+    (None, None),
+    ("E:ID_FS_UUID=one-uuid\nE:ID_FS_UUID=two-uuid\n", None),
+    ("E:ID_FS_UUID=malformed uuid\n", None),
+])
+def test_unpinned_observation_reports_only_unambiguous_uuid(mounted_archive, properties, expected):
+    root, udev, record = mounted_archive
+    if properties is None:
+        record.unlink()
+    else:
+        record.write_text(properties)
+    before = record.read_bytes() if record.exists() else None
+    evidence = inspect_filesystem(root, udev_root=udev, require_writable=False)
+    assert evidence.filesystem_uuid == expected
+    assert evidence.available_bytes >= 0
+    assert (record.read_bytes() if record.exists() else None) == before
+    assert list(root.iterdir()) == []
+
+
 @pytest.mark.parametrize("properties", ["E:ID_FS_UUID=nvme-uuid\n", "", "E:ID_FS_UUID=test-archive-uuid\nE:ID_FS_UUID=test-archive-uuid\n"])
 def test_wrong_or_ambiguous_device_identity_fails_closed(mounted_archive, properties):
     root, _, record = mounted_archive

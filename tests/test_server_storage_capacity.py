@@ -41,6 +41,8 @@ def test_capacity_samples_keep_separate_disk_identities_and_do_not_write(capacit
     assert {s["capacity_authority"] for s in values} == {"engine_storage_filesystem", "archive_filesystem"}
     for row in values:
         assert row["physical_host_visible"] is True
+        # Both observers report UUID, even though the engine has no configured expectation.
+        assert row["filesystem_uuid"] == "archive-uuid"
         assert 0 <= row["used_percent"] <= 100
         assert row["used_percent"] == pytest.approx(100 * row["used_bytes"] / (row["used_bytes"] + row["available_bytes"]))
         assert list(Path(row["path"]).iterdir()) == []
