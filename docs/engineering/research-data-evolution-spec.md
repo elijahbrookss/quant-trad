@@ -53,7 +53,8 @@ with linked component PRs. Their commits and discussions are retained:
 | [#212](https://github.com/elijahbrookss/quant-trad/pull/212) | [#217](https://github.com/elijahbrookss/quant-trad/pull/217) | `feature/research-single-attempt-jobs` |
 | [#202](https://github.com/elijahbrookss/quant-trad/pull/202) | [#218](https://github.com/elijahbrookss/quant-trad/pull/218) | `feature/storage-target-management` |
 
-The local implementation at `fd6a7985` remains in
+The implementation at `fd6a7985` is preserved by
+[PR #219](https://github.com/elijahbrookss/quant-trad/pull/219) from
 `feature/research-data-evolution-spec`, supplying bounded research execution,
 frozen visibility and the reconciled specification. Storage merge reconciliation
 `26683956` preserves the exact `3f4c55c6` file tree; it only records the
