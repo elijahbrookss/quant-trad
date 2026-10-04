@@ -6,117 +6,119 @@ doc_type: adr
 status: draft
 tags:
   - adr
-  - research
-  - datasets
   - storage
-  - known-at
+  - migration
+  - research
+  - compatibility
 code_paths:
-  - src/market_data/frozen.py
-  - src/market_data/fact_archive.py
-  - src/research_science/check.py
+  - portal/backend/db/market_data_models.py
+  - portal/backend/db/fact_storage_schema.py
+  - portal/backend/db/session.py
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/fact_storage.py
-  - portal/backend/service/market/normalization_service.py
-  - portal/backend/service/research
-  - portal/backend/service/async_jobs
-  - portal/backend/workers/research_worker.py
+  - portal/backend/service/storage/repos/market_lifecycle.py
+  - src/market_data/frozen.py
+  - src/market_data/fact_archive.py
+  - scripts/db
+  - scripts/automation/server_deploy.sh
 ---
-# ADR 0078: Evolve Research Within Existing Data Boundaries
+# ADR 0078: Bound Migrations and Preserve Compatible Research
 
 ## Status
 
-Proposed on 2026-10-03. This records the selected implementation direction;
-enforcement and release qualification remain incomplete. It does not describe
-deployed behavior or authorize research, migration, deployment, or cleanup.
+Proposed on 2026-10-03; narrowed after review to storage migration scope and
+research compatibility. This replaces the earlier research-hardening direction
+in this ADR. Implementation and release qualification remain incomplete.
 The [implementation specification](../../engineering/research-data-evolution-spec.md)
-owns slices, evidence, dependencies, and acceptance gates.
+owns the concrete route, slices and acceptance evidence. Neither document
+authorizes migration, deployment, cleanup or restarting paused work.
 
 ## Context
 
-QT already has canonical revisioned Facts, frozen Dataset bindings, a canonical
-state engine, versioned Checks, normalization, archive readers, and fenced jobs.
-Research improvements should extend these owners. Most new computations do not
-require changing historical source Facts. The outstanding risks are stable frozen
-selection, expensive selection and provenance reads, whole-range materialization,
-expensive engine computation, and resource competition with collection.
+QT already has canonical Facts and revisions, payload versions, frozen Dataset
+bindings, a canonical state engine and versioned research computations. Ordinary
+Indicator development does not require reorganizing historical source Facts.
 
-The storage candidate also changes physical identity and startup requirements.
-Its combined application cannot simply run on an older layout. That packaging
-dependency does not establish that H04's scientific behavior needs the physical
-cutover. Existing qualification is useful evidence, not proof of a newly composed
-release. Neither date partitioning nor moving history to disk guarantees faster
-research.
+Storage growth is a separate real problem. Payload archiving leaves substantial
+headers, indexes and lookup metadata in PostgreSQL. The selected storage candidate
+adds dated headers and global identities. Its original upgrade rebuilt historical
+headers and coupled extensive preparation/verification to client holds. Other
+release work then depended on completing that layout.
+
+This was not merely a scheduling mistake: the transition's historical scope and
+blocking phases grew with the dataset. Candidate work now permits retaining the
+existing header table while partitioning new writes. That avoids some large copies
+but still needs identity, key, reference, placement and recovery qualification.
+It does not establish that the candidate is the only solution to the capacity goal.
 
 ## Decision
 
-1. Keep one canonical data authority and `PG_DSN`. Preserve Fact identities,
-   revisions, provenance, exact values, gaps, and known-at meaning. A semantic
-   correction appends a revision or creates a separately versioned derivation;
-   it does not overwrite the evidence used by an old run.
-2. Make the existing Dataset boundary prove stable membership across concurrent
-   commits. Pin the input binding, definition/evaluator and Indicator graph
-   versions, parameters, clocks, seed, and evaluation range in existing Check
-   records. A repeatable transaction alone is not a persisted selection proof.
-3. Run Indicator computations through `initialize -> apply_bar -> snapshot`.
-   Reuse existing normalization and Check results only when their full semantic
-   identity matches. Reuse is explicit and never counts as independent replay.
-4. Bound preparation, reads, decoding, computation, and result persistence in
-   existing data and research owners. Use existing jobs for deduplication,
-   ownership and atomic publication; separately admit resource use and provide
-   cancellation. Start with a serial heavy-research budget, not a new scheduler.
-5. Keep physical evolution behind the existing storage repositories and archive
-   readers. Prefer reading supported older representations. Convert only an
-   explicitly selected unit when evidence justifies it, with verified output,
-   fenced atomic publication, retained source, and independent resource admission.
-   Reads must never perform DDL, conversions, acquisition, or hidden backfills.
-6. Qualify research against an identified supported serving layout. Prefer a
-   compatible research release over requiring the whole storage rollout. Keep
-   startup guards strict; review any actual schema dependency explicitly.
+Keep the existing research architecture. Require each storage change to justify
+the historical data it must copy, transform or validate and the phases that block
+writers or readers. Prefer compatible reads and changes to new writes where they
+meet the actual goal. Convert only the necessary historical scope explicitly.
 
-## Invariants and consequences
+For this migration, qualify retaining existing headers before requiring a
+full-history daily rebuild. Keep global uniqueness and reference enforcement.
+Do not credit SSD relief until actual placement or bounded growth meets the
+declared capacity horizon.
 
-Old bindings and results remain immutable. New formats have explicit versions;
-unsupported or inconsistent inputs fail with actionable context. A run pins
-logical input identity and the reader/recipe it needs; physical replacements
-must preserve that identity and keep required objects available. Collection has
-priority over admitted research and maintenance. Lease ownership prevents stale
-publication; it does not reserve CPU, memory, disk, or database connections.
+Prepare and verify under existing bounded storage owners while collection
+continues where qualified. Keep the final publication interruption measured and
+bounded; reject a route that cannot fit rather than extending a writer hold
+indefinitely. Capture concurrent commits, commit verified units with progress,
+fence publication, and reconcile uncertain completion through durable receipts.
 
-This reduces mandatory historical work and permits incremental releases. It costs
-compatibility tests, retained readers and pinned objects, explicit resource
-accounting, and limited release composition work. Selective reuse consumes disk
-and needs retention rules. An uncollected historical field remains missing; no
-conversion can recreate it. Faster queries will not remove the measured H04
-engine cost, and no speedup is promised before paired measurements.
+Keep physical evolution behind the current repositories and archive readers.
+Use `PG_DSN` and existing controllers, catalogs and recovery boundaries. Runtime
+must never perform hidden DDL, conversion or backfill. Startup guards remain
+strict; old/new compatibility must be an explicit supported contract.
+
+Separate research release requirements from storage cutover unless the exact
+runtime/schema pair, affected reads or resource limits require coupling. Preserve
+pinned inputs, corrections, provenance, known-at meaning and producing code
+identity. Existing scientific budgets, holdouts and authority remain unchanged.
+
+## Consequences and limits
+
+Migration cost may scale with affected data. The objective is to avoid routinely
+affecting all history and making downtime scale with that work, not to promise
+that all future migrations are cheap. Canonical key or relationship changes may
+require global validation.
+
+Compatibility costs readers, tests and retained pinned objects. Retaining an old
+table avoids reformatting; moving it still costs I/O and may block reads.
+Partitions help physical maintenance but do not solve arbitrary schema evolution.
+Global identities and catalogs still grow. No query speedup or zero-interruption
+claim follows from choosing this direction.
+
+Leases prevent conflicting publication; resource admission separately protects
+collection and active readers. Source copies and backups remain until explicitly
+authorized retirement. After publication, old code or an old table alone is not
+a safe rollback plan for a system accepting new writes.
 
 ## Alternatives not selected
 
-- Complete all storage migration before research: retain this dependency only
-  where the exact release or a measured capacity limit requires it.
-- Partition and convert all historical data up front: significant temporary,
-  index, WAL and recovery costs without evidence that every query benefits.
-- Convert during ordinary reads: hidden operational work and uncertain latency.
-- Add a feature store, universal artifact catalog, migration framework, second
-  engine or database: existing owners already cover the demonstrated needs.
-- Precompute every Indicator/parameter combination: speculative storage growth
-  and invalidation cost. Start with a measured, repeatedly requested recipe.
+- Rebuild all history merely to make physical layout uniform.
+- Freeze all research until every storage, recovery enhancement and cleanup task
+  finishes, regardless of its actual dependencies.
+- Promise that date partitioning eliminates future schema migrations.
+- Add a migration framework, second data authority, feature store or resource
+  scheduler before a concrete requirement exceeds existing owners.
+- Make H04, general caching, streaming or research cancellation projects part of
+  this storage transition by default.
 
-## Evidence and enforcement
+## Enforcement and references
 
-The specification records the pinned repository states, measured workloads,
-unreproduced watermark concern, and required disposable concurrency, equivalence,
-failure, resource and replay tests. Acceptance requires evidence for the exact
-release and capabilities being enabled; saved candidate tests are not deployment
-attestation. Physical cleanup is not a general research gate.
+The specification requires scope/capacity justification, concurrent preparation,
+logical read equivalence, bounded pause/resource evidence, crash reconciliation
+and applicable recovery/release qualification for the selected route. Historical
+candidate tests support only their recorded source and scenario; no completed
+production transition is asserted here.
 
-## References
-
-- [System contract](../../contracts/platform/00_system_contract.md),
-  [runtime contract](../../contracts/platform/01_runtime_contract.md), and
-  [engineering contract](../../contracts/platform/03_engineering_contract.md).
-- [Canonical Facts](../data/GENERALIZED_FACT_DATA_PLANE.md),
-  [Check evidence](../research-orchestration/CHECK_EVIDENCE_BOUNDARY.md), and
-  [research jobs](../research-orchestration/RESEARCH_ASYNC_JOB_BOUNDARY.md).
-- [ADR 0062: frozen bindings](0062-use-frozen-bindings-for-durable-check-evidence.md),
-  [ADR 0047: job fencing](0047-fence-async-job-ownership.md), and
-  [ADR 0068: compatible promotion](0068-rehearse-explicit-server-promotion.md).
+- [Engineering contract](../../contracts/platform/03_engineering_contract.md) and
+  [core promises](../../core-promises.md).
+- [Canonical Facts](../data/GENERALIZED_FACT_DATA_PLANE.md) and
+  [Check evidence](../research-orchestration/CHECK_EVIDENCE_BOUNDARY.md).
+- [ADR 0062: frozen bindings](0062-use-frozen-bindings-for-durable-check-evidence.md)
+  and [ADR 0068: compatible promotion](0068-rehearse-explicit-server-promotion.md).
