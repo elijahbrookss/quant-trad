@@ -171,108 +171,190 @@ qualified, but include its real cost before committing to the route.
 
 ## Storage growth plan and release acceptance
 
-The capacity solution is a bounded recent tier plus explicitly budgeted durable
-history and recovery on the existing SSD/HDD layout. A new physical layout is
-not itself proof that the host can sustain collection. Do not shorten scientific
-history or delete pinned Facts to make a forecast pass.
+**October 4 decision: retain the existing tiering route, but do not deploy the
+30-day plan unchanged or claim a two-year capacity solution.** Qualify a 14-day
+recent window as the next candidate; it changes placement timing, not how long
+Facts remain available. No policy, deployment, migration or retention change was
+applied by this assessment. Additional HDD capacity or a measured reduction in
+bytes per Fact is required to support the earlier two-year planning target under
+the current growth proxies. Exact hardware sizing still needs recovery costs.
 
-The last inspected receipt,
-S `artifacts/storage-implementation/migration-release-20260926/completion-forward-capacity-inventory-20261003.json`,
-records **826,616,475,648 SSD bytes free**, **14,867,156,316,160 HDD bytes free**,
-and **1,124,870,419,247 database bytes** at **2026-10-03 19:24:37 UTC**.
-These are historical observations, not current host status. The database total
-already includes retained source/target allocations and spans its physical
-locations; it is not another allocation to add to disk usage.
+### Fresh state and evidence
 
-That receipt's earlier component inventory records roughly 316.2 GB of source
-headers including indexes, 130.3 GB of source raw mappings and 328.0 GB of payload
-partitions. It separately records retained identity/raw/original namespaces.
-Use the original timestamps and ownership when reconciling these figures; do
-not sum overlapping totals or call retained copies disposable.
+Read-only observations at **2026-10-04 17:35–17:41 UTC** found:
 
-### Minimum approach
+| Measurement | Observed value / meaning |
+| --- | --- |
+| SSD filesystem | 1.967 TB total; **814.24 GB available**. Existing migration floor 496.43 GB leaves **317.81 GB**. The 20% policy reserve is 393.35 GB; these floors overlap, not add. |
+| HDD filesystem | 15.936 TB total; **14.867 TB available**. After the 20% reserve, **11.680 TB** remains for additional allocations. Existing HDD allocations are already excluded. |
+| Database | **1.136 TB**, spanning both disks. Do not add this total to filesystem consumption. |
+| Serving headers / raw lookup | **321.52 / 132.25 GB** including indexes. Indexes account for **153.41 / 78.45 GB** respectively. Neither index usage nor safe index removal was established. |
+| Hot payloads | **333.21 GB** in 45 dated groups; 67.75 GB predates September 4. Calendar age alone is not permission or proof of reclaimability. |
+| Applied storage management | No policy, targets, plans or moves recorded. All 45 payload lifecycle rows remain `open`; canonical archive-manifest samples show zero inserts and an empty heap. The proposed lifecycle is not running. |
+| Recovery / migration | WAL archiving is off; no active index build or vacuum at observation. Original capture remains canceled and the forward schema is absent. Existing copies and keys remain untouched. |
 
-| Allocation | Approach using existing owners | What must be demonstrated |
+GB/TB here are decimal. The local evidence bundle is
+`artifacts/storage-implementation/capacity-assessment-20261004/`: host, database,
+relation, policy and physical-series observations; exact read-only queries;
+calculation inputs/formulas; and historical-source hashes. Essential results and
+assumptions are reproduced here because local artifacts are not checked in.
+All nine SQL observations completed in under 0.04 seconds each, with read-only
+transactions, a five-second statement limit, 100 ms lock limit, 16 MiB temporary
+limit and no parallel query workers. Seven Loki queries each read a two-minute
+window. No content scan, recursive walk, benchmark, index build or production
+mutation was performed.
+
+Physical SSD use rose **31.0 / 24.8 / 13.3 GB** across the last three daily
+endpoints. At those rates, the current margin to the migration floor represents
+roughly **10–24 days**, not time to disk failure or a guaranteed future rate.
+Earlier endpoints include migration relocation and cannot define normal growth.
+The historical log samples match device number and size but lack UUID binding;
+this sensitivity is not qualified physical-identity evidence for admission.
+The deployed archive resource currently observes the same SSD as Docker; those
+two series are one disk, not two budgets. The HDD observation comes from its
+actual host path. Deployed logs lack UUIDs, so new forecast panels need identified
+samples after rollout before they can show a 24-hour estimate.
+
+### Ordinary growth versus retained migration work
+
+Stored relation snapshots give the following daily physical growth proxies:
+
+| Category | Sep 26 23:55 → Oct 3 23:55 (7 days) | Sep 28 23:55 → Oct 2 23:55 (4 weekdays) |
+| --- | ---: | ---: |
+| Source headers, including indexes | 8.72 GB/day | 10.04 GB/day |
+| Source raw lookup, including indexes | 3.65 GB/day | 4.07 GB/day |
+| Payload groups | 8.91 GB/day | 10.11 GB/day |
+| Other sampled relations | 0.43 GB/day | 0.36 GB/day |
+| **Source/component subtotal** | **21.70 GB/day** | **24.59 GB/day** |
+| Retained candidate allocations, excluded from that subtotal | 25.99 GB/day | 45.47 GB/day |
+
+These are component deltas, not a controlled collector benchmark or future upper
+bounds. The retained candidate's approximately 181.9 GB growth is migration work,
+not recurring daily demand. The older retained namespace stayed flat. Database
+WAL growth during these intervals includes preparation and must not be labeled
+collection-only WAL. A separate September 24 collection receipt observed a
+10-minute WAL rate equivalent to 402.8 GB/day; that is a short observation, not
+compressed backup growth or a future bound.
+
+### SSD transition: compare the existing policy choices
+
+The retained header group is dated by its newest day, so the 30-day policy keeps
+the entire old group on SSD for approximately 30 days after cutover while new
+headers accumulate. See `header_catalog.py` and `storage_header_placement.py`.
+Retaining historical headers avoids a full historical rewrite; it does not
+immediately free their SSD allocation.
+
+Let H/P/O be daily header/payload/other growth above, W the recent window, and K
+new permanent composite-key bytes. Immediately before the legacy group can move:
+
+`SSD available = current available - [K + (H + P + O) × W - current payload bytes]`
+
+This scenario assumes verified archival/reclamation catches up by that day, new
+identity/raw lookup writes go to HDD, and the current source/raw and rollback
+allocations are retained. It uses **44.49 GB**, the corresponding existing unique
+indexes, only as a comparator for K. Actual new-key size, sorting, WAL and elapsed
+time remain unmeasured; the comparator is neither a bound nor admission.
+
+| Recent window | SSD available before legacy movement, using the two growth proxies | Margin above 496.43 GB floor, before transient costs |
+| --- | ---: | ---: |
+| Existing 30-day candidate | **487–561 GB** | **−9 to +65 GB** |
+| Proposed 14-day candidate | **816–850 GB** | **319–354 GB** |
+
+The 30-day comparison is too tight to accept: one scenario crosses the fixed
+floor and neither demonstrates room for the full transient envelope. Qualify
+14 days first; keep 30 only with a separately demonstrated transition bridge. The tradeoff
+is more 15–30-day reads using HDD/archive readers. Frozen identities, revisions
+and history lifetime are unchanged, and affected cold reads must be checked.
+
+**This comparison grants no unverified reclamation credit to an operation.** With
+no payload reclamation, the 14-day scenario has only **483–517 GB available**
+before transients; the 30-day scenario has **154–228 GB**. Archival must actually
+catch up. Processing the current 333.21 GB payload source within 14 days requires
+an average **23.80 GB/day of source progress**, followed by at least the admitted
+incoming rate; that is a required-work calculation, not measured throughput.
+Verified movement may later release the legacy group, but it cannot be credited
+before publication and physical observation.
+
+### HDD horizon: future primary data, before recovery
+
+Reuse the measured header/raw growth as provisional new-format proxies. Add the
+prior physical identity mean (**486.90 bytes per Fact**) and canonical archive
+sample (**472.82 bytes per Fact**) at the observed source insert-counter rates
+(**4.40 / 5.02 million per day**), plus the prior raw-archive observation
+(**0.566 GB/day**). These are dated sample-based assumptions, not measured new
+production densities. Assume unchanged collection volume and provider scope;
+research expansion and traffic growth are not budgeted by these samples. They
+imply **17.16–19.49 GB/day** of durable HDD growth.
+About **85%** of that modeled durable growth is headers, identity and raw-lookup
+metadata, including their indexes. This makes metadata/index cost the main
+long-term improvement target. Payload history is represented by compressed
+archives here, not counted again as uncompressed historical payload partitions.
+
+With 14 days of future headers retained on SSD, future arrivals alone consume:
+
+| Additional horizon | Additional primary HDD bytes | Remaining from today's 11.680 TB above reserve |
+| --- | ---: | ---: |
+| 180 days | **2.97–3.37 TB** | **8.31–8.71 TB** |
+| 365 days | **6.14–6.98 TB** | **4.71–5.54 TB** |
+| 730 days | **12.40–14.09 TB** | **−2.41 to −0.72 TB** |
+
+This deliberately excludes the old header relocation and new keys, current
+archive catch-up, missing identity/raw adoption rows, new archive catalog costs,
+recovery baselines/increments/WAL, retained failed attempts and temporary overlap.
+Existing HDD allocations already reduce current free space. It is an optimistic
+planning comparison, not a total-space upper bound. The two-year target does not
+fit these proxies even before recovery. One year is conditional on those omitted
+costs; this assessment does not certify it. Fourteen days improves SSD pressure
+but does not eliminate long-term historical growth.
+
+### Peak budget and the remaining decision
+
+Use the existing placement, archive, maintenance and encrypted-recovery owners;
+add no storage service, registry or alternate data authority. For each physical
+disk, count existing occupancy once, then additional coexisting demands. Apply
+`max(policy reserve + demands + competing claims, operation floor)`, not the sum
+of overlapping reserves. Keep source/rollback evidence until separately approved
+retirement; no deletion or deduplication saving is assumed.
+
+| Phase / owner | Known quantity | Missing quantity / next qualification |
 | --- | --- | --- |
-| Recent payloads and dated headers | Use the existing 30-day recent policy as the candidate starting point. Archive/move eligible history through verified lifecycle owners. | After the hot window fills, eligible bytes leave at least as fast as they arrive over the measured workload; lag/backlog has a bounded catch-up path. A configured policy is not evidence it is executing. |
-| Canonical/raw history | Use the existing verified compressed archive formats and HDD placement. Preserve revisions, provenance, frozen pins and reads. | Actual compressed/allocated bytes per day, archive/catalog/index growth, inode overhead and read performance fit the chosen horizon. The earlier two-year goal remains a planning target, not permission to expire history after two years. |
-| Headers, global identities and raw lookup metadata | Retain historical headers for cutover; use dated groups for later placement. Account separately for global structures that continue growing. | Include heap, indexes and TOAST. HDD placement must pass the affected read/write workload. If required SSD metadata growth cannot fit, compare a measured lossless representation/index change with additional SSD capacity before starting an unsuitable migration. |
-| Frozen inputs, research results and observability | Reuse existing frozen bindings, result owners and bounded telemetry retention. Measure their relations in the same capacity dashboard. | These remain part of growth even when market payload retention is healthy. No generic cache/store or automatic research-result expiry is introduced. |
-| Recovery and maintenance | Reuse the candidate's daily/two-copy recovery policy, reserve and bounded storage claims; verify actual applied configuration. | Measure new generation/retained partial/WAL/archive dependencies and peak overlap. Two copies do not imply two full logical dumps, and deduplication is not credited without measurement. |
+| Forward keys | Original one-hour allowance plus 60-second cancellation grace: 68.72 GB WAL, 34.36 GB temp, 34.36 GB maintenance, 30.70 GB declared growth. Current arithmetic leaves **252.75 GB** before uncovered costs. | The 34.36 GB maintenance term must cover actual key construction; existing key comparator is 44.49 GB. Measure keys, sort/WAL peaks, collector/read impact and elapsed time through the existing explicit preparation boundary. Do not add K twice or treat declared allowances as measured costs. |
+| Retained-target adoption / references | Identity/raw baselines are already on HDD; don't charge their 73.51/101.41 GB again. October 3's exact missing-ID count and 8.12 GB allocation comparator remain dated evidence. | New missing rows, raw catch-up, references/catalogs and mirror overhead; reuse completed coverage rather than repeat a whole-history count. |
+| Archive catch-up / legacy movement | 333.21 GB payload source; 321.52 GB old header group plus new keys. | Verified processing rate and working space; whole-group copy/locks/WAL and publication. Failure retains the stable source and known ownership; uncertain completion is inspected before retry. |
+| Encrypted recovery | Initial full baseline and later dependency-safe replacement are necessary; original per-attempt cap is 1.675 TB. | Actual compressed baseline, changed blocks, retained chains, archives, WAL and partial/replacement overlap. Two retained points are not three recurring full logical dumps. Measure actual repository allocation and separately qualify recovery; earlier disposable acceptance does not establish host-size costs. These results must precede a supported horizon or hardware size claim. |
 
-The recorded candidate policy uses 30 recent days and a 20% reserve. These are
-existing candidate settings, not newly applied changes or evidence of adequate
-headroom. Fixed migration floors and simultaneous claims can be stricter;
-never add overlapping floors as separate byte costs or confuse them with the
-Grafana percentage-alert threshold.
+The eight/twelve MiB-per-second SSD/HDD growth limits in the recorded migration
+request are admission inputs, not measured collection rates. Daily averages do
+not justify reducing them, renewing expired clocks or reusing an old operation.
+All preparation, final-stop and recovery bounds still need to pass their existing
+owners. Current free space alone does not admit the migration.
 
-### Capacity arithmetic and decisions
+Next qualification should resolve only three questions: can archive catch-up and
+the 14-day window protect SSD collection; do key/adoption/movement/recovery peaks
+fit and recover within their bounds; and what HDD capacity or measured storage
+reduction supports the chosen horizon? Prioritize header/raw index and repeated
+metadata costs when evaluating reductions, preserving uniqueness, provenance and
+frozen reads. No index removal is authorized by size or low observed use alone.
+No finite disk supports append-only history indefinitely.
 
-For each physical filesystem, start from measured available bytes. Subtract
-expected *additional* retained growth over the declared horizon and the peak
-coexisting preparation/recovery/temporary/WAL allocations. Keep the applicable
-reserve and claims intact. Credit reclamation only after its dependencies,
-authorization and physical effect are verified. A database component breakdown
-explains physical consumption; it is not added to that consumption again.
-Two resource paths on one filesystem share one budget.
+### Dashboard and release status
 
-As a sensitivity example only, the October 3 SSD observation has **307.5 GiB**
-above the unchanged migration floor of **496,426,550,887 bytes**. At assumed net
-growth of 10 / 20 / 40 GiB per day, that margin lasts approximately **30.8 / 15.4 /
-7.7 days** before new migration allocations. These are arithmetic scenarios,
-not measured steady-state rates or today's runway. They show why headline free
-space alone cannot admit the migration.
+Use **QuantTrad Capacity & Database Growth**, UID `quanttrad-capacity-growth`, at
+`/d/quanttrad-capacity-growth` on the configured Grafana host. It covers physical
+headroom, native 24-hour net growth and estimated days to the 85% usage alert,
+database/schema/relation growth, TOAST, WAL, connections and sample freshness.
+The 85% estimate is not the policy reserve, migration floor, two-year forecast or
+maintenance authorization. Missing/stale/unhealthy/unknown-UUID/replaced/resized
+or non-growing evidence produces no runway; shared disks must not be summed.
 
-Before the coordinated release, M0 must provide:
-
-1. A fresh filesystem observation and recent growth series from existing
-   telemetry, separating collection-only periods from index construction,
-   copies and backup activity. Reuse completed source/HDD inventories; do not
-   repeat expensive walks or full-history counts for a dashboard.
-2. A byte ledger for the peak transition and the post-cutover horizon on each
-   disk, including the unbounded global metadata and recovery terms above.
-3. Evidence that archival/movement can keep up with admitted collection and
-   recover from backlog without exceeding collector/read limits. A benchmark
-   on small fixtures does not establish full-host throughput.
-4. An explicit decision: the existing disks meet the horizon, a narrower
-   measured optimization is needed, or additional capacity is needed. If the
-   ledger does not fit, stop before migration rather than assume cleanup,
-   compression or a slower incoming rate will rescue it.
-
-No finite disk supports unbounded append-only collection forever. Once the
-declared horizon is reached, expanding capacity or changing future collection/
-retention policy is an explicit decision. Frozen pins and correction history
-must survive any such change.
-
-### Existing dashboard, targeted additions
-
-Use **QuantTrad Capacity & Database Growth**, UID
-`quanttrad-capacity-growth`, at
-`/d/quanttrad-capacity-growth` on the configured Grafana host. Its existing
-database/schema/relation, insert-rate, WAL, connection and filesystem panels
-already provide most of the needed measurements. Existing 70/85/92% usage and
-per-resource telemetry-failure alerts remain unchanged.
-
-The capacity slice adds native-disk net growth over 24 hours, a linear estimate
-to the existing 85% usage alert, explicit database-sample age, and visible TOAST
-in the relation breakdown. It reuses existing PostgreSQL snapshots and Loki
-filesystem logs; no new sampler, persistence schema, DSN or recursive scan is
-introduced. The 85% estimate is **not** the policy reserve, the migration floor,
-a two-year forecast or maintenance authorization. It is blank for missing,
-stale, unhealthy, unknown-UUID, replaced/resized or non-growing evidence.
-Negative days mean the threshold is already exceeded. Shared-device resource
-series are never summed into extra capacity.
-
-The native forecast compares two fresh two-minute windows 24 hours apart,
-matched by resource/device/UUID/size. Endpoint changes include every workload on
-the filesystem and do not establish future steady-state consumption. Query
-cost is bounded to those windows, not scanning all 24 hours. The existing
-disposable Loki/Grafana proof exercises the actual shipped queries with known
-numeric results and missing/changed/failed-source cases. The fixture extends
-Loki ingester lookback only for newly injected historical samples; production
-retention/configuration stays unchanged. Deployment of the dashboard, fresh
-production measurements, and a passing capacity ledger remain separate
-outstanding work.
+The forecast reuses two fresh two-minute windows 24 hours apart. The disposable
+Loki/Grafana proof exercises actual queries and known numeric/invalid-source
+cases; synthetic history needs test-only ingester lookback. The filesystem
+observer must also emit its discoverable UUID without a configured expectation,
+which the October 4 host check found missing for SSD. That local correction does
+not weaken configured UUID admission or deploy the dashboard. Applicable
+production capacity, lifecycle throughput, recovery and release gates remain
+open; passing tests do not start migration or research.
 
 ## Reuse existing owners
 
