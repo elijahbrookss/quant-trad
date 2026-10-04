@@ -135,6 +135,19 @@ jobs:
       - name: Prove confined online worker launch and refusal
         run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
 
+      - name: Prove retired key inspection handoff and bounded preparation recovery
+        run: |
+          mkdir -p "$RUNNER_TEMP/qt-forward-keys" "$RUNNER_TEMP/qt-forward-keys-history"
+          python3 scripts/ci/rehearse_online_prepared.py \
+            --image qt-incremental-runtime-proof \
+            --database-image quanttrad-postgres:2.14.2-pg15 \
+            --output-root "$RUNNER_TEMP/qt-forward-keys" \
+            --history-parent "$RUNNER_TEMP/qt-forward-keys-history" \
+            --prepare-source --worker-phases --initial-capture \
+            --terminal-cancellation --terminal-image qt-terminal-runtime-proof \
+            --forward-package-image qt-terminal-runtime-proof \
+            --forward-keys --forward-worker --forward-retirement
+
       - name: Prove interrupted initial storage preparation and source resumption
         env:
           QT_STORAGE_TEST_CLIENT_IMAGE: qt-incremental-runtime-proof
