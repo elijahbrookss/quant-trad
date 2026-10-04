@@ -771,6 +771,7 @@ def rederive_research_check_plan_from_pinned_inputs(
         preloaded_metas[indicator_id] = {
             "id": indicator_id,
             "type": str(row.get("indicator_type") or ""),
+            "version": str((row.get("manifest") or {}).get("version") or "v1"),
             "params": dict(row.get("params") or {}),
             "dependencies": list(row.get("dependencies") or []),
             "enabled": True,
