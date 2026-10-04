@@ -171,13 +171,37 @@ qualified, but include its real cost before committing to the route.
 
 ## Storage growth plan and release acceptance
 
-**October 4 decision: retain the existing tiering route, but do not deploy the
-30-day plan unchanged or claim a two-year capacity solution.** Qualify a 14-day
-recent window as the next candidate; it changes placement timing, not how long
-Facts remain available. No policy, deployment, migration or retention change was
+**October 4 user-selected direction: use a 14-day recent-data window on SSD,
+with preserved historical data on HDD through the existing tiering route.**
+This is the accepted policy choice for qualification, not an applied production
+setting or deployment approval. It changes placement timing, not how long Facts
+remain available. No policy, deployment, migration or retention change was
 applied by this assessment. Additional HDD capacity or a measured reduction in
 bytes per Fact is required to support the earlier two-year planning target under
 the current growth proxies. Exact hardware sizing still needs recovery costs.
+
+Keep intake/spool and recent headers/payloads on SSD; keep older eligible groups
+and archives on HDD. Existing global lookup/identity placement remains as
+accounted for below: this is not a blanket rule moving all PostgreSQL files or
+all metadata at day 14. Eligibility follows the saved policy and whole-group
+boundaries; verified publication and explicit maintenance precede reclamation.
+Fourteen days is neither a research lookback limit nor permission to expire data.
+
+Long-range research uses the existing bounded historical readers without copying
+all selected history back onto SSD or introducing another cache layer. First
+reads and scattered historical lookups may cost more on HDD; a repeated request
+is not assumed to hit a cache. PostgreSQL documents the distinction between
+sequential and random reads and the limits of cache assumptions in its
+[planner cost guidance](https://www.postgresql.org/docs/current/runtime-config-query.html#RUNTIME-CONFIG-QUERY-CONSTANTS).
+This supports the tradeoff, not a QT-specific latency estimate.
+
+The existing runtime warms up state and then advances per bar. Future paper/live
+qualification must cover uncached initialization, restart and gap catch-up from
+HDD, including warmup exceeding 14 days; non-HFT use alone does not prove latency
+adequate. Current observe-only paper support does not establish live readiness.
+Use the existing workload/release gates below to measure cold reads and collector
+lag with competing archival/recovery I/O. This choice adds no new service,
+universal result cache or requirement to keep a bot's full history on SSD.
 
 ### Fresh state and evidence
 
@@ -258,13 +282,14 @@ time remain unmeasured; the comparator is neither a bound nor admission.
 | Recent window | SSD available before legacy movement, using the two growth proxies | Margin above 496.43 GB floor, before transient costs |
 | --- | ---: | ---: |
 | Existing 30-day candidate | **487–561 GB** | **−9 to +65 GB** |
-| Proposed 14-day candidate | **816–850 GB** | **319–354 GB** |
+| Selected 14-day policy, awaiting qualification | **816–850 GB** | **319–354 GB** |
 
 The 30-day comparison is too tight to accept: one scenario crosses the fixed
 floor and neither demonstrates room for the full transient envelope. Qualify
-14 days first; keep 30 only with a separately demonstrated transition bridge. The tradeoff
-is more 15–30-day reads using HDD/archive readers. Frozen identities, revisions
-and history lifetime are unchanged, and affected cold reads must be checked.
+the selected 14-day policy; 30 days is retained here only as a comparison, not an
+alternate rollout instruction. The tradeoff is more 15–30-day reads using
+HDD/archive readers. Frozen identities, revisions and history lifetime are
+unchanged, and affected cold reads must be checked.
 
 **This comparison grants no unverified reclamation credit to an operation.** With
 no payload reclamation, the 14-day scenario has only **483–517 GB available**
