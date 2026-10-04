@@ -35,6 +35,30 @@ code_paths:
 ---
 # Check Evidence Boundary
 
+## Bounded input delivery
+
+Indicator Checks consume candle windows through the existing candle service,
+with at most 2,048 nominal bars per window. Sparse ranges stay sparse. A single
+canonical engine spans all pages; rolling features are not independently computed
+per page. Raw-frame evaluators retain their existing materializing contract.
+Canonical SQL hydration uses a 512-row server cursor; causal revision choice
+still happens before invalidation filtering and may retain revisions within the
+requested candle window. Supported hot/cold and retained-history readers remain
+the only storage boundary.
+
+Semantic hashing emits the same canonical JSON incrementally instead of copying
+the complete normalized evidence and encoded history. These changes reduce
+avoidable copies; evaluator arrays and retained outputs still require explicit
+total limits. They do not introduce a computation cache or claim a year-scale
+speedup without a representative measurement.
+
+Research compatibility during storage migration is scoped in
+[ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+and the [bounded migration specification](../../engineering/research-data-evolution-spec.md).
+They add no new Check capability or scientific authority. Only actual schema,
+read or resource dependencies should couple research to a storage transition;
+passing storage gates does not resume paused research.
+
 ## Purpose
 
 A Check is QT's bounded analytical operation. It may calculate analytical

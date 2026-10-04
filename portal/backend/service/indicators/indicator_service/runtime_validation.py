@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from itertools import chain
+from collections.abc import Iterable
+from core.execution_control import execution_checkpoint, consume_execution_json, consume_execution_resource
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
@@ -28,6 +31,11 @@ from .utils import build_meta_from_record, load_indicator_record
 logger = logging.getLogger(__name__)
 
 RUNTIME_VALIDATION_PATH = "typed_indicator_engine.v1"
+
+
+def _append_evidence(rows: list, row: dict) -> None:
+    consume_execution_json("evidence_bytes", row)
+    rows.append(row)
 
 
 def _iso_utc(value: datetime) -> str:
@@ -66,14 +74,13 @@ def _matching_recorded_gaps(
     )
 
 
-def _build_runtime_candles(
+def _iter_runtime_candle_rows(
     df: Any, *, timeframe_seconds: int | None = None
-) -> list[Candle]:
+):
     import pandas as pd
 
     if df is None or getattr(df, "empty", False):
-        return []
-    candles: list[Candle] = []
+        return
     timestamps = pd.to_datetime(df.index, utc=True)
     for timestamp, (_, row) in zip(timestamps, df.iterrows()):
         open_time = timestamp.to_pydatetime()
@@ -91,8 +98,7 @@ def _build_runtime_candles(
             if row.get("known_at") is not None
             else close_time
         )
-        candles.append(
-            Candle(
+        yield Candle(
                 time=open_time,
                 end=close_time,
                 known_at=known_at,
@@ -101,10 +107,11 @@ def _build_runtime_candles(
                 low=float(row["low"]),
                 close=float(row["close"]),
                 volume=float(row["volume"]) if row.get("volume") is not None else None,
-            )
-        )
-    return candles
+            ), row
 
+
+def _build_runtime_candles(df: Any, *, timeframe_seconds: int | None = None) -> list[Candle]:
+    return [candle for candle, _row in _iter_runtime_candle_rows(df, timeframe_seconds=timeframe_seconds)]
 
 def _resolve_market_selection(
     meta: Mapping[str, Any],
@@ -511,6 +518,7 @@ def collect_runtime_output_evidence_for_instance(
     instrument_snapshot: Mapping[str, Any] | None = None,
     indicator_param_overrides: Mapping[str, Any] | None = None,
     candle_frame: Any = None,
+    candle_frames: Iterable[Any] | None = None,
     source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
     source_frame_cache_stats: MutableMapping[str, int] | None = None,
     market_data_resolver: Any = None,
@@ -629,21 +637,38 @@ def collect_runtime_output_evidence_for_instance(
             )
         actual_indicator_graph = list(expected_graph)
     diagnostics = collect_runtime_indicator_diagnostics(indicators)
-    frame = candle_frame
-    if frame is None:
-        frame = _load_candle_frame(
-            start=start,
-            end=end,
-            interval=interval,
-            symbol=resolved_symbol,
-            datasource=resolved_datasource,
-            exchange=resolved_exchange,
-            instrument_id=resolved_instrument_id,
-        )
-    candles = _build_runtime_candles(frame)
-    if not candles:
+    if candle_frames is not None and candle_frame is not None:
+        raise ValueError("indicator_evidence_candles_ambiguous: supply a frame or a stream")
+    if candle_frames is None:
+        frame = candle_frame
+        if frame is None:
+            frame = _load_candle_frame(
+                start=start, end=end, interval=interval, symbol=resolved_symbol,
+                datasource=resolved_datasource, exchange=resolved_exchange,
+                instrument_id=resolved_instrument_id,
+            )
+        candle_frames = (frame,)
+
+    def source_rows():
+        for page in candle_frames:
+            execution_checkpoint()
+            if page is None or page.empty:
+                continue
+            # Convert one source row at a time; keep metadata beside its Candle
+            # instead of constructing a second full-history Candle list.
+            for candle, row in _iter_runtime_candle_rows(page):
+                execution_checkpoint()
+                consume_execution_resource("input_rows", 1)
+                yield candle, row
+
+    source = iter(source_rows())
+    first = next(source, None)
+    if first is None:
         raise LookupError("No candles available for indicator output evidence")
-    configure_indicator_overlay_history(indicators, history_bars=len(candles))
+    first_candle = first[0]
+    # This consumer never requests overlays. Render history is independent of
+    # algorithm warmup and must not grow to the complete historical window.
+    configure_indicator_overlay_history(indicators, history_bars=1)
 
     engine = IndicatorExecutionEngine(indicators)
     output_types = {str(key): str(value) for key, value in engine.output_types.items()}
@@ -698,7 +723,7 @@ def collect_runtime_output_evidence_for_instance(
             ),
             "recorded_evidence": matching_evidence,
         }
-        discontinuities.append(dict(gap_context))
+        _append_evidence(discontinuities, dict(gap_context))
         if require_recorded_discontinuities and not is_declared_gap:
             raise RuntimeError(
                 "indicator_unclassified_discontinuity: frozen candle "
@@ -711,18 +736,18 @@ def collect_runtime_output_evidence_for_instance(
                 next_bar_time=next_bar_time,
                 rewarm_bars=gap_rewarm_bars,
             )
-            gap_transitions.append(
+            _append_evidence(gap_transitions,
                 {**gap_context, "actions": [dict(row) for row in actions]}
             )
 
-    if candles[0].time > requested_start:
+    if first_candle.time > requested_start:
         handle_discontinuity(
             gap_start=requested_start,
-            gap_end=candles[0].time,
-            next_bar_time=candles[0].time,
+            gap_end=first_candle.time,
+            next_bar_time=first_candle.time,
         )
     previous_candle_time: datetime | None = None
-    for bar_index, candle in enumerate(candles):
+    for bar_index, (candle, source_row) in enumerate(chain((first,), source)):
         if previous_candle_time is not None:
             expected_time = previous_candle_time + timedelta(
                 seconds=interval_seconds
@@ -734,7 +759,6 @@ def collect_runtime_output_evidence_for_instance(
                     next_bar_time=candle.time,
                 )
         candle_time = _iso_utc(candle.time)
-        source_row = frame.iloc[bar_index]
         source_close_time = (
             _utc(source_row["close_time"])
             if source_row.get("close_time") is not None
@@ -746,7 +770,7 @@ def collect_runtime_output_evidence_for_instance(
             else source_close_time
         )
         candle_close_time = _iso_utc(source_close_time)
-        candle_rows.append(
+        _append_evidence(candle_rows,
             {
                 "bar_index": bar_index,
                 "time": candle_time,
@@ -813,7 +837,7 @@ def collect_runtime_output_evidence_for_instance(
                     and readiness_intervals[-1]["segment"] == segment):
                 readiness_intervals[-1]["end_exclusive"] = interval_end
             else:
-                readiness_intervals.append({"start": candle_time,
+                _append_evidence(readiness_intervals, {"start": candle_time,
                     "end_exclusive": interval_end, "ready_outputs": readiness,
                     "segment": segment})
         for output_ref in target_output_refs:
@@ -846,7 +870,7 @@ def collect_runtime_output_evidence_for_instance(
                             f"indicator_id={indicator_id} "
                             f"output_name={output_name} event_key={event_key or '<missing>'}"
                         )
-                    output_rows.append(
+                    _append_evidence(output_rows,
                         {
                             "bar_index": bar_index,
                             "time": candle_time,
@@ -863,7 +887,7 @@ def collect_runtime_output_evidence_for_instance(
                         }
                     )
                 continue
-            output_rows.append(
+            _append_evidence(output_rows,
                 {
                     "bar_index": bar_index,
                     "time": candle_time,
@@ -879,7 +903,7 @@ def collect_runtime_output_evidence_for_instance(
                 }
             )
 
-    trailing_gap_start = candles[-1].time + timedelta(seconds=interval_seconds)
+    trailing_gap_start = candle.time + timedelta(seconds=interval_seconds)
     if trailing_gap_start < requested_end:
         handle_discontinuity(
             gap_start=trailing_gap_start,
@@ -911,10 +935,10 @@ def collect_runtime_output_evidence_for_instance(
             "start": start,
             "end": end,
             "interval": interval,
-            "first_bar_time": _iso_utc(candles[0].time),
-            "last_bar_time": _iso_utc(candles[-1].time),
+            "first_bar_time": _iso_utc(first_candle.time),
+            "last_bar_time": _iso_utc(candle.time),
         },
-        "bars_evaluated": len(candles),
+        "bars_evaluated": bar_index + 1,
         "output_types": output_types,
         "ready_counts": dict(sorted(ready_counts.items())),
         "not_ready_counts": dict(sorted(not_ready_counts.items())),

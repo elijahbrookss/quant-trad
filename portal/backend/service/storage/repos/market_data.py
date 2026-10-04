@@ -13,6 +13,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from portal.backend.db.execution_control import owned_connection_cancel
+from core.execution_control import current_execution_control, execution_checkpoint, measure_execution_stage
 
 from market_data.canonical import (
     CanonicalFact,
@@ -2829,6 +2831,12 @@ class PostgresMarketDataRepository:
 
     @staticmethod
     def _read_canonical_rows_with_session(
+        session, **selection,
+    ) -> list[Mapping[str, Any]]:
+        return list(PostgresMarketDataRepository._iter_canonical_rows_with_session(session, **selection))
+
+    @staticmethod
+    def _iter_canonical_rows_with_session(
         session,
         *,
         series_id: int,
@@ -2840,7 +2848,11 @@ class PostgresMarketDataRepository:
         latest_only: bool = True,
         include_invalidated: bool = False,
         causal_at_interval_close: bool = False,
-    ) -> list[Mapping[str, Any]]:
+        batch_rows: int = 512,
+    ) -> Iterable[Mapping[str, Any]]:
+        if type(batch_rows) is not int or not 1 <= batch_rows <= 4096:
+            raise ValueError("canonical_read_batch_rows_invalid: expected 1..4096")
+        execution_checkpoint()
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
         predicates = [
             "versions.series_id = :series_id",
@@ -2876,32 +2888,54 @@ class PostgresMarketDataRepository:
             else "versions.observation_key, versions.revision"
         )
         state_predicate = "" if include_invalidated or causal_at_interval_close else "WHERE visible.state = 'active'"
-        rows = session.execute(
-            text(
-                f"""
-                WITH visible AS (
-                    {select_prefix}
-                           {CANONICAL_ROW_COLUMNS}
-                    {CANONICAL_RANGE_ROW_FROM}
-                    WHERE {' AND '.join(predicates)}
-                    ORDER BY {revision_order}
-                )
-                SELECT visible.*
-                FROM visible
-                {state_predicate}
-                ORDER BY visible.observation_time,
-                         visible.observation_key, visible.revision
-                """
-            ),
-            params,
-        ).mappings().all()
-        hydrated = canonical_fact_storage_repository.hydrate_rows(session, rows)
+        with measure_execution_stage("selection"):
+            result = session.execute(
+                text(
+                    f"""
+                    WITH visible AS (
+                        {select_prefix}
+                               {CANONICAL_ROW_COLUMNS}
+                        {CANONICAL_RANGE_ROW_FROM}
+                        WHERE {' AND '.join(predicates)}
+                        ORDER BY {revision_order}
+                    )
+                    SELECT visible.*
+                    FROM visible
+                    {state_predicate}
+                    ORDER BY visible.observation_time,
+                             visible.observation_key, visible.revision
+                    """
+                ).execution_options(yield_per=batch_rows),
+                params,
+            ).mappings()
+        control = current_execution_control()
+        eligible = []
+        try:
+            if control is not None:
+                control.register(result, owned_connection_cancel(session.connection()))
+            pages = iter(result.partitions(batch_rows))
+            while True:
+                with measure_execution_stage("selection"):
+                    rows = next(pages, None)
+                if rows is None:
+                    break
+                execution_checkpoint()
+                hydrated = canonical_fact_storage_repository.hydrate_rows(session, list(rows))
+                if not causal_at_interval_close:
+                    yield from hydrated
+                else:
+                    eligible.extend(hydrated)
+        finally:
+            if control is not None:
+                control.unregister(result)
+            result.close()
         if not causal_at_interval_close:
-            return hydrated
+            return
         # Close-time filtering must precede latest-revision selection. A newer
         # noncausal correction cannot hide an older causal candle after cooling.
-        eligible = []
+        hydrated, eligible = eligible, []
         for row in hydrated:
+            execution_checkpoint()
             try:
                 close_time = datetime.fromisoformat(str(row["payload"]["close_time"]).replace("Z", "+00:00"))
                 if close_time.tzinfo is None:
@@ -2919,7 +2953,7 @@ class PostgresMarketDataRepository:
             eligible = list(latest.values())
         if not include_invalidated:
             eligible = [row for row in eligible if row["state"] == "active"]
-        return sorted(eligible, key=lambda row: (row["observation_time"], row["observation_key"], row["revision"]))
+        yield from sorted(eligible, key=lambda row: (row["observation_time"], row["observation_key"], row["revision"]))
 
     def read_facts(
         self,
@@ -3780,6 +3814,14 @@ class PostgresMarketDataRepository:
                     raise RuntimeError(
                         f"market_dataset_unsupported_fact: series_id={item.series_id} fact_type={fact_type}"
                     )
+                # Ingestion serializes sequence allocation/commit per series.
+                # A global MAX alone can admit an earlier allocated, still
+                # uncommitted row after a different series commits a larger seq.
+                # Pin this series' visible high-water mark in the same snapshot.
+                series_watermark = int(session.execute(text(
+                    "SELECT COALESCE(MAX(market_commit_seq), 0) "
+                    "FROM market.fact_versions WHERE series_id=:series_id"
+                ), {"series_id": item.series_id}).scalar_one())
                 if fact_type in {
                     CANDLE_FACT_TYPE,
                     OPEN_INTEREST_FACT_TYPE,
@@ -3793,7 +3835,7 @@ class PostgresMarketDataRepository:
                         series_id=item.series_id,
                         start=item.start,
                         end=item.end,
-                        as_of_commit_seq=watermark,
+                        as_of_commit_seq=series_watermark,
                         known_at_lte=None,
                         latest_only=not preserve_revisions,
                         include_invalidated=preserve_revisions,
@@ -3814,7 +3856,7 @@ class PostgresMarketDataRepository:
                         series_id=item.series_id,
                         start=item.start,
                         end=item.end,
-                        as_of_commit_seq=watermark,
+                        as_of_commit_seq=series_watermark,
                         known_at_lte=None,
                         latest_only=False,
                         include_invalidated=True,
@@ -3827,7 +3869,7 @@ class PostgresMarketDataRepository:
                         series_id=item.series_id,
                         start=item.start,
                         end=item.end,
-                        as_of_commit_seq=watermark,
+                        as_of_commit_seq=series_watermark,
                         known_at_lte=None,
                     )
                 if not records:
@@ -4113,7 +4155,7 @@ class PostgresMarketDataRepository:
                         "series_id": item.series_id,
                         "range_start": _iso(item.start),
                         "range_end": _iso(item.end),
-                        "max_commit_seq": watermark,
+                        "max_commit_seq": series_watermark,
                         "row_count": len(records),
                         "material_hash": _build_material_hash(
                             fact_type=fact_type,
@@ -4130,6 +4172,7 @@ class PostgresMarketDataRepository:
                             else build_provenance_hash(records)
                         ),
                         "source_summary": {
+                            "commit_selection": "per_series_committed.v1",
                             "counts": dict(sorted(source_counts.items())),
                             "sources": {key: source_details[key] for key in sorted(source_details)},
                             **(

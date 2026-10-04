@@ -266,7 +266,7 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
         restore_files = root / "restored-archives"
         run([*rs, "restore", incremental["archive_snapshot"], "--target", restore_files],
             name="archive_restore_seconds")
-        recovered_objects = restore_files / "objects" 
+        recovered_objects = restore_files / "objects"
         for row in sql("SELECT name||':'||sha256 FROM archive_refs ORDER BY name",
                        target_socket=restore_socket).splitlines():
             name, expected_hash = row.split(":")

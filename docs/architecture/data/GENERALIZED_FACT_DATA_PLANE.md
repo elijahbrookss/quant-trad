@@ -65,6 +65,29 @@ code_paths:
 ---
 # Generalized Fact Data Plane
 
+## Frozen commit visibility
+
+New freezes pin each series' visible committed high-water mark inside the existing
+repeatable snapshot. The Dataset-wide sequence remains an upper bound and
+informational clock, not the individual series selection boundary. Canonical
+ingestion already holds the per-series transaction lock before allocating Fact
+sequences; later commits on that series therefore cannot appear below its frozen
+high-water mark. This avoids a global ingestion fence or a per-Fact membership
+table. Direct SQL that bypasses canonical ingestion is not an admitted writer.
+
+The source summary records `commit_selection=per_series_committed.v1`, which
+distinguishes the new frozen identity from older selection guarantees without
+rewriting existing Datasets. Existing frozen manifests and hashes are preserved;
+validation still fails if their actual rows disagree. A new freeze is required
+for stronger selection guarantees. Disposable barrier tests exercise a delayed
+insert and correction while another series commits a larger sequence.
+
+Proposed storage evolution is tracked in [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+and the [bounded migration specification](../../engineering/research-data-evolution-spec.md).
+They require justified historical scope, compatible reads and bounded migration
+interruptions. They preserve the current research architecture and do not describe
+a completed storage cutover.
+
 ## Status
 
 ADR 0063 is accepted and this is the active contract. The schema registry,

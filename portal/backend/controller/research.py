@@ -453,6 +453,14 @@ def get_research_job_result(job_id: str) -> Dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.post("/jobs/{job_id}/cancel")
+def cancel_research_job(job_id: str) -> Dict[str, Any]:
+    try:
+        return research_async_dispatch.cancel_research_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @router.get("/checks/compare")
 def compare_research_checks(left_check_id: str, right_check_id: str) -> Dict[str, Any]:
     try:

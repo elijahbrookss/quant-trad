@@ -7,6 +7,9 @@ from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from core.execution_control import ExecutionBudgetExceededError
+from .service.research.execution_limits import ResearchAdmissionError
 
 from core.settings import get_settings
 from .controller import bots, candles, indicators as ind_controller, instruments, market_data, providers, reports, research, strategies, storage_management
@@ -95,6 +98,16 @@ app = FastAPI(
     version="0.1.0",
     lifespan=_lifespan,
 )
+
+
+@app.exception_handler(ExecutionBudgetExceededError)
+async def research_budget_failure(_request, exc: ExecutionBudgetExceededError):
+    return JSONResponse(status_code=422, content={"detail": str(exc), "retryable": False})
+
+
+@app.exception_handler(ResearchAdmissionError)
+async def research_admission_failure(_request, exc: ResearchAdmissionError):
+    return JSONResponse(status_code=503, content={"detail": str(exc), "retryable": True})
 
 
 # NOTE: Normalizing duplicate "/api/api" prefixes is a frontend/proxy

@@ -212,6 +212,13 @@ def test_canonical_engine_readiness_segments_survive_filter(monkeypatch):
         instrument_id="instrument-1", instrument_snapshot={"id":"instrument-1","symbol":"TEST","datasource":"TEST","exchange":"TEST"},
         candle_frame=frame, capture_output_readiness=True, gap_policy="reset_rewarm", require_recorded_discontinuities=True,
         recorded_gap_evidence=[{"start":clock(40),"end":clock(41),"classification":"provider_missing_data"}])
+    for page_size in (1, 37, 512):
+        streamed = rv.collect_runtime_output_evidence_for_instance("stats-1", clock(-200), clock(2880), "1m",
+            instrument_id="instrument-1", instrument_snapshot={"id":"instrument-1","symbol":"TEST","datasource":"TEST","exchange":"TEST"},
+            candle_frames=(frame.iloc[i:i+page_size] for i in range(0, len(frame), page_size)),
+            capture_output_readiness=True, gap_policy="reset_rewarm", require_recorded_discontinuities=True,
+            recorded_gap_evidence=[{"start":clock(40),"end":clock(41),"classification":"provider_missing_data"}])
+        assert {k:v for k,v in streamed.items() if k != "perf"} == {k:v for k,v in evidence.items() if k != "perf"}
     intervals = evidence["output_readiness"]["intervals"]
     assert len(intervals) == 4
     assert intervals[0]["ready_outputs"] == {"atr_expansion":False,"candle_stats":False}

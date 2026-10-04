@@ -94,3 +94,4 @@ respect.
 | [0066](0066-scale-validation-to-consequence-and-trust-boundaries.md) | Scale validation to consequence and trust boundaries | Accepted |
 | [0074](0074-derive-candles-from-frozen-source-snapshots.md) | Derive coarser candles from explicit frozen source snapshots | Accepted |
 | [0077](0077-retain-legacy-headers-during-forward-cutover.md) | Retain legacy headers during a forward cutover | Draft; implementation and production qualification pending |
+| [0078](0078-evolve-research-within-existing-data-boundaries.md) | Bound migrations and preserve compatible research | Accepted direction; implementation and qualification in progress |

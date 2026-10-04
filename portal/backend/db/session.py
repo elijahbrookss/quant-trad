@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
 from core.settings import get_settings
+from core.execution_control import current_execution_control
 from market_data.fact_registry import (
     build_normalized_fact_payload_schema,
     register_fact_payload_schema,
@@ -34,6 +35,7 @@ from .models import (
     REQUIRED_RESEARCH_AUTHORITY_INDEXES,
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
+from . import execution_control as _execution_control  # noqa: F401 - scoped SQL hooks
 from .fact_storage_schema import (
     FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES, FACT_STORAGE_LAYOUT_VERSION,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
@@ -389,7 +391,14 @@ class Database:
             yield session
             session.commit()
         except Exception:  # noqa: BLE001 - commit/rollback guard
-            session.rollback()
+            control = current_execution_control()
+            if control is not None and control.stop_requested:
+                # A libpq cancel packet can arrive after the owned query returns.
+                # Retire this socket rather than expose a subsequent pool user
+                # to that packet. This also rolls back the interrupted session.
+                session.invalidate()
+            else:
+                session.rollback()
             raise
         finally:
             session.close()

@@ -8,7 +8,9 @@ from typing import Any, Dict, Mapping, Optional
 from portal.backend.service.async_jobs import (
     enqueue_or_reuse_job,
     get_job,
+    request_job_cancellation,
 )
+from .execution_limits import research_execution_limits
 
 
 logger = logging.getLogger(__name__)
@@ -139,8 +141,12 @@ def _job_payload(job: Mapping[str, Any], *, include_result: bool = False) -> dic
         "finished_at": job.get("finished_at"),
         "error": job.get("error"),
         "result_available": status == "succeeded" and isinstance(result, Mapping),
+        "execution_limits": dict((job.get("payload") or {}).get("execution_limits") or {}),
     }
-    if isinstance(result, Mapping):
+    if isinstance(result, Mapping) and result.get("schema_version") == "async_job_cancellation.v1":
+        payload["cancellation"] = dict(result)
+        payload["cancellation"]["last_heartbeat_at"] = job.get("heartbeat_at")
+    elif isinstance(result, Mapping):
         payload["result_summary"] = _result_summary(result)
         if include_result:
             payload["result"] = dict(result)
@@ -167,6 +173,7 @@ def dispatch_research_job(
             "schema_version": "research_async_job_request.v1",
             "request": normalized_request,
             "request_fingerprint": request_fingerprint,
+            "execution_limits": research_execution_limits(),
         },
         partition_key=partition_key,
         request_fingerprint=request_fingerprint,
@@ -236,6 +243,10 @@ def get_research_job_status(job_id: str) -> dict[str, Any]:
     if job is None or str(job.get("job_type") or "") not in RESEARCH_JOB_TYPES:
         raise KeyError(f"research_job_not_found: {job_id}")
     return _job_payload(job)
+
+
+def cancel_research_job(job_id: str) -> dict[str, Any]:
+    return _job_payload(request_job_cancellation(str(job_id), job_types=sorted(RESEARCH_JOB_TYPES)))
 
 
 def get_research_job_result(job_id: str) -> dict[str, Any]:

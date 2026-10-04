@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
+from core.execution_control import execution_checkpoint
 
 from .contracts import DATASET_IDENTITY_HASH_VERSION
 from .fact_registry import get_fact_contract
@@ -78,15 +79,42 @@ def _semantic_json(value: Any, *, field: str) -> Any:
 
 def semantic_hash(payload: Mapping[str, Any]) -> str:
     """Return the stable SHA-256 used by frozen-read and Check evidence contracts."""
+    digest = hashlib.sha256()
+    buffer = bytearray()
+    for chunk in _semantic_json_chunks(payload, field="payload"):
+        buffer.extend(chunk.encode("utf-8"))
+        if len(buffer) >= 65536:
+            execution_checkpoint()
+            digest.update(buffer)
+            buffer.clear()
+    digest.update(buffer)
+    return digest.hexdigest()
 
-    encoded = json.dumps(
-        _semantic_json(payload, field="payload"),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+
+def _semantic_json_chunks(value: Any, *, field: str):
+    """Encode identical canonical JSON without duplicating an entire history."""
+    if isinstance(value, Mapping):
+        # Preserve the existing normalization of string keys, including its
+        # last-value rule for distinct input keys with the same string form.
+        keyed = {str(key): item for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+        yield "{"
+        for index, (key, item) in enumerate(sorted(keyed.items())):
+            if index:
+                yield ","
+            yield json.dumps(key, ensure_ascii=True)
+            yield ":"
+            yield from _semantic_json_chunks(item, field=f"{field}.{key}")
+        yield "}"
+    elif isinstance(value, (list, tuple, Iterator)):
+        yield "["
+        for index, item in enumerate(value):
+            if index:
+                yield ","
+            yield from _semantic_json_chunks(item, field=f"{field}[{index}]")
+        yield "]"
+    else:
+        yield json.dumps(_semantic_json(value, field=field), ensure_ascii=True, allow_nan=False,
+                         sort_keys=True, separators=(",", ":"))
 
 
 def frozen_subject_snapshot_hash(snapshot: Mapping[str, Any]) -> str:

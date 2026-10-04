@@ -2,9 +2,14 @@ name: Tests with Coverage
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, 'feature/**', 'hotfix/**']
   pull_request:
     branches: [develop, main]
+
+# Keep the final integrated work-branch run; preserve develop/main run behavior.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/') }}
 
 jobs:
   pr-suite:

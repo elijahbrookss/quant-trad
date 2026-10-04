@@ -143,8 +143,13 @@ def test_claim_heartbeat_preserves_handler_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attempted = threading.Event()
+    calls = 0
 
     def reject_heartbeat(job: ClaimedJob) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return  # Admission proves ownership before starting the handler.
         attempted.set()
         raise AsyncJobOwnershipError(f"stale: {job.id}")
 

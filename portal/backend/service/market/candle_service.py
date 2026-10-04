@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterator, Mapping, Optional
 import pandas as pd
 
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
+from core.execution_control import execution_checkpoint
 from data_providers.utils.ohlcv import compute_tr_atr, interval_to_timedelta
 from indicators.config import DataContext
 from market_data.backtest import normalize_backtest_dataset_binding
@@ -158,6 +159,31 @@ def fetch_ohlcv(
         )
         instrument_id = str(instrument["id"])
     return fetch_ohlcv_by_instrument(instrument_id, start, end, interval)
+
+
+def iter_ohlcv_by_instrument(
+    instrument_id: str, start: str, end: str, interval: str, *,
+    frozen_alias: str | None = None, batch_bars: int = 2048,
+) -> Iterator[pd.DataFrame]:
+    """Read bounded candle windows; the caller owns one continuous engine.
+
+    Rolling runtime features must be computed by that engine, never independently
+    per page. Sparse intervals stay sparse and page boundaries invent no bars.
+    """
+    if type(batch_bars) is not int or not 1 <= batch_bars <= 4096:
+        raise ValueError("candle_read_batch_invalid: expected 1..4096 bars")
+    lower, upper = pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)
+    if upper <= lower:
+        raise ValueError("candle_read_range_invalid: end must follow start")
+    width = interval_to_timedelta(interval) * batch_bars
+    while lower < upper:
+        execution_checkpoint()
+        stop = min(lower + width, upper)
+        yield fetch_ohlcv_by_instrument(
+            instrument_id, lower.isoformat(), stop.isoformat(), interval,
+            frozen_alias=frozen_alias, include_runtime_features=False,
+        )
+        lower = stop
 
 
 def fetch_ohlcv_by_instrument(

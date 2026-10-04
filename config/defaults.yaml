@@ -58,6 +58,12 @@ observability:
   capacity_sample_retention_days: 30
 
 async_jobs:
+  # Execution safety ceilings, not measured production performance targets.
+  research_execution_seconds: 3600
+  research_input_rows: 5000000
+  research_input_bytes: 2147483648
+  research_evidence_bytes: 268435456
+  research_result_bytes: 16777216
   running_timeout_seconds: 1800
   quantlab_job_wait_timeout_seconds: 180
   quantlab_job_poll_interval_seconds: 0.2

@@ -13,9 +13,12 @@ tags:
 code_paths:
   - portal/backend/controller/research.py
   - portal/backend/service/research/async_dispatch.py
+  - portal/backend/service/research/execution_limits.py
   - portal/backend/workers/research_worker.py
   - portal/backend/service/async_jobs
   - portal/backend/db/models.py
+  - portal/backend/db/execution_control.py
+  - src/core/execution_control.py
   - scripts/db/manual_migration_async_job_fencing_v1.sql
   - portal/backend/run_backend.py
   - src/core/settings.py
@@ -78,14 +81,95 @@ conflicting row becomes terminal between the atomic insert and reuse lookup.
 
 Retries restart from the immutable request and remain bounded by
 `max_attempts`; timeout reclaim terminally fails a claim that has exhausted
-that budget. Partial-progress checkpoints and mid-job cancellation are not
-supported; operators must not infer them from retry status.
+that budget. Partial-progress resume is not supported; retries execute the pinned
+request again.
+
+Individual cancellation uses the existing row's result field for an explicit
+`async_job_cancellation.v1` control receipt while work is in flight. It never
+mutates the immutable request. Queued/retry rows become `cancelled` immediately;
+running rows remain `running` with their claim and deduplication identity until
+the owner has unwound computation and I/O. Public status separates the request
+from `execution_stopped`; control receipts are never presented as Check results.
+The same row lock orders cancellation against atomic result publication. A
+completed result wins if its transaction acquired and committed the lock first.
+
+Research heartbeats poll once per second, check cancellation/shutdown, and interrupt
+only the current execution's psycopg2 statement. Engine steps and evaluator loops
+check the execution-local stop signal. This is cooperative: a native computation
+must return to a checkpoint; one second is the polling interval, not a universal
+stop-latency guarantee. SQL interruption is bound to the owning connection until
+its statement releases, preventing a cancellation from following pooled reuse.
+Worker shutdown unwinds execution and uses the existing bounded retry policy;
+an explicit cancellation never retries or publishes partial evidence.
+
+Stale cancellation requests are not automatically reclaimed: an expired heartbeat
+does not establish that the old CPU/DB work stopped. Their retained in-flight
+identity exposes uncertainty and blocks duplicate resubmission until the owner can
+acknowledge. Recovery of a dead owner requires separate proof of stopped execution;
+there is no unsafe automatic acknowledgement or lease-based capacity credit.
+Deploy the cancellation API and worker together after draining older workers.
+No table migration is needed, but rolling mixed-worker cancellation is unsupported.
 
 Existing databases use
 `scripts/db/manual_migration_async_job_fencing_v1.sql` while all backend and
 worker processes are stopped. The migration refuses concurrent client
 sessions, requeues old running claims only on first installation, and is safe
 to apply repeatedly.
+
+## Execution admission and limits
+
+`async_jobs.research_*` settings declare the total execution clock, cumulative
+input row visits and logical UTF-8 input bytes, retained Indicator evidence bytes,
+and result-envelope bytes. Defaults are safety ceilings, not measured production
+capacity: 3,600 seconds; 5,000,000 row visits; 2 GiB input; 256 MiB evidence;
+16 MiB result. Count repeated reads and processing rather than silently resetting
+the budget at each phase. These are logical work limits, not a hard process-RSS
+limit or a promise that every year-scale Check fits. Native evaluator arrays,
+bounded archive decoding and Python object overhead still require workload and
+collector-impact qualification before increasing admitted concurrency or limits.
+
+Dispatch pins these limits outside the immutable scientific request. Workers
+honor the tighter of the pinned and current deployment limits. Old queued jobs
+without a limit receipt use current limits. Synchronous requirements, preparation,
+preview, replay and sweep use the same service boundary; nested operations share
+one clock and counters. Input is checked while pages are hydrated; retained
+evidence is checked before append and result envelopes before publication.
+SQL timeout never exceeds either the remaining execution budget or an already
+stricter statement timeout. Budget exhaustion fails explicitly without automatic
+job retry. Preparation may retain valid facts or a completed frozen Dataset from
+an earlier admitted step; it never deletes them because a later limit fails.
+
+Synchronous capacity per API process is capped at `workers.research.processes`,
+separately from the supervisor's worker pool. With one API process and the default
+two workers, up to four research executions can compete. This is a declared
+deployment bound, not a distributed resource scheduler. Scaling API processes or
+changing worker counts requires fresh combined-resource admission. Busy synchronous
+requests fail with HTTP 503; exhausted budgets return HTTP 422. Cancellation and
+status remain available while that capacity is occupied.
+
+Successful queued results expose `research_execution_metrics.v1` outside the
+scientific result: cumulative row visits, logical JSON bytes and stage seconds
+for selection (including cursor fetch), hydration, decoding, engine, evaluation
+and persistence. Stage timers can nest and must not be summed as exclusive wall
+time. Persistence excludes the final commit round trip. Logical bytes are not
+physical disk/archive reads, WAL, Python heap size or peak RSS; qualification
+must measure those separately. Frozen manifest validation and evaluators can
+still materialize their admitted history, so this is not constant-memory research.
+
+Interrupted database sessions discard their connection before pool reuse, so a
+late cancellation packet cannot interrupt the next borrower.
+
+Synchronous evidence computation and publication share one admission slot and
+deadline. Check and links use one transaction. Cancellation/deadline checks run
+before commit; an acknowledged successful commit remains successful if time
+expires on return. An uncertain commit requires reading durable state before
+retrying. A dead owner with requested cancellation remains unresolved until an
+operator proves its process and database statements have stopped; stale time
+alone cannot release it. No automated dead-process recovery is added here. If heartbeat/interrupt-thread
+shutdown is uncertain, the worker records a cancellation request where possible
+and parks until operator shutdown. It neither acknowledges stopped execution nor
+claims more work; it does not exit and trigger the shared supervisor's other-child
+termination policy.
 
 ## CLI Boundary
 
@@ -95,6 +179,7 @@ work that should be queued:
 ```bash
 qt research check sweep ... --dispatch
 qt research jobs status <job_id>
+qt research jobs cancel <job_id>
 qt research jobs result <job_id> --format table
 ```
 
