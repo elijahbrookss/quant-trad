@@ -26,6 +26,7 @@ parser.add_argument('--forward-package-image',help='qualify separate interrupted
 parser.add_argument('--forward-keys',action='store_true',help='qualify explicit key-only host preparation and interrupted confined worker recovery before publication')
 parser.add_argument('--forward-worker',action='store_true',help='qualify interrupted durable forward launch, actual confined worker and host observation')
 parser.add_argument('--forward-retirement',action='store_true',help='qualify canonical stopped-forward-worker retirement and lost COMMIT reconciliation')
+parser.add_argument('--forward-retirement-recovery',action='store_true',help='qualify explicit recovery after a conflicting writer refuses ordinary retirement')
 parser.add_argument('--forward-operation',action='store_true',help='qualify canonical forward background dispatch and injected pre-stop failure retirement')
 parser.add_argument('--forward-final',choices=('commit','rollback'),help='qualify real forward final owners with synthetic guarded source peers')
 parser.add_argument('--terminal-image',help='use an independently attested production image for the fixed terminal worker')
@@ -57,6 +58,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.forward_retirement_recovery and not options.forward_retirement:
+ parser.error('--forward-retirement-recovery requires --forward-retirement')
 if options.forward_keys and not options.forward_worker:
  parser.error('--forward-keys requires --forward-worker for separate subsequent adoption reuse')
 if options.forward_final and (not options.forward_worker or not options.guarded_source_image or options.forward_operation or options.forward_retirement):
@@ -584,7 +587,7 @@ os.chown(root,70,70)
    if options.forward_package_image:
     from scripts.ci.online_operation_fixture import rehearse_forward_package
     report['forward_package']=rehearse_forward_package(state=state,kwargs=kwargs,
-      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement,operation_route=options.forward_operation,final_mode=options.forward_final,prepare_keys=options.forward_keys)
+      candidate_image=options.forward_package_image,source=source,launch_worker=options.forward_worker,retire_worker=options.forward_retirement,operation_route=options.forward_operation,final_mode=options.forward_final,prepare_keys=options.forward_keys,retirement_recovery=options.forward_retirement_recovery)
    (control/'finished').write_text('finished');fixture.wait(timeout=30)
    assert fixture.returncode==0,(state/'fixture.log').read_text()[-2500:]
    assert (control/'terminal-verified').exists()

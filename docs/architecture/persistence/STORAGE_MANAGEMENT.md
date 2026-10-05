@@ -3750,6 +3750,29 @@ exact placement identity and independently requires PostgreSQL's own PGDATA
 and history directory to remain writable; worker mounts never gain write access.
 
 
+### Explicit recovery after a failed forward retirement
+
+A source writer can make the ordinary nonwaiting retirement refuse before any
+change. A stopped probe and an absent terminal receipt do not make automatic
+redispatch safe. The original dispatched journal remains immutable.
+
+The same `--cancel-attempt-file` surface accepts a separately reviewed
+`qt.storage_online_terminal_recovery.v1` package with the five existing terminal
+fields plus `previous_terminal_sha256`, the exact SHA-256 of that dispatched
+forward terminal journal. This creates one separate recovery journal and probe.
+It requires the same plan, source fleet, worker, capture and preimage, proves
+retirement of the original probe, and reconciles the live SQL state first. A
+completed predecessor or already-retired adoption cannot dispatch recovery.
+
+Only this explicit recovery queues an ACCESS EXCLUSIVE lock on the four owned
+source/target relations before calling the existing preserving retirement owner.
+The lock wait is at most 20 seconds inside the existing 30-second SQL and new
+300-second terminal bounds. Reads/writes may briefly queue; no client is stopped
+and no competing query is canceled. Timeout rolls back; an uncertain reply permits
+only reconciliation, never another dispatch. Original adoption clocks, plans,
+failed journals, every retained row and indexes remain intact. This does not
+resume preparation, grant a cutover, or qualify HDD throughput.
+
 ### Canonical forward operation and UTC cutover window
 
 `qt storage migrate --operation-file <forward-plan> --execute` derives the
