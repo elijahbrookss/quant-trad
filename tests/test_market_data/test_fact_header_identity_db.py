@@ -16,6 +16,58 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage, _ingest, 
 pytestmark = pytest.mark.db
 
 
+def test_installed_identity_validation_uses_keyed_lookup(storage):
+    """Exercise the installed guard's query against a nontrivial identity index.
+
+    A row-wise IS NOT DISTINCT FROM comparison alone is not an index condition
+    in PostgreSQL 15. Tiny integrity fixtures hide its full-scan cost per insert.
+    The temporary relation has the real identity shape/indexes without weakening
+    the real table's deferred header guard to manufacture unrelated identities.
+    """
+    with storage.database.session() as session:
+        body = session.execute(text(
+            "SELECT prosrc FROM pg_proc WHERE oid='market.register_fact_identity()'::regprocedure"
+        )).scalar_one()
+        query = body.split("IF NOT EXISTS (", 1)[1].split(") THEN", 1)[0]
+        query = query.replace("market.fact_identities", "pg_temp.identity_lookup_fixture")
+        for column in ("id", "storage_day", "series_id", "observation_key", "revision"):
+            query = query.replace("NEW." + column, ":" + column)
+        session.execute(text(
+            "CREATE TEMP TABLE identity_lookup_fixture "
+            "(LIKE market.fact_identities INCLUDING ALL) ON COMMIT DROP"
+        ))
+        session.execute(text(
+            "INSERT INTO identity_lookup_fixture "
+            "(id,storage_day,series_id,observation_key,revision) "
+            "SELECT 'identity-'||n,:day,1,'observation-'||n,1 "
+            "FROM generate_series(1,8192) n"
+        ), {"day": storage.today})
+        session.execute(text("ANALYZE identity_lookup_fixture"))
+        values = dict(id="identity-8192", storage_day=storage.today, series_id=1,
+                      observation_key="observation-8192", revision=1)
+
+        def nodes(plan):
+            yield plan
+            for child in plan.get("Plans", []):
+                yield from nodes(child)
+
+        for fact_id, expected in (("identity-8192", True), ("absent-identity", False)):
+            values["id"] = fact_id
+            statement = "SELECT EXISTS (" + query + ")"
+            assert session.execute(text(statement), values).scalar_one() is expected
+            plan = session.execute(text(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement
+            ), values).scalar_one()[0]["Plan"]
+            lookups = [node for node in nodes(plan)
+                       if node.get("Relation Name") == "identity_lookup_fixture"]
+            assert len(lookups) == 1
+            assert lookups[0]["Node Type"] in {"Index Scan", "Index Only Scan"}
+            assert "id" in lookups[0]["Index Cond"]
+        values["id"] = "identity-8192"
+        values["observation_key"] = "different-observation"
+        assert session.execute(text("SELECT EXISTS (" + query + ")"), values).scalar_one() is False
+
+
 def _duplicate_header(session, day, *, same_id):
     columns = [column.name for column in MarketFactVersionRecord.__table__.columns]
     expressions = [

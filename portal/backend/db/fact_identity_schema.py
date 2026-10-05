@@ -26,7 +26,8 @@ BEGIN
     ON CONFLICT (id) DO NOTHING;
     IF NOT EXISTS (
         SELECT 1 FROM market.fact_identities AS identity
-        WHERE (identity.id, identity.storage_day, identity.series_id,
+        WHERE identity.id = NEW.id
+          AND (identity.id, identity.storage_day, identity.series_id,
                identity.observation_key, identity.revision)
               IS NOT DISTINCT FROM
               (NEW.id, NEW.storage_day, NEW.series_id, NEW.observation_key, NEW.revision)
