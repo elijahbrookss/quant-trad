@@ -419,6 +419,13 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         end_day=(datetime.now(timezone.utc).date()+timedelta(days=0 if operation_route or final_mode else 1)).isoformat())
     package=state/"forward-package.json";host_boundary.save_receipt(package,manifest,initial=True)
     recipe=dict(name=kwargs["project"],services={name:dict(image=kwargs["image"]) for name in runtime._APPLICATIONS})
+    # The synthetic peer still carries the real backend identity fields. The
+    # legacy publisher retains these labels; its successor must replace them.
+    recipe["services"]["backend"]["environment"] = dict(
+        SOURCE_REVISION=kwargs["request"]["source_revision"],
+        SOURCE_TREE_HASH=kwargs["request"]["source_tree_hash"],
+        QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+kwargs["request"]["source_revision"],
+        FIXTURE_PRESERVED="unchanged")
     recipe["services"]["tsdb"]=dict(image="unchanged-disposable-database")
     host_boundary.save_receipt(state/runtime.RUNTIME_RECIPE,recipe,initial=True)
     actual_preflight,actual_replace=operation.inspect_prepared_operation,publication._replace
@@ -808,6 +815,12 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
         host_boundary.save_receipt(successor_file, successor_package, initial=True)
         assert not operation.run_operation_plan(plan_path, forward_package_file=successor_file)["storage_mutations_performed"]
         operation.run_operation_plan(plan_path, forward_package_file=successor_file, execute=True)
+        published_runtime = host_boundary.load_receipt(state/forward.runtime.RUNTIME_RECIPE)
+        assert published_runtime["services"]["backend"]["environment"] == dict(
+            SOURCE_REVISION=successor_package["source_revision"],
+            SOURCE_TREE_HASH=successor_package["source_tree_hash"],
+            QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+successor_package["source_revision"],
+            FIXTURE_PRESERVED="unchanged")
         successor_path = Path(successor_package["forward_plan_path"])
         prepared = operation.run_operation_plan(successor_path, prepare_forward_only=True, execute=True)
         assert prepared["phase"] == "forward_background_prepared" and prepared["adoption_active"]
