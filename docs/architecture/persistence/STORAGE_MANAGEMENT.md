@@ -3843,7 +3843,10 @@ resume preparation, grant a cutover, or qualify HDD throughput.
 `qt storage migrate --operation-file <forward-plan> --execute` derives the
 forward request only from the verified completed publication and its separate
 operation path. It retains the immutable base plan for reread comparison and
-checks the original retired worker. Legacy terminal admission is unchanged.
+checks the original retired worker. Retirement admission selects the explicit
+operation journal: a completed predecessor remains preserved while a successor
+can proceed; any retirement journal for that successor still prevents normal
+dispatch. Legacy terminal admission is unchanged.
 The command reuses the durable launcher, observed key/initialization/adoption
 clocks, explicit forward background phases and both prepared-runtime preflights.
 It never invokes the canceled capture or renews its initial receipt.

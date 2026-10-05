@@ -9,7 +9,8 @@ from scripts.automation import storage_online_terminal as terminal
 from scripts.automation import storage_online_deadline as publication
 from scripts.automation import storage_online_launch as launch
 from scripts.automation import storage_host_boundary as host
-from tests.test_storage_online_deadline import attempt, package_attempt, write
+from tests.test_storage_online_deadline import attempt as base_attempt, package_attempt, write
+from tests.test_storage_forward_operation import attempt
 from tests.test_storage_online_forward import prepared
 from tests.test_storage_forward_launch import owned, _rows, _advance
 from tests.test_storage_forward_retirement import retiring
@@ -304,3 +305,38 @@ def test_lookup_publication_requires_completed_host_owner_and_retired_worker(loo
         a.require_lookups_finished(a.root, a.successor_manifest)
     else:
         with pytest.raises(RuntimeError): a.require_lookups_finished(a.root, a.successor_manifest)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+@pytest.mark.parametrize("prepare_only", [False, True])
+@pytest.mark.parametrize("retirement", [None, "dispatched", "complete"])
+def test_successor_dispatch_selects_own_retirement(successor, monkeypatch, execute, prepare_only, retirement):
+    from scripts.automation import storage_online_operation as operation
+    a = successor
+    a.publish_successor()
+    selected = forward.inspect_published_operation(a.root)
+    request = selected["new_request"]
+    path = Path(a.successor_manifest["forward_plan_path"])
+    if retirement is not None:
+        write(a.root/forward.operation_file(terminal.FORWARD_STATE, request=request), {"phase":retirement})
+    # Freeze only this dispatch's UTC admission; publication/retirement evidence
+    # remains real private files validated by the normal entry point.
+    monkeypatch.setattr(operation, "_forward_cutover_day", lambda *args,**kwargs:None)
+    calls = []
+    def dispatch(*args, **kwargs):
+        calls.append(kwargs)
+        return {"adoption_active":True}
+    monkeypatch.setattr(operation, "run_prepared_operation_locked", dispatch)
+    if retirement is not None:
+        with pytest.raises(RuntimeError, match="retirement_requires_reconciliation"):
+            operation.run_operation_plan(path, execute=execute, prepare_forward_only=prepare_only)
+        assert not calls
+    else:
+        result = operation.run_operation_plan(path, execute=execute, prepare_forward_only=prepare_only)
+        assert result["phase"] == (("forward_background_prepared" if prepare_only else "runtime_ready")
+                                   if execute else "forward_inspected")
+        assert len(calls) == int(execute)
+        if execute:
+            assert calls[0]["request"] == request
+            assert calls[0].get("prepare_forward_only", False) is prepare_only
+    assert all(p.read_bytes() == data for p,data in a.protected.items())

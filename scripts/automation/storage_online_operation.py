@@ -638,7 +638,8 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
             return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
         if published is not None:
             from scripts.automation import storage_online_terminal as terminal_owner
-            if os.path.lexists(state_root/terminal_owner.FORWARD_STATE):
+            if os.path.lexists(state_root/forward_owner.operation_file(
+                    terminal_owner.FORWARD_STATE, request=effective_request)):
                 raise RuntimeError("storage_forward_operation_retirement_requires_reconciliation")
             _retired(published["old_worker"])
             _forward_cutover_day(published["forward"], final_seconds=limits.final_seconds)
