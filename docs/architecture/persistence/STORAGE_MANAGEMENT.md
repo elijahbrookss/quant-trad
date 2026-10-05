@@ -576,6 +576,12 @@ It preserves global identity while allowing detail partitions to move later.
 It does not enable Apply or prove physical tiering, and cannot yet be deployed
 over an existing v1 layout.
 
+The identity-registration guard uses an explicit Fact-ID equality lookup before
+checking the full immutable projection. A row-wise null-safe comparison alone
+can scan the whole registry on each insertion; moving its indexes to SSD does
+not repair that query shape. The [layout notes](../../engineering/fact-header-layout-v2.md)
+describe the installed-function plan regression and explicit upgrade requirement.
+
 ## Durable header intent and reservations
 
 The internal header journal saves one immutable batch per reviewed storage plan,

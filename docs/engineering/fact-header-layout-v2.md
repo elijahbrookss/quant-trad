@@ -31,6 +31,15 @@ tablespace allocator or mover: newly created tables still use the database's
 default tablespace. Successful clean-schema tests therefore prove integrity,
 not HDD placement or performance.
 
+Identity registration validates the complete immutable projection after an
+explicit equality lookup by Fact ID. The null-safe row comparison alone plans
+a sequential scan in PostgreSQL 15, so it must not be the lookup predicate.
+A disposable execution-plan regression reads the installed guard body and
+checks indexed present/missing-ID lookups and mismatched-field rejection.
+This changes no identity, correction or frozen-input semantics and needs no
+historical backfill. Existing v2 installations still require an explicit guard
+upgrade before this runtime is admitted; startup never rewrites an old body.
+
 The historical full-row-to-tiered offline helper remains explicit and
 writers-stopped. In this branch it builds the current v2 clean target, retaining
 the original full-row source and comparing every copied field. It cannot
