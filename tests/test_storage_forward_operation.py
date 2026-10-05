@@ -158,10 +158,24 @@ def test_stop_refuses_early_boundary_and_final_wait_cannot_renew_expired_pause(u
     assert not a.sleeps
 
 
+@pytest.mark.parametrize("delay", [0, 1, 569])
+def test_late_stop_refuses_but_an_existing_pause_can_finish_drain(utc_clock, monkeypatch, delay):
+    a = utc_clock
+    a.clock[0] = a.boundary+delay
+    with pytest.raises(RuntimeError, match="stop_window_missed"):
+        operation._admit_forward_stop(a.intent, final_seconds=600)
+    checks = []
+    monkeypatch.setattr(operation.final, "_remaining", lambda saved: checks.append(saved) or 1.)
+    paused = dict(duration_seconds=600, deadline=a.boundary+570)
+    operation._enter_forward_day(a.intent, paused)
+    assert checks == [paused] and not a.sleeps
+
+
 @pytest.fixture
 def prepared_driver(prepared, monkeypatch):
     from contextlib import contextmanager
     a = prepared
+    actual_stop_admission = operation._admit_forward_stop
     a.run()
     publication = forward.inspect_published_operation(a.root)
     plan = publication["new_plan"]
@@ -197,7 +211,8 @@ def prepared_driver(prepared, monkeypatch):
     monkeypatch.setattr(operation.final, "stop_online_source_locked", refuse)
     arguments={k:plan[k] for k in ("project", "source_revision", "source_image", "image", "inventory_path",
         "descriptor_limit", "memory_bytes", "keys_root", "socket_volume", "spool_destination")}
-    return SimpleNamespace(attempt=a, plan=plan, request=request, arguments=arguments, events=events)
+    return SimpleNamespace(attempt=a, plan=plan, request=request, arguments=arguments, events=events,
+                           actual_stop_admission=actual_stop_admission)
 
 
 def test_prepared_forward_driver_rechecks_publication_before_source_stop(prepared_driver):
@@ -207,6 +222,18 @@ def test_prepared_forward_driver_rechecks_publication_before_source_stop(prepare
             limits=operation.OperationLimits(**d.plan["limits"]))
     assert d.events == ["publication", "preflight", "launch", "background", "serving_wait", "preflight",
         "publication", "stop_admission", "stop", "retired"]
+
+
+def test_prepared_forward_driver_missed_midnight_retires_without_source_stop(prepared_driver, monkeypatch):
+    d = prepared_driver
+    boundary = datetime.fromisoformat(d.request["forward"]["end_day"]).replace(tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(operation.time, "time", lambda: boundary+1)
+    monkeypatch.setattr(operation, "_admit_forward_stop", d.actual_stop_admission)
+    with pytest.raises(RuntimeError, match="stop_window_missed"):
+        operation.run_prepared_operation_locked(d.attempt.root, **d.arguments, request=d.request,
+            limits=operation.OperationLimits(**d.plan["limits"]))
+    assert d.events == ["publication", "preflight", "launch", "background", "serving_wait", "preflight",
+                       "publication", "retired"]
 
 
 @pytest.mark.parametrize("fault", [None, "background", "preflight", "close", "retirement", "expired"])

@@ -289,14 +289,21 @@ def _await_forward_boundary(exchange, *, intent, worker, deadline, capture_deadl
 
 def _admit_forward_stop(intent, *, final_seconds):
     boundary = _forward_cutover_day(intent, final_seconds=final_seconds)
-    if boundary-time.time() > min(30, final_seconds/2):
+    now = time.time()
+    if now >= boundary:
+        raise RuntimeError("storage_forward_cutover_stop_window_missed")
+    if boundary-now > min(30, final_seconds/2):
         raise RuntimeError("storage_forward_cutover_stop_too_early")
     return boundary
 
 
 def _enter_forward_day(intent, paused):
     """At most 30 seconds to UTC rollover, charged to the SAME final receipt."""
-    boundary = _admit_forward_stop(intent, final_seconds=paused["duration_seconds"])
+    # Writers are already held. Drain may cross midnight under this original
+    # pause, unlike a new stop request arriving after the selected boundary.
+    boundary = _forward_cutover_day(intent, final_seconds=paused["duration_seconds"])
+    if boundary-time.time() > min(30, paused["duration_seconds"]/2):
+        raise RuntimeError("storage_forward_cutover_stop_too_early")
     while time.time() < boundary:
         remaining = final._remaining(paused)
         time.sleep(min(0.1, boundary-time.time(), remaining))

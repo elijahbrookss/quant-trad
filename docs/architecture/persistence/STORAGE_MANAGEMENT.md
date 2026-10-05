@@ -3817,12 +3817,17 @@ archive file proof. It does not renew the deadline or change the already-bound
 UTC day. If the operation cannot continue, its existing preserving terminal
 owner must retire capture explicitly. There is no automatic cancellation,
 relaunch or cleanup on return, and elapsed time is not cutover approval.
+Normal execution refuses a new source stop at or after the selected midnight;
+an already admitted pause may finish draining across midnight under its original
+deadline. Missing the window cannot be repaired by stopping collection late.
 
 The disposable forward-operation rehearsal exercises this preparation-only
 return, verifies actual worker retirement and continued source serving, then
 reenters the normal operation under the unchanged launch/SQL clocks and refuses
 immediately before source stop. This covers the new boundary, not production
-preparation throughput or final-pause duration. The implementation remains
+preparation throughput, actual UTC rollover or final-pause duration. The fixture
+substitutes only stop-window admission; unit tests exercise early/late requests
+and a held pause crossing midnight. The implementation remains
 subject to exact release qualification and production admission.
 
 ### Measure forward keys before selecting a cutover

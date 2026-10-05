@@ -558,6 +558,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         elif operation_route:
             assert retire_worker, "canonical operation fixture requires preserving failure retirement"
             actual_stop = final.stop_online_source_locked
+            actual_stop_admission = operation._admit_forward_stop
             operation_preflights = []
             def operation_preflight(state_root, **options):
                 launch.inspect_candidate_image(options["image"], options["request"])
@@ -587,6 +588,10 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
                 raise RuntimeError("fixture refusal before forward source stop")
             operation.inspect_prepared_operation = operation_preflight
             final.stop_online_source_locked = refuse_before_stop
+            # This old-day disposable fixture covers worker lifecycle/reentry,
+            # not a real midnight. Unit tests own early/late stop admission;
+            # preserve the real clock for all launch and SQL expiry checks.
+            operation._admit_forward_stop = lambda intent, **options: operation._forward_cutover_day(intent, **options)
             try:
                 forward_path = Path(manifest["forward_plan_path"])
                 inspected = operation.run_operation_plan(forward_path, prepare_forward_only=True)
@@ -613,6 +618,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             finally:
                 operation.inspect_prepared_operation = actual_preflight
                 final.stop_online_source_locked = actual_stop
+                operation._admit_forward_stop = actual_stop_admission
             assert launched.get("canonical_normal_dispatch") and not (state/final.STATE).exists()
             resumed_launch = forward.load_launch(state)
             assert resumed_launch == prepared_launch
