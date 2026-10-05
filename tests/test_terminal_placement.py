@@ -1,5 +1,6 @@
 """Terminal namespace plumbing; real process/filesystem qualification is separate."""
 from datetime import date
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import shutil
@@ -8,6 +9,22 @@ import tempfile
 import pytest
 from core.storage_targets import StorageTarget
 from scripts.db import fact_header_v2_placement as placement
+
+
+def test_lookup_placement_preserves_legacy_binding_and_requires_explicit_boolean():
+    plan = placement.CopyPlacement(
+        StorageTarget("recent", "Recent", "uuid-one", "/recent", "ssd"),
+        StorageTarget("history", "History", "uuid-two", "/history", "hdd"),
+        456, date(2026, 9, 1), Path("/trusted/pg_controldata"))
+    legacy = plan.describe()
+    assert "recent_lookup_indexes" not in legacy
+    assert placement._restore(legacy).describe() == legacy
+    selected = replace(plan, recent_lookup_indexes=True).describe()
+    assert selected == {**legacy, "recent_lookup_indexes": True}
+    assert placement._restore(selected).describe() == selected
+    for invalid in (None, 1, "true", []):
+        with pytest.raises(ValueError, match="placement_invalid"):
+            replace(plan, recent_lookup_indexes=invalid)
 
 
 def test_readonly_terminal_preserves_binding_and_requires_writable_peer(tmp_path,monkeypatch):

@@ -582,6 +582,15 @@ can scan the whole registry on each insertion; moving its indexes to SSD does
 not repair that query shape. The [layout notes](../../engineering/fact-header-layout-v2.md)
 describe the installed-function plan regression and explicit upgrade requirement.
 
+For newly bound private migration copies, `CopyPlacement.recent_lookup_indexes`
+keeps only the identity ID, identity/day and raw-mapping primary-key indexes on
+the verified recent SSD. The existing copy owner still places their heaps,
+TOAST and other indexes on HDD and verifies every member. The absent/default
+choice preserves the original all-history receipts. This candidate does not
+move already retained copies, reopen retired adoption, activate runtime or
+change the recent-data policy. Its durable SSD cost and recovery implications
+are recorded in [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md#candidate-refinement-keep-measured-global-lookup-indexes-on-ssd).
+
 ## Durable header intent and reservations
 
 The internal header journal saves one immutable batch per reviewed storage plan,

@@ -29,6 +29,7 @@ class CopyPlacement:
     history_tablespace_oid: int
     history_before: date
     pg_controldata: Path
+    recent_lookup_indexes: bool = False
 
     def __post_init__(self):
         if (not isinstance(self.recent,StorageTarget) or not isinstance(self.history,StorageTarget)
@@ -42,16 +43,21 @@ class CopyPlacement:
                 or not 1<=self.history_tablespace_oid<=2**32-1
                 or self.history_tablespace_oid in (1663,1664)
                 or type(self.history_before) is not date
+                or type(self.recent_lookup_indexes) is not bool
                 or not isinstance(self.pg_controldata,Path) or not self.pg_controldata.is_absolute()):
             raise ValueError("fact_header_copy_placement_invalid")
 
     def describe(self):
-        return json.loads(json.dumps({
+        description = {
             "recent":asdict(self.recent),"history":asdict(self.history),
             "history_tablespace_oid":self.history_tablespace_oid,
             "history_before":self.history_before.isoformat(),
             "pg_controldata":str(self.pg_controldata),
-        }))
+        }
+        # Existing operation receipts keep their exact all-history meaning.
+        if self.recent_lookup_indexes:
+            description["recent_lookup_indexes"] = True
+        return json.loads(json.dumps(description))
 
 
 def _restore(description):
@@ -177,13 +183,33 @@ def tablespace(conn, name):
     conn.execute(text("SELECT set_config('default_tablespace',:name,true)"),{"name":previous})
 
 
+def recent_lookup_index_names(relation, saved):
+    """Only the measured global point-lookup indexes may remain on recent SSD.
+
+    This is a fixed physical layout choice, not a configurable index allocator.
+    It applies equally to private copies and their eventual canonical names.
+    """
+    enabled = saved["plan"].get("recent_lookup_indexes", False)
+    if type(enabled) is not bool:
+        raise ValueError("fact_header_copy_lookup_placement_invalid")
+    if not enabled:
+        return frozenset()
+    schema, name = relation.split(".")
+    if schema not in {"market", "qt_fact_header_cutover_v2"}:
+        return frozenset()
+    return {
+        "fact_identities": frozenset({"fact_identities_pkey", "uq_market_fact_identity_day"}),
+        "raw_archive_record_mappings": frozenset({"pk_market_raw_archive_record_mapping"}),
+    }.get(name, frozenset())
+
+
 def verify_group(conn, relation, *, history, saved, pid):
-    """Verify heap, ordinary indexes, TOAST and TOAST indexes on the serving disk."""
+    """Verify every heap, index and TOAST file against the bound physical layout."""
     members=conn.execute(text("""
         WITH heap AS (SELECT oid,reltoastrelid FROM pg_class WHERE oid=to_regclass(:relation)),
         heaps AS (SELECT oid FROM heap UNION ALL SELECT reltoastrelid FROM heap WHERE reltoastrelid<>0),
         members AS (SELECT oid FROM heaps UNION ALL SELECT indexrelid FROM pg_index WHERE indrelid IN (SELECT oid FROM heaps))
-        SELECT c.oid,c.relkind,c.relpersistence,c.relfilenode,
+        SELECT c.oid,c.relname,c.relkind,c.relpersistence,c.relfilenode,
                COALESCE(NULLIF(c.reltablespace,0),d.dattablespace)::bigint AS space,
                pg_relation_filepath(c.oid) AS path
         FROM members JOIN pg_class c ON c.oid=members.oid
@@ -191,14 +217,18 @@ def verify_group(conn, relation, *, history, saved, pid):
     """),{"relation":relation}).mappings().all()
     if not members or len(members)>128:
         raise RuntimeError("fact_header_copy_placement_relation_inventory_invalid")
-    space=saved["plan"]["history_tablespace_oid"] if history else 1663
+    recent_indexes = recent_lookup_index_names(relation, saved)
+    if recent_indexes - {member["relname"] for member in members if member["relkind"] == "i"}:
+        raise RuntimeError("fact_header_copy_lookup_index_missing: " + relation)
     root=Path(saved["database_root"])
     for member in members:
         if member["relkind"] in ("p","I"):
             continue
+        on_history = history and not (member["relkind"] == "i" and member["relname"] in recent_indexes)
+        space = saved["plan"]["history_tablespace_oid"] if on_history else 1663
         if member["relkind"] not in ("r","i","t") or member["relpersistence"]!="p" or member["space"]!=space:
             raise RuntimeError("fact_header_copy_relation_on_wrong_tablespace: "+relation)
-        if history:
+        if on_history:
             relative=f"pg_tblspc/{space}/PG_15_{saved['catalog_version']}/{saved['database_oid']}/{member['relfilenode']}"
             serving=Path(saved["history_directory"])/str(saved["database_oid"])/str(member["relfilenode"])
         else:
@@ -210,7 +240,7 @@ def verify_group(conn, relation, *, history, saved, pid):
         info=path.stat()
         if path.is_symlink() or not stat.S_ISREG(info.st_mode):
             raise RuntimeError("fact_header_copy_relation_file_invalid")
-        if _device_id(info.st_dev)!=saved["history_device" if history else "recent_device"]:
+        if _device_id(info.st_dev)!=saved["history_device" if on_history else "recent_device"]:
             raise RuntimeError("fact_header_copy_relation_on_wrong_filesystem")
         _same_process_file(pid,serving,info)
 

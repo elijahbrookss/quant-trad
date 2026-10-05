@@ -15,7 +15,7 @@ from portal.backend.service.storage.repos import market_structure
 from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as copy
 from scripts.db.fact_header_v2_capture import SCHEMA
 from tests.test_market_data.test_fact_header_copy_placement_db import (
-    placed, source, _assert_disk, _configure_placement,
+    placed, source, _assert_disk, _assert_global_layout, _configure_placement,
 )
 from tests.test_market_data.test_fact_header_copy_db import _finish as finish_headers, _insert, _frozen_records
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_trade_fixture, _raw_book_fixture
@@ -44,8 +44,10 @@ def _finish(engine):
     pytest.fail("raw mapping copy did not catch up within fixture budget")
 
 
-def test_raw_mapping_copy_resumes_killed_page_and_captures_new_archives(placed,tmp_path,monkeypatch):
+@pytest.mark.parametrize("recent_lookup_indexes", [False, True])
+def test_raw_mapping_copy_resumes_killed_page_and_captures_new_archives(placed,tmp_path,monkeypatch,recent_lookup_indexes):
     storage=placed
+    storage.copy_plan=replace(storage.copy_plan,recent_lookup_indexes=recent_lookup_indexes)
     engine=storage.database._engine
     _raw_trade_fixture(storage,tmp_path,monkeypatch)
     with engine.begin() as conn:
@@ -91,7 +93,7 @@ def test_raw_mapping_copy_resumes_killed_page_and_captures_new_archives(placed,t
     with engine.begin() as conn:
         assert _rows(conn)==_rows(conn,copy.TARGET)
         assert len(_rows(conn))>len(before)
-        _assert_disk(conn,copy.TARGET,Path("/qt-history"))
+        _assert_global_layout(conn,copy.TARGET,{"pk_market_raw_archive_record_mapping"} if recent_lookup_indexes else set())
     with engine.connect() as conn:
         assert _frozen_records(conn)==storage.frozen_before
     assert storage.archive_path.read_bytes()==storage.archive_bytes
@@ -153,7 +155,8 @@ def test_raw_mapping_copy_refuses_changed_guards_content_and_mount(placed,tmp_pa
         assert _rows(conn)==before==_rows(conn,copy.TARGET)
 
 
-def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_path,monkeypatch):
+@pytest.mark.parametrize("recent_lookup_indexes", [False, True])
+def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_path,monkeypatch,recent_lookup_indexes):
     from tests.test_market_data.test_fact_book_retention_db import (
         test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay,
     )
@@ -182,6 +185,7 @@ def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_pa
     archive_bytes={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.rglob("*") if p.is_file()}
     restore_tiered_v1_fixture(storage)
     _configure_placement(storage,tmp_path,monkeypatch)
+    storage.copy_plan=replace(storage.copy_plan,recent_lookup_indexes=recent_lookup_indexes)
     with engine.begin() as conn:
         headers.prepare_copy(conn,placement=storage.copy_plan)
         copy.prepare_copy(conn)
@@ -199,7 +203,7 @@ def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_pa
         stage_shadow_handoff_fixture(conn,storage,raw_mapping=True)
         assert _rows(conn)==before
         assert _rows(conn,"qt_fact_header_retained_v1."+copy.NAME)==before
-        _assert_disk(conn,copy.SOURCE,Path("/qt-history"))
+        _assert_global_layout(conn,copy.SOURCE,{"pk_market_raw_archive_record_mapping"} if recent_lookup_indexes else set())
     restarted=Database(storage.dsn)
     try:
         assert restarted.ensure_schema(),str(restarted.last_error)
@@ -217,7 +221,7 @@ def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_pa
     with engine.begin() as conn:
         assert len(_rows(conn))>len(before)
         assert _rows(conn,"qt_fact_header_retained_v1."+copy.NAME)==before
-        _assert_disk(conn,copy.SOURCE,Path("/qt-history"))
+        _assert_global_layout(conn,copy.SOURCE,{"pk_market_raw_archive_record_mapping"} if recent_lookup_indexes else set())
 
 
 
@@ -277,7 +281,9 @@ def test_copy_lookup_and_queue_retirement_preserve_key_pairs(placed,tmp_path,mon
         assert _rows(conn)==before
 
 
-def test_raw_history_placement_is_atomic_and_required_for_handoff(placed,tmp_path,monkeypatch):
+@pytest.mark.parametrize("recent_lookup_indexes", [False, True])
+def test_raw_history_placement_is_atomic_and_required_for_handoff(placed,tmp_path,monkeypatch,recent_lookup_indexes):
+    placed.copy_plan=replace(placed.copy_plan,recent_lookup_indexes=recent_lookup_indexes)
     engine=placed.database._engine
     _raw_trade_fixture(placed,tmp_path,monkeypatch)
     with engine.begin() as conn:
@@ -316,7 +322,7 @@ def test_raw_history_placement_is_atomic_and_required_for_handoff(placed,tmp_pat
         assert not copy.place_on_history(conn)["reused"]
     with engine.begin() as conn:
         assert copy.place_on_history(conn)["reused"]
-        _assert_disk(conn,copy.TARGET,Path("/qt-history"))
+        _assert_global_layout(conn,copy.TARGET,{"pk_market_raw_archive_record_mapping"} if recent_lookup_indexes else set())
         assert _rows(conn)==before==_rows(conn,copy.TARGET)
         with headers.verified_copy(conn,timeout_seconds=60):
             with copy.verified_copy(conn) as verified:assert verified["verified_lookup_rows"]==len(before)
