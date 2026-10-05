@@ -58,6 +58,56 @@ def test_environment_preparation_preserves_original_secrets_and_all_journals(com
     assert release.prepare_deployment_environment(root,environment_path=source,saved=saved,execute=True)==result
 
 
+def test_explicit_runtime_budgets_survive_private_handoff(completed):
+    root, source, saved, model = completed
+    selected = {
+        "backend": {"QT_RESEARCH_EVIDENCE_BYTES":"1073741824", "QT_HISTORY_READ_CACHE_BYTES":"0",
+            "QT_HISTORY_READ_CACHE_MIN_FREE_BYTES":"496426550887"},
+        "storage-maintenance": {"QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS":"60",
+            "QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_STEPS_PER_RUN":"4",
+            "QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_RUN_SECONDS":"60"},
+    }
+    for owner, values in selected.items():
+        model["services"][owner].setdefault("environment", {}).update(values)
+    model["services"]["backend"]["environment"]["UNRELATED_SETTING"] = "not-a-binding"
+    release.host.save_receipt(root/release.runtime.RUNTIME_RECIPE, model, initial=False)
+    saved["runtime"]["admission"]["recipe_sha256"] = release.host.digest(model)
+    release.host.save_receipt(root/"storage-online-final.json", saved, initial=False)
+    original = source.read_bytes()
+    source.write_bytes(original+b"QT_RESEARCH_EVIDENCE_BYTES=268435456\n")
+    original = source.read_bytes()
+    release.prepare_deployment_environment(root, environment_path=source, saved=saved, execute=True)
+    values = dotenv_values(root/release.PREPARED_ENVIRONMENT, interpolate=False)
+    for settings in selected.values():
+        for key, expected in settings.items(): assert values[key] == expected
+    assert "UNRELATED_SETTING" not in values
+    assert source.read_bytes() == (root/release.SOURCE_ENVIRONMENT).read_bytes() == original
+    assert values["POSTGRES_PASSWORD"] == "private$with#chars"
+
+
+@pytest.mark.parametrize("key,owner", [
+    ("QT_RESEARCH_EVIDENCE_BYTES", "backend"),
+    ("QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS", "storage-maintenance"),
+])
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "NaN", " 60", "01", "9223372036854775808", True, None])
+def test_runtime_control_refuses_invalid_value_before_writing(completed, key, owner, value):
+    root, source, saved, model = completed
+    model["services"][owner].setdefault("environment", {})[key] = value
+    before = source.read_bytes()
+    with pytest.raises(RuntimeError, match="runtime_setting_invalid"):
+        release.deployment_bindings(root, saved, model)
+    assert source.read_bytes() == before and not (root/release.PREPARED_ENVIRONMENT).exists()
+
+
+def test_runtime_control_refuses_conflicting_service_settings(completed):
+    root, _, saved, model = completed
+    key = "QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS"
+    model["services"]["storage-maintenance"]["environment"] = {key:"60"}
+    model["services"]["backend"]["environment"][key] = "3600"
+    with pytest.raises(RuntimeError, match="runtime_setting_conflict"):
+        release.deployment_bindings(root, saved, model)
+
+
 @pytest.mark.parametrize("fault",["duplicate","malformed","nonprivate","symlink","recipe","journal","partial","existing_other","mutable_db","socket","alias"])
 def test_ambiguous_or_changed_handoff_refuses_without_repair(completed,fault):
     root,source,saved,model=completed
@@ -200,6 +250,20 @@ def test_canonical_comparison_accepts_only_explicit_proposal_differences(configu
     assert result==dict(storage_configuration_sha256=release.host.digest(args["admitted"]),
                         canonical_configuration_sha256=release.host.digest(proposed))
     assert (proposed,args)==before
+
+
+def test_canonical_comparison_preserves_selected_runtime_controls(configuration_pair):
+    proposed, args = configuration_pair
+    controls = {"QT_RESEARCH_EVIDENCE_BYTES":"1073741824",
+        "QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS":"60"}
+    args["admitted"]["services"]["backend"]["environment"]["QT_RESEARCH_EVIDENCE_BYTES"] = controls["QT_RESEARCH_EVIDENCE_BYTES"]
+    args["admitted"]["services"]["storage-maintenance"]["environment"]["QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS"] = "60"
+    args["bindings"].update(controls)
+    for service in proposed["services"].values(): service["environment"].update(controls)
+    release.compare_deployment_configuration(proposed, **args)
+    proposed["services"]["backend"]["environment"]["QT_RESEARCH_EVIDENCE_BYTES"] = "2147483648"
+    with pytest.raises(RuntimeError, match="service_changed"):
+        release.compare_deployment_configuration(proposed, **args)
 
 
 @pytest.mark.parametrize("fault",["project","volume","network","db_image","db_build","app_image","pull",

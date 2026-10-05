@@ -3068,6 +3068,17 @@ still requires canonical configuration comparison and the terminal transition in
 the existing release owner. Its hashes are configuration evidence, not completion
 or replay tokens.
 
+The same adapter carries six optional numeric settings only when they are
+explicitly present in the admitted recipe: the backend's research evidence byte
+limit and history-cache quota/free-space floor; and maintenance's lifecycle
+interval, maximum canonical steps and maximum run seconds. It derives no new
+defaults, refuses invalid or conflicting service values, and preserves all other
+environment entries. The full canonical comparison must retain these exact
+choices. This uses the existing deployment configuration owner so activating the
+selected operational budgets does not require another release or a settings
+registry. Runtime/resource admission and measurement still determine whether
+those choices are safe and keep up with collection.
+
 The storage overlay requires `QT_STORAGE_DATABASE_IMAGE` as the qualified local
 image ID, removes the inherited database build, and sets `pull_policy: never`.
 The deployer refuses database rebuilding in this layout and excludes PostgreSQL
