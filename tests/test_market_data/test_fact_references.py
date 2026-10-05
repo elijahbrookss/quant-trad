@@ -217,3 +217,56 @@ def test_large_unprotected_prefix_fails_before_an_unbounded_mapping_query():
     with pytest.raises(RuntimeError, match="reference_prefix_budget_exceeded"):
         lock_canonical_raw_references(session, [_book(100_000)], max_mapping_rows=2)
     assert not any("raw_archive_record_mappings AS mappings" in sql for sql, _ in session.statements)
+
+
+def _flow(revision=2):
+    return SimpleNamespace(fact_type="market.trade_flow", observation_key="flow",
+        provenance={"_qt_trade_flow_evidence": {"coverage_interval_id": "coverage", "coverage_revision": revision}})
+
+
+class _CoverageSession(_Session):
+    def __init__(self, *, protected=True, **kwargs):
+        super().__init__(**kwargs)
+        self.protected = protected
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "AS coverage_holds" in sql:
+            self.statements.append((sql, params))
+            return _Result([{"request_key": "coverage:coverage:2", "opening_raw_record_id": "raw-1",
+                             "last_raw_record_id": "raw-4"}] if self.protected else [])
+        if "raw_archive_record_mappings AS mappings" in sql:
+            self.statements.append((sql, params))
+            rows = []
+            for ordinal in range(1, 5):
+                raw = f"raw-{ordinal}"
+                if "ids" not in params or raw in params["ids"]:
+                    request = "record:" + raw if "ids" in params else "coverage:coverage:2"
+                    rows.append(_mapping(f"manifest-{ordinal}", raw=raw, request=request))
+            return _Result(rows[:params["limit"]])
+        return super().execute(statement, params)
+
+
+def test_hot_flow_holder_bounds_admission_to_endpoints_not_connection_history():
+    session = _CoverageSession()
+    lock_canonical_raw_references(session, [_flow()], max_mapping_rows=2)
+    assert session.statements[-2][1]["ids"] == ["manifest-1", "manifest-4"]
+    assert not any("mappings.receive_ordinal>=coverage.opening_receive_ordinal" in sql
+                   for sql, _ in session.statements)
+
+
+@pytest.mark.parametrize("kind", ["expired", "pending"])
+def test_hot_flow_holder_does_not_bypass_endpoint_availability(kind):
+    session = _CoverageSession(**{kind: ["manifest-4"]})
+    with pytest.raises(RuntimeError, match="reference_(expired|expiration_pending).*raw-4"):
+        lock_canonical_raw_references(session, [_flow()], max_mapping_rows=2)
+
+
+def test_unprotected_flow_still_requires_the_bounded_full_reference_check():
+    with pytest.raises(RuntimeError, match="reference_budget_exceeded"):
+        lock_canonical_raw_references(_CoverageSession(protected=False), [_flow()], max_mapping_rows=2)
+
+
+def test_coverage_endpoint_expansion_obeys_the_existing_request_budget():
+    with pytest.raises(RuntimeError, match="reference_budget_exceeded"):
+        lock_canonical_raw_references(_CoverageSession(), [_flow()], max_mapping_rows=1)

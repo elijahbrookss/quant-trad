@@ -195,6 +195,15 @@ coverage revision is committed, the finalizer retires that connection epoch's
 projection state. Memory is therefore bounded by active/finalizing epochs, not
 the lifetime reconnect count.
 
+Trade-flow finalization uses the existing hot coverage hold to keep raw-reference
+admission independent of the connection's accumulated mapping count. The writer
+resolves the requested coverage revision and checks its opening/last raw mappings
+under the normal manifest-lock and expiry protocol. First admission without a hot
+holder still checks the full bounded reference set. This removes a recurring
+`canonical_raw_reference_budget_exceeded` failure on long connections without
+raising the mapping limit, weakening retention, changing bucket values or
+introducing another recovery path. See the [reference lifetime boundary](GENERALIZED_FACT_DATA_PLANE.md).
+
 Level 2 operator totals are also bounded by one rebuildable
 `market.book_operational_rollups` row per series. Snapshot, update-batch, and
 mutation counts advance from the canonical Fact commit suffix inside the same
