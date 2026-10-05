@@ -128,6 +128,25 @@ limit or a promise that every year-scale Check fits. Native evaluator arrays,
 bounded archive decoding and Python object overhead still require workload and
 collector-impact qualification before increasing admitted concurrency or limits.
 
+The central settings boundary accepts deployment overrides for these existing
+fields, with the same precedence over YAML as other environment settings:
+
+| Environment setting | Existing field under `async_jobs` |
+| --- | --- |
+| `QT_RESEARCH_EXECUTION_SECONDS` | `research_execution_seconds` |
+| `QT_RESEARCH_INPUT_ROWS` | `research_input_rows` |
+| `QT_RESEARCH_INPUT_BYTES` | `research_input_bytes` |
+| `QT_RESEARCH_EVIDENCE_BYTES` | `research_evidence_bytes` |
+| `QT_RESEARCH_RESULT_BYTES` | `research_result_bytes` |
+
+Choose and admit a workload budget before dispatch; defaults do not certify that
+a particular historical range fits. Apply configuration consistently to the API
+and workers through the existing deployment process. These overrides add no
+request fields, schema, budget registry or dynamic reconfiguration mechanism.
+Input-byte limits also bound archive reads and cache writes independently, as
+defined by the execution boundary. Increasing a deployment limit cannot expand
+an already pinned job budget; reducing it can cause that job to fail explicitly.
+
 Dispatch pins these limits outside the immutable scientific request. Workers
 honor the tighter of the pinned and current deployment limits. Old queued jobs
 without a limit receipt use current limits. Synchronous requirements, preparation,
