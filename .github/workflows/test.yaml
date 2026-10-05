@@ -156,7 +156,7 @@ jobs:
             --prepare-source --worker-phases --initial-capture \
             --terminal-cancellation --terminal-image qt-terminal-runtime-proof \
             --forward-package-image qt-terminal-runtime-proof \
-            --forward-keys --forward-worker --forward-retirement --forward-operation
+            --forward-keys --forward-worker --forward-retirement --forward-operation --forward-retirement-recovery
 
       - name: Prove interrupted initial storage preparation and source resumption
         env:

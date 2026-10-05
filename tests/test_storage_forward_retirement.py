@@ -144,3 +144,113 @@ def test_retirement_rejects_ambiguous_namespace_before_sql():
     from scripts.db import fact_header_forward_adoption as adoption
     with pytest.raises(ValueError, match="namespace_mode_invalid"):
         adoption.retire_adoption(None, operation_sha256="a"*64, read_only_namespace=1)
+
+
+@pytest.fixture
+def recovery_attempt(retiring, monkeypatch):
+    a = retiring
+    def failed(*args, **kw):
+        if kw["action"] == "apply":
+            raise RuntimeError("conflicting writer rolled back terminal transaction")
+        return a.probe(*args, **kw)
+    monkeypatch.setattr(terminal, "_probe", failed)
+    with pytest.raises(RuntimeError, match="conflicting writer"):
+        a.retire()
+    a.previous_bytes = (a.root/terminal.FORWARD_STATE).read_bytes()
+    a.previous = host.load_receipt(a.root/terminal.FORWARD_STATE)
+    a.recovery_package = {**a.retirement_package, "schema_version": terminal.RECOVERY_SCHEMA,
+        "previous_terminal_sha256": amendment._sha(a.previous_bytes)}
+    a.recovery_file = a.path.parent/"terminal-recovery-package.json"
+    write(a.recovery_file, a.recovery_package)
+    a.recovery_actions = []
+    def probe(root, plan, saved, package, **kw):
+        a.recovery_actions.append(kw["action"])
+        if kw["action"] == "inspect":
+            return deepcopy(a.committed or a.observed)
+        if kw["action"] == "apply":
+            journal = host.load_receipt(root/terminal.FORWARD_RECOVERY_STATE)
+            assert journal["phase"] == "dispatched"
+            assert kw["expected_capture"] == a.previous["original_capture"]
+            a.committed = {**a.observed, "retired": True, "terminal_sha256": "c"*64}
+        return deepcopy(a.committed)
+    a.recovery_probe = probe
+    monkeypatch.setattr(terminal, "_probe", probe)
+    a.recover = lambda execute=True: operation.run_operation_plan(a.forward_path,
+        cancel_attempt_file=a.recovery_file, execute=execute)
+    return a
+
+
+def test_explicit_recovery_preserves_failed_intent_and_uses_separate_clock(recovery_attempt):
+    a = recovery_attempt
+    _advance(a, 400)
+    assert a.recover(False)["phase"] == "forward_retirement_inspected"
+    assert not (a.root/terminal.FORWARD_RECOVERY_STATE).exists()
+    assert a.recover()["phase"] == "forward_retired"
+    assert a.recover(False)["phase"] == "forward_retired"
+    assert a.recovery_actions.count("apply") == 1
+    assert (a.root/terminal.FORWARD_STATE).read_bytes() == a.previous_bytes
+    recovery = host.load_receipt(a.root/terminal.FORWARD_RECOVERY_STATE)
+    assert recovery["wall_deadline"] > a.previous["wall_deadline"]
+    assert recovery["original_capture"] == a.previous["original_capture"]
+    assert all(p.read_bytes() == before for p, before in a.preserved.items())
+
+
+def test_recovery_lost_commit_reconciles_without_redispatch(recovery_attempt, monkeypatch):
+    a = recovery_attempt
+    def lost(*args, **kw):
+        value = a.recovery_probe(*args, **kw)
+        if kw["action"] == "apply":
+            raise TimeoutError("lost recovery reply")
+        return value
+    monkeypatch.setattr(terminal, "_probe", lost)
+    with pytest.raises(TimeoutError, match="lost recovery reply"):
+        a.recover()
+    before = (a.root/terminal.FORWARD_RECOVERY_STATE).read_bytes()
+    _advance(a, 400)
+    monkeypatch.setattr(terminal, "_probe", a.recovery_probe)
+    assert a.recover(False)["phase"] == "forward_retired"
+    assert a.recovery_actions.count("apply") == 1
+    after = host.load_receipt(a.root/terminal.FORWARD_RECOVERY_STATE)
+    import json
+    assert after["wall_deadline"] == json.loads(before)["wall_deadline"]
+    assert (a.root/terminal.FORWARD_STATE).read_bytes() == a.previous_bytes
+
+
+@pytest.mark.parametrize("fault", ["hash", "intent", "worker", "completed", "receipt"])
+def test_recovery_refuses_changed_or_completed_predecessor(recovery_attempt, fault):
+    a = recovery_attempt
+    previous = deepcopy(a.previous)
+    if fault == "hash":
+        a.recovery_package["previous_terminal_sha256"] = "0"*64
+    else:
+        if fault == "intent": previous["intent_sha256"] = "0"*64
+        if fault == "worker": previous["worker"]["container_id"] = "f"*64
+        if fault == "completed": previous["phase"] = "complete"
+        if fault == "receipt": previous["receipt"] = {"foreign": True}
+        write(a.root/terminal.FORWARD_STATE, previous)
+        a.recovery_package["previous_terminal_sha256"] = amendment._sha((a.root/terminal.FORWARD_STATE).read_bytes())
+    write(a.recovery_file, a.recovery_package)
+    with pytest.raises(RuntimeError, match="predecessor_changed"):
+        a.recover()
+    assert not a.recovery_actions
+    assert not (a.root/terminal.FORWARD_RECOVERY_STATE).exists()
+
+
+def test_recovery_committed_predecessor_is_read_only_no_new_dispatch(recovery_attempt):
+    a = recovery_attempt
+    a.committed = {**a.observed, "retired": True, "terminal_sha256": "c"*64}
+    assert a.recover(False)["already_retired"]
+    with pytest.raises(RuntimeError, match="unowned_retired_result"):
+        a.recover()
+    assert "apply" not in a.recovery_actions
+    assert not (a.root/terminal.FORWARD_RECOVERY_STATE).exists()
+
+
+def test_recovery_refuses_unretired_original_probe(recovery_attempt, monkeypatch):
+    a = recovery_attempt
+    def live(*args, **kw):
+        raise RuntimeError("original terminal worker still alive")
+    monkeypatch.setattr(terminal, "_retire_previous_probe", live)
+    with pytest.raises(RuntimeError, match="still alive"):
+        a.recover()
+    assert not a.recovery_actions

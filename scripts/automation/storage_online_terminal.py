@@ -25,6 +25,9 @@ STATE = "storage-online-terminal.json"
 PROBE = "storage-online-terminal-worker.json"
 FORWARD_STATE = "storage-online-forward-terminal.json"
 FORWARD_PROBE = "storage-online-forward-terminal-worker.json"
+FORWARD_RECOVERY_STATE = "storage-online-forward-terminal-recovery.json"
+FORWARD_RECOVERY_PROBE = "storage-online-forward-terminal-recovery-worker.json"
+RECOVERY_SCHEMA = "qt.storage_online_terminal_recovery.v1"
 KEY_PROBE = "storage-online-key-preparation-worker.json"
 COMMAND = ["-m", "scripts.automation.storage_online_terminal", "--worker"]
 
@@ -39,13 +42,13 @@ def _check_clock(journal):
         raise RuntimeError("storage_online_terminal_expired_or_rebooted_no_dispatch")
 
 
-def _retire_previous_probe(root, original, package, *, forward=False, keys=False):
+def _retire_previous_probe(root, original, package, *, forward=False, keys=False, recovery=False):
     """Recover create/start/stop uncertainty for this exact confined worker only."""
-    path = root/(KEY_PROBE if keys else FORWARD_PROBE if forward else PROBE)
+    path = root/(KEY_PROBE if keys else FORWARD_RECOVERY_PROBE if recovery else FORWARD_PROBE if forward else PROBE)
     if not os.path.lexists(path):
         return
     saved = host.load_receipt(path)
-    if saved.get("name") != original["binding"]["project"]+("-storage-key-preparation" if keys else "-storage-forward-terminal" if forward else "-storage-terminal"):
+    if saved.get("name") != original["binding"]["project"]+("-storage-key-preparation" if keys else "-storage-forward-terminal-recovery" if recovery else "-storage-forward-terminal" if forward else "-storage-terminal"):
         raise RuntimeError("storage_online_terminal_probe_owner_changed")
     if saved.get("owner") != dict(root=str(root), worker=original["container_id"], package=package):
         from scripts.automation.storage_online_keys import STATE as key_state
@@ -118,10 +121,13 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
     from scripts.automation.storage_online_forward_worker import request_binding
     is_forward = request_binding(request) is not None
     is_keys = action in {"inspect_keys", "prepare_keys"}
+    is_recovery = package["schema_version"] == RECOVERY_SCHEMA
+    if is_recovery and (not is_forward or is_keys):
+        raise ValueError("storage_forward_terminal_recovery_only")
     if is_keys and is_forward:
         raise RuntimeError("storage_key_preparation_before_publication_required")
-    probe_options = {"keys":True} if is_keys else {"forward":True} if is_forward else {}
-    probe_path = root/(KEY_PROBE if is_keys else FORWARD_PROBE if is_forward else PROBE)
+    probe_options = {"keys":True} if is_keys else {"forward":True, **({"recovery":True} if is_recovery else {})} if is_forward else {}
+    probe_path = root/(KEY_PROBE if is_keys else FORWARD_RECOVERY_PROBE if is_recovery else FORWARD_PROBE if is_forward else PROBE)
     _retire_previous_probe(root, original, package, **probe_options)
     payload = dict(action=action, request=request, package=package, wall_deadline=wall_deadline,
                    expected_capture=expected_capture, intent_sha256=intent_sha256)
@@ -145,7 +151,7 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
     if not is_keys:
         for mount in binding["mounts"].values():
             mount["readonly"] = True
-    name = plan["project"]+("-storage-key-preparation" if is_keys else "-storage-forward-terminal" if is_forward else "-storage-terminal")
+    name = plan["project"]+("-storage-key-preparation" if is_keys else "-storage-forward-terminal-recovery" if is_recovery else "-storage-forward-terminal" if is_forward else "-storage-terminal")
     saved = dict(name=name, binding=binding, container_id=None, contract=None, retired=False,
                  owner=dict(root=str(root),worker=original["container_id"],package=package))
     host.save_receipt(probe_path, saved, initial=not os.path.lexists(probe_path))
@@ -216,8 +222,14 @@ def cancel_operation(path, *, package_file, execute=False):
     plan = operation.load_operation_plan(path)
     root = launch._canonical(plan["state_root"])
     package = host.load_receipt(launch._canonical(package_file))
-    if (type(execute) is not bool or set(package) != {"schema_version", "plan_sha256", "image", "source_revision", "source_tree_hash"}
-            or package["schema_version"] != "qt.storage_online_terminal.v1"
+    is_recovery = package.get("schema_version") == RECOVERY_SCHEMA
+    expected_fields = {"schema_version", "plan_sha256", "image", "source_revision", "source_tree_hash"}
+    if is_recovery:
+        expected_fields.add("previous_terminal_sha256")
+    if (type(execute) is not bool or set(package) != expected_fields
+            or package["schema_version"] not in {"qt.storage_online_terminal.v1", RECOVERY_SCHEMA}
+            or (is_recovery and (not isinstance(package["previous_terminal_sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", package["previous_terminal_sha256"]) is None))
             or any(not isinstance(package[k], str) or re.fullmatch(pattern, package[k]) is None
                    for k,pattern in (("plan_sha256",r"[0-9a-f]{64}"),("image",r"sha256:[0-9a-f]{64}"),
                        ("source_revision",r"[0-9a-f]{40}"),("source_tree_hash",r"[0-9a-f]{64}")))):
@@ -226,7 +238,9 @@ def cancel_operation(path, *, package_file, execute=False):
     with host.deployment_lock(root):
         from scripts.automation import storage_online_forward as forward
         if os.path.lexists(root/forward.STATE):
-            return _cancel_forward_locked(root, path, plan, package, execute=execute)
+            return _cancel_forward_locked(root, path, plan, package, execute=execute, **({"recovery":True} if is_recovery else {}))
+        if is_recovery:
+            raise RuntimeError("storage_forward_terminal_recovery_only")
         for name in ("storage-online-final.json", "promotion.env", "alert-preview.env"):
             if os.path.lexists(root/name):
                 raise RuntimeError("storage_online_terminal_pre_final_source_required")
@@ -352,7 +366,61 @@ def _forward_result(value, *, request_sha256, capture=None):
     return value
 
 
-def _cancel_forward_locked(root, path, plan, package, *, execute):
+def _recovery_predecessor(root, path, package, saved):
+    """Bind one explicit preserving recovery to the untouched failed dispatch.
+
+    This does not authorize replay of that dispatch. The recovery has a separate
+    journal/probe and only the same row-preserving SQL retirement capability.
+    Retired worker admission and live SQL reconciliation remain mandatory.
+    """
+    predecessor_path = root/FORWARD_STATE
+    previous = host.load_receipt(predecessor_path, max_bytes=524288)
+    immutable = {k:v for k,v in previous.items() if k not in {"intent_sha256", "phase", "receipt"}}
+    if (hashlib.sha256(predecessor_path.read_bytes()).hexdigest() != package["previous_terminal_sha256"]
+            or host.digest(immutable) != previous.get("intent_sha256")
+            or previous.get("phase") != "dispatched"
+            or previous.get("operation_path") != str(path)
+            or previous.get("worker") != saved
+            or previous.get("package", {}).get("schema_version") != "qt.storage_online_terminal.v1"
+            or previous["package"].get("plan_sha256") != package["plan_sha256"]
+            or "receipt" in previous):
+        raise RuntimeError("storage_forward_terminal_recovery_predecessor_changed")
+    return previous
+
+
+def _wait_for_retirement_sources(conn):
+    """Drain one writer gate, then acquire the remaining locks without waiting.
+
+    Each failed lock-only savepoint releases the gate before trying again. This
+    avoids waiting for an archive publisher while holding a Fact lock it may need.
+    No retirement DDL runs until the entire lock set is held; all attempts share
+    one 20-second ceiling inside the enclosing SQL/advisory deadline.
+    """
+    from sqlalchemy.exc import DBAPIError
+    from scripts.db import fact_header_forward_adoption as adoption
+    from scripts.db import archive_root_v2_copy as archives
+    relations = [relation for family in adoption.FAMILIES.values() for relation in family[:2]]
+    relations += ["market." + name for name in archives.FAMILIES]
+    deadline = time.monotonic()+20
+    while True:
+        remaining = int((deadline-time.monotonic())*1000)
+        if remaining <= 0:
+            raise TimeoutError("storage_forward_terminal_writer_drain_expired")
+        try:
+            with conn.begin_nested():
+                conn.exec_driver_sql("SET LOCAL lock_timeout='" + str(remaining) + "ms'")
+                conn.exec_driver_sql("LOCK TABLE " + relations[0] + " IN ACCESS EXCLUSIVE MODE")
+                conn.exec_driver_sql("LOCK TABLE " + ",".join(relations[1:]) + " IN ACCESS EXCLUSIVE MODE NOWAIT")
+            return
+        except DBAPIError as exc:
+            if getattr(exc.orig, "pgcode", None) != "55P03":
+                raise
+            # Only a known lock refusal is retried, before any retirement DDL.
+            # Savepoint rollback above releases every newly acquired relation lock.
+            time.sleep(min(.05, max(0, deadline-time.monotonic())))
+
+
+def _cancel_forward_locked(root, path, plan, package, *, execute, recovery=False):
     """One separate durable retirement intent; old cancellation stays immutable."""
     from scripts.automation import storage_online_forward as forward
     from scripts.automation.storage_online_forward_worker import capture_binding
@@ -362,9 +430,10 @@ def _cancel_forward_locked(root, path, plan, package, *, execute):
     published = forward.inspect_published_operation(root, operation_path=path)
     request = published["new_request"]
     operator_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    journal_path = root/FORWARD_STATE
+    journal_path = root/(FORWARD_RECOVERY_STATE if recovery else FORWARD_STATE)
     journal = host.load_receipt(journal_path, max_bytes=524288) if os.path.lexists(journal_path) else None
     saved = host.load_receipt(root/launch._STATE)
+    previous = _recovery_predecessor(root, path, package, saved) if recovery else None
     if journal is not None:
         immutable = {k:v for k,v in journal.items() if k not in {"intent_sha256", "phase", "receipt"}}
         if (host.digest(immutable) != journal["intent_sha256"] or journal["operation_path"] != str(path)
@@ -376,13 +445,21 @@ def _cancel_forward_locked(root, path, plan, package, *, execute):
         _check_clock(journal)
         deadline, wall = journal["monotonic_deadline"], journal["wall_deadline"]
     with host.docker_deadline(deadline):
-        _retire_previous_probe(root, saved, package, forward=True)
+        if previous is not None:
+            # A lost reply may leave a transient alive. Retirement uses its exact
+            # original package under this bounded host owner, before SQL inspection.
+            _retire_previous_probe(root, saved, previous["package"], forward=True)
+        _retire_previous_probe(root, saved, package, forward=True, **({"recovery":True} if recovery else {}))
         observation = _admit_forward(root, path, plan, package, saved, deadline=deadline)
+        if previous is not None and observation != previous["observation"]:
+            raise RuntimeError("storage_forward_terminal_recovery_preimage_changed")
         if journal is not None and observation != journal["observation"]:
             raise RuntimeError("storage_forward_terminal_preimage_changed")
         if journal is None:
             inspected = _forward_result(_probe(root, plan, saved, package, action="inspect", wall_deadline=wall),
                 request_sha256=host.digest(request))
+            if previous is not None and inspected["capture"] != previous["original_capture"]:
+                raise RuntimeError("storage_forward_terminal_recovery_capture_changed")
             launch_saved = forward.load_launch(root)
             if (inspected["capture"].get("operation_sha256") != published["forward"]["operation_sha256"]
                     or (launch_saved["capture"] is not None
@@ -459,6 +536,8 @@ def _forward_sql(conn, payload, *, timeout_seconds):
         if payload["action"] == "apply":
             if receipt is not None:
                 raise RuntimeError("storage_forward_terminal_already_retired_no_dispatch")
+            if payload["package"].get("schema_version") == RECOVERY_SCHEMA:
+                _wait_for_retirement_sources(conn)
             adoption.retire_adoption(conn, operation_sha256=intent["operation_sha256"],
                                      timeout_seconds=timeout_seconds, read_only_namespace=True)
             receipt = adoption.inspect_retirement(conn, operation_sha256=intent["operation_sha256"],

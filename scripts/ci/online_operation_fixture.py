@@ -394,7 +394,7 @@ def rehearse_terminal_cancellation(*, state, kwargs, history_uuid, control, sour
 
 
 
-def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False, final_mode=None, prepare_keys=False):
+def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_worker=False, retire_worker=False, operation_route=False, final_mode=None, prepare_keys=False, retirement_recovery=False):
     """Actual canceled SQL proof and durable publication; synthetic runtime peers."""
     from datetime import datetime, timezone, timedelta
     from scripts.automation import storage_online_forward as forward
@@ -684,6 +684,39 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
                 return initial.admit_serving_source(state_root,project=kwargs["project"],
                     source_revision=kwargs["source_revision"],operator_id=arguments["operator_id"])
             operation.inspect_prepared_operation=retirement_preflight
+            terminal_state = terminal.FORWARD_STATE
+            terminal_probe = terminal.FORWARD_PROBE
+            failed_retirement_bytes = None
+            if retirement_recovery:
+                # Real disposable SQL writer: keep its transaction open across the
+                # ordinary probe. No credential or production configuration is used.
+                import subprocess, select
+                writer = subprocess.Popen(["docker", "exec", "-i", rows["tsdb"]["id"], "sh", "-ec",
+                    'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -qAt -v ON_ERROR_STOP=1'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    writer.stdin.write("BEGIN; LOCK TABLE market.fact_versions IN ROW EXCLUSIVE MODE; SELECT 'writer_held';\n")
+                    writer.stdin.flush()
+                    assert select.select([writer.stdout], [], [], 10)[0], "owned writer lock unavailable"
+                    assert writer.stdout.readline().strip() == "writer_held"
+                    try:
+                        operation.run_operation_plan(plan_path, cancel_attempt_file=retirement_path, execute=True)
+                        raise AssertionError("ordinary retirement did not refuse its conflicting writer")
+                    except RuntimeError as exc:
+                        assert str(exc) == "storage_online_terminal_worker_failed_or_output_exceeded"
+                finally:
+                    writer.stdin.write("ROLLBACK;\n\\q\n"); writer.stdin.flush(); writer.stdin.close()
+                    assert writer.wait(timeout=10) == 0
+                failed_retirement_bytes = (state/terminal.FORWARD_STATE).read_bytes()
+                failed_retirement = host_boundary.load_receipt(state/terminal.FORWARD_STATE,max_bytes=524288)
+                assert failed_retirement["phase"] == "dispatched"
+                assert retained_counts() == counts_before
+                retirement_package = {**retirement_package, "schema_version": terminal.RECOVERY_SCHEMA,
+                    "previous_terminal_sha256": publication._sha(failed_retirement_bytes)}
+                retirement_path = state/"forward-retirement-recovery-package.json"
+                host_boundary.save_receipt(retirement_path, retirement_package, initial=True)
+                terminal_state = terminal.FORWARD_RECOVERY_STATE
+                terminal_probe = terminal.FORWARD_RECOVERY_PROBE
             terminal._probe=lost_retirement
             try:
                 operation.run_operation_plan(plan_path,cancel_attempt_file=retirement_path,execute=True)
@@ -692,21 +725,25 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             finally:
                 terminal._probe=actual_probe
                 operation.inspect_prepared_operation=actual_preflight
-            interrupted=host_boundary.load_receipt(state/terminal.FORWARD_STATE,max_bytes=524288)
+            interrupted=host_boundary.load_receipt(state/terminal_state,max_bytes=524288)
             assert interrupted["phase"]=="dispatched" and calls.count("apply")==1
             operation.inspect_prepared_operation=retirement_preflight
             try:result=operation.run_operation_plan(plan_path,cancel_attempt_file=retirement_path)
             finally:operation.inspect_prepared_operation=actual_preflight
             assert result["phase"]=="forward_retired"
-            complete=host_boundary.load_receipt(state/terminal.FORWARD_STATE,max_bytes=524288)
+            complete=host_boundary.load_receipt(state/terminal_state,max_bytes=524288)
             assert complete["phase"]=="complete"
             assert all(complete[k]==interrupted[k] for k in ("wall_deadline","monotonic_deadline","boot_id","intent_sha256"))
-            probe=host_boundary.load_receipt(state/terminal.FORWARD_PROBE)
+            probe=host_boundary.load_receipt(state/terminal_probe)
             assert probe["retired"] and not host_boundary.docker("ps","-aq","--filter","id="+probe["container_id"]).strip()
             try:forward.observe_adoption(rows["tsdb"]["id"])
             except RuntimeError as exc:assert str(exc)=="storage_forward_active_adoption_required"
             else:raise AssertionError("host retired adoption still admitted")
             assert retained_counts()==counts_before
+            if failed_retirement_bytes is not None:
+                assert (state/terminal.FORWARD_STATE).read_bytes() == failed_retirement_bytes
+                launched.update(explicit_retirement_recovery=True, conflicting_writer_refusal_reproduced=True,
+                    failed_retirement_journal_preserved=True)
             launched.update(canonical_failure_retirement=True,actual_forward_terminal_command=True,
                 retirement_lost_commit_reconciled_without_dispatch=True,original_terminal_preserved=True,
                 fixture_source_copy_and_queue_counts_preserved=True)

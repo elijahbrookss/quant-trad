@@ -381,3 +381,114 @@ def test_adoption_naturally_expired_phase_can_only_retire(retained):
         assert not any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())
         assert _old(conn) == original
         _insert(conn, retained, "after-expired-adoption-retirement")
+
+
+
+@pytest.mark.parametrize("held_relation", [headers.SOURCE, "market.raw_archive_manifests"])
+def test_terminal_recovery_waits_for_writer_and_preserves_committed_rows(retained, held_relation):
+    import queue
+    import threading
+    import time
+    from scripts.automation import storage_online_terminal as terminal
+    engine = retained.database._engine
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+        before = adoption._state(conn)
+        frozen = _frozen_records(conn)
+        old = _old(conn)
+    ready = queue.Queue()
+    outcome = queue.Queue()
+    archive_contended = threading.Event()
+    def observe_lock_error(context):
+        if (getattr(context.original_exception, "pgcode", None) == "55P03"
+                and "ACCESS EXCLUSIVE MODE NOWAIT" in (context.statement or "")):
+            archive_contended.set()
+    event.listen(engine, "handle_error", observe_lock_error)
+    if held_relation != headers.SOURCE:
+        with engine.begin() as conn:
+            _insert(conn, retained, "writer-before-terminal-recovery")
+    writer = engine.connect()
+    transaction = writer.begin()
+    if held_relation == headers.SOURCE:
+        _insert(writer, retained, "writer-before-terminal-recovery")
+    else:
+        writer.exec_driver_sql("LOCK TABLE " + held_relation + " IN ROW EXCLUSIVE MODE")
+    def recover():
+        try:
+            with engine.begin() as conn:
+                ready.put(conn.scalar(text("SELECT pg_backend_pid()")))
+                with adoption._step(conn, 10):
+                    terminal._wait_for_retirement_sources(conn)
+                    result = adoption.retire_adoption(conn, operation_sha256=OPERATION)
+            outcome.put(result)
+        except BaseException as exc:
+            outcome.put(exc)
+    thread = threading.Thread(target=recover)
+    try:
+        if held_relation == headers.SOURCE:
+            with pytest.raises(DBAPIError) as failed, engine.begin() as conn:
+                adoption.retire_adoption(conn, operation_sha256=OPERATION)
+            assert failed.value.orig.pgcode == "55P03"
+        thread.start()
+        pid = ready.get(timeout=5)
+        if held_relation == headers.SOURCE:
+            deadline = time.monotonic()+5
+            waiting = False
+            while time.monotonic() < deadline:
+                with engine.connect() as conn:
+                    waiting = conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid "
+                        "AND relation=CAST(:relation AS regclass) AND mode='AccessExclusiveLock' AND NOT granted)"),
+                        {"pid": pid, "relation": held_relation})
+                if waiting: break
+                time.sleep(.02)
+            assert waiting, "recovery did not queue behind the existing writer"
+        else:
+            assert archive_contended.wait(5), "archive publisher was not fenced"
+            # The publisher can still visit Facts: recovery must release its
+            # first gate whenever the rest of its lock set cannot be obtained.
+            writer.exec_driver_sql("SET LOCAL lock_timeout='2s'")
+            writer.exec_driver_sql("LOCK TABLE " + headers.SOURCE + " IN ROW EXCLUSIVE MODE")
+        transaction.commit()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        result = outcome.get_nowait()
+        if isinstance(result, BaseException): raise result
+        assert result["retired"]
+    finally:
+        if transaction.is_active: transaction.rollback()
+        writer.close()
+        if thread.ident is not None: thread.join(timeout=12)
+        event.remove(engine, "handle_error", observe_lock_error)
+    with engine.begin() as conn:
+        after = adoption._state(conn)
+        assert after["terminal"]["rows_preserved"]
+        assert all(after[name] == before[name] for name in ("started_at", "expires_at", "progress"))
+        assert _old(conn) == old and _frozen_records(conn) == frozen
+        assert conn.scalar(text("SELECT count(*) FROM " + headers.SOURCE + " WHERE observation_key='writer-before-terminal-recovery'")) == 1
+        assert conn.scalar(text("SELECT count(*) FROM " + adoption.IDENTITY + " WHERE observation_key='writer-before-terminal-recovery'")) == 1
+        _insert(conn, retained, "writer-after-terminal-recovery")
+        assert conn.scalar(text("SELECT count(*) FROM " + adoption.IDENTITY + " WHERE observation_key='writer-after-terminal-recovery'")) == 0
+
+
+def test_terminal_recovery_lock_wait_keeps_enclosing_deadline(retained):
+    import time
+    from scripts.automation import storage_online_terminal as terminal
+    engine = retained.database._engine
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+        before = adoption._state(conn)
+    with engine.connect() as writer:
+        transaction = writer.begin()
+        try:
+            _insert(writer, retained, "held-terminal-recovery-writer")
+            started = time.monotonic()
+            with pytest.raises(DBAPIError), engine.begin() as conn:
+                with adoption._step(conn, 1):
+                    terminal._wait_for_retirement_sources(conn)
+                    pytest.fail("expired recovery unexpectedly obtained its lock")
+            assert time.monotonic()-started < 5
+        finally:
+            transaction.rollback()
+    with engine.begin() as conn:
+        assert adoption._state(conn) == before
+        assert adoption._snapshot(conn) == before["binding"]
