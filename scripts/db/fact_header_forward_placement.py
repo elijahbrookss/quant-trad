@@ -159,7 +159,8 @@ def move_lookup_indexes(engine, *, operation_sha256, predecessor_operation_sha25
                 previous_ms = conn.scalar(text("SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
                 if previous_ms:
                     deadline = min(deadline, started + previous_ms/1000)
-            with conn.begin(), capture._bounded_step(conn, 30):
+            with conn.begin(), capture._bounded_step(conn, 30) as limit:
+                limit(deadline-monotonic())
                 for name in (CONTROLLER_LOCK, "qt.storage.management.v1"):
                     if not conn.scalar(text("SELECT pg_try_advisory_lock(hashtextextended(:name,0))"), {"name": name}):
                         raise RuntimeError("fact_header_lookup_owner_busy")

@@ -598,6 +598,20 @@ def test_retained_lookup_placement_is_atomic_recoverable_and_explicit(retained, 
         frozen = _frozen_records(conn)
         before = adoption._snapshot(conn, OPERATION)
     options["predecessor_terminal_sha256"] = adoption._digest(terminal)
+    # The caller's shorter absolute bound covers intent creation too. A slow
+    # namespace probe must not publish a fresh intent after that bound expires.
+    import time
+    observe = physical.observe
+    def late_probe(*args, **kwargs):
+        result = observe(*args, **kwargs)
+        time.sleep(max(0, kwargs["deadline"]-time.monotonic()) + .05)
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(physical, "observe", late_probe)
+        with pytest.raises(RuntimeError, match="step_timeout"):
+            lookup.move_lookup_indexes(engine, **options, deadline=time.monotonic()+5)
+    with engine.begin() as conn:
+        assert lookup._row(conn) is None
     # Another controller/storage owner must be refused, including idle owners.
     with engine.connect() as owner:
         owner.exec_driver_sql("SELECT pg_advisory_lock(hashtextextended('qt.storage.management.v1',0))")
