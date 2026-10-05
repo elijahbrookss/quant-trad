@@ -149,6 +149,9 @@ def test_late_book_prefix_admission_and_control_frame_expiry_exclude_each_other(
     assert service._execute_archive_expiration(item=control, store=fixture.store)["status"] == "completed"
     with pytest.raises(RuntimeError, match="canonical_raw_reference_expired.*prefix"):
         _publish_book_result(fixture, 1)
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:id"),
+                               {"id": fixture.series_id}).scalar_one() == 0
 
 
 def test_hot_flow_reference_admission_reuses_hold_without_losing_expiry_or_reclamation_fences(
@@ -210,6 +213,3 @@ def test_hot_flow_holder_cannot_admit_a_nonexistent_coverage_revision(storage, t
     with pytest.raises(RuntimeError, match="canonical_raw_reference_missing"):
         with storage.database.session() as writer:
             lock_canonical_raw_references(writer, [fact], max_mapping_rows=2)
-    with storage.database.session() as session:
-        assert session.execute(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:id"),
-                               {"id": fixture.series_id}).scalar_one() == 0
