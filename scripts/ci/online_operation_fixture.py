@@ -747,6 +747,10 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             launched.update(canonical_failure_retirement=True,actual_forward_terminal_command=True,
                 retirement_lost_commit_reconciled_without_dispatch=True,original_terminal_preserved=True,
                 fixture_source_copy_and_queue_counts_preserved=True)
+            if retirement_recovery:
+                successor_report, created = _rehearse_retained_successor(state=state, plan_path=plan_path,
+                    manifest=manifest, terminal_file=terminal_state, preflight=retirement_preflight)
+                launched.update(successor_report)
         assert all(p.read_bytes()==data for p,data in original.items())
         assert host_boundary.identities(host_boundary.inventory(kwargs["project"],operator_id=created))==source
     return dict(candidate_image=candidate,interrupted_publication_reconciled=True,
@@ -754,6 +758,78 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         original_publication_clocks_preserved=True,old_worker_preserved=True,source_clients_unchanged=final_mode != "commit",
         production_runtime_preflight=False,production_cardinality=False,final_handoff=final_mode == "commit",
         **key_report, **({"forward_worker_started":False}|launched))
+
+
+def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, preflight):
+    """Actual confined lookup/publication/worker/terminal after retained retirement."""
+    from scripts.automation import storage_online_forward as forward
+    from scripts.automation import storage_online_terminal as terminal
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_deadline as publication
+    from scripts.automation import storage_online_keys as lookup_owner
+    prior = forward.inspect_published_operation(state)
+    retired = host_boundary.load_receipt(state/terminal_file, max_bytes=524288)
+    protected = {path:path.read_bytes() for path in (plan_path, state/terminal.STATE,
+        state/terminal.FORWARD_STATE, state/terminal.FORWARD_RECOVERY_STATE, state/forward.STATE, state/forward.LAUNCH_STATE)}
+    package = dict(schema_version="qt.storage_online_lookup_package.v1", plan_sha256=publication._sha(plan_path.read_bytes()),
+        **{k:manifest[k] for k in ("image", "source_revision", "source_tree_hash")},
+        operation_sha256=host_boundary.digest(dict(predecessor=prior["forward"]["operation_sha256"], purpose="lookup-fixture")),
+        predecessor_operation_sha256=prior["forward"]["operation_sha256"],
+        predecessor_terminal_sha256=retired["receipt"]["terminal_sha256"], predecessor_terminal_file=terminal_file,
+        predecessor_terminal_file_sha256=publication._sha((state/terminal_file).read_bytes()))
+    file = state/"lookup-package.json"
+    host_boundary.save_receipt(file, package, initial=True)
+    actual_preflight, actual_probe = operation.inspect_prepared_operation, terminal._probe
+    calls = []
+    def lose_move(*args, **kwargs):
+        calls.append(kwargs["action"])
+        result = actual_probe(*args, **kwargs)
+        if kwargs["action"] == "place_lookups": raise TimeoutError("lookup placement COMMIT reply lost")
+        return result
+    operation.inspect_prepared_operation = preflight
+    try:
+        assert not operation.run_operation_plan(plan_path, place_forward_lookups_file=file)["storage_mutations_performed"]
+        terminal._probe = lose_move
+        try:
+            operation.run_operation_plan(plan_path, place_forward_lookups_file=file, execute=True)
+            raise AssertionError("missing lookup lost reply")
+        except TimeoutError as exc: assert str(exc) == "lookup placement COMMIT reply lost"
+        finally: terminal._probe = actual_probe
+        assert operation.run_operation_plan(plan_path, place_forward_lookups_file=file)["indexes_placed"]
+        lookup_journal = host_boundary.load_receipt(state/forward.operation_file(lookup_owner.LOOKUP_STATE,
+            operation_sha256=package["operation_sha256"]), max_bytes=forward._MAX_BYTES)
+        assert lookup_journal["phase"] == "complete" and calls.count("place_lookups") == 1
+        successor_package = {k:v for k,v in package.items() if k != "operation_sha256"}
+        successor_package.update(schema_version="qt.storage_online_forward_package.v2",
+            lookup_operation_sha256=package["operation_sha256"], end_day=manifest["end_day"],
+            forward_plan_path=str(state/"successor-operation.json"))
+        successor_file = state/"successor-package.json"
+        host_boundary.save_receipt(successor_file, successor_package, initial=True)
+        assert not operation.run_operation_plan(plan_path, forward_package_file=successor_file)["storage_mutations_performed"]
+        operation.run_operation_plan(plan_path, forward_package_file=successor_file, execute=True)
+        successor_path = Path(successor_package["forward_plan_path"])
+        prepared = operation.run_operation_plan(successor_path, prepare_forward_only=True, execute=True)
+        assert prepared["phase"] == "forward_background_prepared" and prepared["adoption_active"]
+        selected = forward.inspect_published_operation(state, operation_path=successor_path)
+        ready = forward.load_launch(state, request=selected["new_request"])
+        worker = host_boundary.load_receipt(state/launch._STATE)
+        assert ready["worker"] == worker and ready["pending_worker"] is None
+        initialization, capture = forward.observe_adoption(worker["binding"]["database_id"], request=selected["new_request"])
+        forward.admit_launched_adoption(state, selected["new_request"], worker, initialization=initialization, capture=capture)
+        cancel_package = dict(schema_version="qt.storage_online_terminal.v1", plan_sha256=publication._sha(successor_path.read_bytes()),
+            **{k:manifest[k] for k in ("image", "source_revision", "source_tree_hash")})
+        cancel_file = state/"successor-retirement-package.json"
+        host_boundary.save_receipt(cancel_file, cancel_package, initial=True)
+        assert operation.run_operation_plan(successor_path, cancel_attempt_file=cancel_file, execute=True)["phase"] == "forward_retired"
+        assert all(path.read_bytes() == data for path,data in protected.items())
+        completed = host_boundary.load_receipt(state/forward.operation_file(terminal.FORWARD_STATE, request=selected["new_request"]))
+        assert completed["phase"] == "complete" and completed["receipt"]["retired"]
+        return dict(actual_successor_host_route=True, actual_lookup_command=True,
+            lookup_lost_commit_no_second_move=True, retained_predecessor_files_unchanged=True,
+            successor_preparation_and_terminal=True, successor_final_handoff=False), worker["container_id"]
+    finally:
+        operation.inspect_prepared_operation, terminal._probe = actual_preflight, actual_probe
 
 
 def _rehearse_forward_final(*, state, arguments, created, launch_intent, plan_path, mode):

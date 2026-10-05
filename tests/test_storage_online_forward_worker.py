@@ -61,3 +61,40 @@ def test_forward_missing_duration_is_not_replaced_with_a_default():
     with pytest.raises(ValueError, match="adoption_bound_invalid"):
         forward.prepare_forward(None, request, targets=(), policy=None, limits=None,
             source=None, destination=None)
+
+
+def _successor_request(original=None):
+    request = _request(original)
+    intent = request["forward"]
+    intent.update(schema_version="qt.storage_online_forward_intent.v2",
+        predecessor_operation_sha256="e"*64, predecessor_terminal_sha256="f"*64,
+        lookup_operation_sha256="1"*64)
+    intent["operation_sha256"] = digest({k:v for k,v in intent.items() if k != "operation_sha256"})
+    return request
+
+
+def test_successor_names_are_explicit_and_legacy_names_are_preserved():
+    request = _successor_request()
+    worker.validate_request_shape(request)
+    intent = forward.request_binding(request)
+    name = forward.initialization_relation(intent)
+    assert name == "qt_fact_header_forward_v2.initialization_" + intent["operation_sha256"][:48]
+    assert len(name.split(".")[1]) <= 63
+    assert forward.initialization_relation() == forward.INITIAL
+    assert forward.initialization_relation(_request()["forward"]) == forward.INITIAL
+    from scripts.automation import storage_online_forward as host
+    from scripts.db import fact_header_forward_adoption as adoption
+    assert host._observation_names(request)[1] == (name, adoption.successor_schema(intent["operation_sha256"])+".adoption")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("lookup_operation_sha256", "wrong"), ("predecessor_operation_sha256", "1"*64),
+    ("predecessor_terminal_sha256", None), ("schema_version", "qt.storage_online_forward_intent.v1"),
+    ("schema_version", []),
+])
+def test_successor_foreign_or_ambiguous_bindings_refuse(field, value):
+    request = _successor_request()
+    request["forward"][field] = value
+    request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
+    with pytest.raises(ValueError):
+        forward.request_binding(request)

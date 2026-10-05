@@ -13,6 +13,11 @@ code_paths:
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
   - scripts/db/fact_header_forward_placement.py
+  - scripts/automation/storage_online_forward.py
+  - scripts/automation/storage_online_forward_worker.py
+  - scripts/automation/storage_online_keys.py
+  - scripts/automation/storage_online_terminal.py
+  - tests/test_storage_forward_successor.py
   - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
@@ -77,13 +82,30 @@ trusted across a period without its guards. Setup, mirrors and proof publication
 remain transactional; an interrupted setup rolls back, and a lost commit reply
 reconciles the same new operation and original new deadline.
 
-The database slice alone is not a production route. A successor still needs
-explicit host publication, physical placement/resource admission, recovery and
-final-switch qualification. The fixed physical owner can now prepare a separately bounded three-index
-transition, described in [ADR 0070](0070-separate-global-fact-identity-from-dated-headers.md).
-A successor must explicitly bind its completed receipt; old all-HDD records keep
-their original meaning. Existing host entrypoints continue to refuse the retired
-operation; database support alone does not authorize a new host publication.
+The candidate host route extends the existing migration command and fixed
+terminal worker. An explicit lookup package names the retired predecessor and
+its exact terminal receipt, then places only the three selected indexes under
+the existing physical resource owner. A separate host intent bounds transport
+and reconciliation; the SQL receipt still owns the atomic move and its original
+clock. The command reconciles an uncertain completion before considering another
+dispatch. It does not publish a successor or start collection mirrors.
+
+A v2 forward package explicitly names that completed placement, predecessor and
+terminal-file digest. Publication preserves the previous publication, launch,
+terminal and failed-recovery records. The new publication, launch, initializer
+and terminal records use the new operation identity. Active request/worker/runtime
+files accept only journaled old/new preimages. Reentry retains the same clocks;
+a foreign preimage or expired incomplete phase refuses. Completed keys are
+reused without rebuilding. The host and confined terminal select the same exact
+SQL adoption; no reader chooses the latest operation.
+
+This handles the current first-successor transition, not an arbitrary chain of
+migrations. Old all-HDD receipts retain their meaning through the explicit
+three-index transition in [ADR 0070](0070-separate-global-fact-identity-from-dated-headers.md).
+The implementation is a candidate pending its exact-image host rehearsal and
+production resource/collector-impact qualification. Final switch, paired recovery
+and application activation remain separate gates. Passing these tests does not
+renew a retired attempt, start research or establish production performance.
 
 ## One parent, with an explicit retained range
 

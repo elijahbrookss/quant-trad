@@ -18,6 +18,7 @@ code_paths:
   - tests/test_storage_forward_observation.py
   - tests/test_storage_forward_launch.py
   - tests/test_storage_forward_retirement.py
+  - tests/test_storage_forward_successor.py
   - tests/test_storage_forward_operation.py
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
@@ -3456,9 +3457,22 @@ The successor explicitly supplies `lookup_operation_sha256`. Its effective
 placement derives from the completed receipt, leaving the prior all-HDD binding
 unchanged. The old retirement is reconciled through only those recorded physical
 file changes; all other metadata, source data and prior evidence must still match.
-This candidate primitive is not wired as a production host command. Admission,
-package publication, measured collector impact and final paired recovery remain
-required before deployment. See [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md)
+The candidate `qt storage migrate --place-forward-lookups-file` command uses
+this helper through the existing confined terminal transport. Its package binds
+one retired predecessor and three-index operation; inspection is the default.
+The host owns one original one-hour transport clock, while the existing SQL
+resource limit can be shorter. Interrupted work first retires the exact confined
+worker and inspects SQL; a completed move is not repeated. Publication requires
+both completed placement and confirmed worker retirement.
+
+The v2 `--forward-package-file` then binds that receipt and the exact predecessor
+terminal file. It preserves legacy journals and writes operation-specific new
+publication/launch/terminal records. A separate initializer reuses completed
+keys, and old/new host observers select the request's operation explicitly.
+These are temporary records owned by the existing migration boundary. No normal
+read performs conversion, and this command neither changes retention nor starts
+research. Exact-image host qualification, measured collector impact and final
+paired recovery remain required before production deployment. See [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md)
 for the permanent SSD growth and compatibility tradeoff.
 
 The internal `fact_header_forward_adoption.py` phase binds a separately supplied

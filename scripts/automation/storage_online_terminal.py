@@ -29,6 +29,7 @@ FORWARD_RECOVERY_STATE = "storage-online-forward-terminal-recovery.json"
 FORWARD_RECOVERY_PROBE = "storage-online-forward-terminal-recovery-worker.json"
 RECOVERY_SCHEMA = "qt.storage_online_terminal_recovery.v1"
 KEY_PROBE = "storage-online-key-preparation-worker.json"
+LOOKUP_PROBE = "storage-online-lookup-placement-worker.json"
 COMMAND = ["-m", "scripts.automation.storage_online_terminal", "--worker"]
 
 
@@ -42,13 +43,14 @@ def _check_clock(journal):
         raise RuntimeError("storage_online_terminal_expired_or_rebooted_no_dispatch")
 
 
-def _retire_previous_probe(root, original, package, *, forward=False, keys=False, recovery=False):
+def _retire_previous_probe(root, original, package, *, forward=False, keys=False, recovery=False, operation_sha256=None, lookups=False):
     """Recover create/start/stop uncertainty for this exact confined worker only."""
-    path = root/(KEY_PROBE if keys else FORWARD_RECOVERY_PROBE if recovery else FORWARD_PROBE if forward else PROBE)
+    from scripts.automation.storage_online_forward import operation_file
+    path = root/operation_file(LOOKUP_PROBE if lookups else KEY_PROBE if keys else FORWARD_RECOVERY_PROBE if recovery else FORWARD_PROBE if forward else PROBE, operation_sha256=operation_sha256)
     if not os.path.lexists(path):
         return
     saved = host.load_receipt(path)
-    if saved.get("name") != original["binding"]["project"]+("-storage-key-preparation" if keys else "-storage-forward-terminal-recovery" if recovery else "-storage-forward-terminal" if forward else "-storage-terminal"):
+    if saved.get("name") != _probe_name(original["binding"]["project"], keys=keys, forward=forward, recovery=recovery, operation_sha256=operation_sha256, lookups=lookups):
         raise RuntimeError("storage_online_terminal_probe_owner_changed")
     if saved.get("owner") != dict(root=str(root), worker=original["container_id"], package=package):
         from scripts.automation.storage_online_keys import STATE as key_state
@@ -111,7 +113,14 @@ def _retire_previous_probe(root, original, package, *, forward=False, keys=False
         host.docker("rm", identity)
 
 
-def _probe(root, plan, original, package, *, action, wall_deadline, expected_capture=None, intent_sha256=None, original_request=None):
+def _probe_name(project, *, keys=False, forward=False, recovery=False, operation_sha256=None, lookups=False):
+    from scripts.automation.storage_online_forward import operation_file
+    operation_file(PROBE, operation_sha256=operation_sha256)  # validate before Docker interpolation
+    name = project+("-storage-lookup-placement" if lookups else "-storage-key-preparation" if keys else "-storage-forward-terminal-recovery" if recovery else "-storage-forward-terminal" if forward else "-storage-terminal")
+    return name+("-"+operation_sha256 if operation_sha256 is not None else "")
+
+
+def _probe(root, plan, original, package, *, action, wall_deadline, expected_capture=None, intent_sha256=None, original_request=None, probe_operation_sha256=None):
     """One fixed command, exact declared mounts and post-exit retirement."""
     from scripts.automation import storage_online_deadline as amendment
     request = (host.load_receipt(root/amendment.REQUEST) if original_request is None else original_request)
@@ -119,15 +128,31 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
             or amendment._sha(amendment.request_bytes(request)) != original["binding"]["request_sha256"]):
         raise RuntimeError("storage_online_terminal_original_request_changed")
     from scripts.automation.storage_online_forward_worker import request_binding
-    is_forward = request_binding(request) is not None
+    intent = request_binding(request)
+    is_forward = intent is not None
     is_keys = action in {"inspect_keys", "prepare_keys"}
+    is_lookups = action in {"inspect_lookups", "place_lookups"}
     is_recovery = package["schema_version"] == RECOVERY_SCHEMA
     if is_recovery and (not is_forward or is_keys):
         raise ValueError("storage_forward_terminal_recovery_only")
+    if is_lookups and (not is_forward or package.get("schema_version") != "qt.storage_online_lookup_package.v1"):
+        raise ValueError("storage_lookup_worker_forward_required")
     if is_keys and is_forward:
         raise RuntimeError("storage_key_preparation_before_publication_required")
     probe_options = {"keys":True} if is_keys else {"forward":True, **({"recovery":True} if is_recovery else {})} if is_forward else {}
-    probe_path = root/(KEY_PROBE if is_keys else FORWARD_RECOVERY_PROBE if is_recovery else FORWARD_PROBE if is_forward else PROBE)
+    from scripts.automation.storage_online_forward import operation_file
+    selected = intent["operation_sha256"] if is_forward and intent["schema_version"] == "qt.storage_online_forward_intent.v2" else None
+    if is_lookups:
+        selected = package["operation_sha256"]
+        probe_options = dict(lookups=True)
+    if probe_operation_sha256 is not None:
+        if action != "reconcile" or original_request is None or selected is not None:
+            raise ValueError("storage_forward_publication_probe_read_only_required")
+        selected = probe_operation_sha256
+    probe_path = root/operation_file(LOOKUP_PROBE if is_lookups else KEY_PROBE if is_keys else FORWARD_RECOVERY_PROBE if is_recovery else FORWARD_PROBE if is_forward else PROBE,
+        operation_sha256=selected)
+    if selected is not None:
+        probe_options["operation_sha256"] = selected
     _retire_previous_probe(root, original, package, **probe_options)
     payload = dict(action=action, request=request, package=package, wall_deadline=wall_deadline,
                    expected_capture=expected_capture, intent_sha256=intent_sha256)
@@ -148,10 +173,10 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
         QT_ONLINE_REQUEST_SHA256=digest, QT_STORAGE_UDEV_ROOT="/run/qt-online/udev")
     binding.update(image=package["image"], request_sha256=digest,
         environment_sha256=host.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
-    if not is_keys:
+    if not is_keys and not is_lookups:
         for mount in binding["mounts"].values():
             mount["readonly"] = True
-    name = plan["project"]+("-storage-key-preparation" if is_keys else "-storage-forward-terminal-recovery" if is_recovery else "-storage-forward-terminal" if is_forward else "-storage-terminal")
+    name = _probe_name(plan["project"], keys=is_keys, forward=is_forward, recovery=is_recovery, operation_sha256=selected, lookups=is_lookups)
     saved = dict(name=name, binding=binding, container_id=None, contract=None, retired=False,
                  owner=dict(root=str(root),worker=original["container_id"],package=package))
     host.save_receipt(probe_path, saved, initial=not os.path.lexists(probe_path))
@@ -162,7 +187,7 @@ def _probe(root, plan, original, package, *, action, wall_deadline, expected_cap
     saved.update(container_id=identity, contract=contract)
     host.save_receipt(probe_path, saved, initial=False)
     monotonic_deadline = host._DOCKER_DEADLINE.get()
-    remaining = min(3600 if action == "prepare_keys" else 60, wall_deadline-time.time()-70,
+    remaining = min(3600 if action in {"prepare_keys", "place_lookups"} else 60, wall_deadline-time.time()-70,
                     monotonic_deadline-time.monotonic()-70 if monotonic_deadline is not None else 60)
     if remaining <= 0:
         _retire_previous_probe(root, original, package, **probe_options)
@@ -318,7 +343,7 @@ def _admit_forward(root, path, plan, package, saved, *, deadline):
     from scripts.automation import storage_online_deadline as amendment
     from scripts.automation import storage_online_operation as operation
     published = forward.inspect_published_operation(root, operation_path=path)
-    current = forward.load_launch(root)
+    current = forward.load_launch(root, request=published["new_request"])
     expected = dict(publication_sha256=published["intent_sha256"],
         request_sha256=saved["binding"]["request_sha256"],
         worker_binding_sha256=host.digest(saved["binding"]),
@@ -366,14 +391,15 @@ def _forward_result(value, *, request_sha256, capture=None):
     return value
 
 
-def _recovery_predecessor(root, path, package, saved):
+def _recovery_predecessor(root, path, package, saved, *, request=None):
     """Bind one explicit preserving recovery to the untouched failed dispatch.
 
     This does not authorize replay of that dispatch. The recovery has a separate
     journal/probe and only the same row-preserving SQL retirement capability.
     Retired worker admission and live SQL reconciliation remain mandatory.
     """
-    predecessor_path = root/FORWARD_STATE
+    from scripts.automation.storage_online_forward import operation_file
+    predecessor_path = root/operation_file(FORWARD_STATE, request=request)
     previous = host.load_receipt(predecessor_path, max_bytes=524288)
     immutable = {k:v for k,v in previous.items() if k not in {"intent_sha256", "phase", "receipt"}}
     if (hashlib.sha256(predecessor_path.read_bytes()).hexdigest() != package["previous_terminal_sha256"]
@@ -430,10 +456,10 @@ def _cancel_forward_locked(root, path, plan, package, *, execute, recovery=False
     published = forward.inspect_published_operation(root, operation_path=path)
     request = published["new_request"]
     operator_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    journal_path = root/(FORWARD_RECOVERY_STATE if recovery else FORWARD_STATE)
+    journal_path = root/forward.operation_file(FORWARD_RECOVERY_STATE if recovery else FORWARD_STATE, request=request)
     journal = host.load_receipt(journal_path, max_bytes=524288) if os.path.lexists(journal_path) else None
     saved = host.load_receipt(root/launch._STATE)
-    previous = _recovery_predecessor(root, path, package, saved) if recovery else None
+    previous = _recovery_predecessor(root, path, package, saved, request=request) if recovery else None
     if journal is not None:
         immutable = {k:v for k,v in journal.items() if k not in {"intent_sha256", "phase", "receipt"}}
         if (host.digest(immutable) != journal["intent_sha256"] or journal["operation_path"] != str(path)
@@ -444,12 +470,14 @@ def _cancel_forward_locked(root, path, plan, package, *, execute, recovery=False
     if journal is not None and journal["phase"] == "prepared":
         _check_clock(journal)
         deadline, wall = journal["monotonic_deadline"], journal["wall_deadline"]
+    probe_options = ({"operation_sha256":request["forward"]["operation_sha256"]}
+        if request["forward"]["schema_version"] == "qt.storage_online_forward_intent.v2" else {})
     with host.docker_deadline(deadline):
         if previous is not None:
             # A lost reply may leave a transient alive. Retirement uses its exact
             # original package under this bounded host owner, before SQL inspection.
-            _retire_previous_probe(root, saved, previous["package"], forward=True)
-        _retire_previous_probe(root, saved, package, forward=True, **({"recovery":True} if recovery else {}))
+            _retire_previous_probe(root, saved, previous["package"], forward=True, **probe_options)
+        _retire_previous_probe(root, saved, package, forward=True, **probe_options, **({"recovery":True} if recovery else {}))
         observation = _admit_forward(root, path, plan, package, saved, deadline=deadline)
         if previous is not None and observation != previous["observation"]:
             raise RuntimeError("storage_forward_terminal_recovery_preimage_changed")
@@ -460,7 +488,7 @@ def _cancel_forward_locked(root, path, plan, package, *, execute, recovery=False
                 request_sha256=host.digest(request))
             if previous is not None and inspected["capture"] != previous["original_capture"]:
                 raise RuntimeError("storage_forward_terminal_recovery_capture_changed")
-            launch_saved = forward.load_launch(root)
+            launch_saved = forward.load_launch(root, request=request)
             if (inspected["capture"].get("operation_sha256") != published["forward"]["operation_sha256"]
                     or (launch_saved["capture"] is not None
                         and capture_binding(launch_saved["capture"]) != inspected["capture"])):
@@ -510,8 +538,8 @@ def _forward_sql(conn, payload, *, timeout_seconds):
     request = payload["request"]
     intent = request_binding(request)
     with adoption._step(conn, timeout_seconds):
-        state = adoption._state(conn)
-        initial = _initial(conn)
+        state = adoption._state(conn, intent["operation_sha256"])
+        initial = _initial(conn, intent)
         expected = dict(request_sha256=host.digest(request), operation_sha256=intent["operation_sha256"],
             cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=3600,
             initial_seconds=600, attempt_seconds=intent["original_capture"]["attempt_seconds"])
@@ -560,9 +588,9 @@ def worker_main():
         raise RuntimeError("storage_online_terminal_input_changed")
     payload = json.loads(data)
     if (set(payload) != {"action", "request", "package", "wall_deadline", "expected_capture", "intent_sha256"}
-            or payload["action"] not in {"inspect", "apply", "reconcile", "inspect_keys", "prepare_keys"}
+            or payload["action"] not in {"inspect", "apply", "reconcile", "inspect_keys", "prepare_keys", "inspect_lookups", "place_lookups"}
             or type(payload["wall_deadline"]) not in (int, float)
-            or not math.isfinite(payload["wall_deadline"]) or not 0 < payload["wall_deadline"]-time.time() <= (3600 if payload["action"] == "prepare_keys" else 300)):
+            or not math.isfinite(payload["wall_deadline"]) or not 0 < payload["wall_deadline"]-time.time() <= (3600 if payload["action"] in {"prepare_keys", "place_lookups"} else 300)):
         raise ValueError("storage_online_terminal_input_invalid")
     package, request = payload["package"], payload["request"]
     for name, variable in (("source_revision", "QT_IMAGE_SOURCE_REVISION"), ("source_tree_hash", "QT_IMAGE_SOURCE_TREE_HASH")):
@@ -577,7 +605,10 @@ def worker_main():
         from sqlalchemy.pool import NullPool
         engine = create_engine(os.environ["PG_DSN"], poolclass=NullPool, connect_args={"connect_timeout":5})
         try:
-            if payload["action"] in {"inspect_keys", "prepare_keys"}:
+            if payload["action"] in {"inspect_lookups", "place_lookups"}:
+                from scripts.automation.storage_online_keys import worker_lookups
+                result = worker_lookups(engine, payload)
+            elif payload["action"] in {"inspect_keys", "prepare_keys"}:
                 from scripts.automation.storage_online_keys import worker_keys
                 result = worker_keys(engine, payload)
             else:

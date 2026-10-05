@@ -26,6 +26,22 @@ STATE = "storage-online-forward.json"
 _MAX_BYTES = publication.PACKAGE_JOURNAL_BYTES
 
 
+def operation_file(name, *, request=None, operation_sha256=None):
+    """Select one explicit successor journal; legacy names remain immutable."""
+    from scripts.automation.storage_online_forward_worker import request_binding
+    if request is not None:
+        intent = request_binding(request)
+        selected = intent["operation_sha256"] if intent and intent["schema_version"] == "qt.storage_online_forward_intent.v2" else None
+        if operation_sha256 is not None and operation_sha256 != selected:
+            raise ValueError("storage_forward_journal_operation_changed")
+        operation_sha256 = selected
+    if operation_sha256 is None:
+        return name
+    if not isinstance(operation_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", operation_sha256):
+        raise ValueError("storage_forward_journal_operation_invalid")
+    return name.removesuffix(".json")+"-"+operation_sha256+".json"
+
+
 def _terminal(root, original_path):
     value = host.load_receipt(root/terminal.STATE, max_bytes=524288)
     check = {k:v for k,v in value.items() if k not in {"intent_sha256", "phase", "receipt"}}
@@ -71,8 +87,11 @@ def _publish_plan(path, expected):
 def _admit_preimages(root, original_path, new_path, journal):
     """Refuse foreign edits across the whole publication before any mutation."""
     if (original_path.read_text() != journal["original_plan_bytes"]
-            or publication._sha((root/terminal.STATE).read_bytes()) != journal["terminal_sha256"]):
+            or publication._sha((root/journal.get("terminal_file", terminal.STATE)).read_bytes()) != journal["terminal_sha256"]):
         raise RuntimeError("storage_forward_original_evidence_changed")
+    for name, digest in journal.get("preserved_files", {}).items():
+        if publication._sha((root/name).read_bytes()) != digest:
+            raise RuntimeError("storage_forward_predecessor_evidence_changed")
     pairs = ((root/publication.REQUEST, journal["old_request_bytes"].encode(), publication.request_bytes(journal["new_request"])),
         (root/launch._STATE, journal["old_worker_bytes"].encode(), (json.dumps(journal["new_worker"], sort_keys=True)+"\n").encode()),
         (root/runtime.RUNTIME_RECIPE, journal["old_runtime_bytes"].encode(), (json.dumps(journal["new_runtime"], sort_keys=True)+"\n").encode()))
@@ -85,6 +104,61 @@ def _admit_preimages(root, original_path, new_path, journal):
         host.load_receipt(new_path, max_bytes=max(65536, len(expected)))
         if new_path.read_bytes() != expected:
             raise RuntimeError("storage_forward_plan_file_changed")
+
+
+def _successor_predecessor(root, package):
+    """Admit the explicitly retired first forward attempt, never discover latest."""
+    prior = host.load_receipt(root/STATE, max_bytes=_MAX_BYTES)
+    if prior.get("forward", {}).get("schema_version") != "qt.storage_online_forward_intent.v1":
+        raise RuntimeError("storage_forward_first_predecessor_required")
+    _inspect_publication(root, prior, active=False)
+    old_path = launch._canonical(prior["package"]["forward_plan_path"])
+    name = package["predecessor_terminal_file"]
+    if name not in (terminal.FORWARD_STATE, terminal.FORWARD_RECOVERY_STATE):
+        raise ValueError("storage_forward_predecessor_terminal_file_invalid")
+    target = root/name
+    retired = host.load_receipt(target, max_bytes=524288)
+    immutable = {k:v for k,v in retired.items() if k not in {"intent_sha256", "phase", "receipt"}}
+    receipt = terminal._forward_result(retired.get("receipt"), request_sha256=host.digest(prior["new_request"]))
+    old_launch = load_launch(root)
+    if (retired.get("phase") != "complete" or host.digest(immutable) != retired.get("intent_sha256")
+            or publication._sha(target.read_bytes()) != package["predecessor_terminal_file_sha256"]
+            or retired.get("operation_path") != str(old_path)
+            or receipt["retired"] is not True
+            or receipt["terminal_sha256"] != package["predecessor_terminal_sha256"]
+            or receipt["capture"].get("operation_sha256") != package["predecessor_operation_sha256"]
+            or prior["forward"]["operation_sha256"] != package["predecessor_operation_sha256"]
+            or retired.get("original_capture") != receipt["capture"]
+            or old_launch["worker"] != retired["worker"] or old_launch["pending_worker"] is not None
+            or retired["observation"].get("launch_sha256") != host.digest(old_launch)
+            or retired["observation"].get("publication_sha256") != prior["intent_sha256"]
+            or retired["worker"]["binding"] != prior["new_worker"]["binding"]):
+        raise RuntimeError("storage_forward_retired_predecessor_changed")
+    if name == terminal.FORWARD_RECOVERY_STATE:
+        terminal._recovery_predecessor(root, old_path, retired["package"], retired["worker"])
+    files = {name: publication._sha((root/name).read_bytes()) for name in
+        (STATE, LAUNCH_STATE, terminal.STATE, package["predecessor_terminal_file"])}
+    if name == terminal.FORWARD_RECOVERY_STATE:
+        files[terminal.FORWARD_STATE] = publication._sha((root/terminal.FORWARD_STATE).read_bytes())
+    return prior, retired, old_path, files
+
+
+def observe_lookup_placement(database_id, package):
+    """Bounded catalog-only proof before publishing the explicit successor."""
+    present = host.database_query(database_id,
+        "SELECT (to_regclass('qt_fact_header_forward_v2.lookup_placement') IS NOT NULL)::text", read_only_seconds=5)
+    if present.strip() != "true":
+        raise RuntimeError("storage_forward_lookup_completion_required")
+    rows = json.loads(host.database_query(database_id,
+        "SELECT json_agg(r)::text FROM (SELECT operation_sha256,binding->>'predecessor_operation_sha256' AS predecessor_operation_sha256,"
+        "binding->>'predecessor_terminal_sha256' AS predecessor_terminal_sha256,completion IS NOT NULL AS complete "
+        "FROM qt_fact_header_forward_v2.lookup_placement LIMIT 2) r", read_only_seconds=5))
+    expected = dict(operation_sha256=package["lookup_operation_sha256"],
+        predecessor_operation_sha256=package["predecessor_operation_sha256"],
+        predecessor_terminal_sha256=package["predecessor_terminal_sha256"], complete=True)
+    if rows != [expected]:
+        raise RuntimeError("storage_forward_lookup_completion_changed")
+    return expected
 
 
 def publish_package(path, *, package_file, execute=False):
@@ -103,9 +177,15 @@ def publish_package(path, *, package_file, execute=False):
     plan = operation.load_operation_plan(path)
     root = launch._canonical(plan["state_root"])
     package = host.load_receipt(launch._canonical(package_file))
-    if (not isinstance(package, dict) or set(package) != {
-            "schema_version", "plan_sha256", "image", "source_revision", "source_tree_hash", "forward_plan_path", "end_day"}
-            or package["schema_version"] != "qt.storage_online_forward_package.v1"
+    successor = isinstance(package, dict) and package.get("schema_version") == "qt.storage_online_forward_package.v2"
+    fields = {"schema_version", "plan_sha256", "image", "source_revision", "source_tree_hash", "forward_plan_path", "end_day"}
+    lineage = {"predecessor_operation_sha256", "predecessor_terminal_sha256", "lookup_operation_sha256"}
+    if successor:
+        fields |= lineage | {"predecessor_terminal_file", "predecessor_terminal_file_sha256"}
+    if (not isinstance(package, dict) or set(package) != fields
+            or package["schema_version"] not in ("qt.storage_online_forward_package.v1", "qt.storage_online_forward_package.v2")
+            or successor and any(not isinstance(package[k], str) or not re.fullmatch(r"[0-9a-f]{64}", package[k])
+                for k in lineage | {"predecessor_terminal_file_sha256"})
             or any(not isinstance(package[k], str) or not re.fullmatch(pattern, package[k])
                 for k,pattern in (("plan_sha256", r"[0-9a-f]{64}"), ("image", r"sha256:[0-9a-f]{64}"),
                     ("source_revision", r"[0-9a-f]{40}"), ("source_tree_hash", r"[0-9a-f]{64}")))
@@ -125,16 +205,38 @@ def publish_package(path, *, package_file, execute=False):
         for name in (publication.STATE, publication.PACKAGE_STATE):
             if os.path.lexists(root/name) and host.load_receipt(root/name, max_bytes=_MAX_BYTES).get("phase") != "complete":
                 raise RuntimeError("storage_forward_prior_publication_unresolved")
-        canceled = _terminal(root, path)
-        terminal_sha256 = publication._sha((root/terminal.STATE).read_bytes())
-        journal = host.load_receipt(root/STATE, max_bytes=_MAX_BYTES) if os.path.lexists(root/STATE) else None
+        prior = None
+        if successor:
+            prior, canceled, predecessor_path, preserved_files = _successor_predecessor(root, package)
+            if predecessor_path != path:
+                raise RuntimeError("storage_forward_predecessor_plan_changed")
+            from scripts.automation.storage_online_keys import require_lookups_finished
+            require_lookups_finished(root, package)
+            terminal_file = package["predecessor_terminal_file"]
+            old_intent = prior["forward"]
+        else:
+            canceled = _terminal(root, path)
+            terminal_file = terminal.STATE
+            old_intent = canceled
+        forward = dict(schema_version="qt.storage_online_forward_intent.v2" if successor else "qt.storage_online_forward_intent.v1",
+            original_plan_sha256=package["plan_sha256"], cancellation_intent_sha256=old_intent["cancellation_intent_sha256"] if successor else canceled["intent_sha256"],
+            original_capture=old_intent["original_capture"], end_day=package["end_day"],
+            candidate_revision=package["source_revision"], candidate_source_hash=package["source_tree_hash"])
+        if successor:
+            forward.update({k:package[k] for k in lineage})
+        forward["operation_sha256"] = host.digest(forward)
+        from scripts.automation.storage_online_forward_worker import request_binding
+        request_binding({**plan["request"], **{k:package[k] for k in ("source_revision", "source_tree_hash")}, "forward":forward})
+        state_file = operation_file(STATE, operation_sha256=forward["operation_sha256"] if successor else None)
+        terminal_sha256 = publication._sha((root/terminal_file).read_bytes())
+        journal = host.load_receipt(root/state_file, max_bytes=_MAX_BYTES) if os.path.lexists(root/state_file) else None
         if journal:
             immutable = {k:v for k,v in journal.items() if k not in {"intent_sha256", "phase"}}
             if (host.digest(immutable) != journal.get("intent_sha256")
                     or journal.get("phase") not in {"prepared", "publishing", "complete"}
                     or journal.get("package") != package or journal.get("operator_sha256") != operator
                     or journal.get("original_plan_bytes") != path.read_text()
-                    or journal.get("terminal_sha256") != publication._sha((root/terminal.STATE).read_bytes())):
+                    or journal.get("terminal_sha256") != publication._sha((root/terminal_file).read_bytes())):
                 raise RuntimeError("storage_forward_publication_intent_changed")
             if journal["phase"] == "complete":
                 _verify_published(root, new_path, journal)
@@ -150,7 +252,7 @@ def publish_package(path, *, package_file, execute=False):
             for name in (publication.REQUEST, launch._STATE, runtime.RUNTIME_RECIPE):
                 host.load_receipt(root/name, max_bytes=524288 if name == runtime.RUNTIME_RECIPE else 65536)
         saved = canceled["worker"]
-        if journal is None and publication._sha((root/launch._STATE).read_bytes()) != canceled["worker_sha256"]:
+        if journal is None and publication._sha((root/launch._STATE).read_bytes()) != (publication._sha((json.dumps(canceled["worker"], sort_keys=True)+"\n").encode()) if successor else canceled["worker_sha256"]):
             raise RuntimeError("storage_forward_original_worker_file_changed")
         wall, mono = time.time(), time.monotonic()
         clock = journal or dict(started_at=wall, started_monotonic=mono,
@@ -161,7 +263,8 @@ def publish_package(path, *, package_file, execute=False):
             old_request_bytes = journal["old_request_bytes"] if journal else (root/publication.REQUEST).read_text()
             old_request = json.loads(old_request_bytes)
             if (publication._sha(old_request_bytes.encode()) != saved["binding"]["request_sha256"]
-                    or {k:v for k,v in old_request.items() if k != "capture_preparation"} != plan["request"]
+                    or {k:v for k,v in old_request.items() if k not in ({"capture_preparation", "forward"} if successor else {"capture_preparation"})} != plan["request"]
+                    or successor and old_request != prior["new_request"]
                     or publication._sha(launch._canonical(plan["inventory_path"]).read_bytes()) != saved["binding"]["inventory_sha256"]):
                 raise RuntimeError("storage_forward_original_request_changed")
             rows = host.inventory(plan["project"], operator_id=saved["container_id"])
@@ -186,11 +289,20 @@ def publish_package(path, *, package_file, execute=False):
                     "inventory_path", "keys_root", "socket_volume", "spool_destination")}
                 operation.inspect_prepared_operation(root, **args, deadline=clock["monotonic_deadline"],
                     operator_id=saved["container_id"], proposed_runtime_recipe=recipe)
-            receipt = terminal._probe(root, plan, saved, canceled["package"], action="reconcile",
+            probe_package = canceled["package"]
+            probe_options = {}
+            if successor:
+                # Reconcile the old receipt using code that understands the
+                # explicit lookup transition; retain the old probe journals too.
+                probe_package = {**probe_package, **{k:package[k] for k in ("image", "source_revision", "source_tree_hash")}}
+                probe_options["probe_operation_sha256"] = host.digest(dict(successor=forward["operation_sha256"], purpose="publication_reconciliation"))
+            receipt = terminal._probe(root, plan, saved, probe_package, action="reconcile",
                 wall_deadline=clock["wall_deadline"], expected_capture=canceled["original_capture"],
-                intent_sha256=canceled["intent_sha256"], original_request=old_request)
+                intent_sha256=canceled["intent_sha256"], original_request=old_request, **probe_options)
             if receipt != canceled["receipt"]:
                 raise RuntimeError("storage_forward_cancellation_proof_changed")
+            if successor:
+                observe_lookup_placement(saved["binding"]["database_id"], package)
             _clock(clock)
             if not execute:
                 return dict(phase="forward_package_reconciliation_required" if journal else "forward_package_inspected",
@@ -198,11 +310,6 @@ def publish_package(path, *, package_file, execute=False):
             if journal is None:
                 # Separate forward identity; the expired capture's start/expiry
                 # and the original initial-preparation receipt are never renewed.
-                forward = dict(schema_version="qt.storage_online_forward_intent.v1",
-                    original_plan_sha256=package["plan_sha256"], cancellation_intent_sha256=canceled["intent_sha256"],
-                    original_capture=canceled["original_capture"], end_day=package["end_day"],
-                    candidate_revision=package["source_revision"], candidate_source_hash=package["source_tree_hash"])
-                forward["operation_sha256"] = host.digest(forward)
                 new_request = {**deepcopy(new_plan["request"]), "forward": forward}
                 image_env = launch.inspect_candidate_image(package["image"], new_plan["request"])
                 old_env = dict(value.split("=", 1) for value in details["config"]["Env"])
@@ -220,17 +327,19 @@ def publish_package(path, *, package_file, execute=False):
                     old_worker_bytes=(root/launch._STATE).read_text(), old_request_bytes=old_request_bytes,
                     old_runtime_bytes=old_runtime_bytes, new_runtime=new_runtime, new_request=new_request,
                     new_worker=new_worker, new_plan=new_plan, forward=forward, **clock)
+                if successor:
+                    journal.update(terminal_file=terminal_file, preserved_files=preserved_files)
                 journal["intent_sha256"] = host.digest(journal)
                 journal["phase"] = "prepared"
                 if len(json.dumps(journal).encode()) > _MAX_BYTES-1:
                     raise ValueError("storage_forward_intent_budget_exceeded")
                 if (publication._sha(path.read_bytes()) != package["plan_sha256"]
-                        or publication._sha((root/launch._STATE).read_bytes()) != canceled["worker_sha256"]
+                        or publication._sha((root/launch._STATE).read_bytes()) != (publication._sha((json.dumps(canceled["worker"], sort_keys=True)+"\n").encode()) if successor else canceled["worker_sha256"])
                         or (root/publication.REQUEST).read_text() != old_request_bytes
                         or runtime_path.read_text() != old_runtime_bytes):
                     raise RuntimeError("storage_forward_preimages_changed")
                 _admit_preimages(root, path, new_path, journal)
-                host.save_receipt(root/STATE, journal, initial=True)
+                host.save_receipt(root/state_file, journal, initial=True)
             _clock(journal)
             _admit_preimages(root, path, new_path, journal)
             rows = host.inventory(plan["project"], operator_id=saved["container_id"])
@@ -239,7 +348,7 @@ def publish_package(path, *, package_file, execute=False):
                 raise RuntimeError("storage_forward_source_fleet_changed")
             LOG.info("storage_forward_publication_start project=%s intent_sha256=%s", plan["project"], journal["intent_sha256"])
             journal["phase"] = "publishing"
-            host.save_receipt(root/STATE, journal, initial=False)
+            host.save_receipt(root/state_file, journal, initial=False)
             publication._retired(saved)
             archived = plan["project"]+"-storage-online-forward-before-"+journal["intent_sha256"][:16]
             name = host.docker("inspect", "--format", "{{.Name}}", saved["container_id"]).strip()
@@ -258,7 +367,7 @@ def publish_package(path, *, package_file, execute=False):
             _clock(journal)
             _verify_published(root, new_path, journal)
             journal["phase"] = "complete"
-            host.save_receipt(root/STATE, journal, initial=False)
+            host.save_receipt(root/state_file, journal, initial=False)
             LOG.info("storage_forward_publication_complete project=%s intent_sha256=%s", plan["project"], journal["intent_sha256"])
             return dict(phase="forward_package_published", migration_started=False, forward_worker_authorized=False)
 
@@ -285,14 +394,28 @@ def inspect_published_operation(root, *, request=None, operation_path=None):
     from scripts.automation.storage_online_forward_worker import request_binding
 
     root = launch._canonical(root)
-    journal = host.load_receipt(root/STATE, max_bytes=_MAX_BYTES)
+    selected_request = request if request is not None else host.load_receipt(root/publication.REQUEST)
+    journal = host.load_receipt(root/operation_file(STATE, request=selected_request), max_bytes=_MAX_BYTES)
+    return _inspect_publication(root, journal, request=request, operation_path=operation_path)
+
+
+def _inspect_publication(root, journal, *, request=None, operation_path=None, active=True):
+    from scripts.automation.storage_online_forward_worker import request_binding
     immutable = {k:v for k,v in journal.items() if k not in {"intent_sha256", "phase"}}
     if journal.get("phase") != "complete" or host.digest(immutable) != journal.get("intent_sha256"):
         raise RuntimeError("storage_forward_completed_publication_required")
-    canceled = host.load_receipt(root/terminal.STATE, max_bytes=524288)
-    original_path = launch._canonical(canceled["operation_path"])
-    canceled = _terminal(root, original_path)
     package = journal["package"]
+    successor = package["schema_version"] == "qt.storage_online_forward_package.v2"
+    if successor:
+        prior, canceled, original_path, preserved = _successor_predecessor(root, package)
+        if journal.get("terminal_file") != package["predecessor_terminal_file"] or journal.get("preserved_files") != preserved:
+            raise RuntimeError("storage_forward_predecessor_evidence_changed")
+        old_intent = prior["forward"]
+    else:
+        canceled = host.load_receipt(root/terminal.STATE, max_bytes=524288)
+        original_path = launch._canonical(canceled["operation_path"])
+        canceled = _terminal(root, original_path)
+        old_intent = dict(original_capture=canceled["original_capture"], cancellation_intent_sha256=canceled["intent_sha256"])
     new_path = _new_plan_path(package["forward_plan_path"], original_path)
     if operation_path is not None and launch._canonical(operation_path) != new_path:
         raise RuntimeError("storage_forward_operation_path_changed")
@@ -319,25 +442,29 @@ def inspect_published_operation(root, *, request=None, operation_path=None):
     if (intent is None or intent != journal["forward"]
             or journal["original_plan_bytes"] != original_path.read_text()
             or publication._sha(original_path.read_bytes()) != package["plan_sha256"]
-            or publication._sha((root/terminal.STATE).read_bytes()) != journal["terminal_sha256"]
+            or publication._sha((root/journal.get("terminal_file", terminal.STATE)).read_bytes()) != journal["terminal_sha256"]
             or journal["old_worker"] != canceled["worker"]
-            or publication._sha(journal["old_worker_bytes"].encode()) != canceled["worker_sha256"]
+            or publication._sha(journal["old_worker_bytes"].encode()) != (publication._sha((json.dumps(canceled["worker"], sort_keys=True)+"\n").encode()) if successor else canceled["worker_sha256"])
             or json.loads(journal["old_worker_bytes"]) != canceled["worker"]
             or publication._sha(journal["old_request_bytes"].encode()) != canceled["worker"]["binding"]["request_sha256"]
             or intent["original_plan_sha256"] != package["plan_sha256"]
-            or intent["original_capture"] != canceled["original_capture"]
-            or intent["cancellation_intent_sha256"] != canceled["intent_sha256"]
+            or intent["original_capture"] != old_intent["original_capture"]
+            or intent["cancellation_intent_sha256"] != old_intent["cancellation_intent_sha256"]
             or intent["end_day"] != package["end_day"]
             or expected != {**candidate["request"], "forward":intent}
             or journal["new_plan"] != candidate
-            or {k:v for k,v in old_request.items() if k != "capture_preparation"} != original["request"]
+            or {k:v for k,v in old_request.items() if k not in ({"capture_preparation", "forward"} if successor else {"capture_preparation"})} != original["request"]
+            or successor and (old_request != prior["new_request"] or any(intent[k] != package[k] for k in
+                ("predecessor_operation_sha256", "predecessor_terminal_sha256", "lookup_operation_sha256")))
             or journal["new_runtime"] != expected_runtime
             or journal["new_worker"] != expected_worker
             or (request is not None and request != expected)):
         raise RuntimeError("storage_forward_publication_binding_changed")
-    for path, data in ((root/publication.REQUEST, publication.request_bytes(expected)),
-            (root/runtime.RUNTIME_RECIPE, (json.dumps(journal["new_runtime"], sort_keys=True)+"\n").encode()),
-            (new_path, (json.dumps(candidate, sort_keys=True)+"\n").encode())):
+    checks = [(new_path, (json.dumps(candidate, sort_keys=True)+"\n").encode())]
+    if active:
+        checks += [(root/publication.REQUEST, publication.request_bytes(expected)),
+            (root/runtime.RUNTIME_RECIPE, (json.dumps(journal["new_runtime"], sort_keys=True)+"\n").encode())]
+    for path, data in checks:
         host.load_receipt(path, max_bytes=max(65536, len(data)))
         if path.read_bytes() != data:
             raise RuntimeError("storage_forward_published_file_changed")
@@ -411,14 +538,31 @@ def admit_adoption_observation(request, *, initialization, capture, now):
     return owner, expiry.timestamp()
 
 
-def observe_adoption(database_id):
+def _observation_names(request):
+    from scripts.automation.storage_online_forward_worker import request_binding, initialization_relation
+    intent = request_binding(request) if request is not None else None
+    if request is not None and intent is None:
+        raise ValueError("storage_forward_observation_intent_required")
+    successor = intent is not None and intent["schema_version"] == "qt.storage_online_forward_intent.v2"
+    # This is the fixed database namespace protocol, covered by native reader
+    # tests. Never discover/select the latest adoption from catalog inventory.
+    adoption = "qt_fwd_"+intent["operation_sha256"][:56]+".adoption" if successor else "qt_fact_header_forward_v2.adoption"
+    return intent, (initialization_relation(intent), adoption)
+
+
+def observe_adoption(database_id, *, request=None):
     """Read both atomic initialization/adoption receipts in one SQL snapshot.
 
     A missing or retired adoption fails closed. The caller must separately admit
     the published request, owned worker and source before using this observation.
     This query neither runs the expensive proof scan nor changes database state.
     """
-    names = ("qt_fact_header_forward_v2.initialization", "qt_fact_header_forward_v2.adoption")
+    intent, names = _observation_names(request)
+    successor = intent is not None and intent["schema_version"] == "qt.storage_online_forward_intent.v2"
+    placement = "binding->'lookup_placement'->'binding'->'placement'" if successor else "binding->'old_headers'->'placement'"
+    lineage = (",binding->'predecessor'->>'operation_sha256' AS predecessor_operation_sha256,"
+        "binding->'predecessor'->>'terminal_sha256' AS predecessor_terminal_sha256,"
+        "binding->'lookup_placement'->>'operation_sha256' AS lookup_operation_sha256") if successor else ""
     present = json.loads(host.database_query(database_id,
         "SELECT json_build_array(to_regclass('"+names[0]+"') IS NOT NULL,"
         "to_regclass('"+names[1]+"') IS NOT NULL)::text", read_only_seconds=5))
@@ -429,12 +573,16 @@ def observe_adoption(database_id):
         "SELECT id,binding,started_at,expires_at,duration_seconds,complete FROM "+names[0]+" LIMIT 2) i),"
         "'adoption',(SELECT json_agg(a) FROM (SELECT id,operation_sha256,started_at,expires_at,"
         "attempt_seconds,terminal,binding->'terminal' AS cancellation,"
-        "binding->'old_headers'->'placement' AS placement FROM "+names[1]+" LIMIT 2) a))::text", read_only_seconds=5))
+        +placement+" AS placement"+lineage+" FROM "+names[1]+" LIMIT 2) a))::text", read_only_seconds=5))
     if (not isinstance(rows, dict) or set(rows) != {"initialization", "adoption"}
             or any(not isinstance(rows[k], list) or len(rows[k]) != 1
                 or type(rows[k][0].get("id")) is not int or rows[k][0]["id"] != 1 for k in rows)
             or rows["adoption"][0].get("terminal") is not None):
         raise RuntimeError("storage_forward_active_adoption_required")
+    if successor:
+        for name in ("predecessor_operation_sha256", "predecessor_terminal_sha256", "lookup_operation_sha256"):
+            if rows["adoption"][0].pop(name, None) != intent[name]:
+                raise RuntimeError("storage_forward_successor_observation_changed")
     initialization = {k:v for k,v in rows["initialization"][0].items() if k != "id"}
     capture = {k:v for k,v in rows["adoption"][0].items() if k not in {"id", "terminal"}}
     return _clock_row(initialization), _clock_row(capture)
@@ -443,8 +591,8 @@ def observe_adoption(database_id):
 LAUNCH_STATE = "storage-online-forward-launch.json"
 
 
-def load_launch(root):
-    return host.load_receipt(root/LAUNCH_STATE, max_bytes=_MAX_BYTES)
+def load_launch(root, *, request=None, operation_sha256=None):
+    return host.load_receipt(root/operation_file(LAUNCH_STATE, request=request, operation_sha256=operation_sha256), max_bytes=_MAX_BYTES)
 
 
 def save_launch(root, saved, *, initial=False):
@@ -452,7 +600,7 @@ def save_launch(root, saved, *, initial=False):
     # Refuse BEFORE publication if the existing 2MiB metadata budget is exceeded.
     if len(json.dumps(saved, sort_keys=True, allow_nan=False).encode())+1 > _MAX_BYTES:
         raise RuntimeError("storage_forward_launch_receipt_budget_exceeded")
-    host.save_receipt(root/LAUNCH_STATE, saved, initial=initial)
+    host.save_receipt(root/operation_file(LAUNCH_STATE, operation_sha256=saved.get("successor_operation_sha256")), saved, initial=initial)
 
 
 def _launch_clock(saved):
@@ -496,10 +644,10 @@ def launch_intent(root, published, worker_binding):
     source mutation or renewal is inferred from this receipt.
     """
     root = launch._canonical(root)
-    if inspect_published_operation(root) != published or worker_binding != published["new_worker"]["binding"]:
+    if inspect_published_operation(root, request=published["new_request"]) != published or worker_binding != published["new_worker"]["binding"]:
         raise RuntimeError("storage_forward_launch_publication_changed")
     publication._retired(published["old_worker"])
-    path = root/LAUNCH_STATE
+    path = root/operation_file(LAUNCH_STATE, request=published["new_request"])
     current = host.load_receipt(root/launch._STATE)
     owner = dict(publication_sha256=published["intent_sha256"],
         request_sha256=worker_binding["request_sha256"], worker_binding_sha256=host.digest(worker_binding),
@@ -513,11 +661,17 @@ def launch_intent(root, published, worker_binding):
             key_deadline=wall+3600, key_deadline_monotonic=mono+3600, key_deadline_boot=boot+3600,
             keys=None, initialization=None, capture=None, forward=None, deadline=None,
             worker=current, pending_worker=None)
+        if published["forward"]["schema_version"] == "qt.storage_online_forward_intent.v2":
+            saved["successor_operation_sha256"] = published["forward"]["operation_sha256"]
         save_launch(root, saved, initial=True)
-    saved = load_launch(root)
+    saved = load_launch(root, request=published["new_request"])
     fields = {"schema_version", "binding", "boot_id", "started_at", "started_monotonic", "started_boot",
         "key_deadline", "key_deadline_monotonic", "key_deadline_boot", "keys", "initialization",
         "capture", "forward", "deadline", "worker", "pending_worker"}
+    if published["forward"]["schema_version"] == "qt.storage_online_forward_intent.v2":
+        fields.add("successor_operation_sha256")
+        if saved.get("successor_operation_sha256") != published["forward"]["operation_sha256"]:
+            raise RuntimeError("storage_forward_launch_intent_changed")
     if (set(saved) != fields or saved["schema_version"] != "qt.storage_online_forward_launch.v1"
             or saved["binding"] != owner or saved["worker"]["binding"] != worker_binding
             or current not in (saved["worker"], saved["pending_worker"])):
@@ -533,8 +687,7 @@ def launch_intent(root, published, worker_binding):
 
 def save_launched_worker(root, saved, worker):
     """Journal the exact next worker file before publishing that progression."""
-    path = root/LAUNCH_STATE
-    if (load_launch(root) != saved or saved["pending_worker"] is not None
+    if (load_launch(root, operation_sha256=saved.get("successor_operation_sha256")) != saved or saved["pending_worker"] is not None
             or host.load_receipt(root/launch._STATE) != saved["worker"]):
         raise RuntimeError("storage_forward_worker_preimage_changed")
     _worker_transition(saved["worker"], worker, saved)
@@ -545,9 +698,10 @@ def save_launched_worker(root, saved, worker):
     save_launch(root, saved)
 
 
-def observe_preparation(database_id):
+def observe_preparation(database_id, *, request=None):
     """Read fixed preparation rows; absence is only a startup observation."""
-    names = ("qt_fact_header_forward_v2.key_preparation", "qt_fact_header_forward_v2.initialization")
+    _, names = _observation_names(request)
+    names = ("qt_fact_header_forward_v2.key_preparation", names[0])
     present = json.loads(host.database_query(database_id,
         "SELECT json_build_array(to_regclass('"+names[0]+"') IS NOT NULL,"
         "to_regclass('"+names[1]+"') IS NOT NULL)::text", read_only_seconds=5))
@@ -581,7 +735,7 @@ def admit_startup(root, saved, request, *, keys, initialization, capture=None):
     intent = request_binding(request)
     if (intent is None or saved["binding"]["operation_sha256"] != intent["operation_sha256"]
             or saved["binding"]["request_sha256"] != publication._sha(publication.request_bytes(request))
-            or load_launch(root) != saved):
+            or load_launch(root, request=request) != saved):
         raise RuntimeError("storage_forward_startup_request_changed")
     before = deepcopy(saved)
     wall, _, _ = _launch_clock(saved)
@@ -657,7 +811,7 @@ def _clock_row(row):
 def admit_launched_adoption(root, request, worker, *, initialization, capture):
     """Read-only final admission of a ready, durably published worker/adoption."""
     published = inspect_published_operation(root, request=request)
-    saved = load_launch(root)
+    saved = load_launch(root, request=request)
     expected = dict(publication_sha256=published["intent_sha256"],
         request_sha256=worker["binding"]["request_sha256"],
         worker_binding_sha256=host.digest(worker["binding"]), operation_sha256=published["forward"]["operation_sha256"])
