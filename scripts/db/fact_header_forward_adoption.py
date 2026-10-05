@@ -394,10 +394,11 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
                 if progress["after"] is not None:
                     params.update({"after" + str(i): v for i, v in enumerate(progress["after"])})
                     bound += " AND ROW(" + names + ")>ROW(" + ",".join(":after" + str(i) for i in range(len(primary))) + ")"
-                rows = [dict(row) for row in conn.execute(text("SELECT " + ",".join(columns) +
+                identity_coverage = family == "identity" and direction == "source"
+                projection = primary if identity_coverage else columns
+                rows = [dict(row) for row in conn.execute(text("SELECT " + ",".join(projection) +
                     " FROM " + relation + " WHERE " + bound + " ORDER BY " + names + " LIMIT :limit"), params).mappings()]
                 wanted = [tuple(row[name] for name in primary) for row in rows]
-                identity_coverage = family == "identity" and direction == "source"
                 if identity_coverage:
                     actual = {(value,): None for value in conn.execute(text(
                         "SELECT id FROM " + IDENTITY + " WHERE id=ANY(:ids)"),
@@ -414,8 +415,15 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
                     conn.execute(text("INSERT INTO " + target + "(" + ",".join(columns) + ") SELECT " +
                         ",".join(columns) + " FROM " + source + " WHERE " + selection + " ON CONFLICT DO NOTHING"), parameters)
                     actual.update(_read_rows(conn, family, peer, missing))
-                missing_keys = set(missing)
-                compared = [row for row in rows if (row["id"],) in missing_keys] if identity_coverage else rows
+                # Retained rows already have an exact, sealed target proof. Read
+                # full source metadata only for the identities this page filled;
+                # INSERT SELECT and the following point read share source guards.
+                if identity_coverage:
+                    compared = list(_read_rows(conn, family, source, missing).values()) if missing else []
+                    if len(compared) != len(missing):
+                        raise RuntimeError("fact_header_forward_adoption_content_mismatch: identity:source")
+                else:
+                    compared = rows
                 if any(actual.get(tuple(row[name] for name in primary)) != row for row in compared):
                     raise RuntimeError("fact_header_forward_adoption_content_mismatch: " + family + ":" + direction)
                 if rows:
