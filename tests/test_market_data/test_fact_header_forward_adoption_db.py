@@ -384,7 +384,8 @@ def test_adoption_naturally_expired_phase_can_only_retire(retained):
 
 
 
-def test_terminal_recovery_waits_for_writer_and_preserves_committed_rows(retained):
+@pytest.mark.parametrize("held_relation", [headers.SOURCE, "market.raw_archive_manifests"])
+def test_terminal_recovery_waits_for_writer_and_preserves_committed_rows(retained, held_relation):
     import queue
     import threading
     import time
@@ -397,9 +398,21 @@ def test_terminal_recovery_waits_for_writer_and_preserves_committed_rows(retaine
         old = _old(conn)
     ready = queue.Queue()
     outcome = queue.Queue()
+    archive_contended = threading.Event()
+    def observe_lock_error(context):
+        if (getattr(context.original_exception, "pgcode", None) == "55P03"
+                and "ACCESS EXCLUSIVE MODE NOWAIT" in (context.statement or "")):
+            archive_contended.set()
+    event.listen(engine, "handle_error", observe_lock_error)
+    if held_relation != headers.SOURCE:
+        with engine.begin() as conn:
+            _insert(conn, retained, "writer-before-terminal-recovery")
     writer = engine.connect()
     transaction = writer.begin()
-    _insert(writer, retained, "writer-before-terminal-recovery")
+    if held_relation == headers.SOURCE:
+        _insert(writer, retained, "writer-before-terminal-recovery")
+    else:
+        writer.exec_driver_sql("LOCK TABLE " + held_relation + " IN ROW EXCLUSIVE MODE")
     def recover():
         try:
             with engine.begin() as conn:
@@ -412,21 +425,29 @@ def test_terminal_recovery_waits_for_writer_and_preserves_committed_rows(retaine
             outcome.put(exc)
     thread = threading.Thread(target=recover)
     try:
-        with pytest.raises(DBAPIError) as failed, engine.begin() as conn:
-            adoption.retire_adoption(conn, operation_sha256=OPERATION)
-        assert failed.value.orig.pgcode == "55P03"
+        if held_relation == headers.SOURCE:
+            with pytest.raises(DBAPIError) as failed, engine.begin() as conn:
+                adoption.retire_adoption(conn, operation_sha256=OPERATION)
+            assert failed.value.orig.pgcode == "55P03"
         thread.start()
         pid = ready.get(timeout=5)
-        deadline = time.monotonic()+5
-        waiting = False
-        while time.monotonic() < deadline:
-            with engine.connect() as conn:
-                waiting = conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid "
-                    "AND relation=CAST(:relation AS regclass) AND mode='AccessExclusiveLock' AND NOT granted)"),
-                    {"pid": pid, "relation": headers.SOURCE})
-            if waiting: break
-            time.sleep(.02)
-        assert waiting, "recovery did not queue behind the existing writer"
+        if held_relation == headers.SOURCE:
+            deadline = time.monotonic()+5
+            waiting = False
+            while time.monotonic() < deadline:
+                with engine.connect() as conn:
+                    waiting = conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid "
+                        "AND relation=CAST(:relation AS regclass) AND mode='AccessExclusiveLock' AND NOT granted)"),
+                        {"pid": pid, "relation": held_relation})
+                if waiting: break
+                time.sleep(.02)
+            assert waiting, "recovery did not queue behind the existing writer"
+        else:
+            assert archive_contended.wait(5), "archive publisher was not fenced"
+            # The publisher can still visit Facts: recovery must release its
+            # first gate whenever the rest of its lock set cannot be obtained.
+            writer.exec_driver_sql("SET LOCAL lock_timeout='2s'")
+            writer.exec_driver_sql("LOCK TABLE " + headers.SOURCE + " IN ROW EXCLUSIVE MODE")
         transaction.commit()
         thread.join(timeout=10)
         assert not thread.is_alive()
@@ -437,6 +458,7 @@ def test_terminal_recovery_waits_for_writer_and_preserves_committed_rows(retaine
         if transaction.is_active: transaction.rollback()
         writer.close()
         if thread.ident is not None: thread.join(timeout=12)
+        event.remove(engine, "handle_error", observe_lock_error)
     with engine.begin() as conn:
         after = adoption._state(conn)
         assert after["terminal"]["rows_preserved"]

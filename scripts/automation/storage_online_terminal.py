@@ -389,16 +389,35 @@ def _recovery_predecessor(root, path, package, saved):
 
 
 def _wait_for_retirement_sources(conn):
-    """Queue a short lock once; enclosing SQL/advisory deadline stays authoritative.
+    """Drain one writer gate, then acquire the remaining locks without waiting.
 
-    DROP TRIGGER needs ACCESS EXCLUSIVE anyway. Acquire the final lock strength
-    before changing any guard, avoiding later lock upgrades. No clients are
-    stopped and no conflicting query is canceled. Timeout rolls back the page.
+    Each failed lock-only savepoint releases the gate before trying again. This
+    avoids waiting for an archive publisher while holding a Fact lock it may need.
+    No retirement DDL runs until the entire lock set is held; all attempts share
+    one 20-second ceiling inside the enclosing SQL/advisory deadline.
     """
+    from sqlalchemy.exc import DBAPIError
     from scripts.db import fact_header_forward_adoption as adoption
+    from scripts.db import archive_root_v2_copy as archives
     relations = [relation for family in adoption.FAMILIES.values() for relation in family[:2]]
-    conn.exec_driver_sql("SET LOCAL lock_timeout='20s'")
-    conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN ACCESS EXCLUSIVE MODE")
+    relations += ["market." + name for name in archives.FAMILIES]
+    deadline = time.monotonic()+20
+    while True:
+        remaining = int((deadline-time.monotonic())*1000)
+        if remaining <= 0:
+            raise TimeoutError("storage_forward_terminal_writer_drain_expired")
+        try:
+            with conn.begin_nested():
+                conn.exec_driver_sql("SET LOCAL lock_timeout='" + str(remaining) + "ms'")
+                conn.exec_driver_sql("LOCK TABLE " + relations[0] + " IN ACCESS EXCLUSIVE MODE")
+                conn.exec_driver_sql("LOCK TABLE " + ",".join(relations[1:]) + " IN ACCESS EXCLUSIVE MODE NOWAIT")
+            return
+        except DBAPIError as exc:
+            if getattr(exc.orig, "pgcode", None) != "55P03":
+                raise
+            # Only a known lock refusal is retried, before any retirement DDL.
+            # Savepoint rollback above releases every newly acquired relation lock.
+            time.sleep(min(.05, max(0, deadline-time.monotonic())))
 
 
 def _cancel_forward_locked(root, path, plan, package, *, execute, recovery=False):

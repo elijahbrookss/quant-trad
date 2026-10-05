@@ -3764,11 +3764,15 @@ It requires the same plan, source fleet, worker, capture and preimage, proves
 retirement of the original probe, and reconciles the live SQL state first. A
 completed predecessor or already-retired adoption cannot dispatch recovery.
 
-Only this explicit recovery queues an ACCESS EXCLUSIVE lock on the four owned
-source/target relations before calling the existing preserving retirement owner.
-The lock wait is at most 20 seconds inside the existing 30-second SQL and new
-300-second terminal bounds. Reads/writes may briefly queue; no client is stopped
-and no competing query is canceled. Timeout rolls back; an uncertain reply permits
+Only this explicit recovery drains the Fact writer gate, then acquires the
+remaining identity, raw-mapping and archive-manifest locks without waiting. A
+known lock refusal rolls back that lock-only savepoint, releasing the gate before
+another attempt; no retirement DDL runs until every required lock is held. This
+allows an existing archive publisher to finish its own Fact work without a
+maintenance lock cycle. All lock acquisition shares one 20-second ceiling inside
+the existing 30-second SQL and new 300-second terminal bounds. Reads/writes may
+briefly queue; the operator never stops clients or cancels competing queries.
+Timeout rolls back; an uncertain reply permits
 only reconciliation, never another dispatch. Original adoption clocks, plans,
 failed journals, every retained row and indexes remain intact. This does not
 resume preparation, grant a cutover, or qualify HDD throughput.
