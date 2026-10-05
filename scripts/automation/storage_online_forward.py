@@ -602,7 +602,11 @@ def admit_startup(root, saved, request, *, keys, initialization, capture=None):
             raise RuntimeError("storage_forward_key_observation_changed")
         if saved["keys"] is not None and keys != saved["keys"]:
             raise RuntimeError("storage_forward_completed_keys_changed")
-        deadline = min(deadline, epoch(keys["expires_at"]))
+        # A completed key build is reusable evidence. Its SQL deadline only
+        # bounds unfinished index work; the unchanged host launch deadline
+        # still bounds starting initialization when no initializer exists yet.
+        if not keys["complete"]:
+            deadline = min(deadline, epoch(keys["expires_at"]))
         if keys["complete"]:
             if (not isinstance(keys["index_oids"], dict)
                     or set(keys["index_oids"]) != {"qt_header_forward_day_pk", "qt_header_forward_revision_day"}

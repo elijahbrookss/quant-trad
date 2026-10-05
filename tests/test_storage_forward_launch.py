@@ -84,6 +84,37 @@ def test_forward_worker_publication_reconciles_exact_pending_preimages(owned,mon
         forward.save_launched_worker(a.root,recovered,changed)
 
 
+@pytest.mark.parametrize("complete", [True, False])
+def test_prebuilt_keys_expiry_only_bounds_unfinished_index_work(owned, complete):
+    a = owned
+    keys, _, _ = _rows(a)
+    keys["complete"] = complete
+    if not complete:
+        keys["index_oids"] = None
+    # Index preparation was a separate completed operation hours before launch.
+    for name in ("started_at", "expires_at"):
+        stamp = datetime.fromisoformat(keys[name]).timestamp() - 3 * 3600
+        keys[name] = datetime.fromtimestamp(stamp, timezone.utc).isoformat()
+    before = (a.root / forward.LAUNCH_STATE).read_bytes()
+    if not complete:
+        with pytest.raises(RuntimeError, match="original_phase_expired"):
+            forward.admit_startup(a.root, a.intent, a.request, keys=keys, initialization=None)
+        assert (a.root / forward.LAUNCH_STATE).read_bytes() == before
+        return
+    clock_fields = ("started_at", "started_monotonic", "started_boot", "key_deadline",
+                    "key_deadline_monotonic", "key_deadline_boot")
+    original_clocks = {name: a.intent[name] for name in clock_fields}
+    assert forward.admit_startup(a.root, a.intent, a.request, keys=keys, initialization=None) == pytest.approx(3600)
+    saved = a.begin()
+    assert saved["keys"] == keys
+    assert {name: saved[name] for name in clock_fields} == original_clocks
+    _advance(a, 3601)
+    before = (a.root / forward.LAUNCH_STATE).read_bytes()
+    with pytest.raises(RuntimeError, match="original_phase_expired"):
+        forward.admit_startup(a.root, saved, a.request, keys=keys, initialization=None)
+    assert (a.root / forward.LAUNCH_STATE).read_bytes() == before
+
+
 def test_forward_sql_initialization_owns_its_original_window_after_key_expiry(owned):
     a=owned;keys,initial,capture=_rows(a)
     _advance(a,3501)
