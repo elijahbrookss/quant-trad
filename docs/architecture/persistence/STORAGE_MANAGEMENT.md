@@ -3862,6 +3862,10 @@ can complete the host journal. Lost acknowledgements do not make a new clock.
 An expired or rebooted host may inspect a completed result but cannot dispatch.
 Normal forward publication refuses an unresolved key-preparation journal or
 unretired reader. Later adoption verifies and reuses the completed key receipt.
+A completed SQL key-build deadline does not expire those reusable indexes.
+Before initialization exists, the host retains its own original launch deadline;
+unfinished key work also remains bounded by the earlier SQL key deadline. This
+allows separately prepared keys to be reused without rewriting either clock.
 
 This explicit preparation boundary addresses production cost uncertainty without
 coupling the measurement to automatic adoption and a premature cutover date. It
