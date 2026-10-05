@@ -573,10 +573,10 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         payload = dict(action="inspect_lookups", request=lookup_request, package=package, wall_deadline=time.time()+300)
         with monkeypatch.context() as inventory:
             inventory.setattr(source_worker, "request_configuration", lambda request,path:
-                (options["policy"], options["resource_limits"], (storage.copy_plan.recent, storage.copy_plan.history)))
+                (options["policy"], {**options["resource_limits"],"movement_timeout_seconds":216000}, (storage.copy_plan.recent, storage.copy_plan.history)))
             assert key_worker.worker_lookups(engine, payload) is None
             result = key_worker.worker_lookups(engine, {**payload,"action":"place_lookups","wall_deadline":time.time()+3600})
-            assert result["complete"] and result["operation_sha256"] == "d"*64
+            assert result["complete"] and result["operation_sha256"] == "d"*64 and result["duration_seconds"] == 3600
             assert key_worker.worker_lookups(engine, payload) == result
         request = _successor_request(original)
         request["forward"].update(cancellation_intent_sha256=CANCEL,

@@ -342,6 +342,13 @@ def require_lookups_finished(root, package):
         raise RuntimeError("storage_lookup_worker_retirement_required")
 
 
+def _lookup_limits(limits):
+    """Shorten a retained catch-up budget for this fixed one-hour physical phase."""
+    from portal.backend.service.storage.header_resource_claims import _limits
+    limits = _limits(limits, migration=True)
+    return {**limits, "movement_timeout_seconds":min(3600, limits["movement_timeout_seconds"])}
+
+
 def worker_lookups(engine, payload):
     """Fixed-image lookup phase; one existing SQL owner retains resource guards."""
     from dataclasses import replace
@@ -359,6 +366,7 @@ def worker_lookups(engine, payload):
             or payload["action"] not in ("inspect_lookups", "place_lookups")):
         raise ValueError("storage_lookup_request_invalid")
     policy, limits, targets = request_configuration(request, Path("/run/qt-online/inventory.json"))
+    limits = _lookup_limits(limits)
     def inspect(conn):
         identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
         if identity != request["database_identity"]:

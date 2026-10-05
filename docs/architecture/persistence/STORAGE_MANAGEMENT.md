@@ -3460,8 +3460,9 @@ file changes; all other metadata, source data and prior evidence must still matc
 The candidate `qt storage migrate --place-forward-lookups-file` command uses
 this helper through the existing confined terminal transport. Its package binds
 one retired predecessor and three-index operation; inspection is the default.
-The host owns one original one-hour transport clock, while the existing SQL
-resource limit can be shorter. Interrupted work first retires the exact confined
+The host owns one original one-hour transport clock. The physical phase caps
+the retained catch-up movement limit at one hour, preserving any shorter limit
+and all growth, WAL, temporary and maintenance allowances. Interrupted work first retires the exact confined
 worker and inspects SQL; a completed move is not repeated. Publication requires
 both completed placement and confirmed worker retirement.
 
