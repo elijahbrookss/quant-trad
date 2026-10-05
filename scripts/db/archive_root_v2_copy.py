@@ -57,7 +57,7 @@ def _operation_step(conn, timeout_seconds, *, deadline=None, forward_operation_s
             raise RuntimeError("archive_copy_fixed_placement_required")
         physical.verify(conn, saved)
         seconds = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) "
-                                   "FROM " + adoption.STATE + " WHERE id=1"))
+                                   "FROM " + adoption.state_relation(conn, forward_operation_sha256) + " WHERE id=1"))
         limit(float(seconds))
         yield saved, monotonic() + float(seconds)
 

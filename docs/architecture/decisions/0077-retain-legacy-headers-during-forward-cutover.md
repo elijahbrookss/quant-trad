@@ -56,6 +56,32 @@ mapping catch-up, reference validation, archive work or recovery publication.
 The existing work can be reused only after its ownership and content are proved
 for the replacement operation. A completed baseline is not a caught-up target.
 
+## Successor ownership after preserving retirement
+
+Candidate implementation: a separately supplied operation may use the existing
+adoption owner after an exact predecessor retirement is reconciled. Its adoption
+row, trigger functions and archive capture/progress/queue live in a private
+namespace derived from its operation digest. The first operation keeps its
+original namespace and serialized binding. No predecessor row, queue, clock or
+terminal receipt is reset or renamed. Readers select the explicit operation;
+they never infer the newest attempt. The successor pins the predecessor row's
+OID and content digest and rejects drift.
+
+This extends the existing temporary migration owner because its singleton
+records cannot represent a new attempt without overwriting the retired one.
+It adds no market-data authority, generic job registry or runtime migration.
+Retained target rows and source keys are reused, while a fresh bounded proof
+checks the uncaptured interval and retained content. The prior cursor is not
+trusted across a period without its guards. Setup, mirrors and proof publication
+remain transactional; an interrupted setup rolls back, and a lost commit reply
+reconciles the same new operation and original new deadline.
+
+The database slice alone is not a production route. A successor still needs
+explicit host publication, physical placement/resource admission, recovery and
+final-switch qualification. In particular it does not move existing indexes to
+SSD or make an old all-HDD binding describe a mixed layout. Existing host
+entrypoints continue to refuse the retired operation.
+
 ## One parent, with an explicit retained range
 
 The physical catalogue must distinguish the single operator-installed legacy

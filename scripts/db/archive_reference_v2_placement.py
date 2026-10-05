@@ -98,7 +98,7 @@ def inspect_reference_catalog(conn, *, relation, forward_operation_sha256=None):
             raise ValueError("archive_reference_forward_catalog_required")
         with archives._operation_step(conn, 30,
                 forward_operation_sha256=forward_operation_sha256) as (saved, _):
-            adoption._reference_states(conn, adoption._state(conn))
+            adoption._reference_states(conn, adoption._state(conn, forward_operation_sha256))
             return _reference_placement(conn, relation, saved, physical.verify(conn, saved))
     state = headers._inspect_progress(conn)
     if state["placement"] is None:
@@ -258,7 +258,7 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
                         forward_operation_sha256=forward_operation_sha256)
                     saved = observed["_binding"]
                     plan = physical._restore(saved["plan"])
-                    started_at = (adoption._state(conn)["started_at"].isoformat()
+                    started_at = (adoption._state(conn, forward_operation_sha256)["started_at"].isoformat()
                                   if forward_operation_sha256 is not None else inspect_capture(conn)["started_at"])
                     if (placement is not None and (plan != placement or started_at != expected_started_at)):
                         raise RuntimeError("archive_reference_move_attempt_binding_changed")

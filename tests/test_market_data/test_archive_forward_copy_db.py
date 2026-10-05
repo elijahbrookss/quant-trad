@@ -72,7 +72,7 @@ def _prepare_canceled(storage, tmp_path, monkeypatch):
     return engine, options, source, original
 
 
-def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None):
+def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, successor_operation=None):
     engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
     roots = {name: options[name] for name in ("source_root", "destination_root")}
     if key_preparation is None:
@@ -87,15 +87,41 @@ def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None):
         assert online.prepare(conn, **roots, forward_operation_sha256=OPERATION)["reused"]
         started = adoption._state(conn)["started_at"]
         expires = adoption._state(conn)["expires_at"]
+    if successor_operation is not None:
+        # Keep the first owner's partial proof, queued catalog rows and files.
+        # The second owner must rediscover writes from the uncaptured interval.
+        with engine.begin() as conn:
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+            _synthetic_descriptor(conn, source, "!before-retirement-" + uuid4().hex)
+            adoption.retire_adoption(conn, operation_sha256=OPERATION)
+            terminal = adoption.inspect_retirement(conn, operation_sha256=OPERATION)
+            previous_owner = online._capture(OPERATION, conn=conn)
+            storage.retired_forward_records = _retired_forward_records(conn, previous_owner)
+            _synthetic_descriptor(conn, source, "!successor-gap-" + uuid4().hex)
+            adoption.prepare_adoption(conn, expected_capture=original, cancellation_intent_sha256=CANCEL,
+                operation_sha256=successor_operation, attempt_seconds=600,
+                predecessor_operation_sha256=OPERATION, predecessor_terminal_sha256=adoption._digest(terminal))
+            online.prepare(conn, **roots, forward_operation_sha256=successor_operation)
+            state = adoption._state(conn, successor_operation)
+            started, expires = state["started_at"], state["expires_at"]
     return engine, options, source, original, old, old_archives, frozen, started, expires
 
 
-def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage, tmp_path, monkeypatch):
+def _retired_forward_records(conn, owner):
+    relations = (adoption.STATE, owner.state, owner.progress, owner.queue, owner.closed)
+    return {name: conn.execute(text("SELECT to_jsonb(t) FROM " + name + " t ORDER BY to_jsonb(t)::text")).scalars().all()
+            for name in relations}
+
+
+@pytest.mark.parametrize("successor", [False, True])
+def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage, tmp_path, monkeypatch, successor):
+    operation = "c" * 64 if successor else OPERATION
     engine, options, source, original, old, old_archives, frozen, started, expires = _prepare_forward(
-        storage, tmp_path, monkeypatch)
+        storage, tmp_path, monkeypatch, successor_operation=operation if successor else None)
     roots = {name: options[name] for name in ("source_root", "destination_root")}
-    owner = online._capture(OPERATION)
-    forward = dict(options, forward_operation_sha256=OPERATION)
+    with engine.begin() as conn:
+        owner = online._capture(operation, conn=conn)
+    forward = dict(options, forward_operation_sha256=operation)
     for family in archives.FAMILIES:
         _drain(engine, forward, family)
     family = "raw_archive_manifests"
@@ -130,19 +156,19 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
             online.copy_page(engine, family=family, **forward)
     assert online.copy_page(engine, family=family, **forward)["selected_catalog_rows"] == 0
     with pytest.raises(RuntimeError, match="intent_changed"):
-        online.copy_page(engine, family=family, **dict(forward, forward_operation_sha256="c" * 64))
+        online.copy_page(engine, family=family, **dict(forward, forward_operation_sha256="d" * 64))
     with pytest.raises(RuntimeError, match="cancelled"):
         online.copy_page(engine, family=family, **options)
     with engine.begin() as conn:
         with pytest.raises(RuntimeError, match="live_inventory_context_required"):
-            online.retire_capture(conn, **roots, forward_operation_sha256=OPERATION)
+            online.retire_capture(conn, **roots, forward_operation_sha256=operation)
     # Cancellation is a distinct preserving transaction, including queued rows.
     with engine.begin() as writer:
         _synthetic_descriptor(writer, source, "!cancel-" + uuid4().hex)
     before_files = _hashes(options["destination_root"])
     with pytest.raises(RuntimeError, match="rollback forward cancellation"), engine.begin() as conn:
-        assert adoption.retire_adoption(conn, operation_sha256=OPERATION)["retired"]
-        assert adoption.retire_adoption(conn, operation_sha256=OPERATION)["reused"]
+        assert adoption.retire_adoption(conn, operation_sha256=operation)["retired"]
+        assert adoption.retire_adoption(conn, operation_sha256=operation)["reused"]
         assert conn.scalar(text("SELECT count(*) FROM " + owner.queue)) == 1
         assert _old(conn) == old and _original_archives(conn) == old_archives
         raise RuntimeError("rollback forward cancellation")
@@ -150,26 +176,26 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
     _drain(engine, forward, family)
     for _ in range(64):
         with engine.begin() as conn:
-            result = adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=128)
+            result = adoption.adoption_page(conn, operation_sha256=operation, page_rows=128)
         if result["retained_targets_verified"]:
             break
     else:
         pytest.fail("forward adoption fixture did not converge")
     with engine.begin() as conn:
-        inventory = adoption.inspect_references(conn, operation_sha256=OPERATION)["references"]
+        inventory = adoption.inspect_references(conn, operation_sha256=operation)["references"]
     for relation in inventory:
         if relation == references.PARENT:
             continue
         with engine.begin() as conn:
-            adoption.prepare_reference(conn, operation_sha256=OPERATION, relation=relation)
+            adoption.prepare_reference(conn, operation_sha256=operation, relation=relation)
         with engine.begin() as conn:
-            adoption.validate_reference(conn, operation_sha256=OPERATION, relation=relation)
+            adoption.validate_reference(conn, operation_sha256=operation, relation=relation)
     with engine.begin() as conn:
-        adoption.adopt_payload_references(conn, operation_sha256=OPERATION)
+        adoption.adopt_payload_references(conn, operation_sha256=operation)
         today = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
-        switch = dict(operation_sha256=OPERATION, end_day=today, evidence={"fixture":"forward archives"})
-        assert adoption._state(conn)["started_at"] == started
-        assert adoption._state(conn)["expires_at"] == expires
+        switch = dict(operation_sha256=operation, end_day=today, evidence={"fixture":"forward archives"})
+        assert adoption._state(conn, operation)["started_at"] == started
+        assert adoption._state(conn, operation)["expires_at"] == expires
     with pytest.raises(RuntimeError, match="live_archive_inventory_required"), engine.begin() as conn:
         handoff.stage_forward_tables(conn, **switch)
     verification = {k: v for k, v in forward.items() if k != "max_page_bytes"}
@@ -190,11 +216,11 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
             pid = owning.scalar(text("SELECT pg_backend_pid()"))
         try:
             with pytest.raises(RuntimeError, match="controller_active"), engine.begin() as other:
-                adoption.inspect_references(other, operation_sha256=OPERATION)
+                adoption.inspect_references(other, operation_sha256=operation)
             for relation in catalogs.RELATIONS:
                 move = dict(relation=relation, policy=options["policy"], resource_limits=options["resource_limits"],
                             expected_started_at=started.isoformat(), placement=storage.copy_plan,
-                            forward_operation_sha256=OPERATION, connection=owning)
+                            forward_operation_sha256=operation, connection=owning)
                 assert not catalogs.move_reference_catalog(engine, **move)["reused"]
                 assert catalogs.move_reference_catalog(engine, **move)["reused"]
             with owning.begin():
@@ -202,7 +228,7 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
                 assert _old(owning) == old and _original_archives(owning) == old_archives
             finish = {k: v for k, v in options.items() if k != "max_page_bytes"}
             finish.update(max_objects=1000, max_bytes=64*1024**2,
-                          forward_operation_sha256=OPERATION, forward_end_day=today,
+                          forward_operation_sha256=operation, forward_end_day=today,
                           connection=owning, deadline=monotonic()+30, activate_policy=True)
             checks = []
             def publisher_check(conn, *, deadline):
@@ -226,7 +252,7 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
             with owning.begin():
                 observed = handoff.inspect_handoff(owning, policy=options["policy"], **roots)
                 assert observed["database_handoff_committed"]
-                assert observed["receipt"]["forward_header"]["operation_sha256"] == OPERATION
+                assert observed["receipt"]["forward_header"]["operation_sha256"] == operation
                 assert handoff.inspect_handoff_policy(owning, policy=options["policy"], **roots)["policy_current"]
                 with owning.begin_nested() as changed:
                     owning.exec_driver_sql("ALTER TABLE market.fact_versions_legacy DISABLE TRIGGER trg_seal_fact_versions_legacy")
@@ -234,7 +260,7 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
                         handoff.inspect_handoff(owning, policy=options["policy"], **roots)
                     changed.rollback()
                 with owning.begin_nested() as changed:
-                    owning.execute(text("UPDATE " + adoption.STATE + " SET progress='{}'::jsonb WHERE id=1"))
+                    owning.execute(text("UPDATE " + adoption.state_relation(owning, operation) + " SET progress='{}'::jsonb WHERE id=1"))
                     with pytest.raises(RuntimeError, match="certificate_changed"):
                         handoff.inspect_handoff(owning, policy=options["policy"], **roots)
                     changed.rollback()
@@ -253,19 +279,26 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
     finally:
         restarted._reset_engine()
 
+    if successor:
+        with engine.begin() as conn:
+            previous_owner = online._capture(OPERATION, conn=conn)
+            assert _retired_forward_records(conn, previous_owner) == storage.retired_forward_records
 
-def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tmp_path, monkeypatch):
+
+@pytest.mark.parametrize("successor", [False, True])
+def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tmp_path, monkeypatch, successor):
     from time import monotonic
     from sqlalchemy import event
     from scripts.automation.storage_online_controller import OnlineController
     from scripts.automation.storage_online_operation import prepare_background
 
+    operation = "c" * 64 if successor else OPERATION
     engine, options, source, original, old, old_archives, frozen, started, expires = _prepare_forward(
-        storage, tmp_path, monkeypatch)
+        storage, tmp_path, monkeypatch, successor_operation=operation if successor else None)
     with engine.begin() as conn:
         today = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
     settings = dict(placement=storage.copy_plan, expected_started_at=started.isoformat(),
-        max_objects=1000, max_bytes=64*1024**2, forward_operation_sha256=OPERATION,
+        max_objects=1000, max_bytes=64*1024**2, forward_operation_sha256=operation,
         forward_end_day=today, **options)
     # Background reentry retains its immutable intent and original clock.
     with OnlineController(engine, **settings) as first:
@@ -297,8 +330,8 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
                        for _, step in calls)
         with worker._owner.begin():
             assert _old(worker._owner) == old and _original_archives(worker._owner) == old_archives
-            assert adoption._state(worker._owner)["expires_at"] == expires
-            assert adoption._state(worker._owner)["started_at"] == started
+            assert adoption._state(worker._owner, operation)["expires_at"] == expires
+            assert adoption._state(worker._owner, operation)["started_at"] == started
         # An uncaught foreign source session prevents COMMIT; its idle state
         # cannot be treated as publisher retirement.
         with engine.connect() as peer:
@@ -325,14 +358,14 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
             assert worker._final_pid == worker._pid
             from scripts.automation import storage_online_final as host_final
             session = worker.final_session_observation(deadline=deadline)
-            assert session["capture"]["operation_sha256"] == OPERATION
+            assert session["capture"]["operation_sha256"] == operation
             assert session["capture"]["started_at"] == started.isoformat()
             assert session["capture"]["expires_at"] == expires.isoformat()
             assert "prepared_at" not in session["capture"]
             from scripts.automation.storage_online_forward_worker import capture_binding
             assert session["capture"] == capture_binding(worker._capture)
             forward_binding = session["forward"]
-            assert forward_binding["operation_sha256"] == OPERATION
+            assert forward_binding["operation_sha256"] == operation
             assert forward_binding["started_at"] == started.isoformat()
             assert forward_binding["expires_at"] == expires.isoformat()
             assert forward_binding["end_day"] == today.isoformat()
@@ -373,6 +406,11 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
         assert restarted.ensure_schema(), str(restarted.last_error)
     finally:
         restarted._reset_engine()
+
+    if successor:
+        with engine.begin() as conn:
+            previous_owner = online._capture(OPERATION, conn=conn)
+            assert _retired_forward_records(conn, previous_owner) == storage.retired_forward_records
 
 
 def _phase_budget_regression(monkeypatch, options, *, key_seconds, initial_seconds=None):
@@ -533,7 +571,7 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         assert not initial["complete"] and key_state["complete"]
         assert [is_initial for is_initial, _ in budgets] == [False, True]
         assert adoption._state(conn) is None
-        assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":online._capture(operation).state}) is None
+        assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":online._capture(operation, conn=conn).state}) is None
         assert _old(conn) == old and _original_archives(conn) == archives_before
         # Source remains writable after rolled-back guards and archive capture.
         _synthetic_descriptor(conn, source, "!worker-interrupted-"+uuid4().hex)

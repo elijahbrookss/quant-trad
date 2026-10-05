@@ -3430,6 +3430,16 @@ activation is authorized by a `keys_prepared` result.
 
 ## Retained-target adoption after an uncaptured interval
 
+The candidate successor path keeps a separately authorized operation's adoption
+and archive journals in its own private SQL namespace. It binds an exactly
+reconciled predecessor retirement and the unchanged predecessor row/OID; all
+older records and queues remain intact. The existing database copy, reference,
+controller and handoff owners receive the explicit operation identity. They do
+not select a latest attempt or reset an expired clock. This database path still
+requires qualified host publication and a separate preserving placement
+transition before production use; see [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#successor-ownership-after-preserving-retirement).
+
+
 The internal `fact_header_forward_adoption.py` phase binds a separately supplied
 forward operation intent to the exact committed cancellation, prepared keys and
 retained identity/raw targets. It never resumes the expired attempt, rewrites its

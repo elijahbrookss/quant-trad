@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 import json
+import hashlib
 import logging
 import re
 
@@ -37,6 +38,50 @@ FAMILIES = {
 logger = logging.getLogger(__name__)
 
 
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def successor_schema(operation_sha256):
+    """A private namespace for this operation; the full intent remains in its row."""
+    if not isinstance(operation_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", operation_sha256):
+        raise ValueError("fact_header_forward_operation_invalid")
+    return "qt_fwd_" + operation_sha256[:56]
+
+
+def operation_schema(conn, operation_sha256=None):
+    """Resolve only an explicitly named operation, never the newest attempt."""
+    if operation_sha256 is None:
+        return keys.SCHEMA
+    candidate = successor_schema(operation_sha256)
+    original = None
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
+        rows = conn.execute(text("SELECT id,operation_sha256 FROM " + STATE + " LIMIT 2")).all()
+        if len(rows) > 1 or rows and rows[0][0] != 1:
+            raise RuntimeError("fact_header_forward_adoption_state_changed")
+        original = rows[0][1] if rows else None
+    candidate_exists = conn.scalar(text("SELECT to_regnamespace(:name) IS NOT NULL"), {"name": candidate})
+    if original == operation_sha256 and candidate_exists:
+        raise RuntimeError("fact_header_forward_operation_ambiguous")
+    if candidate_exists or original is not None and original != operation_sha256:
+        return candidate
+    return keys.SCHEMA
+
+
+def state_relation(conn, operation_sha256=None):
+    return operation_schema(conn, operation_sha256) + ".adoption"
+
+
+def _predecessor(conn, operation_sha256, terminal_sha256):
+    terminal = inspect_retirement(conn, operation_sha256=operation_sha256)
+    if terminal is None or _digest(terminal) != terminal_sha256:
+        raise RuntimeError("fact_header_forward_successor_retirement_required")
+    relation = state_relation(conn, operation_sha256)
+    return dict(operation_sha256=operation_sha256, terminal_sha256=terminal_sha256,
+        state_sha256=_digest(_json_row(conn, relation)),
+        relation_oid=conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"), {"name": relation}))
+
+
 def _trigger_name(family, suffix):
     if (family, suffix) == ("identity", "mirror"):
         return IDENTITY_MIRROR
@@ -61,13 +106,17 @@ def _require_identity_heap(conn):
         raise RuntimeError("fact_header_forward_identity_heap_required")
 
 
-def _snapshot(conn):
+def _snapshot(conn, operation_sha256=None, *, schema=None, predecessor=None):
     _require_identity_heap(conn)
+    schema = schema or operation_schema(conn, operation_sha256)
+    state_name = schema + ".adoption"
+    if predecessor is None and schema != keys.SCHEMA:
+        predecessor = conn.scalar(text("SELECT binding->'predecessor' FROM " + state_name + " WHERE id=1"))
     # Fixed objects only. The old journals and queues remain evidence. Target
     # contents may gain missing source rows; their definitions/files may not drift.
     relations = (headers.SOURCE, IDENTITY, raw.SOURCE, raw.TARGET,
                  headers.STATE, raw.STATE, capture.STATE, capture.QUEUE,
-                 raw.QUEUE, capture.CANCELLED, keys.STATE, STATE)
+                 raw.QUEUE, capture.CANCELLED, keys.STATE, state_name)
     shapes = {}
     for relation in relations:
         schema, name = relation.split(".")
@@ -89,13 +138,27 @@ def _snapshot(conn):
              (SELECT to_regclass(name) FROM unnest(CAST(:names AS text[])) name))
         ORDER BY c.oid
     """), {"names": list(relations)}).mappings()]
-    return dict(shapes=shapes, functions=functions, files=files,
-                old_headers=_json_row(conn, headers.STATE), old_raw=_json_row(conn, raw.STATE),
-                old_capture=_json_row(conn, capture.STATE), terminal=_json_row(conn, capture.CANCELLED),
-                keys=_json_row(conn, keys.STATE))
+    result = dict(shapes=shapes, functions=functions, files=files,
+                  old_headers=_json_row(conn, headers.STATE), old_raw=_json_row(conn, raw.STATE),
+                  old_capture=_json_row(conn, capture.STATE), terminal=_json_row(conn, capture.CANCELLED),
+                  keys=_json_row(conn, keys.STATE))
+    if schema != keys.SCHEMA:
+        if not isinstance(predecessor, dict) or set(predecessor) != {
+                "operation_sha256", "terminal_sha256", "state_sha256", "relation_oid"}:
+            raise RuntimeError("fact_header_forward_successor_binding_changed")
+        relation = state_relation(conn, predecessor["operation_sha256"])
+        previous = _json_row(conn, relation)
+        if (_digest(previous) != predecessor["state_sha256"]
+                or previous["terminal"] is None
+                or _digest(previous["terminal"]) != predecessor["terminal_sha256"]
+                or conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                               {"name": relation}) != predecessor["relation_oid"]):
+            raise RuntimeError("fact_header_forward_successor_predecessor_changed")
+        result["predecessor"] = predecessor
+    return result
 
 
-def _install_family(conn, family):
+def _install_family(conn, family, *, schema=keys.SCHEMA):
     source, target, columns, primary = FAMILIES[family]
     source_oid, target_oid = [conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
                                        {"name": relation}) for relation in (source, target)]
@@ -127,7 +190,7 @@ def _install_family(conn, family):
         "immutable": "BEGIN RAISE EXCEPTION 'fact_header_forward_adoption_immutable'; END;",
     }
     for action, body in bodies.items():
-        function = keys.SCHEMA + "." + family + "_" + action
+        function = schema + "." + family + "_" + action
         conn.exec_driver_sql("CREATE FUNCTION " + function + "() RETURNS trigger "
             "LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $qt$" + body + "$qt$")
         conn.exec_driver_sql("REVOKE ALL ON FUNCTION " + function + "() FROM PUBLIC")
@@ -139,14 +202,15 @@ def _install_family(conn, family):
     ):
         trigger = conn.dialect.identifier_preparer.quote(_trigger_name(family, suffix))
         conn.exec_driver_sql(f"CREATE TRIGGER {trigger} {when} {events} ON {relation} FOR EACH {scope} "
-                            f"EXECUTE FUNCTION {keys.SCHEMA}.{family}_{action}()")
+                            f"EXECUTE FUNCTION {schema}.{family}_{action}()")
         conn.exec_driver_sql(f"ALTER TABLE {relation} ENABLE ALWAYS TRIGGER {trigger}")
 
 
-def _state(conn):
-    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is None:
+def _state(conn, operation_sha256=None):
+    relation = state_relation(conn, operation_sha256)
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": relation}) is None:
         return None
-    rows = conn.execute(text("SELECT * FROM " + STATE + " LIMIT 2")).mappings().all()
+    rows = conn.execute(text("SELECT * FROM " + relation + " LIMIT 2")).mappings().all()
     if len(rows) != 1 or rows[0]["id"] != 1 or "reference_progress" not in rows[0]:
         raise RuntimeError("fact_header_forward_adoption_state_changed")
     return dict(rows[0])
@@ -162,16 +226,16 @@ def _step(conn, timeout_seconds):
 
 
 def _inspect(conn, operation_sha256, limit):
-    state = _state(conn)
+    state = _state(conn, operation_sha256)
     if state is None or state["operation_sha256"] != operation_sha256:
         raise RuntimeError("fact_header_forward_adoption_intent_changed")
     if state["terminal"] is not None:
         raise RuntimeError("fact_header_forward_adoption_retired")
-    remaining = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) FROM " + STATE + " WHERE id=1"))
+    remaining = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) FROM " + state_relation(conn, operation_sha256) + " WHERE id=1"))
     if remaining <= 0:
         raise RuntimeError("fact_header_forward_adoption_expired")
     limit(float(remaining))
-    if state["binding"] != _snapshot(conn):
+    if state["binding"] != _snapshot(conn, state["operation_sha256"]):
         raise RuntimeError("fact_header_forward_adoption_binding_changed")
     _reference_states(conn, state)
     if state["progress"]["identity_target"].get("scan") != IDENTITY_HEAP_SCAN:
@@ -180,7 +244,8 @@ def _inspect(conn, operation_sha256, limit):
 
 
 def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
-                     operation_sha256, attempt_seconds, timeout_seconds=30):
+                     operation_sha256, attempt_seconds, timeout_seconds=30,
+                     predecessor_operation_sha256=None, predecessor_terminal_sha256=None):
     """Fence briefly, mirror new source writes, then admit a separate bounded scan.
 
     Synchronous target writes need measured HDD/collection admission before any
@@ -191,14 +256,37 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
             or operation_sha256 == cancellation_intent_sha256
             or type(attempt_seconds) is not int or not 30 <= attempt_seconds <= 345600):
         raise ValueError("fact_header_forward_adoption_request_invalid")
+    if ((predecessor_operation_sha256 is None) != (predecessor_terminal_sha256 is None)
+            or predecessor_operation_sha256 == operation_sha256
+            or predecessor_terminal_sha256 is not None and (not isinstance(predecessor_terminal_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", predecessor_terminal_sha256))):
+        raise ValueError("fact_header_forward_successor_request_invalid")
+    if predecessor_operation_sha256 is not None:
+        successor_schema(predecessor_operation_sha256)
     with _step(conn, timeout_seconds) as limit:
-        if _state(conn) is not None:
+        schema = operation_schema(conn, operation_sha256)
+        relation = schema + ".adoption"
+        if _state(conn, operation_sha256) is not None:
             state = _inspect(conn, operation_sha256, limit)
+            bound = state["binding"].get("predecessor")
+            if ((bound is None) != (predecessor_operation_sha256 is None)
+                    or bound is not None and (bound["operation_sha256"] != predecessor_operation_sha256
+                        or bound["terminal_sha256"] != predecessor_terminal_sha256)):
+                raise RuntimeError("fact_header_forward_successor_intent_changed")
             if (state["attempt_seconds"] != attempt_seconds
                     or state["binding"]["terminal"]["receipt"]["intent_sha256"] != cancellation_intent_sha256
                     or state["binding"]["terminal"]["receipt"]["capture"] != expected_capture):
                 raise RuntimeError("fact_header_forward_adoption_intent_changed")
             return _report(state, reused=True)
+        predecessor = None
+        if predecessor_operation_sha256 is not None:
+            predecessor = _predecessor(conn, predecessor_operation_sha256, predecessor_terminal_sha256)
+            schema = successor_schema(operation_sha256)
+            relation = schema + ".adoption"
+            if conn.scalar(text("SELECT to_regnamespace(:name)"), {"name": schema}) is not None:
+                raise RuntimeError("fact_header_forward_successor_namespace_unowned")
+        elif schema != keys.SCHEMA:
+            raise RuntimeError("fact_header_forward_successor_retirement_required")
         conn.exec_driver_sql("LOCK TABLE " + headers.SOURCE + "," + raw.SOURCE + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         source_binding = keys._source_binding(conn, expected_capture, cancellation_intent_sha256)
         prepared = keys._read_state(conn)
@@ -211,7 +299,10 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
         if any(saved_raw["binding"][name] != value for name, value in actual_raw.items() if name != "triggers"):
             raise RuntimeError("fact_header_forward_retained_raw_changed")
         conn.exec_driver_sql("LOCK TABLE " + IDENTITY + "," + raw.TARGET + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-        conn.exec_driver_sql("CREATE TABLE " + STATE + "(id integer PRIMARY KEY CHECK(id=1),"
+        if predecessor is not None:
+            conn.exec_driver_sql("CREATE SCHEMA " + schema)
+            conn.exec_driver_sql("REVOKE ALL ON SCHEMA " + schema + " FROM PUBLIC")
+        conn.exec_driver_sql("CREATE TABLE " + relation + "(id integer PRIMARY KEY CHECK(id=1),"
             "operation_sha256 text NOT NULL,started_at timestamptz NOT NULL,expires_at timestamptz NOT NULL,"
             "attempt_seconds integer NOT NULL CHECK(attempt_seconds BETWEEN 30 AND 345600),"
             "binding jsonb NOT NULL,progress jsonb NOT NULL,terminal jsonb,reference_progress jsonb NOT NULL,"
@@ -220,7 +311,7 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
             raise RuntimeError("fact_header_forward_unowned_reference")
         progress = {}
         for family, (source, target, _, primary) in FAMILIES.items():
-            _install_family(conn, family)
+            _install_family(conn, family, schema=schema)
             for direction, relation in (("source", source), ("target", target)):
                 if (family, direction) == ("identity", "target"):
                     _require_identity_heap(conn)
@@ -233,11 +324,11 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
                     " ORDER BY " + ",".join(name + " DESC" for name in primary) + " LIMIT 1")).one_or_none()
                 progress[family + "_" + direction] = dict(high=list(high) if high else None,
                     after=None, complete=high is None, verified=0)
-        conn.execute(text("INSERT INTO " + STATE + " SELECT 1,:operation,stamp,"
+        conn.execute(text("INSERT INTO " + schema + ".adoption SELECT 1,:operation,stamp,"
             "stamp+:seconds*interval '1 second',:seconds,CAST(:binding AS jsonb),CAST(:progress AS jsonb),NULL,'{}'::jsonb "
             "FROM (SELECT clock_timestamp() stamp) start"),
             {"operation": operation_sha256, "seconds": attempt_seconds,
-             "binding": json.dumps(_snapshot(conn)), "progress": json.dumps(progress)})
+             "binding": json.dumps(_snapshot(conn, schema=schema, predecessor=predecessor)), "progress": json.dumps(progress)})
         state = _inspect(conn, operation_sha256, limit)
         logger.info("fact_header_forward_adoption_prepared | operation=%s", operation_sha256)
         return _report(state, reused=False)
@@ -309,7 +400,7 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
 
 
 def _save_page(conn, state, family, direction, rows):
-    conn.execute(text("UPDATE " + STATE + " SET progress=CAST(:progress AS jsonb) WHERE id=1"),
+    conn.execute(text("UPDATE " + state_relation(conn, state["operation_sha256"]) + " SET progress=CAST(:progress AS jsonb) WHERE id=1"),
                  {"progress": json.dumps(state["progress"])})
     logger.info("fact_header_forward_adoption_page | family=%s direction=%s rows=%s", family, direction, rows)
 
@@ -371,7 +462,7 @@ def _reference_states(conn, state):
 
 def _advance_references(conn, state, before, slots):
     after = references._states(conn, slots)
-    actual = _snapshot(conn)
+    actual = _snapshot(conn, state["operation_sha256"])
     changed = {item["oid"] for item in (*before.values(), *after.values()) if item is not None}
     expected = deepcopy(state["binding"])
     expected["functions"] = sorted(
@@ -389,7 +480,7 @@ def _advance_references(conn, state, before, slots):
     if expected != actual:
         raise RuntimeError("fact_header_forward_reference_publication_changed")
     progress = {name: item for name, item in after.items() if item is not None}
-    conn.execute(text("UPDATE " + STATE + " SET binding=CAST(:binding AS jsonb),"
+    conn.execute(text("UPDATE " + state_relation(conn, state["operation_sha256"]) + " SET binding=CAST(:binding AS jsonb),"
         "reference_progress=CAST(:progress AS jsonb) WHERE id=1"),
         {"binding": json.dumps(expected), "progress": json.dumps(progress)})
 
@@ -455,7 +546,7 @@ def verified_adoption(conn, *, operation_sha256, timeout_seconds=30):
     with _step(conn, timeout_seconds) as limit:
         relations = [relation for family in FAMILIES.values() for relation in family[:2]]
         relations += [references.PARENT, "market.fact_archive_material_aliases",
-                      "market.fact_archive_canonical_dependencies", STATE]
+                      "market.fact_archive_canonical_dependencies", state_relation(conn, operation_sha256)]
         conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN ACCESS EXCLUSIVE MODE NOWAIT")
         state = _inspect(conn, operation_sha256, limit)
         if not _report(state, reused=True)["retained_targets_verified"]:
@@ -481,7 +572,7 @@ def release_for_switch(conn):
             context["transaction"] != conn.scalar(text("SELECT txid_current()"))):
         raise RuntimeError("fact_header_forward_live_switch_required")
     state = context["state"]
-    if state["binding"] != _snapshot(conn):
+    if state["binding"] != _snapshot(conn, state["operation_sha256"]):
         raise RuntimeError("fact_header_forward_adoption_binding_changed")
     _reference_states(conn, state)
     for family, (source, target, _, _) in FAMILIES.items():
@@ -501,20 +592,20 @@ def inspect_retirement(conn, *, operation_sha256, timeout_seconds=10):
     """
     from scripts.db import archive_root_v2_online as archives
     with _step(conn, timeout_seconds):
-        state = _state(conn)
+        state = _state(conn, operation_sha256)
         if state is None or state["operation_sha256"] != operation_sha256:
             raise RuntimeError("fact_header_forward_adoption_intent_changed")
         relations = [relation for family in FAMILIES.values() for relation in family[:2]]
         conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN ACCESS SHARE MODE NOWAIT")
         terminal = state["terminal"]
         if terminal is None:
-            if state["binding"] != _snapshot(conn):
+            if state["binding"] != _snapshot(conn, state["operation_sha256"]):
                 raise RuntimeError("fact_header_forward_adoption_binding_changed")
             return None
         if (terminal.get("kind") == "switched"
                 or terminal.get("operation_sha256") != operation_sha256
                 or terminal.get("rows_preserved") is not True
-                or terminal.get("binding") != _snapshot(conn)
+                or terminal.get("binding") != _snapshot(conn, operation_sha256)
                 or any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())):
             raise RuntimeError("fact_header_forward_adoption_terminal_changed")
         archives._inspect_forward_cancellation(conn, operation_sha256=operation_sha256,
@@ -533,7 +624,7 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30, read_only_nam
     if type(read_only_namespace) is not bool:
         raise ValueError("fact_header_forward_retirement_namespace_mode_invalid")
     with _step(conn, timeout_seconds):
-        state = _state(conn)
+        state = _state(conn, operation_sha256)
         if state is None or state["operation_sha256"] != operation_sha256:
             raise RuntimeError("fact_header_forward_adoption_intent_changed")
         if state["terminal"] is not None and state["terminal"].get("kind") == "switched":
@@ -544,7 +635,7 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30, read_only_nam
             inspect_retirement(conn, operation_sha256=operation_sha256, timeout_seconds=timeout_seconds)
             return dict(retired=True, reused=True, source_authoritative=True,
                         migration_ready=False, final_switch_authorized=False)
-        if state["binding"] != _snapshot(conn):
+        if state["binding"] != _snapshot(conn, state["operation_sha256"]):
             raise RuntimeError("fact_header_forward_adoption_binding_changed")
         archive_capture = archives._cancel_forward_capture(conn, state=state,
             **({"read_only_namespace": True} if read_only_namespace else {}))
@@ -580,13 +671,13 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30, read_only_nam
         if staged.get(headers.SOURCE) is not None:
             shape = expected["shapes"][headers.SOURCE]
             shape[5] = [item for item in shape[5] if item[0] != references.STAGED]
-        if len(admitted_removed) != len(removed) or expected != _snapshot(conn):
+        if len(admitted_removed) != len(removed) or expected != _snapshot(conn, operation_sha256):
             raise RuntimeError("fact_header_forward_adoption_retirement_changed")
         terminal = dict(operation_sha256=operation_sha256, binding=expected,
                         retired_at=conn.scalar(text("SELECT clock_timestamp()" )).isoformat(),
                         removed_triggers=removed, removed_reference_roots=roots, rows_preserved=True,
                         archive_capture=archive_capture)
-        conn.execute(text("UPDATE " + STATE + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
+        conn.execute(text("UPDATE " + state_relation(conn, operation_sha256) + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
                      {"terminal": json.dumps(terminal)})
         logger.info("fact_header_forward_adoption_retired | operation=%s triggers=%s", operation_sha256, len(removed))
         return dict(retired=True, reused=False, source_authoritative=True,
