@@ -1566,7 +1566,9 @@ finally:
   report['passed']=False
  if options.forward_final and report.get('forward_package',{}).get('actual_forward_final_mode') != options.forward_final:
   report['forward_final_not_qualified']=True
- if options.forward_operation and not report.get('forward_package',{}).get('canonical_normal_dispatch'):
+ if options.forward_operation and not all(report.get('forward_package',{}).get(field) is True for field in (
+     'canonical_normal_dispatch','canonical_preparation_only','preparation_reader_retired',
+     'source_serving_after_preparation','preparation_reentry_original_deadline')):
   report['forward_operation_not_qualified']=True
  if options.forward_retirement and not report.get('forward_package',{}).get('canonical_failure_retirement'):
   report['forward_retirement_not_qualified']=True

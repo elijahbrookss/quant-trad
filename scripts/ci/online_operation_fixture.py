@@ -588,6 +588,24 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             operation.inspect_prepared_operation = operation_preflight
             final.stop_online_source_locked = refuse_before_stop
             try:
+                forward_path = Path(manifest["forward_plan_path"])
+                inspected = operation.run_operation_plan(forward_path, prepare_forward_only=True)
+                assert inspected["phase"] == "forward_inspected" and not inspected["storage_mutations_performed"]
+                prepared = operation.run_operation_plan(forward_path, prepare_forward_only=True, execute=True)
+                assert prepared["phase"] == "forward_background_prepared" and prepared["adoption_active"]
+                assert not any(prepared[k] for k in ("source_stopped", "final_switch_authorized", "runtime_activated"))
+                prepared_launch = forward.load_launch(state)
+                prepared_sql = forward.observe_adoption(old_worker["binding"]["database_id"])
+                assert prepared["adoption_deadline"] == prepared_launch["deadline"]
+                status = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", created))
+                assert not status["Running"] and status["Pid"] == 0 and not status["OOMKilled"]
+                serving = host_boundary.inventory(kwargs["project"], operator_id=created)
+                assert host_boundary.source_clients_serving(serving)
+                assert host_boundary.identities(serving) == source
+                assert not (state/final.STATE).exists()
+                assert all(p.read_bytes() == data for p,data in original.items())
+                assert operation_preflights == [None, None, None, created]
+                operation_preflights.clear()
                 operation.run_operation_plan(Path(manifest["forward_plan_path"]), execute=True)
                 raise AssertionError("missing canonical forward pre-stop refusal")
             except RuntimeError as exc:
@@ -596,6 +614,11 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
                 operation.inspect_prepared_operation = actual_preflight
                 final.stop_online_source_locked = actual_stop
             assert launched.get("canonical_normal_dispatch") and not (state/final.STATE).exists()
+            resumed_launch = forward.load_launch(state)
+            assert resumed_launch == prepared_launch
+            assert forward.observe_adoption(old_worker["binding"]["database_id"]) == prepared_sql
+            launched.update(canonical_preparation_only=True, preparation_reader_retired=True,
+                source_serving_after_preparation=True, preparation_reentry_original_deadline=True)
         else:
             with launch.launched_online_worker(state,**arguments) as (worker,receipt):
                 assert receipt["container_id"]==created

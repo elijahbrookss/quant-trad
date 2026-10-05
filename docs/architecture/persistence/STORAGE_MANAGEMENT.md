@@ -3792,6 +3792,39 @@ These synthetic source peers and old-day records do not establish production
 source-runtime admission, UTC rollover, throughput, or range-scan duration.
 
 
+### Review online preparation before source stop
+
+The existing command also accepts `--prepare-forward-only` with a published
+forward operation plan. Without `--execute` it only inspects. With `--execute`
+it runs the same bounded identity/raw adoption, reference preparation and archive
+catch-up, rechecks source/runtime admission and publication, closes the control
+channel, and independently retires the worker before returning
+`forward_background_prepared`. It never enters the UTC wait, source stop, login
+gate, final handoff, recovery activation or deployment. A failed preparation,
+changed preflight, expired owner, uncertain close or failed retirement propagates
+instead of returning success. Combining this option with a publication, key,
+cancellation or deadline operation refuses before dispatch, as does using it on
+a non-forward or already-final operation.
+
+This is a stopping point in the existing operator, with no new journal, worker,
+proof format or schema. Preparation is a production mutation: adoption mirrors
+and archive capture remain active after the worker retires, so collection keeps
+writing to the admitted targets and must remain monitored for lag and capacity.
+The result includes the original adoption expiry and bound UTC day. A later separately authorized
+normal invocation reuses the same operation, worker identity, durable progress
+and clocks; it rechecks current tails/references and rebuilds its process-local
+archive file proof. It does not renew the deadline or change the already-bound
+UTC day. If the operation cannot continue, its existing preserving terminal
+owner must retire capture explicitly. There is no automatic cancellation,
+relaunch or cleanup on return, and elapsed time is not cutover approval.
+
+The disposable forward-operation rehearsal exercises this preparation-only
+return, verifies actual worker retirement and continued source serving, then
+reenters the normal operation under the unchanged launch/SQL clocks and refuses
+immediately before source stop. This covers the new boundary, not production
+preparation throughput or final-pause duration. The implementation remains
+subject to exact release qualification and production admission.
+
 ### Measure forward keys before selecting a cutover
 
 `qt storage migrate --operation-file <original-plan> --prepare-forward-keys-file

@@ -306,18 +306,22 @@ def _enter_forward_day(intent, paused):
 
 def run_prepared_operation_locked(state_root, *, project, source_revision, source_image,
         image, request, inventory_path, descriptor_limit, memory_bytes,
-        limits, keys_root, socket_volume, spool_destination):
-    """One continuous live operation from prepared source through runtime readiness.
+        limits, keys_root, socket_volume, spool_destination, prepare_forward_only=False):
+    """Run existing live phase owners, optionally ending before the forward pause.
 
     Caller supplies reviewed private recipes, prepared roots and measured limits.
     Uncertainty propagates immediately, retaining phase intent. No automatic abort,
     reopen, reconnect, replay, marker deletion or repeated COMMIT occurs here.
     Runtime readiness is not encrypted-pair completion or ordinary relaunch authority.
+    Forward preparation-only retains active adoption and its original deadline;
+    returning retires the worker, not the source mirrors or copied data.
     """
     state_root=validate_operation_arguments(state_root,limits=limits,request=request,source_image=source_image)
     from scripts.automation.storage_online_forward_worker import request_binding
     from scripts.automation import storage_online_forward as forward_owner
     intent = request_binding(request)
+    if type(prepare_forward_only) is not bool or (prepare_forward_only and intent is None):
+        raise ValueError("storage_forward_preparation_requires_forward_operation")
     if intent is not None:
         forward_owner.inspect_published_operation(state_root, request=request)
         _forward_cutover_day(intent, final_seconds=limits.final_seconds)
@@ -340,7 +344,7 @@ def run_prepared_operation_locked(state_root, *, project, source_revision, sourc
                 exchange = channel.exchange
                 prepared = prepare_background(exchange, preparation_seconds=limits.preparation_seconds,
                     **({"forward": True} if intent is not None else {}))
-                if intent is not None:
+                if intent is not None and not prepare_forward_only:
                     _await_forward_boundary(exchange, intent=intent, worker=worker,
                         deadline=channel_deadline, capture_deadline=receipt["deadline"], final_seconds=limits.final_seconds)
                 current = inspect_prepared_operation(state_root, **plan,
@@ -351,6 +355,20 @@ def run_prepared_operation_locked(state_root, *, project, source_revision, sourc
                     raise RuntimeError("storage_online_operation_preflight_changed")
                 if intent is not None:
                     forward_owner.inspect_published_operation(state_root, request=request)
+                    if prepare_forward_only:
+                        if worker.poll() is not None or time.monotonic() >= channel_deadline:
+                            raise RuntimeError("storage_forward_preparation_owner_expired")
+                        exchange("close")
+                        # Context exit independently retires this worker before
+                        # returning. Durable adoption/mirrors remain active;
+                        # reentry retains the operation, worker and SQL deadline.
+                        logger.info("storage_forward_background_prepared | project=%s "
+                            "operation_sha256=%s adoption_deadline=%s final_switch_authorized=false",
+                            project, intent["operation_sha256"], receipt["deadline"])
+                        return dict(background=prepared, elapsed_seconds=time.monotonic()-started,
+                            adoption_deadline=receipt["deadline"], end_day=intent["end_day"], source_stopped=False,
+                            adoption_active=True, final_switch_authorized=False,
+                            runtime_activated=False, ordinary_relaunch_authorized=False)
                     _admit_forward_stop(intent, final_seconds=limits.final_seconds)
                 paused = final.stop_online_source_locked(state_root, project=project,
                     source_revision=source_revision, worker_id=receipt["container_id"],
@@ -494,7 +512,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, prepare_forward_only=False):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -504,6 +522,12 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     """
     if type(execute) is not bool:
         raise ValueError("storage_online_operation_execute_invalid")
+    if type(prepare_forward_only) is not bool:
+        raise ValueError("storage_forward_preparation_flag_invalid")
+    if prepare_forward_only and any(value is not None for value in (
+            extend_attempt_seconds, capacity_file, replacement_package_file,
+            cancel_attempt_file, forward_package_file, prepare_forward_keys_file)):
+        raise ValueError("storage_forward_preparation_must_be_separate")
     if prepare_forward_keys_file is not None:
         if any(v is not None for v in (forward_package_file, cancel_attempt_file, replacement_package_file, extend_attempt_seconds, capacity_file)):
             raise ValueError("storage_key_preparation_must_be_separate")
@@ -544,6 +568,8 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
             effective_request = published["new_request"]
         else:
             require_settled(state_root)
+        if prepare_forward_only and (published is None or os.path.lexists(state_root/final.STATE)):
+            raise ValueError("storage_forward_preparation_requires_pre_final_publication")
         if os.path.lexists(state_root/"storage-online-final.json"):
             saved = final._load(state_root/final.STATE)
             worker = host.load_receipt(state_root/launch._STATE)
@@ -615,8 +641,10 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                 return dict(phase="forward_inspected", configuration_sha256=host.digest(observation),
                     storage_mutations_performed=False, final_switch_authorized=False)
             result = run_prepared_operation_locked(state_root, **arguments, request=effective_request,
-                descriptor_limit=plan["descriptor_limit"], memory_bytes=plan["memory_bytes"], limits=limits)
-            return dict(phase="runtime_ready", forward=True, **result)
+                descriptor_limit=plan["descriptor_limit"], memory_bytes=plan["memory_bytes"], limits=limits,
+                **({"prepare_forward_only": True} if prepare_forward_only else {}))
+            return dict(phase="forward_background_prepared" if prepare_forward_only else "runtime_ready",
+                forward=True, **result)
         prepared=initial._load(state_root) if os.path.lexists(state_root/initial.STATE) else None
         if prepared is None:
             observation=inspect_initial_operation(state_root,plan=plan,
