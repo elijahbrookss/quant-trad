@@ -41,20 +41,8 @@ def _original_archives(conn):
             for name in (online.STATE, online.PROGRESS, online.QUEUE)}
 
 
-def _prepare_canceled(storage, tmp_path, monkeypatch, *, provision_hot=False):
+def _prepare_canceled(storage, tmp_path, monkeypatch):
     engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
-    if provision_hot:
-        # Reproduce ordinary v1 daily provisioning before any proof is bound.
-        # The archive fixture has reclaimed all its previous hot partitions.
-        with engine.begin() as conn:
-            storage.open_day = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
-            child = "market.fact_hot_payloads_"+storage.open_day.strftime("%Y%m%d")
-            assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":child}) is None
-            end = storage.open_day+timedelta(days=1)
-            conn.exec_driver_sql(f"CREATE TABLE {child} PARTITION OF market.fact_hot_payloads "
-                f"FOR VALUES FROM ('{storage.open_day}') TO ('{end}')")
-            conn.execute(text("INSERT INTO market.fact_retention_partitions(storage_day) VALUES(:day)"),
-                {"day":storage.open_day})
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
         raw.prepare_copy(conn)
@@ -553,8 +541,7 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     from scripts.automation.storage_host_boundary import digest
     from tests.test_storage_online_forward_worker import _request, _successor_request
 
-    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch,
-        provision_hot=successor and outcome=="recover")
+    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
     kwargs = dict(targets=(storage.copy_plan.recent, storage.copy_plan.history),
         policy=options["policy"], limits=options["resource_limits"],
         source=options["source_root"], destination=options["destination_root"],
@@ -746,6 +733,11 @@ def _qualify_reschedule(engine, storage, source, request, kwargs):
     tomorrow = (datetime.now(timezone.utc).date()+timedelta(days=1)).isoformat()
     proposed = _rescheduled(request, end_day=tomorrow)
     with engine.begin() as conn:
+        # The archive fixture has no hot rows, but has an empty open partition.
+        # Select its registered day; rescheduling performs no partition DDL.
+        storage.open_day = conn.scalar(text("SELECT storage_day FROM market.fact_retention_partitions "
+            "WHERE state='open' ORDER BY storage_day DESC LIMIT 1"))
+        assert storage.open_day is not None
         adoption.adoption_page(conn, operation_sha256=operation, page_rows=1)
         expected = worker.inspect_reschedule(conn, request=request)
         old_state = adoption._state(conn, operation)
