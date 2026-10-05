@@ -1510,13 +1510,22 @@ finally:
  forward_workers=[]
  if options.forward_package_image:
   from scripts.automation import storage_online_forward as forward_owner
+  from scripts.automation import storage_online_reschedule as reschedule_owner
+  current_request=host_boundary.load_receipt(state/'storage-online-request.json')
   for launch_path in (state/forward_owner.LAUNCH_STATE,
       state/forward_owner.operation_file(forward_owner.LAUNCH_STATE,
-          request=host_boundary.load_receipt(state/'storage-online-request.json'))):
+          request=current_request)):
    if launch_path.exists():
     worker=host_boundary.load_receipt(launch_path,max_bytes=forward_owner._MAX_BYTES).get('worker')
     if worker and worker.get('container_id'):
      forward_workers.append(worker);owned.append(worker['container_id'])
+  # A reschedule preserves its stopped worker only in the amendment preimage;
+  # the active launch now owns the replacement. Both remain fixture-owned.
+  reschedule_path=state/reschedule_owner.state_file(current_request['forward']['operation_sha256'])
+  if reschedule_path.exists():
+   worker=host_boundary.load_receipt(reschedule_path,max_bytes=reschedule_owner.MAX_BYTES)['old_worker']
+   if worker.get('container_id'):
+    forward_workers.append(worker);owned.append(worker['container_id'])
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue
