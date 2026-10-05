@@ -2186,6 +2186,20 @@ complete range CHECK, heap attachment and exact proof still belong to one final
 transaction and its original time bound; this route does not precommit a CHECK.
 
 
+### Review online preparation before source stop
+
+The same operation may explicitly stop after online preparation through
+`--prepare-forward-only --execute`, before any source pause or final handoff.
+This allows production preparation costs and progress to be reviewed without
+automatically entering the later cutover. It reuses existing owners and durable
+progress, retires its worker, and preserves the original adoption expiry and
+bound UTC day. Source mirrors remain active until the existing switch or
+preserving cancellation owner retires them; their ongoing resource cost is still
+part of admission. A subsequent normal invocation rebuilds its transient file
+proof and rechecks current state under the same deadline. This adds no migration
+framework or new persisted authority. See the storage component for the command,
+failure behavior and the scope of the native preparation/reentry rehearsal.
+
 ### Measure forward keys before selecting a cutover
 
 `qt storage migrate --operation-file <original-plan> --prepare-forward-keys-file

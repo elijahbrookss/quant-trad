@@ -558,6 +558,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
         elif operation_route:
             assert retire_worker, "canonical operation fixture requires preserving failure retirement"
             actual_stop = final.stop_online_source_locked
+            actual_stop_admission = operation._admit_forward_stop
             operation_preflights = []
             def operation_preflight(state_root, **options):
                 launch.inspect_candidate_image(options["image"], options["request"])
@@ -587,7 +588,29 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
                 raise RuntimeError("fixture refusal before forward source stop")
             operation.inspect_prepared_operation = operation_preflight
             final.stop_online_source_locked = refuse_before_stop
+            # This old-day disposable fixture covers worker lifecycle/reentry,
+            # not a real midnight. Unit tests own early/late stop admission;
+            # preserve the real clock for all launch and SQL expiry checks.
+            operation._admit_forward_stop = lambda intent, **options: operation._forward_cutover_day(intent, **options)
             try:
+                forward_path = Path(manifest["forward_plan_path"])
+                inspected = operation.run_operation_plan(forward_path, prepare_forward_only=True)
+                assert inspected["phase"] == "forward_inspected" and not inspected["storage_mutations_performed"]
+                prepared = operation.run_operation_plan(forward_path, prepare_forward_only=True, execute=True)
+                assert prepared["phase"] == "forward_background_prepared" and prepared["adoption_active"]
+                assert not any(prepared[k] for k in ("source_stopped", "final_switch_authorized", "runtime_activated"))
+                prepared_launch = forward.load_launch(state)
+                prepared_sql = forward.observe_adoption(old_worker["binding"]["database_id"])
+                assert prepared["adoption_deadline"] == prepared_launch["deadline"]
+                status = json.loads(host_boundary.docker("inspect", "--format", "{{json .State}}", created))
+                assert not status["Running"] and status["Pid"] == 0 and not status["OOMKilled"]
+                serving = host_boundary.inventory(kwargs["project"], operator_id=created)
+                assert host_boundary.source_clients_serving(serving)
+                assert host_boundary.identities(serving) == source
+                assert not (state/final.STATE).exists()
+                assert all(p.read_bytes() == data for p,data in original.items())
+                assert operation_preflights == [None, None, None, created]
+                operation_preflights.clear()
                 operation.run_operation_plan(Path(manifest["forward_plan_path"]), execute=True)
                 raise AssertionError("missing canonical forward pre-stop refusal")
             except RuntimeError as exc:
@@ -595,7 +618,13 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             finally:
                 operation.inspect_prepared_operation = actual_preflight
                 final.stop_online_source_locked = actual_stop
+                operation._admit_forward_stop = actual_stop_admission
             assert launched.get("canonical_normal_dispatch") and not (state/final.STATE).exists()
+            resumed_launch = forward.load_launch(state)
+            assert resumed_launch == prepared_launch
+            assert forward.observe_adoption(old_worker["binding"]["database_id"]) == prepared_sql
+            launched.update(canonical_preparation_only=True, preparation_reader_retired=True,
+                source_serving_after_preparation=True, preparation_reentry_original_deadline=True)
         else:
             with launch.launched_online_worker(state,**arguments) as (worker,receipt):
                 assert receipt["container_id"]==created
