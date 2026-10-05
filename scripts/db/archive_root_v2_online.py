@@ -57,13 +57,16 @@ class _Capture:
         return self.schema + ".reject_fact_source_change"
 
 
-def _capture(forward_operation_sha256=None):
+def _capture(forward_operation_sha256=None, *, conn=None):
     if forward_operation_sha256 is None:
         return _Capture(SCHEMA, TRIGGER, GUARD)
     if (not isinstance(forward_operation_sha256, str)
             or not re.fullmatch(r"[0-9a-f]{64}", forward_operation_sha256)):
         raise ValueError("archive_forward_operation_invalid")
-    from scripts.db.fact_header_forward_keys import SCHEMA as forward_schema
+    from scripts.db import fact_header_forward_adoption as adoption
+    if conn is None:
+        raise ValueError("archive_forward_operation_connection_required")
+    forward_schema = adoption.operation_schema(conn, forward_operation_sha256)
     return _Capture(forward_schema, "trg_qt_forward_archive_capture", "trg_qt_forward_archive_reject_change")
 
 
@@ -78,17 +81,17 @@ def _roots(conn, source_root, destination_root, *, read_only_namespace=False, sa
 
 
 def _binding(conn, forward_operation_sha256=None):
-    owner = _capture(forward_operation_sha256)
+    owner = _capture(forward_operation_sha256, conn=conn)
     if forward_operation_sha256 is None:
         result = {"capture_oid": conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
                                              {"name": SCHEMA + ".capture"}),
                   "prepared_at": str(conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1")))}
     else:
         from scripts.db import fact_header_forward_adoption as adoption
-        state = adoption._state(conn)
+        state = adoption._state(conn, forward_operation_sha256)
         result = {"operation_sha256": state["operation_sha256"],
                   "adoption_oid": conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
-                                               {"name": adoption.STATE}),
+                                               {"name": adoption.state_relation(conn, forward_operation_sha256)}),
                   "started_at": state["started_at"].isoformat(),
                   "expires_at": state["expires_at"].isoformat()}
     for family in archives.FAMILIES:
@@ -120,7 +123,7 @@ def _require_open(conn, owner):
 
 def _inspect(conn, source_root, destination_root, *, read_only_namespace=False,
              forward_operation_sha256=None, saved=None):
-    owner = _capture(forward_operation_sha256)
+    owner = _capture(forward_operation_sha256, conn=conn)
     if forward_operation_sha256 is not None and saved is None:
         raise RuntimeError("archive_forward_admitted_placement_required")
     _require_open(conn, owner)
@@ -134,7 +137,7 @@ def _inspect(conn, source_root, destination_root, *, read_only_namespace=False,
 
 def prepare(conn, *, source_root, destination_root, timeout_seconds=30, forward_operation_sha256=None):
     """Install capture and a finite baseline at one short catalog writer fence."""
-    owner = _capture(forward_operation_sha256)
+    owner = _capture(forward_operation_sha256, conn=conn)
     with archives._operation_step(conn, timeout_seconds,
             forward_operation_sha256=forward_operation_sha256) as (saved, _):
         _require_open(conn, owner)
@@ -220,14 +223,14 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, t
         raise ValueError("archive_copy_known_family_required")
     if type(tail_only) is not bool:
         raise ValueError("archive_online_tail_mode_invalid")
-    owner = _capture(forward_operation_sha256)
     selection = {}
 
     def select(conn, selected_family, unused_after, limit):
+        owner = _capture(forward_operation_sha256, conn=conn)
         saved = None
         if forward_operation_sha256 is not None:
             from scripts.db import fact_header_forward_adoption as adoption
-            saved = adoption._state(conn)["binding"]["old_headers"]["placement"]
+            saved = adoption._state(conn, forward_operation_sha256)["binding"]["old_headers"]["placement"]
         _inspect(conn, source_root, destination_root,
                  forward_operation_sha256=forward_operation_sha256, saved=saved)
         state = dict(conn.execute(text(f"SELECT * FROM {owner.progress} WHERE family=:family"),
@@ -256,10 +259,13 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, t
         """), {"kind": kind, "ids": ids}).scalars()) if ids and kind is not None else set()
         rows = [row for row in all_rows if row["id"] not in expired]
         archives._validate_descriptors(rows)
-        selection.update(state=state, ids=ids, expired=len(expired))
+        selection.update(owner=owner, state=state, ids=ids, expired=len(expired))
         return rows
 
     def record(conn, rows):
+        owner = _capture(forward_operation_sha256, conn=conn)
+        if owner != selection["owner"]:
+            raise RuntimeError("archive_forward_operation_owner_changed")
         state, ids = selection["state"], selection["ids"]
         conn.execute(text(f"DELETE FROM {owner.queue} WHERE family=:family AND id=ANY(:ids)"),
                      {"family": family, "ids": ids})
@@ -293,7 +299,7 @@ def retire_capture(conn, *, source_root, destination_root, timeout_seconds=30, f
     terminal receipt, refusing preparation/copy retries of the closed attempt.
     This is neither publisher drain, root activation nor collection permission.
     """
-    owner = _capture(forward_operation_sha256)
+    owner = _capture(forward_operation_sha256, conn=conn)
     context = conn.info.get("qt.archive_inventory_context.v2")
     if (context is None or context["transaction"] is not conn.get_transaction()
             or not context["transaction"].is_active
@@ -343,7 +349,7 @@ def _cancel_forward_capture(conn, *, state, read_only_namespace=False):
         raise ValueError("archive_forward_terminal_namespace_mode_invalid")
     placement_options = {"read_only_namespace": True} if read_only_namespace else {}
     operation = state["operation_sha256"]
-    owner = _capture(operation)
+    owner = _capture(operation, conn=conn)
     if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.state}) is None:
         return None
     conn.exec_driver_sql("LOCK TABLE " + ",".join("market." + name for name in archives.FAMILIES)
@@ -364,7 +370,7 @@ def _cancel_forward_capture(conn, *, state, read_only_namespace=False):
 
 
 def _inspect_forward_cancellation(conn, *, operation_sha256, receipt):
-    owner = _capture(operation_sha256)
+    owner = _capture(operation_sha256, conn=conn)
     if receipt is None:
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name": owner.state}) is not None:
             raise RuntimeError("archive_forward_terminal_changed")

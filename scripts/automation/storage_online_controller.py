@@ -137,7 +137,7 @@ class OnlineController:
                         started_at = observed["started_at"]
                         protection.inspect_protection(self._owner)
                     else:
-                        started_at = adoption._state(self._owner)["started_at"].isoformat()
+                        started_at = adoption._state(self._owner, self.forward_operation_sha256)["started_at"].isoformat()
                     if started_at != self.expected_started_at:
                         raise RuntimeError("storage_online_attempt_binding_changed")
                     if handoff.physical._restore(saved["plan"]) != self.placement:
@@ -180,7 +180,7 @@ class OnlineController:
     def _capture_row(self, conn):
         if self.forward_operation_sha256 is None:
             return dict(conn.execute(text(f"SELECT * FROM {capture.STATE}")).mappings().one())
-        state = adoption._state(conn)
+        state = adoption._state(conn, self.forward_operation_sha256)
         if state is None:
             raise RuntimeError("storage_online_forward_owner_missing")
         # Progress, native references and terminal outcome change legitimately.
@@ -190,10 +190,10 @@ class OnlineController:
         return capture_observation(state)
 
     def _inspect_forward_retained(self, conn):
-        state = adoption._state(conn)
+        state = adoption._state(conn, self.forward_operation_sha256)
         if (state is None or state["terminal"] is not None
                 or self._capture_row(conn) != self._capture
-                or state["binding"] != adoption._snapshot(conn)):
+                or state["binding"] != adoption._snapshot(conn, self.forward_operation_sha256)):
             raise RuntimeError("storage_online_forward_retained_binding_changed")
         adoption._reference_states(conn, state)
         saved = state["binding"]["old_headers"]["placement"]
@@ -574,7 +574,7 @@ class OnlineController:
             args = dict(operation_sha256=self.forward_operation_sha256, timeout_seconds=seconds)
             if step == "adoption":
                 if tail_only:
-                    report = adoption._report(adoption._state(conn), reused=True)
+                    report = adoption._report(adoption._state(conn, self.forward_operation_sha256), reused=True)
                     if not report["retained_targets_verified"]:
                         raise RuntimeError("storage_online_final_delta_sql_baseline_required")
                 else:
@@ -868,14 +868,14 @@ class OnlineController:
                         complete = online._phase(headers._inspect_progress(conn), handoff.raw._inspect(conn)) == "catch_up"
                         saved = None
                     else:
-                        state = adoption._state(conn)
+                        state = adoption._state(conn, self.forward_operation_sha256)
                         complete = adoption._report(state, reused=True)["retained_targets_verified"]
                         saved = state["binding"]["old_headers"]["placement"]
                     if not complete:
                         raise RuntimeError("storage_online_final_delta_sql_baseline_required")
                     archive_online._inspect(conn, self.source_root, self.destination_root,
                         forward_operation_sha256=self.forward_operation_sha256, saved=saved)
-                    owner = archive_online._capture(self.forward_operation_sha256)
+                    owner = archive_online._capture(self.forward_operation_sha256, conn=conn)
                     progress = conn.execute(text(f"SELECT family,baseline_complete FROM {owner.progress}")).mappings().all()
                     if ({row["family"] for row in progress} != set(archives.FAMILIES)
                             or any(not row["baseline_complete"] for row in progress)):

@@ -128,6 +128,10 @@ def test_retirement_checks_exact_namespace_before_any_dependency_change(monkeypa
     monkeypatch.setattr(adoption, "_step", lambda *a: nullcontext())
     monkeypatch.setattr(adoption, "_state", lambda *a: state)
     monkeypatch.setattr(adoption, "_snapshot", lambda *a: state["binding"])
+    def operation_schema(actual, operation):
+        assert actual is conn and operation == state["operation_sha256"]
+        return adoption.keys.SCHEMA
+    monkeypatch.setattr(adoption, "operation_schema", operation_schema)
     def verify(actual, saved, *, read_only_namespace=False):
         assert actual is conn and saved == {"exact": "saved"}
         assert read_only_namespace is expected_namespace

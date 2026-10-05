@@ -390,7 +390,7 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
         # Forward archive capture has its own original owner and journals.
         # It may close only under the matching live inventory, never by borrowing
         # the canceled attempt's preserved state or an earlier verification dict.
-        forward_archives = online_archives._capture(operation_sha256)
+        forward_archives = online_archives._capture(operation_sha256, conn=conn)
         archive_receipt = None
         if _oid(conn, forward_archives.state) is not None:
             inventory = conn.info.get("qt.archive_inventory_context.v2")
@@ -479,7 +479,7 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
                        search_files=search_files,switched_at=conn.scalar(text("SELECT clock_timestamp()")).isoformat(),
                        archive_inventory_sha256=(archive_receipt["inventory"]["inventory_sha256"]
                                                  if archive_receipt else None))
-        conn.execute(text("UPDATE " + adoption.STATE + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
+        conn.execute(text("UPDATE " + adoption.state_relation(conn, operation_sha256) + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
                      {"terminal":json.dumps(receipt)})
         context["switched"] = True
         logger.info("fact_header_forward_tables_staged | operation=%s legacy_oid=%s end_day=%s",
@@ -502,10 +502,10 @@ def _stage_forward_certificate(conn, *, policy, saved, source_root, destination_
     from scripts.db import fact_header_forward_adoption as adoption
     from scripts.db import archive_root_v2_online as online_archives
 
-    owner = online_archives._capture(operation_sha256)
+    owner = online_archives._capture(operation_sha256, conn=conn)
     if _oid(conn, owner.state) is None:
         raise RuntimeError("fact_header_forward_archive_capture_required")
-    state = adoption._state(conn)
+    state = adoption._state(conn, operation_sha256)
     proof_digest = _forward_adoption_digest(state)
     pid = physical.verify(conn, saved)
     for relation in (adoption.IDENTITY, raw.TARGET, *reference_move.RELATIONS):
@@ -798,12 +798,12 @@ def _verify_forward_certificate(conn, receipt):
             or forward.get("retained_raw_oid") != receipt["retained_relation_oids"][raw.NAME]
             or forward.get("archive_inventory_sha256") != receipt["archive_inventory_sha256"]):
         raise RuntimeError("fact_header_forward_certificate_changed")
-    state = adoption._state(conn)
+    state = adoption._state(conn, forward["operation_sha256"])
     if (state is None or state["terminal"] != forward
             or state["operation_sha256"] != forward["operation_sha256"]
             or _forward_adoption_digest(state) != receipt.get("forward_adoption_sha256")):
         raise RuntimeError("fact_header_forward_certificate_changed")
-    owner = online_archives._capture(forward["operation_sha256"])
+    owner = online_archives._capture(forward["operation_sha256"], conn=conn)
     if _oid(conn, owner.closed) is None:
         raise RuntimeError("fact_header_forward_archive_receipt_changed")
     closed = conn.execute(text("SELECT receipt FROM " + owner.closed + " WHERE id=1")).scalar_one()

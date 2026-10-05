@@ -470,3 +470,10 @@ def test_background_sql_batch_does_not_expand_archive_or_final_work(monkeypatch,
     controller._final_deadline=monotonic()+10
     with pytest.raises(RuntimeError,match="final_background_work_refused"):
         controller.command(dict(controller_id=controller.controller_id,sequence=3,operation="sql_copy"))
+
+
+def test_forward_archive_owner_requires_explicit_database_resolution():
+    from scripts.db import archive_root_v2_online as archives
+    assert archives._capture().state == archives.STATE
+    with pytest.raises(ValueError, match="operation_connection_required"):
+        archives._capture("a" * 64)

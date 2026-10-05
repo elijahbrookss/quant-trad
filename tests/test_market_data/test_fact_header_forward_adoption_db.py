@@ -492,3 +492,86 @@ def test_terminal_recovery_lock_wait_keeps_enclosing_deadline(retained):
     with engine.begin() as conn:
         assert adoption._state(conn) == before
         assert adoption._snapshot(conn) == before["binding"]
+
+
+def test_successor_owns_new_proof_and_clocks_without_reopening_retired_attempt(retained, monkeypatch):
+    engine = retained.database._engine
+    successor = "c" * 64
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+        adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+        with pytest.raises(RuntimeError, match="successor_retirement_required"):
+            adoption.prepare_adoption(conn, **{**retained.adoption_args, "operation_sha256": successor},
+                predecessor_operation_sha256=OPERATION, predecessor_terminal_sha256="0" * 64)
+        adoption.retire_adoption(conn, operation_sha256=OPERATION)
+        previous = adoption._json_row(conn, adoption.STATE)
+        old = _old(conn)
+        frozen = _frozen_records(conn)
+        terminal = adoption.inspect_retirement(conn, operation_sha256=OPERATION)
+        terminal_hash = adoption._digest(terminal)
+        _insert(conn, retained, "uncaptured-successor-gap")
+    args = {**retained.adoption_args, "operation_sha256": successor,
+            "predecessor_operation_sha256": OPERATION, "predecessor_terminal_sha256": terminal_hash}
+    with pytest.raises(RuntimeError, match="retirement_required"), engine.begin() as conn:
+        adoption.prepare_adoption(conn, **{**retained.adoption_args, "operation_sha256": successor})
+    with pytest.raises(RuntimeError, match="retirement_required"), engine.begin() as conn:
+        adoption.prepare_adoption(conn, **{**args, "predecessor_terminal_sha256": "0" * 64})
+    schema = adoption.successor_schema(successor)
+    with pytest.raises(RuntimeError, match="namespace_unowned"), engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA " + schema)
+        adoption.prepare_adoption(conn, **args)
+    with pytest.raises(RuntimeError, match="rollback successor prepare"), engine.begin() as conn:
+        adoption.prepare_adoption(conn, **args)
+        raise RuntimeError("rollback successor prepare")
+    with engine.begin() as conn:
+        assert conn.scalar(text("SELECT to_regnamespace(:name)"), {"name": schema}) is None
+        assert adoption._json_row(conn, adoption.STATE) == previous
+    commit = Connection._commit_impl
+    def lose_reply(conn):
+        commit(conn)
+        raise RuntimeError("lost successor commit reply")
+    with monkeypatch.context() as lost:
+        lost.setattr(Connection, "_commit_impl", lose_reply)
+        with pytest.raises(RuntimeError, match="lost successor commit reply"), engine.begin() as conn:
+            adoption.prepare_adoption(conn, **args)
+    with engine.begin() as conn:
+        state = adoption._state(conn, successor)
+        assert state["started_at"].isoformat() > previous["started_at"]
+        assert state["progress"]["identity_target"]["verified"] == 0
+        assert adoption.prepare_adoption(conn, **args)["reused"]
+        assert adoption._state(conn, successor) == state
+        assert adoption._json_row(conn, adoption.STATE) == previous
+        with pytest.raises(RuntimeError, match="successor_intent_changed"):
+            adoption.prepare_adoption(conn, **{**retained.adoption_args, "operation_sha256": successor})
+        with pytest.raises(RuntimeError, match="adoption_retired"):
+            adoption.adoption_page(conn, operation_sha256=OPERATION)
+        _insert(conn, retained, "live-successor-publisher")
+    with pytest.raises(RuntimeError, match="terminal_changed"), engine.begin() as conn:
+        adoption.prepare_adoption(conn, **{**args, "operation_sha256": "d" * 64})
+    with engine.begin() as conn:
+        assert conn.scalar(text("SELECT to_regnamespace(:name)"),
+                           {"name": adoption.successor_schema("d" * 64)}) is None
+    # An old journal mutation cannot be accepted as the successor's lineage.
+    with pytest.raises(RuntimeError, match="predecessor_changed"), engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE " + adoption.STATE + " SET progress='{}'::jsonb")
+        adoption.adoption_page(conn, operation_sha256=successor)
+    for _ in range(64):
+        with engine.begin() as conn:
+            result = adoption.adoption_page(conn, operation_sha256=successor, page_rows=1)
+        if result["retained_targets_verified"]:
+            break
+    else:
+        pytest.fail("successor proof did not finish within fixture budget")
+    with engine.begin() as conn:
+        assert adoption._json_row(conn, adoption.STATE) == previous
+        assert _old(conn) == old and _frozen_records(conn) == frozen
+        current = adoption._state(conn, successor)
+        assert current["started_at"] == state["started_at"]
+        assert current["expires_at"] == state["expires_at"]
+        columns = ",".join(headers.IDENTITY_COLUMNS)
+        assert conn.execute(text("SELECT " + columns + " FROM " + headers.SOURCE + " ORDER BY id")).all() == conn.execute(
+            text("SELECT " + columns + " FROM " + adoption.IDENTITY + " ORDER BY id")).all()
+        adoption.retire_adoption(conn, operation_sha256=successor)
+        assert adoption.inspect_retirement(conn, operation_sha256=successor)["rows_preserved"]
+        assert adoption._json_row(conn, adoption.STATE) == previous
+        assert _old(conn) == old
