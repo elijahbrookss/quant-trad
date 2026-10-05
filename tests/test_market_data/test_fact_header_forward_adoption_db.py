@@ -575,3 +575,201 @@ def test_successor_owns_new_proof_and_clocks_without_reopening_retired_attempt(r
         assert adoption.inspect_retirement(conn, operation_sha256=successor)["rows_preserved"]
         assert adoption._json_row(conn, adoption.STATE) == previous
         assert _old(conn) == old
+
+
+def test_retained_lookup_placement_is_atomic_recoverable_and_explicit(retained, monkeypatch):
+    from scripts.db import fact_header_forward_placement as lookup
+    from scripts.db import fact_header_v2_placement as physical
+    from tests.test_market_data.test_archive_reference_placement_db import _options
+    engine = retained.database._engine
+    plan = replace(retained.copy_plan, recent_lookup_indexes=True)
+    options = dict(operation_sha256="d"*64, predecessor_operation_sha256=OPERATION,
+        predecessor_terminal_sha256="e"*64, placement=plan, **_options(retained))
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+    with pytest.raises(RuntimeError, match="retirement_required"):
+        lookup.move_lookup_indexes(engine, **options)
+    with engine.begin() as conn:
+        adoption.retire_adoption(conn, operation_sha256=OPERATION)
+        terminal = adoption.inspect_retirement(conn, operation_sha256=OPERATION)
+        old_state = adoption._json_row(conn, adoption.STATE)
+        old = _old(conn)
+        old_keys = adoption._json_row(conn, keys.STATE)
+        frozen = _frozen_records(conn)
+        before = adoption._snapshot(conn, OPERATION)
+    options["predecessor_terminal_sha256"] = adoption._digest(terminal)
+    # The caller's shorter absolute bound covers intent creation too. A slow
+    # namespace probe must not publish a fresh intent after that bound expires.
+    import time
+    observe = physical.observe
+    def late_probe(*args, **kwargs):
+        result = observe(*args, **kwargs)
+        time.sleep(max(0, kwargs["deadline"]-time.monotonic()) + .05)
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(physical, "observe", late_probe)
+        with pytest.raises(RuntimeError, match="step_timeout"):
+            lookup.move_lookup_indexes(engine, **options, deadline=time.monotonic()+5)
+    with engine.begin() as conn:
+        assert lookup._row(conn) is None
+    # Another controller/storage owner must be refused, including idle owners.
+    with engine.connect() as owner:
+        owner.exec_driver_sql("SELECT pg_advisory_lock(hashtextextended('qt.storage.management.v1',0))")
+        owner.commit()
+        try:
+            with pytest.raises(RuntimeError, match="owner_busy"):
+                lookup.move_lookup_indexes(engine, **options)
+        finally:
+            owner.invalidate()
+    with pytest.raises(RuntimeError, match="storage_move_cancelled"):
+        lookup.move_lookup_indexes(engine, **options, cancelled=lambda: True)
+    with engine.connect() as conn:
+        assert lookup._row(conn) is None
+    # Kill the real backend after its first ALTER. Source writes still commit;
+    # PostgreSQL rolls every index back, and the durable original clock survives.
+    interrupted = [False]
+    def kill_first(conn, cursor, statement, parameters, context, executemany):
+        if not interrupted[0] and statement.startswith("ALTER INDEX "+capture.SCHEMA+"."):
+            interrupted[0] = True
+            with engine.begin() as writer:
+                writer.exec_driver_sql("SET LOCAL statement_timeout='2s'")
+                _insert(writer, retained, "collected-during-lookup-move")
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),
+                    {"pid": conn.connection.driver_connection.get_backend_pid()})
+            conn.exec_driver_sql("SELECT 1")
+    event.listen(engine, "after_cursor_execute", kill_first)
+    try:
+        with pytest.raises(DBAPIError):
+            lookup.move_lookup_indexes(engine, **options)
+    finally:
+        event.remove(engine, "after_cursor_execute", kill_first)
+    assert interrupted[0]
+    with engine.begin() as conn:
+        pending = lookup._row(conn)
+        assert pending["completion"] is None
+        assert adoption._snapshot(conn, OPERATION) == before
+        assert adoption.inspect_retirement(conn, operation_sha256=OPERATION) == terminal
+        assert conn.scalar(text("SELECT count(*) FROM market.fact_versions WHERE observation_key='collected-during-lookup-move'")) == 1
+    changed = dict(options, operation_sha256="f"*64)
+    with pytest.raises(RuntimeError, match="intent_changed"):
+        lookup.move_lookup_indexes(engine, **changed)
+    # Cancel while the first move is staged. Same-session watch must roll back
+    # SQL before returning the connection; this is separate from ownership.
+    cancel = [False]
+    def cancel_first(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("ALTER INDEX "+capture.SCHEMA+"."):
+            cancel[0] = True
+    event.listen(engine, "after_cursor_execute", cancel_first)
+    try:
+        with pytest.raises(RuntimeError, match="storage_move_cancelled"):
+            lookup.move_lookup_indexes(engine, **options, cancelled=lambda: cancel[0])
+    finally:
+        event.remove(engine, "after_cursor_execute", cancel_first)
+    with engine.begin() as conn:
+        assert lookup._row(conn) == pending
+        assert adoption._snapshot(conn, OPERATION) == before
+    # Lost COMMIT reply after all three moves and completion, then read-only
+    # reconciliation. No second ALTER and no replacement attempt clock.
+    commit = Connection._commit_impl
+    lost = [False]
+    def lose_completion(conn):
+        if not lost[0] and not conn.invalidated:
+            value = conn.scalar(text("SELECT completion IS NOT NULL FROM "+lookup.STATE+" WHERE id=1"))
+            if value:
+                commit(conn)
+                lost[0] = True
+                raise RuntimeError("lost lookup commit reply")
+        commit(conn)
+    with monkeypatch.context() as patch:
+        patch.setattr(Connection, "_commit_impl", lose_completion)
+        with pytest.raises(RuntimeError, match="lost lookup commit reply"):
+            lookup.move_lookup_indexes(engine, **options)
+    assert lost[0]
+    def forbid_alter(conn, cursor, statement, parameters, context, executemany):
+        assert not statement.startswith("ALTER INDEX")
+    event.listen(engine, "before_cursor_execute", forbid_alter)
+    try:
+        complete = lookup.move_lookup_indexes(engine, **options)
+    finally:
+        event.remove(engine, "before_cursor_execute", forbid_alter)
+    assert complete["reused"] and not complete["migration_ready"]
+    assert complete["started_at"] == pending["started_at"] and complete["expires_at"] == pending["expires_at"]
+    files = complete["completion"]
+    assert {r["oid"] for r in files["before_files"]} == {r["oid"] for r in files["after_files"]}
+    assert all(r["reltablespace"] in (0, 1663) for r in files["after_files"])
+    budget = complete["completion"]["resource_budget"]["filesystems"]
+    assert next(r for r in budget if r["target_id"] == plan.recent.target_id)["copy_bytes"] == complete["completion"]["copy_bytes"]
+    assert next(r for r in budget if r["target_id"] == plan.history.target_id)["copy_bytes"] == 0
+    with engine.begin() as conn:
+        assert _old(conn) == old and adoption._json_row(conn, keys.STATE) == old_keys
+        assert adoption._json_row(conn, adoption.STATE) == old_state
+        assert _frozen_records(conn) == frozen
+        assert adoption.inspect_retirement(conn, operation_sha256=OPERATION) == terminal
+        with pytest.raises(RuntimeError, match="wrong_tablespace"), conn.begin_nested():
+            physical.verify_group(conn, adoption.IDENTITY, history=True, saved=old["headers"]["placement"],
+                pid=physical.verify(conn, old["headers"]["placement"]))
+    successor = dict(retained.adoption_args, operation_sha256="c"*64,
+        predecessor_operation_sha256=OPERATION, predecessor_terminal_sha256=adoption._digest(terminal))
+    with pytest.raises(RuntimeError, match="explicit_lookup_placement_required"), engine.begin() as conn:
+        adoption.prepare_adoption(conn, **successor)
+    successor["lookup_operation_sha256"] = options["operation_sha256"]
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **successor)
+        assert adoption.placement_binding(adoption._state(conn, "c"*64))["plan"] == plan.describe()
+        _insert(conn, retained, "collected-after-lookup-adoption")
+    for _ in range(64):
+        with engine.begin() as conn:
+            result = adoption.adoption_page(conn, operation_sha256="c"*64, page_rows=2)
+        if result["retained_targets_verified"]:
+            break
+    assert result["retained_targets_verified"]
+    with engine.begin() as conn:
+        adoption.retire_adoption(conn, operation_sha256="c"*64)
+        assert _old(conn) == old and adoption._json_row(conn, adoption.STATE) == old_state
+        assert _frozen_records(conn) == frozen
+
+
+def test_retained_lookup_intent_expiry_cannot_be_renewed(retained, monkeypatch):
+    import time
+    from scripts.db import fact_header_forward_placement as lookup
+    from tests.test_market_data.test_archive_reference_placement_db import _options
+    engine = retained.database._engine
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+        adoption.retire_adoption(conn, operation_sha256=OPERATION)
+        terminal = adoption.inspect_retirement(conn, operation_sha256=OPERATION)
+        before = adoption._snapshot(conn, OPERATION)
+    options = dict(operation_sha256="d"*64, predecessor_operation_sha256=OPERATION,
+        predecessor_terminal_sha256=adoption._digest(terminal),
+        placement=replace(retained.copy_plan, recent_lookup_indexes=True), **_options(retained))
+    options["resource_limits"]["movement_timeout_seconds"] = 15
+    commit = Connection._commit_impl
+    interrupted = [False]
+    def interrupt_after_intent(conn):
+        exists = conn.scalar(text("SELECT to_regclass(:name)"), {"name": lookup.STATE}) is not None
+        commit(conn)
+        if exists and not interrupted[0]:
+            interrupted[0] = True
+            raise RuntimeError("lost committed lookup intent reply")
+    with monkeypatch.context() as patch:
+        patch.setattr(Connection, "_commit_impl", interrupt_after_intent)
+        with pytest.raises(RuntimeError, match="lost committed lookup intent reply"):
+            lookup.move_lookup_indexes(engine, **options)
+    assert interrupted[0]
+    with engine.begin() as conn:
+        pending = lookup._row(conn)
+        assert pending["completion"] is None
+        remaining = conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) FROM "+lookup.STATE))
+    if remaining > 0:
+        time.sleep(float(remaining) + .05)
+    with pytest.raises(RuntimeError, match="lookup_expired"):
+        lookup.move_lookup_indexes(engine, **options)
+    with pytest.raises(RuntimeError, match="lookup_intent_changed"):
+        lookup.move_lookup_indexes(engine, **{**options, "resource_limits": {
+            **options["resource_limits"], "movement_timeout_seconds": 60}})
+    with engine.begin() as conn:
+        assert lookup._row(conn) == pending
+        assert adoption._snapshot(conn, OPERATION) == before
+        assert adoption.inspect_retirement(conn, operation_sha256=OPERATION) == terminal
+        _insert(conn, retained, "collected-after-lookup-expiry")

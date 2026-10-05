@@ -230,7 +230,7 @@ def copy_page(engine, *, family, source_root, destination_root, page_rows=128, t
         saved = None
         if forward_operation_sha256 is not None:
             from scripts.db import fact_header_forward_adoption as adoption
-            saved = adoption._state(conn, forward_operation_sha256)["binding"]["old_headers"]["placement"]
+            saved = adoption.placement_binding(adoption._state(conn, forward_operation_sha256))
         _inspect(conn, source_root, destination_root,
                  forward_operation_sha256=forward_operation_sha256, saved=saved)
         state = dict(conn.execute(text(f"SELECT * FROM {owner.progress} WHERE family=:family"),
@@ -347,6 +347,7 @@ def _cancel_forward_capture(conn, *, state, read_only_namespace=False):
     """
     if type(read_only_namespace) is not bool:
         raise ValueError("archive_forward_terminal_namespace_mode_invalid")
+    from scripts.db import fact_header_forward_adoption as adoption
     placement_options = {"read_only_namespace": True} if read_only_namespace else {}
     operation = state["operation_sha256"]
     owner = _capture(operation, conn=conn)
@@ -354,7 +355,7 @@ def _cancel_forward_capture(conn, *, state, read_only_namespace=False):
         return None
     conn.exec_driver_sql("LOCK TABLE " + ",".join("market." + name for name in archives.FAMILIES)
                          + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-    saved = state["binding"]["old_headers"]["placement"]
+    saved = adoption.placement_binding(state)
     archives.physical.verify(conn, saved, **placement_options)
     row = conn.execute(text(f"SELECT * FROM {owner.state} WHERE id=1")).mappings().one()
     source, destination = row["roots"]["source"][0], row["roots"]["destination"][0]

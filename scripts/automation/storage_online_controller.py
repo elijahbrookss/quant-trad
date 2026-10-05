@@ -196,7 +196,7 @@ class OnlineController:
                 or state["binding"] != adoption._snapshot(conn, self.forward_operation_sha256)):
             raise RuntimeError("storage_online_forward_retained_binding_changed")
         adoption._reference_states(conn, state)
-        saved = state["binding"]["old_headers"]["placement"]
+        saved = adoption.placement_binding(state)
         handoff.physical.verify(conn, saved)
         archive_online._inspect(conn, self.source_root, self.destination_root,
             forward_operation_sha256=self.forward_operation_sha256, saved=saved)
@@ -870,7 +870,7 @@ class OnlineController:
                     else:
                         state = adoption._state(conn, self.forward_operation_sha256)
                         complete = adoption._report(state, reused=True)["retained_targets_verified"]
-                        saved = state["binding"]["old_headers"]["placement"]
+                        saved = adoption.placement_binding(state)
                     if not complete:
                         raise RuntimeError("storage_online_final_delta_sql_baseline_required")
                     archive_online._inspect(conn, self.source_root, self.destination_root,

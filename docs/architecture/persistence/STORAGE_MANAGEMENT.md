@@ -22,6 +22,7 @@ code_paths:
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
+  - scripts/db/fact_header_forward_placement.py
   - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
@@ -3439,6 +3440,26 @@ not select a latest attempt or reset an expired clock. This database path still
 requires qualified host publication and a separate preserving placement
 transition before production use; see [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#successor-ownership-after-preserving-retirement).
 
+
+The fixed `fact_header_forward_placement.py` helper admits a separate, at-most
+one-hour move of the three measured lookup indexes after the predecessor's
+retirement is reconciled. It extends existing physical placement, storage locking,
+resource admission and the same-session cancellation watcher. A single temporary
+`lookup_placement` row preserves intent, original deadline and completion because
+old copy/adoption records cannot be rewritten. Only private target relations are
+fenced; v1 collection remains authoritative. All three index moves and completion
+commit atomically. Crash/cancellation rolls them back; a lost commit reply is
+reconciled against actual files without another move or renewed clock. Incomplete
+expired work stays preserved and refused.
+
+The successor explicitly supplies `lookup_operation_sha256`. Its effective
+placement derives from the completed receipt, leaving the prior all-HDD binding
+unchanged. The old retirement is reconciled through only those recorded physical
+file changes; all other metadata, source data and prior evidence must still match.
+This candidate primitive is not wired as a production host command. Admission,
+package publication, measured collector impact and final paired recovery remain
+required before deployment. See [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md)
+for the permanent SSD growth and compatibility tradeoff.
 
 The internal `fact_header_forward_adoption.py` phase binds a separately supplied
 forward operation intent to the exact committed cancellation, prepared keys and

@@ -52,6 +52,7 @@ COPY scripts/db/archive_file_v2_proof.py \
      scripts/db/fact_header_v2_admission.py \
      scripts/db/fact_header_forward_keys.py \
      scripts/db/fact_header_forward_adoption.py \
+     scripts/db/fact_header_forward_placement.py \
      scripts/db/fact_header_v2_placement.py \
      scripts/db/fact_header_v2_references.py \
      scripts/db/raw_mapping_v2_copy.py \

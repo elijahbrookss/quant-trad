@@ -144,8 +144,11 @@ def _fixed_inputs(policy, limits, targets):
     policy.validate_targets(targets)
 
 
-def _budget(conn, *, observed, policy, limits, targets, resources):
+def _budget(conn, *, observed, policy, limits, targets, resources, copy_target_id=None):
     ids = {target.target_id for target in targets}
+    copy_target_id = targets[1].target_id if copy_target_id is None else copy_target_id
+    if copy_target_id not in ids:
+        raise ValueError("archive_reference_move_copy_target_invalid")
     # The global storage transaction lock prevents new cooperating reservations.
     # Retain every already durable claim; the current synchronous copy allowance
     # exists only for this transaction and needs no new job or migration ledger.
@@ -170,7 +173,7 @@ def _budget(conn, *, observed, policy, limits, targets, resources):
     for row in rows:
         reservations[row["id"]] = row["reserved_bytes"]
         auxiliary[row["id"]] = row["auxiliary_reserved_bytes"]
-    reservations[targets[1].target_id] += own
+    reservations[copy_target_id] += own
     wal, temporary = _bound_resource_targets(resources, targets, resources.capacity)
     if wal != targets[0].target_id or temporary != (targets[0].target_id,):
         raise RuntimeError("archive_reference_move_fixed_wal_and_temp_required")
@@ -184,13 +187,14 @@ def _budget(conn, *, observed, policy, limits, targets, resources):
     budget = assess_header_move_resources(
         targets=targets, capacity=resources.capacity, policy=policy,
         observed_at=resources.observed_at, now=conn.scalar(text("SELECT clock_timestamp()")),
-        copy_target_id=targets[1].target_id, copy_bytes=copy_bytes, own_reserved_bytes=own,
+        copy_target_id=copy_target_id, copy_bytes=copy_bytes, own_reserved_bytes=own,
         reserved_bytes=reservations, auxiliary_reserved_bytes=auxiliary,
         own_auxiliary_reserved_bytes={key: 0 for key in ids},
         wal_target_id=wal, wal_bytes=limits["wal_bytes"],
         temporary_bytes=limits["temporary_bytes"], growth_bytes_per_second=limits["growth_bytes_per_second"],
         maintenance_bytes=limits["maintenance_bytes"], timeout_seconds=limits["movement_timeout_seconds"],
-        cancellation_grace_seconds=limits["cancellation_grace_seconds"])
+        cancellation_grace_seconds=limits["cancellation_grace_seconds"],
+        **({"copy_role": "recent"} if copy_target_id == targets[0].target_id else {}))
     if not budget["capacity_sufficient_for_declared_limits"]:
         raise RuntimeError("archive_reference_move_capacity_blocked")
     floors = {}

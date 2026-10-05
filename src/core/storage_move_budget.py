@@ -41,7 +41,7 @@ def assess_header_move_resources(
     wal_target_id: str, wal_bytes: int,
     temporary_bytes: Mapping[str, int], growth_bytes_per_second: Mapping[str, int],
     maintenance_bytes: Mapping[str, int], timeout_seconds: int,
-    cancellation_grace_seconds: int,
+    cancellation_grace_seconds: int, copy_role: str = "history",
 ) -> dict:
     """Count all declared demands once against each physical filesystem.
 
@@ -57,7 +57,8 @@ def assess_header_move_resources(
     reflected in available_bytes; neither those bytes nor future source frees
     are added to available capacity. Zero allowances must be explicit. Arithmetic
     admits the bounded initial migration horizon; routine movement admission
-    independently retains its one-hour limit.
+    independently retains its one-hour limit. The fixed retained-index transition
+    explicitly selects the recent role; existing callers remain history-only.
     """
     if (not isinstance(targets, Sequence) or not 1 <= len(targets) <= 32
             or any(not isinstance(item, StorageTarget) for item in targets)
@@ -85,8 +86,9 @@ def assess_header_move_resources(
     _integer(copy_bytes, "copy bytes")
     _integer(own_reserved_bytes, "own copy reservation", 1)
     _integer(wal_bytes, "additional WAL allowance", 1)
-    if (not isinstance(copy_target_id, str) or not isinstance(wal_target_id, str)
-            or copy_target_id not in ids or copy_target_id not in policy.history
+    if (copy_role not in ("history", "recent")
+            or not isinstance(copy_target_id, str) or not isinstance(wal_target_id, str)
+            or copy_target_id not in ids or copy_target_id not in getattr(policy, copy_role)
             or wal_target_id not in ids):
         raise ValueError("storage_move_budget_invalid: copy or WAL target")
     if own_reserved_bytes < max(1, copy_bytes):

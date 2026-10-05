@@ -48,10 +48,11 @@ def _digest(value):
 
 def capture_observation(state):
     """The immutable adoption identity shared by live and terminal observers."""
+    from scripts.db import fact_header_forward_adoption as adoption
     return {**{name: state[name] for name in
         ("operation_sha256", "started_at", "expires_at", "attempt_seconds")},
         "cancellation": state["binding"]["terminal"],
-        "placement": state["binding"]["old_headers"]["placement"]}
+        "placement": adoption.placement_binding(state)}
 
 
 def capture_binding(value):

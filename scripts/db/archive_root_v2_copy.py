@@ -52,7 +52,7 @@ def _operation_step(conn, timeout_seconds, *, deadline=None, forward_operation_s
         if deadline is not None:
             limit(deadline - monotonic())
         state = adoption._inspect(conn, forward_operation_sha256, limit)
-        saved = state["binding"]["old_headers"]["placement"]
+        saved = adoption.placement_binding(state)
         if saved is None:
             raise RuntimeError("archive_copy_fixed_placement_required")
         physical.verify(conn, saved)

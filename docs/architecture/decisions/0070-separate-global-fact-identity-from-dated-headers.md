@@ -19,6 +19,7 @@ code_paths:
   - scripts/db/fact_header_v2_admission.py
   - scripts/db/fact_header_v2_references.py
   - scripts/db/fact_header_v2_placement.py
+  - scripts/db/fact_header_forward_placement.py
   - scripts/db/raw_mapping_v2_copy.py
   - scripts/db/archive_reference_v2_placement.py
   - scripts/db/archive_root_v2_copy.py
@@ -169,9 +170,9 @@ checks every file against that choice. This adds no allocator or runtime policy.
 Omitting the choice preserves old serialized bindings exactly; changing a
 prepared copy's choice is refused. No saved production receipt is reinterpreted.
 
-This is an implemented candidate boundary, not a deployed change or authority
-to relocate existing retained targets. Their explicit preserving transition and
-successor-operation qualification are still required. About 49.8 GB of measured
+This is an implemented candidate boundary, not a deployed change. The separate
+retained-target transition below still requires host, resource and successor
+qualification before production use. About 49.8 GB of measured
 index occupancy, future global-index growth, WAL and copy/backup peaks must fit
 the SSD admission budget. These are durable database indexes, not disposable
 archive-cache entries or data governed by the 14-day recent window. The existing
@@ -181,6 +182,30 @@ Before cutover the serving v1 source is unchanged. Serving or restoring the
 selected layout requires code that understands its binding; an older all-HDD
 verifier will refuse it. Reversing placement requires another reviewed physical
 transition, never editing the bound choice to conceal where files reside.
+
+
+The fixed physical owner also supports an explicit retained-target transition
+in `fact_header_forward_placement.py`, after exact predecessor retirement has
+removed its mirrors. A separate `lookup_placement` row in the existing temporary
+migration schema owns only this three-index intent, original deadline and
+completion. The old copy and adoption rows cannot own that responsibility without
+changing immutable evidence. This is not a reusable allocator or runtime job API.
+
+One transaction moves all three private indexes and publishes completion. Source
+writers remain on v1; only the private targets are fenced. The existing storage
+budget and same-session watcher account for SSD copy, WAL, temporary space and
+concurrent growth, with a maximum one-hour attempt. Cancellation, session loss
+or SQL failure rolls the group back. A lost commit reply is reconciled against
+the receipt and actual files; retry cannot reset the deadline. Expired incomplete
+work remains refused and preserved for explicit recovery review.
+
+A completed transition allows the old retirement receipt to be reconciled only
+through its three recorded file/tablespace changes. Every other bound field must
+still match. A successor must explicitly name the completed placement operation;
+its effective placement comes from that receipt while the original all-HDD copy
+binding remains unchanged. Host publication and runtime activation are separate
+qualification requirements. Small disposable tests establish preservation and
+recovery behavior, not production copy duration or research performance.
 
 
 The same fixed migration now has a bounded copy for the installed immutable

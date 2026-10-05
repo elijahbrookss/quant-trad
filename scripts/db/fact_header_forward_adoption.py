@@ -106,12 +106,14 @@ def _require_identity_heap(conn):
         raise RuntimeError("fact_header_forward_identity_heap_required")
 
 
-def _snapshot(conn, operation_sha256=None, *, schema=None, predecessor=None):
+def _snapshot(conn, operation_sha256=None, *, schema=None, predecessor=None, lookup_operation_sha256=None):
     _require_identity_heap(conn)
     schema = schema or operation_schema(conn, operation_sha256)
     state_name = schema + ".adoption"
     if predecessor is None and schema != keys.SCHEMA:
         predecessor = conn.scalar(text("SELECT binding->'predecessor' FROM " + state_name + " WHERE id=1"))
+    if lookup_operation_sha256 is None and conn.scalar(text("SELECT to_regclass(:name)"), {"name": state_name}) is not None:
+        lookup_operation_sha256 = conn.scalar(text("SELECT binding->'lookup_placement'->>'operation_sha256' FROM " + state_name + " WHERE id=1"))
     # Fixed objects only. The old journals and queues remain evidence. Target
     # contents may gain missing source rows; their definitions/files may not drift.
     relations = (headers.SOURCE, IDENTITY, raw.SOURCE, raw.TARGET,
@@ -155,7 +157,16 @@ def _snapshot(conn, operation_sha256=None, *, schema=None, predecessor=None):
                                {"name": relation}) != predecessor["relation_oid"]):
             raise RuntimeError("fact_header_forward_successor_predecessor_changed")
         result["predecessor"] = predecessor
+    if lookup_operation_sha256 is not None:
+        from scripts.db import fact_header_forward_placement as lookup
+        result["lookup_placement"] = lookup._completed(conn, lookup_operation_sha256)
     return result
+
+
+def placement_binding(state):
+    """Select the explicitly adopted physical receipt; preserve old copy meaning."""
+    placed = state["binding"].get("lookup_placement")
+    return placed["binding"]["placement"] if placed is not None else state["binding"]["old_headers"]["placement"]
 
 
 def _install_family(conn, family, *, schema=keys.SCHEMA):
@@ -245,7 +256,8 @@ def _inspect(conn, operation_sha256, limit):
 
 def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
                      operation_sha256, attempt_seconds, timeout_seconds=30,
-                     predecessor_operation_sha256=None, predecessor_terminal_sha256=None):
+                     predecessor_operation_sha256=None, predecessor_terminal_sha256=None,
+                     lookup_operation_sha256=None):
     """Fence briefly, mirror new source writes, then admit a separate bounded scan.
 
     Synchronous target writes need measured HDD/collection admission before any
@@ -263,11 +275,18 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
         raise ValueError("fact_header_forward_successor_request_invalid")
     if predecessor_operation_sha256 is not None:
         successor_schema(predecessor_operation_sha256)
+    if lookup_operation_sha256 is not None:
+        successor_schema(lookup_operation_sha256)
+        if predecessor_operation_sha256 is None:
+            raise ValueError("fact_header_forward_lookup_successor_required")
     with _step(conn, timeout_seconds) as limit:
         schema = operation_schema(conn, operation_sha256)
         relation = schema + ".adoption"
         if _state(conn, operation_sha256) is not None:
             state = _inspect(conn, operation_sha256, limit)
+            bound_lookup = state["binding"].get("lookup_placement", {}).get("operation_sha256")
+            if bound_lookup != lookup_operation_sha256:
+                raise RuntimeError("fact_header_forward_lookup_intent_changed")
             bound = state["binding"].get("predecessor")
             if ((bound is None) != (predecessor_operation_sha256 is None)
                     or bound is not None and (bound["operation_sha256"] != predecessor_operation_sha256
@@ -287,6 +306,16 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
                 raise RuntimeError("fact_header_forward_successor_namespace_unowned")
         elif schema != keys.SCHEMA:
             raise RuntimeError("fact_header_forward_successor_retirement_required")
+        from scripts.db import fact_header_forward_placement as lookup
+        known_placement = lookup._row(conn)
+        if (lookup_operation_sha256 is None and known_placement is not None
+                and known_placement["completion"] is not None):
+            raise RuntimeError("fact_header_forward_explicit_lookup_placement_required")
+        if lookup_operation_sha256 is not None:
+            placed = lookup.completed_receipt(conn, lookup_operation_sha256)
+            if (placed["binding"]["predecessor_operation_sha256"] != predecessor_operation_sha256
+                    or placed["binding"]["predecessor_terminal_sha256"] != predecessor_terminal_sha256):
+                raise RuntimeError("fact_header_forward_lookup_predecessor_changed")
         conn.exec_driver_sql("LOCK TABLE " + headers.SOURCE + "," + raw.SOURCE + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         source_binding = keys._source_binding(conn, expected_capture, cancellation_intent_sha256)
         prepared = keys._read_state(conn)
@@ -328,7 +357,7 @@ def prepare_adoption(conn, *, expected_capture, cancellation_intent_sha256,
             "stamp+:seconds*interval '1 second',:seconds,CAST(:binding AS jsonb),CAST(:progress AS jsonb),NULL,'{}'::jsonb "
             "FROM (SELECT clock_timestamp() stamp) start"),
             {"operation": operation_sha256, "seconds": attempt_seconds,
-             "binding": json.dumps(_snapshot(conn, schema=schema, predecessor=predecessor)), "progress": json.dumps(progress)})
+             "binding": json.dumps(_snapshot(conn, schema=schema, predecessor=predecessor, lookup_operation_sha256=lookup_operation_sha256)), "progress": json.dumps(progress)})
         state = _inspect(conn, operation_sha256, limit)
         logger.info("fact_header_forward_adoption_prepared | operation=%s", operation_sha256)
         return _report(state, reused=False)
@@ -602,10 +631,11 @@ def inspect_retirement(conn, *, operation_sha256, timeout_seconds=10):
             if state["binding"] != _snapshot(conn, state["operation_sha256"]):
                 raise RuntimeError("fact_header_forward_adoption_binding_changed")
             return None
+        from scripts.db import fact_header_forward_placement as lookup
         if (terminal.get("kind") == "switched"
                 or terminal.get("operation_sha256") != operation_sha256
                 or terminal.get("rows_preserved") is not True
-                or terminal.get("binding") != _snapshot(conn, operation_sha256)
+                or lookup.retired_binding(conn, state) != _snapshot(conn, operation_sha256)
                 or any(references._states(conn, references._native_inventory(conn, forward_header=True)).values())):
             raise RuntimeError("fact_header_forward_adoption_terminal_changed")
         archives._inspect_forward_cancellation(conn, operation_sha256=operation_sha256,
