@@ -5,7 +5,7 @@ owner. No capture, adoption, archive preparation, source stop or runtime change.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import os
 from pathlib import Path
@@ -391,7 +391,7 @@ def worker_lookups(engine, payload):
         if row["completion"] is not None:
             lookup._completed(conn, package["operation_sha256"])
         return placement, dict(operation_sha256=row["operation_sha256"], binding_sha256=host.digest(row["binding"]),
-            started_at=row["started_at"].isoformat(), expires_at=row["expires_at"].isoformat(),
+            started_at=datetime.fromisoformat(row["started_at"]).isoformat(), expires_at=datetime.fromisoformat(row["expires_at"]).isoformat(),
             duration_seconds=row["duration_seconds"], complete=row["completion"] is not None,
             completion_sha256=host.digest(row["completion"]) if row["completion"] is not None else None)
     with engine.begin() as conn:
