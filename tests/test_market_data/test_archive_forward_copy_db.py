@@ -2,6 +2,7 @@
 
 Small disposable records; these establish no production throughput or pause bound.
 """
+from dataclasses import replace
 from datetime import timedelta
 import os
 from uuid import uuid4
@@ -72,7 +73,7 @@ def _prepare_canceled(storage, tmp_path, monkeypatch):
     return engine, options, source, original
 
 
-def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, successor_operation=None):
+def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, successor_operation=None, recent_lookup=False):
     engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
     roots = {name: options[name] for name in ("source_root", "destination_root")}
     if key_preparation is None:
@@ -98,8 +99,18 @@ def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, su
             previous_owner = online._capture(OPERATION, conn=conn)
             storage.retired_forward_records = _retired_forward_records(conn, previous_owner)
             _synthetic_descriptor(conn, source, "!successor-gap-" + uuid4().hex)
+        placement_args = {}
+        if recent_lookup:
+            from scripts.db import fact_header_forward_placement as lookup
+            storage.copy_plan = replace(storage.copy_plan, recent_lookup_indexes=True)
+            placed = lookup.move_lookup_indexes(engine, operation_sha256="d"*64,
+                predecessor_operation_sha256=OPERATION, predecessor_terminal_sha256=adoption._digest(terminal),
+                placement=storage.copy_plan, policy=options["policy"], resource_limits=options["resource_limits"])
+            assert placed["completion"] is not None
+            placement_args["lookup_operation_sha256"] = "d"*64
+        with engine.begin() as conn:
             adoption.prepare_adoption(conn, expected_capture=original, cancellation_intent_sha256=CANCEL,
-                operation_sha256=successor_operation, attempt_seconds=600,
+                operation_sha256=successor_operation, attempt_seconds=600, **placement_args,
                 predecessor_operation_sha256=OPERATION, predecessor_terminal_sha256=adoption._digest(terminal))
             online.prepare(conn, **roots, forward_operation_sha256=successor_operation)
             state = adoption._state(conn, successor_operation)
@@ -113,11 +124,11 @@ def _retired_forward_records(conn, owner):
             for name in relations}
 
 
-@pytest.mark.parametrize("successor", [False, True])
+@pytest.mark.parametrize("successor", [False, True, "recent_lookup"])
 def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage, tmp_path, monkeypatch, successor):
     operation = "c" * 64 if successor else OPERATION
     engine, options, source, original, old, old_archives, frozen, started, expires = _prepare_forward(
-        storage, tmp_path, monkeypatch, successor_operation=operation if successor else None)
+        storage, tmp_path, monkeypatch, successor_operation=operation if successor else None, recent_lookup=successor == "recent_lookup")
     roots = {name: options[name] for name in ("source_root", "destination_root")}
     with engine.begin() as conn:
         owner = online._capture(operation, conn=conn)
@@ -285,7 +296,7 @@ def test_forward_archives_preserve_canceled_work_and_fence_final_switch(storage,
             assert _retired_forward_records(conn, previous_owner) == storage.retired_forward_records
 
 
-@pytest.mark.parametrize("successor", [False, True])
+@pytest.mark.parametrize("successor", [False, True, "recent_lookup"])
 def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tmp_path, monkeypatch, successor):
     from time import monotonic
     from sqlalchemy import event
@@ -294,7 +305,7 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
 
     operation = "c" * 64 if successor else OPERATION
     engine, options, source, original, old, old_archives, frozen, started, expires = _prepare_forward(
-        storage, tmp_path, monkeypatch, successor_operation=operation if successor else None)
+        storage, tmp_path, monkeypatch, successor_operation=operation if successor else None, recent_lookup=successor == "recent_lookup")
     with engine.begin() as conn:
         today = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
     settings = dict(placement=storage.copy_plan, expected_started_at=started.isoformat(),

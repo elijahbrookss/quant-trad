@@ -177,3 +177,21 @@ def test_initial_migration_horizon_counts_growth_without_relaxing_routine_limits
     assert not result["capacity_sufficient_for_declared_limits"]
     with pytest.raises(ValueError,match="limits_invalid"):
         _limits({**limits,"movement_timeout_seconds":4*86400+1},migration=True)
+
+
+def test_explicit_recent_copy_counts_ssd_index_and_wal_without_history_credit(request_data):
+    request_data.update(copy_target_id="ssd", reserved_bytes={"ssd": 1500, "hdd": 100})
+    with pytest.raises(ValueError, match="copy or WAL target"):
+        assess_header_move_resources(**request_data)
+    result = assess_header_move_resources(**request_data, copy_role="recent")
+    budget = rows(result)
+    assert budget["ssd"]["required_bytes"] == 1000 + 300 + 400 + 200 + 120 + 100 + 2000
+    assert budget["hdd"]["required_bytes"] == 100 + 50 + 240 + 150 + 2000
+    assert result["source_space_credited_bytes"] == 0
+    request_data["capacity"]["ssd"] = replace(request_data["capacity"]["ssd"],
+        available_bytes=budget["ssd"]["required_bytes"]-1, used_bytes=10001-budget["ssd"]["required_bytes"])
+    result = assess_header_move_resources(**request_data, copy_role="recent")
+    assert result["blockers"] == [{"code": "filesystem_headroom_insufficient", "target_id": "ssd", "shortfall_bytes": 1}]
+    for role in ("archives", "missing", [], None):
+        with pytest.raises(ValueError, match="copy or WAL target"):
+            assess_header_move_resources(**request_data, copy_role=role)

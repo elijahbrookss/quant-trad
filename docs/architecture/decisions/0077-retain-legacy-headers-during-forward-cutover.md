@@ -12,6 +12,7 @@ tags:
 code_paths:
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
+  - scripts/db/fact_header_forward_placement.py
   - scripts/db/fact_header_v2_references.py
   - tests/test_market_data/test_fact_header_forward_keys_db.py
   - tests/test_market_data/test_fact_header_forward_adoption_db.py
@@ -78,9 +79,11 @@ reconciles the same new operation and original new deadline.
 
 The database slice alone is not a production route. A successor still needs
 explicit host publication, physical placement/resource admission, recovery and
-final-switch qualification. In particular it does not move existing indexes to
-SSD or make an old all-HDD binding describe a mixed layout. Existing host
-entrypoints continue to refuse the retired operation.
+final-switch qualification. The fixed physical owner can now prepare a separately bounded three-index
+transition, described in [ADR 0070](0070-separate-global-fact-identity-from-dated-headers.md).
+A successor must explicitly bind its completed receipt; old all-HDD records keep
+their original meaning. Existing host entrypoints continue to refuse the retired
+operation; database support alone does not authorize a new host publication.
 
 ## One parent, with an explicit retained range
 
