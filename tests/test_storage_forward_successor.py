@@ -38,6 +38,14 @@ def successor(retiring, monkeypatch):
     write(a.successor_file, a.successor_manifest)
     a.protected = {p:p.read_bytes() for p in (a.path, a.previous_path, a.root/terminal.STATE,
         a.root/terminal.FORWARD_STATE, a.root/forward.STATE, a.root/forward.LAUNCH_STATE)}
+    # The historical publisher changed images only. Reproduce its stale labels
+    # without rewriting the predecessor journal, which remains preserved below.
+    model = host.load_receipt(a.root/publication.runtime.RUNTIME_RECIPE)
+    model["services"]["backend"]["environment"].update(
+        SOURCE_REVISION="1"*40, SOURCE_TREE_HASH="2"*64,
+        QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+"1"*40)
+    write(a.root/publication.runtime.RUNTIME_RECIPE, model)
+    a.before_runtime = deepcopy(model)
     a.name = "/"+a.plan["project"]+"-storage-online"
     monkeypatch.setattr(publication, "_retired", lambda saved: dict(config=dict(Env=[
         "PG_DSN=fixture-only", "QT_DISABLE_DOTENV=1", "QT_ARCHIVE_SHARED_GROUP_ID=1000",
@@ -62,6 +70,18 @@ def successor(retiring, monkeypatch):
     return a
 
 
+def assert_runtime_identity(a):
+    actual = host.load_receipt(a.root/publication.runtime.RUNTIME_RECIPE)
+    expected = deepcopy(a.before_runtime)
+    for name in publication.runtime._APPLICATIONS:
+        expected["services"][name]["image"] = a.successor_manifest["image"]
+    expected["services"]["backend"]["environment"].update(
+        SOURCE_REVISION=a.successor_manifest["source_revision"],
+        SOURCE_TREE_HASH=a.successor_manifest["source_tree_hash"],
+        QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+a.successor_manifest["source_revision"])
+    assert actual == expected
+
+
 def test_successor_publication_and_launch_keep_retired_owners(successor):
     a = successor
     assert a.publish_successor(False)["storage_mutations_performed"] is False
@@ -72,6 +92,7 @@ def test_successor_publication_and_launch_keep_retired_owners(successor):
     assert selected["forward"]["schema_version"] == "qt.storage_online_forward_intent.v2"
     assert a.lookups
     assert a.publish_successor()["phase"] == "forward_package_recorded"
+    assert_runtime_identity(a)
     with pytest.raises(RuntimeError, match="operation_path_changed"):
         forward.inspect_published_operation(a.root, operation_path=a.previous_path)
     intent = forward.launch_intent(a.root, selected, selected["new_worker"]["binding"])
@@ -88,6 +109,22 @@ def test_successor_publication_and_launch_keep_retired_owners(successor):
     forward.save_launched_worker(a.root, intent, worker)
     forward.admit_launched_adoption(a.root, request, worker, initialization=initial, capture=capture)
     assert all(p.read_bytes() == before for p,before in a.protected.items())
+
+
+@pytest.mark.parametrize("key", ["SOURCE_REVISION", "SOURCE_TREE_HASH", "QT_BOT_RUNTIME_IMAGE"])
+def test_successor_inspection_refuses_rebound_runtime_identity(successor, key):
+    a = successor
+    a.publish_successor()
+    request = host.load_receipt(a.root/publication.REQUEST)
+    journal_path = a.root/forward.operation_file(forward.STATE, request=request)
+    journal = host.load_receipt(journal_path, max_bytes=forward._MAX_BYTES)
+    journal["new_runtime"]["services"]["backend"]["environment"][key] = "foreign"
+    journal["intent_sha256"] = host.digest({k:v for k,v in journal.items() if k not in {"intent_sha256", "phase"}})
+    write(journal_path, journal)
+    write(a.root/publication.runtime.RUNTIME_RECIPE, journal["new_runtime"])
+    with pytest.raises(RuntimeError):
+        forward.inspect_published_operation(a.root, operation_path=a.successor_manifest["forward_plan_path"])
+    assert all(p.read_bytes() == data for p,data in a.protected.items())
 
 
 @pytest.mark.parametrize("boundary", ["intent", "rename", publication.runtime.RUNTIME_RECIPE,
@@ -121,6 +158,8 @@ def test_successor_partial_publication_reuses_original_intent(successor, monkeyp
     assert len(records) == 1
     before = host.load_receipt(records[0], max_bytes=forward._MAX_BYTES)
     assert a.publish_successor()["phase"] in ("forward_package_published", "forward_package_recorded")
+    assert_runtime_identity(a)
+    forward.inspect_published_operation(a.root, operation_path=a.successor_manifest["forward_plan_path"])
     after = host.load_receipt(records[0], max_bytes=forward._MAX_BYTES)
     assert {k:v for k,v in before.items() if k != "phase"} == {k:v for k,v in after.items() if k != "phase"}
     assert all(p.read_bytes() == data for p,data in a.protected.items())

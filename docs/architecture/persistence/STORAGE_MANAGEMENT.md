@@ -3847,6 +3847,12 @@ checks the original retired worker. Retirement admission selects the explicit
 operation journal: a completed predecessor remains preserved while a successor
 can proceed; any retirement journal for that successor still prevents normal
 dispatch. Legacy terminal admission is unchanged.
+Successor publication changes the backend source revision/hash and bot-image
+label together with the application image IDs, deriving all three labels from
+the exact package. Other environment values remain preserved. Its replay
+inspector reconstructs the same recipe; legacy image-only publication receipts
+retain their original interpretation. The complete canonical deployment
+comparison still rejects unrelated configuration drift.
 The command reuses the durable launcher, observed key/initialization/adoption
 clocks, explicit forward background phases and both prepared-runtime preflights.
 It never invokes the canceled capture or renews its initial receipt.

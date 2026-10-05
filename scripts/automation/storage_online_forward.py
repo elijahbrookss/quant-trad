@@ -161,6 +161,26 @@ def observe_lookup_placement(database_id, package):
     return expected
 
 
+def _published_runtime(old_runtime, original, package):
+    """Publish the fixed application identity while retaining unrelated settings.
+
+    Legacy v1 receipts keep their original image-only interpretation. The new
+    successor owns the source and bot-image labels used by canonical deployment.
+    Derive those labels from the already validated package, never mutable tags.
+    """
+    model = deepcopy(old_runtime)
+    for name in runtime._APPLICATIONS:
+        if model["services"][name].get("image") != original["image"]:
+            raise RuntimeError("storage_forward_original_runtime_changed")
+        model["services"][name]["image"] = package["image"]
+    if package["schema_version"] == "qt.storage_online_forward_package.v2":
+        model["services"]["backend"]["environment"].update(
+            SOURCE_REVISION=package["source_revision"],
+            SOURCE_TREE_HASH=package["source_tree_hash"],
+            QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+package["source_revision"])
+    return model
+
+
 def publish_package(path, *, package_file, execute=False):
     """Inspect or publish one exact forward package under one original 300s intent.
 
@@ -276,11 +296,7 @@ def publish_package(path, *, package_file, execute=False):
             runtime_path = root/runtime.RUNTIME_RECIPE
             old_runtime_bytes = journal["old_runtime_bytes"] if journal else runtime_path.read_text()
             old_runtime = json.loads(old_runtime_bytes)
-            new_runtime = deepcopy(old_runtime)
-            for name in runtime._APPLICATIONS:
-                if old_runtime["services"][name].get("image") != plan["image"]:
-                    raise RuntimeError("storage_forward_original_runtime_changed")
-                new_runtime["services"][name]["image"] = package["image"]
+            new_runtime = _published_runtime(old_runtime, plan, package)
             new_runtime_bytes = (json.dumps(new_runtime, sort_keys=True)+"\n").encode()
             if runtime_path.read_bytes() not in (old_runtime_bytes.encode(), new_runtime_bytes):
                 raise RuntimeError("storage_forward_runtime_file_changed")
@@ -426,11 +442,7 @@ def _inspect_publication(root, journal, *, request=None, operation_path=None, ac
     candidate["image"] = package["image"]
     candidate["request"].update({k:package[k] for k in ("source_revision", "source_tree_hash")})
     old_request = json.loads(journal["old_request_bytes"])
-    expected_runtime = json.loads(journal["old_runtime_bytes"])
-    for name in runtime._APPLICATIONS:
-        if expected_runtime["services"][name].get("image") != original["image"]:
-            raise RuntimeError("storage_forward_original_runtime_changed")
-        expected_runtime["services"][name]["image"] = package["image"]
+    expected_runtime = _published_runtime(json.loads(journal["old_runtime_bytes"]), original, package)
     expected_worker = deepcopy(journal["old_worker"])
     expected_worker.pop("capture", None)
     expected_worker.update(container_id=None, contract=None, deadline=None)
