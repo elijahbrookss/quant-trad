@@ -18,7 +18,7 @@ from tests.test_storage_online_deadline import attempt, package_attempt, write
 def prepared(package_attempt, monkeypatch):
     a = package_attempt
     inventory = Path(a.plan["inventory_path"]); inventory.write_text("fixture-only")
-    a.worker["binding"].update(inventory_sha256=publication._sha(inventory.read_bytes()), clients={"fixture":"source"})
+    a.worker["binding"].update(inventory_sha256=publication._sha(inventory.read_bytes()), clients={"fixture":"source"}, database_id="c"*64)
     write(a.root/launch._STATE, a.worker)
     a.canceled = dict(operation_path=str(a.path), package={"original":"terminal-package"}, operator_sha256="f"*64,
         worker=deepcopy(a.worker), worker_sha256=publication._sha((a.root/launch._STATE).read_bytes()),

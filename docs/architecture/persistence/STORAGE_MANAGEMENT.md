@@ -18,6 +18,7 @@ code_paths:
   - tests/test_storage_forward_observation.py
   - tests/test_storage_forward_launch.py
   - tests/test_storage_forward_retirement.py
+  - tests/test_storage_forward_successor.py
   - tests/test_storage_forward_operation.py
   - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
@@ -3067,6 +3068,17 @@ still requires canonical configuration comparison and the terminal transition in
 the existing release owner. Its hashes are configuration evidence, not completion
 or replay tokens.
 
+The same adapter carries six optional numeric settings only when they are
+explicitly present in the admitted recipe: the backend's research evidence byte
+limit and history-cache quota/free-space floor; and maintenance's lifecycle
+interval, maximum canonical steps and maximum run seconds. It derives no new
+defaults, refuses invalid or conflicting service values, and preserves all other
+environment entries. The full canonical comparison must retain these exact
+choices. This uses the existing deployment configuration owner so activating the
+selected operational budgets does not require another release or a settings
+registry. Runtime/resource admission and measurement still determine whether
+those choices are safe and keep up with collection.
+
 The storage overlay requires `QT_STORAGE_DATABASE_IMAGE` as the qualified local
 image ID, removes the inherited database build, and sets `pull_policy: never`.
 The deployer refuses database rebuilding in this layout and excludes PostgreSQL
@@ -3456,9 +3468,23 @@ The successor explicitly supplies `lookup_operation_sha256`. Its effective
 placement derives from the completed receipt, leaving the prior all-HDD binding
 unchanged. The old retirement is reconciled through only those recorded physical
 file changes; all other metadata, source data and prior evidence must still match.
-This candidate primitive is not wired as a production host command. Admission,
-package publication, measured collector impact and final paired recovery remain
-required before deployment. See [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md)
+The candidate `qt storage migrate --place-forward-lookups-file` command uses
+this helper through the existing confined terminal transport. Its package binds
+one retired predecessor and three-index operation; inspection is the default.
+The host owns one original one-hour transport clock. The physical phase caps
+the retained catch-up movement limit at one hour, preserving any shorter limit
+and all growth, WAL, temporary and maintenance allowances. Interrupted work first retires the exact confined
+worker and inspects SQL; a completed move is not repeated. Publication requires
+both completed placement and confirmed worker retirement.
+
+The v2 `--forward-package-file` then binds that receipt and the exact predecessor
+terminal file. It preserves legacy journals and writes operation-specific new
+publication/launch/terminal records. A separate initializer reuses completed
+keys, and old/new host observers select the request's operation explicitly.
+These are temporary records owned by the existing migration boundary. No normal
+read performs conversion, and this command neither changes retention nor starts
+research. Exact-image host qualification, measured collector impact and final
+paired recovery remain required before production deployment. See [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md)
 for the permanent SSD growth and compatibility tradeoff.
 
 The internal `fact_header_forward_adoption.py` phase binds a separately supplied
@@ -3828,7 +3854,16 @@ resume preparation, grant a cutover, or qualify HDD throughput.
 `qt storage migrate --operation-file <forward-plan> --execute` derives the
 forward request only from the verified completed publication and its separate
 operation path. It retains the immutable base plan for reread comparison and
-checks the original retired worker. Legacy terminal admission is unchanged.
+checks the original retired worker. Retirement admission selects the explicit
+operation journal: a completed predecessor remains preserved while a successor
+can proceed; any retirement journal for that successor still prevents normal
+dispatch. Legacy terminal admission is unchanged.
+Successor publication changes the backend source revision/hash and bot-image
+label together with the application image IDs, deriving all three labels from
+the exact package. Other environment values remain preserved. Its replay
+inspector reconstructs the same recipe; legacy image-only publication receipts
+retain their original interpretation. The complete canonical deployment
+comparison still rejects unrelated configuration drift.
 The command reuses the durable launcher, observed key/initialization/adoption
 clocks, explicit forward background phases and both prepared-runtime preflights.
 It never invokes the canceled capture or renews its initial receipt.

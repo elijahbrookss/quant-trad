@@ -23,8 +23,12 @@ def request_binding(request):
     value = request["forward"]
     fields = {"schema_version", "original_plan_sha256", "cancellation_intent_sha256",
         "original_capture", "end_day", "candidate_revision", "candidate_source_hash", "operation_sha256"}
+    version = value.get("schema_version") if isinstance(value, dict) else None
+    successor_fields = {"predecessor_operation_sha256", "predecessor_terminal_sha256", "lookup_operation_sha256"}
+    if version == "qt.storage_online_forward_intent.v2":
+        fields |= successor_fields
     if (not isinstance(value, dict) or set(value) != fields
-            or value["schema_version"] != "qt.storage_online_forward_intent.v1"
+            or version not in ("qt.storage_online_forward_intent.v1", "qt.storage_online_forward_intent.v2")
             or "capture_preparation" in request
             or not isinstance(value["original_capture"], dict) or not value["original_capture"]
             or not isinstance(value["end_day"], str)
@@ -37,6 +41,10 @@ def request_binding(request):
             or value["operation_sha256"] == value["cancellation_intent_sha256"]
             or value["operation_sha256"] != _digest({k:v for k,v in value.items() if k != "operation_sha256"})):
         raise ValueError("storage_forward_worker_request_invalid")
+    if version == "qt.storage_online_forward_intent.v2" and (
+            any(not isinstance(value[name], str) or not re.fullmatch(r"[0-9a-f]{64}", value[name]) for name in successor_fields)
+            or len({value[name] for name in ("operation_sha256", "predecessor_operation_sha256", "lookup_operation_sha256", "cancellation_intent_sha256")}) != 4):
+        raise ValueError("storage_forward_worker_successor_invalid")
     if date.fromisoformat(value["end_day"]).isoformat() != value["end_day"]:
         raise ValueError("storage_forward_worker_end_day_invalid")
     return value
@@ -81,11 +89,24 @@ def capture_binding(value):
         proof_sha256=_digest(normalized))
 
 
-def _initial(conn):
+def initialization_relation(intent=None):
+    """Explicit operation identity, never a newest-attempt lookup."""
+    if intent is None or intent.get("schema_version") == "qt.storage_online_forward_intent.v1":
+        return INITIAL
+    if (intent.get("schema_version") != "qt.storage_online_forward_intent.v2"
+            or not isinstance(intent.get("operation_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", intent["operation_sha256"])):
+        raise ValueError("storage_forward_initialization_intent_invalid")
+    # PostgreSQL names are limited to 63 bytes. Full identity remains in binding.
+    return "qt_fact_header_forward_v2.initialization_" + intent["operation_sha256"][:48]
+
+
+def _initial(conn, intent=None):
     from sqlalchemy import text
-    if conn.scalar(text("SELECT to_regclass(:name)"), {"name":INITIAL}) is None:
+    relation = initialization_relation(intent)
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name":relation}) is None:
         return None
-    rows = conn.execute(text("SELECT id,binding,started_at,expires_at,duration_seconds,complete FROM "+INITIAL+" LIMIT 2")).mappings().all()
+    rows = conn.execute(text("SELECT id,binding,started_at,expires_at,duration_seconds,complete FROM "+relation+" LIMIT 2")).mappings().all()
     if (len(rows) != 1 or rows[0]["id"] != 1
             or rows[0]["expires_at"] != rows[0]["started_at"]+timedelta(seconds=rows[0]["duration_seconds"])):
         raise RuntimeError("storage_forward_initialization_receipt_changed")
@@ -114,6 +135,8 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
     from portal.backend.service.storage.header_movement import _MoveWatch
 
     intent = request_binding(request)
+    successor = intent is not None and intent["schema_version"] == "qt.storage_online_forward_intent.v2"
+    initial_relation = initialization_relation(intent)
     if (intent is None or type(key_seconds) is not int or not 30 <= key_seconds <= 3600
             or type(initial_seconds) is not int or not 30 <= initial_seconds <= 600):
         raise ValueError("storage_forward_worker_phase_bounds_invalid")
@@ -125,14 +148,21 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
         cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=key_seconds,
         initial_seconds=initial_seconds, attempt_seconds=seconds)
     with engine.begin() as conn, capture._bounded_step(conn, 10):
-        prior = _initial(conn)
+        prior = _initial(conn, intent)
         saved = conn.scalar(text("SELECT placement FROM "+headers.STATE+" WHERE id=1"))
         if not isinstance(saved, dict) or not isinstance(saved.get("plan"), dict):
             raise RuntimeError("storage_forward_retained_placement_required")
+        if successor:
+            from scripts.db import fact_header_forward_placement as lookup
+            placed = lookup.completed_receipt(conn, intent["lookup_operation_sha256"])
+            if (placed["binding"]["predecessor_operation_sha256"] != intent["predecessor_operation_sha256"]
+                    or placed["binding"]["predecessor_terminal_sha256"] != intent["predecessor_terminal_sha256"]):
+                raise RuntimeError("storage_forward_lookup_predecessor_changed")
+            saved = placed["binding"]["placement"]
         placement = physical._restore(saved["plan"])
         if {t.target_id:t for t in targets} != {t.target_id:t for t in (placement.recent,placement.history)}:
             raise RuntimeError("storage_forward_worker_inventory_changed")
-    if prior is None:
+    if prior is None and not successor:
         keys.prepare_keys_supervised(engine, expected_capture=intent["original_capture"],
             intent_sha256=intent["cancellation_intent_sha256"], placement=placement,
             policy=policy, resource_limits=limits, max_duration_seconds=key_seconds)
@@ -145,34 +175,36 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
                     if not conn.scalar(text("SELECT pg_try_advisory_lock(hashtextextended(:name,0))"), {"name":name}):
                         raise RuntimeError("storage_forward_initialization_owner_busy")
                     acquired.append(name)
-                phase = _initial(conn)
+                phase = _initial(conn, intent)
                 prepared = keys._read_state(conn)
                 if (prepared is None or not prepared["complete"]
                         or prepared["duration_seconds"] != key_seconds
                         or prepared["index_oids"] != keys.inspect_keys(conn)):
                     raise RuntimeError("storage_forward_initialization_keys_changed")
                 if phase is None:
-                    if adoption._state(conn) is not None:
+                    if adoption._state(conn, intent["operation_sha256"]) is not None:
                         raise RuntimeError("storage_forward_unowned_adoption")
+                    if successor:
+                        adoption._predecessor(conn, intent["predecessor_operation_sha256"], intent["predecessor_terminal_sha256"])
                     actual = keys._source_binding(conn, intent["original_capture"], intent["cancellation_intent_sha256"])
                     if actual != prepared["binding"]:
                         raise RuntimeError("storage_forward_initialization_source_changed")
-                    conn.exec_driver_sql("CREATE TABLE "+INITIAL+"(id integer PRIMARY KEY CHECK(id=1),"
+                    conn.exec_driver_sql("CREATE TABLE "+initial_relation+"(id integer PRIMARY KEY CHECK(id=1),"
                         "binding jsonb NOT NULL,started_at timestamptz NOT NULL,expires_at timestamptz NOT NULL,"
                         "duration_seconds integer NOT NULL CHECK(duration_seconds BETWEEN 30 AND 600),"
                         "complete boolean NOT NULL DEFAULT false,"
                         "CHECK(expires_at=started_at+duration_seconds*interval '1 second'))")
-                    conn.execute(text("INSERT INTO "+INITIAL+" SELECT 1,CAST(:binding AS jsonb),"
+                    conn.execute(text("INSERT INTO "+initial_relation+" SELECT 1,CAST(:binding AS jsonb),"
                         "stamp,stamp+:seconds*interval '1 second',:seconds,false FROM (SELECT clock_timestamp() stamp) s"),
                         {"binding":json.dumps(binding),"seconds":initial_seconds})
-                    phase = _initial(conn)
+                    phase = _initial(conn, intent)
                 if phase["binding"] != binding or phase["duration_seconds"] != initial_seconds:
                     raise RuntimeError("storage_forward_initialization_binding_changed")
             # Durable initialization intent is committed before adoption/archive
             # preparation. Session locks still belong to this actual connection.
             if not phase["complete"]:
                 with conn.begin(), capture._bounded_step(conn, 10):
-                    remaining = float(conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) FROM "+INITIAL+" WHERE id=1")))
+                    remaining = float(conn.scalar(text("SELECT extract(epoch FROM expires_at-clock_timestamp()) FROM "+initial_relation+" WHERE id=1")))
                     if remaining <= 1:
                         raise RuntimeError("storage_forward_initialization_expired")
                     deadline = monotonic()+min(remaining, limits["movement_timeout_seconds"])
@@ -196,13 +228,14 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
                     if allowance < 1: raise RuntimeError("storage_forward_initialization_expired")
                     adoption.prepare_adoption(conn, expected_capture=intent["original_capture"],
                         cancellation_intent_sha256=intent["cancellation_intent_sha256"],
-                        operation_sha256=intent["operation_sha256"], attempt_seconds=seconds, timeout_seconds=allowance)
+                        operation_sha256=intent["operation_sha256"], attempt_seconds=seconds, timeout_seconds=allowance,
+                        **({name: intent[name] for name in ("predecessor_operation_sha256", "predecessor_terminal_sha256", "lookup_operation_sha256")} if successor else {}))
                     allowance = int(min(30, deadline-monotonic()))
                     if allowance < 1: raise RuntimeError("storage_forward_initialization_expired")
                     archives.prepare(conn, source_root=source, destination_root=destination,
                         forward_operation_sha256=intent["operation_sha256"], timeout_seconds=allowance)
                     watch.check()
-                    conn.exec_driver_sql("UPDATE "+INITIAL+" SET complete=true WHERE id=1")
+                    conn.exec_driver_sql("UPDATE "+initial_relation+" SET complete=true WHERE id=1")
                 watch.check()
                 LOG.info("storage_forward_initialized operation_sha256=%s", intent["operation_sha256"])
             with conn.begin(), capture._bounded_step(conn, 10) as limit:

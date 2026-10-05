@@ -370,14 +370,14 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
         environment_sha256=host_boundary.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
     forward_launch = None
     if published is not None:
-        key_observation, initialization = forward.observe_preparation(database_id)
-        if not os.path.lexists(state_root/forward.LAUNCH_STATE) and initialization is not None:
+        key_observation, initialization = forward.observe_preparation(database_id, request=request)
+        if not os.path.lexists(state_root/forward.operation_file(forward.LAUNCH_STATE, request=request)) and initialization is not None:
             raise RuntimeError("storage_forward_unowned_initialization")
         forward_launch = forward.launch_intent(state_root, published, binding)
         saved = deepcopy(forward_launch["worker"])
         capture = None
         if initialization is not None and initialization["complete"]:
-            initialization, capture = forward.observe_adoption(database_id)
+            initialization, capture = forward.observe_adoption(database_id, request=request)
         forward.admit_startup(state_root, forward_launch, request,
             keys=key_observation, initialization=initialization, capture=capture)
         deadline = forward_launch["deadline"]
@@ -439,10 +439,10 @@ def launched_online_worker_locked(state_root, *, project, source_revision, image
                 # prior phase expired. It never grants more time to that phase.
                 forward._launch_clock(forward_launch)
                 with host_boundary.docker_deadline(time.monotonic()+20):
-                    key_observation, initialization = forward.observe_preparation(database_id)
+                    key_observation, initialization = forward.observe_preparation(database_id, request=request)
                     capture = None
                     if initialization is not None and initialization["complete"]:
-                        initialization, capture = forward.observe_adoption(database_id)
+                        initialization, capture = forward.observe_adoption(database_id, request=request)
                 remaining = forward.admit_startup(state_root, forward_launch, request,
                     keys=key_observation, initialization=initialization, capture=capture)
                 with host_boundary.docker_deadline(time.monotonic()+remaining):

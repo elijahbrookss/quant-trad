@@ -106,7 +106,7 @@ def deployment_bindings(state_root, saved, model):
     if (len(sockets) != 1 or not sockets[0].isdecimal()
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", db["image"])):
         raise RuntimeError("storage_online_deployment_identity_binding_invalid")
-    return {
+    bindings = {
         "QT_COMPOSE_PROJECT_NAME": saved["binding"]["project"],
         "QT_SINGLE_NODE_STATE_ROOT": str(state_root),
         "QT_STORAGE_HDD_ROOT": history,
@@ -124,6 +124,31 @@ def deployment_bindings(state_root, saved, model):
         "QT_STORAGE_RECOVERY_SOCKET_VOLUME": model["volumes"]["storage-recovery-socket"]["name"],
         "QT_STORAGE_NETWORK": model["networks"]["quanttrad"]["name"],
     }
+    # Carry only these existing, explicitly selected numeric runtime controls.
+    # They enter the canonical Compose env_file just like the fixed host bindings;
+    # no defaults are invented and no arbitrary environment is promoted.
+    for owner, key, minimum in (
+        ("backend", "QT_RESEARCH_EVIDENCE_BYTES", 1),
+        ("backend", "QT_HISTORY_READ_CACHE_BYTES", 0),
+        ("backend", "QT_HISTORY_READ_CACHE_MIN_FREE_BYTES", 0),
+        ("storage-maintenance", "QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS", 1),
+        ("storage-maintenance", "QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_STEPS_PER_RUN", 1),
+        ("storage-maintenance", "QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_RUN_SECONDS", 1),
+    ):
+        selected = services[owner].get("environment", {})
+        if key not in selected:
+            continue
+        value = selected[key]
+        if (type(value) not in (str, int) or not re.fullmatch(r"0|[1-9][0-9]{0,18}", str(value))
+                or not minimum <= int(value) <= 2**63-1):
+            raise RuntimeError("storage_online_deployment_runtime_setting_invalid: key="+key)
+        value = str(value)
+        for service in services.values():
+            current = service.get("environment", {})
+            if key in current and str(current[key]) != value:
+                raise RuntimeError("storage_online_deployment_runtime_setting_conflict: key="+key)
+        bindings[key] = value
+    return bindings
 
 
 def prepare_deployment_environment(state_root, *, environment_path, saved, execute=False):

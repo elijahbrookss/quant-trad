@@ -519,7 +519,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, prepare_forward_only=False):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, prepare_forward_only=False):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -533,8 +533,13 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
         raise ValueError("storage_forward_preparation_flag_invalid")
     if prepare_forward_only and any(value is not None for value in (
             extend_attempt_seconds, capacity_file, replacement_package_file,
-            cancel_attempt_file, forward_package_file, prepare_forward_keys_file)):
+            cancel_attempt_file, forward_package_file, prepare_forward_keys_file, place_forward_lookups_file)):
         raise ValueError("storage_forward_preparation_must_be_separate")
+    if place_forward_lookups_file is not None:
+        if any(v is not None for v in (forward_package_file, prepare_forward_keys_file, cancel_attempt_file, replacement_package_file, extend_attempt_seconds, capacity_file)):
+            raise ValueError("storage_lookup_placement_must_be_separate")
+        from scripts.automation.storage_online_keys import place_lookups
+        return place_lookups(path, package_file=place_forward_lookups_file, execute=execute)
     if prepare_forward_keys_file is not None:
         if any(v is not None for v in (forward_package_file, cancel_attempt_file, replacement_package_file, extend_attempt_seconds, capacity_file)):
             raise ValueError("storage_key_preparation_must_be_separate")
@@ -633,7 +638,8 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
             return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
         if published is not None:
             from scripts.automation import storage_online_terminal as terminal_owner
-            if os.path.lexists(state_root/terminal_owner.FORWARD_STATE):
+            if os.path.lexists(state_root/forward_owner.operation_file(
+                    terminal_owner.FORWARD_STATE, request=effective_request)):
                 raise RuntimeError("storage_forward_operation_retirement_requires_reconciliation")
             _retired(published["old_worker"])
             _forward_cutover_day(published["forward"], final_seconds=limits.final_seconds)

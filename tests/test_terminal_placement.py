@@ -74,3 +74,17 @@ def test_readonly_terminal_preserves_binding_and_requires_writable_peer(tmp_path
             placement.observe(conn,plan,read_only_namespace=True)
     finally:
         shutil.rmtree(history)
+
+
+@pytest.mark.parametrize("seconds, expected", [(60,60), (3600,3600), (216000,3600)])
+def test_lookup_phase_shortens_retained_catchup_budget_without_changing_allowances(seconds, expected):
+    from copy import deepcopy
+    from scripts.automation.storage_online_keys import _lookup_limits
+    original = dict(movement_timeout_seconds=seconds, cancellation_grace_seconds=60,
+        growth_bytes_per_second={"ssd":8388608,"hdd":12582912},
+        maintenance_bytes={"ssd":34359738368,"hdd":274877906944},
+        temporary_bytes={"ssd":34359738368,"hdd":34359738368}, wal_bytes=68719476736)
+    before = deepcopy(original)
+    result = _lookup_limits(original)
+    assert original == before
+    assert result == {**before, "movement_timeout_seconds":expected}

@@ -424,7 +424,7 @@ def test_forward_controller_owns_pages_final_session_and_lost_commit(storage, tm
             assert _retired_forward_records(conn, previous_owner) == storage.retired_forward_records
 
 
-def _phase_budget_regression(monkeypatch, options, *, key_seconds, initial_seconds=None):
+def _phase_budget_regression(monkeypatch, options, *, key_seconds, initial_seconds=None, initial_intent=None):
     """Exercise real capacity admission with a longer immutable migration limit."""
     from copy import deepcopy
     from math import ceil
@@ -437,7 +437,7 @@ def _phase_budget_regression(monkeypatch, options, *, key_seconds, initial_secon
     budget = catalogs._budget
     observations = []
     def checked(conn, **kwargs):
-        initial = worker._initial(conn) if initial_seconds is not None else None
+        initial = worker._initial(conn, initial_intent) if initial_seconds is not None else None
         key_state = keys._read_state(conn)
         phase = initial or (key_state if key_state and not key_state["complete"] else None)
         bound = initial_seconds if initial is not None else key_seconds
@@ -533,20 +533,64 @@ def test_forward_key_watch_cancels_same_session_and_preserves_committed_index(st
 
 
 @pytest.mark.parametrize("outcome", ["recover", "expire"])
-def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("successor", [False, True])
+def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp_path, monkeypatch, outcome, successor):
     from datetime import datetime, timezone
     import time
     from scripts.automation import storage_online_forward_worker as worker
     from scripts.automation.storage_host_boundary import digest
-    from tests.test_storage_online_forward_worker import _request
+    from tests.test_storage_online_forward_worker import _request, _successor_request
 
     engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
-    budgets = _phase_budget_regression(monkeypatch, options, key_seconds=3600,
-        initial_seconds=30 if outcome == "expire" else 600)
+    kwargs = dict(targets=(storage.copy_plan.recent, storage.copy_plan.history),
+        policy=options["policy"], limits=options["resource_limits"],
+        source=options["source_root"], destination=options["destination_root"],
+        key_seconds=3600, initial_seconds=30 if outcome == "expire" else 600)
     request = _request(original)
     request["forward"]["cancellation_intent_sha256"] = CANCEL
     request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
+    previous_records = None
+    if successor:
+        from scripts.db import fact_header_forward_placement as lookup
+        worker.prepare_forward(engine, request, **{**kwargs, "initial_seconds":600})
+        previous_operation = request["forward"]["operation_sha256"]
+        with engine.begin() as conn:
+            adoption.retire_adoption(conn, operation_sha256=previous_operation)
+            terminal = adoption.inspect_retirement(conn, operation_sha256=previous_operation)
+            previous_owner = online._capture(previous_operation, conn=conn)
+            previous_records = _retired_forward_records(conn, previous_owner)
+            previous_initializer = worker._initial(conn)
+        storage.copy_plan = replace(storage.copy_plan, recent_lookup_indexes=True)
+        from scripts.automation import storage_online_keys as key_worker
+        from scripts.automation import storage_online_worker as source_worker
+        with engine.begin() as conn:
+            database_identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
+        lookup_request = {**request, "database_identity":database_identity}
+        package = dict(schema_version="qt.storage_online_lookup_package.v1", plan_sha256="1"*64,
+            image="sha256:"+"2"*64, source_revision="3"*40, source_tree_hash="4"*64, operation_sha256="d"*64,
+            predecessor_operation_sha256=previous_operation, predecessor_terminal_sha256=adoption._digest(terminal),
+            predecessor_terminal_file="storage-online-forward-terminal.json", predecessor_terminal_file_sha256="5"*64)
+        payload = dict(action="inspect_lookups", request=lookup_request, package=package, wall_deadline=time.time()+300)
+        with monkeypatch.context() as inventory:
+            inventory.setattr(source_worker, "request_configuration", lambda request,path:
+                (options["policy"], {**options["resource_limits"],"movement_timeout_seconds":216000}, (storage.copy_plan.recent, storage.copy_plan.history)))
+            assert key_worker.worker_lookups(engine, payload) is None
+            result = key_worker.worker_lookups(engine, {**payload,"action":"place_lookups","wall_deadline":time.time()+3600})
+            assert result["complete"] and result["operation_sha256"] == "d"*64 and result["duration_seconds"] == 3600
+            assert key_worker.worker_lookups(engine, payload) == result
+        request = _successor_request(original)
+        request["forward"].update(cancellation_intent_sha256=CANCEL,
+            predecessor_operation_sha256=previous_operation, predecessor_terminal_sha256=adoption._digest(terminal),
+            lookup_operation_sha256="d"*64)
+        request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
     operation = request["forward"]["operation_sha256"]
+    intent = request["forward"]
+    budgets = _phase_budget_regression(monkeypatch, options, key_seconds=3600,
+        initial_seconds=kwargs["initial_seconds"], initial_intent=intent)
+    def never_rebuild(*args, **kwargs):
+        pytest.fail("initialization retry/successor attempted key phase again")
+    if successor:
+        monkeypatch.setattr(keys, "prepare_keys_supervised", never_rebuild)
     from scripts.automation import storage_online_forward as host_forward
     queries = []
     def database_query(database_id, sql, *, read_only_seconds):
@@ -559,13 +603,9 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
             return conn.scalar(text(sql))
     monkeypatch.setattr(host_forward.host, "database_query", database_query)
     def observed():
-        phase, capture = host_forward.observe_adoption("disposable-forward-host")
+        phase, capture = host_forward.observe_adoption("disposable-forward-host", request=request)
         return host_forward.admit_adoption_observation(request, initialization=phase,
             capture=capture, now=time.time())
-    kwargs = dict(targets=(storage.copy_plan.recent, storage.copy_plan.history),
-        policy=options["policy"], limits=options["resource_limits"],
-        source=options["source_root"], destination=options["destination_root"],
-        key_seconds=3600, initial_seconds=30 if outcome == "expire" else 600)
     with engine.begin() as conn:
         old, archives_before = _old(conn), _original_archives(conn)
     prepare = online.prepare
@@ -577,27 +617,28 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         with pytest.raises(RuntimeError, match="interrupt after forward"):
             worker.prepare_forward(engine, request, **kwargs)
     with engine.begin() as conn:
-        initial = worker._initial(conn)
+        initial = worker._initial(conn, intent)
         key_state = keys._read_state(conn)
         assert not initial["complete"] and key_state["complete"]
-        assert [is_initial for is_initial, _ in budgets] == [False, True]
-        assert adoption._state(conn) is None
+        assert [is_initial for is_initial, _ in budgets] == ([True] if successor else [False, True])
+        assert adoption._state(conn, operation) is None
         assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":online._capture(operation, conn=conn).state}) is None
         assert _old(conn) == old and _original_archives(conn) == archives_before
+        if successor:
+            assert worker._initial(conn) == previous_initializer
+            assert _retired_forward_records(conn, previous_owner) == previous_records
         # Source remains writable after rolled-back guards and archive capture.
         _synthetic_descriptor(conn, source, "!worker-interrupted-"+uuid4().hex)
     with pytest.raises(RuntimeError, match="active_adoption_required"):
         observed()
-    def never_rebuild(*args, **kwargs):
-        pytest.fail("initialization retry attempted key phase again")
     monkeypatch.setattr(keys, "prepare_keys_supervised", never_rebuild)
     if outcome == "expire":
         time.sleep(max(0, (initial["expires_at"]-datetime.now(timezone.utc)).total_seconds())+0.1)
         with pytest.raises(RuntimeError, match="initialization_expired"):
             worker.prepare_forward(engine, request, **kwargs)
         with engine.begin() as conn:
-            assert worker._initial(conn) == initial and keys._read_state(conn) == key_state
-            assert adoption._state(conn) is None
+            assert worker._initial(conn, intent) == initial and keys._read_state(conn) == key_state
+            assert adoption._state(conn, operation) is None
             assert _old(conn) == old
         return
     commit = Connection._commit_impl
@@ -605,7 +646,7 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     def lost_commit(conn):
         # Lose only the initialization COMMIT reply, after both SQL owners and
         # the complete receipt became durable in the same transaction.
-        state = worker._initial(conn)
+        state = worker._initial(conn, intent)
         complete = state is not None and state["complete"]
         commit(conn)
         if complete and not lost[0]:
@@ -616,17 +657,17 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         with pytest.raises(RuntimeError, match="lost forward initialization COMMIT"):
             worker.prepare_forward(engine, request, **kwargs)
     assert lost[0]
-    assert [is_initial for is_initial, _ in budgets] == [False, True, True]
+    assert [is_initial for is_initial, _ in budgets] == ([True, True] if successor else [False, True, True])
     with engine.begin() as conn:
-        complete = worker._initial(conn)
-        adopted = adoption._state(conn)
+        complete = worker._initial(conn, intent)
+        adopted = adoption._state(conn, operation)
         assert complete == {**initial, "complete":True}
         assert keys._read_state(conn) == key_state
         assert _old(conn) == old
     placement, started = worker.prepare_forward(engine, request, **kwargs)
     assert placement == storage.copy_plan and started == adopted["started_at"].isoformat()
     with engine.begin() as conn:
-        assert worker._initial(conn) == complete and adoption._state(conn) == adopted
+        assert worker._initial(conn, intent) == complete and adoption._state(conn, operation) == adopted
         assert keys._read_state(conn) == key_state
         assert _old(conn) == old
     owner, deadline = observed()
@@ -634,13 +675,41 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     assert owner["started_at"] == adopted["started_at"].isoformat()
     assert deadline == adopted["expires_at"].timestamp()
     assert queries and all(query.startswith("SELECT ") for query in queries)
+    if successor:
+        with pytest.raises(RuntimeError, match="active_adoption_required"):
+            host_forward.observe_adoption("disposable-forward-host")
+        with engine.begin() as conn:
+            assert worker._initial(conn) == previous_initializer
+            assert _retired_forward_records(conn, previous_owner) == previous_records
     changed = dict(request, source_inode=request["source_inode"]+1)
     with pytest.raises(RuntimeError, match="initialization_binding_changed"):
         worker.prepare_forward(engine, changed, **kwargs)
-    # A completed initializer still rejects an expired/retired adoption; it
-    # cannot manufacture a replacement operation or delete retained evidence.
+    # The confined terminal selects this same explicit owner, even with the old
+    # retired adoption/initializer still present. Its lost-reply reconciliation
+    # remains read-only and cannot retire the predecessor a second time.
+    from scripts.automation import storage_online_terminal as terminal_worker
+    payload = dict(action="inspect", request=request, expected_capture=None, intent_sha256="f"*64,
+        package={"schema_version":"qt.storage_online_terminal.v1"})
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        terminal_observed = terminal_worker._forward_sql(conn, payload, timeout_seconds=30)
+        assert not terminal_observed["retired"] and terminal_observed["capture"]["operation_sha256"] == operation
+    payload.update(action="apply", expected_capture=terminal_observed["capture"])
+    # This native database fixture has writable storage mounts. The confined
+    # terminal must reject that namespace; the Linux host rehearsal exercises
+    # apply through its actual read-only container. Keep this guard intact.
+    with pytest.raises(RuntimeError, match="terminal_readonly_namespace_required"):
+        with engine.begin() as conn:
+            terminal_worker._forward_sql(conn, payload, timeout_seconds=30)
     with engine.begin() as conn:
         adoption.retire_adoption(conn, operation_sha256=operation)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        terminal_result = terminal_worker._forward_sql(conn, {**payload,"action":"reconcile"}, timeout_seconds=30)
+        assert terminal_result["retired"] and terminal_result["capture"] == terminal_observed["capture"]
+        if successor:
+            assert _retired_forward_records(conn, previous_owner) == previous_records
+            assert worker._initial(conn) == previous_initializer
     with engine.begin() as conn:
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
         retired=adoption.inspect_retirement(conn, operation_sha256=operation)

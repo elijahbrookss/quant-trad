@@ -1504,6 +1504,18 @@ finally:
    saved_terminal=host_boundary.load_receipt(state/terminal_path)
    if saved_terminal.get('container_id'):
     owned.append(saved_terminal['container_id'])
+ # Publication renames the retired predecessor; retain exact worker receipts
+ # for fixture cleanup even when successor preparation fails before returning.
+ forward_workers=[]
+ if options.forward_package_image:
+  from scripts.automation import storage_online_forward as forward_owner
+  for launch_path in (state/forward_owner.LAUNCH_STATE,
+      state/forward_owner.operation_file(forward_owner.LAUNCH_STATE,
+          request=host_boundary.load_receipt(state/'storage-online-request.json'))):
+   if launch_path.exists():
+    worker=host_boundary.load_receipt(launch_path,max_bytes=forward_owner._MAX_BYTES).get('worker')
+    if worker and worker.get('container_id'):
+     forward_workers.append(worker);owned.append(worker['container_id'])
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue
@@ -1543,6 +1555,10 @@ finally:
         and terminal_saved['binding']['project']==project):
      launch._admit(name,terminal_saved['binding'],terminal_saved['contract'],command=terminal.COMMAND)
      mine=True
+  for proof in forward_workers:
+   if name==proof['container_id']==details['Id'] and proof['binding']['project']==project:
+    launch._admit(name,proof['binding'],proof['contract'])
+    mine=True
   if name==project+'-storage-spool-prepare':
    mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
   if name==project+'-storage-repository-prepare':

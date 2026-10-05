@@ -340,9 +340,9 @@ def _observe(state_root, *, project, source_revision, controller_id, worker_id, 
         # owning SQL session. Closed logins must never force a reconnect.
         forward.inspect_published_operation(state_root, request=request)
         if session is None:
-            initialization, capture = forward.observe_adoption(rows["tsdb"]["id"])
+            initialization, capture = forward.observe_adoption(rows["tsdb"]["id"], request=request)
         else:
-            pinned = forward.load_launch(state_root)
+            pinned = forward.load_launch(state_root, request=request)
             initialization, capture = pinned["initialization"], pinned["capture"]
             if session["capture"] != capture_binding(capture):
                 raise RuntimeError("storage_forward_retained_session_proof_changed")
