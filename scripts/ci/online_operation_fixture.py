@@ -682,7 +682,7 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             def retirement_preflight(state_root,**arguments):
                 launch.inspect_candidate_image(arguments["image"],arguments["request"])
                 return initial.admit_serving_source(state_root,project=kwargs["project"],
-                    source_revision=kwargs["source_revision"],operator_id=arguments["operator_id"])
+                    source_revision=kwargs["source_revision"],operator_id=arguments.get("operator_id"))
             operation.inspect_prepared_operation=retirement_preflight
             terminal_state = terminal.FORWARD_STATE
             terminal_probe = terminal.FORWARD_PROBE
