@@ -151,6 +151,37 @@ temporary capture state remain on the verified recent filesystem. Copy progress
 records the binding and refuses a changed destination rather than relocating
 already copied data. This is not a general placement API or runtime policy.
 
+### Candidate refinement: keep measured global lookup indexes on SSD
+
+The October 5 production preparation showed sustained HDD pressure from the
+temporary identity/raw mirrors even after its scan stopped. Over comparable
+five-minute observations, retiring those mirrors reduced whole-device HDD busy
+time from 97.3% to 2.6%, with all 17 collectors healthy in the later window.
+Relation I/O counters identified the identity primary key, identity/day unique
+key and raw-mapping primary key as the busiest HDD indexes. These observations
+justify qualifying selective placement; they do not establish research speedup.
+
+The existing `CopyPlacement` now has an explicit `recent_lookup_indexes` choice
+for those three fixed indexes. Their heaps, TOAST and remaining indexes still
+use the bound history disk. New private copies retain the selected indexes on
+SSD during their existing atomic history move, and final placement verification
+checks every file against that choice. This adds no allocator or runtime policy.
+Omitting the choice preserves old serialized bindings exactly; changing a
+prepared copy's choice is refused. No saved production receipt is reinterpreted.
+
+This is an implemented candidate boundary, not a deployed change or authority
+to relocate existing retained targets. Their explicit preserving transition and
+successor-operation qualification are still required. About 49.8 GB of measured
+index occupancy, future global-index growth, WAL and copy/backup peaks must fit
+the SSD admission budget. These are durable database indexes, not disposable
+archive-cache entries or data governed by the 14-day recent window. The existing
+paired recovery must cover both disks. Failure during private relocation rolls
+back placement and progress; ordinary verification never moves a misplaced file.
+Before cutover the serving v1 source is unchanged. Serving or restoring the
+selected layout requires code that understands its binding; an older all-HDD
+verifier will refuse it. Reversing placement requires another reviewed physical
+transition, never editing the bound choice to conceal where files reside.
+
 
 The same fixed migration now has a bounded copy for the installed immutable
 raw archive record lookup. This table is a measured source of SSD growth; it

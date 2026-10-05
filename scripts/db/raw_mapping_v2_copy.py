@@ -327,8 +327,11 @@ def place_on_history(conn, *, timeout_seconds=30):
         """),{"target":TARGET}).all()
         quote=conn.dialect.identifier_preparer.quote_identifier
         destination=quote(state["placement"]["history_name"])
+        recent_indexes=physical.recent_lookup_index_names(TARGET,state["placement"])
         conn.exec_driver_sql(f"ALTER TABLE {TARGET} SET TABLESPACE {destination}")
         for schema,name in indexes:
+            if name in recent_indexes:
+                continue
             conn.exec_driver_sql(f"ALTER INDEX {quote(schema)}.{quote(name)} SET TABLESPACE {destination}")
         conn.exec_driver_sql(f"UPDATE {STATE} SET history_ready=true WHERE id=1")
         _inspect(conn)

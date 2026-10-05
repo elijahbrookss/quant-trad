@@ -72,8 +72,25 @@ def _assert_disk(conn, relation, root):
     assert all((Path("/qt-source/pgdata")/path).stat().st_dev==expected for kind,path in members)
 
 
-def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(placed):
+def _assert_global_layout(conn, relation, recent_indexes):
+    indexes = dict(conn.execute(text("""
+        SELECT c.relname,pg_relation_filepath(c.oid) FROM pg_index i
+        JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid=to_regclass(:relation)
+    """), {"relation": relation}).all())
+    assert set(recent_indexes) <= indexes.keys()
+    recent_paths = {indexes[name] for name in recent_indexes}
+    members = _files(conn, relation)
+    assert members and any(kind == "i" for kind, path in members)
+    for kind, path in members:
+        expected = Path("/qt-source/pgdata" if path in recent_paths else "/qt-history")
+        assert (Path("/qt-source/pgdata") / path).stat().st_dev == expected.stat().st_dev
+
+
+@pytest.mark.parametrize("recent_lookup_indexes", [False, True])
+def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(placed, recent_lookup_indexes):
     storage=placed
+    storage.copy_plan=replace(storage.copy_plan,recent_lookup_indexes=recent_lookup_indexes)
+    recent_indexes = {"fact_identities_pkey", "uq_market_fact_identity_day"} if recent_lookup_indexes else set()
     engine=storage.database._engine
     with engine.begin() as conn:
         before=conn.scalar(text("SHOW default_tablespace"))
@@ -86,6 +103,9 @@ def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(pl
         with pytest.raises(RuntimeError,match="placement_cannot_change"):
             copy.prepare_copy(conn,placement=replace(storage.copy_plan,
                               history_before=storage.copy_plan.history_before-timedelta(days=1)))
+        with pytest.raises(RuntimeError,match="placement_cannot_change"):
+            copy.prepare_copy(conn,placement=replace(storage.copy_plan,
+                              recent_lookup_indexes=not recent_lookup_indexes))
         assert copy.prepare_copy(conn,placement=storage.copy_plan)["reused"]
     killed=[False]
     def terminate(conn,cursor,statement,parameters,context,executemany):
@@ -107,6 +127,14 @@ def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(pl
         assert conn.scalar(text(f"SELECT verified_rows FROM {copy.STATE}"))==0
         assert not _headers(conn,SCHEMA+".fact_versions")
     _finish(engine)
+    if recent_lookup_indexes:
+        # Both directions are refused; an exception rolls each physical change
+        # back without rewriting the bound copy plan or weakening its checks.
+        for name, destination in (("fact_identities_pkey", storage.copy_history_name),
+                                  ("uq_market_fact_identity_revision", "pg_default")):
+            with pytest.raises(RuntimeError,match="wrong_tablespace"),engine.begin() as conn:
+                conn.exec_driver_sql(f"ALTER INDEX {SCHEMA}.{name} SET TABLESPACE {destination}")
+                copy._inspect_progress(conn)
     with engine.begin() as conn:
         copy.enable_identity_capture(conn)
         later=_insert(conn,storage,"physical-copy-late")
@@ -115,9 +143,9 @@ def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(pl
         assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
         _assert_disk(conn,SCHEMA+".fact_versions_"+storage.today.strftime("%Y%m%d"),Path("/qt-history"))
         _assert_disk(conn,SCHEMA+".fact_versions_"+storage.open_day.strftime("%Y%m%d"),Path("/qt-source/pgdata"))
-        _assert_disk(conn,SCHEMA+".fact_identities",Path("/qt-history"))
+        _assert_global_layout(conn,SCHEMA+".fact_identities",recent_indexes)
         stage_shadow_handoff_fixture(conn,storage)
-        _assert_disk(conn,"market.fact_identities",Path("/qt-history"))
+        _assert_global_layout(conn,"market.fact_identities",recent_indexes)
     from portal.backend.db.session import Database
     restarted=Database(storage.dsn)
     try:
@@ -129,7 +157,7 @@ def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(pl
     assert storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,
                                     facts=[new]).inserted_count==1
     with engine.connect() as conn:
-        _assert_disk(conn,"market.fact_identities",Path("/qt-history"))
+        _assert_global_layout(conn,"market.fact_identities",recent_indexes)
         _assert_disk(conn,"market.fact_versions_"+storage.open_day.strftime("%Y%m%d"),Path("/qt-source/pgdata"))
     assert storage.repo.read_dataset_fact_revisions(
         dataset_id=storage.frozen_dataset_id,series_id=storage.series_id)==storage.frozen_result
