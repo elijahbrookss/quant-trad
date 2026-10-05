@@ -324,9 +324,9 @@ def run_prepared_operation_locked(state_root, *, project, source_revision, sourc
     returning retires the worker, not the source mirrors or copied data.
     """
     state_root=validate_operation_arguments(state_root,limits=limits,request=request,source_image=source_image)
-    from scripts.automation.storage_online_forward_worker import request_binding
+    from scripts.automation.storage_online_forward_worker import execution_intent
     from scripts.automation import storage_online_forward as forward_owner
-    intent = request_binding(request)
+    intent = execution_intent(request)
     if type(prepare_forward_only) is not bool or (prepare_forward_only and intent is None):
         raise ValueError("storage_forward_preparation_requires_forward_operation")
     if intent is not None:
@@ -519,7 +519,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, prepare_forward_only=False):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, reschedule_forward_file=None, prepare_forward_only=False):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -533,8 +533,14 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
         raise ValueError("storage_forward_preparation_flag_invalid")
     if prepare_forward_only and any(value is not None for value in (
             extend_attempt_seconds, capacity_file, replacement_package_file,
-            cancel_attempt_file, forward_package_file, prepare_forward_keys_file, place_forward_lookups_file)):
+            cancel_attempt_file, forward_package_file, prepare_forward_keys_file, place_forward_lookups_file, reschedule_forward_file)):
         raise ValueError("storage_forward_preparation_must_be_separate")
+    if reschedule_forward_file is not None:
+        if any(v is not None for v in (forward_package_file, prepare_forward_keys_file, place_forward_lookups_file,
+                cancel_attempt_file, replacement_package_file, extend_attempt_seconds, capacity_file)):
+            raise ValueError("storage_forward_reschedule_must_be_separate")
+        from scripts.automation.storage_online_reschedule import publish
+        return publish(path, package_file=reschedule_forward_file, execute=execute)
     if place_forward_lookups_file is not None:
         if any(v is not None for v in (forward_package_file, prepare_forward_keys_file, cancel_attempt_file, replacement_package_file, extend_attempt_seconds, capacity_file)):
             raise ValueError("storage_lookup_placement_must_be_separate")
@@ -642,7 +648,8 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                     terminal_owner.FORWARD_STATE, request=effective_request)):
                 raise RuntimeError("storage_forward_operation_retirement_requires_reconciliation")
             _retired(published["old_worker"])
-            _forward_cutover_day(published["forward"], final_seconds=limits.final_seconds)
+            from scripts.automation.storage_online_forward_worker import execution_intent
+            _forward_cutover_day(execution_intent(effective_request), final_seconds=limits.final_seconds)
             arguments = {k:plan[k] for k in ("project", "source_revision", "source_image", "image",
                 "inventory_path", "keys_root", "socket_volume", "spool_destination")}
             observation = inspect_prepared_operation(state_root, **arguments, request=effective_request,

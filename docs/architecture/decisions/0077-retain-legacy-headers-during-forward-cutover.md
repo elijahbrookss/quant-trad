@@ -15,6 +15,8 @@ code_paths:
   - scripts/db/fact_header_forward_placement.py
   - scripts/automation/storage_online_forward.py
   - scripts/automation/storage_online_forward_worker.py
+  - scripts/automation/storage_online_reschedule.py
+  - tests/test_storage_forward_reschedule.py
   - scripts/automation/storage_online_keys.py
   - scripts/automation/storage_online_terminal.py
   - tests/test_storage_forward_successor.py
@@ -106,6 +108,37 @@ The implementation is a candidate pending its exact-image host rehearsal and
 production resource/collector-impact qualification. Final switch, paired recovery
 and application activation remain separate gates. Passing these tests does not
 renew a retired attempt, start research or establish production performance.
+
+## Reschedule a stopped worker without discarding guarded proof
+
+The candidate operator supports one explicit reschedule of an active successor
+after its worker has stopped, while the source still serves. A later UTC boundary
+must fit the original adoption expiry, including the final pause allowance.
+The original operation digest, request, SQL start/expiry, proof cursors, mirrors,
+seals and reference/archive ownership remain bound. A qualified replacement image
+and a finite increase in archive object count and matching descriptors may change;
+bytes, memory, page limits, resource floors and other budgets do not.
+
+The existing initializer owns the revised request binding. The existing host
+publication owner retains the original plan/publication/launch preimages in one
+operation-specific amendment journal. This is temporary migration metadata, not
+a new dataset authority. Ordinary startup cannot amend it or backfill data.
+
+Publication takes the deployment lock, checks actual worker retirement and source
+identity, admits fresh capacity, and changes the initializer under controller and
+storage exclusion. It verifies that only the binding changed. Lost SQL replies
+are inspected without redispatch; partial host publication accepts only recorded
+old/new bytes within its original five-minute publication bound. Unresolved or
+expired incomplete publication refuses normal launch. The original worker and
+all evidence remain retained. A separate canonical invocation starts the qualified
+replacement under every original wall, monotonic and boot clock.
+
+This avoids repeating validated history merely because the schedule changed. It
+does not rescue an expired adoption or guarantee that the remaining work will
+fit. Native concurrent-publication/rollback checks and the confined Docker
+reschedule/reentry/retirement rehearsal are release gates. Production use and
+throughput remain separate qualification; this candidate is not deployed by
+documentation or by passing tests.
 
 ## One parent, with an explicit retained range
 

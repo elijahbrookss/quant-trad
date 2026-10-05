@@ -41,8 +41,20 @@ def _original_archives(conn):
             for name in (online.STATE, online.PROGRESS, online.QUEUE)}
 
 
-def _prepare_canceled(storage, tmp_path, monkeypatch):
+def _prepare_canceled(storage, tmp_path, monkeypatch, *, provision_hot=False):
     engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
+    if provision_hot:
+        # Reproduce ordinary v1 daily provisioning before any proof is bound.
+        # The archive fixture has reclaimed all its previous hot partitions.
+        with engine.begin() as conn:
+            storage.open_day = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
+            child = "market.fact_hot_payloads_"+storage.open_day.strftime("%Y%m%d")
+            assert conn.scalar(text("SELECT to_regclass(:name)"), {"name":child}) is None
+            end = storage.open_day+timedelta(days=1)
+            conn.exec_driver_sql(f"CREATE TABLE {child} PARTITION OF market.fact_hot_payloads "
+                f"FOR VALUES FROM ('{storage.open_day}') TO ('{end}')")
+            conn.execute(text("INSERT INTO market.fact_retention_partitions(storage_day) VALUES(:day)"),
+                {"day":storage.open_day})
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
         raw.prepare_copy(conn)
@@ -541,7 +553,8 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     from scripts.automation.storage_host_boundary import digest
     from tests.test_storage_online_forward_worker import _request, _successor_request
 
-    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
+    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch,
+        provision_hot=successor and outcome=="recover")
     kwargs = dict(targets=(storage.copy_plan.recent, storage.copy_plan.history),
         policy=options["policy"], limits=options["resource_limits"],
         source=options["source_root"], destination=options["destination_root"],
@@ -684,6 +697,8 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
     changed = dict(request, source_inode=request["source_inode"]+1)
     with pytest.raises(RuntimeError, match="initialization_binding_changed"):
         worker.prepare_forward(engine, changed, **kwargs)
+    if successor and outcome == "recover":
+        request = _qualify_reschedule(engine, storage, source, request, kwargs)
     # The confined terminal selects this same explicit owner, even with the old
     # retired adoption/initializer still present. Its lost-reply reconciliation
     # remains read-only and cannot retire the predecessor a second time.
@@ -718,6 +733,70 @@ def test_forward_worker_initialization_owns_clock_and_atomic_commit(storage, tmp
         worker.prepare_forward(engine, request, **kwargs)
     with pytest.raises(RuntimeError, match="active_adoption_required"):
         observed()
+
+
+def _qualify_reschedule(engine, storage, source, request, kwargs):
+    """Use actual SQL guards/progress and resume; never replace them with mocks."""
+    from copy import deepcopy
+    from datetime import datetime, timezone
+    from scripts.automation import storage_online_forward_worker as worker
+    from tests.test_storage_online_forward_worker import _rescheduled
+    from tests.test_market_data.test_fact_header_copy_db import _insert
+    operation = request["forward"]["operation_sha256"]
+    tomorrow = (datetime.now(timezone.utc).date()+timedelta(days=1)).isoformat()
+    proposed = _rescheduled(request, end_day=tomorrow)
+    with engine.begin() as conn:
+        adoption.adoption_page(conn, operation_sha256=operation, page_rows=1)
+        expected = worker.inspect_reschedule(conn, request=request)
+        old_state = adoption._state(conn, operation)
+        frozen = _frozen_records(conn)
+    assert old_state["progress"]["identity_target"]["verified"] > 0
+    with engine.connect() as owner:
+        owner.execute(text("SELECT pg_advisory_lock(hashtextextended(:name,0))"), {"name":adoption.CONTROLLER_LOCK})
+        try:
+            with pytest.raises(RuntimeError, match="controller_active"):
+                with engine.begin() as conn:
+                    worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+        finally:
+            owner.execute(text("SELECT pg_advisory_unlock(hashtextextended(:name,0))"), {"name":adoption.CONTROLLER_LOCK})
+    outside = _rescheduled(request, end_day=(datetime.now(timezone.utc).date()+timedelta(days=5)).isoformat())
+    with pytest.raises(RuntimeError, match="outside_original_deadline"):
+        with engine.begin() as conn:
+            worker.reschedule_initialization(conn, request=outside, expected=expected, final_seconds=1)
+    with pytest.raises(RuntimeError, match="rollback reschedule fixture"):
+        with engine.begin() as conn:
+            worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+            raise RuntimeError("rollback reschedule fixture")
+    with engine.begin() as conn:
+        assert worker.inspect_reschedule(conn, request=request) == expected
+    with engine.begin() as conn:
+        _insert(conn, storage, "published-before-reschedule")
+        _synthetic_descriptor(conn, source, "!reschedule-live-"+uuid4().hex)
+    with engine.begin() as conn:
+        # Ordinary publication changes data, not the preserved proof journal.
+        assert worker.inspect_reschedule(conn, request=request) == expected
+        worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+    # Discard the commit response. Fresh read-only reconciliation must recover
+    # the new binding without replaying any mutation or restarting the scan.
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        actual = worker.inspect_reschedule(conn, request=proposed)
+        wanted = deepcopy(expected)
+        wanted["initialization"]["binding"] = worker.initialization_binding(proposed)
+        assert actual == wanted and adoption._state(conn, operation) == old_state
+        assert _frozen_records(conn) == frozen
+    with pytest.raises(RuntimeError, match="preimage_changed"):
+        with engine.begin() as conn:
+            worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+    with pytest.raises(RuntimeError, match="initialization_binding_changed"):
+        worker.prepare_forward(engine, request, **kwargs)
+    worker.prepare_forward(engine, proposed, **kwargs)
+    with engine.begin() as conn:
+        assert adoption._state(conn, operation) == old_state
+        row = _insert(conn, storage, "published-after-reschedule")
+        assert conn.scalar(text("SELECT count(*) FROM "+adoption.IDENTITY+" WHERE id=:id"), {"id":row["id"]}) == 1
+        assert _frozen_records(conn) == frozen
+    return proposed
 
 
 def test_key_only_worker_keeps_original_clock_and_never_initializes_adoption(storage, tmp_path, monkeypatch):

@@ -12,6 +12,8 @@ code_paths:
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward_worker.py
+  - scripts/automation/storage_online_reschedule.py
+  - tests/test_storage_forward_reschedule.py
   - tests/test_storage_online_forward_worker.py
   - scripts/automation/storage_online_forward.py
   - tests/test_storage_online_forward.py
@@ -3440,6 +3442,40 @@ adoption must account explicitly for the uncaptured interval after terminal
 cancellation, then prove catch-up and the final live reference boundary. No new
 capture, header attachment, source switch, history placement or runtime/recovery
 activation is authorized by a `keys_prepared` result.
+
+## Explicit schedule amendment while source collection continues
+
+Candidate `qt storage migrate --operation-file <original-successor-plan>
+--reschedule-forward-file <package>` inspects by default; `--execute` publishes
+one stopped-worker amendment. It does not stop source services, launch a worker,
+switch schemas, apply retention or start research. The command cannot combine
+with another migration phase.
+
+The exact package (`qt.storage_online_forward_reschedule_package.v1`) names the
+original plan hash and operation digest, qualified image/revision/source hash,
+later UTC `end_day`, finite `max_objects`, corresponding `descriptor_limit`, new
+plan path and fresh capacity evidence. All other scope and resource limits remain
+unchanged. The date plus final allowance must fit the original adoption expiry.
+Preserved guards make the existing proof reusable; no progress cursor or clock
+is reset. A retired adoption is ineligible.
+
+`storage_online_reschedule.py` extends the existing host publication boundary;
+`storage_online_forward_worker.py` extends the existing initializer binding. No
+new SQL structure or generic conversion service is needed. The amendment journal
+retains exact preimages, SQL proof identity and one five-minute publication clock.
+SQL dispatch is recorded before sending. An uncertain result is inspected, never
+replayed. Interrupted file publication accepts only recorded old/new bytes.
+Unknown outcomes or expired incomplete publication refuse and retain evidence.
+After completion, a separately invoked canonical worker must present the new
+request and still uses the original adoption and launch clocks. Ordinary startup
+rejects an unpublished request change; old packages cannot resume the amended
+initializer. Terminal retirement uses the same binding check.
+
+Qualification covers real SQL rollback, concurrent facts/archive publication,
+preserved frozen inputs and partial proof, ownership conflict, lost COMMIT and
+file replies, changed clocks, actual confined transport, replacement-worker
+reentry and retirement. Small fixtures establish correctness, not production
+duration or capacity. See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
 
 ## Retained-target adoption after an uncaptured interval
 
