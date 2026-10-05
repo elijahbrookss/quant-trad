@@ -209,8 +209,11 @@ def test_prepared_worker_serves_and_catches_live_publication(storage, tmp_path, 
         resource_limits=options["resource_limits"], max_page_bytes=options["max_page_bytes"],
         max_objects=128,max_bytes=64*1024**2,page_rows=2,command_seconds=30)
     if initial_capture:
+        # A later UTC boundary needs room in the original fixture lifetime.
+        # Choose it before capture; the reschedule must never renew this clock.
+        attempt_seconds = 48*3600 if os.getenv("QT_ONLINE_FORWARD_RESCHEDULE_FIXTURE")=="1" else 180
         request["capture_preparation"] = dict(history_before=storage.copy_plan.history_before.isoformat(),
-            attempt_seconds=180, requested_at=None, deadline=None)
+            attempt_seconds=attempt_seconds, requested_at=None, deadline=None)
     if os.getenv("QT_ONLINE_RUNTIME_FIXTURE")=="1":
         request["archive_shared_group_id"]=70
     # Generated disposable credentials only, private fixture control, never receipts.

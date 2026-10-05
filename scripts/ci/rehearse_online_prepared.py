@@ -330,7 +330,8 @@ os.chown(root,70,70)
    '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_LOGGING_LOKI_URL=','--env','QT_ONLINE_RUNTIME_FIXTURE='+str(int(options.recovery_runtime)),
    '--env','QT_STORAGE_DEMO=1','--env','QT_DB_TEST_ISOLATED=1','--env','RUN_DB_TESTS=1',
    '--env','QT_ONLINE_TERMINAL_FIXTURE='+str(int(options.terminal_cancellation)),
-   '--env','QT_ONLINE_FORWARD_FIXTURE='+str(int(options.forward_worker)),
+    '--env','QT_ONLINE_FORWARD_FIXTURE='+str(int(options.forward_worker)),
+    '--env','QT_ONLINE_FORWARD_RESCHEDULE_FIXTURE='+str(int(options.forward_retirement_recovery)),
    '--env','QT_ONLINE_TERMINAL_EXPIRED='+str(int(options.terminal_cancellation_expired)),
    '--env','QT_ONLINE_FULL_OPERATION='+str(int(options.full_operation)),
    '--env','QT_ONLINE_INITIAL_CAPTURE='+str(int(options.initial_capture)),'--env','QT_SIGNAL_REAL_PUBLICATION='+str(int(options.real_worker_publication)),'--env','QT_ONLINE_FINAL_DELTA='+str(int(options.final_delta)),'--env','QT_ONLINE_WORKER_PHASES='+str(int(options.worker_phases)),'--env','QT_ONLINE_ATOMIC_PREPARE='+str(int(options.prepare_source)),'--env','QT_ONLINE_HOST_FIXTURE=1','--env','QT_ONLINE_ENTRYPOINT_FIXTURE=1','--entrypoint','python',image,'-m','pytest','-q','-s','--tb=short','--show-capture=no',
@@ -1509,13 +1510,23 @@ finally:
  forward_workers=[]
  if options.forward_package_image:
   from scripts.automation import storage_online_forward as forward_owner
+  from scripts.automation import storage_online_reschedule as reschedule_owner
+  current_request=host_boundary.load_receipt(state/'storage-online-request.json')
   for launch_path in (state/forward_owner.LAUNCH_STATE,
       state/forward_owner.operation_file(forward_owner.LAUNCH_STATE,
-          request=host_boundary.load_receipt(state/'storage-online-request.json'))):
+          request=current_request)):
    if launch_path.exists():
     worker=host_boundary.load_receipt(launch_path,max_bytes=forward_owner._MAX_BYTES).get('worker')
     if worker and worker.get('container_id'):
      forward_workers.append(worker);owned.append(worker['container_id'])
+  # A reschedule preserves its stopped worker only in the amendment preimage;
+  # the active launch now owns the replacement. Both remain fixture-owned.
+  reschedule_path=(state/reschedule_owner.state_file(current_request['forward']['operation_sha256'])
+      if 'forward' in current_request else None)
+  if reschedule_path is not None and reschedule_path.exists():
+   worker=host_boundary.load_receipt(reschedule_path,max_bytes=reschedule_owner.MAX_BYTES)['old_worker']
+   if worker.get('container_id'):
+    forward_workers.append(worker);owned.append(worker['container_id'])
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue

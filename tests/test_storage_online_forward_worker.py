@@ -73,6 +73,61 @@ def _successor_request(original=None):
     return request
 
 
+def _rescheduled(request, *, end_day="2026-10-05"):
+    return {**deepcopy(request), "source_revision":"2"*40, "source_tree_hash":"3"*64,
+        "max_objects":request["max_objects"]+10,
+        "forward_reschedule":dict(schema_version="qt.storage_online_forward_reschedule.v1",
+            original_request_sha256=digest(request), original_max_objects=request["max_objects"], end_day=end_day)}
+
+
+def test_reschedule_preserves_hashed_operation_and_has_separate_effective_schedule():
+    original = _successor_request()
+    request = _rescheduled(original)
+    before = deepcopy(request)
+    worker.validate_request_shape(request)
+    assert forward.original_request(request) == original
+    assert forward.request_binding(request) == original["forward"]
+    assert forward.execution_intent(request) == {**original["forward"], "end_day":"2026-10-05"}
+    old = forward.initialization_binding(original)
+    new = forward.initialization_binding(request)
+    assert {k:v for k,v in old.items() if k != "request_sha256"} == {
+        k:v for k,v in new.items() if k not in {"request_sha256", "reschedule"}}
+    assert new["reschedule"] == request["forward_reschedule"]
+    assert new["request_sha256"] == digest(request)
+    assert request == before
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r:r.update(forward_reschedule=None),
+    lambda r:r["forward_reschedule"].update(extra=True),
+    lambda r:r["forward_reschedule"].update(end_day="2026-10-04"),
+    lambda r:r["forward_reschedule"].update(end_day="20261005"),
+    lambda r:r["forward_reschedule"].update(original_request_sha256="f"*64),
+    lambda r:r["forward_reschedule"].update(original_max_objects=True),
+    lambda r:r.update(max_objects=99),
+    lambda r:r.update(max_objects=1000001),
+    lambda r:r.update(max_objects=True),
+    lambda r:r.update(source_revision="wrong"),
+    lambda r:r.update(source_inode=999),
+    lambda r:r.update(max_bytes=999),
+    lambda r:r.update(page_rows=1),
+    lambda r:r["forward"].update(end_day="2026-10-03"),
+])
+def test_reschedule_refuses_hidden_scope_changes_or_unbounded_inputs(mutation):
+    request = _rescheduled(_successor_request())
+    mutation(request)
+    with pytest.raises(ValueError):
+        worker.validate_request_shape(request)
+
+
+def test_reschedule_cannot_adopt_legacy_or_another_reschedule():
+    with pytest.raises(ValueError, match="successor_required"):
+        forward.request_binding(_rescheduled(_request()))
+    request = _rescheduled(_rescheduled(_successor_request()), end_day="2026-10-06")
+    with pytest.raises(ValueError, match="original_request_changed"):
+        forward.request_binding(request)
+
+
 def test_successor_names_are_explicit_and_legacy_names_are_preserved():
     request = _successor_request()
     worker.validate_request_shape(request)

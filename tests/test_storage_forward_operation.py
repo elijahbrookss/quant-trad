@@ -296,7 +296,7 @@ def test_preparation_only_retires_without_entering_final_and_preserves_failure(p
 
 
 @pytest.mark.parametrize("argument", ["extend_attempt_seconds", "capacity_file", "replacement_package_file",
-    "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file"])
+    "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "reschedule_forward_file"])
 def test_preparation_only_refuses_combined_phase_before_reading_plan(tmp_path, argument):
     with pytest.raises(ValueError, match="preparation_must_be_separate"):
         operation.run_operation_plan(tmp_path/"missing.json", execute=True, prepare_forward_only=True,

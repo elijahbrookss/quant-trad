@@ -534,15 +534,13 @@ def _forward_sql(conn, payload, *, timeout_seconds):
     from datetime import timedelta
     from scripts.db import fact_header_forward_adoption as adoption
     from scripts.automation.storage_online_forward_worker import (
-        request_binding, capture_observation, capture_binding, _initial)
+        request_binding, initialization_binding, capture_observation, capture_binding, _initial)
     request = payload["request"]
     intent = request_binding(request)
     with adoption._step(conn, timeout_seconds):
         state = adoption._state(conn, intent["operation_sha256"])
         initial = _initial(conn, intent)
-        expected = dict(request_sha256=host.digest(request), operation_sha256=intent["operation_sha256"],
-            cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=3600,
-            initial_seconds=600, attempt_seconds=intent["original_capture"]["attempt_seconds"])
+        expected = initialization_binding(request)
         if (state is None or initial is None or initial["complete"] is not True
                 or initial["binding"] != expected or initial["duration_seconds"] != 600
                 or state["operation_sha256"] != intent["operation_sha256"]

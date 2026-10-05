@@ -173,7 +173,7 @@ def _published_runtime(old_runtime, original, package):
         if model["services"][name].get("image") != original["image"]:
             raise RuntimeError("storage_forward_original_runtime_changed")
         model["services"][name]["image"] = package["image"]
-    if package["schema_version"] == "qt.storage_online_forward_package.v2":
+    if package["schema_version"] in {"qt.storage_online_forward_package.v2", "qt.storage_online_forward_reschedule_package.v1"}:
         model["services"]["backend"]["environment"].update(
             SOURCE_REVISION=package["source_revision"],
             SOURCE_TREE_HASH=package["source_tree_hash"],
@@ -412,6 +412,9 @@ def inspect_published_operation(root, *, request=None, operation_path=None):
     root = launch._canonical(root)
     selected_request = request if request is not None else host.load_receipt(root/publication.REQUEST)
     journal = host.load_receipt(root/operation_file(STATE, request=selected_request), max_bytes=_MAX_BYTES)
+    from scripts.automation import storage_online_reschedule as reschedule
+    if os.path.lexists(root/reschedule.state_file(journal["forward"]["operation_sha256"])):
+        return reschedule.inspect_published(root, journal, request=request, operation_path=operation_path)
     return _inspect_publication(root, journal, request=request, operation_path=operation_path)
 
 
@@ -497,9 +500,9 @@ def admit_adoption_observation(request, *, initialization, capture, now):
     """
     from datetime import datetime, timedelta
     import math
-    from scripts.automation.storage_online_forward_worker import request_binding
+    from scripts.automation.storage_online_forward_worker import execution_intent, initialization_binding
 
-    intent = request_binding(request)
+    intent = execution_intent(request)
     if intent is None or type(now) not in (int, float) or not math.isfinite(now):
         raise ValueError("storage_forward_observation_inputs_invalid")
     def instant(value):
@@ -516,9 +519,7 @@ def admit_adoption_observation(request, *, initialization, capture, now):
             or initialization["duration_seconds"] != 600):
         raise RuntimeError("storage_forward_initialization_observation_invalid")
     seconds = intent["original_capture"].get("attempt_seconds")
-    expected = dict(request_sha256=host.digest(request), operation_sha256=intent["operation_sha256"],
-        cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=3600,
-        initial_seconds=600, attempt_seconds=seconds)
+    expected = initialization_binding(request)
     start, end = instant(initialization["started_at"]), instant(initialization["expires_at"])
     if (initialization["binding"] != expected
             or any(type(initialization["binding"][k]) is not int for k in ("key_seconds", "initial_seconds", "attempt_seconds"))
@@ -648,6 +649,18 @@ def _worker_transition(before, after, saved):
         raise RuntimeError("storage_forward_worker_progress_changed")
 
 
+def _launch_shape(saved, intent):
+    fields = {"schema_version", "binding", "boot_id", "started_at", "started_monotonic", "started_boot",
+        "key_deadline", "key_deadline_monotonic", "key_deadline_boot", "keys", "initialization",
+        "capture", "forward", "deadline", "worker", "pending_worker"}
+    if intent["schema_version"] == "qt.storage_online_forward_intent.v2":
+        fields.add("successor_operation_sha256")
+        if saved.get("successor_operation_sha256") != intent["operation_sha256"]:
+            raise RuntimeError("storage_forward_launch_intent_changed")
+    if set(saved) != fields or saved["schema_version"] != "qt.storage_online_forward_launch.v1":
+        raise RuntimeError("storage_forward_launch_intent_changed")
+
+
 def launch_intent(root, published, worker_binding):
     """Own the exact published worker preimage before any container creation.
 
@@ -677,15 +690,8 @@ def launch_intent(root, published, worker_binding):
             saved["successor_operation_sha256"] = published["forward"]["operation_sha256"]
         save_launch(root, saved, initial=True)
     saved = load_launch(root, request=published["new_request"])
-    fields = {"schema_version", "binding", "boot_id", "started_at", "started_monotonic", "started_boot",
-        "key_deadline", "key_deadline_monotonic", "key_deadline_boot", "keys", "initialization",
-        "capture", "forward", "deadline", "worker", "pending_worker"}
-    if published["forward"]["schema_version"] == "qt.storage_online_forward_intent.v2":
-        fields.add("successor_operation_sha256")
-        if saved.get("successor_operation_sha256") != published["forward"]["operation_sha256"]:
-            raise RuntimeError("storage_forward_launch_intent_changed")
-    if (set(saved) != fields or saved["schema_version"] != "qt.storage_online_forward_launch.v1"
-            or saved["binding"] != owner or saved["worker"]["binding"] != worker_binding
+    _launch_shape(saved, published["forward"])
+    if (saved["binding"] != owner or saved["worker"]["binding"] != worker_binding
             or current not in (saved["worker"], saved["pending_worker"])):
         raise RuntimeError("storage_forward_launch_intent_changed")
     _launch_clock(saved)
@@ -743,7 +749,7 @@ def admit_startup(root, saved, request, *, keys, initialization, capture=None):
     cannot, and neither worker retry nor a delayed host observation creates time.
     """
     from datetime import datetime, timedelta
-    from scripts.automation.storage_online_forward_worker import request_binding
+    from scripts.automation.storage_online_forward_worker import request_binding, initialization_binding
     intent = request_binding(request)
     if (intent is None or saved["binding"]["operation_sha256"] != intent["operation_sha256"]
             or saved["binding"]["request_sha256"] != publication._sha(publication.request_bytes(request))
@@ -782,9 +788,7 @@ def admit_startup(root, saved, request, *, keys, initialization, capture=None):
     elif saved["keys"] is not None or initialization is not None:
         raise RuntimeError("storage_forward_completed_keys_missing")
     if initialization is not None:
-        expected = dict(request_sha256=host.digest(request), operation_sha256=intent["operation_sha256"],
-            cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=3600,
-            initial_seconds=600, attempt_seconds=intent["original_capture"]["attempt_seconds"])
+        expected = initialization_binding(request)
         if (saved["keys"] is None or set(initialization) != {"binding", "started_at", "expires_at", "duration_seconds", "complete"}
                 or initialization["binding"] != expected
                 or any(type(initialization["binding"][k]) is not int for k in ("key_seconds", "initial_seconds", "attempt_seconds"))

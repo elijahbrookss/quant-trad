@@ -248,7 +248,7 @@ def prepare_capture(engine, request, *, targets, policy, limits, source):
 
 
 def validate_request_shape(request):
-    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id", "capture_preparation", "forward"} != {
+    if (not isinstance(request, dict) or set(request)-{"archive_shared_group_id", "capture_preparation", "forward", "forward_reschedule"} != {
             "schema_version", "source_revision", "source_tree_hash", "database_identity",
             "source_device", "source_inode", "expected_started_at", "policy",
             "resource_limits", "max_page_bytes", "max_objects", "max_bytes",
@@ -396,8 +396,8 @@ def prepared_controller_main():
                         "WHERE d.datname=current_database()"))
                     if identity != request["database_identity"]:
                         raise RuntimeError("storage_online_database_binding_changed")
-                from scripts.automation.storage_online_forward_worker import request_binding, prepare_forward
-                forward = request_binding(request)
+                from scripts.automation.storage_online_forward_worker import execution_intent, prepare_forward
+                forward = execution_intent(request)
                 controller_options = {}
                 if forward is None:
                     placement, started = prepare_capture(engine, request, targets=targets,

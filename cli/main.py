@@ -3286,7 +3286,7 @@ def _cmd_storage(args: argparse.Namespace) -> int:
     if args.storage_command == "migrate":
         from scripts.automation.storage_online_operation import run_operation_plan
 
-        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file")
+        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file", "reschedule_forward_file")
                    if getattr(args, name, None) is not None}
         if getattr(args, "prepare_forward_only", False):
             options["prepare_forward_only"] = True
@@ -4920,6 +4920,7 @@ def build_parser() -> argparse.ArgumentParser:
     migration.add_argument("--forward-package-file", help="Inspect or publish a separate forward package after verified cancellation; preserves the original plan and grants no worker start or source stop.")
     migration.add_argument("--prepare-forward-keys-file", help="Inspect or prepare only the two forward keys using a qualified candidate package; no publication, adoption or source stop.")
     migration.add_argument("--place-forward-lookups-file", help="Inspect or place the three retained lookup indexes on SSD before successor publication; no adoption or source stop.")
+    migration.add_argument("--reschedule-forward-file", help="Inspect or publish one stopped-worker schedule/package change while preserving current forward proof and its original deadline; no launch or source stop.")
     migration.add_argument("--prepare-forward-only", action="store_true", help="With --execute and a published forward plan, complete online preparation and retire the worker before source stop; preserves adoption and its original deadline.")
     migration.set_defaults(func=_cmd_storage)
     storage_status = storage_sub.add_parser("status")

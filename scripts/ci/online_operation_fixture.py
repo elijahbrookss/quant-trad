@@ -830,6 +830,8 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
         assert ready["worker"] == worker and ready["pending_worker"] is None
         initialization, capture = forward.observe_adoption(worker["binding"]["database_id"], request=selected["new_request"])
         forward.admit_launched_adoption(state, selected["new_request"], worker, initialization=initialization, capture=capture)
+        successor_path, selected, worker = _rehearse_forward_reschedule(
+            state=state, plan_path=successor_path, selected=selected, worker=worker)
         cancel_package = dict(schema_version="qt.storage_online_terminal.v1", plan_sha256=publication._sha(successor_path.read_bytes()),
             **{k:manifest[k] for k in ("image", "source_revision", "source_tree_hash")})
         cancel_file = state/"successor-retirement-package.json"
@@ -840,9 +842,80 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
         assert completed["phase"] == "complete" and completed["receipt"]["retired"]
         return dict(actual_successor_host_route=True, actual_lookup_command=True,
             lookup_lost_commit_no_second_move=True, retained_predecessor_files_unchanged=True,
-            successor_preparation_and_terminal=True, successor_final_handoff=False), worker["container_id"]
+            successor_preparation_and_terminal=True, successor_final_handoff=False,
+            actual_reschedule_sql_transport=True, reschedule_lost_commit_no_replay=True,
+            reschedule_original_clocks_and_proof=True, rescheduled_worker_and_terminal=True), worker["container_id"]
     finally:
         operation.inspect_prepared_operation, terminal._probe = actual_preflight, actual_probe
+
+
+def _rehearse_forward_reschedule(*, state, plan_path, selected, worker):
+    """Actual confined SQL, uncertain reply, retained proof and worker reentry."""
+    import os, time
+    from datetime import datetime, timezone, timedelta
+    from scripts.automation import storage_online_reschedule as reschedule
+    from scripts.automation import storage_online_forward as forward
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_deadline as publication
+
+    plan=operation.load_operation_plan(plan_path)
+    old_launch=forward.load_launch(state,request=selected["new_request"])
+    capture=old_launch["capture"]
+    original={path:path.read_bytes() for path in (plan_path,state/forward.operation_file(
+        forward.STATE,request=selected["new_request"]))}
+    # Finite, idle synthetic fixture: these allowances are not production evidence.
+    forecast=dict(schema_version="qt.storage_deadline_capacity.v1",plan_sha256=publication._sha(plan_path.read_bytes()),
+        attempt_seconds=capture["attempt_seconds"],through_epoch=datetime.fromisoformat(capture["expires_at"]).timestamp(),
+        observed_at=time.time(),filesystems=[])
+    for key in ("/app/logs/market-structure","/qt-history"):
+        path=Path(worker["binding"]["mounts"][key]["host_source"]);space=os.statvfs(path)
+        floor=(max(plan["limits"]["spool_reserve_bytes"],plan["limits"]["recent_free_bytes"])
+            if key=="/app/logs/market-structure" else plan["limits"]["repository_reserve_bytes"])
+        forecast["filesystems"].append(dict(path=str(path),device=path.stat().st_dev,
+            reserve_bytes=max(floor,(space.f_blocks*space.f_frsize*plan["request"]["policy"]["reserve_percent"]+99)//100),
+            remaining_peak_bytes={k:1024 for k in ("targets","growth","queue","wal","temporary","maintenance","recovery")},
+            evidence_sha256=host_boundary.digest(dict(scope="idle disposable reschedule fixture",capture=capture))))
+    capacity_file=state/"reschedule-capacity.json"
+    host_boundary.save_receipt(capacity_file,forecast,initial=True)
+    package=dict(schema_version="qt.storage_online_forward_reschedule_package.v1",
+        plan_sha256=forecast["plan_sha256"],operation_sha256=selected["forward"]["operation_sha256"],
+        image=plan["image"],source_revision=selected["new_request"]["source_revision"],
+        source_tree_hash=selected["new_request"]["source_tree_hash"],
+        end_day=(datetime.now(timezone.utc).date()+timedelta(days=1)).isoformat(),
+        max_objects=selected["new_request"]["max_objects"]+16,descriptor_limit=plan["descriptor_limit"]+16,
+        forward_plan_path=str(state/"rescheduled-operation.json"),capacity_file=str(capacity_file))
+    package_file=state/"reschedule-package.json"
+    host_boundary.save_receipt(package_file,package,initial=True)
+    assert not operation.run_operation_plan(plan_path,reschedule_forward_file=package_file)["storage_mutations_performed"]
+    actual_probe=reschedule._probe
+    dispatches=[]
+    def lose_commit(*args,**kwargs):
+        result=actual_probe(*args,**kwargs)
+        dispatches.append(kwargs["action"])
+        if kwargs["action"]=="apply":raise TimeoutError("reschedule COMMIT reply lost")
+        return result
+    reschedule._probe=lose_commit
+    try:
+        try:
+            operation.run_operation_plan(plan_path,reschedule_forward_file=package_file,execute=True)
+            raise AssertionError("missing reschedule lost reply")
+        except TimeoutError as exc:assert str(exc)=="reschedule COMMIT reply lost"
+        assert operation.run_operation_plan(plan_path,reschedule_forward_file=package_file,execute=True)["deadline_renewed"] is False
+    finally:reschedule._probe=actual_probe
+    assert dispatches.count("apply")==1
+    journal=host_boundary.load_receipt(state/reschedule.state_file(package["operation_sha256"]),max_bytes=reschedule.MAX_BYTES)
+    assert actual_probe(journal["new_plan"],worker,request=journal["new_request"],action="inspect")==reschedule._after_sql(journal)
+    new_path=Path(package["forward_plan_path"])
+    prepared=operation.run_operation_plan(new_path,prepare_forward_only=True,execute=True)
+    assert prepared["phase"]=="forward_background_prepared" and prepared["adoption_active"]
+    selected=forward.inspect_published_operation(state,operation_path=new_path)
+    current=forward.load_launch(state,request=selected["new_request"])
+    for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic",
+            "key_deadline_boot","deadline","capture"):
+        assert current[key]==old_launch[key],key
+    assert all(path.read_bytes()==value for path,value in original.items())
+    return new_path,selected,host_boundary.load_receipt(state/launch._STATE)
 
 
 def _rehearse_forward_final(*, state, arguments, created, launch_intent, plan_path, mode):
