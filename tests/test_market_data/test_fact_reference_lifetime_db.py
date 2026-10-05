@@ -5,6 +5,7 @@ from time import monotonic, sleep
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
 from portal.backend.service.market.market_storage_lifecycle import MarketStorageLifecycleService
@@ -148,6 +149,67 @@ def test_late_book_prefix_admission_and_control_frame_expiry_exclude_each_other(
     assert service._execute_archive_expiration(item=control, store=fixture.store)["status"] == "completed"
     with pytest.raises(RuntimeError, match="canonical_raw_reference_expired.*prefix"):
         _publish_book_result(fixture, 1)
+
+
+def test_hot_flow_reference_admission_reuses_hold_without_losing_expiry_or_reclamation_fences(
+    storage, tmp_path, monkeypatch,
+):
+    from market_data.canonical_adapters import canonicalize_trade_flow
+    from tests.test_market_data.test_fact_flow_retention_db import _flow_fixture
+
+    fixture = _flow_fixture(storage, tmp_path, monkeypatch)
+    monkeypatch.setattr(market_lifecycle, "db", storage.database)
+    lifecycle = market_lifecycle.market_storage_lifecycle_repository
+    service = MarketStorageLifecycleService(lifecycle_repository=lifecycle, market_repository=fixture.structures)
+    fact = canonicalize_trade_flow(fixture.zero, source=fixture.source)
+    middle = _expiration_item(storage, fixture.manifests[2])
+    with storage.database.session() as writer:
+        # Four archived frames exceed this two-mapping allowance. The hot
+        # interval holder permits checking just the opening and last frames.
+        lock_canonical_raw_references(writer, [fact], max_mapping_rows=2)
+        outcome = service._execute_archive_expiration(item=middle, store=fixture.store)
+        assert outcome["status"] == "skipped" and outcome["reason"] == "pinned"
+        assert fixture.store.local_path(middle["object_key"]).exists()
+        # This is the first native lock taken by payload reclamation. Reading
+        # the holder must exclude its removal until this writer finishes.
+        with pytest.raises(DBAPIError) as busy:
+            with storage.database.session() as reclaimer:
+                reclaimer.execute(text("LOCK TABLE ONLY market.fact_hot_payloads IN ACCESS EXCLUSIVE MODE NOWAIT"))
+        assert getattr(busy.value.orig, "pgcode", None) == "55P03"
+    with storage.database.session() as reclaimer:
+        reclaimer.execute(text("LOCK TABLE ONLY market.fact_hot_payloads IN ACCESS EXCLUSIVE MODE NOWAIT"))
+
+
+def test_first_flow_reference_still_checks_all_mappings_and_unfinished_expiration(storage, tmp_path, monkeypatch):
+    from market_data.canonical_adapters import canonicalize_trade_flow
+    from tests.test_market_data.test_fact_flow_retention_db import _flow_fixture
+
+    fixture = _flow_fixture(storage, tmp_path, monkeypatch, publish_flows=False)
+    monkeypatch.setattr(market_lifecycle, "db", storage.database)
+    fact = canonicalize_trade_flow(fixture.zero, source=fixture.source)
+    with pytest.raises(RuntimeError, match="canonical_raw_reference_budget_exceeded"):
+        with storage.database.session() as writer:
+            lock_canonical_raw_references(writer, [fact], max_mapping_rows=2)
+    with storage.database.session() as writer:
+        lock_canonical_raw_references(writer, [fact], max_mapping_rows=4)
+    lifecycle = market_lifecycle.market_storage_lifecycle_repository
+    lifecycle.append_event(operation_id="flow-expiry-interrupted", action="archive_expire",
+        target_kind="raw_manifest", target_id=fixture.manifests[2], event_type="planned", evidence={})
+    with pytest.raises(RuntimeError, match="canonical_raw_reference_expiration_pending"):
+        with storage.database.session() as writer:
+            lock_canonical_raw_references(writer, [fact], max_mapping_rows=4)
+
+
+def test_hot_flow_holder_cannot_admit_a_nonexistent_coverage_revision(storage, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from market_data.canonical_adapters import canonicalize_trade_flow
+    from tests.test_market_data.test_fact_flow_retention_db import _flow_fixture
+
+    fixture = _flow_fixture(storage, tmp_path, monkeypatch)
+    fact = canonicalize_trade_flow(replace(fixture.zero, coverage_revision=999), source=fixture.source)
+    with pytest.raises(RuntimeError, match="canonical_raw_reference_missing"):
+        with storage.database.session() as writer:
+            lock_canonical_raw_references(writer, [fact], max_mapping_rows=2)
     with storage.database.session() as session:
         assert session.execute(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:id"),
                                {"id": fixture.series_id}).scalar_one() == 0

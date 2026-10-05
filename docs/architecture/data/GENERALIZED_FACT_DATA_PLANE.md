@@ -635,6 +635,17 @@ placement; a surviving compacted copy can satisfy it, but an unrelated live
 object cannot. This catalog/lifetime check does not replace deep byte, mapping,
 causal, or complete-chain verification during archive admission.
 
+Trade-flow admission reuses the existing hot coverage hold after resolving the
+exact requested immutable coverage revision. A hot flow for that interval already
+prevents expiry of its session's raw objects; the reader's relation locks prevent
+reclamation of the holder before this transaction commits. Admission checks the
+opening and last raw-record mappings through the same manifest locks and fresh
+expiry checks. It does not enumerate the entire growing connection history for
+every new bucket. The existing request/mapping budget still applies to these
+endpoints. A first or late import without a hot holder retains the full bounded
+reference check, and an unknown coverage revision still fails. No new hold,
+schema, archive format, evidence hash or semantic coverage rule is introduced.
+
 For a book reference, an existing immutable hot L2/BBO/depth row in the same
 definition/session already protects the session's raw objects. The writer's
 backlog lookup retains PostgreSQL relation locks until commit, preventing that

@@ -27,7 +27,7 @@ from tests.test_market_data.test_fact_storage_tiers_db import BASE, _placement, 
 pytestmark = pytest.mark.db
 
 
-def _flow_fixture(storage, tmp_path, monkeypatch, *, include_partial=True):
+def _flow_fixture(storage, tmp_path, monkeypatch, *, include_partial=True, publish_flows=True):
     monkeypatch.setattr(market_structure, "db", storage.database)
     structures = market_structure.market_structure_repository
     start = BASE.replace(microsecond=0)
@@ -103,7 +103,7 @@ def _flow_fixture(storage, tmp_path, monkeypatch, *, include_partial=True):
     _placement(monkeypatch, flow_day)
     partial = aggregate_trade_bucket([trades[1]], interval_seconds=1, bucket_start=start + timedelta(seconds=1),
         coverage=coverage, computed_at=start + timedelta(seconds=6))
-    if include_partial:
+    if include_partial and publish_flows:
         assert structures.ingest_aggregates(series_id=flow_series, facts=[partial]).inserted_count == 1
     coverage = replace(coverage, revision=2, archive_status=ArchiveStatus.COMPLETE,
         known_at=start + timedelta(seconds=4, milliseconds=2))
@@ -112,7 +112,8 @@ def _flow_fixture(storage, tmp_path, monkeypatch, *, include_partial=True):
         coverage=coverage, computed_at=start + timedelta(seconds=7))
     zero = aggregate_trade_bucket([], interval_seconds=1, bucket_start=start + timedelta(seconds=2),
         coverage=coverage, computed_at=start + timedelta(seconds=7))
-    assert structures.ingest_aggregates(series_id=flow_series, facts=[complete, zero]).inserted_count == 2
+    if publish_flows:
+        assert structures.ingest_aggregates(series_id=flow_series, facts=[complete, zero]).inserted_count == 2
     return SimpleNamespace(start=start, source_day=source_day, flow_day=flow_day, source_id=source_id,
         trade_series=trade_series, flow_series=flow_series, structures=structures, store=store,
         raws=raws, manifests=manifests, canonical=canonical, partial=partial, complete=complete, zero=zero,
