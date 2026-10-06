@@ -847,7 +847,7 @@ def _qualify_extension(engine, storage, previous, kwargs):
     with pytest.raises(RuntimeError, match="preimage_changed"):
         with engine.begin() as conn:
             worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
-    with pytest.raises(RuntimeError, match="initialization_binding_changed"):
+    with pytest.raises(RuntimeError, match="reschedule_initializer_required"):
         worker.prepare_forward(engine, previous, **kwargs)
     worker.prepare_forward(engine, proposed, **kwargs)
     return proposed
