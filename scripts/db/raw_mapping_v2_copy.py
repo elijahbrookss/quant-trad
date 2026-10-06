@@ -32,6 +32,8 @@ COLUMNS = tuple(column.name for column in Base.metadata.tables[SOURCE].columns)
 logger = logging.getLogger(__name__)
 _KEY_ROWS = """unnest(CAST(:raw_keys AS text[]), CAST(:manifest_keys AS text[]))
     AS wanted(raw_record_id,manifest_id)"""
+_ORDERED_KEY_ROWS = """unnest(CAST(:raw_keys AS text[]), CAST(:manifest_keys AS text[]))
+    WITH ORDINALITY AS wanted(raw_record_id,manifest_id,ordinal)"""
 
 
 def _key_parameters(keys):
