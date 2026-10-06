@@ -3586,6 +3586,13 @@ before source coverage: at most 128 blocks and the existing row bound per page,
 with the original extent and physical row cursor committed atomically. Exact
 source lookups establish every retained row; subsequent key-only target lookups
 avoid repeating historical heap reads while filling missing source identities.
+The source coverage cursor also selects IDs only. Missing identities are copied
+from the sealed source and compared with a bounded full-metadata point read;
+already-proven identities do not force source heap reads merely to advance the
+cursor. This candidate query change preserves the existing scan journal, exact
+missing-row comparison, atomic page commit and original operation clocks. It
+requires a qualified package and stopped-worker admission before an existing
+operation can use it; editing operator code does not update a running worker.
 Native insertion validation, immutable seals and OID/file bindings preserve the
 proof and reject rewrites. Raw mapping scans are unchanged. Old scan journals
 refuse resume under the new protocol; explicit preserving retirement remains.

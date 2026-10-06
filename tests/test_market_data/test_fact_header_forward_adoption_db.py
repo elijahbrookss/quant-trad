@@ -67,6 +67,61 @@ def _finish(engine):
     pytest.fail("bounded adoption fixture did not finish")
 
 
+def test_source_coverage_reads_metadata_only_for_missing_identities(retained):
+    engine = retained.database._engine
+    with engine.begin() as conn:
+        missing = {
+            _insert(conn, retained, key)["id"]
+            for key in ("projection-gap-first", "projection-gap-second")
+        }
+        frozen = _frozen_records(conn)
+        old = _old(conn)
+    with engine.begin() as conn:
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+    for _ in range(64):
+        with engine.begin() as conn:
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+            before = adoption._state(conn)
+        if before["progress"]["identity_target"]["complete"]:
+            break
+    else:
+        pytest.fail("target proof did not complete")
+    assert before["progress"]["identity_source"]["after"] is None
+    # New mirrored arrivals also have validated identities and do not require
+    # another full-header read when the source cursor reaches them.
+    with engine.begin() as conn:
+        _insert(conn, retained, "projection-captured-arrival")
+
+    pages, metadata_ids = [], set()
+
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if " FROM " + headers.SOURCE + " WHERE ROW(id)" in statement:
+            assert statement.startswith("SELECT id FROM ")
+            pages.append(statement)
+        elif statement.startswith("SELECT " + ",".join(headers.IDENTITY_COLUMNS) +
+                                  " FROM " + headers.SOURCE + " WHERE id=ANY"):
+            metadata_ids.update(parameters["ids"])
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        _finish(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert pages
+    assert metadata_ids == missing
+    with engine.begin() as conn:
+        columns = ",".join(headers.IDENTITY_COLUMNS)
+        expected = conn.execute(text("SELECT " + columns + " FROM " + headers.SOURCE + " ORDER BY id")).all()
+        actual = conn.execute(text("SELECT " + columns + " FROM " + adoption.IDENTITY + " ORDER BY id")).all()
+        assert actual == expected
+        assert _frozen_records(conn) == frozen
+        assert _old(conn) == old
+        after = adoption._state(conn)
+        assert after["progress"]["identity_target"] == before["progress"]["identity_target"]
+        assert after["started_at"] == before["started_at"]
+        assert after["expires_at"] == before["expires_at"]
+
+
 def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained, tmp_path, monkeypatch):
     engine = retained.database._engine
     with engine.begin() as conn:
