@@ -319,15 +319,26 @@ row bound. This avoids fetching historical target heap rows in random ID order.
 Once that reverse proof completes, source coverage reads only target IDs and
 inserts missing exact source rows. Native insertion validation and immutable seals
 preserve the earlier content proof, including concurrent inserts behind a cursor.
-Missing-row insertion still gets an exact full-row recheck. Raw mapping scans keep
-their existing primary-key comparison algorithm. Older scan journals cannot be
-resumed as this protocol; preserving retirement remains available. Native target insertion
+Missing-row insertion still gets an exact full-row recheck. Older identity scan
+journals cannot be resumed as this protocol; preserving retirement remains
+available. Native target insertion
 guards require an exact matching source row; mirrors cover subsequent inserts,
 including keys behind a committed scan cursor. This covers the post-cancellation
 gap without assuming timestamps or allocated sequences are commit ordered. Page
 inserts and cursor advancement commit together; reentry retains the same intent,
 clock and physical/catalog bindings. Header contents and search indexes are not
 copied by this phase. Original source/copy/queue data and frozen references remain.
+
+The raw-mapping candidate applies the same exact-target-first proof, with bounded
+physical scans on both sides. Source heap order keeps archive-object groups
+together while inserting missing mappings; raw-ID order scattered a measured
+4,096-row sample across 4,059 objects. Physical samples of about 2,560 rows covered
+7–19 objects. These samples motivate the change but do not establish production
+throughput. Key-only target coverage follows the completed content proof, and
+missing rows still receive exact comparisons. The explicit adoption job records
+physical extents without resetting prior key cursors, completed passes or clocks.
+No index movement, deadline extension or worker replacement follows from this
+query change; each remains subject to its existing operational admission.
 
 This is database preparation, not an executable production forward operation or
 a final proof token. Synchronous writes to retained HDD targets require measured

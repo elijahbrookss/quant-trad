@@ -3594,11 +3594,30 @@ missing-row comparison, atomic page commit and original operation clocks. It
 requires a qualified package and stopped-worker admission before an existing
 operation can use it; editing operator code does not update a running worker.
 Native insertion validation, immutable seals and OID/file bindings preserve the
-proof and reject rewrites. Raw mapping scans are unchanged. Old scan journals
+proof and reject rewrites. Old identity scan journals
 refuse resume under the new protocol; explicit preserving retirement remains.
 This addresses observed 10.7–10.9s disjoint 2,048-row comparisons on the existing
 drives, but does not yet establish production elapsed time or admission. See
 [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md).
+
+The raw-mapping candidate now verifies retained target contents in physical
+order, then scans source heap pages for key coverage. Both scans reuse the same
+128-block and configured row bounds. Missing mappings are inserted in that
+page's source order, keeping archive-object groups together, and compared exactly
+after insertion. Existing primary keys, secondary indexes and native constraints
+remain active. The performance hypothesis is fewer scattered HDD index reads;
+bounded query samples do not establish whole-job speed or collector impact.
+
+The explicit adoption job initializes `raw_heap_v1` extents atomically with its
+first page. It preserves earlier key cursors, completed passes, operation clocks,
+guards and identity progress. `heap_verified` counts this physical pass;
+`verified` retains earlier verification work and adds physical visits, so it is
+not a distinct-row total after a query transition. Reentry uses the saved extent
+and tuple cursor; rollback leaves neither partial inserts nor advanced progress.
+Single-heap checks and file bindings reject inheritance and rewrites. Ordinary
+observers and application reads never initialize these scans. This candidate
+does not admit a replacement image, another schedule amendment, or more operating
+time; a live operation still needs separately qualified host admission.
 
 
 ### Atomic forward SQL handoff

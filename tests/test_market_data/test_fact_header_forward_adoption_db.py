@@ -4,6 +4,7 @@ Small correctness fixtures, not production HDD throughput or host admission.
 """
 from dataclasses import replace
 from datetime import timedelta
+import json
 import os
 
 import pytest
@@ -120,6 +121,147 @@ def test_source_coverage_reads_metadata_only_for_missing_identities(retained):
         assert after["progress"]["identity_target"] == before["progress"]["identity_target"]
         assert after["started_at"] == before["started_at"]
         assert after["expires_at"] == before["expires_at"]
+
+
+@pytest.mark.parametrize("corruption", ["changed", "extra", "inherited"])
+def test_raw_heap_proof_rejects_invalid_retained_content_and_topology(retained, corruption):
+    engine = retained.database._engine
+    error = "raw_heap_required" if corruption == "inherited" else "content_mismatch: raw:target"
+    with pytest.raises(RuntimeError, match=error), engine.begin() as conn:
+        if corruption == "changed":
+            conn.exec_driver_sql("UPDATE " + raw.TARGET + " SET raw_frame_sha256=repeat('e',64)")
+        elif corruption == "extra":
+            row = _rows(conn, raw.TARGET)[0]
+            row.update(raw_record_id="unowned-retained-raw", object_row_index=99999)
+            conn.execute(text("INSERT INTO " + raw.TARGET + "(" + ",".join(raw.COLUMNS) +
+                ") VALUES(" + ",".join(":" + name for name in raw.COLUMNS) + ")"), row)
+        else:
+            conn.exec_driver_sql("CREATE TABLE " + keys.SCHEMA + ".unowned_raw_child () INHERITS (" + raw.TARGET + ")")
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+        for _ in range(64):
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+        pytest.fail("invalid retained raw mapping was accepted")
+    with engine.begin() as conn:
+        assert adoption._state(conn) is None
+        assert _rows(conn) == _rows(conn, raw.TARGET)
+
+
+def test_raw_heap_passes_preserve_partial_key_evidence_and_atomic_fill(retained, tmp_path, monkeypatch):
+    engine = retained.database._engine
+    _raw_book_fixture(retained, tmp_path, monkeypatch, definition_id="raw-heap-gap")
+    with engine.begin() as conn:
+        old, frozen = _old(conn), _frozen_records(conn)
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+    for _ in range(64):
+        with engine.begin() as conn:
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+            before = adoption._state(conn)
+        if before["progress"]["identity_source"]["complete"]:
+            break
+    else:
+        pytest.fail("identity proof did not finish")
+    # A real previously verified key prefix is retained across the query change.
+    with engine.begin() as conn:
+        first = _rows(conn)[0]
+        conn.execute(text("INSERT INTO " + raw.TARGET + "(" + ",".join(raw.COLUMNS) +
+            ") VALUES(" + ",".join(":" + name for name in raw.COLUMNS) + ") ON CONFLICT DO NOTHING"), first)
+        assert first in _rows(conn, raw.TARGET)
+        before["progress"]["raw_source"].update(after=[first[k] for k in raw.KEYS], verified=1)
+        conn.execute(text("UPDATE " + adoption.STATE + " SET progress=CAST(:progress AS jsonb) WHERE id=1"),
+            {"progress": json.dumps(before["progress"])})
+    # Initializing physical bounds and verifying the first target row are atomic.
+    def interrupt_cursor(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE " + adoption.STATE + " SET progress="):
+            raise RuntimeError("interrupt raw heap cursor")
+    event.listen(engine, "after_cursor_execute", interrupt_cursor)
+    try:
+        with pytest.raises(RuntimeError, match="interrupt raw heap cursor"), engine.begin() as conn:
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+    finally:
+        event.remove(engine, "after_cursor_execute", interrupt_cursor)
+    with engine.begin() as conn:
+        assert adoption._state(conn) == before
+        adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+        started = adoption._state(conn)
+        assert started["progress"]["raw_target"]["heap_verified"] == 1
+        assert started["progress"]["raw_source"]["heap_verified"] == 0
+        assert started["progress"]["raw_source"]["after"] == before["progress"]["raw_source"]["after"]
+    failed = []
+    def interrupt_fill(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO " + raw.TARGET) and "SELECT" in statement:
+            assert "ORDER BY wanted.ordinal" in statement
+            failed.append(adoption._state(conn))
+            raise RuntimeError("interrupt raw heap fill")
+    event.listen(engine, "after_cursor_execute", interrupt_fill)
+    try:
+        with pytest.raises(RuntimeError, match="interrupt raw heap fill"):
+            _finish(engine)
+    finally:
+        event.remove(engine, "after_cursor_execute", interrupt_fill)
+    with engine.begin() as conn:
+        assert adoption._state(conn) == failed[0]
+    _finish(engine)
+    with engine.begin() as conn:
+        final = adoption._state(conn)
+        assert _rows(conn) == _rows(conn, raw.TARGET)
+        assert _old(conn) == old and _frozen_records(conn) == frozen
+        for key in ("binding", "started_at", "expires_at", "attempt_seconds"):
+            assert final[key] == before[key]
+        for direction in ("source", "target"):
+            assert final["progress"]["identity_" + direction] == before["progress"]["identity_" + direction]
+        source = final["progress"]["raw_source"]
+        assert source["after"] == before["progress"]["raw_source"]["after"]
+        assert source["heap_verified"] == len(_rows(conn))
+        assert source["verified"] == source["heap_verified"] + 1
+        assert source["next_block"] == source["high_block"]
+
+
+def test_raw_heap_fill_keeps_source_locality_and_covers_commit_after_scan(retained):
+    engine = retained.database._engine
+    insert_sql = text("INSERT INTO " + raw.SOURCE + "(" + ",".join(raw.COLUMNS) +
+        ") VALUES(" + ",".join(":" + name for name in raw.COLUMNS) + ")")
+    # Reverse lexical keys make a key-order regression observable. All other
+    # synthetic mapping metadata and the real manifest FK use the owned fixture.
+    local_keys = ["raw-locality-z", "raw-locality-y", "raw-locality-x"]
+    with engine.begin() as conn:
+        template = _rows(conn)[0]
+        for ordinal, key in enumerate(local_keys, 1000):
+            conn.execute(insert_sql, {**template, "raw_record_id": key, "object_row_index": ordinal})
+        adoption.prepare_adoption(conn, **retained.adoption_args)
+    for _ in range(64):
+        with engine.begin() as conn:
+            adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+            before = adoption._state(conn)
+        if before["progress"]["raw_target"]["complete"]:
+            break
+    else:
+        pytest.fail("raw target proof did not finish")
+    assert before["progress"]["raw_source"]["heap_verified"] == 0
+    # This tuple exists physically before the source scan, but its transaction
+    # commits afterwards. The synchronous mirror must preserve coverage even
+    # though neither physical pass can count the uncommitted row.
+    with engine.connect() as late:
+        transaction = late.begin()
+        late.execute(insert_sql, {**template, "raw_record_id": "raw-late-commit", "object_row_index": 2000})
+        with engine.begin() as conn:
+            report = adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=4096)
+            assert report["retained_targets_verified"]
+            state = adoption._state(conn)
+            assert not conn.scalar(text("SELECT EXISTS(SELECT 1 FROM " + raw.TARGET +
+                " WHERE raw_record_id='raw-late-commit')"))
+            physical_keys = conn.execute(text("SELECT raw_record_id FROM " + raw.TARGET +
+                " WHERE raw_record_id=ANY(:keys) ORDER BY ctid"), {"keys": local_keys}).scalars().all()
+            assert physical_keys == local_keys
+        transaction.commit()
+    with engine.begin() as conn:
+        assert adoption.adoption_page(conn, operation_sha256=OPERATION)["retained_targets_verified"]
+        assert adoption._state(conn) == state
+        assert _rows(conn) == _rows(conn, raw.TARGET)
+        assert any(row["raw_record_id"] == "raw-late-commit" for row in _rows(conn))
+    # A physical rewrite invalidates the saved proof, even after completion.
+    with pytest.raises(RuntimeError, match="adoption_binding_changed"), engine.begin() as conn:
+        conn.exec_driver_sql("CLUSTER " + raw.TARGET + " USING pk_market_raw_archive_record_mapping")
+        adoption.adoption_page(conn, operation_sha256=OPERATION)
 
 
 def test_adoption_covers_uncaptured_gap_late_keys_and_interrupted_page(retained, tmp_path, monkeypatch):
