@@ -111,7 +111,7 @@ renew a retired attempt, start research or establish production performance.
 
 ## Reschedule a stopped worker without discarding guarded proof
 
-The candidate operator supports one explicit reschedule of an active successor
+The V1 operator supports one explicit reschedule of an active successor
 after its worker has stopped, while the source still serves. A later UTC boundary
 must fit the original adoption expiry, including the final pause allowance.
 The original operation digest, request, SQL start/expiry, proof cursors, mirrors,
@@ -132,6 +132,23 @@ old/new bytes within its original five-minute publication bound. Unresolved or
 expired incomplete publication refuses normal launch. The original worker and
 all evidence remain retained. A separate canonical invocation starts the qualified
 replacement under every original wall, monotonic and boot clock.
+
+The follow-up V2 candidate allows one explicit extension after a completed V1
+amendment, before the current adoption expires. It binds the exact preceding
+amendment and request, and increases the cumulative adoption duration to a
+declared bound of at most 96 hours from the original SQL start. Fresh capacity
+must cover that new expiry. Only adoption duration/expiry and the existing
+package/schedule binding change; original start times, completed proof, guards,
+initializer clocks and the five-minute publication bound remain intact. The
+previous amendment is retained alongside one V2 journal. An expired proof cannot
+be revived, and this is not an indefinitely renewable migration lease.
+
+This exception addresses measured preparation that misses its first revised
+window without making another full-history verification the recovery path. Its
+cost is longer-lived guards, queues and retained allocations; admission must
+budget those costs without assuming cleanup. Ordinary reads and research gain
+no migration authority. The V2 candidate requires native SQL and confined-host
+qualification before an explicitly admitted production transition.
 
 This avoids repeating validated history merely because the schedule changed. It
 does not rescue an expired adoption or guarantee that the remaining work will

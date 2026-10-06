@@ -1,6 +1,6 @@
 """Stopped-worker rescheduling preserves operation proof and launch clocks."""
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -33,9 +33,10 @@ def attempt(operation_attempt):
     return a
 
 
-@pytest.fixture
-def rescheduling(successor,monkeypatch):
+@pytest.fixture(params=[1, 2])
+def rescheduling(successor,monkeypatch,request):
     a = successor
+    a.amendment_version = request.param
     # Existing fixtures use a fixed original boundary. Keep a genuinely later
     # boundary within their original 60-hour adoption, without extending it.
     _advance(a, datetime.fromisoformat("2026-10-04T12:00:00+00:00").timestamp()-a.clock[0])
@@ -72,6 +73,10 @@ def rescheduling(successor,monkeypatch):
         if action=="apply":
             assert expected==a.sql
             a.sql["initialization"]["binding"]=worker.initialization_binding(request)
+            if request["forward_reschedule"]["schema_version"] == "qt.storage_online_forward_reschedule.v2":
+                seconds = worker.adoption_seconds(request)
+                a.sql["capture"].update(attempt_seconds=seconds, expires_at=(
+                    datetime.fromisoformat(a.sql["capture"]["started_at"])+timedelta(seconds=seconds)).isoformat())
         return deepcopy(a.sql)
     a.reschedule_probe=probe
     monkeypatch.setattr(reschedule,"_probe",probe)
@@ -81,6 +86,35 @@ def rescheduling(successor,monkeypatch):
     a.protected.update({a.reschedule_path:a.reschedule_path.read_bytes(),
         a.root/forward.operation_file(forward.STATE,request=a.request):
             (a.root/forward.operation_file(forward.STATE,request=a.request)).read_bytes()})
+    if a.amendment_version == 2:
+        a.change()
+        a.protected[a.reschedule_state] = a.reschedule_state.read_bytes()
+        a.protected[Path(a.reschedule_package["forward_plan_path"])] = Path(a.reschedule_package["forward_plan_path"]).read_bytes()
+        selected = forward.inspect_published_operation(a.root)
+        a.request = selected["new_request"]
+        a.intent = forward.launch_intent(a.root,selected,selected["new_worker"]["binding"])
+        a.current = deepcopy(a.intent["worker"])
+        a.current.update(container_id="8"*64, contract={"fixture":"first-amendment"})
+        forward.save_launched_worker(a.root,a.intent,a.current)
+        a.name = "/"+a.plan["project"]+"-storage-online"
+        a.sql["preserved_adoption_sha256"] = a.sql.pop("adoption_sha256")
+        a.old_sql = deepcopy(a.sql)
+        a.reschedule_path = Path(a.reschedule_package["forward_plan_path"])
+        a.reschedule_plan = host.load_receipt(a.reschedule_path)
+        a.reschedule_package.update(schema_version="qt.storage_online_forward_reschedule_package.v2",
+            plan_sha256=publication._sha(a.reschedule_path.read_bytes()),
+            previous_amendment_sha256=publication._sha(a.reschedule_state.read_bytes()),
+            attempt_seconds=84*3600, end_day="2026-10-07", image="sha256:"+"a"*64,
+            source_revision="a"*40, source_tree_hash="b"*64,
+            forward_plan_path=str(a.path.parent/"extended-operation.json"))
+        a.reschedule_file = a.path.parent/"extension-package.json"
+        write(a.reschedule_file,a.reschedule_package)
+        capacity.update(plan_sha256=a.reschedule_package["plan_sha256"],attempt_seconds=84*3600,
+            through_epoch=datetime.fromisoformat(a.sql["capture"]["started_at"]).timestamp()+84*3600,
+            observed_at=a.clock[0])
+        write(a.capacity_path,capacity)
+        a.reschedule_state = a.root/reschedule.state_file(a.request["forward"]["operation_sha256"],version=2)
+        a.actions.clear()
     return a
 
 
@@ -90,16 +124,21 @@ def test_reschedule_inspection_and_publication_preserve_proof_and_all_clocks(res
     assert a.change(False)["phase"]=="forward_reschedule_inspected"
     assert a.sql==a.old_sql and not a.reschedule_state.exists()
     assert all(p.read_bytes()==v for p,v in before.items())
-    assert a.change()["deadline_renewed"] is False
+    assert a.change()["deadline_renewed"] is (a.amendment_version == 2)
     assert a.actions.count("apply")==1
     selected=forward.inspect_published_operation(a.root,operation_path=a.reschedule_package["forward_plan_path"])
-    assert worker.original_request(selected["new_request"])==a.request
-    assert worker.execution_intent(selected["new_request"])["end_day"]=="2026-10-06"
+    assert worker.original_request(selected["new_request"])==worker.original_request(a.request)
+    assert worker.execution_intent(selected["new_request"])["end_day"]==a.reschedule_package["end_day"]
     started=forward.launch_intent(a.root,selected,selected["new_worker"]["binding"])
-    for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic","key_deadline_boot","capture","deadline"):
+    for key in ("started_at","started_monotonic","started_boot","key_deadline","key_deadline_monotonic","key_deadline_boot"):
         assert started[key]==a.intent[key]
-    assert a.sql["adoption_sha256"]==a.old_sql["adoption_sha256"]
-    assert a.sql["capture"]==a.old_sql["capture"]
+    digest_key = "adoption_sha256" if a.amendment_version == 1 else "preserved_adoption_sha256"
+    assert a.sql[digest_key]==a.old_sql[digest_key]
+    delta = 0 if a.amendment_version == 1 else 24*3600
+    assert started["deadline"] == a.intent["deadline"]+delta
+    assert started["capture"] == a.sql["capture"]
+    assert {k:v for k,v in a.sql["capture"].items() if k not in {"expires_at","attempt_seconds"}} == {
+        k:v for k,v in a.old_sql["capture"].items() if k not in {"expires_at","attempt_seconds"}}
     assert a.change()["phase"]=="forward_reschedule_published"
     assert a.actions.count("apply")==1
     assert all(p.read_bytes()==data for p,data in a.protected.items())
@@ -199,6 +238,46 @@ def test_interrupted_reschedule_keeps_original_publication_deadline(rescheduling
     _advance(a,301)
     with pytest.raises(RuntimeError):a.change()
     assert a.reschedule_state.read_bytes()==retained and "apply" not in a.actions
+
+
+@pytest.mark.parametrize("rescheduling", [2], indirect=True)
+@pytest.mark.parametrize("fault", ["previous_hash", "same_bound", "unbounded", "same_day", "fewer_objects", "old_forecast", "wrong_predecessor"])
+def test_extension_requires_exact_predecessor_and_new_capacity_bound(rescheduling,fault):
+    a = rescheduling
+    if fault == "previous_hash": a.reschedule_package["previous_amendment_sha256"] = "f"*64
+    elif fault == "same_bound": a.reschedule_package["attempt_seconds"] = a.old_sql["capture"]["attempt_seconds"]
+    elif fault == "unbounded": a.reschedule_package["attempt_seconds"] = 345601
+    elif fault == "same_day": a.reschedule_package["end_day"] = a.request["forward_reschedule"]["end_day"]
+    elif fault == "fewer_objects": a.reschedule_package["max_objects"] -= 1
+    elif fault == "old_forecast":
+        value = host.load_receipt(a.capacity_path)
+        value["through_epoch"] -= 86400
+        write(a.capacity_path,value)
+    else:
+        path = a.root/reschedule.state_file(a.request["forward"]["operation_sha256"])
+        value = host.load_receipt(path,max_bytes=reschedule.MAX_BYTES)
+        value["schema_version"] = "qt.storage_online_forward_reschedule_publication.v2"
+        write(path,value)
+    write(a.reschedule_file,a.reschedule_package)
+    with pytest.raises((ValueError,RuntimeError)):
+        a.change()
+    assert "apply" not in a.actions and not a.reschedule_state.exists()
+
+
+@pytest.mark.parametrize("rescheduling", [2], indirect=True)
+def test_completed_extension_outlives_old_expiry_without_resetting_starts(rescheduling):
+    a = rescheduling
+    a.change()
+    _advance(a,datetime.fromisoformat(a.old_sql["capture"]["expires_at"]).timestamp()+1-a.clock[0])
+    selected = forward.inspect_published_operation(a.root)
+    started = forward.launch_intent(a.root,selected,selected["new_worker"]["binding"])
+    assert started["started_at"] == a.intent["started_at"]
+    assert started["initialization"]["started_at"] == a.intent["initialization"]["started_at"]
+    assert forward.admit_startup(a.root,started,selected["new_request"],keys=started["keys"],
+        initialization=started["initialization"],capture=started["capture"]) == pytest.approx(86400-1)
+    with pytest.raises(RuntimeError,match="request_changed"):
+        forward.inspect_published_operation(a.root,request=a.request)
+    assert a.actions.count("apply") == 1
 
 
 @pytest.mark.parametrize("option", ["forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file",

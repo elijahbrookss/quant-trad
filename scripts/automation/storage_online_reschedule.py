@@ -1,8 +1,8 @@
-"""One explicit stopped-worker reschedule of the current forward operation.
+"""Explicit stopped-worker amendments of the current forward operation.
 
-No data copy, clock extension, source stop or automatic worker restart. Original
-publication/launch evidence is retained; only a qualified replacement package,
-later UTC boundary and finite archive-object/descriptor ceilings may change.
+V1 keeps the adoption deadline. One V2 follow-up may extend its cumulative
+bound before expiry, with fresh capacity evidence. Neither copies data, stops
+source clients, restarts workers or resets proof, start times or phase clocks.
 """
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
@@ -24,10 +24,13 @@ MAX_BYTES = 2*1024**2
 LOG = logging.getLogger(__name__)
 
 
-def state_file(operation_sha256):
+def state_file(operation_sha256, *, version=1):
     if not isinstance(operation_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", operation_sha256):
         raise ValueError("storage_forward_reschedule_operation_invalid")
-    return "storage-online-forward-reschedule-"+operation_sha256+".json"
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("storage_forward_reschedule_version_invalid")
+    suffix = "" if version == 1 else "-v2"
+    return "storage-online-forward-reschedule-"+operation_sha256+suffix+".json"
 
 
 def _bytes(value):
@@ -37,21 +40,35 @@ def _bytes(value):
 def _proposal(plan, request, package):
     fields = {"schema_version", "plan_sha256", "operation_sha256", "image", "source_revision",
         "source_tree_hash", "end_day", "max_objects", "descriptor_limit", "forward_plan_path", "capacity_file"}
+    extension = isinstance(package, dict) and package.get("schema_version") == "qt.storage_online_forward_reschedule_package.v2"
+    if extension:
+        fields |= {"previous_amendment_sha256", "attempt_seconds"}
     if (not isinstance(package, dict) or set(package) != fields
-            or package["schema_version"] != "qt.storage_online_forward_reschedule_package.v1"
+            or package["schema_version"] not in {"qt.storage_online_forward_reschedule_package.v1", "qt.storage_online_forward_reschedule_package.v2"}
             or any(not isinstance(package[k], str) or not re.fullmatch(pattern, package[k]) for k,pattern in (
                 ("plan_sha256", r"[0-9a-f]{64}"), ("operation_sha256", r"[0-9a-f]{64}"),
                 ("image", r"sha256:[0-9a-f]{64}"), ("source_revision", r"[0-9a-f]{40}"),
                 ("source_tree_hash", r"[0-9a-f]{64}")))
-            or "forward_reschedule" in request
+            or (not extension and "forward_reschedule" in request)
             or worker.request_binding(request) is None
             or request["forward"]["schema_version"] != "qt.storage_online_forward_intent.v2"
             or request["forward"]["operation_sha256"] != package["operation_sha256"]):
         raise ValueError("storage_forward_reschedule_package_invalid")
+    previous = request.get("forward_reschedule", {})
+    if extension and (previous.get("schema_version") != "qt.storage_online_forward_reschedule.v1"
+            or not isinstance(package["previous_amendment_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", package["previous_amendment_sha256"])
+            or package["end_day"] <= previous["end_day"]
+            or type(package["max_objects"]) is not int or package["max_objects"] < request["max_objects"]):
+        raise ValueError("storage_forward_reschedule_predecessor_invalid")
+    original = worker.original_request(request)
     revised = {**deepcopy(request), **{k:package[k] for k in ("source_revision", "source_tree_hash", "max_objects")},
         "forward_reschedule":dict(schema_version="qt.storage_online_forward_reschedule.v1",
-            original_request_sha256=host.digest(request), original_max_objects=request["max_objects"],
+            original_request_sha256=host.digest(original), original_max_objects=original["max_objects"],
             end_day=package["end_day"])}
+    if extension:
+        revised["forward_reschedule"].update(schema_version="qt.storage_online_forward_reschedule.v2",
+            previous_request_sha256=host.digest(request), attempt_seconds=package["attempt_seconds"])
     worker.request_binding(revised)
     # Increasing the descriptor ceiling pays only for the explicitly increased
     # immutable-object inventory; it cannot raise memory, bytes or other limits.
@@ -60,6 +77,8 @@ def _proposal(plan, request, package):
         raise ValueError("storage_forward_reschedule_descriptor_scope_changed")
     result = {**deepcopy(plan), "image":package["image"], "request":revised,
         "descriptor_limit":package["descriptor_limit"]}
+    if extension:
+        result["attempt_seconds"] = worker.adoption_seconds(revised)
     launch.validate_launch_inputs(**{k:result[k] for k in
         ("project", "source_revision", "image", "request", "descriptor_limit", "memory_bytes")})
     return result, revised
@@ -70,6 +89,8 @@ def _new_worker(before, *, package, request, environment_sha256):
     result.update(container_id=None, contract=None)
     result["binding"].update(image=package["image"], request_sha256=publication._sha(publication.request_bytes(request)),
         descriptor_limit=package["descriptor_limit"], environment_sha256=environment_sha256)
+    if package["schema_version"] == "qt.storage_online_forward_reschedule_package.v2":
+        result["deadline"] += worker.adoption_seconds(request)-request["forward"]["original_capture"]["attempt_seconds"]
     return result
 
 
@@ -80,25 +101,50 @@ def _new_launch(journal):
         worker_binding_sha256=host.digest(journal["new_worker"]["binding"]),
         operation_sha256=journal["package"]["operation_sha256"])
     result.update(worker=deepcopy(journal["new_worker"]), pending_worker=None)
-    result["initialization"]["binding"] = worker.initialization_binding(journal["new_request"])
-    result["forward"]["end_day"] = journal["package"]["end_day"]
+    sql = _after_sql(journal)
+    result["initialization"] = {k:v for k,v in sql["initialization"].items() if k != "id"}
+    result["capture"] = sql["capture"]
+    result["forward"], result["deadline"] = forward.admit_adoption_observation(journal["new_request"],
+        initialization=result["initialization"], capture=result["capture"], now=journal["started_at"])
     return result
 
 
 def _after_sql(journal):
     result = deepcopy(journal["sql_before"])
     result["initialization"]["binding"] = worker.initialization_binding(journal["new_request"])
+    if journal["package"]["schema_version"] == "qt.storage_online_forward_reschedule_package.v2":
+        seconds = worker.adoption_seconds(journal["new_request"])
+        expiry = datetime.fromisoformat(result["capture"]["started_at"])+timedelta(seconds=seconds)
+        result["capture"].update(attempt_seconds=seconds, expires_at=expiry.isoformat())
     return result
 
 
 def _window(journal):
     boundary = datetime.fromisoformat(journal["package"]["end_day"]).replace(tzinfo=timezone.utc)
-    expiry = datetime.fromisoformat(journal["sql_before"]["capture"]["expires_at"])
+    old_expiry = datetime.fromisoformat(journal["sql_before"]["capture"]["expires_at"])
+    expiry = datetime.fromisoformat(_after_sql(journal)["capture"]["expires_at"])
     if (not max(time.time(), journal["wall_deadline"]) < boundary.timestamp()
             or boundary+timedelta(seconds=journal["new_plan"]["limits"]["final_seconds"]) > expiry):
         raise RuntimeError("storage_forward_reschedule_outside_original_deadline")
     forward._launch_clock(journal["old_launch"])
-    forward._launch_remaining(journal["old_launch"], expiry.timestamp())
+    forward._launch_remaining(journal["old_launch"], old_expiry.timestamp())
+
+
+def _amendment_base(root, base, package):
+    """V2 has exactly one named completed V1 predecessor, never a latest chain."""
+    if package.get("schema_version") != "qt.storage_online_forward_reschedule_package.v2":
+        return base
+    path = root/state_file(base["forward"]["operation_sha256"])
+    previous = host.load_receipt(path, max_bytes=MAX_BYTES)
+    if previous.get("schema_version") != "qt.storage_online_forward_reschedule_publication.v1":
+        raise RuntimeError("storage_forward_reschedule_predecessor_changed")
+    previous = _verify_journal(root, base, previous)
+    if (previous["phase"] != "complete"
+            or previous["schema_version"] != "qt.storage_online_forward_reschedule_publication.v1"
+            or publication._sha(path.read_bytes()) != package["previous_amendment_sha256"]):
+        raise RuntimeError("storage_forward_reschedule_predecessor_changed")
+    return {**base, **{k:previous[k] for k in
+        ("package", "new_plan", "new_request", "new_worker", "new_runtime", "old_worker", "intent_sha256")}}
 
 
 def _verify_journal(root, base, journal):
@@ -106,10 +152,15 @@ def _verify_journal(root, base, journal):
         "old_request_bytes", "old_worker_bytes", "old_worker", "old_runtime_bytes", "old_launch_bytes", "old_launch",
         "new_plan", "new_request", "new_worker", "new_runtime", "sql_before", "capacity",
         "started_at", "started_monotonic", "wall_deadline", "monotonic_deadline", "boot_id", "phase", "intent_sha256"}
-    if (set(journal) != fields or journal["schema_version"] != "qt.storage_online_forward_reschedule_publication.v1"
+    extension = journal.get("schema_version") == "qt.storage_online_forward_reschedule_publication.v2"
+    if (set(journal) != fields or journal["schema_version"] not in {
+            "qt.storage_online_forward_reschedule_publication.v1", "qt.storage_online_forward_reschedule_publication.v2"}
             or journal["phase"] not in {"prepared", "database_dispatched", "database_reconciled", "publishing", "complete"}
             or host.digest({k:v for k,v in journal.items() if k not in {"intent_sha256", "phase"}}) != journal["intent_sha256"]
-            or journal["original_publication_sha256"] != base["intent_sha256"]):
+            or extension != (journal["package"].get("schema_version") == "qt.storage_online_forward_reschedule_package.v2")):
+        raise RuntimeError("storage_forward_reschedule_journal_changed")
+    base = _amendment_base(root, base, journal["package"])
+    if journal["original_publication_sha256"] != base["intent_sha256"]:
         raise RuntimeError("storage_forward_reschedule_journal_changed")
     original_path = Path(base["package"]["forward_plan_path"])
     package = journal["package"]
@@ -150,7 +201,9 @@ def _verify_journal(root, base, journal):
 def inspect_published(root, base, *, request=None, operation_path=None):
     """Verify both original evidence and the exact completed publication."""
     forward._inspect_publication(root, base, active=False)
-    path = root/state_file(base["forward"]["operation_sha256"])
+    path = root/state_file(base["forward"]["operation_sha256"], version=2)
+    if not os.path.lexists(path):
+        path = root/state_file(base["forward"]["operation_sha256"])
     journal = _verify_journal(root, base, host.load_receipt(path, max_bytes=MAX_BYTES))
     if journal["phase"] != "complete":
         raise RuntimeError("storage_forward_reschedule_reconciliation_required")
@@ -230,7 +283,7 @@ def _capacity(journal):
     plan = json.loads(journal["original_plan_bytes"])
     saved = journal["old_worker"]
     paths = [saved["binding"]["mounts"][key]["host_source"] for key in ("/app/logs/market-structure", "/qt-history")]
-    capture = journal["sql_before"]["capture"]
+    capture = _after_sql(journal)["capture"]
     publication._capacity(journal["capacity"], plan_bytes=journal["original_plan_bytes"].encode(),
         seconds=capture["attempt_seconds"], deadline=datetime.fromisoformat(capture["expires_at"]).timestamp(),
         paths=paths, reserve_percent=plan["request"]["policy"]["reserve_percent"], reserve_floors={
@@ -268,13 +321,15 @@ def publish(path, *, package_file, execute=False):
     package = host.load_receipt(launch._canonical(package_file))
     # Read a specifically named original publication, never the current/latest
     # request when recovering a torn multi-file change.
-    name = state_file(package.get("operation_sha256"))
+    extension = package.get("schema_version") == "qt.storage_online_forward_reschedule_package.v2"
+    name = state_file(package.get("operation_sha256"), version=2 if extension else 1)
     base_path = root/forward.operation_file(forward.STATE,operation_sha256=package["operation_sha256"])
-    base = host.load_receipt(base_path,max_bytes=MAX_BYTES)
+    original_base = host.load_receipt(base_path,max_bytes=MAX_BYTES)
     operator = publication._sha(b"".join(Path(module.__file__).read_bytes() for module in
         (publication, forward, worker, launch, operation, host, runtime, forward.terminal)) + Path(__file__).read_bytes())
     with host.deployment_lock(root):
-        forward._inspect_publication(root,base,active=False)
+        forward._inspect_publication(root,original_base,active=False)
+        base = _amendment_base(root,original_base,package)
         if Path(base["package"]["forward_plan_path"]) != path or plan != base["new_plan"]:
             raise RuntimeError("storage_forward_reschedule_original_plan_required")
         proposed, request = _proposal(plan,base["new_request"],package)
@@ -286,13 +341,13 @@ def publish(path, *, package_file, execute=False):
                 raise RuntimeError("storage_forward_reschedule_pre_final_required")
         journal = host.load_receipt(root/name,max_bytes=MAX_BYTES) if os.path.lexists(root/name) else None
         if journal is not None:
-            _verify_journal(root,base,journal)
+            _verify_journal(root,original_base,journal)
             if journal["package"] != package or journal["operator_sha256"] != operator:
                 raise RuntimeError("storage_forward_reschedule_reconciliation_binding_changed")
             if journal["phase"] == "complete":
-                inspect_published(root,base)
+                inspect_published(root,original_base)
                 return dict(phase="forward_reschedule_published",operation_sha256=package["operation_sha256"],
-                    migration_started=False,deadline_renewed=False)
+                    migration_started=False,deadline_renewed=extension)
         saved = journal["old_worker"] if journal else host.load_receipt(root/launch._STATE)
         wall,mono = time.time(),time.monotonic()
         clock = journal or dict(started_at=wall,started_monotonic=mono,wall_deadline=wall+300,
@@ -320,7 +375,8 @@ def publish(path, *, package_file, execute=False):
                 overrides["QT_ONLINE_REQUEST_SHA256"] = publication._sha(publication.request_bytes(request))
                 new_worker = _new_worker(saved,package=package,request=request,
                     environment_sha256=host.digest(sorted(k+"="+v for k,v in {**image_env,**overrides}.items())))
-                journal = dict(schema_version="qt.storage_online_forward_reschedule_publication.v1",package=package,
+                journal = dict(schema_version="qt.storage_online_forward_reschedule_publication.v2" if extension
+                    else "qt.storage_online_forward_reschedule_publication.v1",package=package,
                     operator_sha256=operator,original_publication_sha256=base["intent_sha256"],original_plan_bytes=path.read_text(),
                     old_request_bytes=(root/publication.REQUEST).read_text(),old_worker_bytes=(root/launch._STATE).read_text(),
                     old_worker=saved,old_runtime_bytes=(root/runtime.RUNTIME_RECIPE).read_text(),
@@ -329,12 +385,12 @@ def publish(path, *, package_file, execute=False):
                     capacity=host.load_receipt(launch._canonical(package["capacity_file"])),**clock)
                 journal["intent_sha256"] = host.digest(journal)
                 journal["phase"] = "prepared"
-                _verify_journal(root,base,journal)
+                _verify_journal(root,original_base,journal)
                 _window(journal); _capacity(journal); _preimages(root,journal)
                 if not execute:
                     return dict(phase="forward_reschedule_inspected",operation_sha256=package["operation_sha256"],
                         end_day=package["end_day"],max_objects=package["max_objects"],
-                        expires_at=before["capture"]["expires_at"],storage_mutations_performed=False,migration_started=False)
+                        expires_at=_after_sql(journal)["capture"]["expires_at"],storage_mutations_performed=False,migration_started=False)
                 if len(_bytes(journal)) > MAX_BYTES:
                     raise ValueError("storage_forward_reschedule_journal_budget")
                 forward._clock(journal)
@@ -381,9 +437,9 @@ def publish(path, *, package_file, execute=False):
             _preimages(root,journal)
             journal["phase"] = "complete"
             host.save_receipt(root/name,journal,initial=False)
-            inspect_published(root,base,request=request,operation_path=new_path)
-            LOG.info("storage_forward_reschedule_published operation_sha256=%s intent_sha256=%s end_day=%s deadline_unchanged=true",
-                package["operation_sha256"],journal["intent_sha256"],package["end_day"])
+            inspect_published(root,original_base,request=request,operation_path=new_path)
+            LOG.info("storage_forward_reschedule_published operation_sha256=%s intent_sha256=%s end_day=%s deadline_extended=%s start_unchanged=true",
+                package["operation_sha256"],journal["intent_sha256"],package["end_day"],extension)
             return dict(phase="forward_reschedule_published",operation_sha256=package["operation_sha256"],
-                end_day=package["end_day"],expires_at=journal["sql_before"]["capture"]["expires_at"],
-                migration_started=False,deadline_renewed=False)
+                end_day=package["end_day"],expires_at=_after_sql(journal)["capture"]["expires_at"],
+                migration_started=False,deadline_renewed=extension)
