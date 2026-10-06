@@ -1521,12 +1521,13 @@ finally:
      forward_workers.append(worker);owned.append(worker['container_id'])
   # A reschedule preserves its stopped worker only in the amendment preimage;
   # the active launch now owns the replacement. Both remain fixture-owned.
-  reschedule_path=(state/reschedule_owner.state_file(current_request['forward']['operation_sha256'])
-      if 'forward' in current_request else None)
-  if reschedule_path is not None and reschedule_path.exists():
-   worker=host_boundary.load_receipt(reschedule_path,max_bytes=reschedule_owner.MAX_BYTES)['old_worker']
-   if worker.get('container_id'):
-    forward_workers.append(worker);owned.append(worker['container_id'])
+  if 'forward' in current_request:
+   for version in (1, 2):
+    reschedule_path=state/reschedule_owner.state_file(current_request['forward']['operation_sha256'],version=version)
+    if reschedule_path.exists():
+     worker=host_boundary.load_receipt(reschedule_path,max_bytes=reschedule_owner.MAX_BYTES)['old_worker']
+     if worker.get('container_id'):
+      forward_workers.append(worker);owned.append(worker['container_id'])
  for name in reversed(owned):
   observed=run(['inspect',name,'--format','{{json .}}'],check=False)
   if observed.returncode:continue

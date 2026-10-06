@@ -121,6 +121,37 @@ def _require_open(conn, owner):
         raise RuntimeError("archive_online_capture_closed")
 
 
+def _forward_amendment_state(conn, operation_sha256):
+    """SQL proof for an explicit stopped-controller deadline amendment.
+
+    Ordinary collection may append queue entries. Bind the queue's physical
+    identity, not its changing contents; the amendment never writes that queue.
+    The caller owns adoption/controller and storage exclusion in its transaction.
+    """
+    owner = _capture(operation_sha256, conn=conn)
+    _require_open(conn, owner)
+    row = dict(conn.execute(text(f"SELECT * FROM {owner.state} WHERE id=1")).mappings().one())
+    if row["binding"] != _binding(conn, operation_sha256):
+        raise RuntimeError("archive_online_capture_binding_changed")
+    progress = [dict(x) for x in conn.execute(text(f"SELECT * FROM {owner.progress} ORDER BY family LIMIT :limit"),
+        {"limit":len(archives.FAMILIES)+1}).mappings()]
+    if {x["family"] for x in progress} != set(archives.FAMILIES):
+        raise RuntimeError("archive_online_progress_families_changed")
+    physical = {name:{"properties":raw._relation(conn, name), "filenode":conn.scalar(text(
+        "SELECT pg_relation_filenode(to_regclass(:name))"), {"name":name})}
+        for name in (owner.state, owner.progress, owner.queue)}
+    return {"capture":row, "progress":progress, "physical":physical}
+
+
+def _amend_forward_expiry(conn, operation_sha256, expiry):
+    """Change only this binding, paired atomically with the adoption expiry."""
+    owner = _capture(operation_sha256, conn=conn)
+    before = _forward_amendment_state(conn, operation_sha256)
+    binding = {**before["capture"]["binding"], "expires_at":expiry.isoformat()}
+    conn.execute(text(f"UPDATE {owner.state} SET binding=CAST(:binding AS jsonb) WHERE id=1"),
+                 {"binding":json.dumps(binding)})
+
+
 def _inspect(conn, source_root, destination_root, *, read_only_namespace=False,
              forward_operation_sha256=None, saved=None):
     owner = _capture(forward_operation_sha256, conn=conn)

@@ -80,6 +80,40 @@ def _rescheduled(request, *, end_day="2026-10-05"):
             original_request_sha256=digest(request), original_max_objects=request["max_objects"], end_day=end_day)}
 
 
+def _extended(request, *, end_day="2026-10-06", attempt_seconds=3600):
+    result = deepcopy(request)
+    result["forward_reschedule"].update(schema_version="qt.storage_online_forward_reschedule.v2",
+        previous_request_sha256=digest(request), end_day=end_day, attempt_seconds=attempt_seconds)
+    return result
+
+
+def test_explicit_extension_preserves_original_operation_and_canceled_capture():
+    original = _successor_request()
+    previous = _rescheduled(original)
+    request = _extended(previous)
+    worker.validate_request_shape(request)
+    assert forward.original_request(request) == original
+    assert forward.request_binding(request) == original["forward"]
+    assert forward.adoption_seconds(previous) == 600
+    assert forward.adoption_seconds(request) == 3600
+    assert forward.initialization_binding(request)["attempt_seconds"] == 3600
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r:r["forward_reschedule"].update(attempt_seconds=True),
+    lambda r:r["forward_reschedule"].update(attempt_seconds=600),
+    lambda r:r["forward_reschedule"].update(attempt_seconds=345601),
+    lambda r:r["forward_reschedule"].update(previous_request_sha256="wrong"),
+    lambda r:r["forward_reschedule"].update(previous_request_sha256=r["forward_reschedule"]["original_request_sha256"]),
+    lambda r:r.update(page_rows=1),
+])
+def test_extension_refuses_unbounded_or_hidden_scope_changes(mutation):
+    request = _extended(_rescheduled(_successor_request()))
+    mutation(request)
+    with pytest.raises(ValueError):
+        worker.validate_request_shape(request)
+
+
 def test_reschedule_preserves_hashed_operation_and_has_separate_effective_schedule():
     original = _successor_request()
     request = _rescheduled(original)

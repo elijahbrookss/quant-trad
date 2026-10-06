@@ -788,6 +788,75 @@ def _qualify_reschedule(engine, storage, source, request, kwargs):
         row = _insert(conn, storage, "published-after-reschedule")
         assert conn.scalar(text("SELECT count(*) FROM "+adoption.IDENTITY+" WHERE id=:id"), {"id":row["id"]}) == 1
         assert _frozen_records(conn) == frozen
+    return _qualify_extension(engine, storage, proposed, kwargs)
+
+
+def _qualify_extension(engine, storage, previous, kwargs):
+    """Extend only the explicit bound; retain real cursors, guards and inputs."""
+    from copy import deepcopy
+    from scripts.automation import storage_online_forward_worker as worker
+    from tests.test_storage_online_forward_worker import _extended
+    operation = previous["forward"]["operation_sha256"]
+    with engine.begin() as conn:
+        old = adoption._state(conn, operation)
+        frozen = _frozen_records(conn)
+        archive_before = online._forward_amendment_state(conn, operation)
+        archive_owner = online._capture(operation, conn=conn)
+        queued_before = conn.execute(text(f"SELECT * FROM {archive_owner.queue} ORDER BY family,id")).all()
+    boundary = (old["expires_at"].date()+timedelta(days=1)).isoformat()
+    proposed = _extended(previous, end_day=boundary, attempt_seconds=old["attempt_seconds"]+86400)
+    with engine.begin() as conn:
+        expected = worker.inspect_reschedule(conn, request=proposed)
+    for mutation, message in (
+        (lambda r:r["forward_reschedule"].update(previous_request_sha256="f"*64), "predecessor_changed"),
+        (lambda r:r["forward_reschedule"].update(end_day=previous["forward_reschedule"]["end_day"]), "predecessor_changed")):
+        bad = deepcopy(proposed)
+        mutation(bad)
+        with pytest.raises(RuntimeError, match=message):
+            with engine.begin() as conn:
+                worker.reschedule_initialization(conn, request=bad, expected=expected, final_seconds=1)
+    with engine.connect() as owner:
+        owner.execute(text("SELECT pg_advisory_lock(hashtextextended(:name,0))"), {"name":adoption.CONTROLLER_LOCK})
+        try:
+            with pytest.raises(RuntimeError, match="controller_active"):
+                with engine.begin() as conn:
+                    worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+        finally:
+            owner.execute(text("SELECT pg_advisory_unlock(hashtextextended(:name,0))"), {"name":adoption.CONTROLLER_LOCK})
+    with pytest.raises(RuntimeError, match="adoption_expired"):
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE "+adoption.state_relation(conn, operation)+
+                " SET started_at=started_at-interval '5 days',expires_at=expires_at-interval '5 days' WHERE id=1"))
+            worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+    with pytest.raises(RuntimeError, match="rollback extension fixture"):
+        with engine.begin() as conn:
+            worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+            raise RuntimeError("rollback extension fixture")
+    with engine.begin() as conn:
+        assert worker.inspect_reschedule(conn, request=proposed) == expected
+        worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+    # Ignore the response and reconcile independently, without replaying SQL.
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        actual = worker.inspect_reschedule(conn, request=proposed)
+        wanted = deepcopy(expected)
+        wanted["initialization"]["binding"] = worker.initialization_binding(proposed)
+        wanted["capture"].update(attempt_seconds=old["attempt_seconds"]+86400,
+            expires_at=(old["expires_at"]+timedelta(days=1)).isoformat())
+        assert actual == wanted
+        assert adoption._state(conn, operation) == {**old, "attempt_seconds":old["attempt_seconds"]+86400,
+            "expires_at":old["expires_at"]+timedelta(days=1)}
+        archive_after = deepcopy(archive_before)
+        archive_after["capture"]["binding"]["expires_at"] = (old["expires_at"]+timedelta(days=1)).isoformat()
+        assert online._forward_amendment_state(conn, operation) == archive_after
+        assert conn.execute(text(f"SELECT * FROM {archive_owner.queue} ORDER BY family,id")).all() == queued_before
+        assert _frozen_records(conn) == frozen
+    with pytest.raises(RuntimeError, match="preimage_changed"):
+        with engine.begin() as conn:
+            worker.reschedule_initialization(conn, request=proposed, expected=expected, final_seconds=1)
+    with pytest.raises(RuntimeError, match="reschedule_initializer_required"):
+        worker.prepare_forward(engine, previous, **kwargs)
+    worker.prepare_forward(engine, proposed, **kwargs)
     return proposed
 
 

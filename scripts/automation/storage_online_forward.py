@@ -173,7 +173,8 @@ def _published_runtime(old_runtime, original, package):
         if model["services"][name].get("image") != original["image"]:
             raise RuntimeError("storage_forward_original_runtime_changed")
         model["services"][name]["image"] = package["image"]
-    if package["schema_version"] in {"qt.storage_online_forward_package.v2", "qt.storage_online_forward_reschedule_package.v1"}:
+    if package["schema_version"] in {"qt.storage_online_forward_package.v2", "qt.storage_online_forward_reschedule_package.v1",
+            "qt.storage_online_forward_reschedule_package.v2"}:
         model["services"]["backend"]["environment"].update(
             SOURCE_REVISION=package["source_revision"],
             SOURCE_TREE_HASH=package["source_tree_hash"],
@@ -413,7 +414,8 @@ def inspect_published_operation(root, *, request=None, operation_path=None):
     selected_request = request if request is not None else host.load_receipt(root/publication.REQUEST)
     journal = host.load_receipt(root/operation_file(STATE, request=selected_request), max_bytes=_MAX_BYTES)
     from scripts.automation import storage_online_reschedule as reschedule
-    if os.path.lexists(root/reschedule.state_file(journal["forward"]["operation_sha256"])):
+    if any(os.path.lexists(root/reschedule.state_file(journal["forward"]["operation_sha256"], version=version))
+            for version in (1, 2)):
         return reschedule.inspect_published(root, journal, request=request, operation_path=operation_path)
     return _inspect_publication(root, journal, request=request, operation_path=operation_path)
 
@@ -500,7 +502,7 @@ def admit_adoption_observation(request, *, initialization, capture, now):
     """
     from datetime import datetime, timedelta
     import math
-    from scripts.automation.storage_online_forward_worker import execution_intent, initialization_binding
+    from scripts.automation.storage_online_forward_worker import adoption_seconds, execution_intent, initialization_binding
 
     intent = execution_intent(request)
     if intent is None or type(now) not in (int, float) or not math.isfinite(now):
@@ -518,7 +520,7 @@ def admit_adoption_observation(request, *, initialization, capture, now):
             or type(initialization["duration_seconds"]) is not int
             or initialization["duration_seconds"] != 600):
         raise RuntimeError("storage_forward_initialization_observation_invalid")
-    seconds = intent["original_capture"].get("attempt_seconds")
+    seconds = adoption_seconds(request)
     expected = initialization_binding(request)
     start, end = instant(initialization["started_at"]), instant(initialization["expires_at"])
     if (initialization["binding"] != expected

@@ -3477,6 +3477,28 @@ file replies, changed clocks, actual confined transport, replacement-worker
 reentry and retirement. Small fixtures establish correctness, not production
 duration or capacity. See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
 
+The V2 follow-up candidate uses the same command with the current V1 plan.
+`qt.storage_online_forward_reschedule_package.v2` adds
+`previous_amendment_sha256` (the exact completed V1 journal bytes) and
+`attempt_seconds` (a strictly larger cumulative bound, at most 345600 seconds
+from the original adoption start). It requires a later boundary, an unexpired
+adoption, a stopped worker, unchanged guards/ownership and a fresh forecast
+through the amended expiry. Object and descriptor limits may increase together;
+other resource floors and byte/memory limits remain unchanged.
+
+The existing initializer atomically changes its binding, the adoption's
+duration/expiry and the archive capture's matching expiry. It preserves start
+time, archive cursors/queue identities and the full progress/physical proof;
+queued entries are never rewritten or removed by the amendment.
+Host publication retains the V1 journal and writes one operation-specific `-v2`
+journal. It updates the launch/worker deadline without resetting wall, monotonic
+or boot anchors. Each uncertain SQL dispatch remains observation-only on reentry;
+expired or torn publication refuses launch. There is no third amendment, automatic
+extension, source stop or worker restart. Completed publication remains readable
+after the old expiry; execution is limited by the new finite bound. This candidate
+is not a production extension until its SQL/host rehearsal, resource admission
+and exact operational authorization are satisfied.
+
 ## Retained-target adoption after an uncaptured interval
 
 The candidate successor path keeps a separately authorized operation's adoption

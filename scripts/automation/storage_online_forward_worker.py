@@ -58,19 +58,22 @@ def request_binding(request):
 
 
 def original_request(request):
-    """Recover the one immutable request underlying an explicit reschedule.
+    """Recover the immutable request underlying an explicit amendment.
 
     The operation identity, data proof and clocks remain those of this request.
-    Only package provenance, a later cutover day and the finite archive-object
-    ceiling may change. The host publisher and SQL initializer must independently
-    admit the exact transition before a replacement worker can use it.
+    V1 keeps its original clocks. V2 names the preceding request and an explicit
+    cumulative adoption duration; the host and SQL initializer independently admit
+    that pre-expiry extension. Neither version rewrites the canceled capture.
     """
     update = request.get("forward_reschedule")
     if update is None and "forward_reschedule" not in request:
         return deepcopy(request)
     fields = {"schema_version", "original_request_sha256", "original_max_objects", "end_day"}
+    version = update.get("schema_version") if isinstance(update, dict) else None
+    if version == "qt.storage_online_forward_reschedule.v2":
+        fields |= {"previous_request_sha256", "attempt_seconds"}
     if (not isinstance(update, dict) or set(update) != fields
-            or update["schema_version"] != "qt.storage_online_forward_reschedule.v1"
+            or version not in {"qt.storage_online_forward_reschedule.v1", "qt.storage_online_forward_reschedule.v2"}
             or not isinstance(update["original_request_sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", update["original_request_sha256"])
             or type(update["original_max_objects"]) is not int
@@ -88,6 +91,14 @@ def original_request(request):
     original.update(source_revision=intent.get("candidate_revision"),
         source_tree_hash=intent.get("candidate_source_hash"), max_objects=update["original_max_objects"])
     request_binding(original)
+    if version == "qt.storage_online_forward_reschedule.v2" and (
+            not isinstance(update["previous_request_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", update["previous_request_sha256"])
+            or update["previous_request_sha256"] == update["original_request_sha256"]
+            or type(update["attempt_seconds"]) is not int
+            or type(intent["original_capture"].get("attempt_seconds")) is not int
+            or not intent["original_capture"]["attempt_seconds"] < update["attempt_seconds"] <= 345600):
+        raise ValueError("storage_forward_reschedule_extension_invalid")
     if (_digest(original) != update["original_request_sha256"]
             or date.fromisoformat(update["end_day"]).isoformat() != update["end_day"]
             or date.fromisoformat(update["end_day"]) <= date.fromisoformat(intent["end_day"])):
@@ -103,13 +114,21 @@ def execution_intent(request):
     return {**value, "end_day": request.get("forward_reschedule", {}).get("end_day", value["end_day"])}
 
 
+def adoption_seconds(request):
+    """Effective finite bound; the original operation/cancellation stays intact."""
+    intent = request_binding(request)
+    if intent is None:
+        raise ValueError("storage_forward_adoption_intent_required")
+    return request.get("forward_reschedule", {}).get("attempt_seconds", intent["original_capture"].get("attempt_seconds"))
+
+
 def initialization_binding(request, *, key_seconds=3600, initial_seconds=600):
     intent = request_binding(request)
     if intent is None:
         raise ValueError("storage_forward_initialization_intent_required")
     result = dict(request_sha256=_digest(request), operation_sha256=intent["operation_sha256"],
         cancellation_intent_sha256=intent["cancellation_intent_sha256"], key_seconds=key_seconds,
-        initial_seconds=initial_seconds, attempt_seconds=intent["original_capture"].get("attempt_seconds"))
+        initial_seconds=initial_seconds, attempt_seconds=adoption_seconds(request))
     if "forward_reschedule" in request:
         result["reschedule"] = deepcopy(request["forward_reschedule"])
     return result
@@ -193,21 +212,34 @@ def inspect_reschedule(conn, *, request, timeout_seconds=10):
         phase = _initial(conn, intent)
         if phase is None or not phase["complete"]:
             raise RuntimeError("storage_forward_reschedule_completed_initializer_required")
-        return dict(initialization={k:(v.isoformat() if isinstance(v, datetime) else v)
-                                    for k,v in phase.items()},
-                    adoption_sha256=_digest({k:(v.isoformat() if isinstance(v, datetime) else v)
-                                             for k,v in state.items()}),
-                    capture={k:(v.isoformat() if isinstance(v, datetime) else v)
-                             for k,v in capture_observation(state).items()})
+        result = dict(initialization={k:(v.isoformat() if isinstance(v, datetime) else v)
+                                      for k,v in phase.items()},
+                      capture={k:(v.isoformat() if isinstance(v, datetime) else v)
+                               for k,v in capture_observation(state).items()})
+        preserved = {k:(v.isoformat() if isinstance(v, datetime) else v) for k,v in state.items()}
+        if request.get("forward_reschedule", {}).get("schema_version") == "qt.storage_online_forward_reschedule.v2":
+            # Only these two explicit amendment fields may change. Start time,
+            # progress, guards, reference state and physical bindings still hash.
+            for key in ("expires_at", "attempt_seconds"):
+                del preserved[key]
+            result["preserved_adoption_sha256"] = _digest(preserved)
+            from scripts.db import archive_root_v2_online as archives
+            archive = archives._forward_amendment_state(conn, intent["operation_sha256"])
+            del archive["capture"]["binding"]["expires_at"]
+            result["preserved_archive_sha256"] = _digest(archive)
+        else:
+            result["adoption_sha256"] = _digest(preserved)
+        return result
 
 
 def reschedule_initialization(conn, *, request, expected, final_seconds, timeout_seconds=10):
-    """Explicit operator-only change of package/schedule binding, never data.
+    """Explicit stopped-worker amendment, with no progress or start-time reset.
 
     The host must have retired the old worker and journaled this exact dispatch.
     The same SQL lock independently excludes a surviving controller. Initializer
-    and adoption clocks, progress, constraints, mirrors and archive capture remain
-    byte-for-byte unchanged. A lost COMMIT reply is observed through
+    V1 leaves all clocks unchanged. V2 can increase the cumulative adoption bound
+    before expiry; progress, constraints, mirrors and archive capture stay intact.
+    The short initializer and publication clocks are never renewed. Lost COMMIT is observed through
     ``inspect_reschedule``; the host must not replay uncertain dispatch.
     """
     from sqlalchemy import text
@@ -218,25 +250,47 @@ def reschedule_initialization(conn, *, request, expected, final_seconds, timeout
         raise ValueError("storage_forward_reschedule_arguments_invalid")
     original = original_request(request)
     intent = request_binding(request)
+    extension = request["forward_reschedule"]["schema_version"] == "qt.storage_online_forward_reschedule.v2"
     with adoption._step(conn, timeout_seconds):
         before = inspect_reschedule(conn, request=request, timeout_seconds=timeout_seconds)
-        if before != expected or before["initialization"]["binding"] != initialization_binding(original):
+        binding_before = before["initialization"]["binding"]
+        if before != expected:
+            raise RuntimeError("storage_forward_reschedule_preimage_changed")
+        if extension:
+            previous = binding_before.get("reschedule", {})
+            if (binding_before.get("request_sha256") != request["forward_reschedule"]["previous_request_sha256"]
+                    or previous.get("schema_version") != "qt.storage_online_forward_reschedule.v1"
+                    or {k:v for k,v in binding_before.items() if k not in {"request_sha256", "reschedule"}}
+                        != {k:v for k,v in initialization_binding(original).items() if k != "request_sha256"}
+                    or before["capture"]["attempt_seconds"] != binding_before["attempt_seconds"]
+                    or request["forward_reschedule"]["end_day"] <= previous["end_day"]):
+                raise RuntimeError("storage_forward_reschedule_predecessor_changed")
+        elif binding_before != initialization_binding(original):
             raise RuntimeError("storage_forward_reschedule_preimage_changed")
         boundary = datetime.fromisoformat(execution_intent(request)["end_day"]).replace(tzinfo=timezone.utc)
-        expiry = datetime.fromisoformat(before["capture"]["expires_at"])
+        expiry = (datetime.fromisoformat(before["capture"]["started_at"]) + timedelta(seconds=adoption_seconds(request))
+                  if extension else datetime.fromisoformat(before["capture"]["expires_at"]))
         now = conn.scalar(text("SELECT clock_timestamp()"))
         if not now < boundary or boundary + timedelta(seconds=final_seconds) > expiry:
             raise RuntimeError("storage_forward_reschedule_outside_original_deadline")
+        if extension:
+            from scripts.db import archive_root_v2_online as archives
+            archives._amend_forward_expiry(conn, intent["operation_sha256"], expiry)
+            conn.execute(text("UPDATE " + adoption.state_relation(conn, intent["operation_sha256"]) +
+                " SET attempt_seconds=:seconds,expires_at=started_at+:seconds*interval '1 second' WHERE id=1"),
+                {"seconds": adoption_seconds(request)})
         binding = initialization_binding(request)
         conn.execute(text("UPDATE " + initialization_relation(intent) + " SET binding=CAST(:binding AS jsonb) WHERE id=1"),
                      {"binding": json.dumps(binding)})
         after = inspect_reschedule(conn, request=request, timeout_seconds=timeout_seconds)
         wanted = deepcopy(before)
         wanted["initialization"]["binding"] = binding
+        if extension:
+            wanted["capture"].update(attempt_seconds=adoption_seconds(request), expires_at=expiry.isoformat())
         if after != wanted:
             raise RuntimeError("storage_forward_reschedule_preservation_failed")
-        LOG.info("storage_forward_rescheduled operation_sha256=%s original_request_sha256=%s request_sha256=%s end_day=%s deadline_unchanged=true",
-            intent["operation_sha256"], _digest(original), _digest(request), request["forward_reschedule"]["end_day"])
+        LOG.info("storage_forward_rescheduled operation_sha256=%s original_request_sha256=%s request_sha256=%s end_day=%s deadline_extended=%s start_unchanged=true",
+            intent["operation_sha256"], _digest(original), _digest(request), request["forward_reschedule"]["end_day"], extension)
         return after
 
 
@@ -267,7 +321,7 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
     if (intent is None or type(key_seconds) is not int or not 30 <= key_seconds <= 3600
             or type(initial_seconds) is not int or not 30 <= initial_seconds <= 600):
         raise ValueError("storage_forward_worker_phase_bounds_invalid")
-    seconds = intent["original_capture"].get("attempt_seconds")
+    seconds = adoption_seconds(request)
     if type(seconds) is not int or not 30 <= seconds <= 345600:
         raise ValueError("storage_forward_worker_adoption_bound_invalid")
     limits = _limits(limits, migration=True)
