@@ -137,8 +137,9 @@ The follow-up V2 candidate allows one explicit extension after a completed V1
 amendment, before the current adoption expires. It binds the exact preceding
 amendment and request, and increases the cumulative adoption duration to a
 declared bound of at most 96 hours from the original SQL start. Fresh capacity
-must cover that new expiry. Only adoption duration/expiry and the existing
-package/schedule binding change; original start times, completed proof, guards,
+must cover that new expiry. Adoption duration/expiry, the archive capture's
+matching expiry and the existing package/schedule binding change atomically;
+original start times, completed proof, archive cursors/queue identities, guards,
 initializer clocks and the five-minute publication bound remain intact. The
 previous amendment is retained alongside one V2 journal. An expired proof cannot
 be revived, and this is not an indefinitely renewable migration lease.

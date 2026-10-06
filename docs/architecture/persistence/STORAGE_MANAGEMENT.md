@@ -3486,8 +3486,10 @@ adoption, a stopped worker, unchanged guards/ownership and a fresh forecast
 through the amended expiry. Object and descriptor limits may increase together;
 other resource floors and byte/memory limits remain unchanged.
 
-The existing initializer atomically changes its binding and the adoption's
-duration/expiry, preserving start time and the full progress/physical proof.
+The existing initializer atomically changes its binding, the adoption's
+duration/expiry and the archive capture's matching expiry. It preserves start
+time, archive cursors/queue identities and the full progress/physical proof;
+queued entries are never rewritten or removed by the amendment.
 Host publication retains the V1 journal and writes one operation-specific `-v2`
 journal. It updates the launch/worker deadline without resetting wall, monotonic
 or boot anchors. Each uncertain SQL dispatch remains observation-only on reentry;

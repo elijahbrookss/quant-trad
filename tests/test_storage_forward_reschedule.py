@@ -98,6 +98,7 @@ def rescheduling(successor,monkeypatch,request):
         forward.save_launched_worker(a.root,a.intent,a.current)
         a.name = "/"+a.plan["project"]+"-storage-online"
         a.sql["preserved_adoption_sha256"] = a.sql.pop("adoption_sha256")
+        a.sql["preserved_archive_sha256"] = "9"*64
         a.old_sql = deepcopy(a.sql)
         a.reschedule_path = Path(a.reschedule_package["forward_plan_path"])
         a.reschedule_plan = host.load_receipt(a.reschedule_path)

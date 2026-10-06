@@ -223,6 +223,10 @@ def inspect_reschedule(conn, *, request, timeout_seconds=10):
             for key in ("expires_at", "attempt_seconds"):
                 del preserved[key]
             result["preserved_adoption_sha256"] = _digest(preserved)
+            from scripts.db import archive_root_v2_online as archives
+            archive = archives._forward_amendment_state(conn, intent["operation_sha256"])
+            del archive["capture"]["binding"]["expires_at"]
+            result["preserved_archive_sha256"] = _digest(archive)
         else:
             result["adoption_sha256"] = _digest(preserved)
         return result
@@ -270,6 +274,8 @@ def reschedule_initialization(conn, *, request, expected, final_seconds, timeout
         if not now < boundary or boundary + timedelta(seconds=final_seconds) > expiry:
             raise RuntimeError("storage_forward_reschedule_outside_original_deadline")
         if extension:
+            from scripts.db import archive_root_v2_online as archives
+            archives._amend_forward_expiry(conn, intent["operation_sha256"], expiry)
             conn.execute(text("UPDATE " + adoption.state_relation(conn, intent["operation_sha256"]) +
                 " SET attempt_seconds=:seconds,expires_at=started_at+:seconds*interval '1 second' WHERE id=1"),
                 {"seconds": adoption_seconds(request)})

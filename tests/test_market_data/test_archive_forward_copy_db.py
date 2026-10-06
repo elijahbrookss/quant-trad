@@ -800,6 +800,9 @@ def _qualify_extension(engine, storage, previous, kwargs):
     with engine.begin() as conn:
         old = adoption._state(conn, operation)
         frozen = _frozen_records(conn)
+        archive_before = online._forward_amendment_state(conn, operation)
+        archive_owner = online._capture(operation, conn=conn)
+        queued_before = conn.execute(text(f"SELECT * FROM {archive_owner.queue} ORDER BY family,id")).all()
     boundary = (old["expires_at"].date()+timedelta(days=1)).isoformat()
     proposed = _extended(previous, end_day=boundary, attempt_seconds=old["attempt_seconds"]+86400)
     with engine.begin() as conn:
@@ -843,6 +846,10 @@ def _qualify_extension(engine, storage, previous, kwargs):
         assert actual == wanted
         assert adoption._state(conn, operation) == {**old, "attempt_seconds":old["attempt_seconds"]+86400,
             "expires_at":old["expires_at"]+timedelta(days=1)}
+        archive_after = deepcopy(archive_before)
+        archive_after["capture"]["binding"]["expires_at"] = (old["expires_at"]+timedelta(days=1)).isoformat()
+        assert online._forward_amendment_state(conn, operation) == archive_after
+        assert conn.execute(text(f"SELECT * FROM {archive_owner.queue} ORDER BY family,id")).all() == queued_before
         assert _frozen_records(conn) == frozen
     with pytest.raises(RuntimeError, match="preimage_changed"):
         with engine.begin() as conn:
