@@ -33,10 +33,10 @@ def attempt(operation_attempt):
     return a
 
 
-@pytest.fixture(params=[1, 2])
+@pytest.fixture(params=[1, 2, "retain_raw"])
 def rescheduling(successor,monkeypatch,request):
     a = successor
-    a.amendment_version = request.param
+    a.amendment_version = 2 if request.param == "retain_raw" else request.param
     # Existing fixtures use a fixed original boundary. Keep a genuinely later
     # boundary within their original 60-hour adoption, without extending it.
     _advance(a, datetime.fromisoformat("2026-10-04T12:00:00+00:00").timestamp()-a.clock[0])
@@ -77,6 +77,11 @@ def rescheduling(successor,monkeypatch,request):
                 seconds = worker.adoption_seconds(request)
                 a.sql["capture"].update(attempt_seconds=seconds, expires_at=(
                     datetime.fromisoformat(a.sql["capture"]["started_at"])+timedelta(seconds=seconds)).isoformat())
+        if request.get("forward_reschedule", {}).get("raw_mapping_mode") == "retain_source":
+            if action == "apply":
+                a.sql["raw_mapping_mode"] = "retain_source"
+            else:
+                a.sql.setdefault("raw_mapping_mode", "replace")
         return deepcopy(a.sql)
     a.reschedule_probe=probe
     monkeypatch.setattr(reschedule,"_probe",probe)
@@ -108,6 +113,10 @@ def rescheduling(successor,monkeypatch,request):
             attempt_seconds=84*3600, end_day="2026-10-07", image="sha256:"+"a"*64,
             source_revision="a"*40, source_tree_hash="b"*64,
             forward_plan_path=str(a.path.parent/"extended-operation.json"))
+        if request.param == "retain_raw":
+            a.reschedule_package["raw_mapping_mode"] = "retain_source"
+            a.sql["raw_mapping_mode"] = "replace"
+            a.old_sql = deepcopy(a.sql)
         a.reschedule_file = a.path.parent/"extension-package.json"
         write(a.reschedule_file,a.reschedule_package)
         capacity.update(plan_sha256=a.reschedule_package["plan_sha256"],attempt_seconds=84*3600,
@@ -300,3 +309,20 @@ def test_reschedule_cli_uses_local_operator_without_http(monkeypatch,tmp_path):
             "--reschedule-forward-file",str(package),*(["--execute"] if execute else [])])
         assert args.func(args)==0
     assert calls==[(str(path),dict(execute=value,reschedule_forward_file=str(package))) for value in (False,True)]
+
+
+def test_raw_retention_is_explicit_v2_request_and_preserves_identity_binding(rescheduling):
+    a = rescheduling
+    a.reschedule_package["raw_mapping_mode"] = "retain_source"
+    if a.amendment_version == 1:
+        with pytest.raises(ValueError, match="package_invalid"):
+            reschedule._proposal(a.reschedule_plan, a.request, a.reschedule_package)
+        return
+    revised, request = reschedule._proposal(a.reschedule_plan, a.request, a.reschedule_package)
+    assert worker.original_request(request) == worker.original_request(a.request)
+    assert request["forward_reschedule"]["raw_mapping_mode"] == "retain_source"
+    assert worker.initialization_binding(request)["reschedule"]["raw_mapping_mode"] == "retain_source"
+    assert revised["attempt_seconds"] == a.reschedule_package["attempt_seconds"]
+    a.reschedule_package["raw_mapping_mode"] = "skip_validation"
+    with pytest.raises(ValueError, match="raw_mapping_mode_invalid"):
+        reschedule._proposal(a.reschedule_plan, a.request, a.reschedule_package)

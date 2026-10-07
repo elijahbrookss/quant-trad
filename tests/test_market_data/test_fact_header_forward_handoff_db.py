@@ -33,9 +33,14 @@ def storage(native_storage, monkeypatch):
     return native_storage
 
 
-def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(retained, monkeypatch):
+@pytest.mark.parametrize("retain_raw", [False, True])
+def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(retained, monkeypatch, retain_raw):
     engine = retained.database._engine
     with engine.begin() as conn:
+        if retain_raw:
+            # An untrusted private copy cannot affect canonical reads when it is
+            # retained solely as evidence. The old path must prove it before use.
+            conn.exec_driver_sql("UPDATE " + raw.TARGET + " SET raw_frame_sha256=repeat('f',64)")
         adoption.prepare_adoption(conn, **retained.adoption_args)
         today = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
         args = dict(operation_sha256=OPERATION, end_day=today, evidence={"fixture": "forward"})
@@ -45,7 +50,29 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
         frozen = _frozen_records(conn)
     with pytest.raises(RuntimeError, match="adoption_incomplete"), engine.begin() as conn:
         handoff.stage_forward_tables(conn, **args)
-    _finish(engine)
+    if retain_raw:
+        with engine.begin() as conn:
+            with pytest.raises(RuntimeError, match="completed_identity_required"):
+                adoption._retain_raw_source(conn, adoption._state(conn))
+        for _ in range(64):
+            with engine.begin() as conn:
+                state = adoption._state(conn)
+                if all(state["progress"]["identity_" + side]["complete"] for side in ("source", "target")):
+                    raw_progress = {k:v for k,v in state["progress"].items() if k.startswith("raw_")}
+                    original_raw_oid = handoff._oid(conn, raw.SOURCE)
+                    adoption._retain_raw_source(conn, state)
+                    break
+                adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
+        else:
+            pytest.fail("identity fixture did not finish")
+        with engine.begin() as conn:
+            after = adoption._state(conn)
+            assert {k:v for k,v in after["progress"].items() if k.startswith("raw_")} == raw_progress
+            assert not all(p["complete"] for p in raw_progress.values())
+            assert adoption.adoption_page(conn, operation_sha256=OPERATION)["retained_targets_verified"]
+            assert adoption._state(conn)["progress"] == after["progress"]
+    else:
+        _finish(engine)
     with engine.begin() as conn:
         inventory = adoption.inspect_references(conn, operation_sha256=OPERATION)["references"]
     for relation in inventory:
@@ -111,6 +138,16 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
         assert _old(conn) == original and _frozen_records(conn) == frozen
         assert _headers(conn, headers.SCHEMA + ".fact_versions") == old_copy
         assert conn.scalar(text("SELECT count(*) FROM " + handoff.RETAINED + "." + raw.NAME)) > 0
+        if retain_raw:
+            assert handoff._oid(conn, raw.SOURCE) == original_raw_oid
+            assert result["receipt"]["raw_history_placement_pending"] is True
+            assert result["receipt"]["canonical_raw_oid"] == original_raw_oid
+            assert not adoption._state(conn)["progress"]["raw_target"]["complete"]
+            for statement in ("UPDATE " + handoff.RETAINED + "." + raw.NAME + " SET object_row_index=0",
+                              "DELETE FROM " + handoff.RETAINED + "." + raw.NAME,
+                              "TRUNCATE " + handoff.RETAINED + "." + raw.NAME):
+                with pytest.raises(Exception, match="immutable"), conn.begin_nested():
+                    conn.exec_driver_sql(statement)
         assert conn.scalar(text("SELECT market.fact_header_legacy_end_day()")) == today
         assert _headers(conn, "market.fact_versions_legacy") == _headers(conn, headers.SOURCE)
         with pytest.raises(RuntimeError, match="already_switched"):

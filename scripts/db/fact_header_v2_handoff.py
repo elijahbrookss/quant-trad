@@ -375,7 +375,9 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
                         "fact_header_partitions", "fact_header_series_days"))):
             raise RuntimeError("fact_header_forward_unowned_destination")
         source_oid = _oid(conn, headers.SOURCE)
-        raw_oid = _oid(conn, raw.SOURCE)
+        retain_raw = adoption.retains_raw_source(context["state"])
+        canonical_raw_oid = _oid(conn, raw.SOURCE)
+        raw_oid = _oid(conn, raw.TARGET if retain_raw else raw.SOURCE)
         search_files = [dict(row) for row in conn.execute(text(
             "SELECT c.oid::bigint,c.relfilenode::bigint FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
             "WHERE i.indrelid='market.fact_versions'::regclass AND NOT i.indisunique ORDER BY c.oid")).mappings()]
@@ -444,16 +446,24 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
         for row in incoming:
             conn.exec_driver_sql("ALTER TABLE " + row["relation"] + " RENAME CONSTRAINT " + references.STAGED +
                                 " TO " + quote(row["conname"]))
-        conn.exec_driver_sql("ALTER TABLE " + raw.SOURCE + " SET SCHEMA " + RETAINED)
+        # The amended path keeps the original canonical table, including its
+        # constraints and immutable guard. Quarantine the unfinished copy instead.
+        conn.exec_driver_sql("ALTER TABLE " + (raw.TARGET if retain_raw else raw.SOURCE) + " SET SCHEMA " + RETAINED)
         conn.exec_driver_sql("CREATE TRIGGER trg_retained_raw_source_closed BEFORE INSERT ON " + RETAINED + "." + raw.NAME +
                             " FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()")
         conn.exec_driver_sql("ALTER TABLE " + RETAINED + "." + raw.NAME +
                             " ENABLE ALWAYS TRIGGER trg_retained_raw_source_closed")
-        conn.exec_driver_sql("ALTER TABLE " + raw.TARGET + " SET SCHEMA market")
+        if retain_raw:
+            conn.exec_driver_sql("CREATE TRIGGER trg_retained_raw_copy_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON " +
+                RETAINED + "." + raw.NAME + " FOR EACH STATEMENT EXECUTE FUNCTION market.reject_immutable_mutation()")
+            conn.exec_driver_sql("ALTER TABLE " + RETAINED + "." + raw.NAME +
+                " ENABLE ALWAYS TRIGGER trg_retained_raw_copy_immutable")
+        else:
+            conn.exec_driver_sql("ALTER TABLE " + raw.TARGET + " SET SCHEMA market")
         conn.exec_driver_sql("CREATE TRIGGER trg_assert_fact_version_valid BEFORE INSERT ON market.fact_versions "
                             "FOR EACH ROW EXECUTE FUNCTION market.assert_fact_version_valid()")
         install_fact_storage_functions(conn)
-        for name in ("fact_versions", "fact_identities", "fact_header_partitions", raw.NAME):
+        for name in ("fact_versions", "fact_identities", "fact_header_partitions", *(() if retain_raw else (raw.NAME,))):
             conn.exec_driver_sql("CREATE TRIGGER trg_reject_mutation_" + name + " BEFORE UPDATE OR DELETE ON market." + name +
                                 " FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()")
         for suffix, events, scope in (("", "INSERT OR UPDATE OR DELETE", "ROW"), ("_truncate", "TRUNCATE", "STATEMENT")):
@@ -479,6 +489,11 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
                        search_files=search_files,switched_at=conn.scalar(text("SELECT clock_timestamp()")).isoformat(),
                        archive_inventory_sha256=(archive_receipt["inventory"]["inventory_sha256"]
                                                  if archive_receipt else None))
+        if retain_raw:
+            if _oid(conn, raw.SOURCE) != canonical_raw_oid:
+                raise RuntimeError("fact_header_forward_canonical_raw_changed")
+            receipt.update(raw_mapping_mode="retain_source", canonical_raw_oid=canonical_raw_oid,
+                           raw_history_placement_pending=True)
         conn.execute(text("UPDATE " + adoption.state_relation(conn, operation_sha256) + " SET terminal=CAST(:terminal AS jsonb) WHERE id=1"),
                      {"terminal":json.dumps(receipt)})
         context["switched"] = True
@@ -510,6 +525,9 @@ def _stage_forward_certificate(conn, *, policy, saved, source_root, destination_
     pid = physical.verify(conn, saved)
     for relation in (adoption.IDENTITY, raw.TARGET, *reference_move.RELATIONS):
         physical.verify_group(conn, relation, history=True, saved=saved, pid=pid)
+    if adoption.retains_raw_source(state):
+        # Explicit SSD bridge, not an assertion that raw HDD placement finished.
+        physical.verify_group(conn, raw.SOURCE, history=False, saved=saved, pid=pid)
     switched = stage_forward_tables(conn, operation_sha256=operation_sha256, end_day=end_day,
         evidence={"source_retained": True}, timeout_seconds=timeout_seconds)
     terminal = switched["receipt"]
@@ -780,8 +798,9 @@ def _verify_handoff_relations(conn, receipt, *, pid):
         """), {"relation": RETAINED+"."+name, "trigger": trigger})
         if closed != 1:
             raise RuntimeError("fact_header_handoff_retained_source_not_closed")
+    retain_raw = forward is not None and forward.get("raw_mapping_mode") == "retain_source"
     for relation in ("market.fact_identities", raw.SOURCE, *reference_move.RELATIONS):
-        physical.verify_group(conn, relation, history=True, saved=saved, pid=pid)
+        physical.verify_group(conn, relation, history=not (retain_raw and relation == raw.SOURCE), saved=saved, pid=pid)
     assert_fact_storage_contract(conn)
 
 
@@ -803,6 +822,21 @@ def _verify_forward_certificate(conn, receipt):
             or state["operation_sha256"] != forward["operation_sha256"]
             or _forward_adoption_digest(state) != receipt.get("forward_adoption_sha256")):
         raise RuntimeError("fact_header_forward_certificate_changed")
+    retain_raw = adoption.retains_raw_source(state)
+    if retain_raw:
+        if (forward.get("raw_mapping_mode") != "retain_source"
+                or forward.get("canonical_raw_oid") != receipt["active_relation_oids"][raw.NAME]
+                or forward.get("raw_history_placement_pending") is not True
+                or forward["canonical_raw_oid"] == forward["retained_raw_oid"]):
+            raise RuntimeError("fact_header_forward_raw_retention_receipt_changed")
+        closed = conn.scalar(text("SELECT count(*) FROM pg_trigger WHERE tgrelid=to_regclass(:relation) "
+            "AND tgname='trg_retained_raw_copy_immutable' AND tgenabled='A' AND tgtype=58 "
+            "AND NOT tgisinternal AND tgfoid='market.reject_immutable_mutation()'::regprocedure"),
+            {"relation": RETAINED + "." + raw.NAME})
+        if closed != 1:
+            raise RuntimeError("fact_header_forward_retained_raw_copy_not_closed")
+    elif any(name in forward for name in ("raw_mapping_mode", "canonical_raw_oid", "raw_history_placement_pending")):
+        raise RuntimeError("fact_header_forward_raw_retention_receipt_changed")
     owner = online_archives._capture(forward["operation_sha256"], conn=conn)
     if _oid(conn, owner.closed) is None:
         raise RuntimeError("fact_header_forward_archive_receipt_changed")

@@ -43,6 +43,10 @@ def _proposal(plan, request, package):
     extension = isinstance(package, dict) and package.get("schema_version") == "qt.storage_online_forward_reschedule_package.v2"
     if extension:
         fields |= {"previous_amendment_sha256", "attempt_seconds"}
+        if "raw_mapping_mode" in package:
+            fields.add("raw_mapping_mode")
+            if package["raw_mapping_mode"] != "retain_source":
+                raise ValueError("storage_forward_reschedule_raw_mapping_mode_invalid")
     if (not isinstance(package, dict) or set(package) != fields
             or package["schema_version"] not in {"qt.storage_online_forward_reschedule_package.v1", "qt.storage_online_forward_reschedule_package.v2"}
             or any(not isinstance(package[k], str) or not re.fullmatch(pattern, package[k]) for k,pattern in (
@@ -69,6 +73,8 @@ def _proposal(plan, request, package):
     if extension:
         revised["forward_reschedule"].update(schema_version="qt.storage_online_forward_reschedule.v2",
             previous_request_sha256=host.digest(request), attempt_seconds=package["attempt_seconds"])
+    if extension and "raw_mapping_mode" in package:
+        revised["forward_reschedule"]["raw_mapping_mode"] = package["raw_mapping_mode"]
     worker.request_binding(revised)
     # Increasing the descriptor ceiling pays only for the explicitly increased
     # immutable-object inventory; it cannot raise memory, bytes or other limits.
@@ -116,6 +122,8 @@ def _after_sql(journal):
         seconds = worker.adoption_seconds(journal["new_request"])
         expiry = datetime.fromisoformat(result["capture"]["started_at"])+timedelta(seconds=seconds)
         result["capture"].update(attempt_seconds=seconds, expires_at=expiry.isoformat())
+    if journal["new_request"].get("forward_reschedule", {}).get("raw_mapping_mode") == "retain_source":
+        result["raw_mapping_mode"] = "retain_source"
     return result
 
 

@@ -167,6 +167,12 @@ def _snapshot(conn, operation_sha256=None, *, schema=None, predecessor=None, loo
     if lookup_operation_sha256 is not None:
         from scripts.db import fact_header_forward_placement as lookup
         result["lookup_placement"] = lookup._completed(conn, lookup_operation_sha256)
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": state_name}) is not None:
+        mode = conn.scalar(text("SELECT binding->>'raw_mapping_mode' FROM " + state_name + " WHERE id=1"))
+        if mode is not None:
+            if mode != "retain_source":
+                raise RuntimeError("fact_header_forward_raw_mapping_mode_invalid")
+            result["raw_mapping_mode"] = mode
     return result
 
 
@@ -386,6 +392,8 @@ def adoption_page(conn, *, operation_sha256, page_rows=2048, timeout_seconds=30)
         state = _inspect(conn, operation_sha256, limit)
         for family, (source, target, columns, primary) in FAMILIES.items():
             if family == "raw":
+                if retains_raw_source(state):
+                    continue
                 if all(state["progress"]["raw_" + direction]["complete"] for direction in ("target", "source")):
                     continue
                 _prepare_raw_heap_progress(conn, state)
@@ -806,7 +814,35 @@ def _read_rows(conn, family, relation, wanted):
     return {tuple(row[name] for name in raw.KEYS): row for row in raw._rows_for_keys(conn, relation, wanted)}
 
 
+def retains_raw_source(state):
+    """The explicit amendment keeps the same canonical raw relation and schema."""
+    mode = state["binding"].get("raw_mapping_mode")
+    if mode not in (None, "retain_source"):
+        raise RuntimeError("fact_header_forward_raw_mapping_mode_invalid")
+    return mode == "retain_source"
+
+
+def _retain_raw_source(conn, state):
+    """Internal part of the stopped-worker request amendment, never a read repair.
+
+    Preserve every cursor/count and all native guards. Historical raw-copy proof
+    is no longer required because that copy will never become authoritative.
+    Identity mirrors remain continuous; ordinary retirement would break that proof.
+    """
+    if not all(state["progress"]["identity_" + side]["complete"] for side in ("source", "target")):
+        raise RuntimeError("fact_header_forward_completed_identity_required")
+    conn.exec_driver_sql("LOCK TABLE " + raw.SOURCE + "," + raw.TARGET + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+    if _snapshot(conn, state["operation_sha256"]) != state["binding"]:
+        raise RuntimeError("fact_header_forward_raw_retention_binding_changed")
+    binding = {**state["binding"], "raw_mapping_mode": "retain_source"}
+    conn.execute(text("UPDATE " + state_relation(conn, state["operation_sha256"]) +
+        " SET binding=CAST(:binding AS jsonb) WHERE id=1"), {"binding": json.dumps(binding)})
+    if _snapshot(conn, state["operation_sha256"]) != binding:
+        raise RuntimeError("fact_header_forward_raw_retention_binding_changed")
+
+
 def _report(state, *, reused, verified=0):
-    return dict(retained_targets_verified=all(p["complete"] for p in state["progress"].values()),
+    required = ("identity_source", "identity_target") if retains_raw_source(state) else tuple(state["progress"])
+    return dict(retained_targets_verified=all(state["progress"][name]["complete"] for name in required),
                 verified_page_rows=verified, reused=reused, source_authoritative=True,
                 migration_ready=False, final_switch_authorized=False)
