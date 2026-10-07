@@ -3499,6 +3499,36 @@ after the old expiry; execution is limited by the new finite bound. This candida
 is not a production extension until its SQL/host rehearsal, resource admission
 and exact operational authorization are satisfied.
 
+### Explicit retention of the canonical raw mapping table
+
+The V2 amendment optionally accepts only `raw_mapping_mode: retain_source`.
+Without this field, existing copy-and-swap behavior and receipts keep their meaning.
+The initializer requires completed identity-source and identity-target checks,
+briefly fences the raw relations, and records the choice with its exact new request.
+It changes no data, cursor, count or file. It removes only the raw source mirror
+to stop writes to the abandoned copy, preserving every identity guard. A
+preservation digest excludes only this named decision, that raw mirror and the
+independently admitted expiry fields. Unknown
+modes, changed proof, an active controller or incomplete identities refuse.
+
+The adopted worker omits both raw-copy scans. Native FK validation, archive
+verification and resource bounds remain required. The final atomic handoff keeps
+the original canonical raw OID, moves the unfinished copy into the retained
+namespace, closes that copy to mutation, and records the original canonical OID
+plus `raw_history_placement_pending: true`. Existing source readers, corrections,
+frozen inputs and raw provenance continue through the same schema. Rollback
+restores the entire switch; uncertain completion is inspected without replay.
+
+This candidate deliberately verifies the retained canonical raw table on SSD.
+It is a temporary capacity bridge, not completed HDD placement. Publication needs
+a fresh whole-operation forecast with no reclamation credit. A separate bounded
+physical move and matching recovery verification must retire that bridge before
+the full capacity goal is considered complete. The current amendment does not
+implement or authorize that move. See the
+[raw-table decision](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#keep-the-unchanged-canonical-raw-table)
+for remaining work and the distinction between stopping a worker and retiring
+its continuously maintained identity proof.
+
 ## Retained-target adoption after an uncaptured interval
 
 The candidate successor path keeps a separately authorized operation's adoption

@@ -64,6 +64,52 @@ mapping catch-up, reference validation, archive work or recovery publication.
 The existing work can be reused only after its ownership and content are proved
 for the replacement operation. A completed baseline is not a caught-up target.
 
+## Keep the unchanged canonical raw table
+
+Direction selected October 7, 2026; candidate implementation, not deployed.
+The current raw archive mapping table and its private replacement have identical
+columns, keys and logical indexes. Replacing this authority merely to change
+physical placement requires unnecessary source/target reconciliation. Retain
+`market.raw_archive_record_mappings` and its OID instead. All readers and writers
+continue using that same model. Preserve the unfinished private copy as closed
+operational evidence; do not delete it or count its allocation as free space.
+
+The existing stopped-worker V2 amendment can explicitly select
+`raw_mapping_mode: retain_source`. It requires completed identity checks and
+unchanged live guards. All identity and raw scan counters, original timestamps,
+file bindings and prior receipts remain intact. Only the raw source mirror is
+removed, so collection stops maintaining the abandoned copy; identity guards
+remain continuous. Raw checks remain **unfinished**,
+with no assertion of verified content; only the required-target selection changes.
+The final transaction keeps the canonical raw table and quarantines the private
+copy. The normal copy route remains compatible with existing requests/receipts.
+No registry, new migration service or runtime compatibility reader is added.
+
+This choice separates logical cutover from raw HDD placement. The canonical raw
+heap and indexes initially remain on SSD and the handoff explicitly reports
+`raw_history_placement_pending`. Existing source bytes already reduce observed
+free space; do not subtract them again or credit their future removal. Admit
+collection growth, WAL, temporary allocations and recovery through the selected
+operation horizon. Long-term capacity is **not solved** by this bridge.
+
+Before the storage goal is complete, qualify an explicit physical move through
+the existing storage boundary: native tablespace relocation, finite lock/time
+and resource limits, cancellation/rollback, lost-reply inspection, correct runtime
+mounts and a recovery baseline for the resulting layout. No historical row-by-row
+raw reconciliation is justified for a move of the authoritative relation itself.
+Moving files still copies bytes and blocks access; neither a short pause nor
+production throughput has been established. Do not hide that move inside the
+schema switch or an ordinary read, or claim that the current candidate executes it.
+
+Remaining cutover work is concrete: native references to the adopted identity
+table, archive inventory/copy catch-up, reference-catalog placement, the final
+header range check/attachment, application activation and recovery. Finished
+identity proof is reused only while its guards remain continuous. Stop the worker
+through its existing process owner when replacing it; **do not retire the adoption
+or remove identity mirrors merely to stop obsolete raw scans**. Retirement would
+create another unproved write interval. The cutover still obeys its bound and
+actual UTC range boundary; this decision does not authorize a renewed clock.
+
 ## Successor ownership after preserving retirement
 
 Candidate implementation: a separately supplied operation may use the existing

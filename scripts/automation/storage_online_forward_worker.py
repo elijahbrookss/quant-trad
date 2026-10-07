@@ -72,6 +72,10 @@ def original_request(request):
     version = update.get("schema_version") if isinstance(update, dict) else None
     if version == "qt.storage_online_forward_reschedule.v2":
         fields |= {"previous_request_sha256", "attempt_seconds"}
+        if "raw_mapping_mode" in update:
+            fields.add("raw_mapping_mode")
+            if update["raw_mapping_mode"] != "retain_source":
+                raise ValueError("storage_forward_reschedule_raw_mapping_mode_invalid")
     if (not isinstance(update, dict) or set(update) != fields
             or version not in {"qt.storage_online_forward_reschedule.v1", "qt.storage_online_forward_reschedule.v2"}
             or not isinstance(update["original_request_sha256"], str)
@@ -222,6 +226,14 @@ def inspect_reschedule(conn, *, request, timeout_seconds=10):
             # progress, guards, reference state and physical bindings still hash.
             for key in ("expires_at", "attempt_seconds"):
                 del preserved[key]
+            if request["forward_reschedule"].get("raw_mapping_mode") == "retain_source":
+                # Only this named decision and the abandoned raw copy's source
+                # mirror may change. Identity guards/progress/files remain pinned.
+                preserved = deepcopy(preserved)
+                result["raw_mapping_mode"] = preserved["binding"].pop("raw_mapping_mode", "replace")
+                preserved["binding"]["functions"] = [entry for entry in preserved["binding"]["functions"]
+                    if (entry["relation"], entry["tgname"]) !=
+                       (adoption.raw.SOURCE, adoption._trigger_name("raw", "mirror"))]
             result["preserved_adoption_sha256"] = _digest(preserved)
             from scripts.db import archive_root_v2_online as archives
             archive = archives._forward_amendment_state(conn, intent["operation_sha256"])
@@ -279,6 +291,8 @@ def reschedule_initialization(conn, *, request, expected, final_seconds, timeout
             conn.execute(text("UPDATE " + adoption.state_relation(conn, intent["operation_sha256"]) +
                 " SET attempt_seconds=:seconds,expires_at=started_at+:seconds*interval '1 second' WHERE id=1"),
                 {"seconds": adoption_seconds(request)})
+        if request["forward_reschedule"].get("raw_mapping_mode") == "retain_source":
+            adoption._retain_raw_source(conn, adoption._state(conn, intent["operation_sha256"]))
         binding = initialization_binding(request)
         conn.execute(text("UPDATE " + initialization_relation(intent) + " SET binding=CAST(:binding AS jsonb) WHERE id=1"),
                      {"binding": json.dumps(binding)})
@@ -287,6 +301,8 @@ def reschedule_initialization(conn, *, request, expected, final_seconds, timeout
         wanted["initialization"]["binding"] = binding
         if extension:
             wanted["capture"].update(attempt_seconds=adoption_seconds(request), expires_at=expiry.isoformat())
+        if request["forward_reschedule"].get("raw_mapping_mode") == "retain_source":
+            wanted["raw_mapping_mode"] = "retain_source"
         if after != wanted:
             raise RuntimeError("storage_forward_reschedule_preservation_failed")
         LOG.info("storage_forward_rescheduled operation_sha256=%s original_request_sha256=%s request_sha256=%s end_day=%s deadline_extended=%s start_unchanged=true",
@@ -426,6 +442,8 @@ def prepare_forward(engine, request, *, targets, policy, limits, source, destina
                         or state["binding"]["terminal"]["receipt"]["capture"] != intent["original_capture"]
                         or state["binding"]["terminal"]["receipt"]["intent_sha256"] != intent["cancellation_intent_sha256"]):
                     raise RuntimeError("storage_forward_adoption_binding_changed")
+                if adoption.retains_raw_source(state) != (request.get("forward_reschedule", {}).get("raw_mapping_mode") == "retain_source"):
+                    raise RuntimeError("storage_forward_raw_mapping_mode_changed")
                 archives._inspect(conn, source, destination, forward_operation_sha256=intent["operation_sha256"], saved=saved)
                 return placement, state["started_at"].isoformat()
         except Exception as exc:
