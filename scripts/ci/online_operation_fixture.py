@@ -847,7 +847,8 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
             successor_preparation_and_terminal=True, successor_final_handoff=False,
             actual_reschedule_sql_transport=True, reschedule_lost_commit_no_replay=True,
             reschedule_original_clocks_and_proof=True, rescheduled_worker_and_terminal=True,
-            explicit_extension_transport_and_reentry=True, extension_preserved_start_and_progress=True), worker["container_id"]
+            explicit_extension_transport_and_reentry=True, extension_preserved_start_and_progress=True,
+            retained_raw_amendment_transport_and_reentry=True), worker["container_id"]
     finally:
         operation.inspect_prepared_operation, terminal._probe = actual_preflight, actual_probe
 
@@ -896,7 +897,7 @@ def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=
         original[previous_path] = previous_path.read_bytes()
         package.update(schema_version="qt.storage_online_forward_reschedule_package.v2",
             previous_amendment_sha256=publication._sha(original[previous_path]), attempt_seconds=seconds,
-            end_day=(datetime.fromisoformat(capture["expires_at"]).date()+timedelta(days=1)).isoformat())
+            raw_mapping_mode="retain_source", end_day=(datetime.fromisoformat(capture["expires_at"]).date()+timedelta(days=1)).isoformat())
     package_file=state/("reschedule-package"+suffix+".json")
     host_boundary.save_receipt(package_file,package,initial=True)
     assert not operation.run_operation_plan(plan_path,reschedule_forward_file=package_file)["storage_mutations_performed"]
