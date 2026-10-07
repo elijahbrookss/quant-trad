@@ -695,11 +695,9 @@ def release_for_switch(conn):
     if state["binding"] != _snapshot(conn, state["operation_sha256"]):
         raise RuntimeError("fact_header_forward_adoption_binding_changed")
     _reference_states(conn, state)
-    for family, (source, target, _, _) in FAMILIES.items():
-        for relation, suffix in ((target, "validate"), (source, "mirror"),
-                                 (source, "source_seal"), (target, "target_seal")):
-            trigger = conn.dialect.identifier_preparer.quote(_trigger_name(family, suffix))
-            conn.exec_driver_sql("DROP TRIGGER " + trigger + " ON " + relation)
+    for family, relation, suffix in _owned_triggers(state):
+        trigger = conn.dialect.identifier_preparer.quote(_trigger_name(family, suffix))
+        conn.exec_driver_sql("DROP TRIGGER " + trigger + " ON " + relation)
     return context
 
 
@@ -777,12 +775,10 @@ def retire_adoption(conn, *, operation_sha256, timeout_seconds=30, read_only_nam
             raise RuntimeError("fact_header_forward_reference_retirement_incomplete")
         removed_reference_oids = {item["oid"] for item in staged.values() if item}
         removed = []
-        for family, (source, target, _, _) in FAMILIES.items():
-            for relation, suffix in ((target, "validate"), (source, "mirror"),
-                                     (source, "source_seal"), (target, "target_seal")):
-                trigger = _trigger_name(family, suffix)
-                conn.exec_driver_sql("DROP TRIGGER " + conn.dialect.identifier_preparer.quote(trigger) + " ON " + relation)
-                removed.append([relation, trigger])
+        for family, relation, suffix in _owned_triggers(state):
+            trigger = _trigger_name(family, suffix)
+            conn.exec_driver_sql("DROP TRIGGER " + conn.dialect.identifier_preparer.quote(trigger) + " ON " + relation)
+            removed.append([relation, trigger])
         expected = deepcopy(state["binding"])
         admitted_removed = [entry for entry in expected["functions"]
             if [entry["relation"], entry["tgname"]] in removed]
@@ -822,10 +818,21 @@ def retains_raw_source(state):
     return mode == "retain_source"
 
 
+def _owned_triggers(state):
+    """One trigger inventory for both final switch and preserving retirement."""
+    for family, (source, target, _, _) in FAMILIES.items():
+        for relation, suffix in ((target, "validate"), (source, "mirror"),
+                                 (source, "source_seal"), (target, "target_seal")):
+            if family == "raw" and suffix == "mirror" and retains_raw_source(state):
+                continue
+            yield family, relation, suffix
+
+
 def _retain_raw_source(conn, state):
     """Internal part of the stopped-worker request amendment, never a read repair.
 
-    Preserve every cursor/count and all native guards. Historical raw-copy proof
+    Preserve every cursor/count and all identity guards. Remove only the raw
+    source mirror so collection stops maintaining the abandoned copy. Raw-copy proof
     is no longer required because that copy will never become authoritative.
     Identity mirrors remain continuous; ordinary retirement would break that proof.
     """
@@ -834,7 +841,15 @@ def _retain_raw_source(conn, state):
     conn.exec_driver_sql("LOCK TABLE " + raw.SOURCE + "," + raw.TARGET + " IN SHARE ROW EXCLUSIVE MODE NOWAIT")
     if _snapshot(conn, state["operation_sha256"]) != state["binding"]:
         raise RuntimeError("fact_header_forward_raw_retention_binding_changed")
-    binding = {**state["binding"], "raw_mapping_mode": "retain_source"}
+    if retains_raw_source(state):
+        raise RuntimeError("fact_header_forward_raw_retention_already_selected")
+    mirror = _trigger_name("raw", "mirror")
+    functions = [entry for entry in state["binding"]["functions"]
+                 if (entry["relation"], entry["tgname"]) != (raw.SOURCE, mirror)]
+    if len(functions) != len(state["binding"]["functions"]) - 1:
+        raise RuntimeError("fact_header_forward_raw_mirror_changed")
+    conn.exec_driver_sql("DROP TRIGGER " + mirror + " ON " + raw.SOURCE)
+    binding = {**state["binding"], "functions": functions, "raw_mapping_mode": "retain_source"}
     conn.execute(text("UPDATE " + state_relation(conn, state["operation_sha256"]) +
         " SET binding=CAST(:binding AS jsonb) WHERE id=1"), {"binding": json.dumps(binding)})
     if _snapshot(conn, state["operation_sha256"]) != binding:

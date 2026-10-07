@@ -875,7 +875,9 @@ def _qualify_extension(engine, storage, previous, kwargs, *, retain_raw=False):
         expected_state = {**old, "attempt_seconds":old["attempt_seconds"]+86400,
             "expires_at":old["expires_at"]+timedelta(days=1)}
         if retain_raw:
-            expected_state["binding"] = {**old["binding"], "raw_mapping_mode": "retain_source"}
+            expected_state["binding"] = {**old["binding"], "raw_mapping_mode": "retain_source",
+                "functions": [entry for entry in old["binding"]["functions"]
+                    if (entry["relation"], entry["tgname"]) != (raw.SOURCE, adoption._trigger_name("raw", "mirror"))]}
             assert not all(old["progress"]["raw_" + side]["complete"] for side in ("source", "target"))
         assert adoption._state(conn, operation) == expected_state
         archive_after = deepcopy(archive_before)

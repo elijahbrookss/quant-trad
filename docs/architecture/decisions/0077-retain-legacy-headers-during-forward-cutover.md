@@ -77,7 +77,9 @@ operational evidence; do not delete it or count its allocation as free space.
 The existing stopped-worker V2 amendment can explicitly select
 `raw_mapping_mode: retain_source`. It requires completed identity checks and
 unchanged live guards. All identity and raw scan counters, original timestamps,
-file bindings and prior receipts remain intact. Raw checks remain **unfinished**,
+file bindings and prior receipts remain intact. Only the raw source mirror is
+removed, so collection stops maintaining the abandoned copy; identity guards
+remain continuous. Raw checks remain **unfinished**,
 with no assertion of verified content; only the required-target selection changes.
 The final transaction keeps the canonical raw table and quarantines the private
 copy. The normal copy route remains compatible with existing requests/receipts.

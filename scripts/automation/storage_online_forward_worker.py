@@ -227,10 +227,13 @@ def inspect_reschedule(conn, *, request, timeout_seconds=10):
             for key in ("expires_at", "attempt_seconds"):
                 del preserved[key]
             if request["forward_reschedule"].get("raw_mapping_mode") == "retain_source":
-                # Exactly this optional decision changes; all old proof/cursors,
-                # files and guards stay in the preservation digest.
+                # Only this named decision and the abandoned raw copy's source
+                # mirror may change. Identity guards/progress/files remain pinned.
                 preserved = deepcopy(preserved)
                 result["raw_mapping_mode"] = preserved["binding"].pop("raw_mapping_mode", "replace")
+                preserved["binding"]["functions"] = [entry for entry in preserved["binding"]["functions"]
+                    if (entry["relation"], entry["tgname"]) !=
+                       (adoption.raw.SOURCE, adoption._trigger_name("raw", "mirror"))]
             result["preserved_adoption_sha256"] = _digest(preserved)
             from scripts.db import archive_root_v2_online as archives
             archive = archives._forward_amendment_state(conn, intent["operation_sha256"])

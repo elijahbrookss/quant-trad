@@ -71,6 +71,18 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
             assert not all(p["complete"] for p in raw_progress.values())
             assert adoption.adoption_page(conn, operation_sha256=OPERATION)["retained_targets_verified"]
             assert adoption._state(conn)["progress"] == after["progress"]
+            # Exercise a real source insert inside a disposable savepoint: the
+            # abandoned copy stops growing immediately, before final cutover.
+            with conn.begin_nested() as insertion:
+                before_copy = conn.scalar(text("SELECT count(*) FROM " + raw.TARGET))
+                projection = ["'raw-retained-probe'" if c == "raw_record_id" else
+                    "object_row_index+100000" if c == "object_row_index" else c for c in raw.COLUMNS]
+                conn.exec_driver_sql("INSERT INTO " + raw.SOURCE + "(" + ",".join(raw.COLUMNS) +
+                    ") SELECT " + ",".join(projection) + " FROM " + raw.SOURCE + " LIMIT 1")
+                assert conn.scalar(text("SELECT count(*) FROM " + raw.SOURCE +
+                    " WHERE raw_record_id='raw-retained-probe'")) == 1
+                assert conn.scalar(text("SELECT count(*) FROM " + raw.TARGET)) == before_copy
+                insertion.rollback()
     else:
         _finish(engine)
     with engine.begin() as conn:

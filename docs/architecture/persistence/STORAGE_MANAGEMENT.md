@@ -3505,8 +3505,10 @@ The V2 amendment optionally accepts only `raw_mapping_mode: retain_source`.
 Without this field, existing copy-and-swap behavior and receipts keep their meaning.
 The initializer requires completed identity-source and identity-target checks,
 briefly fences the raw relations, and records the choice with its exact new request.
-It changes no data, guard, cursor, count or file. A preservation digest excludes
-only this named decision and the independently admitted expiry fields. Unknown
+It changes no data, cursor, count or file. It removes only the raw source mirror
+to stop writes to the abandoned copy, preserving every identity guard. A
+preservation digest excludes only this named decision, that raw mirror and the
+independently admitted expiry fields. Unknown
 modes, changed proof, an active controller or incomplete identities refuse.
 
 The adopted worker omits both raw-copy scans. Native FK validation, archive
