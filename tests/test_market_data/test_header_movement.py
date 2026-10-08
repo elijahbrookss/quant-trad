@@ -104,6 +104,9 @@ def test_stalled_watcher_invalidates_backend_before_it_can_return_to_pool():
     try:
         watch.start()
         assert entered.wait(2)
+        watch._last_observed_at = monotonic() - 1
+        with pytest.raises(RuntimeError, match="resource_observation_stale"):
+            watch.check_progress()
         with pytest.raises(RuntimeError,match="watcher_did_not_stop"):
             watch.stop(connection)
         assert connection.invalidated
@@ -111,6 +114,99 @@ def test_stalled_watcher_invalidates_backend_before_it_can_return_to_pool():
         release.set()
         watch._thread.join(2)
         assert not watch._thread.is_alive()
+
+
+@pytest.fixture
+def running_watch():
+    import threading
+    from time import monotonic
+    from types import SimpleNamespace
+    from portal.backend.service.storage.header_movement import _MoveWatch
+
+    evidence = SimpleNamespace(filesystem_uuid="same", device_id="1:2",
+                               path="/owned", available_bytes=100)
+    state = SimpleNamespace(evidence=evidence, cancelled=False, scans=[],
+                            backend_cancelled=threading.Event())
+
+    class Target:
+        target_id = "hdd"
+
+        def inspect(self, **kwargs):
+            state.scans.append(threading.get_ident())
+            return state.evidence
+
+    class Driver:
+        def cancel(self):
+            state.backend_cancelled.set()
+
+    class Connection:
+        def invalidate(self):
+            pytest.fail("healthy watcher did not stop")
+
+    watch = _MoveWatch(driver=Driver(), targets=(Target(),), capacity={"hdd": evidence},
+                      floors={"hdd": 50}, deadline=monotonic() + 10,
+                      cancelled=lambda: state.cancelled, grace=2)
+    watch.start()
+    try:
+        yield watch, state
+    finally:
+        watch.stop(Connection())
+        assert not watch._thread.is_alive()
+
+
+def test_archive_progress_callbacks_do_not_rescan_filesystems(running_watch):
+    import threading
+
+    watch, state = running_watch
+    owner = threading.get_ident()
+    before = state.scans.count(owner)
+    for _ in range(10_000):
+        watch.check_progress()
+    assert state.scans.count(owner) == before
+    # A page/transaction boundary still takes a fresh physical observation.
+    watch.check()
+    assert state.scans.count(owner) == before + 1
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("cancel", "storage_move_cancelled"),
+    ("deadline", "storage_move_time_budget_exceeded"),
+])
+def test_progress_checks_controls_without_waiting_for_watcher(running_watch, fault, expected):
+    from time import monotonic
+
+    watch, state = running_watch
+    if fault == "cancel":
+        state.cancelled = True
+    else:
+        watch.deadline = monotonic() - 1
+    with pytest.raises(RuntimeError, match=expected):
+        watch.check_progress()
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("space", "storage_move_space_budget_exceeded"),
+    ("identity", "storage_move_filesystem_changed"),
+])
+def test_progress_checks_preserve_watcher_resource_failure(running_watch, fault, expected):
+    from types import SimpleNamespace
+
+    watch, state = running_watch
+    changed = vars(state.evidence).copy()
+    changed["available_bytes" if fault == "space" else "filesystem_uuid"] = (
+        0 if fault == "space" else "replacement")
+    state.evidence = SimpleNamespace(**changed)
+    assert state.backend_cancelled.wait(2)
+    with pytest.raises(RuntimeError, match=expected):
+        watch.check_progress()
+
+
+def test_progress_checks_require_a_running_watcher(running_watch):
+    watch, _ = running_watch
+    watch._stop.set()
+    watch._thread.join(2)
+    with pytest.raises(RuntimeError, match="watcher_not_running"):
+        watch.check_progress()
 
 
 def test_legacy_physical_receipt_preserves_range_through_file_relocation(transition):

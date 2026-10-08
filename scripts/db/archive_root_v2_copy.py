@@ -200,7 +200,7 @@ def _copy_archive_page(engine, *, select_page, record_page, family, source_root,
                         key = row["object_key"]
 
                         def check():
-                            watch.check()
+                            watch.check_progress()
                             if (_root(source, saved["recent_device"])[1] != source_identity
                                     or _root(destination, saved["history_device"])[1] != destination_identity):
                                 raise RuntimeError("archive_copy_root_changed")
@@ -341,7 +341,7 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
                             raise RuntimeError("archive_inventory_verification_budget_exceeded")
 
                         def check():
-                            watch.check()
+                            watch.check_progress()
                             if (_root(source, saved["recent_device"])[1] != source_identity
                                     or _root(destination, saved["history_device"])[1] != destination_identity):
                                 raise RuntimeError("archive_copy_root_changed")
@@ -388,7 +388,8 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
                 yield report
                 watch.check()
                 if file_proof is not None:
-                    file_proof.verify_all(check_budget=watch.check)
+                    file_proof.verify_all(check_budget=watch.check_progress)
+                    watch.check()
             finally:
                 metadata.pop(key, None)
         finally:

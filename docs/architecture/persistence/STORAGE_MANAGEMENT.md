@@ -3714,6 +3714,16 @@ forward-schema capture/progress/queue records and triggers; the canceled
 operation's journals and queues remain unchanged. Both routes retain the same
 file hashes, path checks, resource watch, expiry fence and transaction bounds.
 
+Archive loops use the existing resource watch's `check_progress` callback between
+fresh page and transaction inspections. This avoids repeating both filesystem
+inspections for every file and hash chunk. Cancellation and deadlines are checked
+on each callback; filesystem identity and free space continue to be polled every
+0.1 seconds. Progress refuses a failed or stopped watcher, or an observation older
+than the existing cancellation grace. File hashes, read leases and exact path
+checks are unchanged, and the final lease pass is followed by a fresh inspection.
+This is candidate implementation behavior, not evidence of deployment or a
+qualified production pause duration.
+
 Manifest IDs are not commit ordered. A forward catalog insert queue captures
 late arrivals behind the baseline cursor. File publication can survive a failed
 SQL page; retry verifies and reuses it before committing queue consumption.
