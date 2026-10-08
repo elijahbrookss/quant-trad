@@ -479,3 +479,85 @@ def test_stream_fences_recheck_wall_clock_expiry_after_waiting_for_raw(storage, 
             finally:
                 if blocker.in_transaction():
                     blocker.rollback()
+
+
+@pytest.mark.parametrize("channel", ["trade", "l2"])
+def test_buffer_reconfiguration_requires_drained_owner_and_preserves_lifecycle(storage, monkeypatch, channel):
+    """Use existing definition/lifecycle owners; no production sizing claim."""
+    from datetime import UTC, datetime
+    from dataclasses import replace
+    from copy import deepcopy
+    from market_data.stream_enrollment import load_stream_enrollment_manifest
+    from portal.backend.service.market import market_structure_service
+    from portal.backend.service.storage.repos import collector_operations, market_structure
+
+    monkeypatch.setattr(collector_operations, "db", storage.database)
+    monkeypatch.setattr(market_structure, "db", storage.database)
+    monkeypatch.setattr(market_structure_service, "market_data_repo", storage.repo)
+    structures = market_structure.market_structure_repository
+    operations = collector_operations.PostgresCollectorOperationsRepository()
+    service = market_structure_service.MarketStructureService(repository=structures)
+    template = load_stream_enrollment_manifest(f"config/market_data/coinbase_perpetual_{channel}_fleet.v1.json")
+    enrollment = replace(template.enrollments[0], instrument_id="storage-fixture")
+    manifest = replace(template, manifest_hash="", enrollments=(enrollment,))
+    larger = replace(manifest, manifest_hash="", enrollments=(replace(enrollment, max_inflight_segments=64),))
+    monkeypatch.setattr(market_structure_service, "get_instrument_record", lambda instrument_id: {
+        "symbol": enrollment.product_contract.provider_product_id,
+        "metadata": {"instrument_fields": {"tick_size": "0.01", "qty_step": "1"}},
+    })
+
+    def apply(value):
+        return service.apply_stream_enrollment_manifest(manifest=value)["definitions"][0]
+
+    initial = apply(manifest)
+    definition = initial["id"]
+    expected = deepcopy(initial["config"])
+    expected["manifest_hash"] = larger.manifest_hash
+    expected["runtime_policy"]["max_inflight_segments"] = 64
+
+    def lifecycle(action, request_id):
+        return operations.apply_lifecycle_action(
+            request_id=request_id, collector_id=definition, collector_kind="continuous_stream",
+            action=action, requested_at=datetime.now(UTC), actor_id="fixture:buffer-config",
+            context={"purpose": "bounded raw placement preparation"})
+
+    def claim():
+        return structures.claim_stream(definition_id=definition, owner_id="fixture:collector",
+                                       lease_seconds=90, bounded=False)
+
+    with pytest.raises(RuntimeError, match="buffer_change_requires_stopped_owner"):
+        apply(larger)
+    first_claim = claim()
+    request = "pause-" + uuid4().hex
+    paused = lifecycle("pause", request)
+    assert paused["status"] == "succeeded"
+    assert lifecycle("pause", request)["idempotent_replay"]
+    # Desired paused is insufficient while the old collector still owns drain.
+    with pytest.raises(RuntimeError, match="buffer_change_requires_stopped_owner"):
+        apply(larger)
+    structures.release(first_claim)
+    changed = apply(larger)
+    assert changed["desired_state"] == "paused" and changed["enabled"] is True
+    assert changed["identity_key"] == initial["identity_key"]
+    assert changed["generation"] == initial["generation"] + 1
+    assert changed["config"] == expected
+    assert apply(larger)["generation"] == changed["generation"]
+    with pytest.raises(ValueError, match="not_desired_running"):
+        claim()
+    lifecycle("resume", "resume-" + uuid4().hex)
+    new_claim = claim()
+    assert new_claim.config["runtime_policy"]["max_inflight_segments"] == 64
+    assert new_claim.definition_generation == changed["generation"]
+    # Restoring the reviewed prior configuration is another controlled change.
+    with pytest.raises(RuntimeError, match="buffer_change_requires_stopped_owner"):
+        apply(manifest)
+    lifecycle("pause", "pause-restore-" + uuid4().hex)
+    structures.release(new_claim)
+    restored = apply(manifest)
+    assert restored["config"] == initial["config"]
+    assert restored["generation"] == changed["generation"] + 1
+    assert restored["desired_state"] == "paused"
+    lifecycle("resume", "resume-restored-" + uuid4().hex)
+    restored_claim = claim()
+    assert restored_claim.config["runtime_policy"]["max_inflight_segments"] == 4
+    structures.release(restored_claim)

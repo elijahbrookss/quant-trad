@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
+from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.archive import (
     ArchiveObjectAcknowledgement,
     EncodedRawArchive,
@@ -600,6 +601,24 @@ class PostgresMarketStructureRepository:
                         and operational_key not in next_config
                     ):
                         next_config[operational_key] = existing_config[operational_key]
+                prior_slots = (existing_config.get("runtime_policy") or {}).get(
+                    "max_inflight_segments", ContinuousStreamPolicy.max_inflight_segments
+                )
+                next_slots = (next_config.get("runtime_policy") or {}).get(
+                    "max_inflight_segments", ContinuousStreamPolicy.max_inflight_segments
+                )
+                if prior_slots != next_slots:
+                    # The definition row also serializes claims/lifecycle changes.
+                    # Never fence a live finalizer merely to resize its queue.
+                    active_lease = session.execute(text(
+                        "SELECT 1 FROM market.stream_lease_state "
+                        "WHERE definition_id=:id AND expires_at>clock_timestamp()"
+                    ), {"id": existing["id"]}).first()
+                    if existing["desired_state"] == "running" or active_lease is not None:
+                        raise RuntimeError(
+                            "market_stream_buffer_change_requires_stopped_owner: "
+                            f"definition_id={existing['id']}; stop or pause and wait for drain"
+                        )
                 # Enrollment owns initial state and reviewed configuration.
                 # Once installed, audited lifecycle actions are the only
                 # authority allowed to start, stop, pause, or resume a stream.
