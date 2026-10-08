@@ -1,7 +1,8 @@
 """Explicit stopped-worker amendments of the current forward operation.
 
 V1 keeps the adoption deadline. One V2 follow-up may extend its cumulative
-bound before expiry, with fresh capacity evidence. Neither copies data, stops
+bound with fresh capacity evidence. Explicit guarded continuation can retain
+completed proof after expiry. Neither copies data, stops
 source clients, restarts workers or resets proof, start times or phase clocks.
 """
 from copy import deepcopy
@@ -43,6 +44,10 @@ def _proposal(plan, request, package):
     extension = isinstance(package, dict) and package.get("schema_version") == "qt.storage_online_forward_reschedule_package.v2"
     if extension:
         fields |= {"previous_amendment_sha256", "attempt_seconds"}
+        if "continue_guarded_proof" in package:
+            fields.add("continue_guarded_proof")
+            if package["continue_guarded_proof"] is not True or package.get("raw_mapping_mode") != "retain_source":
+                raise ValueError("storage_forward_guarded_continuation_invalid")
         if "raw_mapping_mode" in package:
             fields.add("raw_mapping_mode")
             if package["raw_mapping_mode"] != "retain_source":
@@ -73,6 +78,8 @@ def _proposal(plan, request, package):
     if extension:
         revised["forward_reschedule"].update(schema_version="qt.storage_online_forward_reschedule.v2",
             previous_request_sha256=host.digest(request), attempt_seconds=package["attempt_seconds"])
+    if extension and "continue_guarded_proof" in package:
+        revised["forward_reschedule"]["continue_guarded_proof"] = True
     if extension and "raw_mapping_mode" in package:
         revised["forward_reschedule"]["raw_mapping_mode"] = package["raw_mapping_mode"]
     worker.request_binding(revised)
@@ -135,7 +142,8 @@ def _window(journal):
             or boundary+timedelta(seconds=journal["new_plan"]["limits"]["final_seconds"]) > expiry):
         raise RuntimeError("storage_forward_reschedule_outside_original_deadline")
     forward._launch_clock(journal["old_launch"])
-    forward._launch_remaining(journal["old_launch"], old_expiry.timestamp())
+    deadline = expiry if journal["package"].get("continue_guarded_proof") is True else old_expiry
+    forward._launch_remaining(journal["old_launch"], deadline.timestamp())
 
 
 def _amendment_base(root, base, package):
@@ -180,7 +188,8 @@ def _verify_journal(root, base, journal):
     sql = journal["sql_before"]
     old_initial = {k:v for k,v in sql["initialization"].items() if k != "id"}
     owner, expiry = forward.admit_adoption_observation(base["new_request"], initialization=old_initial,
-        capture=sql["capture"], now=journal["started_at"])
+        capture=sql["capture"], now=journal["started_at"],
+        allow_expired=package.get("continue_guarded_proof") is True)
     expected_binding = dict(publication_sha256=base["intent_sha256"],
         request_sha256=old_worker["binding"]["request_sha256"],
         worker_binding_sha256=host.digest(old_worker["binding"]), operation_sha256=package["operation_sha256"])

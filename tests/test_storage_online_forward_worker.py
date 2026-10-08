@@ -187,3 +187,16 @@ def test_successor_foreign_or_ambiguous_bindings_refuse(field, value):
     request["forward"]["operation_sha256"] = digest({k:v for k,v in request["forward"].items() if k != "operation_sha256"})
     with pytest.raises(ValueError):
         forward.request_binding(request)
+
+
+@pytest.mark.parametrize("value", [False, None, 1, "true"])
+def test_guarded_continuation_requires_explicit_true_and_retained_raw(value):
+    request = _extended(_rescheduled(_successor_request()))
+    request["forward_reschedule"].update(raw_mapping_mode="retain_source", continue_guarded_proof=value)
+    with pytest.raises(ValueError, match="guarded_continuation_invalid"):
+        forward.request_binding(request)
+    request["forward_reschedule"]["continue_guarded_proof"] = True
+    assert forward.original_request(request) == _successor_request()
+    del request["forward_reschedule"]["raw_mapping_mode"]
+    with pytest.raises(ValueError, match="guarded_continuation_invalid"):
+        forward.request_binding(request)

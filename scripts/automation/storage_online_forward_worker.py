@@ -63,7 +63,7 @@ def original_request(request):
     The operation identity, data proof and clocks remain those of this request.
     V1 keeps its original clocks. V2 names the preceding request and an explicit
     cumulative adoption duration; the host and SQL initializer independently admit
-    that pre-expiry extension. Neither version rewrites the canceled capture.
+    that explicit extension. Neither version rewrites the canceled capture.
     """
     update = request.get("forward_reschedule")
     if update is None and "forward_reschedule" not in request:
@@ -72,6 +72,10 @@ def original_request(request):
     version = update.get("schema_version") if isinstance(update, dict) else None
     if version == "qt.storage_online_forward_reschedule.v2":
         fields |= {"previous_request_sha256", "attempt_seconds"}
+        if "continue_guarded_proof" in update:
+            fields.add("continue_guarded_proof")
+            if update["continue_guarded_proof"] is not True or update.get("raw_mapping_mode") != "retain_source":
+                raise ValueError("storage_forward_guarded_continuation_invalid")
         if "raw_mapping_mode" in update:
             fields.add("raw_mapping_mode")
             if update["raw_mapping_mode"] != "retain_source":
@@ -212,7 +216,22 @@ def inspect_reschedule(conn, *, request, timeout_seconds=10):
     with adoption._step(conn, timeout_seconds) as limit:
         if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))")):
             raise RuntimeError("storage_forward_reschedule_storage_owner_busy")
-        state = adoption._inspect(conn, intent["operation_sha256"], limit)
+        if request.get("forward_reschedule", {}).get("continue_guarded_proof") is True:
+            # Expiry stops work, but does not remove these ALWAYS guards. This
+            # explicitly selected amendment may inspect preserved proof, never
+            # a retired adoption or the original canceled capture.
+            adoption.inspect_retirement(conn, operation_sha256=intent["operation_sha256"],
+                                        timeout_seconds=timeout_seconds)
+            state = adoption._inspect_guarded_state(conn, adoption._state(conn, intent["operation_sha256"]))
+            if not all(state["progress"]["identity_"+side]["complete"] for side in ("source", "target")):
+                raise RuntimeError("storage_forward_guarded_identity_proof_incomplete")
+            expiry = state["started_at"] + timedelta(seconds=adoption_seconds(request))
+            remaining = (expiry-conn.scalar(text("SELECT clock_timestamp()"))).total_seconds()
+            if remaining <= 0:
+                raise RuntimeError("storage_forward_guarded_continuation_expired")
+            limit(remaining)
+        else:
+            state = adoption._inspect(conn, intent["operation_sha256"], limit)
         phase = _initial(conn, intent)
         if phase is None or not phase["complete"]:
             raise RuntimeError("storage_forward_reschedule_completed_initializer_required")
@@ -250,7 +269,8 @@ def reschedule_initialization(conn, *, request, expected, final_seconds, timeout
     The host must have retired the old worker and journaled this exact dispatch.
     The same SQL lock independently excludes a surviving controller. Initializer
     V1 leaves all clocks unchanged. V2 can increase the cumulative adoption bound
-    before expiry; progress, constraints, mirrors and archive capture stay intact.
+    before expiry, or explicitly continue completed guarded proof afterward;
+    progress, constraints, mirrors and archive capture stay intact.
     The short initializer and publication clocks are never renewed. Lost COMMIT is observed through
     ``inspect_reschedule``; the host must not replay uncertain dispatch.
     """

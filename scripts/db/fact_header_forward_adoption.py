@@ -259,6 +259,13 @@ def _inspect(conn, operation_sha256, limit):
     if remaining <= 0:
         raise RuntimeError("fact_header_forward_adoption_expired")
     limit(float(remaining))
+    return _inspect_guarded_state(conn, state)
+
+
+def _inspect_guarded_state(conn, state):
+    """Content/ownership evidence only; this helper grants no work lifetime."""
+    if state["terminal"] is not None:
+        raise RuntimeError("fact_header_forward_adoption_retired")
     if state["binding"] != _snapshot(conn, state["operation_sha256"]):
         raise RuntimeError("fact_header_forward_adoption_binding_changed")
     _reference_states(conn, state)

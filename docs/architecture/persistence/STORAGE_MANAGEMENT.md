@@ -3481,7 +3481,7 @@ The V2 follow-up candidate uses the same command with the current V1 plan.
 `qt.storage_online_forward_reschedule_package.v2` adds
 `previous_amendment_sha256` (the exact completed V1 journal bytes) and
 `attempt_seconds` (a strictly larger cumulative bound, at most 345600 seconds
-from the original adoption start). It requires a later boundary, an unexpired
+from the original adoption start). It normally requires a later boundary, an unexpired
 adoption, a stopped worker, unchanged guards/ownership and a fresh forecast
 through the amended expiry. Object and descriptor limits may increase together;
 other resource floors and byte/memory limits remain unchanged.
@@ -3498,6 +3498,16 @@ extension, source stop or worker restart. Completed publication remains readable
 after the old expiry; execution is limited by the new finite bound. This candidate
 is not a production extension until its SQL/host rehearsal, resource admission
 and exact operational authorization are satisfied.
+
+The optional `continue_guarded_proof: true` is limited to V2 with
+`raw_mapping_mode: retain_source`. It admits an expired, **unretired** adoption
+only after exact live native/reference/archive verification and complete identity
+proof. The existing ALWAYS guards must remain intact. Ordinary worker admission
+still refuses expiry; only this explicit amendment may inspect the preserved
+proof and atomically extend its allowance. It adds no scan, queue, service or
+registry. Original starts, receipts and the 96-hour cumulative maximum remain;
+a missed new boundary, insufficient capacity, changed guards or reboot refuses.
+See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
 
 ### Explicit retention of the canonical raw mapping table
 
@@ -3682,7 +3692,17 @@ terminal receipt share one transaction; interruption rolls them back together.
 There is no committed early range CHECK that can strand collection at rollover.
 The original private copied headers/catalogues and raw source remain preserved.
 The native range scan is part of the final pause and needs measured production
-admission within the existing deadline. The host entrypoint, durable COMMIT
+admission within the existing deadline.
+Required FK validations log elapsed SQL time, reuse status, heap sizes and
+before/after transaction-local scan counters through the existing reference
+owner. These catalog/statistics reads add no historical scan and change no
+migration or pause allowance. They distinguish a reused constraint from actual
+validation work. [PostgreSQL transaction statistics](https://www.postgresql.org/docs/15/monitoring-stats.html)
+update within the transaction; shared I/O counters can lag or include collectors.
+A reused constraint, index-only path, disabled statistics or incomplete parallel
+accounting cannot qualify the full header range scan. Review the observations
+with collector health, I/O/temp/WAL peaks and other final phases before source
+pause; logs alone confer no cutover authority. The host entrypoint, durable COMMIT
 reconciliation, full physical qualification, recovery and deployment remain open.
 
 ## Forward archive catch-up ownership
