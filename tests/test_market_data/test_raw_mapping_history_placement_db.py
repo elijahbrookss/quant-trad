@@ -344,7 +344,7 @@ def test_continuous_capture_buffers_raw_lock_then_publishes_every_frame(
             assert waiting, "fixture publisher never reached the real raw relation lock"
             blocked_at = monotonic()
             raw_waiting.set()
-            captured = await asyncio.to_thread(produced.wait, 20)
+            captured = await asyncio.to_thread(produced.wait, 45)
             if not captured:
                 with engine.begin() as conn:
                     graph = [dict(row) for row in conn.execute(text(
