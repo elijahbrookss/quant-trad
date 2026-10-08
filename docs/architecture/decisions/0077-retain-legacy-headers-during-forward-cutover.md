@@ -202,7 +202,7 @@ still refuse. The canceled original capture is never reactivated.
 The original start, proof counters, queues, receipts and five-minute publication
 clock remain. The maximum is still 96 cumulative hours, with a fresh capacity
 forecast and a future boundary inside the new allowance. Old packages retain
-the pre-expiry rule. No third amendment, automatic renewal, larger approved
+the pre-expiry rule. No further deadline amendment, automatic renewal, larger approved
 allowance, new registry or market-data authority follows from this option.
 
 This exception addresses measured preparation that misses its first revised
@@ -218,6 +218,19 @@ fit. The guarded option above is the sole exception to pre-expiry amendment. Nat
 reschedule/reentry/retirement rehearsal are release gates. Production use and
 throughput remain separate qualification; this candidate is not deployed by
 documentation or by passing tests.
+
+The V3 candidate permits one package correction after completed V2 raw retention.
+This addresses a qualified worker defect without coupling its replacement to
+another schedule extension or historical scan. The existing publication owner
+binds the exact V2 predecessor, stopped worker and replacement image; the SQL
+initializer changes only candidate request provenance. Dates, all clocks, budgets,
+physical bindings, data and completed progress remain fixed. The cost is one
+additional receipt in the existing private publication journal. Original bytes
+remain recoverable, uncertain SQL completion is observed without replay, and
+partial file publication resumes only inside its original five-minute window.
+An expired adoption still refuses. Native rollback, confined replacement/reentry
+and lost-reply qualification are required before production use; the correction
+does not by itself admit the final pause or deploy the release.
 
 ## One parent, with an explicit retained range
 

@@ -938,6 +938,55 @@ def _qualify_extension(engine, storage, source, previous, kwargs, *, retain_raw=
     with pytest.raises(RuntimeError, match="reschedule_initializer_required"):
         worker.prepare_forward(engine, previous, **kwargs)
     worker.prepare_forward(engine, proposed, **kwargs)
+    if retain_raw:
+        proposed = _qualify_package_correction(engine, proposed, kwargs)
+    return proposed
+
+
+def _qualify_package_correction(engine, previous, kwargs):
+    """Real package-binding commit/rollback without repeating historical work."""
+    from copy import deepcopy
+    from scripts.automation import storage_online_forward_worker as worker
+    operation = previous["forward"]["operation_sha256"]
+    proposed = {**deepcopy(previous), "source_revision":"d"*40, "source_tree_hash":"e"*64}
+    with engine.begin() as conn:
+        expected = worker.inspect_reschedule(conn, request=proposed)
+        state = adoption._state(conn, operation)
+        archive = online._forward_amendment_state(conn, operation)
+        frozen = _frozen_records(conn)
+    def replace(conn, request=proposed):
+        return worker.replace_initialization_package(conn, request=request, previous_request=previous,
+            expected=expected, final_seconds=1)
+    for field, value in (("max_objects", previous["max_objects"]+1),
+                         ("forward_reschedule", {**previous["forward_reschedule"], "attempt_seconds":1})):
+        with pytest.raises((ValueError, RuntimeError)), engine.begin() as conn:
+            replace(conn, {**deepcopy(proposed), field:value})
+    with engine.connect() as owner:
+        owner.execute(text("SELECT pg_advisory_lock(hashtextextended(:name,0))"), {"name":adoption.CONTROLLER_LOCK})
+        try:
+            with pytest.raises(RuntimeError, match="controller_active"), engine.begin() as conn:
+                replace(conn)
+        finally:
+            owner.execute(text("SELECT pg_advisory_unlock(hashtextextended(:name,0))"), {"name":adoption.CONTROLLER_LOCK})
+    with pytest.raises(RuntimeError, match="rollback package fixture"), engine.begin() as conn:
+        replace(conn)
+        raise RuntimeError("rollback package fixture")
+    with engine.begin() as conn:
+        assert worker.inspect_reschedule(conn, request=proposed) == expected
+        replace(conn)
+    with engine.begin() as conn:
+        actual = worker.inspect_reschedule(conn, request=proposed)
+        wanted = deepcopy(expected)
+        wanted["initialization"]["binding"] = worker.initialization_binding(proposed)
+        assert actual == wanted
+        assert adoption._state(conn, operation) == state
+        assert online._forward_amendment_state(conn, operation) == archive
+        assert _frozen_records(conn) == frozen
+    with pytest.raises(RuntimeError, match="preimage_changed"), engine.begin() as conn:
+        replace(conn)
+    with pytest.raises(RuntimeError, match="reschedule_initializer_required"):
+        worker.prepare_forward(engine, previous, **kwargs)
+    worker.prepare_forward(engine, proposed, **kwargs)
     return proposed
 
 

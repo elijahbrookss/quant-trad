@@ -3509,6 +3509,20 @@ registry. Original starts, receipts and the 96-hour cumulative maximum remain;
 a missed new boundary, insufficient capacity, changed guards or reboot refuses.
 See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
 
+The V3 package correction uses the same command after a completed V2 retained-raw
+publication. It names that exact predecessor and changes only the immutable
+worker image and source provenance. The effective request, selected day, original
+starts, expiry, inventory ceilings, physical placement and resource budgets stay
+fixed. It requires a stopped worker, an unexpired adoption, fresh capacity and
+candidate/runtime qualification. The existing initializer changes only its
+request binding under controller exclusion; it does not rescan or reset completed
+work. A separate V3 receipt in the existing publication journal preserves all
+predecessor bytes and makes interrupted file publication recoverable. An uncertain
+SQL dispatch is observed without replay. This narrowly supports one qualified
+package correction; it is not a new deadline extension or an automatic retry.
+Unit and native rehearsals cover rollback, lost replies, source/frozen preservation
+and reentry. Production image qualification and pause admission remain separate.
+
 ### Explicit retention of the canonical raw mapping table
 
 The V2 amendment optionally accepts only `raw_mapping_mode: retain_source`.

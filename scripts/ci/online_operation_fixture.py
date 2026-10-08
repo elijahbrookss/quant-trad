@@ -845,6 +845,8 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
             state=state, plan_path=successor_path, selected=selected, worker=worker)
         successor_path, selected, worker = _rehearse_forward_reschedule(
             state=state, plan_path=successor_path, selected=selected, worker=worker, version=2)
+        successor_path, selected, worker = _rehearse_forward_reschedule(
+            state=state, plan_path=successor_path, selected=selected, worker=worker, version=3)
         cancel_package = dict(schema_version="qt.storage_online_terminal.v1", plan_sha256=publication._sha(successor_path.read_bytes()),
             **{k:manifest[k] for k in ("image", "source_revision", "source_tree_hash")})
         cancel_file = state/"successor-retirement-package.json"
@@ -859,7 +861,8 @@ def _rehearse_retained_successor(*, state, plan_path, manifest, terminal_file, p
             actual_reschedule_sql_transport=True, reschedule_lost_commit_no_replay=True,
             reschedule_original_clocks_and_proof=True, rescheduled_worker_and_terminal=True,
             explicit_extension_transport_and_reentry=True, extension_preserved_start_and_progress=True,
-            retained_raw_amendment_transport_and_reentry=True), worker["container_id"]
+            retained_raw_amendment_transport_and_reentry=True,
+            package_correction_transport_reentry_and_unchanged_clocks=True), worker["container_id"]
     finally:
         operation.inspect_prepared_operation, terminal._probe = actual_preflight, actual_probe
 
@@ -881,7 +884,7 @@ def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=
         forward.STATE,request=selected["new_request"]))}
     seconds = capture["attempt_seconds"]+(86400 if version == 2 else 0)
     expiry = datetime.fromisoformat(capture["started_at"])+timedelta(seconds=seconds)
-    suffix = "" if version == 1 else "-v2"
+    suffix = "" if version == 1 else "-v"+str(version)
     # Finite, idle synthetic fixture: these allowances are not production evidence.
     forecast=dict(schema_version="qt.storage_deadline_capacity.v1",plan_sha256=publication._sha(plan_path.read_bytes()),
         attempt_seconds=seconds,through_epoch=expiry.timestamp(),
@@ -910,15 +913,32 @@ def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=
             previous_amendment_sha256=publication._sha(original[previous_path]), attempt_seconds=seconds,
             raw_mapping_mode="retain_source", continue_guarded_proof=True,
             end_day=(datetime.fromisoformat(capture["expires_at"]).date()+timedelta(days=1)).isoformat())
+    if version == 3:
+        # A distinct immutable image of the same attested source exercises the
+        # real replacement path; only a disposable fixture label is added.
+        context = state/"package-image-context"
+        context.mkdir(mode=0o700)
+        tag = "qt-package-correction-fixture:"+host_boundary.digest(dict(path=str(state)))[:16]
+        host_boundary.docker("tag", plan["image"], tag)
+        image = host_boundary.docker("build", "--network", "none", "--pull=false", "--quiet",
+            "--file", "-", str(context), input="FROM "+tag+"\nLABEL qt.storage.package-correction-fixture=true\n",
+            timeout=120).strip().splitlines()[-1]
+        previous_path = state/reschedule.state_file(package["operation_sha256"], version=2)
+        original[previous_path] = previous_path.read_bytes()
+        package.update(schema_version="qt.storage_online_forward_reschedule_package.v3",
+            previous_amendment_sha256=publication._sha(original[previous_path]), attempt_seconds=seconds,
+            end_day=selected["new_request"]["forward_reschedule"]["end_day"],
+            max_objects=selected["new_request"]["max_objects"], descriptor_limit=plan["descriptor_limit"], image=image)
     package_file=state/("reschedule-package"+suffix+".json")
     host_boundary.save_receipt(package_file,package,initial=True)
     assert not operation.run_operation_plan(plan_path,reschedule_forward_file=package_file)["storage_mutations_performed"]
     actual_probe=reschedule._probe
     dispatches=[]
+    apply_action = "replace_package" if version == 3 else "apply"
     def lose_commit(*args,**kwargs):
         result=actual_probe(*args,**kwargs)
         dispatches.append(kwargs["action"])
-        if kwargs["action"]=="apply":raise TimeoutError("reschedule COMMIT reply lost")
+        if kwargs["action"]==apply_action:raise TimeoutError("reschedule COMMIT reply lost")
         return result
     reschedule._probe=lose_commit
     try:
@@ -928,7 +948,7 @@ def _rehearse_forward_reschedule(*, state, plan_path, selected, worker, version=
         except TimeoutError as exc:assert str(exc)=="reschedule COMMIT reply lost"
         assert operation.run_operation_plan(plan_path,reschedule_forward_file=package_file,execute=True)["deadline_renewed"] is (version == 2)
     finally:reschedule._probe=actual_probe
-    assert dispatches.count("apply")==1
+    assert dispatches.count(apply_action)==1
     journal=host_boundary.load_receipt(state/reschedule.state_file(package["operation_sha256"],version=version),max_bytes=reschedule.MAX_BYTES)
     assert actual_probe(journal["new_plan"],worker,request=journal["new_request"],action="inspect")==reschedule._after_sql(journal)
     new_path=Path(package["forward_plan_path"])
