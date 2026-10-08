@@ -351,6 +351,10 @@ class MarketStructureService:
         definitions: list[dict[str, Any]] = []
         now = datetime.now(UTC)
         for enrollment in manifest.enrollments:
+            runtime_policy = ContinuousStreamPolicy.from_mapping(
+                {"max_inflight_segments": enrollment.max_inflight_segments}
+                if enrollment.max_inflight_segments is not None else None
+            ).to_dict()
             instrument = get_instrument_record(enrollment.instrument_id)
             if str(instrument.get("symbol") or "") != (
                 enrollment.product_contract.provider_product_id
@@ -555,9 +559,7 @@ class MarketStructureService:
                         str(key): value
                         for key, value in flow_feature_series_ids.items()
                     },
-                    "runtime_policy": ContinuousStreamPolicy.from_mapping(
-                        None
-                    ).to_dict(),
+                    "runtime_policy": runtime_policy,
                 }
             else:
                 tick_size = _instrument_decimal(instrument, "tick_size")
@@ -627,9 +629,7 @@ class MarketStructureService:
                     ),
                     "checkpoint_max_seconds": 300,
                     "checkpoint_max_mutations": 100000,
-                    "runtime_policy": ContinuousStreamPolicy.from_mapping(
-                        None
-                    ).to_dict(),
+                    "runtime_policy": runtime_policy,
                 }
             definitions.append(
                 self.repository.upsert_stream_definition(

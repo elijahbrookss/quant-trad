@@ -1521,3 +1521,17 @@ the intended archived objects before changing the archive root. Existing spool
 paths and raw record identities remain valid. Private file ownership must also
 be qualified across API, initializer and collector processes; the root separation
 does not itself establish production permissions or authorize a server change.
+
+Raw publication and fenced stream Fact writes acquire raw-mapping relation
+access before locking the stream lease row. An exclusive physical move can then
+delay publication without holding the row needed by capture's heartbeat. Lease
+expiry is checked against the actual wall clock after that wait; ownership,
+generation, token and source checks remain mandatory. Heartbeats themselves do
+not acquire the raw relation lock.
+
+Capture still has the existing finite `max_inflight_segments` queue and spool
+byte limits. The native raw-placement regression crosses heartbeat intervals
+while publication is blocked, then requires complete archive/canonical
+acknowledgement and preserved known-at timing. This does not choose a production
+queue size or admit a move duration. Changing a definition's runtime policy
+changes its generation and requires coordinated lifecycle handling.

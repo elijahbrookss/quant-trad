@@ -25,6 +25,8 @@ code_paths:
   - src/data_providers/streams/runtime.py
   - src/core/market_storage_lifecycle.py
   - src/market_data/archive.py
+  - src/market_data/stream_enrollment.py
+  - portal/backend/service/market/collector_definition_enrollment_service.py
   - portal/backend/service/market/collector_supervisor.py
   - tests/test_market_data/test_continuous_collector_supervisor.py
   - tests/test_market_data/test_collector_shutdown_signal.py
@@ -396,6 +398,30 @@ no `stop_at`. A restart reconstructs desired tasks
 from the database and cannot bypass an active safety latch. Reapplying an
 enrollment changes reviewed configuration but does not overwrite an operator's
 later stopped or paused lifecycle state.
+
+A reviewed stream enrollment may declare a positive integer
+`max_inflight_segments` alongside its spool and segment byte limits. Omission
+keeps the four-slot default and preserves existing manifest material/hashes;
+an explicit value becomes part of the manifest hash and is retained by product
+templates. This is reviewed capacity configuration, not a new lifecycle action
+or arbitrary runtime-JSON editor.
+
+To change the queue, stop or pause through the canonical collector controls,
+wait for successful drain and loss of the live lease, apply the reviewed
+manifest, then explicitly start or resume. The definition repository refuses a
+queue change while desired running or a live lease remains. Reapplication is
+idempotent and never resumes a paused collector. Restoring a prior limit uses
+the same sequence and advances configuration generation; it does not erase
+operation history. A manifest value alone does not admit a maintenance duration:
+queue occupancy, spool arrivals, memory, cancellation and rollback still need
+their measured resource budget.
+
+Stored runtime-policy rows keep their existing format. Older enrollment loaders
+can use the preserved original manifests; they reject manifests containing the
+new optional field. Fleet enrollment commits each definition separately. If an
+apply fails, keep the selected collectors paused, inspect each definition's
+manifest hash, queue value and generation, and reapply the same reviewed
+manifest to finish. Resume only after every selected definition matches.
 
 ## Resource Authority
 

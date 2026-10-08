@@ -2452,6 +2452,8 @@ class PostgresMarketDataRepository:
                     "market_collection_fence_invalid: stream definition "
                     "generation is required"
                 ) from exc
+            from .fact_references import lock_stream_raw_mapping_access
+            lock_stream_raw_mapping_access(session)
             ownership = session.execute(
                 text(
                     """
@@ -2459,7 +2461,7 @@ class PostgresMarketDataRepository:
                            definitions.generation AS definition_generation,
                            leases.owner_id, leases.token_hash,
                            leases.lease_generation,
-                           leases.expires_at > now() AS lease_current
+                           leases.expires_at > clock_timestamp() AS lease_current
                     FROM market.stream_definitions AS definitions
                     JOIN market.stream_lease_state AS leases
                       ON leases.definition_id = definitions.id

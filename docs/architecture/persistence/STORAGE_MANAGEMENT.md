@@ -3615,6 +3615,17 @@ Host admission, successful exact-image recovery qualification and representative
 time/WAL/spool measurements remain required. A small
 fixture cannot establish a production pause or turn timeout into a recovery SLA.
 
+Collector admission must include the configured pending-segment queue, its
+occupancy, byte-triggered rotation and rollback time; a disk/WAL reservation alone
+is insufficient. Raw publication and canonical stream writers wait for raw
+relation access before taking lease-row locks, so their wait does not prevent
+capture heartbeats. Expiry checks use the current wall clock after waiting.
+The native regression exercises multiple queued segments across heartbeat
+intervals, complete publication after release, and expired ownership refusal.
+Default collector limits remain unchanged. Larger tested fixture queues are
+not approved production settings or a guarantee of capture continuity for an
+arbitrary maintenance duration.
+
 ## Retained-target adoption after an uncaptured interval
 
 The candidate successor path keeps a separately authorized operation's adoption

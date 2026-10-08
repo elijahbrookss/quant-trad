@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
+from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.archive import (
     ArchiveObjectAcknowledgement,
     EncodedRawArchive,
@@ -600,6 +601,24 @@ class PostgresMarketStructureRepository:
                         and operational_key not in next_config
                     ):
                         next_config[operational_key] = existing_config[operational_key]
+                prior_slots = (existing_config.get("runtime_policy") or {}).get(
+                    "max_inflight_segments", ContinuousStreamPolicy.max_inflight_segments
+                )
+                next_slots = (next_config.get("runtime_policy") or {}).get(
+                    "max_inflight_segments", ContinuousStreamPolicy.max_inflight_segments
+                )
+                if prior_slots != next_slots:
+                    # The definition row also serializes claims/lifecycle changes.
+                    # Never fence a live finalizer merely to resize its queue.
+                    active_lease = session.execute(text(
+                        "SELECT 1 FROM market.stream_lease_state "
+                        "WHERE definition_id=:id AND expires_at>clock_timestamp()"
+                    ), {"id": existing["id"]}).first()
+                    if existing["desired_state"] == "running" or active_lease is not None:
+                        raise RuntimeError(
+                            "market_stream_buffer_change_requires_stopped_owner: "
+                            f"definition_id={existing['id']}; stop or pause and wait for drain"
+                        )
                 # Enrollment owns initial state and reviewed configuration.
                 # Once installed, audited lifecycle actions are the only
                 # authority allowed to start, stop, pause, or resume a stream.
@@ -1089,7 +1108,12 @@ class PostgresMarketStructureRepository:
         return int(value)
 
     @staticmethod
-    def _require_fence(session, claim: StreamClaim) -> Mapping[str, Any]:
+    def _require_fence(
+        session, claim: StreamClaim, *, raw_mapping_access: bool = False,
+    ) -> Mapping[str, Any]:
+        if raw_mapping_access:
+            from .fact_references import lock_stream_raw_mapping_access
+            lock_stream_raw_mapping_access(session)
         row = session.execute(
             text(
                 """
@@ -1109,7 +1133,7 @@ class PostgresMarketStructureRepository:
                        definitions.max_segment_bytes
                            AS definition_max_segment_bytes,
                        definitions.config AS definition_config,
-                       leases.*, leases.expires_at > now() AS lease_current
+                       leases.*, leases.expires_at > clock_timestamp() AS lease_current
                 FROM market.stream_definitions AS definitions
                 JOIN market.stream_lease_state AS leases
                   ON leases.definition_id = definitions.id
@@ -1482,7 +1506,7 @@ class PostgresMarketStructureRepository:
                     {"scope": f"market-archive-compaction:{claim.definition_id}"},
                 )
             else:
-                self._require_fence(session, claim)
+                self._require_fence(session, claim, raw_mapping_access=True)
             ordered_sources: list[Mapping[str, Any]] = []
             if source_manifest_ids:
                 ordered_sources = list(
@@ -2227,7 +2251,7 @@ class PostgresMarketStructureRepository:
             )
 
         with db.session() as session:
-            self._require_fence(session, claim)
+            self._require_fence(session, claim, raw_mapping_access=require_archive_mapping)
             for fact in rows:
                 if fact.provider_product_id != claim.provider_product_id:
                     raise ValueError(
@@ -2588,7 +2612,7 @@ class PostgresMarketStructureRepository:
         inserted_validity = 0
         max_commit_seq = 0
         with db.session() as session:
-            self._require_fence(session, claim)
+            self._require_fence(session, claim, raw_mapping_access=True)
             for fact in (*snapshot_rows, *batch_rows):
                 if fact.series_id != claim.series_id:
                     raise ValueError(
