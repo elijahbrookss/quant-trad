@@ -13,6 +13,7 @@ code_paths:
   - cli/storage_placement.py
   - tests/test_cli/test_storage_placement.py
   - tests/test_market_data/test_raw_mapping_history_placement_db.py
+  - tests/test_market_data/test_incremental_raw_placement_db.py
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward_worker.py
@@ -3601,9 +3602,17 @@ fixture covers read-only/no-intent inspection, rollback, concurrent-reader
 refusal, duplicate requests, cancellation, lost replies, preserved frozen inputs
 and the SSD primary index. The atomic completion pointer changes the existing
 recovery layout fingerprint; an older pair is no longer current. A placement
-result deliberately returns `recovery_verified: false`. Host admission, actual
-encrypted recovery of the resulting layout and representative time/WAL/spool
-measurements remain required. A small
+result deliberately returns `recovery_verified: false`. The separate
+`test_incremental_raw_placement_db.py` rehearsal runs the packaged CLI using its
+image identity and a labelled heartbeat fixture. It takes a full encrypted pair
+before movement and an incremental pair afterward, restores into an empty
+disposable volume, then compares current/frozen facts, book replay, canonical and
+retained raw rows, native relation identities and completion evidence. Original
+archive paths are unavailable and writes after the selected pair must be absent.
+It runs in a separate `incremental-recovery` invocation; the test topology cannot
+reuse a restore volume or postmaster from the original full-copy rehearsal.
+Host admission, successful exact-image recovery qualification and representative
+time/WAL/spool measurements remain required. A small
 fixture cannot establish a production pause or turn timeout into a recovery SLA.
 
 ## Retained-target adoption after an uncaptured interval

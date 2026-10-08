@@ -40,14 +40,26 @@ pytestmark = [
 
 
 def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
-        storage, tmp_path, monkeypatch):
+        storage, tmp_path, monkeypatch, *, retained_raw=False):
     assert os.getuid() == 70 and os.getenv("QT_STORAGE_DEMO") == "1"
-    source_root = tmp_path/"source-archives"
-    source_root.mkdir()
-    _cold_book(storage, source_root, monkeypatch, split_sources=False)
-    storage.open_day = storage.today+timedelta(days=1)
-    _placement(monkeypatch, storage.open_day)
-    _preserving_handoff(storage, tmp_path, monkeypatch)
+    if retained_raw:
+        from tests.test_market_data.test_incremental_raw_placement_db import (
+            prepare_retained_raw, execute_packaged_move, assert_restored_raw,
+        )
+        source_root = prepare_retained_raw(storage, tmp_path, monkeypatch)
+        legacy_headers = "market.fact_versions_legacy"
+        reader = FilesystemRawArchiveObjectStore(source_root/"objects", writable=False)
+        tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda:reader)
+        monkeypatch.setattr(market_data, "canonical_fact_storage_repository", tiered)
+        monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", tiered)
+    else:
+        source_root = tmp_path/"source-archives"
+        source_root.mkdir()
+        _cold_book(storage, source_root, monkeypatch, split_sources=False)
+        storage.open_day = storage.today+timedelta(days=1)
+        _placement(monkeypatch, storage.open_day)
+        _preserving_handoff(storage, tmp_path, monkeypatch)
+        legacy_headers = "qt_fact_header_retained_v1.fact_versions"
     _placement(monkeypatch, storage.open_day)
     recent = replace(storage.fact, observation_key="incremental-recent",
                      observation_time=BASE+timedelta(days=2))
@@ -56,13 +68,22 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     engine = storage.database._engine
     with engine.connect() as conn:
         identity = _identity(conn)[0]
-        assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions")) > 0
+        assert conn.scalar(text("SELECT count(*) FROM " + legacy_headers)) > 0
     hdd, secrets_root = Path("/qt-history"), Path("/qt-incremental-secrets")
-    device, udev = hdd.stat().st_dev, tmp_path/"udev"
-    udev.mkdir()
-    (udev/f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID=uuid-incremental-application\n")
+    if retained_raw:
+        # Keep the physical binding used by the real handoff and CLI verifier.
+        udev, target, recent_target = storage.copy_udev, storage.copy_plan.history, storage.copy_plan.recent
+    else:
+        device, udev = hdd.stat().st_dev, tmp_path/"udev"
+        udev.mkdir()
+        (udev/f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID=uuid-incremental-application\n")
+        target = StorageTarget("hdd", "Disposable", "uuid-incremental-application", str(hdd), "hdd")
+        recent_target = StorageTarget("ssd", "Disposable recent", "uuid-incremental-recent",
+                                     "/qt-source/pgdata", "ssd")
+        source_device = Path(recent_target.root).stat().st_dev
+        (udev/f"b{os.major(source_device)}:{os.minor(source_device)}").write_text(
+            "E:ID_FS_UUID=uuid-incremental-recent\n")
     monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
-    target = StorageTarget("hdd", "Disposable", "uuid-incremental-application", str(hdd), "hdd")
     keys = [secrets.token_hex(32), secrets.token_hex(32)]
     for name, key in zip(("database-key", "archive-key"), keys):
         (secrets_root/name).write_text(key)
@@ -80,11 +101,6 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     # PostgreSQL filesystem/PID attestation, not a bypassed test helper.
     from dataclasses import asdict
     inventory = tmp_path/"inventory.json"
-    recent_target = StorageTarget("ssd", "Disposable recent", "uuid-incremental-recent",
-                                 "/qt-source/pgdata", "ssd")
-    source_device = Path(recent_target.root).stat().st_dev
-    (udev/f"b{os.major(source_device)}:{os.minor(source_device)}").write_text(
-        "E:ID_FS_UUID=uuid-incremental-recent\\n".replace("\\n","\n"))
     inventory.write_text(json.dumps({"schema_version":"qt.storage_inventory.v1",
                                     "targets":[asdict(recent_target),asdict(target)]}))
     config_path = secrets_root/"incremental.json"
@@ -113,6 +129,8 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     objects = FilesystemRawArchiveObjectStore(source_root/"objects", writable=False)
     with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
         baseline = manager().create(snapshot, objects=objects, keep_copies=2)
+    if retained_raw:
+        raw_expected = execute_packaged_move(storage, source_root, tmp_path)
     correction = replace(recent, payload={**recent.payload,"rate":"0.3","raw_rate":"0.3"},
                          accepted_at=recent.accepted_at+timedelta(seconds=1),
                          known_at=recent.known_at+timedelta(seconds=1))
@@ -140,6 +158,8 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
         selected = manager().create(snapshot, objects=objects, keep_copies=2)
     assert baseline["database_type"] == "full" and selected["database_type"] == "incr"
     assert selected["archive_objects"] > 0
+    if retained_raw:
+        assert baseline["storage_layout"] != selected["storage_layout"]
     # Exercise release receipt selection against the real encrypted pair.
     # Policy activation is covered by the separate preserving operator
     # rehearsal; this isolates its new recovery-format admission.
@@ -188,7 +208,7 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     for line in inventory.read_text().splitlines():
         item = json.loads(line)
         assert hashlib.sha256((recovered/item["object_key"]).read_bytes()).hexdigest() == item["sha256"]
-    source_root.rename(tmp_path/"retained-original-archives")
+    source_root.rename(source_root.with_name(source_root.name+"-before-restore"))
     source_root.mkdir()
     shutil.copytree(recovered, source_root/"objects")
     (restored_root/"start").write_text("selected complete recovery point\n")
@@ -221,7 +241,9 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
             assert _snapshot_layout(session) == selected["storage_layout"]
             assert not session.scalar(text("SELECT EXISTS(SELECT 1 FROM market.fact_versions "
                                            "WHERE observation_key='incremental-after-selected')"))
-            assert session.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions")) > 0
+            assert session.scalar(text("SELECT count(*) FROM " + legacy_headers)) > 0
+            if retained_raw:
+                assert_restored_raw(session, raw_expected)
         for (series,start,end), expected in current.items():
             assert repository.read_facts(series_id=series,start=start-timedelta(seconds=1),
                                         end=end+timedelta(seconds=1)) == expected
@@ -233,6 +255,7 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
                                                storage_root=source_root) == expected
         print(json.dumps({"qt_current_corrections_frozen_and_book_replay_restored":True,
                           "preserved_v1_and_v2_data_restored":True,
+                          "packaged_retained_raw_placement_restored":retained_raw,
                           "later_source_writes_excluded":True,"production_touched":False}))
     finally:
         restored._reset_engine()

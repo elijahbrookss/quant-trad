@@ -37,6 +37,7 @@ code_paths:
   - scripts/automation/server_deploy.sh
   - tests/test_server_promotion.py
   - tests/test_market_data/test_raw_mapping_history_placement_db.py
+  - tests/test_market_data/test_incremental_raw_placement_db.py
 ---
 # ADR 0077: Retain Legacy Headers During a Forward Cutover
 
@@ -135,6 +136,12 @@ checkout and image match. Fresh resource/spool admission and a recovery baseline
 remain separate prerequisites; routing does not certify them.
 Completion always reports recovery unverified until the
 existing recovery owner publishes and verifies a pair for the changed layout.
+The disposable encrypted-restore check runs the packaged command after a full
+backup, takes an incremental pair after placement, and restores current facts,
+frozen inputs, book replay, mapping rows and completion evidence. It excludes the
+old archive path and later source writes. This test is separate from the original
+full-copy recovery fixture and requires its own empty restore volume; its result
+does not admit production throughput or collection impact.
 
 Remaining cutover work is concrete: native references to the adopted identity
 table, archive inventory/copy catch-up, reference-catalog placement, the final

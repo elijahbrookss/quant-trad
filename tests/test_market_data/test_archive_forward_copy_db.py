@@ -42,8 +42,9 @@ def _original_archives(conn):
             for name in (online.STATE, online.PROGRESS, online.QUEUE)}
 
 
-def _prepare_canceled(storage, tmp_path, monkeypatch):
-    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False)
+def _prepare_canceled(storage, tmp_path, monkeypatch, *, destination_directory=None, synthetic_probes=True):
+    engine, options, source, _ = _prepare(storage, tmp_path, monkeypatch, prepare_captures=False,
+        destination_directory=destination_directory)
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan, stage_identity_first=True)
         raw.prepare_copy(conn)
@@ -69,13 +70,16 @@ def _prepare_canceled(storage, tmp_path, monkeypatch):
         original = cancellation._capture_binding(conn)
         cancellation.cancel_attempt(conn, expected_capture=original, intent_sha256=CANCEL,
             expected_started_at=capture.inspect_capture(conn)["started_at"], **roots)
-    with engine.begin() as conn:
-        _synthetic_descriptor(conn, source, "!uncaptured-" + uuid4().hex)
+    if synthetic_probes:
+        with engine.begin() as conn:
+            _synthetic_descriptor(conn, source, "!uncaptured-" + uuid4().hex)
     return engine, options, source, original
 
 
-def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, successor_operation=None, recent_lookup=False):
-    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch)
+def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, successor_operation=None,
+                     recent_lookup=False, destination_directory=None, synthetic_probes=True):
+    engine, options, source, original = _prepare_canceled(storage, tmp_path, monkeypatch,
+        destination_directory=destination_directory, synthetic_probes=synthetic_probes)
     roots = {name: options[name] for name in ("source_root", "destination_root")}
     if key_preparation is None:
         keys.prepare_keys(engine, expected_capture=original, intent_sha256=CANCEL)
@@ -94,12 +98,14 @@ def _prepare_forward(storage, tmp_path, monkeypatch, *, key_preparation=None, su
         # The second owner must rediscover writes from the uncaptured interval.
         with engine.begin() as conn:
             adoption.adoption_page(conn, operation_sha256=OPERATION, page_rows=1)
-            _synthetic_descriptor(conn, source, "!before-retirement-" + uuid4().hex)
+            if synthetic_probes:
+                _synthetic_descriptor(conn, source, "!before-retirement-" + uuid4().hex)
             adoption.retire_adoption(conn, operation_sha256=OPERATION)
             terminal = adoption.inspect_retirement(conn, operation_sha256=OPERATION)
             previous_owner = online._capture(OPERATION, conn=conn)
             storage.retired_forward_records = _retired_forward_records(conn, previous_owner)
-            _synthetic_descriptor(conn, source, "!successor-gap-" + uuid4().hex)
+            if synthetic_probes:
+                _synthetic_descriptor(conn, source, "!successor-gap-" + uuid4().hex)
         placement_args = {}
         if recent_lookup:
             from scripts.db import fact_header_forward_placement as lookup
