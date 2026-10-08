@@ -618,7 +618,17 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
                 assert all(p.read_bytes() == data for p,data in original.items())
                 assert operation_preflights == [None, None, None, created]
                 operation_preflights.clear()
-                operation.run_operation_plan(Path(manifest["forward_plan_path"]), execute=True)
+                actual_exchange = host_boundary.OnlineWorkerChannel.exchange
+                def resumed_exchange(channel, command, **options):
+                    if command == "prepare_step":
+                        assert options["step"] not in {"reference_prepare", "reference_validate"}, \
+                            "completed native references must not reacquire preparation locks"
+                    return actual_exchange(channel, command, **options)
+                host_boundary.OnlineWorkerChannel.exchange = resumed_exchange
+                try:
+                    operation.run_operation_plan(Path(manifest["forward_plan_path"]), execute=True)
+                finally:
+                    host_boundary.OnlineWorkerChannel.exchange = actual_exchange
                 raise AssertionError("missing canonical forward pre-stop refusal")
             except RuntimeError as exc:
                 assert str(exc) == "fixture refusal before forward source stop"
@@ -631,7 +641,8 @@ def rehearse_forward_package(*, state, kwargs, candidate_image, source, launch_w
             assert resumed_launch == prepared_launch
             assert forward.observe_adoption(old_worker["binding"]["database_id"]) == prepared_sql
             launched.update(canonical_preparation_only=True, preparation_reader_retired=True,
-                source_serving_after_preparation=True, preparation_reentry_original_deadline=True)
+                source_serving_after_preparation=True, preparation_reentry_original_deadline=True,
+                prepared_references_reused_without_schema_steps=True)
         else:
             with launch.launched_online_worker(state,**arguments) as (worker,receipt):
                 assert receipt["container_id"]==created
