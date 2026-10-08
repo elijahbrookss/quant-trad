@@ -10,6 +10,8 @@ tags:
   - recovery
 code_paths:
   - scripts/db/raw_mapping_v2_placement.py
+  - cli/storage_placement.py
+  - tests/test_cli/test_storage_placement.py
   - tests/test_market_data/test_raw_mapping_history_placement_db.py
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
@@ -3571,11 +3573,36 @@ files remain in place. A different request can follow only a reconciled terminal
 plan. The historical handoff inspector accepts the new placement only through
 the matching completed plan and physical checks.
 
-This is an internal candidate, not wired to CLI or automatic maintenance and not
-production-qualified. Its native fixture covers rollback, concurrent-reader
+The explicit candidate command is `qt storage place-retained-raw --request-file
+<file-or-dash>` inside the existing maintenance container. Default inspection
+reads catalogs and relation sizes in a bounded read-only transaction, creates no
+plan and starts no attempt clock. `--execute` performs the separately admitted
+move; `--cancel` reconciles an unmoved intent. These flags cannot be combined.
+The bounded JSON request has `schema_version: qt.retained_raw_history.v1`, exact
+`source_revision`, `request_id`, `handoff_sha256`, the saved `policy` and existing
+`resource_limits` fields. Inputs cannot select arbitrary tables, drives or SQL.
+
+The adapter requires the dedicated database UID, matching source attestation,
+archive/working mounts and a live maintenance heartbeat. It opens only `PG_DSN`
+without schema bootstrap. Signals request cancellation through the existing move
+watcher; failed/disconnected dispatch is inspected with the same request before
+retry. No callback silently renews an expired intent. The existing
+`scripts/automation/server_deploy.sh qt storage place-retained-raw --request-file -`
+route holds the deployment lock and selects maintenance only when the recorded
+SSD/HDD release, clean checkout and running image match. Ordinary `qt` commands
+retain their backend owner. Routing does not replace collector/spool admission
+or recovery evidence. Do not inject this command into an older image or weaken the original
+pre-recovery migration launcher's mount checks to run it. The already pinned
+first release must settle before a qualified subsequent release can include it.
+
+This is not automatic maintenance and is not production-qualified. Its native
+fixture covers read-only/no-intent inspection, rollback, concurrent-reader
 refusal, duplicate requests, cancellation, lost replies, preserved frozen inputs
-and the SSD primary index. Host admission, encrypted recovery of the resulting
-layout and representative time/WAL/spool measurements remain required. A small
+and the SSD primary index. The atomic completion pointer changes the existing
+recovery layout fingerprint; an older pair is no longer current. A placement
+result deliberately returns `recovery_verified: false`. Host admission, actual
+encrypted recovery of the resulting layout and representative time/WAL/spool
+measurements remain required. A small
 fixture cannot establish a production pause or turn timeout into a recovery SLA.
 
 ## Retained-target adoption after an uncaptured interval

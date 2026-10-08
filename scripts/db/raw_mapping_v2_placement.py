@@ -127,6 +127,66 @@ def _current_policy(conn, policy):
     return row["revision"]
 
 
+def _copy_bytes(conn, saved):
+    recent = sorted(physical.recent_lookup_index_names(raw.SOURCE, saved))
+    return int(conn.scalar(text("SELECT pg_total_relation_size(:relation)-COALESCE(("
+        "SELECT sum(pg_total_relation_size(indexrelid)) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+        "WHERE i.indrelid=to_regclass(:relation) AND c.relname=ANY(:recent)),0)"),
+        {"relation": raw.SOURCE, "recent": recent}))
+
+
+def inspect_retained_raw_history(engine, *, request_id, handoff_sha256, policy, resource_limits):
+    """Observe native placement and this exact intent without starting its clock.
+
+    This bounded, read-only transaction does not reserve space or authorize a
+    move. A completion is verified even after its original deadline; its recovery
+    status remains separate. No row or archive-content scan is performed.
+    """
+    plan_id = _plan_id(request_id)
+    if not isinstance(handoff_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", handoff_sha256):
+        raise ValueError("raw_history_handoff_hash_invalid")
+    limits = _limits(resource_limits)
+    with engine.connect() as conn:
+        try:
+            with conn.begin():
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                with _bounded_step(conn, 30):
+                    _owner(conn)
+                    receipt = _handoff(_state(conn))
+                    if _digest(receipt) != handoff_sha256:
+                        raise RuntimeError("raw_history_handoff_changed")
+                    saved = receipt["binding"]
+                    placement = physical._restore(saved["plan"])
+                    resources_owner._fixed_inputs(policy, limits, (placement.recent, placement.history))
+                    pid = physical.verify(conn, saved)
+                    completed = inspect_completed_raw_history(conn, receipt, pid=pid)
+                    plan = _plan(conn, plan_id)
+                    if plan is not None and (plan["request_id"] != request_id
+                            or plan["policy"] != policy.to_dict()
+                            or plan["progress"].get("operation") != OPERATION
+                            or plan["progress"].get("handoff_sha256") != handoff_sha256
+                            or plan["progress"].get("resource_limits") != limits):
+                        raise RuntimeError("raw_history_intent_changed")
+                    if completed is not None:
+                        if completed["plan_id"] != plan_id:
+                            raise RuntimeError("raw_history_already_completed_by_other_request")
+                        return {**completed, "state": "completed", "inspection_only": True}
+                    from scripts.db.fact_header_v2_handoff import _verify_handoff_relations
+                    _verify_handoff_relations(conn, receipt, pid=pid)
+                    revision = _current_policy(conn, policy)
+                    now = conn.scalar(text("SELECT clock_timestamp()"))
+                    progress = plan["progress"] if plan else {}
+                    return {"plan_id": plan_id, "state": plan["state"] if plan else "not_started",
+                        "policy_revision": revision, "observed_at": now.isoformat(),
+                        "started_at": progress.get("started_at"), "expires_at": progress.get("expires_at"),
+                        "copy_bytes": _copy_bytes(conn, saved),
+                        "retained_ssd_indexes": sorted(physical.recent_lookup_index_names(raw.SOURCE, saved)),
+                        "raw_history_placement_pending": True, "recovery_verified": False,
+                        "inspection_only": True, "execution_admitted": False}
+        finally:
+            conn.invalidate()
+
+
 def move_retained_raw_history(engine, *, request_id, handoff_sha256, policy, resource_limits,
                               cancelled=None):
     """One atomic native move; repeated calls retain the original intent deadline.
@@ -231,10 +291,7 @@ def move_retained_raw_history(engine, *, request_id, handoff_sha256, policy, res
                 indexes = conn.execute(text("SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
                     "WHERE i.indrelid=to_regclass(:relation) ORDER BY c.oid LIMIT 65"), {"relation": raw.SOURCE}).scalars().all()
                 recent = physical.recent_lookup_index_names(raw.SOURCE, saved)
-                copy_bytes = conn.scalar(text("SELECT pg_total_relation_size(:relation)-COALESCE(("
-                    "SELECT sum(pg_total_relation_size(indexrelid)) FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
-                    "WHERE i.indrelid=to_regclass(:relation) AND c.relname=ANY(:recent)),0)"),
-                    {"relation": raw.SOURCE, "recent": sorted(recent)})
+                copy_bytes = _copy_bytes(conn, saved)
                 resources = observe_header_resources(conn, targets, pg_controldata=placement.pg_controldata,
                     timeout_seconds=min(30, max(1, math.ceil(deadline - monotonic()))))
                 budget, floors = resources_owner._budget(conn, observed={"bytes": int(copy_bytes), "_binding": saved},

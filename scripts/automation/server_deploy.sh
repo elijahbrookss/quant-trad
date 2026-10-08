@@ -832,6 +832,24 @@ restore_alerting_preview() {
   echo "Grafana alerting restored to production revision $base_revision."
 }
 
+run_qt_command() {
+  require_runtime
+  compute_release_material
+  test "$#" -gt 0 || die "qt action requires at least one qt argument"
+  local service=backend
+  if test "${1:-}" = storage && test "${2:-}" = place-retained-raw; then
+    test "$(recorded_storage_layout)" = ssd-hdd-v1 \
+      || die "raw placement requires the deployed SSD/HDD layout"
+    test "$(state_value current_revision)" = "$QT_RELEASE_REVISION" \
+      || die "raw placement requires the recorded deployed checkout"
+    verify_release_image storage-maintenance
+    service=storage-maintenance
+  fi
+  # The qt dispatch already holds the existing host deployment lock. Keep stdin
+  # for the bounded request; never mount source into an older runtime image.
+  compose exec -T "$service" /app/scripts/qt "$@"
+}
+
 deploy_release() {
   local requested_ref="${1:-}"
   require_no_storage_handoff "$requested_ref"
@@ -1117,10 +1135,7 @@ case "$action" in
     compose exec -T backend /app/scripts/qt data collectors fleet
     ;;
   qt)
-    require_runtime
-    compute_release_material
-    test "$#" -gt 0 || die "qt action requires at least one qt argument"
-    compose exec -T backend /app/scripts/qt "$@"
+    run_qt_command "$@"
     ;;
   credentials-coinbase)
     require_runtime

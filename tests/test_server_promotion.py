@@ -53,6 +53,39 @@ def test_lock_refuses_overlapping_operations(tmp_path):
     assert "another server operation" in result.stderr
 
 
+@pytest.mark.parametrize("fault", [None, "layout", "revision", "image"])
+def test_raw_placement_routes_only_to_the_recorded_maintenance_release(tmp_path, fault):
+    result = shell(tmp_path, r'''
+require_runtime() { :; }
+compute_release_material() { QT_RELEASE_REVISION=fixture; }
+recorded_storage_layout() { if test "$FAULT" = layout; then printf ''; else printf ssd-hdd-v1; fi; }
+state_value() { if test "$FAULT" = revision; then printf old; else printf fixture; fi; }
+verify_release_image() { test "$1" = storage-maintenance; test "$FAULT" != image; }
+compose() { printf 'DISPATCH:%s\n' "$@"; }
+run_qt_command storage place-retained-raw --request-file - --execute
+''', env={"FAULT": fault or "none"})
+    if fault:
+        assert result.returncode != 0
+        assert "DISPATCH:" not in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["DISPATCH:"+arg for arg in (
+            "exec", "-T", "storage-maintenance", "/app/scripts/qt", "storage", "place-retained-raw",
+            "--request-file", "-", "--execute")]
+
+
+def test_ordinary_qt_commands_keep_the_backend_owner(tmp_path):
+    result = shell(tmp_path, r'''
+require_runtime() { :; }
+compute_release_material() { :; }
+verify_release_image() { echo INCORRECT_MAINTENANCE; exit 9; }
+compose() { printf '%s\n' "$@"; }
+run_qt_command storage status
+''')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["exec", "-T", "backend", "/app/scripts/qt", "storage", "status"]
+
+
 def test_unresolved_promotion_blocks_direct_deploy(tmp_path):
     state = tmp_path / "state"
     state.mkdir()

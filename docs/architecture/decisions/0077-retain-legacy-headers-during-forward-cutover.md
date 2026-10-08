@@ -32,6 +32,10 @@ code_paths:
   - portal/backend/service/storage/repos/fact_storage.py
   - scripts/db/fact_header_v2_handoff.py
   - scripts/db/raw_mapping_v2_placement.py
+  - cli/storage_placement.py
+  - tests/test_cli/test_storage_placement.py
+  - scripts/automation/server_deploy.sh
+  - tests/test_server_promotion.py
   - tests/test_market_data/test_raw_mapping_history_placement_db.py
 ---
 # ADR 0077: Retain Legacy Headers During a Forward Cutover
@@ -103,8 +107,8 @@ Moving files still copies bytes and blocks access; neither a short pause nor
 production throughput has been established. Do not hide that move inside the
 schema switch or an ordinary read, or claim that the current candidate executes it.
 
-The follow-up database boundary is a separate **unqualified candidate**, with no
-CLI/runtime wiring or production dispatch. It extends the existing fixed physical
+The follow-up database boundary is a separate **unqualified candidate**, with an
+explicit CLI adapter but no automatic runtime dispatch. It extends the existing fixed physical
 owner to move this one canonical raw heap and its two secondary indexes to HDD.
 The measured raw primary-key index remains on SSD under `recent_lookup_indexes`;
 that durable index is outside the disposable cache and 14-day window.
@@ -118,6 +122,19 @@ handoff inspector now recognizes only this verified post-cutover transition;
 an unexplained physical change still refuses. Production use additionally needs
 host/recovery integration, native qualification, measured movement and WAL costs,
 and bounded collection/spool impact. It does not amend the running cutover.
+
+`qt storage place-retained-raw --request-file <file-or-dash>` inspects without
+creating an intent or starting its clock. `--execute` and `--cancel` are separate,
+mutually exclusive operator actions. The command runs inside the existing
+dedicated maintenance container as its database UID, verifies the requested image
+revision and live local heartbeat, and uses only `PG_DSN`. It performs no schema
+bootstrap, service change, automatic retry or backup pruning. The existing
+`server_deploy.sh qt storage place-retained-raw --request-file -` route holds the
+deployment lock and selects maintenance only after the recorded SSD/HDD release,
+checkout and image match. Fresh resource/spool admission and a recovery baseline
+remain separate prerequisites; routing does not certify them.
+Completion always reports recovery unverified until the
+existing recovery owner publishes and verifies a pair for the changed layout.
 
 Remaining cutover work is concrete: native references to the adopted identity
 table, archive inventory/copy catch-up, reference-catalog placement, the final

@@ -8,6 +8,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
 from core.storage_targets import StoragePolicy
+from portal.backend.service.storage.recovery_copies import _snapshot_layout
 from scripts.db import raw_mapping_v2_placement as move
 from scripts.db import fact_header_v2_handoff as handoff
 from scripts.db import fact_header_v2_placement as physical
@@ -34,6 +35,7 @@ def test_retained_raw_move_is_atomic_reconciles_duplicates_and_keeps_frozen_hist
         assert source_rows
         retained_rows = _rows(conn, handoff.RETAINED + "." + raw.NAME)
         frozen = _frozen_records(conn)
+        recovery_layout_before = _snapshot_layout(conn)
         policy = physical._restore(receipt["binding"]["plan"])
         assert policy.recent_lookup_indexes
         saved_policy = StoragePolicy.from_dict(conn.scalar(text("SELECT policy FROM public.portal_storage_policy WHERE id=1")))
@@ -45,6 +47,15 @@ def test_retained_raw_move_is_atomic_reconciles_duplicates_and_keeps_frozen_hist
     request_id = "native-raw-history-" + uuid4().hex
     args = dict(request_id=request_id, handoff_sha256=move._digest(receipt), **options)
     plan_id = move._plan_id(request_id)
+
+    observed = move.inspect_retained_raw_history(engine, **args)
+    assert observed["state"] == "not_started" and observed["copy_bytes"] > 0
+    assert observed["inspection_only"] and not observed["execution_admitted"]
+    assert observed["started_at"] is None and observed["expires_at"] is None
+    assert observed["retained_ssd_indexes"] == ["pk_market_raw_archive_record_mapping"]
+    with engine.begin() as conn:
+        assert move._plan(conn, plan_id) is None
+        assert move._files(conn) == before and _snapshot_layout(conn) == recovery_layout_before
 
     # A real reader prevents the exclusive move. The durable intent may exist,
     # but no bytes or authoritative relation identities may change.
@@ -133,6 +144,9 @@ def test_retained_raw_move_is_atomic_reconciles_duplicates_and_keeps_frozen_hist
             raise AssertionError("completed raw placement was replayed")
     event.listen(engine, "before_cursor_execute", prohibit_replay)
     try:
+        inspected = move.inspect_retained_raw_history(engine, **args)
+        assert inspected["state"] == "completed" and inspected["inspection_only"]
+        assert inspected["recovery_verified"] is False
         result = move.move_retained_raw_history(engine, **args)
         assert result["reused"] and not result["raw_history_placement_pending"]
         assert result["recovery_verified"] is False
@@ -140,6 +154,10 @@ def test_retained_raw_move_is_atomic_reconciles_duplicates_and_keeps_frozen_hist
         event.remove(engine, "before_cursor_execute", prohibit_replay)
     with engine.begin() as conn:
         current = move._state(conn)
+        # The existing recovery owner sees this physical layout as changed and
+        # cannot treat the previous encrypted pair as current merely by age.
+        recovery_layout_after = _snapshot_layout(conn)
+        assert recovery_layout_after != recovery_layout_before
         assert {k:v for k,v in current.items() if k != move.POINTER} == evidence
         assert _rows(conn, raw.SOURCE) == source_rows
         assert _rows(conn, handoff.RETAINED + "." + raw.NAME) == retained_rows
@@ -165,6 +183,7 @@ def test_retained_raw_move_is_atomic_reconciles_duplicates_and_keeps_frozen_hist
                 " WHERE raw_record_id='raw-post-history-probe'")) == 1
             assert move.inspect_completed_raw_history(conn, receipt,
                 pid=physical.verify(conn, receipt["binding"]))["reused"]
+            assert _snapshot_layout(conn) == recovery_layout_after
             appended.rollback()
         with conn.begin_nested() as changed:
             conn.execute(text("UPDATE market.fact_storage_state SET evidence=evidence-:key WHERE layout_version=:layout"),

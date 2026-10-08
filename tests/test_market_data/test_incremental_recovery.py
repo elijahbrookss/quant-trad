@@ -64,7 +64,13 @@ def test_deadline_kills_owned_child_even_after_leader_exits(tmp_path):
     deadline = monotonic()+3
     while True:
         status = Path(f"/proc/{child}/stat")
-        if not status.exists() or status.read_text().split()[2] == "Z":
+        try:
+            state = status.read_text().split()[2]
+        except FileNotFoundError:
+            # Reaping may occur between an existence check and the read.
+            # A gone child is the successful termination this test requires.
+            break
+        if state == "Z":
             break
         if monotonic() >= deadline:
             os.kill(child, signal.SIGKILL)
