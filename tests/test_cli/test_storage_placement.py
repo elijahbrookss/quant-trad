@@ -47,7 +47,7 @@ def test_changed_image_refuses_before_mount_or_database_access(monkeypatch):
     monkeypatch.setattr(operator.os, "geteuid", lambda: 70, raising=False)
     monkeypatch.setattr(core.settings, "get_settings", lambda: SimpleNamespace(storage=SimpleNamespace(
         maintenance_owner="dedicated", archive_shared_group_id=70)))
-    monkeypatch.setattr(provenance, "evidence_source_revision", lambda: "c"*40)
+    monkeypatch.setattr(provenance, "_verified_image_source_revision", lambda *a, **kw: "c"*40)
     monkeypatch.setattr(core.storage_mounts, "require_configured_archive_mount",
         lambda: pytest.fail("changed image reached the mount check"))
     with pytest.raises(RuntimeError, match="operator_revision_changed"):

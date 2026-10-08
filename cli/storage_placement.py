@@ -45,7 +45,7 @@ def read_request(path):
 def _runtime(request):
     from core.settings import get_settings
     from core.storage_mounts import require_configured_archive_mount, require_configured_working_mount
-    from portal.backend.service.provenance import evidence_source_revision
+    from portal.backend.service.provenance import _verified_image_source_revision
     from portal.backend.workers.market_data_collector_health import live_worker_for_host
 
     settings = get_settings()
@@ -53,7 +53,9 @@ def _runtime(request):
             or settings.storage.maintenance_owner != "dedicated"
             or settings.storage.archive_shared_group_id is None):
         raise RuntimeError("raw_history_existing_maintenance_runtime_required")
-    if evidence_source_revision() != request["source_revision"]:
+    revision = _verified_image_source_revision(Path(__file__).resolve().parents[1],
+        request["source_revision"], configured_tree_hash=os.environ.get("QT_IMAGE_SOURCE_TREE_HASH", ""))
+    if revision != request["source_revision"]:
         raise RuntimeError("raw_history_operator_revision_changed")
     require_configured_archive_mount()
     require_configured_working_mount()

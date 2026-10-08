@@ -3582,7 +3582,8 @@ The bounded JSON request has `schema_version: qt.retained_raw_history.v1`, exact
 `source_revision`, `request_id`, `handoff_sha256`, the saved `policy` and existing
 `resource_limits` fields. Inputs cannot select arbitrary tables, drives or SQL.
 
-The adapter requires the dedicated database UID, matching source attestation,
+The adapter requires the dedicated database UID, matching immutable image
+attestation (the image's `QT_IMAGE_SOURCE_*`, without requiring research `SOURCE_*` settings),
 archive/working mounts and a live maintenance heartbeat. It opens only `PG_DSN`
 without schema bootstrap. Signals request cancellation through the existing move
 watcher; failed/disconnected dispatch is inspected with the same request before
