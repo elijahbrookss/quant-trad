@@ -1089,7 +1089,12 @@ class PostgresMarketStructureRepository:
         return int(value)
 
     @staticmethod
-    def _require_fence(session, claim: StreamClaim) -> Mapping[str, Any]:
+    def _require_fence(
+        session, claim: StreamClaim, *, raw_mapping_access: bool = False,
+    ) -> Mapping[str, Any]:
+        if raw_mapping_access:
+            from .fact_references import lock_stream_raw_mapping_access
+            lock_stream_raw_mapping_access(session)
         row = session.execute(
             text(
                 """
@@ -1109,7 +1114,7 @@ class PostgresMarketStructureRepository:
                        definitions.max_segment_bytes
                            AS definition_max_segment_bytes,
                        definitions.config AS definition_config,
-                       leases.*, leases.expires_at > now() AS lease_current
+                       leases.*, leases.expires_at > clock_timestamp() AS lease_current
                 FROM market.stream_definitions AS definitions
                 JOIN market.stream_lease_state AS leases
                   ON leases.definition_id = definitions.id
@@ -1482,7 +1487,7 @@ class PostgresMarketStructureRepository:
                     {"scope": f"market-archive-compaction:{claim.definition_id}"},
                 )
             else:
-                self._require_fence(session, claim)
+                self._require_fence(session, claim, raw_mapping_access=True)
             ordered_sources: list[Mapping[str, Any]] = []
             if source_manifest_ids:
                 ordered_sources = list(
@@ -2227,7 +2232,7 @@ class PostgresMarketStructureRepository:
             )
 
         with db.session() as session:
-            self._require_fence(session, claim)
+            self._require_fence(session, claim, raw_mapping_access=require_archive_mapping)
             for fact in rows:
                 if fact.provider_product_id != claim.provider_product_id:
                     raise ValueError(
@@ -2588,7 +2593,7 @@ class PostgresMarketStructureRepository:
         inserted_validity = 0
         max_commit_seq = 0
         with db.session() as session:
-            self._require_fence(session, claim)
+            self._require_fence(session, claim, raw_mapping_access=True)
             for fact in (*snapshot_rows, *batch_rows):
                 if fact.series_id != claim.series_id:
                     raise ValueError(

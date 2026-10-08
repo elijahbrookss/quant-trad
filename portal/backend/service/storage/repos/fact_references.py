@@ -15,6 +15,16 @@ from sqlalchemy import text
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
 
+def lock_stream_raw_mapping_access(session):
+    """Wait for raw-table maintenance before holding a stream's lease row.
+
+    ACCESS SHARE permits ordinary readers and inserts. Holding it through the
+    publishing transaction prevents an exclusive move from entering after the
+    lease check; waiting for it leaves the heartbeat free to renew ownership.
+    """
+    session.execute(text("LOCK TABLE market.raw_archive_record_mappings IN ACCESS SHARE MODE"))
+
+
 def _book_position(position, *, observation_key):
     if (not isinstance(position, Mapping)
             or not isinstance(position.get("definition_id"), str)
