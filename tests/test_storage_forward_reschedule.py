@@ -33,10 +33,11 @@ def attempt(operation_attempt):
     return a
 
 
-@pytest.fixture(params=[1, 2, "retain_raw", "guarded"])
+@pytest.fixture(params=[1, 2, "retain_raw", "guarded", "package"])
 def rescheduling(successor,monkeypatch,request):
     a = successor
-    a.amendment_version = 2 if request.param in ("retain_raw", "guarded") else request.param
+    a.amendment_version = 3 if request.param == "package" else 2 if request.param in ("retain_raw", "guarded") else request.param
+    a.apply_action = "apply"
     # Existing fixtures use a fixed original boundary. Keep a genuinely later
     # boundary within their original 60-hour adoption, without extending it.
     _advance(a, datetime.fromisoformat("2026-10-04T12:00:00+00:00").timestamp()-a.clock[0])
@@ -67,10 +68,10 @@ def rescheduling(successor,monkeypatch,request):
         through_epoch=datetime.fromisoformat(capture["expires_at"]).timestamp(),observed_at=a.clock[0])
     write(a.capacity_path,capacity)
     a.actions=[]
-    def probe(plan,saved,*,request,action,expected=None):
+    def probe(plan,saved,*,request,action,expected=None,previous_request=None):
         assert saved==a.current and plan["image"]==a.reschedule_package["image"]
         a.actions.append(action)
-        if action=="apply":
+        if action in ("apply", "replace_package"):
             assert expected==a.sql
             a.sql["initialization"]["binding"]=worker.initialization_binding(request)
             if request["forward_reschedule"]["schema_version"] == "qt.storage_online_forward_reschedule.v2":
@@ -91,7 +92,7 @@ def rescheduling(successor,monkeypatch,request):
     a.protected.update({a.reschedule_path:a.reschedule_path.read_bytes(),
         a.root/forward.operation_file(forward.STATE,request=a.request):
             (a.root/forward.operation_file(forward.STATE,request=a.request)).read_bytes()})
-    if a.amendment_version == 2:
+    if a.amendment_version >= 2:
         a.change()
         a.protected[a.reschedule_state] = a.reschedule_state.read_bytes()
         a.protected[Path(a.reschedule_package["forward_plan_path"])] = Path(a.reschedule_package["forward_plan_path"]).read_bytes()
@@ -113,11 +114,11 @@ def rescheduling(successor,monkeypatch,request):
             attempt_seconds=84*3600, end_day="2026-10-07", image="sha256:"+"a"*64,
             source_revision="a"*40, source_tree_hash="b"*64,
             forward_plan_path=str(a.path.parent/"extended-operation.json"))
-        if request.param in ("retain_raw", "guarded"):
+        if request.param in ("retain_raw", "guarded", "package"):
             a.reschedule_package["raw_mapping_mode"] = "retain_source"
             a.sql["raw_mapping_mode"] = "replace"
             a.old_sql = deepcopy(a.sql)
-        if request.param == "guarded":
+        if request.param in ("guarded", "package"):
             a.reschedule_package["continue_guarded_proof"] = True
         a.reschedule_file = a.path.parent/"extension-package.json"
         write(a.reschedule_file,a.reschedule_package)
@@ -126,6 +127,34 @@ def rescheduling(successor,monkeypatch,request):
             observed_at=a.clock[0])
         write(a.capacity_path,capacity)
         a.reschedule_state = a.root/reschedule.state_file(a.request["forward"]["operation_sha256"],version=2)
+        a.actions.clear()
+    if a.amendment_version == 3:
+        a.change()
+        a.protected[a.reschedule_state] = a.reschedule_state.read_bytes()
+        a.reschedule_path = Path(a.reschedule_package["forward_plan_path"])
+        a.protected[a.reschedule_path] = a.reschedule_path.read_bytes()
+        selected = forward.inspect_published_operation(a.root)
+        a.request = selected["new_request"]
+        a.intent = forward.launch_intent(a.root, selected, selected["new_worker"]["binding"])
+        a.current = deepcopy(a.intent["worker"])
+        a.current.update(container_id="b"*64, contract={"fixture":"package-predecessor"})
+        forward.save_launched_worker(a.root, a.intent, a.current)
+        a.name = "/"+a.plan["project"]+"-storage-online"
+        a.old_sql = deepcopy(a.sql)
+        a.reschedule_plan = host.load_receipt(a.reschedule_path)
+        a.reschedule_package.update(schema_version="qt.storage_online_forward_reschedule_package.v3",
+            plan_sha256=publication._sha(a.reschedule_path.read_bytes()),
+            previous_amendment_sha256=publication._sha(a.reschedule_state.read_bytes()),
+            image="sha256:"+"c"*64, source_revision="d"*40, source_tree_hash="e"*64,
+            forward_plan_path=str(a.path.parent/"package-operation.json"))
+        for key in ("raw_mapping_mode", "continue_guarded_proof"):
+            del a.reschedule_package[key]
+        a.reschedule_file = a.path.parent/"package-correction.json"
+        write(a.reschedule_file, a.reschedule_package)
+        capacity.update(plan_sha256=a.reschedule_package["plan_sha256"], observed_at=a.clock[0])
+        write(a.capacity_path, capacity)
+        a.reschedule_state = a.root/reschedule.state_file(a.request["forward"]["operation_sha256"], version=3)
+        a.apply_action = "replace_package"
         a.actions.clear()
     return a
 
@@ -137,7 +166,7 @@ def test_reschedule_inspection_and_publication_preserve_proof_and_all_clocks(res
     assert a.sql==a.old_sql and not a.reschedule_state.exists()
     assert all(p.read_bytes()==v for p,v in before.items())
     assert a.change()["deadline_renewed"] is (a.amendment_version == 2)
-    assert a.actions.count("apply")==1
+    assert a.actions.count(a.apply_action)==1
     selected=forward.inspect_published_operation(a.root,operation_path=a.reschedule_package["forward_plan_path"])
     assert worker.original_request(selected["new_request"])==worker.original_request(a.request)
     assert worker.execution_intent(selected["new_request"])["end_day"]==a.reschedule_package["end_day"]
@@ -146,13 +175,13 @@ def test_reschedule_inspection_and_publication_preserve_proof_and_all_clocks(res
         assert started[key]==a.intent[key]
     digest_key = "adoption_sha256" if a.amendment_version == 1 else "preserved_adoption_sha256"
     assert a.sql[digest_key]==a.old_sql[digest_key]
-    delta = 0 if a.amendment_version == 1 else 24*3600
+    delta = 24*3600 if a.amendment_version == 2 else 0
     assert started["deadline"] == a.intent["deadline"]+delta
     assert started["capture"] == a.sql["capture"]
     assert {k:v for k,v in a.sql["capture"].items() if k not in {"expires_at","attempt_seconds"}} == {
         k:v for k,v in a.old_sql["capture"].items() if k not in {"expires_at","attempt_seconds"}}
     assert a.change()["phase"]=="forward_reschedule_published"
-    assert a.actions.count("apply")==1
+    assert a.actions.count(a.apply_action)==1
     assert all(p.read_bytes()==data for p,data in a.protected.items())
 
 
@@ -168,7 +197,7 @@ def test_reschedule_lost_replies_reconcile_without_replaying_sql(rescheduling,mo
             raise TimeoutError("lost reschedule intent reply")
     def lose_probe(*args,**kwargs):
         result=a.reschedule_probe(*args,**kwargs)
-        if boundary=="sql" and kwargs["action"]=="apply":raise TimeoutError("lost SQL COMMIT reply")
+        if boundary=="sql" and kwargs["action"]==a.apply_action:raise TimeoutError("lost SQL COMMIT reply")
         return result
     def lose_replace(path,before,after):
         replace(path,before,after)
@@ -190,7 +219,7 @@ def test_reschedule_lost_replies_reconcile_without_replaying_sql(rescheduling,mo
     assert a.change()["phase"]=="forward_reschedule_published"
     current=host.load_receipt(a.reschedule_state,max_bytes=reschedule.MAX_BYTES)
     assert {k:v for k,v in current.items() if k!="phase"}=={k:v for k,v in original.items() if k!="phase"}
-    assert a.actions.count("apply")==1
+    assert a.actions.count(a.apply_action)==1
     assert all(p.read_bytes()==data for p,data in a.protected.items())
 
 
@@ -206,7 +235,7 @@ def test_reschedule_rejects_changed_ownership_scope_and_expired_admission(resche
     elif fault=="capacity":monkeypatch.setattr(publication,"_capacity",lambda *a,**k:(_ for _ in ()).throw(RuntimeError("capacity insufficient")))
     else:write(a.root/"storage-online-final.json",{"already":"held"})
     with pytest.raises((ValueError,RuntimeError)):a.change()
-    assert "apply" not in a.actions
+    assert a.apply_action not in a.actions
     assert not a.reschedule_state.exists()
     assert all(p.read_bytes()==data for p,data in a.protected.items())
 
@@ -214,14 +243,14 @@ def test_reschedule_rejects_changed_ownership_scope_and_expired_admission(resche
 def test_uncertain_uncommitted_reschedule_never_replays_apply(rescheduling,monkeypatch):
     a=rescheduling
     def uncertain(*args,**kwargs):
-        if kwargs["action"]=="apply":
-            a.actions.append("apply");raise TimeoutError("unknown SQL transport")
+        if kwargs["action"]==a.apply_action:
+            a.actions.append(a.apply_action);raise TimeoutError("unknown SQL transport")
         return a.reschedule_probe(*args,**kwargs)
     with monkeypatch.context() as lost:
         lost.setattr(reschedule,"_probe",uncertain)
         with pytest.raises(TimeoutError):a.change()
     with pytest.raises(RuntimeError,match="outcome_unresolved_no_replay"):a.change()
-    assert a.actions.count("apply")==1 and a.sql==a.old_sql
+    assert a.actions.count(a.apply_action)==1 and a.sql==a.old_sql
 
 
 @pytest.mark.parametrize("field", ["started_at", "started_monotonic", "started_boot",
@@ -249,7 +278,7 @@ def test_interrupted_reschedule_keeps_original_publication_deadline(rescheduling
     retained=a.reschedule_state.read_bytes()
     _advance(a,301)
     with pytest.raises(RuntimeError):a.change()
-    assert a.reschedule_state.read_bytes()==retained and "apply" not in a.actions
+    assert a.reschedule_state.read_bytes()==retained and a.apply_action not in a.actions
 
 
 @pytest.mark.parametrize("rescheduling", [2], indirect=True)
@@ -273,7 +302,7 @@ def test_extension_requires_exact_predecessor_and_new_capacity_bound(reschedulin
     write(a.reschedule_file,a.reschedule_package)
     with pytest.raises((ValueError,RuntimeError)):
         a.change()
-    assert "apply" not in a.actions and not a.reschedule_state.exists()
+    assert a.apply_action not in a.actions and not a.reschedule_state.exists()
 
 
 @pytest.mark.parametrize("rescheduling", [2], indirect=True)
@@ -289,7 +318,7 @@ def test_completed_extension_outlives_old_expiry_without_resetting_starts(resche
         initialization=started["initialization"],capture=started["capture"]) == pytest.approx(86400-1)
     with pytest.raises(RuntimeError,match="request_changed"):
         forward.inspect_published_operation(a.root,request=a.request)
-    assert a.actions.count("apply") == 1
+    assert a.actions.count(a.apply_action) == 1
 
 
 @pytest.mark.parametrize("option", ["forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file",
@@ -313,10 +342,41 @@ def test_reschedule_cli_uses_local_operator_without_http(monkeypatch,tmp_path):
     assert calls==[(str(path),dict(execute=value,reschedule_forward_file=str(package))) for value in (False,True)]
 
 
+@pytest.mark.parametrize("rescheduling", ["package"], indirect=True)
+@pytest.mark.parametrize("field,value", [
+    ("end_day", "2026-10-08"), ("attempt_seconds", 345600),
+    ("max_objects", 201), ("previous_amendment_sha256", "f"*64),
+    ("continue_guarded_proof", True), ("raw_mapping_mode", "retain_source"),
+])
+def test_package_correction_cannot_change_schedule_budgets_or_predecessor(rescheduling, field, value):
+    a = rescheduling
+    a.reschedule_package[field] = value
+    write(a.reschedule_file, a.reschedule_package)
+    with pytest.raises((ValueError, RuntimeError)):
+        a.change()
+    assert a.apply_action not in a.actions and a.sql == a.old_sql
+    assert not a.reschedule_state.exists()
+
+
+@pytest.mark.parametrize("rescheduling", ["package"], indirect=True)
+def test_package_correction_changes_only_provenance_and_actual_image(rescheduling):
+    a = rescheduling
+    assert a.change()["deadline_renewed"] is False
+    selected = forward.inspect_published_operation(a.root)
+    for key, value in a.request.items():
+        if key not in {"source_revision", "source_tree_hash"}:
+            assert selected["new_request"][key] == value
+    assert selected["new_plan"]["image"] != a.reschedule_plan["image"]
+    before, after = deepcopy(a.old_sql), deepcopy(a.sql)
+    del before["initialization"]["binding"]["request_sha256"]
+    del after["initialization"]["binding"]["request_sha256"]
+    assert before == after
+
+
 def test_raw_retention_is_explicit_v2_request_and_preserves_identity_binding(rescheduling):
     a = rescheduling
     a.reschedule_package["raw_mapping_mode"] = "retain_source"
-    if a.amendment_version == 1:
+    if a.amendment_version in (1, 3):
         with pytest.raises(ValueError, match="package_invalid"):
             reschedule._proposal(a.reschedule_plan, a.request, a.reschedule_package)
         return
@@ -359,7 +419,7 @@ def test_expired_guarded_continuation_keeps_completed_work_and_finite_clocks(res
     assert a.sql["preserved_archive_sha256"] == a.old_sql["preserved_archive_sha256"]
     assert forward.admit_startup(a.root, started, selected["new_request"], keys=started["keys"],
         initialization=started["initialization"], capture=started["capture"]) == pytest.approx(36*3600-1)
-    assert a.actions.count("apply") == 1
+    assert a.actions.count(a.apply_action) == 1
     assert all(p.read_bytes() == data for p, data in a.protected.items())
     _advance(a, 36*3600)
     with pytest.raises(RuntimeError):
@@ -392,4 +452,4 @@ def test_guarded_continuation_does_not_relax_other_admission(rescheduling, fault
     write(a.reschedule_file, a.reschedule_package)
     with pytest.raises((ValueError, RuntimeError)):
         a.change()
-    assert "apply" not in a.actions and not a.reschedule_state.exists()
+    assert a.apply_action not in a.actions and not a.reschedule_state.exists()

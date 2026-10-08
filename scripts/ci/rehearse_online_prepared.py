@@ -1522,7 +1522,7 @@ finally:
   # A reschedule preserves its stopped worker only in the amendment preimage;
   # the active launch now owns the replacement. Both remain fixture-owned.
   if 'forward' in current_request:
-   for version in (1, 2):
+   for version in (1, 2, 3):
     reschedule_path=state/reschedule_owner.state_file(current_request['forward']['operation_sha256'],version=version)
     if reschedule_path.exists():
      worker=host_boundary.load_receipt(reschedule_path,max_bytes=reschedule_owner.MAX_BYTES)['old_worker']

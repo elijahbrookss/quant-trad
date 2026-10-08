@@ -330,6 +330,54 @@ def reschedule_initialization(conn, *, request, expected, final_seconds, timeout
         return after
 
 
+def replace_initialization_package(conn, *, request, previous_request, expected,
+                                   final_seconds, timeout_seconds=10):
+    """Rebind only candidate provenance after exact stopped-worker publication.
+
+    The host journals dispatch once and reconciles a lost reply by observation.
+    SQL independently excludes a surviving controller. No capture, adoption,
+    reference progress, schedule, data or archive row is rewritten here.
+    """
+    from sqlalchemy import text
+    from datetime import timezone
+    from scripts.db import fact_header_forward_adoption as adoption
+    from scripts.db import archive_root_v2_online as archives
+
+    intent = request_binding(request)
+    previous_intent = request_binding(previous_request)
+    provenance = {"source_revision", "source_tree_hash"}
+    if (intent is None or intent != previous_intent
+            or type(final_seconds) is not int or not 1 <= final_seconds <= 600
+            or request.get("forward_reschedule", {}).get("schema_version") != "qt.storage_online_forward_reschedule.v2"
+            or request["forward_reschedule"].get("raw_mapping_mode") != "retain_source"
+            or {k:v for k,v in request.items() if k not in provenance}
+                != {k:v for k,v in previous_request.items() if k not in provenance}):
+        raise ValueError("storage_forward_package_replacement_scope_changed")
+    with adoption._step(conn, timeout_seconds):
+        before = inspect_reschedule(conn, request=request, timeout_seconds=timeout_seconds)
+        if (before != expected or before["initialization"]["binding"] != initialization_binding(previous_request)
+                or before["raw_mapping_mode"] != "retain_source"
+                or before["capture"]["attempt_seconds"] != adoption_seconds(request)):
+            raise RuntimeError("storage_forward_package_replacement_preimage_changed")
+        boundary = datetime.fromisoformat(execution_intent(request)["end_day"]).replace(tzinfo=timezone.utc)
+        expiry = datetime.fromisoformat(before["capture"]["expires_at"])
+        if not conn.scalar(text("SELECT clock_timestamp()")) < boundary or boundary+timedelta(seconds=final_seconds) > expiry:
+            raise RuntimeError("storage_forward_reschedule_outside_original_deadline")
+        archive_before = archives._forward_amendment_state(conn, intent["operation_sha256"])
+        binding = initialization_binding(request)
+        conn.execute(text("UPDATE " + initialization_relation(intent) + " SET binding=CAST(:binding AS jsonb) WHERE id=1"),
+                     {"binding": json.dumps(binding)})
+        after = inspect_reschedule(conn, request=request, timeout_seconds=timeout_seconds)
+        wanted = deepcopy(before)
+        wanted["initialization"]["binding"] = binding
+        if (after != wanted
+                or archives._forward_amendment_state(conn, intent["operation_sha256"]) != archive_before):
+            raise RuntimeError("storage_forward_package_replacement_preservation_failed")
+        LOG.info("storage_forward_package_replaced operation_sha256=%s previous_request_sha256=%s request_sha256=%s clocks_unchanged=true",
+                 intent["operation_sha256"], _digest(previous_request), _digest(request))
+        return after
+
+
 def prepare_forward(engine, request, *, targets, policy, limits, source, destination,
                     key_seconds=3600, initial_seconds=600):
     """Prepare keys, then persist ONE short initialization clock before adoption.

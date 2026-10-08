@@ -214,14 +214,19 @@ class _MoveWatch:
         self.cancelled = cancelled
         self.grace = grace
         self.failure = None
+        self._last_observed_at = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="qt-history-move-watch", daemon=True)
 
-    def _observe(self):
+    def _check_controls(self):
         if self.cancelled is not None and self.cancelled():
             raise RuntimeError("storage_move_cancelled")
         if monotonic() >= self.deadline:
             raise RuntimeError("storage_move_time_budget_exceeded")
+
+    def _observe(self):
+        observed_at = monotonic()
+        self._check_controls()
         for target in self.targets:
             current = target.inspect(require_writable=True)
             original = self.capacity[target.target_id]
@@ -233,11 +238,25 @@ class _MoveWatch:
                              target.target_id, current.available_bytes,
                              self.floors[target.target_id], original.available_bytes)
                 raise RuntimeError("storage_move_space_budget_exceeded")
+        # Freshness starts at the oldest target observation, not at the end of
+        # a potentially stalled filesystem call.
+        self._last_observed_at = observed_at
 
     def check(self):
         if self.failure is not None:
             raise RuntimeError(self.failure)
         self._observe()
+
+    def check_progress(self):
+        """Use the live watcher between explicit fresh boundary inspections."""
+        if self.failure is not None:
+            raise RuntimeError(self.failure)
+        self._check_controls()
+        if self._stop.is_set() or not self._thread.is_alive():
+            raise RuntimeError("storage_move_watcher_not_running")
+        if (self._last_observed_at is None
+                or monotonic() - self._last_observed_at > self.grace):
+            raise RuntimeError("storage_move_resource_observation_stale")
 
     def start(self):
         self.check()

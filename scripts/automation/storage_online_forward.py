@@ -415,7 +415,7 @@ def inspect_published_operation(root, *, request=None, operation_path=None):
     journal = host.load_receipt(root/operation_file(STATE, request=selected_request), max_bytes=_MAX_BYTES)
     from scripts.automation import storage_online_reschedule as reschedule
     if any(os.path.lexists(root/reschedule.state_file(journal["forward"]["operation_sha256"], version=version))
-            for version in (1, 2)):
+            for version in (1, 2, 3)):
         return reschedule.inspect_published(root, journal, request=request, operation_path=operation_path)
     return _inspect_publication(root, journal, request=request, operation_path=operation_path)
 
