@@ -805,10 +805,10 @@ def _qualify_reschedule(engine, storage, source, request, kwargs, *, retain_raw=
         row = _insert(conn, storage, "published-after-reschedule")
         assert conn.scalar(text("SELECT count(*) FROM "+adoption.IDENTITY+" WHERE id=:id"), {"id":row["id"]}) == 1
         assert _frozen_records(conn) == frozen
-    return _qualify_extension(engine, storage, proposed, kwargs, retain_raw=retain_raw, guarded=guarded)
+    return _qualify_extension(engine, storage, source, proposed, kwargs, retain_raw=retain_raw, guarded=guarded)
 
 
-def _qualify_extension(engine, storage, previous, kwargs, *, retain_raw=False, guarded=False):
+def _qualify_extension(engine, storage, source, previous, kwargs, *, retain_raw=False, guarded=False):
     """Extend only the explicit bound; retain real cursors, guards and inputs."""
     from copy import deepcopy
     from scripts.automation import storage_online_forward_worker as worker
@@ -877,7 +877,7 @@ def _qualify_extension(engine, storage, previous, kwargs, *, retain_raw=False, g
         with engine.begin() as conn:
             row = _insert(conn, storage, "published-after-expiry")
             assert conn.scalar(text("SELECT count(*) FROM "+adoption.IDENTITY+" WHERE id=:id"), {"id":row["id"]}) == 1
-            _synthetic_descriptor(conn, kwargs["source"], "!after-expiry-"+uuid4().hex)
+            _synthetic_descriptor(conn, source, "!after-expiry-"+uuid4().hex)
             queued_before = conn.execute(text(f"SELECT * FROM {archive_owner.queue} ORDER BY family,id")).all()
         with engine.begin() as conn:
             assert worker.inspect_reschedule(conn, request=proposed) == expected
