@@ -27,7 +27,7 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
         calls.append((op,kw))
         if op=="prepare_step":return dict(result=dict(committed=True))
         if op=="sql_copy":return dict(result=next(replies))
-        if op=="inspect_references":return dict(result=dict(references=[dict(relation="market.ref")],catalogs=list(operation._CATALOGS),next_after=None))
+        if op=="inspect_references":return dict(result=dict(references=[dict(relation="market.ref",prepared=False,validated=False)],catalogs=list(operation._CATALOGS),next_after=None))
         if op=="archive_copy":
             name=next(family);proved.add(name)
             return dict(result=dict(family=name,baseline_complete=True))
@@ -43,6 +43,67 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
     assert steps==['catalog_history','raw_history','identity_history','identity_order','identity_capture',
                    'reference_prepare','reference_validate','reference_adopt','catalog_history','catalog_history']
     assert all(kw['max_duration_seconds']==30 for op,kw in calls if op=='prepare_step')
+
+
+@pytest.mark.parametrize("forward", [False, True])
+@pytest.mark.parametrize("adoption_failure", [False, True])
+def test_background_reuses_native_reference_progress_but_rechecks_adoption(forward, adoption_failure):
+    calls = []
+    rows = [dict(relation="market.a", prepared=True, validated=True),
+            dict(relation="market.b", prepared=True, validated=False),
+            dict(relation="market.c", prepared=False, validated=False)]
+    families = iter(sorted(operation._FAMILIES))
+    proved = set()
+
+    def exchange(op, **kw):
+        calls.append((op, kw))
+        if op == "sql_copy":
+            return dict(result=dict(outcome="both_tails_observed_empty", phase="catch_up"))
+        if op == "inspect_references":
+            return dict(result=dict(references=rows, catalogs=list(operation._CATALOGS), next_after=None))
+        if op == "prepare_step":
+            # Reacquiring an already completed schema lock can conflict with
+            # collection. Neither preparation nor validation is needed for a.
+            assert kw["relation"] != "market.a"
+            assert not (kw["relation"] == "market.b" and kw["step"] == "reference_prepare")
+            if kw["step"] == "reference_adopt" and adoption_failure:
+                raise RuntimeError("fact_header_forward_reference_publication_changed")
+            return dict(result=dict(committed=True))
+        if op == "archive_copy":
+            name = next(families)
+            proved.add(name)
+            return dict(result=dict(family=name, baseline_complete=True))
+        if op == "reprove":
+            return dict(reproved_families_at_observation=sorted(proved))
+        raise AssertionError(op)
+
+    if adoption_failure:
+        with pytest.raises(RuntimeError, match="reference_publication_changed"):
+            operation.prepare_background(exchange, preparation_seconds=30, forward=forward)
+        assert not any(op in {"archive_copy", "reprove"} for op, _ in calls)
+    else:
+        result = operation.prepare_background(exchange, preparation_seconds=30, forward=forward)
+        assert result == dict(reference_count=3, tail_rounds=3, final_switch_authorized=False)
+    steps = [(kw["step"], kw["relation"]) for op, kw in calls
+             if op == "prepare_step" and kw["step"].startswith("reference_")]
+    assert steps == [("reference_validate", "market.b"),
+                     ("reference_prepare", "market.c"), ("reference_validate", "market.c"),
+                     ("reference_adopt", None)]
+
+
+@pytest.mark.parametrize("flags", [{}, {"prepared": True},
+    {"prepared": 1, "validated": True}, {"prepared": True, "validated": "false"},
+    {"prepared": False, "validated": True}])
+def test_background_refuses_ambiguous_reference_progress_before_schema_steps(flags):
+    def exchange(op, **kw):
+        if op == "sql_copy":
+            return dict(result=dict(outcome="both_tails_observed_empty", phase="catch_up"))
+        if op == "inspect_references":
+            return dict(result=dict(references=[dict(relation="market.a", **flags)],
+                catalogs=list(operation._CATALOGS), next_after=None))
+        pytest.fail("ambiguous native progress must not dispatch a schema step")
+    with pytest.raises(RuntimeError, match="reference_page_invalid"):
+        operation.prepare_background(exchange, preparation_seconds=30, forward=True)
 
 
 def test_background_tail_expiry_never_attempts_identity_capture():

@@ -107,13 +107,21 @@ def prepare_background(exchange, *, preparation_seconds, forward=False):
         names = [row["relation"] for row in page["references"]]
         if (tuple(page["catalogs"]) != _CATALOGS or len(names) > 32
                 or names != sorted(set(names)) or seen.intersection(names)
+                or any(type(row.get("prepared")) is not bool
+                    or type(row.get("validated")) is not bool
+                    or row["validated"] and not row["prepared"] for row in page["references"])
                 or any(after is not None and name <= after for name in names)
                 or len(seen)+len(names) > 8192
                 or page["next_after"] is not None and (not names or page["next_after"] != names[-1])):
             raise RuntimeError("storage_online_operation_reference_page_invalid")
-        for relation in names:
-            phase("reference_prepare", relation)
-            phase("reference_validate", relation)
+        for row in page["references"]:
+            relation = row["relation"]
+            if not row["prepared"]:
+                phase("reference_prepare", relation)
+            if not row["validated"]:
+                phase("reference_validate", relation)
+            else:
+                logger.info("storage_online_reference_reused | relation=%s native_validated=true", relation)
         seen.update(names)
         after = page["next_after"]
         if after is None:

@@ -4063,6 +4063,18 @@ Normal execution refuses a new source stop at or after the selected midnight;
 an already admitted pause may finish draining across midnight under its original
 deadline. Missing the window cannot be repaired by stopping collection late.
 
+Reference discovery already verifies native constraint ownership and reports
+strict boolean `prepared` and `validated` fields. The host reuses that current
+worker observation: completed references require no schema step, while an
+existing unvalidated reference requires only validation. Missing, non-boolean or
+contradictory flags refuse before reference dispatch. This avoids reacquiring
+writer-conflicting preparation locks on completed constraints after a stop.
+The same worker still rechecks the complete native reference set during parent
+adoption and final handoff; a discovery result never authorizes a switch. New
+reference preparation retains its existing non-waiting locks, phase budget and
+failure behavior. No automatic retry, clock renewal or new persisted state is
+introduced.
+
 The disposable forward-operation rehearsal exercises this preparation-only
 return, verifies actual worker retirement and continued source serving, then
 reenters the normal operation under the unchanged launch/SQL clocks and refuses
