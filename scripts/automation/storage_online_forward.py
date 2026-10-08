@@ -494,10 +494,12 @@ def _inspect_publication(root, journal, *, request=None, operation_path=None, ac
     return journal
 
 
-def admit_adoption_observation(request, *, initialization, capture, now):
+def admit_adoption_observation(request, *, initialization, capture, now, allow_expired=False):
     """Bind actual SQL clocks to the published request, never the old expiry.
 
     This read-only validator is shared by host launch and final observations.
+    The explicit guarded amendment alone may inspect an expired preimage with
+    allow_expired; all ordinary admissions require the original live deadline.
     It confers no publication, launch, source-stop, COMMIT or replay authority.
     """
     from datetime import datetime, timedelta
@@ -505,7 +507,7 @@ def admit_adoption_observation(request, *, initialization, capture, now):
     from scripts.automation.storage_online_forward_worker import adoption_seconds, execution_intent, initialization_binding
 
     intent = execution_intent(request)
-    if intent is None or type(now) not in (int, float) or not math.isfinite(now):
+    if intent is None or type(now) not in (int, float) or not math.isfinite(now) or type(allow_expired) is not bool:
         raise ValueError("storage_forward_observation_inputs_invalid")
     def instant(value):
         if not isinstance(value, str):
@@ -545,7 +547,7 @@ def admit_adoption_observation(request, *, initialization, capture, now):
         raise RuntimeError("storage_forward_cancellation_observation_changed")
     adopted, expiry = instant(capture["started_at"]), instant(capture["expires_at"])
     if (not start <= adopted <= end or expiry != adopted+timedelta(seconds=seconds)
-            or not adopted.timestamp() <= now < expiry.timestamp()):
+            or now < adopted.timestamp() or (not allow_expired and now >= expiry.timestamp())):
         raise RuntimeError("storage_forward_adoption_original_clock_invalid")
     owner = dict(schema_version="qt.storage_online_forward_session.v1",
         operation_sha256=intent["operation_sha256"], cancellation_intent_sha256=intent["cancellation_intent_sha256"],

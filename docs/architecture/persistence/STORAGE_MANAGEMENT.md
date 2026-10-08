@@ -3481,7 +3481,7 @@ The V2 follow-up candidate uses the same command with the current V1 plan.
 `qt.storage_online_forward_reschedule_package.v2` adds
 `previous_amendment_sha256` (the exact completed V1 journal bytes) and
 `attempt_seconds` (a strictly larger cumulative bound, at most 345600 seconds
-from the original adoption start). It requires a later boundary, an unexpired
+from the original adoption start). It normally requires a later boundary, an unexpired
 adoption, a stopped worker, unchanged guards/ownership and a fresh forecast
 through the amended expiry. Object and descriptor limits may increase together;
 other resource floors and byte/memory limits remain unchanged.
@@ -3498,6 +3498,16 @@ extension, source stop or worker restart. Completed publication remains readable
 after the old expiry; execution is limited by the new finite bound. This candidate
 is not a production extension until its SQL/host rehearsal, resource admission
 and exact operational authorization are satisfied.
+
+The optional `continue_guarded_proof: true` is limited to V2 with
+`raw_mapping_mode: retain_source`. It admits an expired, **unretired** adoption
+only after exact live native/reference/archive verification and complete identity
+proof. The existing ALWAYS guards must remain intact. Ordinary worker admission
+still refuses expiry; only this explicit amendment may inspect the preserved
+proof and atomically extend its allowance. It adds no scan, queue, service or
+registry. Original starts, receipts and the 96-hour cumulative maximum remain;
+a missed new boundary, insufficient capacity, changed guards or reboot refuses.
+See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
 
 ### Explicit retention of the canonical raw mapping table
 

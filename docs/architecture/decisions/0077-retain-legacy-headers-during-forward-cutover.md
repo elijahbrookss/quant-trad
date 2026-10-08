@@ -180,15 +180,30 @@ all evidence remain retained. A separate canonical invocation starts the qualifi
 replacement under every original wall, monotonic and boot clock.
 
 The follow-up V2 candidate allows one explicit extension after a completed V1
-amendment, before the current adoption expires. It binds the exact preceding
+amendment, normally before the current adoption expires. It binds the exact preceding
 amendment and request, and increases the cumulative adoption duration to a
 declared bound of at most 96 hours from the original SQL start. Fresh capacity
 must cover that new expiry. Adoption duration/expiry, the archive capture's
 matching expiry and the existing package/schedule binding change atomically;
 original start times, completed proof, archive cursors/queue identities, guards,
 initializer clocks and the five-minute publication bound remain intact. The
-previous amendment is retained alongside one V2 journal. An expired proof cannot
-be revived, and this is not an indefinitely renewable migration lease.
+previous amendment is retained alongside one V2 journal. Ordinary retries cannot
+revive expired work; this is not an indefinitely renewable migration allowance.
+
+The explicit V2 option `continue_guarded_proof: true` (candidate, not deployed)
+permits that same amendment after the work allowance expires, only with
+`raw_mapping_mode: retain_source`. Complete identity proof, an unretired adoption
+and exact native table/file/guard/reference/archive bindings are required.
+ALWAYS mirrors and immutable guards preserve the proof while the worker is
+stopped. Expiry alone need not force another historical scan. Missing or changed
+guards, retirement, incomplete identities, reboot and uncertain publication
+still refuse. The canceled original capture is never reactivated.
+
+The original start, proof counters, queues, receipts and five-minute publication
+clock remain. The maximum is still 96 cumulative hours, with a fresh capacity
+forecast and a future boundary inside the new allowance. Old packages retain
+the pre-expiry rule. No third amendment, automatic renewal, larger approved
+allowance, new registry or market-data authority follows from this option.
 
 This exception addresses measured preparation that misses its first revised
 window without making another full-history verification the recovery path. Its
@@ -198,8 +213,8 @@ no migration authority. The V2 candidate requires native SQL and confined-host
 qualification before an explicitly admitted production transition.
 
 This avoids repeating validated history merely because the schedule changed. It
-does not rescue an expired adoption or guarantee that the remaining work will
-fit. Native concurrent-publication/rollback checks and the confined Docker
+does not rescue a retired adoption or guarantee that the remaining work will
+fit. The guarded option above is the sole exception to pre-expiry amendment. Native concurrent-publication/rollback checks and the confined Docker
 reschedule/reentry/retirement rehearsal are release gates. Production use and
 throughput remain separate qualification; this candidate is not deployed by
 documentation or by passing tests.
@@ -330,7 +345,7 @@ with native integrity and startup rejection tests. Then connect complete
 physical inventory and conservative movement eligibility. The supported
 operator must prepare composite keys and references, reconcile the original
 expired attempt through a preserving terminal transition, and qualify a new
-bounded handoff with uncertain-COMMIT handling. Expired capture is never revived
+bounded handoff with uncertain-COMMIT handling. Canceled capture is never revived
 or reset, and retained queues, copies and receipts are not discarded.
 
 Only after measured preparation, catch-up, resource and pause admission may the

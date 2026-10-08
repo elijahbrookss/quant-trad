@@ -33,10 +33,10 @@ def attempt(operation_attempt):
     return a
 
 
-@pytest.fixture(params=[1, 2, "retain_raw"])
+@pytest.fixture(params=[1, 2, "retain_raw", "guarded"])
 def rescheduling(successor,monkeypatch,request):
     a = successor
-    a.amendment_version = 2 if request.param == "retain_raw" else request.param
+    a.amendment_version = 2 if request.param in ("retain_raw", "guarded") else request.param
     # Existing fixtures use a fixed original boundary. Keep a genuinely later
     # boundary within their original 60-hour adoption, without extending it.
     _advance(a, datetime.fromisoformat("2026-10-04T12:00:00+00:00").timestamp()-a.clock[0])
@@ -113,10 +113,12 @@ def rescheduling(successor,monkeypatch,request):
             attempt_seconds=84*3600, end_day="2026-10-07", image="sha256:"+"a"*64,
             source_revision="a"*40, source_tree_hash="b"*64,
             forward_plan_path=str(a.path.parent/"extended-operation.json"))
-        if request.param == "retain_raw":
+        if request.param in ("retain_raw", "guarded"):
             a.reschedule_package["raw_mapping_mode"] = "retain_source"
             a.sql["raw_mapping_mode"] = "replace"
             a.old_sql = deepcopy(a.sql)
+        if request.param == "guarded":
+            a.reschedule_package["continue_guarded_proof"] = True
         a.reschedule_file = a.path.parent/"extension-package.json"
         write(a.reschedule_file,a.reschedule_package)
         capacity.update(plan_sha256=a.reschedule_package["plan_sha256"],attempt_seconds=84*3600,
@@ -323,6 +325,71 @@ def test_raw_retention_is_explicit_v2_request_and_preserves_identity_binding(res
     assert request["forward_reschedule"]["raw_mapping_mode"] == "retain_source"
     assert worker.initialization_binding(request)["reschedule"]["raw_mapping_mode"] == "retain_source"
     assert revised["attempt_seconds"] == a.reschedule_package["attempt_seconds"]
+    a.reschedule_package.pop("continue_guarded_proof", None)
     a.reschedule_package["raw_mapping_mode"] = "skip_validation"
     with pytest.raises(ValueError, match="raw_mapping_mode_invalid"):
         reschedule._proposal(a.reschedule_plan, a.request, a.reschedule_package)
+
+
+@pytest.mark.parametrize("rescheduling", ["guarded"], indirect=True)
+def test_expired_guarded_continuation_keeps_completed_work_and_finite_clocks(rescheduling, monkeypatch):
+    a = rescheduling
+    _advance(a, datetime.fromisoformat(a.old_sql["capture"]["expires_at"]).timestamp()+1-a.clock[0])
+    a.reschedule_package.update(attempt_seconds=96*3600, end_day="2026-10-08")
+    write(a.reschedule_file, a.reschedule_package)
+    capacity = host.load_receipt(a.capacity_path)
+    capacity.update(observed_at=a.clock[0], attempt_seconds=96*3600,
+        through_epoch=datetime.fromisoformat(a.old_sql["capture"]["started_at"]).timestamp()+96*3600)
+    write(a.capacity_path, capacity)
+    with monkeypatch.context() as lost:
+        def lose_commit(*args, **kwargs):
+            result = a.reschedule_probe(*args, **kwargs)
+            if kwargs["action"] == "apply":
+                raise TimeoutError("lost guarded continuation reply")
+            return result
+        lost.setattr(reschedule, "_probe", lose_commit)
+        with pytest.raises(TimeoutError):
+            a.change()
+    assert a.change()["phase"] == "forward_reschedule_published"
+    selected = forward.inspect_published_operation(a.root)
+    started = forward.launch_intent(a.root, selected, selected["new_worker"]["binding"])
+    assert started["started_at"] == a.intent["started_at"]
+    assert started["capture"]["started_at"] == a.old_sql["capture"]["started_at"]
+    assert a.sql["preserved_adoption_sha256"] == a.old_sql["preserved_adoption_sha256"]
+    assert a.sql["preserved_archive_sha256"] == a.old_sql["preserved_archive_sha256"]
+    assert forward.admit_startup(a.root, started, selected["new_request"], keys=started["keys"],
+        initialization=started["initialization"], capture=started["capture"]) == pytest.approx(36*3600-1)
+    assert a.actions.count("apply") == 1
+    assert all(p.read_bytes() == data for p, data in a.protected.items())
+    _advance(a, 36*3600)
+    with pytest.raises(RuntimeError):
+        forward.admit_startup(a.root, started, selected["new_request"], keys=started["keys"],
+            initialization=started["initialization"], capture=started["capture"])
+
+
+@pytest.mark.parametrize("rescheduling", ["guarded"], indirect=True)
+@pytest.mark.parametrize("fault", ["boot", "new_expiry", "capacity", "missing_flag", "false_flag", "copy_mode"])
+def test_guarded_continuation_does_not_relax_other_admission(rescheduling, fault):
+    a = rescheduling
+    _advance(a, datetime.fromisoformat(a.old_sql["capture"]["expires_at"]).timestamp()+1-a.clock[0])
+    capacity = host.load_receipt(a.capacity_path)
+    if fault != "capacity":
+        capacity["observed_at"] = a.clock[0]
+    write(a.capacity_path, capacity)
+    if fault == "boot":
+        path = a.root/forward.operation_file(forward.LAUNCH_STATE, request=a.request)
+        saved = host.load_receipt(path, max_bytes=reschedule.MAX_BYTES)
+        saved["boot_id"] = "foreign-boot"
+        write(path, saved)
+    elif fault == "new_expiry":
+        _advance(a, 86400)
+    elif fault == "missing_flag":
+        del a.reschedule_package["continue_guarded_proof"]
+    elif fault == "false_flag":
+        a.reschedule_package["continue_guarded_proof"] = False
+    elif fault == "copy_mode":
+        del a.reschedule_package["raw_mapping_mode"]
+    write(a.reschedule_file, a.reschedule_package)
+    with pytest.raises((ValueError, RuntimeError)):
+        a.change()
+    assert "apply" not in a.actions and not a.reschedule_state.exists()
