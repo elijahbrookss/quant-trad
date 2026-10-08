@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import timedelta
 import os
+import json
 from time import monotonic
 
 import pytest
@@ -41,7 +42,7 @@ def _prepare_slots(engine, slots):
 
 
 def test_online_references_cover_new_partitions_and_concurrent_collection(
-        placed, tmp_path, monkeypatch):
+        placed, tmp_path, monkeypatch, caplog):
     engine, options = _protected(placed, tmp_path, monkeypatch)
     initial = _ordinary(engine)
     _prepare_slots(engine, initial)
@@ -55,8 +56,29 @@ def test_online_references_cover_new_partitions_and_concurrent_collection(
         early.exec_driver_sql("SET LOCAL statement_timeout='2s'")
         earlier = _insert(early, placed, "reference-earlier-late-commit")
         with engine.begin() as validator:
+            validator.exec_driver_sql("SET LOCAL enable_indexscan=off")
+            validator.exec_driver_sql("SET LOCAL enable_indexonlyscan=off")
+            validator.exec_driver_sql("SET LOCAL max_parallel_workers_per_gather=0")
             for relation in initial:
                 references.validate_reference(validator, relation=relation)
+            leaf = next(name for name in initial if name.startswith(references.PARENT+"_"))
+            records = [r for r in caplog.records if r.name == references.logger.name and r.args[0] == leaf]
+            beginning = next(r for r in records if r.msg.startswith("fact_header_reference_validation_start"))
+            finished = next(r for r in records if r.msg.startswith("fact_header_reference_validated"))
+            before_stats = json.loads(beginning.args[2])
+            after_stats = json.loads(finished.args[3])
+            before_leaf = next(row for row in before_stats["relations"] if row["relation"] == leaf)
+            after_leaf = next(row for row in after_stats["relations"] if row["relation"] == leaf)
+            assert finished.args[1] is False and finished.args[2] >= 0
+            assert after_stats["settings"]["track_counts"] == "on"
+            assert after_stats["settings"]["max_parallel_workers_per_gather"] == "0"
+            assert after_leaf["relation_oid"] == before_leaf["relation_oid"]
+            assert after_leaf["heap_bytes"] > 0
+            assert after_leaf["seq_scan"] > before_leaf["seq_scan"]
+            references.validate_reference(validator, relation=leaf)
+            repeated = [r for r in caplog.records if r.name == references.logger.name
+                        and r.msg.startswith("fact_header_reference_validated") and r.args[0] == leaf][-1]
+            assert repeated.args[1] is True
             with engine.begin() as writer:
                 writer.exec_driver_sql("SET LOCAL statement_timeout='2s'")
                 started = monotonic()

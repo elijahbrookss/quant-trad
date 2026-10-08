@@ -4,7 +4,9 @@ Internal one-time migration steps, not a cutover command. Original source FKs
 stay in force. No table rename, old-FK removal, ready certificate or runtime
 wiring occurs here. The caller commits each preparation/validation separately.
 """
+import json
 import logging
+from time import monotonic
 
 from sqlalchemy import text
 
@@ -134,16 +136,44 @@ def _prepare_reference(conn, slots, relation):
             "validated":existing["convalidated"],"reused":reused,"migration_ready":False}
 
 
+def _validation_observation(conn, relation):
+    # Catalog/statistics only, no fact scan. Transaction-local counters include
+    # this backend's current uncommitted work; shared counters can lag and also
+    # mix in collector activity. These are observations, not a pause certificate.
+    rows = conn.execute(text("""
+        SELECT c.oid::bigint AS relation_oid,c.oid::regclass::text AS relation,
+               pg_relation_size(c.oid) AS heap_bytes,
+               s.seq_scan,s.seq_tup_read,s.idx_scan,s.idx_tup_fetch
+        FROM pg_class c LEFT JOIN pg_stat_xact_all_tables s ON s.relid=c.oid
+        WHERE c.oid IN (to_regclass(:source),to_regclass(:target)) ORDER BY c.oid
+    """), {"source":relation,"target":TARGET}).mappings()
+    return dict(relations=[dict(row) for row in rows],
+                settings=dict(conn.execute(text("SELECT name,setting FROM pg_settings WHERE name IN "
+                    "('track_counts','max_parallel_workers_per_gather')")).all()))
+
+
 def _validate_reference(conn, slots, relation):
     slot=_slot(slots,relation)
     before=_states(conn,slots)[relation]
     if before is None:
         raise RuntimeError("fact_header_reference_not_prepared: "+relation)
-    conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} VALIDATE CONSTRAINT {STAGED}")
+    observation = _validation_observation(conn, relation)
+    started = monotonic()
+    logger.info("fact_header_reference_validation_start | relation=%s reused=%s observation=%s",
+                relation,before["convalidated"],json.dumps(observation,sort_keys=True))
+    try:
+        conn.exec_driver_sql(f"ALTER TABLE {_qualified(conn,relation)} VALIDATE CONSTRAINT {STAGED}")
+    except Exception:
+        logger.exception("fact_header_reference_validation_failed | relation=%s elapsed_seconds=%.6f",
+                         relation,monotonic()-started)
+        raise
+    elapsed = monotonic()-started
+    observed = _validation_observation(conn, relation)
     after=_existing(conn,slot)
     if after["oid"]!=before["oid"] or not after["convalidated"]:
         raise RuntimeError("fact_header_reference_validation_changed")
-    logger.info("fact_header_reference_validated | relation=%s",relation)
+    logger.info("fact_header_reference_validated | relation=%s reused=%s elapsed_seconds=%.6f observation=%s",
+                relation,before["convalidated"],elapsed,json.dumps(observed,sort_keys=True))
     return {"relation":relation,"constraint_oid":after["oid"],
             "validated":True,"reused":before["convalidated"],"migration_ready":False}
 

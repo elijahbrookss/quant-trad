@@ -3682,7 +3682,17 @@ terminal receipt share one transaction; interruption rolls them back together.
 There is no committed early range CHECK that can strand collection at rollover.
 The original private copied headers/catalogues and raw source remain preserved.
 The native range scan is part of the final pause and needs measured production
-admission within the existing deadline. The host entrypoint, durable COMMIT
+admission within the existing deadline.
+Required FK validations log elapsed SQL time, reuse status, heap sizes and
+before/after transaction-local scan counters through the existing reference
+owner. These catalog/statistics reads add no historical scan and change no
+migration or pause allowance. They distinguish a reused constraint from actual
+validation work. [PostgreSQL transaction statistics](https://www.postgresql.org/docs/15/monitoring-stats.html)
+update within the transaction; shared I/O counters can lag or include collectors.
+A reused constraint, index-only path, disabled statistics or incomplete parallel
+accounting cannot qualify the full header range scan. Review the observations
+with collector health, I/O/temp/WAL peaks and other final phases before source
+pause; logs alone confer no cutover authority. The host entrypoint, durable COMMIT
 reconciliation, full physical qualification, recovery and deployment remain open.
 
 ## Forward archive catch-up ownership
