@@ -416,6 +416,13 @@ operation history. A manifest value alone does not admit a maintenance duration:
 queue occupancy, spool arrivals, memory, cancellation and rollback still need
 their measured resource budget.
 
+Stored runtime-policy rows keep their existing format. Older enrollment loaders
+can use the preserved original manifests; they reject manifests containing the
+new optional field. Fleet enrollment commits each definition separately. If an
+apply fails, keep the selected collectors paused, inspect each definition's
+manifest hash, queue value and generation, and reapply the same reviewed
+manifest to finish. Resume only after every selected definition matches.
+
 ## Resource Authority
 
 Resource detection is scoped. Container CPU/memory and Docker engine storage
