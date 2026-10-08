@@ -167,8 +167,9 @@ def observe(conn, plan, *, deadline=None, read_only_namespace=False):
     return binding,pid
 
 
-def verify(conn, saved, *, read_only_namespace=False):
-    observed,pid=observe(conn,_restore(saved["plan"]), **({"read_only_namespace":True} if read_only_namespace else {}))
+def verify(conn, saved, *, read_only_namespace=False, deadline=None):
+    observed,pid=observe(conn,_restore(saved["plan"]), **({"deadline":deadline} if deadline is not None else {}),
+                         **({"read_only_namespace":True} if read_only_namespace else {}))
     if observed!=saved:
         raise RuntimeError("fact_header_copy_placement_binding_changed")
     return pid

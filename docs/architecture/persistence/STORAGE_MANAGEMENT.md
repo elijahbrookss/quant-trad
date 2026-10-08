@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/raw_mapping_v2_placement.py
+  - tests/test_market_data/test_raw_mapping_history_placement_db.py
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward_worker.py
@@ -3552,6 +3554,29 @@ implement or authorize that move. See the
 [raw-table decision](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#keep-the-unchanged-canonical-raw-table)
 for remaining work and the distinction between stopping a worker and retiring
 its continuously maintained identity proof.
+
+The separate `raw_mapping_v2_placement` database candidate closes that physical
+bridge after cutover. Its fixed target is the retained canonical raw relation:
+heap/TOAST and secondary indexes go to the bound HDD, while the already selected
+primary lookup index stays on SSD. No Fact, mapping row, key, permission, archive,
+retained copy or historical handoff is rewritten. It owns no service lifecycle.
+
+An explicit request uses the existing storage-plan table for its original clock
+and completion. Session locks exclude competing storage work; fresh capacity
+admission and the existing watcher separately enforce declared resource limits.
+Native DDL and the completion pointer in `fact_storage_state.evidence` commit
+together. Reentry verifies completion before considering another move. Interrupted
+work keeps its original deadline; explicit cancellation first proves the original
+files remain in place. A different request can follow only a reconciled terminal
+plan. The historical handoff inspector accepts the new placement only through
+the matching completed plan and physical checks.
+
+This is an internal candidate, not wired to CLI or automatic maintenance and not
+production-qualified. Its native fixture covers rollback, concurrent-reader
+refusal, duplicate requests, cancellation, lost replies, preserved frozen inputs
+and the SSD primary index. Host admission, encrypted recovery of the resulting
+layout and representative time/WAL/spool measurements remain required. A small
+fixture cannot establish a production pause or turn timeout into a recovery SLA.
 
 ## Retained-target adoption after an uncaptured interval
 

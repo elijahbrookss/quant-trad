@@ -31,6 +31,8 @@ code_paths:
   - portal/backend/service/storage/header_catalog.py
   - portal/backend/service/storage/repos/fact_storage.py
   - scripts/db/fact_header_v2_handoff.py
+  - scripts/db/raw_mapping_v2_placement.py
+  - tests/test_market_data/test_raw_mapping_history_placement_db.py
 ---
 # ADR 0077: Retain Legacy Headers During a Forward Cutover
 
@@ -100,6 +102,22 @@ raw reconciliation is justified for a move of the authoritative relation itself.
 Moving files still copies bytes and blocks access; neither a short pause nor
 production throughput has been established. Do not hide that move inside the
 schema switch or an ordinary read, or claim that the current candidate executes it.
+
+The follow-up database boundary is a separate **unqualified candidate**, with no
+CLI/runtime wiring or production dispatch. It extends the existing fixed physical
+owner to move this one canonical raw heap and its two secondary indexes to HDD.
+The measured raw primary-key index remains on SSD under `recent_lookup_indexes`;
+that durable index is outside the disposable cache and 14-day window.
+
+The existing `portal_storage_plans` journal owns its explicit request, immutable
+deadline, cancellation and atomic completion. The existing `fact_storage_state`
+evidence points to that completion, leaving the historical handoff unchanged.
+Native catalog/file checks remain authoritative. This avoids a new table,
+generic mover, second data authority or fresh row-copy reconciliation. The old
+handoff inspector now recognizes only this verified post-cutover transition;
+an unexplained physical change still refuses. Production use additionally needs
+host/recovery integration, native qualification, measured movement and WAL costs,
+and bounded collection/spool impact. It does not amend the running cutover.
 
 Remaining cutover work is concrete: native references to the adopted identity
 table, archive inventory/copy catch-up, reference-catalog placement, the final
