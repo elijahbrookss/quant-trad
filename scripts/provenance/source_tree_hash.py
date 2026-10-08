@@ -40,6 +40,7 @@ OPERATOR_FILES = (
     "scripts/db/fact_header_v2_placement.py",
     "scripts/db/fact_header_v2_references.py",
     "scripts/db/raw_mapping_v2_copy.py",
+    "scripts/db/raw_mapping_v2_placement.py",
     "scripts/db/archive_root_v2_copy.py",
     "scripts/db/archive_reference_v2_placement.py",
 )

@@ -9,6 +9,11 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/raw_mapping_v2_placement.py
+  - cli/storage_placement.py
+  - tests/test_cli/test_storage_placement.py
+  - tests/test_market_data/test_raw_mapping_history_placement_db.py
+  - tests/test_market_data/test_incremental_raw_placement_db.py
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward_worker.py
@@ -3552,6 +3557,63 @@ implement or authorize that move. See the
 [raw-table decision](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#keep-the-unchanged-canonical-raw-table)
 for remaining work and the distinction between stopping a worker and retiring
 its continuously maintained identity proof.
+
+The separate `raw_mapping_v2_placement` database candidate closes that physical
+bridge after cutover. Its fixed target is the retained canonical raw relation:
+heap/TOAST and secondary indexes go to the bound HDD, while the already selected
+primary lookup index stays on SSD. No Fact, mapping row, key, permission, archive,
+retained copy or historical handoff is rewritten. It owns no service lifecycle.
+
+An explicit request uses the existing storage-plan table for its original clock
+and completion. Session locks exclude competing storage work; fresh capacity
+admission and the existing watcher separately enforce declared resource limits.
+Native DDL and the completion pointer in `fact_storage_state.evidence` commit
+together. Reentry verifies completion before considering another move. Interrupted
+work keeps its original deadline; explicit cancellation first proves the original
+files remain in place. A different request can follow only a reconciled terminal
+plan. The historical handoff inspector accepts the new placement only through
+the matching completed plan and physical checks.
+
+The explicit candidate command is `qt storage place-retained-raw --request-file
+<file-or-dash>` inside the existing maintenance container. Default inspection
+reads catalogs and relation sizes in a bounded read-only transaction, creates no
+plan and starts no attempt clock. `--execute` performs the separately admitted
+move; `--cancel` reconciles an unmoved intent. These flags cannot be combined.
+The bounded JSON request has `schema_version: qt.retained_raw_history.v1`, exact
+`source_revision`, `request_id`, `handoff_sha256`, the saved `policy` and existing
+`resource_limits` fields. Inputs cannot select arbitrary tables, drives or SQL.
+
+The adapter requires the dedicated database UID, matching immutable image
+attestation (the image's `QT_IMAGE_SOURCE_*`, without requiring research `SOURCE_*` settings),
+archive/working mounts and a live maintenance heartbeat. It opens only `PG_DSN`
+without schema bootstrap. Signals request cancellation through the existing move
+watcher; failed/disconnected dispatch is inspected with the same request before
+retry. No callback silently renews an expired intent. The existing
+`scripts/automation/server_deploy.sh qt storage place-retained-raw --request-file -`
+route holds the deployment lock and selects maintenance only when the recorded
+SSD/HDD release, clean checkout and running image match. Ordinary `qt` commands
+retain their backend owner. Routing does not replace collector/spool admission
+or recovery evidence. Do not inject this command into an older image or weaken the original
+pre-recovery migration launcher's mount checks to run it. The already pinned
+first release must settle before a qualified subsequent release can include it.
+
+This is not automatic maintenance and is not production-qualified. Its native
+fixture covers read-only/no-intent inspection, rollback, concurrent-reader
+refusal, duplicate requests, cancellation, lost replies, preserved frozen inputs
+and the SSD primary index. The atomic completion pointer changes the existing
+recovery layout fingerprint; an older pair is no longer current. A placement
+result deliberately returns `recovery_verified: false`. The separate
+`test_incremental_raw_placement_db.py` rehearsal runs the packaged CLI using its
+image identity and a labelled heartbeat fixture. It takes a full encrypted pair
+before movement and an incremental pair afterward, restores into an empty
+disposable volume, then compares current/frozen facts, book replay, canonical and
+retained raw rows, native relation identities and completion evidence. Original
+archive paths are unavailable and writes after the selected pair must be absent.
+It runs in a separate `incremental-recovery` invocation; the test topology cannot
+reuse a restore volume or postmaster from the original full-copy rehearsal.
+Host admission, successful exact-image recovery qualification and representative
+time/WAL/spool measurements remain required. A small
+fixture cannot establish a production pause or turn timeout into a recovery SLA.
 
 ## Retained-target adoption after an uncaptured interval
 

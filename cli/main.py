@@ -3283,6 +3283,11 @@ def _add_global_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _cmd_storage(args: argparse.Namespace) -> int:
+    if args.storage_command == "place-retained-raw":
+        from cli.storage_placement import run_local_placement
+
+        _print_json(run_local_placement(args.request_file, execute=args.execute, cancel=args.cancel))
+        return 0
     if args.storage_command == "migrate":
         from scripts.automation.storage_online_operation import run_operation_plan
 
@@ -4910,6 +4915,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     storage = subparsers.add_parser("storage", help="Inspect drives and review server-owned storage policy.")
     storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    raw_placement = storage_sub.add_parser("place-retained-raw",
+        help="Explicit post-cutover raw placement inside the admitted maintenance container; inspect by default.")
+    raw_placement.add_argument("--request-file", required=True, help="Bounded reviewed JSON file, or '-' for stdin.")
+    raw_action = raw_placement.add_mutually_exclusive_group()
+    raw_action.add_argument("--execute", action="store_true", help="Move the admitted unchanged raw relation; host admission and recovery remain required.")
+    raw_action.add_argument("--cancel", action="store_true", help="Close an unmoved intent after proving rollback; never reverse a completed move.")
+    raw_placement.set_defaults(func=_cmd_storage)
     migration = storage_sub.add_parser("migrate", help="Inspect or execute a prepared local host migration plan; final release checks remain separate.")
     migration.add_argument("--operation-file", required=True, help="Private fixed SSD/HDD operation JSON on this Linux host.")
     migration.add_argument("--execute", action="store_true", help="Perform the admitted preserving migration; default is read-only inspection.")

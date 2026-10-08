@@ -305,7 +305,9 @@ def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     assert "previous_revision" in deploy
     assert "credentials-coinbase)" in deploy
     assert "qt)" in deploy
-    assert 'compose exec -T backend /app/scripts/qt "$@"' in deploy
+    # Executable routing tests cover ordinary backend commands and the one
+    # explicitly admitted maintenance operation through the same host lock.
+    assert 'run_qt_command "$@"' in deploy
     assert "will be enrolled without credentials" in deploy
     assert "credentials are optional" in deploy
     assert "load provider credentials before judging" not in deploy

@@ -799,8 +799,13 @@ def _verify_handoff_relations(conn, receipt, *, pid):
         if closed != 1:
             raise RuntimeError("fact_header_handoff_retained_source_not_closed")
     retain_raw = forward is not None and forward.get("raw_mapping_mode") == "retain_source"
+    raw_history = None
+    if retain_raw:
+        from scripts.db.raw_mapping_v2_placement import inspect_completed_raw_history
+        raw_history = inspect_completed_raw_history(conn, receipt, pid=pid)
     for relation in ("market.fact_identities", raw.SOURCE, *reference_move.RELATIONS):
-        physical.verify_group(conn, relation, history=not (retain_raw and relation == raw.SOURCE), saved=saved, pid=pid)
+        history = not (retain_raw and relation == raw.SOURCE and raw_history is None)
+        physical.verify_group(conn, relation, history=history, saved=saved, pid=pid)
     assert_fact_storage_contract(conn)
 
 
