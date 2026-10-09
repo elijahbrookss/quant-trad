@@ -742,7 +742,9 @@ def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
         check()
         raw = preserving._runtime_configuration_bytes(state_root/"storage-online-request.json")
         request = json.loads(raw)
-        identity = saved["binding"]["capture"]["cluster_id"]+"/"+saved["binding"]["capture"]["database_oid"]
+        # The authenticated request owns identity for both original and forward
+        # captures; forward capture receipts contain proof/clock fields only.
+        identity = request["database_identity"]
         result = preserving._runtime_observation(journal["candidate_ids"]["storage-maintenance"],
             dict(policy=request["policy"], database_identity=identity,
                  inventory_path="/run/quanttrad/storage-inventory.json", confirmed_plan_id=plan_id),

@@ -2730,7 +2730,10 @@ receipt, the canonical operation reader binds the current runtime recipe to the
 final owner's recorded admission, including an explicitly corrected database
 image. Before completion, publication still requires the original recipe bytes.
 Plan, request, inventory, launch clocks and publication history remain checked in
-both cases. The existing runtime observer must then verify the actual containers,
+both cases. Database identity comes from the authenticated operation request for
+both original and forward capture formats; forward capture receipts own proof
+and clocks, not a duplicate database identity. The existing runtime observer must
+then verify the actual containers,
 cluster, mounts, configuration and complete backup pair before deployment
 publication; matching a recipe alone grants no operational authority. Inspection
 never renews a deadline or dispatches the retired migration. This reader correction

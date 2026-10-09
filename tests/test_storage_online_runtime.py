@@ -499,3 +499,78 @@ def test_proposed_runtime_uses_complete_validator_without_publication(split_reci
         result,proof=runtime.inspect_runtime_configuration(tmp_path,**args)
         assert result == proposed and proof["recipe_sha256"] == runtime.host.digest(proposed)
     if fault != "file-drift": assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("forward_capture", [False, True])
+def test_completed_runtime_uses_bound_request_identity_for_both_capture_formats(tmp_path, monkeypatch, forward_capture):
+    """Exercise completion through its backup probe, with read-only Docker peers."""
+    now = time.time()
+    tmp_path.chmod(0o700)
+    actual_stat = Path.stat
+    def fixture_stat(path, **kwargs):
+        value = actual_stat(path, **kwargs)
+        # The runtime directory is owned by container UID/GID 1000; the host
+        # test runner may have a different UID. Other stat fields stay real.
+        return os.stat_result((*value[:4], 1000, 1000, *value[6:])) if path == tmp_path else value
+    monkeypatch.setattr(Path, "stat", fixture_stat)
+    worker = dict(container_id="worker", binding={}, contract={})
+    preparation = dict(cluster="123", clients={n:{} for n in runtime._PRESERVED_SERVICES})
+    candidate_ids = {n:hashlib.sha256(n.encode()).hexdigest() for n in runtime._APPLICATIONS}
+    recipe = dict(services={n:dict(image="owned") for n in (*runtime._APPLICATIONS, "tsdb")})
+    admission = dict(images={}, recipe_sha256=runtime.host.digest(recipe))
+    stopped = dict(Running=False, Paused=False, Restarting=False, Dead=False,
+        Pid=0, Status="exited", StartedAt="original", ExitCode=0, OOMKilled=False)
+    journal = dict(started_at=now-1, deadline_monotonic=time.monotonic()+20,
+        completed=list(runtime._RUNTIME_ACTIONS), inflight=None, finished_at=now,
+        admission=admission, compose_hashes={}, candidate_ids=candidate_ids)
+    saved = dict(phase="recovery_runtime_ready", deadline=now+30,
+        switch=dict(deadline_monotonic=time.monotonic()+30),
+        commit=dict(confirmed_plan_id="handoff-"+"a"*32), runtime=journal,
+        binding=dict(project="fixture", worker_id="worker", worker_started_at="original",
+            worker_sha256=runtime.host.digest(worker), preparation_sha256=runtime.host.digest(preparation),
+            capture=(dict(schema_version="qt.storage_online_forward_capture.v1", proof_sha256="a"*64)
+                if forward_capture else dict(cluster_id="123", database_oid="456"))),
+        recovery=dict(replacement_id="db"),
+        runtime_spool=dict(destination=str(tmp_path), destination_identity=[tmp_path.stat().st_dev,tmp_path.stat().st_ino],
+            helper_id="spool", helper_retirement=runtime.host.digest(stopped),
+            finished_at=now-2, report=dict(manifest_sha256="b"*64)),
+        repositories=dict(helper_id="repository", helper_retirement=runtime.host.digest(stopped)))
+    runtime.host.save_receipt(tmp_path/runtime.launch._STATE, worker, initial=True)
+    runtime.host.save_receipt(tmp_path/final.STATE, saved, initial=True)
+    request = dict(policy={"fixture":"unchanged"}, database_identity="123/456")
+    runtime.host.save_receipt(tmp_path/"storage-online-request.json", request, initial=True)
+    monkeypatch.setattr(runtime.initial, "_load", lambda root: preparation)
+    rows = {n:dict(id=identity) for n,identity in {**candidate_ids,"tsdb":"db",
+        **{n:n for n in runtime._PRESERVED_SERVICES}}.items()}
+    monkeypatch.setattr(runtime.host, "inventory", lambda *a, **kw: rows)
+    monkeypatch.setattr(runtime, "admit_runtime_recipe", lambda *a: (recipe,admission))
+    monkeypatch.setattr(runtime.host, "database_details", lambda *a: {})
+    monkeypatch.setattr(runtime.host, "database_networks", lambda *a: [])
+    monkeypatch.setattr(runtime.launch, "_admit", lambda *a: None)
+    def inspect(*args, **kwargs):
+        assert args[:3] == ("inspect", "--format", "{{json .State}}")
+        if args[-1] in {"worker", "spool", "repository", candidate_ids["initialize"]}:
+            return json.dumps(stopped)
+        return json.dumps({**stopped,"Running":True,"Health":{"Status":"healthy"}})
+    monkeypatch.setattr(runtime.host, "docker", inspect)
+    monkeypatch.setattr(runtime, "_copy_report", lambda *a: {})
+    monkeypatch.setattr(runtime.preserving, "_runtime_candidate_details", lambda *a: {})
+    monkeypatch.setattr(runtime, "admit_candidate_privileges", lambda *a: None)
+    monkeypatch.setattr(runtime, "observe_preserved_services",
+        lambda *a: ({n:{} for n in runtime._PRESERVED_SERVICES},[]))
+    monkeypatch.setattr(runtime, "admit_preserved_runtime_service", lambda *a, **kw: None)
+    monkeypatch.setattr(runtime.host, "cluster_identifier", lambda *a, **kw: "123")
+    probes = []
+    def probe(container, selected, database_result):
+        assert container == candidate_ids["storage-maintenance"]
+        assert selected["database_identity"] == request["database_identity"]
+        assert selected["policy"] == request["policy"]
+        assert selected["confirmed_plan_id"] == database_result["plan_id"] == saved["commit"]["confirmed_plan_id"]
+        probes.append(selected)
+        return dict(ready=False, reason="current_layout_recovery_pending")
+    monkeypatch.setattr(runtime.preserving, "_runtime_observation", probe)
+    before = (tmp_path/final.STATE).read_bytes()
+    result = runtime.inspect_completed_runtime(tmp_path, saved=saved)
+    assert result["runtime_ready"] and not result["complete_backup_confirmed"]
+    assert not result["storage_mutations_performed"] and len(probes) == 1
+    assert (tmp_path/final.STATE).read_bytes() == before
