@@ -42,6 +42,7 @@ def recover_missing_repository_configuration(operation_file, *, state, owned, ru
     assert saved['repositories']['completed'] == ['logins', 'create']
     assert saved['repositories']['inflight'] == 'prepare'
     failed = saved['repositories']['helper_id']
+    failed_project = json.loads(run(['inspect', failed, '--format', '{{json .Config.Labels}}']).stdout)['com.docker.compose.project']
     owned.append(failed)
     while time.time() <= saved['deadline']+.1:
         time.sleep(min(.2, saved['deadline']+.2-time.time()))
@@ -59,6 +60,9 @@ def recover_missing_repository_configuration(operation_file, *, state, owned, ru
     assert host_boundary.load_receipt(state/launch._STATE) == worker
     assert audit['phase'] == 'runtime_ready' and audit['deadline']-audit['started_at'] <= 120
     current = final._load(state/final.STATE)
+    replacement_project = json.loads(run(['inspect', current['repositories']['helper_id'],
+        '--format', '{{json .Config.Labels}}']).stdout)['com.docker.compose.project']
+    assert replacement_project != failed_project
     assert all(current[k] == saved[k] for k in ('started_at', 'started_boot', 'boot_id', 'commit', 'binding'))
     status = json.loads(run(['inspect', failed, '--format', '{{json .State}}']).stdout)
     assert status['Status'] == 'exited' and status['Pid'] == 0 and status['ExitCode'] == 1

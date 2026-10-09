@@ -1512,7 +1512,10 @@ an existing continuation intent refuse execution.
 
 Execution preserves the failed receipt, private recipe and helper; verifies the
 committed certificate, policy, cluster, mounts and stopped workers; and reacquires
-the deployment lock and archive namespace exclusion. An explicit allowance of at
+the deployment lock and archive namespace exclusion. The replacement helper has
+a separate Compose project identity: renaming the failed container alone would
+still let Compose replace it through its original project/service labels.
+An explicit allowance of at
 most 600 seconds extends only the final recovery window. The original start and
 pause times remain intact, and a separate audit records the original deadline and
 the extension. Capture clocks, committed SQL, keys and policy are unchanged. The

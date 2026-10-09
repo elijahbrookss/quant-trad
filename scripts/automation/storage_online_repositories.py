@@ -154,6 +154,9 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
     backup = next(t for t in targets if t["medium"]=="hdd")
     identity = str(saved["login_gate"]["database"]["cluster"])+"/"+str(saved["login_gate"]["database"]["oid"])
     project = saved["binding"]["project"]
+    # Compose selects existing containers by project/service labels, even after
+    # docker rename. Keep the failed preparer intact under its original project.
+    preparer_project = project+("-recovery-continuation" if logins_already_open else "-recovery")
     recipe_path = state_root/RECIPE
     name = project+"-storage-repository-prepare"
     if recipe_path.exists() or recipe_path.is_symlink():
@@ -241,7 +244,7 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
             return contract
 
         # Private rendered recipe, never printed: it contains the original PG_DSN.
-        recipe=dict(name=project+"-recovery",services=dict(prepare=helper),volumes=model["volumes"])
+        recipe=dict(name=preparer_project,services=dict(prepare=helper),volumes=model["volumes"])
         host.save_receipt(recipe_path,recipe,initial=True)
         saved.update(phase="recovery_repository_preparing",repositories=dict(
             recipe_sha256=host.digest(recipe),helper_id=None,helper_contract=None,
@@ -293,7 +296,7 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
         if not logins_already_open:
             dispatch("logins",sql_args,sql="SET statement_timeout='5s';\nSELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
         gate(True);completed("logins")
-        dispatch("create",["compose","--project-name",project+"-recovery","--file",str(recipe_path),
+        dispatch("create",["compose","--project-name",preparer_project,"--file",str(recipe_path),
                            "create","--no-build","--pull","never","prepare"])
         ids=host.docker("ps","-aq","--no-trunc","--filter","name=^/"+name+"$").split()
         if len(ids)!=1:raise RuntimeError("storage_online_repository_preparer_missing")
