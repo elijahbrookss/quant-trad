@@ -164,14 +164,27 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
          "AND manifests.first_receive_ordinal<=positions.receive_ordinal AND manifests.last_receive_ordinal>=positions.receive_ordinal "
          "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
          {"positions": json.dumps(positions)}),
-        ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:prefixes AS jsonb)) "
-         "AS prefixes(definition_id text, session_id text, connection_epoch bigint, first_receive_ordinal bigint, receive_ordinal bigint) "
-         "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
-         "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
-         "AND prefixes.connection_epoch=mappings.connection_epoch "
-         "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
-         {"prefixes": json.dumps(prefixes)}),
     ]
+    if prefixes:
+        # Expose the bounded number of requested scopes to the planner. The
+        # recordset function's generic row estimate can choose a full mapping
+        # scan even for one prefix. Values remain bound, and EXISTS preserves
+        # one result per mapping when requested ranges overlap.
+        fields = (("definition_id", "text"), ("session_id", "text"),
+                  ("connection_epoch", "bigint"), ("first_receive_ordinal", "bigint"),
+                  ("receive_ordinal", "bigint"))
+        prefix_values = ",".join("(" + ",".join(
+            f"CAST(:prefix_{index}_{name} AS {kind})" for name, kind in fields) + ")"
+            for index in range(len(prefixes)))
+        prefix_params = {f"prefix_{index}_{name}": scope[name]
+                         for index, scope in enumerate(prefixes) for name, _ in fields}
+        queries.append((f"EXISTS (SELECT 1 FROM (VALUES {prefix_values}) "
+            "AS prefixes(definition_id, session_id, connection_epoch, first_receive_ordinal, receive_ordinal) "
+            "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
+            "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
+            "AND prefixes.connection_epoch=mappings.connection_epoch "
+            "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
+            prefix_params))
     for predicate, params in queries:
         if not (record_ids if "ids" in params else positions if "positions" in params else prefixes):
             continue

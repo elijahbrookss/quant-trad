@@ -115,6 +115,39 @@ def test_trade_prefix_progress_holds_raw_evidence_and_resumes_after_interruption
     assert set(verify()) == set(fixture.manifests)
 
 
+def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_lineage
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch)
+    last = fixture.raws[-1]
+    prefix = {name: getattr(last, name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+        "first_receive_ordinal": 1, "receive_ordinal": 2, "root_fact_version_id": "prefix-root",
+        "requested_channel": "market_trades",
+    }
+    prefixes = [prefix, {**prefix, "first_receive_ordinal": 2, "root_fact_version_id": "overlapping-root"}]
+    returned = []
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if "raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement:
+            returned.append(cursor.rowcount)
+    def resolve(ranges=prefixes, **kwargs):
+        with storage.database.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=fixture.store,
+                byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()),
+                book_prefix_ranges=ranges, max_mapping_rows=3, **kwargs)
+    event.listen(storage.database._engine, "after_cursor_execute", observe)
+    try:
+        assert set(resolve()) == set(fixture.manifests)
+        assert returned == [2], "overlapping requests must not multiply mapping candidates"
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve(bound_manifest_ids=fixture.manifests[:1])
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve([prefix, {**prefixes[1], "session_id": "another-connection"}])
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", observe)
+
+
 def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
     trade = replace(_trade(trade_id, offset="0", side=MarketSide.BUY, price="100", receive_ordinal=1),
                     provider_product_id="BTC-USD", provider_event_time=fixture.raws[0].received_at - timedelta(seconds=1),

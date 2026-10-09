@@ -814,6 +814,13 @@ file/logical-byte bounds apply, with cooperative cancellation during hashing.
 The surrounding checksum and file-stability gates still bind those columns to
 the fully decoded object; a fingerprint alone is not raw-frame verification.
 
+Raw-prefix lookup supplies its bounded scope list as typed, bound SQL `VALUES`,
+so PostgreSQL can plan using the requested scope count instead of a generic
+JSON-recordset estimate. The existing `EXISTS` predicate keeps overlapping
+requests from multiplying mapping candidates. Exact session/epoch/ordinal
+matching, placement bounds, expiry exclusion, deterministic ordering, and raw
+byte verification remain unchanged. This query change adds no index or backfill.
+
 Default per-call bounds are 50,000 mapping candidates, 1,000,000 decoded raw
 records, and 2 GiB logical data. Individual files are limited to 1 GiB and
 declared row groups to 256 MiB; decoding uses 128-row batches, with additional

@@ -59,7 +59,10 @@ class _Session:
                 (item["definition_id"], item["session_id"], item["connection_epoch"], item["receive_ordinal"])
                 for item in wanted)]
         else:
-            prefixes = json.loads(params["prefixes"])
+            prefixes = []
+            while f"prefix_{len(prefixes)}_definition_id" in params:
+                prefixes.append({name: params[f"prefix_{len(prefixes)}_{name}"] for name in
+                    ("definition_id", "session_id", "connection_epoch", "first_receive_ordinal", "receive_ordinal")})
             found = [row for row in self.mappings if any(
                 (row["definition_id"], row["mapped_session_id"], row["mapped_epoch"]) ==
                 (item["definition_id"], item["session_id"], item["connection_epoch"])
