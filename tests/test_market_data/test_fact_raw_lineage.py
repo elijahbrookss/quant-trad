@@ -287,14 +287,16 @@ def test_qt_authored_book_features_bind_provider_frames_without_relabeling_the_a
     assert list(_resolve(store, mappings, [row])[0]) == ["raw-manifest"]
 
 
-def test_aliases_with_different_raw_bytes_at_one_book_position_are_ambiguous(tmp_path):
+@pytest.mark.parametrize("bound_witness", [False, True])
+def test_aliases_with_different_raw_bytes_at_one_book_position_are_ambiguous(tmp_path, bound_witness):
     store, records, mappings, rows = _fixture(tmp_path)
     extra = {**mappings[0], "id": "other-manifest", "raw_record_id": "another-raw-id"}
     evidence = {"definition_id": records[0].definition_id, "session_id": records[0].session_id,
                 "connection_epoch": 0, "receive_ordinal": 1, "provider_product_id": "BTC-USD"}
     row = {**rows[0], "fact_type": "market.bbo", "provenance": {"_qt_bbo_evidence": {"source_position": evidence}}}
+    bindings = {row["id"]: {"raw-manifest", "other-manifest"}} if bound_witness else None
     with pytest.raises(RuntimeError, match="position_ambiguous"):
-        _resolve(store, [*mappings, extra], [row])
+        _resolve(store, [*mappings, extra], [row], witness_manifest_ids=bindings)
 
 
 @pytest.mark.parametrize("limit", ["max_rows", "max_file_bytes", "max_logical_bytes", "max_row_group_bytes"])

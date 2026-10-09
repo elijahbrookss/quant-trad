@@ -762,6 +762,14 @@ an immutable page. A missing/corrupt selected copy fails without silently
 switching to another copy. Multiple different raw IDs at the same claimed book
 position are ambiguous and rejected.
 
+When every requested witness already has pinned raw placements, the lookup
+restricts SQL candidates to their union before applying the mapping-row budget.
+An existing page-wide bound further intersects that union; each witness still
+checks its own binding afterward. Partial bindings leave unbound witnesses
+unrestricted, and an empty eligible set fails closed. This avoids considering
+unrelated placements during trade-prefix endpoint checks without changing raw
+identity, ambiguity checks, byte verification, or archive formats.
+
 Every selected object receives a fresh byte checksum and bounded streaming
 decode. The complete object's row count, order, source session/epoch, and ordinal
 bounds must agree with its manifest. Each requested physical row must match its

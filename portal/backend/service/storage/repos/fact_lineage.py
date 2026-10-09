@@ -150,6 +150,16 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                 wanted[("position", *key, ordinal)].append((None, {**scope, "receive_ordinal": ordinal}))
     if not wanted:
         return {}
+    # Prefix verification already pins eligible placements per witness. Apply
+    # their union before the SQL candidate limit, then retain the per-witness
+    # checks below. Incomplete bindings cannot restrict unbound witnesses.
+    witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
+                   for witnesses in wanted.values() for row, evidence in witnesses}
+    if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
+        eligible = {identity for witness_id in witness_ids
+                    for identity in witness_manifest_ids[witness_id]}
+        bound_manifest_ids = (eligible if bound_manifest_ids is None
+                              else eligible.intersection(bound_manifest_ids))
     matches = []
     bound_predicate = "" if bound_manifest_ids is None else "AND manifests.id = ANY(:bound_ids)"
     bound_params = {} if bound_manifest_ids is None else {"bound_ids": sorted(set(bound_manifest_ids))}

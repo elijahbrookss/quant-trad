@@ -148,6 +148,60 @@ def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage,
         event.remove(storage.database._engine, "after_cursor_execute", observe)
 
 
+def test_bound_prefix_witnesses_exclude_later_placements_before_mapping_budget(storage, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    from market_data.archive import encode_raw_records_to_parquet
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_lineage
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch)
+    encoded = encode_raw_records_to_parquet(fixture.raws, archive_segment_id="compacted-fixture",
+                                           temporary_directory=tmp_path / "compact")
+    ack = fixture.store.put_verified(object_key="compacted.parquet", source_path=encoded.path,
+                                    expected_sha256=encoded.sha256)
+    compacted = fixture.structures.commit_compacted_archive(definition_id=fixture.claim.definition_id,
+        encoded=encoded, acknowledgement=ack, records=fixture.raws, source_manifest_ids=fixture.manifests)
+    prefixes = [{name: getattr(raw, name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+        "first_receive_ordinal": raw.receive_ordinal, "receive_ordinal": raw.receive_ordinal,
+        "root_fact_version_id": f"endpoint-{raw.receive_ordinal}", "requested_channel": "market_trades",
+    } for raw in fixture.raws]
+    bindings = {prefix["root_fact_version_id"]: {manifest}
+                for prefix, manifest in zip(prefixes, fixture.manifests)}
+    returned = []
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if "raw_archive_record_mappings AS mappings" in statement:
+            returned.append(cursor.rowcount)
+    def resolve(witnesses=None, **kwargs):
+        with storage.database.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=fixture.store,
+                byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()),
+                book_prefix_ranges=prefixes, max_mapping_rows=2, witness_manifest_ids=witnesses, **kwargs)
+    event.listen(storage.database._engine, "after_cursor_execute", observe)
+    try:
+        # Both original and compacted copies remain acknowledged. Only the pinned
+        # originals can prove these witnesses; the other copies must not use budget.
+        with pytest.raises(RuntimeError, match="mapping_budget_exceeded"):
+            resolve()
+        assert returned.pop() == 3
+        assert set(resolve(bindings)) == set(fixture.manifests)
+        assert returned.pop() == 2
+        with pytest.raises(RuntimeError, match="mapping_budget_exceeded"):
+            resolve({"endpoint-1": bindings["endpoint-1"]})
+        for rejected in ({"endpoint-1": set(), "endpoint-2": set()},
+                         {"endpoint-1": bindings["endpoint-2"], "endpoint-2": bindings["endpoint-1"]}):
+            with pytest.raises(RuntimeError, match="mapping_missing"):
+                resolve(rejected)
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve(bindings, bound_manifest_ids={compacted.manifest_id})
+        global_ids = set(fixture.manifests) | {compacted.manifest_id}
+        assert set(resolve(bindings, bound_manifest_ids=global_ids)) == set(fixture.manifests)
+        assert global_ids == set(fixture.manifests) | {compacted.manifest_id}
+        assert bindings == {prefix["root_fact_version_id"]: {manifest}
+                            for prefix, manifest in zip(prefixes, fixture.manifests)}
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", observe)
+
+
 def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
     trade = replace(_trade(trade_id, offset="0", side=MarketSide.BUY, price="100", receive_ordinal=1),
                     provider_product_id="BTC-USD", provider_event_time=fixture.raws[0].received_at - timedelta(seconds=1),
