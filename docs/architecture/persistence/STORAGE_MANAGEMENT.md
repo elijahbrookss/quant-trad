@@ -2737,8 +2737,11 @@ then verify the actual containers,
 cluster, mounts, configuration and complete backup pair before deployment
 publication; matching a recipe alone grants no operational authority. Inspection
 never renews a deadline or dispatches the retired migration. This reader correction
-passed 651 focused host tests; production completion inspection and deployment
-publication remain unverified.
+passed 651 focused host tests; the identity-reader correction passed its 74-test
+runtime suite. Read-only production completion inspection now verifies the actual
+runtime and leaves the journals unchanged, returning
+`current_layout_recovery_pending` until a complete backup pair exists. Deployment
+publication remains unverified.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.
