@@ -357,6 +357,11 @@ os.chown(root,70,70)
    if time.monotonic()>received_deadline:raise RuntimeError('real Docker collector did not receive frame')
    time.sleep(.05)
  request=json.loads((control/'request.json').read_text())
+ if options.repository_config_failure:
+  # Declare enough time for native preparation before creating the capture.
+  # The final 120s window and its real expiry remain unchanged; recovery gets
+  # its separate explicit allowance only after reproducing the missing file.
+  request['capture_preparation']['attempt_seconds']=600
  if options.initial_capture:
   if not options.full_operation:
    request['capture_preparation'].update(requested_at=time.time(),deadline=preparation['deadline'])
