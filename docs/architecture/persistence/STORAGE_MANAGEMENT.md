@@ -1405,6 +1405,15 @@ interrupted cleanup resumes before reporting a point as not_due. Native tools
 inherit no ambient credentials or configuration, and their child processes are
 bounded by the existing cancellation, deadline and filesystem reserve checks.
 
+Restic runs with JSON output and quiet progress: native summaries and errors
+remain available, while periodic status messages cannot consume the bounded
+subprocess output buffer during long backups. Each output stream retains its
+8 MiB cap; an overflow identifies the tool and stream without exposing its
+contents. Nonzero native exits still fail the pair. The production-image native
+test exercises chunk processing before a delay, verifies summary publication
+and failure handling, and checks both output caps and child termination. This
+fix changes neither backup formats nor the paired-publication requirement.
+
 Production images contain pinned tools. Image availability does not enable WAL
 archiving, provision keys, qualify a restore or activate a backup policy. Those
 operator steps and full QT application recovery remain pending under ADR0072.

@@ -1,6 +1,8 @@
 """Encrypted recovery key/configuration and bounded subprocess failure paths."""
+import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import sys
 from time import monotonic, sleep
@@ -10,6 +12,57 @@ import pytest
 from portal.backend.service.storage.incremental_recovery import (
     EncryptedRecoveryCopies, _private_bytes, _root_label,
 )
+
+
+@pytest.mark.skipif(shutil.which("restic") is None, reason="requires pinned native restic")
+def test_native_restic_keeps_summary_without_periodic_progress_and_reports_failure(tmp_path):
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker.root = tmp_path
+    worker.restic = Path(shutil.which("restic"))
+    worker.env = {"PATH": os.defpath, "HOME": str(tmp_path),
+                  "RESTIC_PASSWORD": "disposable-test-key"}
+    worker.deadline = monotonic()+30
+
+    def check(*args):
+        if monotonic() >= worker.deadline:
+            raise RuntimeError("recovery_time_budget_exceeded")
+
+    worker.check = check
+    assert worker._run([str(worker.restic), "version"]).startswith(b"restic 0.19.1 ")
+    worker._run(worker._rs("init"))
+    # With --no-scan, progress starts only after a chunk/item is processed.
+    # Exceed the native maximum chunk size before waiting; a small stdin input
+    # would finish without exercising periodic progress at all.
+    output = worker._run(worker._rs("backup", "--no-scan", "--stdin-from-command",
+        "--stdin-filename", "probe", "--", sys.executable, "-c",
+        "import sys,time; sys.stdout.buffer.write(b'a'*(16*1024*1024)); "
+        "sys.stdout.flush(); time.sleep(1)"))
+    messages = [json.loads(line) for line in output.splitlines()]
+    assert [item["message_type"] for item in messages] == ["summary"]
+    snapshot = messages[0]["snapshot_id"]
+    assert len(snapshot) == 64
+
+    with pytest.raises(RuntimeError, match="incremental_tool_failed:restic:exit=") as failure:
+        worker._run(worker._rs("backup", "--stdin-from-command", "--",
+            sys.executable, "-c",
+            "import sys; sys.stderr.write('private diagnostic'); sys.exit(7)"))
+    assert "private diagnostic" not in str(failure.value)
+    snapshots = json.loads(worker._run(worker._rs("snapshots")))
+    assert [item["id"] for item in snapshots] == [snapshot]
+
+
+@pytest.mark.parametrize("stream", ["out", "err"])
+def test_tool_output_limit_names_stream_without_exposing_content(tmp_path, stream):
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker.root, worker.env = tmp_path, {"PATH": os.defpath}
+    worker.deadline = monotonic()+10
+    worker.check = lambda *args: None
+    descriptor = 1 if stream == "out" else 2
+    script = f"import os; os.write({descriptor}, b'private diagnostic'*500000)"
+    with pytest.raises(RuntimeError) as failure:
+        worker._run([sys.executable, "-c", script])
+    assert str(failure.value) == (
+        f"incremental_tool_output_limit:{Path(sys.executable).name}:stream={stream}")
 
 
 def test_private_keys_reject_aliases_permissions_and_unbounded_content(tmp_path):

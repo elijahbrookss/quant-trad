@@ -189,8 +189,10 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                 *["--"+key+"="+value for key, value in options.items()], command]
 
     def _rs(self, *args):
+        # Periodic JSON progress grows with backup duration. Keep summaries and
+        # errors, but do not consume the bounded output buffer with progress.
         return [str(self.restic), "--repo", str(self.root/"archives"),
-                "--no-cache", "--json", *args]
+                "--no-cache", "--json", "--quiet", *args]
 
     def _run(self, command):
         """Bounded subprocess, no secret-bearing diagnostics or ambient config."""
@@ -212,7 +214,8 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                                 continue
                             captured[key.data].extend(chunk)
                             if len(captured[key.data]) > 8*1024*1024:
-                                raise RuntimeError("incremental_tool_output_limit")
+                                raise RuntimeError(
+                                    f"incremental_tool_output_limit:{Path(command[0]).name}:stream={key.data}")
                 code = process.wait(timeout=max(0.01, self.deadline-monotonic()))
                 if code:
                     # Even native error output may include file contents or keys.

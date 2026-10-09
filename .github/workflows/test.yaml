@@ -222,6 +222,12 @@ jobs:
           docker build --file portal/backend/Dockerfile --target storage-test \
             --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
             --tag qt-incremental-runtime-proof .
+          docker run --rm --network none --user postgres --cpus 2 --memory 512m --pids-limit 64 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
+            qt-incremental-runtime-proof \
+            python -m pytest -q tests/test_market_data/test_incremental_recovery.py \
+            -o cache_dir=/tmp/qt-incremental-output-pytest-cache
           docker run --rm --network none --user postgres --cpus 2 --memory 2g --pids-limit 128 \
             --cap-drop ALL --security-opt no-new-privileges \
             --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
