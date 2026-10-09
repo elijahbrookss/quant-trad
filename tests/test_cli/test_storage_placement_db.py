@@ -62,15 +62,20 @@ finally:
 """
     engine = create_engine(dsn, poolclass=NullPool, connect_args={
         "connect_timeout": 3, "options": "-c statement_timeout=2000"})
+    # Pytest's configured source paths are not inherited by a fresh interpreter.
+    child_env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
     child = subprocess.Popen([sys.executable, "-c", child_code],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True)
+        stderr=subprocess.PIPE, text=True, env=child_env)
     try:
         with selectors.DefaultSelector() as ready:
             ready.register(child.stdout, selectors.EVENT_READ)
             assert ready.select(15), "placement child did not become ready"
         line = child.stdout.readline()
-        assert line, "placement child exited before its database connection was ready"
+        if not line:
+            _, errors = child.communicate(timeout=5)
+            pytest.fail("placement child exited before its database connection "
+                "was ready: " + errors)
         backend_pid = json.loads(line)["backend_pid"]
         with engine.connect() as observer:
             deadline = monotonic()+5
