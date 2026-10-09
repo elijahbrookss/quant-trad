@@ -31,6 +31,24 @@ _CONTINUATION = ContextVar("storage_committed_recovery_continuation", default=No
 CONTINUATION_STATE = "storage-online-repository-continuation.json"
 
 
+def inspect_database_archiver(database_id):
+    """Prove the retained database can execute the pinned native WAL tool.
+
+    An application image's backup tools do not establish this property for the
+    separately retained PostgreSQL image. This probe reads no keys or data.
+    """
+    try:
+        version = host.docker("exec", "--user", "70:70", database_id,
+                              "/usr/local/bin/pgbackrest", "version", timeout=10).strip()
+    except RuntimeError as exc:
+        raise RuntimeError("storage_database_archiver_unavailable: qualify the PostgreSQL "
+                           "image with pgBackRest before pausing collection") from exc
+    if version != "pgBackRest 2.59.1":
+        raise RuntimeError("storage_database_archiver_version_mismatch: PostgreSQL must "
+                           "use the same pinned pgBackRest 2.59.1 recovery tooling")
+    return {"pgbackrest_version": version}
+
+
 def validate_recovery_journal(saved):
     value = saved["recovery"]
     if (not isinstance(value, dict)
@@ -404,6 +422,7 @@ def _inspect_continuation(state_root, plan, package):
     preserving._runtime_candidate_details("tsdb",rows["tsdb"],database_model,observation)
     if host.cluster_identifier(database["id"],maintenance=True) != preparation["cluster"]:
         raise RuntimeError("storage_repository_continuation_cluster_changed")
+    inspect_database_archiver(database["id"])
     helper = _failed_preparer(state_root,saved,database)
     _committed_policy(database["id"],saved,request)
     roots = preparation["source_roots"]

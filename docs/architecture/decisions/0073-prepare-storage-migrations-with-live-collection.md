@@ -1531,6 +1531,21 @@ frozen inputs and the original keys, restart the matching runtime, and prove the
 existing completion reader accepts the result. No general migration retry
 framework or second data authority is introduced.
 
+The October 9 execution exposed a second deployment mismatch after repository
+preparation succeeded: the retained PostgreSQL image lacked `pgbackrest`, although
+the application and disposable database images included it. The database's WAL
+archive command could not execute. Native recovery qualification therefore did
+not establish compatibility with that retained production image. Collection
+remained stopped; no successful production recovery is claimed.
+
+Preflight now probes the database container's pinned pgBackRest executable as its
+ordinary UID70 before source pause and before committed repository recovery. It
+reads no keys or data and cannot install tools. A missing or incompatible tool
+requires a separately qualified preserving database-image correction. Replaying
+the migration, bypassing WAL verification, or modifying an active operation's
+receipts is not a correction. The image correction and continuation from the
+completed repository steps remain pending implementation and qualification.
+
 ### Connect private pending-WAL preparation after native WAL readiness
 
 The final-state owner may enter `storage_online_runtime.prepare_spool` only from

@@ -215,6 +215,7 @@ def inspect_operation_configuration(state_root, *, project, source_revision, sou
     if len(roots) != 2 or len(candidates) != 1:
         raise RuntimeError("storage_online_operation_source_roots_invalid")
     source = candidates[0]
+    database_archiver = recovery.inspect_database_archiver(rows["tsdb"]["id"])
     launch.inspect_candidate_image(image, request)
     for name in final._SOURCE_WRITERS:
         final._source_writer_contract(host.database_details(rows[name]["id"]),
@@ -236,7 +237,7 @@ def inspect_operation_configuration(state_root, *, project, source_revision, sou
     if runtime["services"]["storage-maintenance"].get("pid") != "service:tsdb":
         raise RuntimeError("storage_online_operation_future_database_service_required")
     key = Path(keys_root).stat()
-    observed = dict(runtime=admission,
+    observed = dict(runtime=admission, database_archiver=database_archiver,
         archive_destination=inspect_archive_destination(image, history, request),
         socket_sha256=host.digest(socket), source_image=source_image,
         destination=[str(destination),info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode],

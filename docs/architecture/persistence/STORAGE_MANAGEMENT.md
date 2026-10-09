@@ -2683,6 +2683,10 @@ Production pause and resource admission still require the integrated measured op
 ### Repository preparation and native WAL continuation
 
 Online preflight requires typed incremental recovery settings before source stop.
+It also executes `pgbackrest version` as UID70 in the retained database container,
+requiring the pinned 2.59.1 tooling. Tools in the application image do not prove
+the separately retained database image can archive WAL. The probe reads no keys
+or data and performs no installation.
 
 Incremental settings come from the admitted maintenance limits; the helper uses
 a private tmpfs input and does not require duplicate configuration beside keys.
@@ -2690,8 +2694,11 @@ For the confirmed pre-preparation missing-config failure after commit, the
 existing recovery owner provides an explicit, bounded continuation. Its failed
 receipt and helper remain preserved, and ordinary migration replay stays closed.
 See [ADR 0073's recovery decision](../decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure)
-for the exact admission, clock and failure rules. This path is a local candidate
-until native qualification and deployment are recorded.
+for the exact admission, clock and failure rules. Native qualification passed for
+the current and first-release application versions on October 9. Production
+repository preparation subsequently succeeded, but WAL delivery remained blocked
+by missing pgBackRest in the retained database image. The production continuation
+has not completed; the preserving image correction remains pending qualification.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.

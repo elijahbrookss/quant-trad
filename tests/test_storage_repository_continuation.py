@@ -13,6 +13,40 @@ from scripts.automation import storage_online_repositories as repositories
 from scripts.automation import storage_online_operation as operation
 
 
+def test_database_archiver_probe_uses_database_uid_and_no_keys(monkeypatch):
+    calls = []
+    def docker(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "pgBackRest 2.59.1\n"
+    monkeypatch.setattr(host, 'docker', docker)
+    assert recovery.inspect_database_archiver('database') == {
+        'pgbackrest_version': 'pgBackRest 2.59.1'}
+    assert calls == [(('exec', '--user', '70:70', 'database',
+                      '/usr/local/bin/pgbackrest', 'version'), {'timeout': 10})]
+
+
+@pytest.mark.parametrize('version', ['pgBackRest 2.58.0', '', 'unconfirmed'])
+def test_database_archiver_probe_rejects_wrong_or_missing_version(monkeypatch, version):
+    monkeypatch.setattr(host, 'docker', lambda *a, **kw: version)
+    with pytest.raises(RuntimeError, match='archiver_version_mismatch'):
+        recovery.inspect_database_archiver('database')
+
+
+def test_missing_database_archiver_refuses_preflight_before_other_preparation(tmp_path, monkeypatch):
+    def missing(*args, **kwargs):
+        raise RuntimeError('storage_pause_docker_failed: operation=exec exit=127')
+    monkeypatch.setattr(host, 'docker', missing)
+    monkeypatch.setattr(operation.launch, 'inspect_candidate_image',
+                        lambda *a: pytest.fail('continued after missing database tool'))
+    source = tmp_path/'source'
+    with pytest.raises(RuntimeError, match='archiver_unavailable.*before pausing collection'):
+        operation.inspect_operation_configuration(tmp_path, project='fixture',
+            source_revision='owned', source_image='owned', image='candidate', request={},
+            inventory_path=tmp_path, keys_root=tmp_path, socket_volume='socket',
+            spool_destination=tmp_path/'spool', roots={str(source): [], str(source/'objects'): []},
+            rows={'tsdb': {'id': 'database'}}, recipe_sha256='owned', deadline=time.monotonic()+20)
+
+
 @pytest.fixture
 def request_file(tmp_path):
     path = tmp_path/'continuation.json'
