@@ -1171,9 +1171,11 @@ the canonical source row budget. Hot lookup uses containment supported by the
 existing provenance GIN index; cold aliases are candidate locators only.
 The batched material resolver also supplies the distinct legacy witnesses as a
 bound constant array prefilter. The exact per-request series, family, hash and
-causal predicates remain authoritative. This avoids the observed plan that
-scanned historical headers before testing provenance; it adds no index, stored
-alias or schema change. The October 9 three-root read-only probe returned three
+causal predicates remain authoritative. Each hot match obtains its header through
+an ID/day-parameterized lateral lookup, with an `OFFSET 0` boundary to prevent
+pulling it into a merge against the entire header history. This retains all
+matching revisions and adds no index, stored alias or schema change. The earlier
+October 9 three-root read-only probe returned three
 source revisions in 1.30 seconds under a two-second statement limit. That small
 sample is not an archive-throughput estimate, and normal maintenance budgets
 still apply. Hydrated rows must

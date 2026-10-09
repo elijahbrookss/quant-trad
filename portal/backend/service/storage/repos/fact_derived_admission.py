@@ -25,15 +25,20 @@ DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.deri
 _LEGACY_MATERIAL_CANDIDATES = """
                 UNION
                 SELECT requested.root_id,requested.role,source.id
-                FROM requested JOIN market.fact_versions AS source
-                  ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
-                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
-                JOIN market.fact_hot_payloads AS hot ON hot.storage_day=source.storage_day AND hot.id=source.id
-                WHERE CASE WHEN requested.evidence_key IS NOT NULL THEN
+                FROM requested JOIN market.fact_hot_payloads AS hot
+                  ON CASE WHEN requested.evidence_key IS NOT NULL THEN
                     hot.provenance @> jsonb_build_object(requested.evidence_key,
                         jsonb_build_object('legacy_material_hash',requested.material_hash))
                     ELSE false END
-                  AND hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
+                JOIN LATERAL (
+                    SELECT headers.id,headers.series_id,headers.fact_type,
+                           headers.market_commit_seq,headers.known_at
+                    FROM market.fact_versions AS headers
+                    WHERE headers.storage_day=hot.storage_day AND headers.id=hot.id
+                    OFFSET 0
+                ) AS source ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
+                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
+                WHERE hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
                 UNION
                 SELECT requested.root_id,requested.role,source.id
                 FROM requested JOIN market.fact_archive_material_aliases AS aliases
@@ -85,6 +90,9 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         # Bound constant witnesses expose the existing provenance GIN path.
         # The exact per-request predicate still owns series, family and clocks;
         # joining it alone can make PostgreSQL scan all historical headers.
+        # LATERAL with OFFSET 0 keeps each hot match's header lookup parameterized
+        # by id/day instead of a merge against the whole header history. OFFSET
+        # does not truncate matches or choose one correction revision.
         legacy_candidates = _LEGACY_MATERIAL_CANDIDATES if legacy_witnesses else ""
         found = session.execute(text(f"""
             WITH requested AS (

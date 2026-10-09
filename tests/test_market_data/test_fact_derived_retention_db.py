@@ -96,11 +96,11 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
     tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader)
     monkeypatch.setattr(market_data, "canonical_fact_storage_repository", tiered)
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", tiered)
-    # A single batch must retain the canonical-only input and every causal
+    # Multiple batches must retain the canonical-only input and every causal
     # delivery of the legacy witness. The GIN prefilter must not narrow the
     # canonical branch or admit the future-known/later-commit BBO revisions.
     with storage.database.session() as session:
-        mixed_sources, mixed_edges = resolve_material_source_revisions(session, requests=[{
+        mixed_requests = [{
             "root_id": "mixed", "role": "book", "series_id": futures.series_id,
             "fact_type": "market.l2_book", "material_hash": futures.facts[0].material_hash,
             "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
@@ -108,10 +108,15 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
             "root_id": "mixed", "role": "bbo", "series_id": features[0][0].series_id,
             "fact_type": "market.bbo", "material_hash": features[0][0].material_hash,
             "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
-        }], reader=tiered, max_rows=10, max_logical_bytes=64 * 1024**2)
+        }]
+        mixed_sources, mixed_edges = resolve_material_source_revisions(session,
+            requests=[{**request, "root_id": f"mixed-{index}"}
+                      for index in range(70) for request in mixed_requests],
+            reader=tiered, max_rows=210, max_logical_bytes=64 * 1024**2)
         assert len(mixed_sources) == 3
-        assert len(mixed_edges[("mixed", "book")]) == 1
-        assert len(mixed_edges[("mixed", "bbo")]) == 2
+        assert len(mixed_edges) == 140
+        assert all(len(mixed_edges[(f"mixed-{index}", "book")]) == 1
+                   and len(mixed_edges[(f"mixed-{index}", "bbo")]) == 2 for index in range(70))
         assert all(row["market_commit_seq"] not in {
             future_known_outcome.max_commit_seq, late_outcome.max_commit_seq,
         } for row in mixed_sources.values())
