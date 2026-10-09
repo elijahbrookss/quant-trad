@@ -2847,7 +2847,7 @@ class PostgresMarketDataRepository:
     def _canonical_selection_sql(
         *, series_id, start, end, as_of_commit_seq, known_at_lte,
         source_identity_keys=(), latest_only=True, include_invalidated=False,
-        columns=CANONICAL_ROW_COLUMNS, row_from=CANONICAL_RANGE_ROW_FROM,
+        columns, row_from,
     ):
         """One source/revision predicate for payload reads and header projections.
 
@@ -2930,6 +2930,7 @@ class PostgresMarketDataRepository:
             source_identity_keys=source_identity_keys,
             latest_only=latest_only and not causal_at_interval_close,
             include_invalidated=include_invalidated or causal_at_interval_close,
+            columns=CANONICAL_ROW_COLUMNS, row_from=CANONICAL_RANGE_ROW_FROM,
         )
         with measure_execution_stage("selection"):
             result = session.execute(
