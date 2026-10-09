@@ -3198,7 +3198,13 @@ owns their build. Non-storage UI and observability profiles remain deployer-owne
 Before either active file changes, a `release` section in the existing final
 receipt records exact proposal, original-file, configuration and request hashes.
 Original environment and `release.env` bytes are preserved as private create-once
-artifacts. Atomic replacements publish the proposed environment and a bridge
+artifacts. Source metadata accepts the older four-field deployer record or the
+later record with an empty `storage_layout`; both must identify the original
+source revision. Unknown fields, missing required fields, duplicates and any
+claimed layout refuse. The read-only configuration inspection checks this before
+rendering and detects metadata changes during rendering; publication repeats the
+check under the deployment lock. It preserves the original bytes without adding
+fields to historical evidence. Atomic replacements publish the proposed environment and a bridge
 release record with the fixed layout and exact pending candidate, but no completed
 current/previous revision. An old source-layout revision is not a rollback target.
 All original migration journals and clocks remain unchanged and retained.

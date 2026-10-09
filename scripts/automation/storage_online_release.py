@@ -349,6 +349,10 @@ def inspect_deployment_configuration(state_root, *, repository, environment_path
     state_root, repository, environment_path = map(Path, (state_root, repository, environment_path))
     if repository.resolve(strict=True) != repository or not repository.is_absolute():
         raise RuntimeError("storage_online_deployment_repository_alias")
+    source_release = None
+    if "release" not in saved:
+        _admit_initial_hold(state_root, saved)
+        source_release = _read_source_release(state_root, saved)
     original_request = host.load_receipt(state_root/"storage-online-request.json")
     request = _deployment_request(original_request, saved, repair)
     admitted = host.load_receipt(state_root/runtime.RUNTIME_RECIPE, max_bytes=524288)
@@ -412,7 +416,8 @@ def inspect_deployment_configuration(state_root, *, repository, environment_path
             or host.load_receipt(state_root/"storage-online-final.json") != saved
             or host.load_receipt(state_root/runtime.RUNTIME_RECIPE, max_bytes=524288) != admitted
             or host.load_receipt(state_root/"storage-online-request.json") != original_request
-            or checkout_files() != files):
+            or checkout_files() != files
+            or source_release is not None and read_private_environment(state_root/"release.env") != source_release):
         raise RuntimeError("storage_online_deployment_inspection_changed")
     result = dict(**result, request_sha256=host.digest(original_request), deployment_storage_sha256=deployment_storage_fingerprint(proposed,
         environment_path=environment_path, prepared_path=prepared_path),
@@ -475,6 +480,20 @@ def _release_values(raw):
     if len(values)!=len(lines):
         raise RuntimeError("storage_online_release_metadata_invalid")
     return values
+
+
+def _read_source_release(state_root, saved):
+    """Accept the two existing pre-cutover writer formats without rewriting either."""
+    raw = read_private_environment(state_root/"release.env")
+    values = _release_values(raw)
+    fields = {"current_revision", "current_source_tree_hash", "previous_revision", "deployed_at"}
+    # Older deployers did not emit storage_layout. Later deployers emitted an
+    # empty value before cutover. Neither format may claim an existing layout.
+    if (set(values) not in (fields, fields | {"storage_layout"})
+            or values["current_revision"] != saved["binding"]["source_revision"]
+            or values.get("storage_layout", "") != ""):
+        raise RuntimeError("storage_online_release_source_metadata_changed")
+    return raw
 
 
 def _publish_file(path, *, before, after):
@@ -541,12 +560,7 @@ def publish_configuration(state_root, *, repository, environment_path, saved, co
     if read_private_environment(environment_path)!=original:
         raise RuntimeError("storage_online_release_environment_changed")
     _admit_initial_hold(state_root, saved)
-    source_release=read_private_environment(state_root/"release.env")
-    values=_release_values(source_release)
-    if (set(values)!={"current_revision","current_source_tree_hash","previous_revision","deployed_at","storage_layout"}
-            or values["current_revision"]!=saved["binding"]["source_revision"]
-            or values["storage_layout"]!=""):
-        raise RuntimeError("storage_online_release_source_metadata_changed")
+    source_release = _read_source_release(state_root, saved)
     request=host.load_receipt(state_root/"storage-online-request.json")
     if host.digest(request) != configuration["request_sha256"]:
         raise RuntimeError("storage_online_release_request_changed")

@@ -382,8 +382,8 @@ def test_canonical_comparison_refuses_drift_without_exposing_private_values(conf
     assert "SECRET-DO-NOT-EXPOSE" not in str(exc.value) and "private-fixture" not in str(exc.value)
 
 
-@pytest.fixture
-def publication(completed):
+@pytest.fixture(params=["legacy-four-fields", "empty-storage-layout"])
+def publication(completed, request):
     root, source, saved, model = completed
     saved["binding"]["source_revision"] = "a"*40
     saved["runtime"]["finished_at"] = 1
@@ -400,7 +400,8 @@ def publication(completed):
     release.host.save_receipt(root/"storage-online-request.json", dict(source_revision="c"*40, source_tree_hash="d"*64), initial=True)
     metadata=root/"release.env"
     metadata.write_text("current_revision="+"a"*40+"\ncurrent_source_tree_hash="+"b"*64+
-        "\nprevious_revision=\ndeployed_at=original\nstorage_layout=\n")
+        "\nprevious_revision=\ndeployed_at=original\n"+
+        ("storage_layout=\n" if request.param == "empty-storage-layout" else ""))
     metadata.chmod(0o600)
     release.prepare_deployment_environment(root, environment_path=source, saved=saved, execute=True)
     configuration=dict(storage_configuration_sha256=release.host.digest(model), canonical_configuration_sha256="e"*64,
@@ -412,6 +413,32 @@ def publication(completed):
 def publish(publication, repair=None):
     root, source, saved, configuration = publication
     return release.publish_configuration(root, repository=root, environment_path=source, saved=saved, configuration=configuration, repair=repair)
+
+
+@pytest.mark.parametrize("entry", ["inspect", "publish"])
+@pytest.mark.parametrize("fault", ["extra", "missing", "other-revision", "claimed-layout", "duplicate", "malformed"])
+def test_source_metadata_refuses_before_publication_or_render(publication, monkeypatch, entry, fault):
+    root, source, saved, _ = publication
+    path = root/"release.env"
+    raw = path.read_bytes()
+    if fault == "extra": raw += b"unknown=value\n"
+    elif fault == "missing": raw = raw.replace(b"deployed_at=original\n", b"")
+    elif fault == "other-revision": raw = raw.replace(b"a"*40, b"f"*40)
+    elif fault == "claimed-layout": raw = raw.replace(b"storage_layout=\n", b"")+b"storage_layout=ssd-hdd-v1\n"
+    elif fault == "duplicate": raw += b"current_revision="+b"a"*40+b"\n"
+    elif fault == "malformed": raw += b"not-a-field\n"
+    path.write_bytes(raw)
+    before = {p:p.read_bytes() for p in root.iterdir() if p.is_file()}
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid source metadata must refuse before external inspection")
+    monkeypatch.setattr(release.subprocess, "run", unexpected)
+    monkeypatch.setattr(release.host, "docker", unexpected)
+    with pytest.raises(RuntimeError, match="source_metadata_changed|metadata_invalid"):
+        if entry == "inspect":
+            release.inspect_deployment_configuration(root, repository=root, environment_path=source, saved=saved)
+        else:
+            publish(publication)
+    assert {p:p.read_bytes() for p in root.iterdir() if p.is_file()} == before
 
 
 def repair_request(saved):
@@ -534,7 +561,7 @@ def test_repair_publication_requires_fresh_stopped_runtime_admission(publication
         assert release.host.load_receipt(root/"storage-online-final.json") == saved
 
 
-@pytest.mark.parametrize("fault", [None, "dirty", "wrong-revision", "wrong-hash", "storage-drift"])
+@pytest.mark.parametrize("fault", [None, "dirty", "wrong-revision", "wrong-hash", "storage-drift", "metadata-during-render"])
 def test_repair_configuration_binds_clean_new_source_and_original_request(publication, configuration_pair, monkeypatch, fault):
     import subprocess
     from scripts.provenance.source_tree_hash import working_tree_hash
@@ -580,13 +607,16 @@ def test_repair_configuration_binds_clean_new_source_and_original_request(public
             return json.dumps(dict(Id=image, Config=dict(Env=[k+"="+v for k,v in args["image_environments"][image].items()])))
         assert argv[0] == "compose"
         assert kwargs["env"]["QT_RELEASE_REVISION"] == revision
+        if fault == "metadata-during-render":
+            metadata = root/"release.env"
+            metadata.write_bytes(metadata.read_bytes().replace(b"deployed_at=original", b"deployed_at=changed"))
         return json.dumps(proposed)
     monkeypatch.setattr(release.host, "docker", docker)
     def inspect():
         return release.inspect_deployment_configuration(root, repository=repository,
             environment_path=source, saved=saved, repair=repair)
     if fault:
-        with pytest.raises(RuntimeError, match="exact_clean_checkout_required|source_hash_changed|service_changed"):
+        with pytest.raises(RuntimeError, match="exact_clean_checkout_required|source_hash_changed|service_changed|inspection_changed"):
             inspect()
     else:
         result = inspect()
