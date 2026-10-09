@@ -352,14 +352,24 @@ class PostgresCanonicalFactArchiveRepository:
             ordinal = previous["page_ordinal"] + 1 if previous else 0
             params = {"day": day, "seq": cursor[0], "id": cursor[1], "limit": self.limits.max_rows,
                       "max_bytes": self.limits.max_logical_bytes}
+            # Bound the ASCII JSON used by the archive codec before hydration.
+            # Printable ASCII already has its JSON escaping in PostgreSQL's
+            # text. Every other character needs at most 12 ASCII bytes (a UTF-16
+            # surrogate pair); reserve 11 beyond its existing UTF-8 bytes.
+            # Five typed timestamps may each gain seven microsecond characters.
+            # The C collation keeps the printable range independent of locale.
             source = session.execute(text(f"""
                 WITH candidates AS MATERIALIZED (
                     SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
                     WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
                     ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
+                ), documents AS MATERIALIZED (
+                    SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
+                    FROM candidates
                 ), budget AS (
-                    SELECT id, sum(6::bigint * octet_length(to_jsonb(candidates)::text))
-                        OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM candidates
+                    SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
+                        char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
+                        OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
                 )
                 SELECT candidates.* FROM candidates JOIN budget USING(id)
                 WHERE budget.cumulative_bytes <= :max_bytes

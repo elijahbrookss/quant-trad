@@ -578,7 +578,14 @@ records the source count and physical allocation.
 Each staging call reads the next ordered source page after the last acknowledged
 cursor. Both row count and a conservative SQL-side JSON byte allowance bound
 transfer to Python; a first row outside the byte allowance fails explicitly and
-never advances the cursor. Exact canonical hashes are checked before dependency
+never advances the cursor. The allowance counts PostgreSQL JSON bytes, reserves
+ASCII escape expansion only for non-printable/non-ASCII characters, and allows
+for the five clocks' fixed microsecond rendering. It no longer multiplies every
+ASCII byte by six. The codec still enforces the same 64 MiB default logical-byte
+limit; fuller pages do not enlarge the existing reader's budget or change the
+archive format. Acknowledged pages keep their bytes and cursor boundaries when
+the packing estimate changes, and subsequent publication resumes after them.
+Exact canonical hashes are checked before dependency
 resolution. Object count and cumulative bytes bound raw dependency verification.
 Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit

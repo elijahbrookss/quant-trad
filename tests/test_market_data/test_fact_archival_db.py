@@ -14,6 +14,55 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage, _placemen
 pytestmark = pytest.mark.db
 
 
+@pytest.mark.parametrize("text_value", ["ascii-" * 150, "\u007f\u00e9\u20ac\U0001f680\\\"\n" * 16])
+def test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping(
+        storage, tmp_path, monkeypatch, text_value):
+    from market_data.fact_archive import _json_bytes, read_canonical_fact_archive
+    from portal.backend.service.storage.repos.fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM
+
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    for index in range(3):
+        _ingest(storage, replace(storage.fact, observation_key=f"packing-{index}-{text_value}"))
+    with storage.database.session() as session:
+        source = session.execute(text(f"""
+            SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
+            WHERE versions.storage_day=:day ORDER BY versions.market_commit_seq,versions.id
+        """), {"day": day}).mappings().all()
+    expected = [{key: value for key, value in row.items() if key != "storage_day"} for row in source]
+    # Enough for two ASCII rows and SQL's whitespace/clock allowance, but not
+    # three. The former six-times-every-byte estimate could not admit even one.
+    byte_limit = sum(len(_json_bytes(row)) for row in expected[:2]) + 512
+    assert sum(len(_json_bytes(row)) for row in expected) > byte_limit
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database, object_store=store, temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=3, row_group_size=3, max_logical_bytes=byte_limit),
+    )
+    archive.seal_partition(day)
+    pages = []
+    for _ in range(4):
+        result = archive.stage_next_page(day)
+        if result["status"] == "source_exhausted":
+            break
+        pages.append(result)
+    assert result["status"] == "source_exhausted"
+    if text_value.isascii() and "\u007f" not in text_value:
+        assert [page["row_count"] for page in pages] == [2, 1]
+    with storage.database.session() as session:
+        manifests = session.execute(text(
+            "SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day ORDER BY page_ordinal"
+        ), {"day": day}).mappings().all()
+    restored = []
+    for row in manifests:
+        manifest = fact_archival._catalog_manifest(row)
+        assert manifest.logical_byte_count <= byte_limit
+        restored.extend(read_canonical_fact_archive(
+            store.local_path(manifest.object_key), expected=manifest, limits=archive.limits))
+    assert restored == expected
+    assert archive.inspect_partition(day)["state"] == "sealed"
+
+
 def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_publication(storage, tmp_path, monkeypatch):
     day = storage.today - timedelta(days=2)
     _placement(monkeypatch, day)
