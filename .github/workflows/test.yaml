@@ -59,22 +59,30 @@ jobs:
           QT_DISABLE_DOTENV: '1'
         run: |
           mkdir -p "$RUNNER_TEMP/committed-recovery"
+          sudo chown 1000:1000 "$RUNNER_TEMP/committed-recovery"
           history_root="$(mktemp -d "$RUNNER_TEMP/recovery-history.XXXXXX")"
-          sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$history_root"
+          sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=1000,gid=1000" tmpfs "$history_root"
           trap 'sudo umount "$history_root"' EXIT
-          python scripts/ci/rehearse_online_prepared.py \
+          # The private application spool deliberately belongs to UID/GID 1000.
+          # Match that unprivileged operator in the fixture; grant only Docker's
+          # existing socket group, without changing runtime admission or modes.
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env QT_DISABLE_DOTENV=1 "$(command -v python)" scripts/ci/rehearse_online_prepared.py \
             --image qt-committed-recovery-runtime --database-image quanttrad-postgres:2.14.2-pg15 \
             --output-root "$RUNNER_TEMP/committed-recovery" --history-parent "$history_root" --require-distinct-devices \
             --prepare-source --worker-phases --initial-capture --final-pause --final-delta --switch-entry \
             --close-logins success --commit-switch --guarded-source-image qt-committed-recovery-guard \
             --recovery-mounts --recovery-repositories --recovery-spool --recovery-runtime \
             --operation-driver --full-operation --repository-config-failure --completion-observation
+      - name: Pack disposable qualification evidence
+        if: always()
+        run: sudo tar -C "$RUNNER_TEMP/committed-recovery" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .
       - name: Preserve disposable qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: committed-recovery-${{ matrix.runtime }}
-          path: ${{ runner.temp }}/committed-recovery
+          path: ${{ runner.temp }}/committed-recovery.tar.gz
           retention-days: 7
 
   pr-suite:
