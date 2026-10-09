@@ -3720,9 +3720,15 @@ The bounded JSON request has `schema_version: qt.retained_raw_history.v1`, exact
 The adapter requires the dedicated database UID, matching immutable image
 attestation (the image's `QT_IMAGE_SOURCE_*`, without requiring research `SOURCE_*` settings),
 archive/working mounts and a live maintenance heartbeat. It opens only `PG_DSN`
-without schema bootstrap. Signals request cancellation through the existing move
-watcher; failed/disconnected dispatch is inspected with the same request before
-retry. No callback silently renews an expired intent. The existing
+without schema bootstrap. During this dedicated CLI's ordinary SQL, psycopg2's
+`wait_select` callback lets Python receive SIGINT/SIGTERM while the database call
+waits, so signals request cancellation through the existing move watcher. The
+adapter restores the previous callback and signal handlers on success or failure;
+it does not use driver COPY or large-object APIs. The native CLI regression sends
+real signals only after PostgreSQL reports the child query active, and verifies
+the existing watcher cancels it before the statement timeout. Failed/disconnected
+dispatch is inspected with the same request before retry. No callback silently
+renews an expired intent. The existing
 `scripts/automation/server_deploy.sh qt storage place-retained-raw --request-file -`
 route holds the deployment lock and selects maintenance only when the recorded
 SSD/HDD release, clean checkout and running image match. Ordinary `qt` commands

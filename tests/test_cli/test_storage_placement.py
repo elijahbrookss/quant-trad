@@ -111,10 +111,27 @@ def test_cli_rejects_combined_actions():
     assert error.value.code == 2
 
 
-def test_signal_requests_cooperative_cancel_and_restores_handlers():
+@pytest.mark.parametrize("fails", [False, True])
+def test_signal_requests_cooperative_cancel_and_restores_handlers(fails):
+    from psycopg2 import extensions
+    from psycopg2.extras import wait_select
+
     before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
-    with operator._cancellation() as cancelled:
-        assert not cancelled()
-        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
-        assert cancelled()
+    previous_wait = extensions.get_wait_callback()
+    sentinel = Mock()
+    extensions.set_wait_callback(sentinel)
+    try:
+        try:
+            with operator._cancellation() as cancelled:
+                assert extensions.get_wait_callback() is wait_select
+                assert not cancelled()
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                assert cancelled()
+                if fails:
+                    raise RuntimeError("fixture move failed")
+        except RuntimeError as exc:
+            assert fails and str(exc) == "fixture move failed"
+        assert extensions.get_wait_callback() is sentinel
+    finally:
+        extensions.set_wait_callback(previous_wait)
     assert {sig: signal.getsignal(sig) for sig in before} == before
