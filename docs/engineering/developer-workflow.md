@@ -185,6 +185,23 @@ For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component
 docs, refresh the index, and run `make sync-docs`.
 
+## Local release-package storage
+
+Keep bulky image exports outside the checkout on a deliberately selected
+volume. Before exporting, check that volume's free space and the host drive
+backing WSL; Linux's virtual free-space figure does not establish Windows
+headroom. On the current workstation, release packages use
+`D:\QuantTradReleaseStaging`; repositories remain on the internal SSD.
+
+Retain the deployed package, a compatible rollback package, the active
+candidate, and any explicitly pinned recovery image. Superseded test/build
+exports need not accumulate: identify exact files and active dependencies
+before authorized cleanup, preserve small receipts and source hashes, and
+record removals. Do not use broad Docker pruning or delete archive data,
+backups, research results, keys, or active jobs as package cleanup. After WSL
+cleanup, verify actual host free space before resuming builds; disk compaction
+is a separate controlled workstation operation.
+
 ## Hard-Shutdown And Desktop UI Recovery
 
 After an unclean workstation shutdown, prove PostgreSQL readiness before
