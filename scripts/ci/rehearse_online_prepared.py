@@ -533,31 +533,32 @@ os.chown(root,70,70)
     assert (state/initial.STATE).read_bytes()==prepared_bytes
     report['completion_observation']=dict(observed,after_original_final_deadline=True,
       repeated_without_dispatch=True,journals_unchanged=not bool(canonical))
-    finally:host_boundary.supervised_source_action=actual_action
-    if not canonical:
-     # A software failure after committed runtime activation must not require
-     # replaying migration or pretending that stopped maintenance is healthy.
-     # Exercise the real read-only policy/schema probe in the running backend,
-     # including the pinned older image used by committed-recovery CI.
-     with host_boundary.deployment_lock(state):
-      maintenance=saved['runtime']['candidate_ids']['storage-maintenance']
-      run(['stop','--time','10',maintenance],timeout=30)
-      stopped=json.loads(run(['inspect',maintenance,'--format','{{json .State}}']).stdout)
-      assert not stopped['Running'] and stopped['Pid']==0 and stopped['ExitCode']==0
-      try:
-       final_host.inspect_runtime_completion_locked(state)
-       raise AssertionError('stopped maintenance unexpectedly certified recovery readiness')
-      except RuntimeError as exc:
-       assert str(exc)=='storage_online_completion_unhealthy', str(exc)
-      repair=final_host.inspect_runtime_completion_locked(state,repair_release=True)
-      assert repair['repair_release_admissible'] and not repair['ready'] and not repair['complete_backup_confirmed']
-      assert repair['database_identity']==observed['database_identity']
-      assert repair['plan_id']==observed['plan_id'] and repair['storage_layout']==observed['storage_layout']
-      assert (state/final_host.STATE).read_bytes()==final_bytes
-      assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
-      report['stopped_maintenance_repair_observation']=dict(repair,journals_unchanged=True,
-        frozen_preserved=True,no_runtime_start=True,production_admission=False)
-   if canonical:
+   finally:host_boundary.supervised_source_action=actual_action
+   if not canonical:
+    # A software failure after committed runtime activation must not require
+    # replaying migration or pretending that stopped maintenance is healthy.
+    # Exercise the real read-only policy/schema probe in the running backend,
+    # including the pinned older image used by committed-recovery CI.
+    with host_boundary.deployment_lock(state):
+     maintenance=saved['runtime']['candidate_ids']['storage-maintenance']
+     run(['stop','--time','10',maintenance],timeout=30)
+     stopped=json.loads(run(['inspect',maintenance,'--format','{{json .State}}']).stdout)
+     assert not stopped['Running'] and stopped['Pid']==0 and stopped['ExitCode']==0
+     try:
+      final_host.inspect_runtime_completion_locked(state)
+      raise AssertionError('stopped maintenance unexpectedly certified recovery readiness')
+     except RuntimeError as exc:
+      assert str(exc)=='storage_online_completion_unhealthy', str(exc)
+     repair=final_host.inspect_runtime_completion_locked(state,repair_release=True)
+     assert repair['repair_release_admissible'] and not repair['ready'] and not repair['complete_backup_confirmed']
+     assert repair['database_identity']==observed['database_identity']
+     assert repair['plan_id']==observed['plan_id'] and repair['storage_layout']==observed['storage_layout']
+     assert (state/final_host.STATE).read_bytes()==final_bytes
+     assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+     report['stopped_maintenance_repair_observation']=dict(repair,journals_unchanged=True,
+       frozen_preserved=True,no_runtime_start=True,production_admission=False)
+
+  if canonical:
    published=final_host._load(state/final_host.STATE)
    assert published['release']['status']=='published'
    report['canonical_publication']=dict(retained_marker=True,exact_public_recipe=True)
