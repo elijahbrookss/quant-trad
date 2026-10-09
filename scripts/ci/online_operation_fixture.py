@@ -35,6 +35,9 @@ def recover_missing_repository_configuration(operation_file, *, state, owned, ru
     from scripts.automation import storage_online_final as final
     from scripts.automation import storage_online_recovery as recovery
     from scripts.automation import storage_online_launch as launch
+    # Includes actual application startup and encrypted recovery checks; native
+    # runners measured about 120s through the last UI restoration check.
+    recovery_seconds = 180
     original = (state/final.STATE).read_bytes()
     saved = final._load(state/final.STATE)
     worker = host_boundary.load_receipt(state/launch._STATE)
@@ -49,7 +52,7 @@ def recover_missing_repository_configuration(operation_file, *, state, owned, ru
     request = state/'repository-continuation-request.json'
     host_boundary.save_receipt(request, dict(schema_version='qt.storage_repository_continuation.v1',
         operation_sha256=hashlib.sha256(operation_file.read_bytes()).hexdigest(),
-        final_sha256=hashlib.sha256(original).hexdigest(), duration_seconds=120), initial=True)
+        final_sha256=hashlib.sha256(original).hexdigest(), duration_seconds=recovery_seconds), initial=True)
     observed = operation.run_operation_plan(operation_file, recover_repositories_file=request)
     assert observed['storage_mutations_performed'] is False
     assert not (state/recovery.CONTINUATION_STATE).exists()
@@ -58,7 +61,7 @@ def recover_missing_repository_configuration(operation_file, *, state, owned, ru
     audit = host_boundary.load_receipt(state/recovery.CONTINUATION_STATE)
     assert Path(audit['original_final']).read_bytes() == original
     assert host_boundary.load_receipt(state/launch._STATE) == worker
-    assert audit['phase'] == 'runtime_ready' and audit['deadline']-audit['started_at'] <= 120
+    assert audit['phase'] == 'runtime_ready' and audit['deadline']-audit['started_at'] <= recovery_seconds
     current = final._load(state/final.STATE)
     replacement_project = json.loads(run(['inspect', current['repositories']['helper_id'],
         '--format', '{{json .Config.Labels}}']).stdout)['com.docker.compose.project']

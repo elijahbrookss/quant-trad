@@ -493,7 +493,8 @@ os.chown(root,70,70)
    report['operation_preflight_retired_worker_reentry']=True
   else:
    from datetime import datetime
-   assert worker_receipt['deadline']-datetime.fromisoformat(worker_receipt['capture']['started_at']).timestamp() <= 180
+   assert worker_receipt['capture']['seconds']==plan['attempt_seconds']
+   assert worker_receipt['deadline']-datetime.fromisoformat(worker_receipt['capture']['started_at']).timestamp() <= plan['attempt_seconds']
   retired=json.loads(run(['inspect',worker_receipt['container_id'],'--format','{{json .State}}']).stdout)
   assert not retired['Running'] and retired['Pid']==0
   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
@@ -1593,20 +1594,20 @@ finally:
     mine=True
   if name==project+'-storage-spool-prepare':
    mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
-   retained_preparer=False
-   if options.repository_config_failure and (state/recovery_host.CONTINUATION_STATE).exists():
-    continuation=host_boundary.load_receipt(state/recovery_host.CONTINUATION_STATE)
-    retained_preparer=name==details['Id']==continuation['observation']['helper_id']
-   if name==project+'-storage-repository-prepare' or retained_preparer:
-    mine=details['Config']['Labels'].get('com.docker.compose.project') in {project+'-recovery',project+'-recovery-continuation'} and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
+  retained_preparer=False
+  if options.repository_config_failure and (state/recovery_host.CONTINUATION_STATE).exists():
+   continuation=host_boundary.load_receipt(state/recovery_host.CONTINUATION_STATE)
+   retained_preparer=name==details['Id']==continuation['observation']['helper_id']
+  if name==project+'-storage-repository-prepare' or retained_preparer:
+   mine=details['Config']['Labels'].get('com.docker.compose.project') in {project+'-recovery',project+'-recovery-continuation'} and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)
  if canonical:
   for name in run(['volume','ls','-q','--filter','label=com.docker.compose.project='+project]).stdout.split():
    details=json.loads(run(['volume','inspect',name]).stdout)[0]
    assert details['Labels'].get('com.docker.compose.project')==project
    run(['volume','rm',name])
-  for created,kind,name in ((created_volume,'volume',volume),(created_recovery_socket,'volume',recovery_socket),(created_network,'network',network)):
-   if created and run([kind,'rm',name],check=False).returncode:cleanup_failures.append(kind+':'+name)
+ for created,kind,name in ((created_volume,'volume',volume),(created_recovery_socket,'volume',recovery_socket),(created_network,'network',network)):
+  if created and run([kind,'rm',name],check=False).returncode:cleanup_failures.append(kind+':'+name)
  if created_history:
   assert history.parent==history_parent and history.name==project
   cleanup=project+'-cleanup'
