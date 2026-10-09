@@ -2698,7 +2698,13 @@ for the exact admission, clock and failure rules. Native qualification passed fo
 the current and first-release application versions on October 9. Production
 repository preparation subsequently succeeded, but WAL delivery remained blocked
 by missing pgBackRest in the retained database image. The production continuation
-has not completed; the preserving image correction remains pending qualification.
+has not completed. The same continuation owner implements an explicitly bound
+v2 image correction for that completed-preparation failure. It preserves the
+same cluster, volumes, keys and runtime contract, requires identical PostgreSQL
+and Timescale binaries, journals replacement without volume removal, and verifies
+actual WAL delivery before continuing existing spool/runtime steps. Prior
+attempts remain evidence; uncertain outcomes refuse automatic replay. Native
+qualification and deployment of this correction remain pending.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.

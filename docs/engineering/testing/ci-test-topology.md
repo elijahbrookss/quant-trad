@@ -33,7 +33,7 @@ pinned first-release revision `24357ff387776822f676ae2a8b1cce7f209c313e`. Each b
 its attested test runtime, uses synthetic guarded source peers and independent
 disposable PostgreSQL/archive storage, reproduces the missing repository input,
 and exercises the explicit continuation and completion observation. Neither run
-uses production inputs or proves production throughput. The 20-minute job timeout
+uses production inputs or proves production throughput. The 25-minute job timeout
 bounds fixture setup and teardown; the operation keeps its own smaller limits.
 This runs on native Linux because Docker Desktop remaps bind paths and cannot
 qualify the exact Linux host identity checks.
@@ -320,3 +320,13 @@ Its internal network, generated credentials, owned resources and cleanup remain
 unchanged. A passed run supports only the exercised disposable layout; actual
 HDD performance, preserving migration duration and server permissions require
 their own evidence.
+
+The committed-recovery matrix also exercises a retained database image missing
+pgBackRest. It reproduces the historical missing-config failure, then completed
+repository setup blocked on WAL archival, and waits for both actual attempt
+expiries. The explicit v2 correction replaces only the database image while
+preserving PGDATA, keys and completed preparation. The same current/frozen reads,
+encrypted pair and read-only completion checks must pass afterward. This test
+uses generated disposable inputs; it does not measure production outage or grant
+production operation authority. Its 25-minute job bound includes image builds
+and deliberate expiry waits, not a production completion estimate.

@@ -2,8 +2,8 @@
 
 The existing final-state owner supplies a live source hold and committed result.
 This module owns database recreation and the explicit, narrowly admitted recovery
-of a missing-config repository failure after commit. Recovery reuses the existing
-repository, spool and runtime owners; it never replays SQL or generates keys.
+of confirmed repository failures after commit. Recovery reuses the existing
+repository, spool and runtime owners; it never replays migration SQL or generates keys.
 """
 from __future__ import annotations
 
@@ -286,10 +286,18 @@ def admit_retired_reader(worker_process, worker, saved, source_check, deadline):
 
 def _continuation_request(path):
     value = host.load_receipt(launch._canonical(path))
-    if (set(value) != {"schema_version", "operation_sha256", "final_sha256", "duration_seconds"}
-            or value["schema_version"] != "qt.storage_repository_continuation.v1"
+    image_repair = value.get("schema_version") == "qt.storage_repository_continuation.v2"
+    fields = {"schema_version", "operation_sha256", "final_sha256", "duration_seconds"}
+    if image_repair:
+        fields |= {"previous_continuation_sha256", "database_image"}
+    if (set(value) != fields
+            or value["schema_version"] not in ("qt.storage_repository_continuation.v1", "qt.storage_repository_continuation.v2")
             or any(not isinstance(value[k], str) or not re.fullmatch(r"[0-9a-f]{64}", value[k])
-                   for k in ("operation_sha256", "final_sha256"))
+                    for k in ("operation_sha256", "final_sha256"))
+            or image_repair and (not isinstance(value["previous_continuation_sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value["previous_continuation_sha256"])
+                or not isinstance(value["database_image"], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["database_image"]))
             or type(value["duration_seconds"]) is not int or not 1 <= value["duration_seconds"] <= 600):
         raise ValueError("storage_repository_continuation_request_invalid")
     return value
@@ -336,7 +344,86 @@ def _failed_preparer(state_root, saved, database):
                 recipe_sha256=host.digest(recipe), helper_logs_sha256=hashlib.sha256(logs.encode()).hexdigest())
 
 
-def _committed_policy(database_id, saved, request):
+_DATABASE_BINARIES = ("postgres --version; sha256sum /usr/local/bin/postgres "
+    "/usr/local/lib/postgresql/timescaledb*.so "
+    "/usr/local/share/postgresql/extension/timescaledb.control")
+
+
+def inspect_archiver_replacement(database, image):
+    """Admit backup-tool additions, never a PostgreSQL/Timescale version change."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image) or image == database["image"]:
+        raise RuntimeError("storage_archiver_replacement_image_invalid")
+    configs = []
+    for identity in (database["image"], image):
+        config = json.loads(host.docker("image", "inspect", "--format", "{{json .Config}}", identity))
+        labels = config.get("Labels") or {}
+        # Compose adds build provenance labels; the replacement container must
+        # still match the complete original runtime contract below.
+        for key in ("project", "service", "version"):
+            labels.pop("com.docker.compose."+key, None)
+        config["Labels"] = labels
+        configs.append(config)
+    if configs[0] != configs[1]:
+        raise RuntimeError("storage_archiver_replacement_image_configuration_changed")
+    original = host.docker("exec", "--user", "70:70", database["id"],
+                           "sh", "-ec", _DATABASE_BINARIES)
+    candidate = host.docker("run", "--rm", "--pull", "never", "--network", "none",
+        "--read-only", "--user", "70:70", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges", "--memory", "64m", "--cpus", "1",
+        "--pids-limit", "16", "--entrypoint", "sh", image,
+        "-ec", "/usr/local/bin/pgbackrest version; "+_DATABASE_BINARIES)
+    if (not original.startswith("postgres (PostgreSQL) ")
+            or len(original.splitlines()) < 4
+            or candidate != "pgBackRest 2.59.1\n"+original):
+        raise RuntimeError("storage_archiver_replacement_database_binaries_changed")
+    return dict(original=database["image"], candidate=image,
+        configuration_sha256=host.digest(configs[0]),
+        database_binaries_sha256=hashlib.sha256(original.encode()).hexdigest())
+
+
+def _prepared_repository_failure(state_root, saved, database):
+    """Recognize completed preparation blocked only on the missing WAL tool."""
+    from scripts.automation import storage_online_repositories as repositories
+    journal = saved["repositories"]
+    if (saved["phase"] != "recovery_repository_preparing"
+            or journal["completed"] != list(repositories._ACTIONS)
+            or journal["inflight"] is not None or journal["finished_at"] is not None
+            or not isinstance(journal["report"], dict)
+            or journal["report"].get("repositories_initialized") is not True
+            or journal["report"].get("backup_created") is not False
+            or journal["report"].get("policy_enabled") is not False):
+        raise RuntimeError("storage_archiver_recovery_repository_outcome_uncertain")
+    recipe = host.load_receipt(state_root/repositories.RECIPE)
+    helper = host.database_details(journal["helper_id"])
+    if (host.digest(recipe) != journal["recipe_sha256"]
+            or repositories._preparer_contract(helper, database) != journal["helper_contract"]
+            or helper["config"].get("Cmd") != recipe["services"]["prepare"]["command"]):
+        raise RuntimeError("storage_archiver_recovery_preparer_changed")
+    status = json.loads(host.docker("inspect", "--format", "{{json .State}}", journal["helper_id"]))
+    if (host.digest(status) != journal["helper_retirement"] or status.get("Status") != "exited"
+            or status.get("ExitCode") != 0 or status.get("Pid") != 0
+            or any(status.get(k) is not False for k in ("Running", "Paused", "Restarting", "Dead", "OOMKilled"))):
+        raise RuntimeError("storage_archiver_recovery_preparer_not_retired")
+    config = host.docker("exec", "--user", "70:70", database["id"], "sha256sum",
+                         "/run/quanttrad/recovery/pgbackrest.conf").split()
+    if config != [journal["report"].get("archiver_config_sha256"), "/run/quanttrad/recovery/pgbackrest.conf"]:
+        raise RuntimeError("storage_archiver_recovery_configuration_changed")
+    host.docker("exec", "--user", "70:70", database["id"], "sh", "-ec",
+        "test ! -e /usr/local/bin/pgbackrest && ! command -v pgbackrest >/dev/null 2>&1")
+    wal = json.loads(host.maintenance_query(database["id"],
+        "SELECT json_build_object('mode',current_setting('archive_mode'),"
+        "'command',current_setting('archive_command'),'library',current_setting('archive_library'),"
+        "'archived_count',(SELECT archived_count FROM pg_stat_archiver),"
+        "'pending_restart',EXISTS(SELECT 1 FROM pg_settings WHERE name IN "
+        "('archive_mode','archive_command') AND pending_restart))::text"))
+    if wal != dict(mode="on", command=repositories._ARCHIVE_COMMAND, library="",
+                   archived_count=0, pending_restart=False):
+        raise RuntimeError("storage_archiver_recovery_wal_state_changed")
+    return dict(helper_id=journal["helper_id"], helper_state_sha256=host.digest(status),
+        recipe_sha256=journal["recipe_sha256"], database_contract=host.database_contract(database))
+
+
+def _committed_policy(database_id, saved, request, *, native_wal=False):
     """Inspect only the small canonical certificate/policy records, not history."""
     from core.storage_targets import StoragePolicy
     from scripts.db.fact_header_v2_handoff import _policy_plan_id, POLICY_OPERATION, RECEIPT_VERSION
@@ -372,7 +459,8 @@ def _committed_policy(database_id, saved, request):
                 database_handoff_plan=plan_id,runtime_activation_required=True)
             or current != dict(revision=plan["base_revision"]+1,policy=policy.to_dict(),applied_plan_id=plan_id)
             or observed["clients"] != 0 or observed["prepared"] != 0
-            or observed["archive_mode"] != "off" or observed["archive_disabled"] is not True):
+            or observed["archive_mode"] != ("on" if native_wal else "off")
+            or observed["archive_disabled"] is not (not native_wal)):
         raise RuntimeError("storage_repository_continuation_database_changed")
     return plan_id
 
@@ -422,9 +510,14 @@ def _inspect_continuation(state_root, plan, package):
     preserving._runtime_candidate_details("tsdb",rows["tsdb"],database_model,observation)
     if host.cluster_identifier(database["id"],maintenance=True) != preparation["cluster"]:
         raise RuntimeError("storage_repository_continuation_cluster_changed")
-    inspect_database_archiver(database["id"])
-    helper = _failed_preparer(state_root,saved,database)
-    _committed_policy(database["id"],saved,request)
+    image_repair = package["schema_version"] == "qt.storage_repository_continuation.v2"
+    if image_repair:
+        helper = _prepared_repository_failure(state_root, saved, database)
+        helper["database_image"] = inspect_archiver_replacement(database, package["database_image"])
+    else:
+        inspect_database_archiver(database["id"])
+        helper = _failed_preparer(state_root,saved,database)
+    _committed_policy(database["id"],saved,request,native_wal=image_repair)
     roots = preparation["source_roots"]
     candidates = [Path(p) for p in roots if str(Path(p)/"objects") in roots]
     if len(roots) != 2 or len(candidates) != 1:
@@ -499,6 +592,8 @@ def continue_repositories(operation_path, *, request_file, execute=False):
     plan=operation.load_operation_plan(operation_path)
     root=launch._canonical(plan["state_root"])
     with host.deployment_lock(root):
+        if package["schema_version"] == "qt.storage_repository_continuation.v2":
+            return _continue_archiver_recovery(root, plan, package, execute=execute)
         with host.docker_deadline(time.monotonic()+60):
             if os.path.lexists(root/CONTINUATION_STATE):
                 raise RuntimeError("storage_repository_continuation_intent_exists_reconcile_required")
@@ -563,3 +658,204 @@ def continue_repositories(operation_path, *, request_file, execute=False):
             return dict(phase="runtime_ready",runtime=runtime,migration_replay_authorized=False,
                 original_final_preserved=str(retained_final),complete_backup_confirmed=False,
                 ordinary_relaunch_authorized=False)
+
+
+def _inspect_previous_archiver_attempt(root, plan, package):
+    raw = preserving._runtime_configuration_bytes(root/CONTINUATION_STATE)
+    previous = json.loads(raw)
+    if (hashlib.sha256(raw).hexdigest() != package["previous_continuation_sha256"]
+            or previous.get("schema_version") != "qt.storage_repository_continuation.v1"
+            or previous.get("phase") != "preparing" or previous.get("finished_at") is not None
+            or type(previous.get("deadline")) not in (int, float)
+            or time.time() <= previous["deadline"]):
+        raise RuntimeError("storage_archiver_recovery_previous_attempt_unresolved")
+    result = _inspect_continuation(root, plan, package)
+    saved = result[0]
+    if (saved["deadline"] != previous["deadline"]
+            or saved["deadline_boot"] != previous["deadline_boot"]
+            or saved["switch"]["deadline_monotonic"] != previous["deadline_monotonic"]):
+        raise RuntimeError("storage_archiver_recovery_previous_clock_changed")
+    return (*result, raw)
+
+
+def _replace_archiver_database(root, *, saved, worker, preparation, audit, check):
+    """Replace only the database image under the existing source/deployment hold."""
+    from scripts.automation import storage_online_final as final, storage_online_runtime as runtime
+    from scripts.automation import storage_online_repositories as repositories
+    old_id = saved["recovery"]["replacement_id"]
+    original = host.database_details(old_id)
+    original_contract = host.database_contract(original)
+    original_mounts = sorted(original["mounts"], key=lambda value: value["Destination"])
+    original_networks = host.database_networks(original)
+    model = host.load_receipt(root/RECIPE)
+    runtime_model = host.load_receipt(root/runtime.RUNTIME_RECIPE, max_bytes=524288)
+    if (host.digest(model) != saved["recovery"]["recipe_sha256"]
+            or runtime_model["services"]["tsdb"] != model["services"]["tsdb"]):
+        raise RuntimeError("storage_archiver_recovery_recipes_changed")
+    model["services"]["tsdb"]["image"] = audit["request"]["database_image"]
+    runtime_model["services"]["tsdb"] = deepcopy(model["services"]["tsdb"])
+    candidate_path = root/("storage-online-archiver-database-"+host.digest(audit["request"])+".compose.json")
+    host.save_receipt(candidate_path, model, initial=True)
+    journal = dict(original_id=old_id, replacement_id=None, candidate_recipe=str(candidate_path),
+        original_image=original["image"], original_contract=original_contract,
+        original_mounts_sha256=host.digest(original_mounts), original_networks_sha256=host.digest(original_networks),
+        recipe_sha256=host.digest(model), completed=[], inflight=None, started_at=time.time(), finished_at=None)
+    audit["database_replacement"] = journal
+    host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+    deadline = audit["deadline_monotonic"]
+
+    def held():
+        check()
+        if host.load_receipt(root/final.STATE) != saved or host.load_receipt(candidate_path) != model:
+            raise RuntimeError("storage_archiver_recovery_saved_inputs_changed")
+        rows = host.inventory(saved["binding"]["project"], database_preparing=True,
+            operator_id=worker["container_id"],
+            **({"removing_database_id": old_id} if journal["inflight"] == "remove" else {}))
+        initial._admit_clients(rows, preparation["clients"])
+        if any(rows[name]["running"] for name in host.STOP):
+            raise RuntimeError("storage_archiver_recovery_source_restarted")
+        current = rows.get("tsdb")
+        if journal["replacement_id"] is not None:
+            if current is None or current["id"] != journal["replacement_id"]:
+                raise RuntimeError("storage_archiver_recovery_database_identity_changed")
+        elif "remove" not in journal["completed"]:
+            if (current is None and journal["inflight"] != "remove"
+                    or current is not None and current["id"] != old_id):
+                raise RuntimeError("storage_archiver_recovery_database_identity_changed")
+        elif journal["inflight"] != "create" and current is not None:
+            raise RuntimeError("storage_archiver_recovery_unexpected_database")
+        return rows
+
+    def dispatch(action, args):
+        held()
+        journal["inflight"] = action
+        host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+        print("event=storage_archiver_recovery_dispatch action="+action+" intent_retained=true",
+              file=sys.stderr, flush=True)
+        host.supervised_source_action(args, deadline=deadline, check=held)
+
+    def completed(action):
+        journal["completed"].append(action)
+        journal["inflight"] = None
+        host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+        held()
+
+    dispatch("stop", ["stop", "--signal", "SIGTERM", "--timeout", "-1", old_id])
+    stopped = held()["tsdb"]
+    if stopped["id"] != old_id or stopped["running"] or stopped["pid"] != 0 or stopped["exit_code"] != 0:
+        raise RuntimeError("storage_archiver_recovery_database_unclean_stop")
+    completed("stop")
+    dispatch("remove", ["rm", old_id])  # No volume removal; PGDATA and all bind roots remain.
+    if "tsdb" in held():
+        raise RuntimeError("storage_archiver_recovery_original_still_present")
+    completed("remove")
+    dispatch("create", ["compose", "--project-name", saved["binding"]["project"],
+        "--file", str(candidate_path), "create", "--no-build", "--pull", "never", "tsdb"])
+    created = held()["tsdb"]
+    candidate = host.database_details(created["id"])
+    if (created["id"] == old_id or created["running"] or created["status"] != "created" or created["pid"] != 0
+            or candidate["image"] != audit["request"]["database_image"]
+            or host.database_contract(candidate) != original_contract
+            or sorted(candidate["mounts"], key=lambda value: value["Destination"]) != original_mounts
+            or not host.same_database_networks(candidate, original_networks)):
+        raise RuntimeError("storage_archiver_recovery_replacement_changed")
+    journal["replacement_id"] = created["id"]
+    completed("create")
+    dispatch("start", ["start", created["id"]])
+    completed("start")
+    while True:
+        current = held()["tsdb"]
+        if current["id"] != created["id"] or not current["running"]:
+            raise RuntimeError("storage_archiver_recovery_database_not_running")
+        try:
+            cluster = host.cluster_identifier(created["id"], maintenance=True)
+        except RuntimeError:
+            time.sleep(min(.2, max(0, deadline-time.monotonic())))
+            continue
+        if cluster != preparation["cluster"]:
+            raise RuntimeError("storage_archiver_recovery_cluster_changed")
+        break
+    inspect_database_archiver(created["id"])
+    while True:
+        held()
+        wal = json.loads(host.maintenance_query(created["id"],
+            "SELECT json_build_object('mode',current_setting('archive_mode'),"
+            "'command',current_setting('archive_command'),"
+            "'archived_count',(SELECT archived_count FROM pg_stat_archiver))::text"))
+        if wal["mode"] != "on" or wal["command"] != repositories._ARCHIVE_COMMAND:
+            raise RuntimeError("storage_archiver_recovery_wal_configuration_changed")
+        if wal["archived_count"] > 0:
+            break
+        time.sleep(min(.2, max(0, deadline-time.monotonic())))
+    held()
+    final._admit_mount_writers(held(), operator_id=worker["container_id"])
+    # The prior attempts remain exact snapshots. Publish only the corrected image
+    # binding; completed repository actions are retained, never executed again.
+    journal["inflight"] = "publish"
+    host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+    host.save_receipt(root/RECIPE, model, initial=False)
+    host.save_receipt(root/runtime.RUNTIME_RECIPE, runtime_model, initial=False)
+    saved["recovery"].update(replacement_id=created["id"], recipe_sha256=host.digest(model))
+    saved["repositories"]["finished_at"] = time.time()
+    saved["phase"] = "recovery_wal_ready"
+    host.save_receipt(root/final.STATE, saved, initial=False)
+    journal.update(inflight=None, finished_at=time.time())
+    journal["completed"].append("publish")
+    host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+    held()
+
+
+def _continue_archiver_recovery(root, plan, package, *, execute):
+    """One explicit correction after fully prepared repositories lack a WAL tool."""
+    from scripts.automation import storage_online_final as final, storage_online_runtime as runtime
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation.storage_online_release import _preserve_file
+    with host.docker_deadline(time.monotonic()+60):
+        saved, worker, preparation, source, observed, previous = _inspect_previous_archiver_attempt(root, plan, package)
+        if not execute:
+            return dict(phase="database_archiver_recovery_inspected", observation_sha256=host.digest(observed),
+                database_image=package["database_image"], duration_seconds=package["duration_seconds"],
+                migration_replay_authorized=False, storage_mutations_performed=False)
+    elapsed = max(time.time()-saved["started_at"], final._boot_seconds()-saved["started_boot"])
+    duration = math.floor(elapsed)+package["duration_seconds"]
+    if duration <= saved["duration_seconds"] or duration > 96*3600:
+        raise RuntimeError("storage_repository_continuation_window_invalid")
+    extension = duration-saved["duration_seconds"]
+    amended = deepcopy(saved)
+    amended.update(duration_seconds=duration, deadline=saved["deadline"]+extension,
+                   deadline_boot=saved["deadline_boot"]+extension)
+    amended["switch"]["deadline_monotonic"] += extension
+    suffix = host.digest(package)
+    retained = {}
+    for name in (final.STATE, CONTINUATION_STATE, RECIPE, runtime.RUNTIME_RECIPE):
+        path = root/(name+".failed-"+suffix)
+        raw = preserving._runtime_configuration_bytes(root/name)
+        if ((name == final.STATE and hashlib.sha256(raw).hexdigest() != package["final_sha256"])
+                or name == CONTINUATION_STATE and raw != previous):
+            raise RuntimeError("storage_archiver_recovery_previous_attempt_changed")
+        _preserve_file(path, raw)
+        retained[name] = str(path)
+    audit = dict(schema_version="qt.storage_repository_continuation.v2", request=package,
+        started_at=time.time(), deadline=amended["deadline"], deadline_boot=amended["deadline_boot"],
+        deadline_monotonic=amended["switch"]["deadline_monotonic"], observation=observed,
+        previous_records=retained, original_final_deadline=saved["deadline"],
+        phase="preparing", finished_at=None)
+    with host.docker_deadline(amended["switch"]["deadline_monotonic"]):
+        if _inspect_previous_archiver_attempt(root, plan, package)[4] != observed:
+            raise RuntimeError("storage_archiver_recovery_preflight_changed")
+        host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+        host.save_receipt(root/final.STATE, amended, initial=False)
+        with _held_continuation(root, saved=amended, worker=worker, preparation=preparation,
+                source=source, source_image=plan["source_image"], audit=audit) as check:
+            _replace_archiver_database(root, saved=amended, worker=worker,
+                preparation=preparation, audit=audit, check=check)
+            limits = operation.OperationLimits(**plan["limits"])
+            final.prepare_online_runtime_spool_locked(root, worker_process=None, destination=plan["spool_destination"],
+                max_bytes=limits.spool_max_bytes, max_entries=limits.spool_max_entries,
+                reserve_bytes=limits.spool_reserve_bytes, max_duration_seconds=package["duration_seconds"])
+            result = final.activate_online_runtime_locked(root, worker_process=None,
+                max_duration_seconds=package["duration_seconds"])
+        audit.update(phase="runtime_ready", finished_at=time.time())
+        host.save_receipt(root/CONTINUATION_STATE, audit, initial=False)
+        return dict(phase="runtime_ready", runtime=result, database_image=package["database_image"],
+            migration_replay_authorized=False, complete_backup_confirmed=False, ordinary_relaunch_authorized=False)

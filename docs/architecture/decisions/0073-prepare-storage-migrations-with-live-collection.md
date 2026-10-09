@@ -1543,8 +1543,35 @@ ordinary UID70 before source pause and before committed repository recovery. It
 reads no keys or data and cannot install tools. A missing or incompatible tool
 requires a separately qualified preserving database-image correction. Replaying
 the migration, bypassing WAL verification, or modifying an active operation's
-receipts is not a correction. The image correction and continuation from the
-completed repository steps remain pending implementation and qualification.
+receipts outside the recovery owner is not a correction.
+
+The same continuation owner now implements a v2 request for this exact second
+failure. It additionally binds the expired v1 continuation and an immutable
+replacement database image. Admission requires all repository actions confirmed,
+no action in flight, the retired successful helper, the unchanged archive
+configuration and zero archived WAL segments. The candidate must contain the
+pinned tool, byte-identical PostgreSQL/Timescale binaries and the same image
+configuration apart from Compose build provenance labels. This is not a database
+upgrade route.
+
+Execution preserves all previous receipts and recipes, then journals a clean
+stop, container removal without volumes, recreation and start. Complete mounts,
+networks and the runtime contract must match. The original cluster and actual
+native WAL delivery are required before publishing the new image/container
+binding and invoking the existing spool/runtime owners. Preparation, SQL cutover,
+keys and archive settings are not repeated. A lost daemon reply or interrupted
+publication remains unresolved; an existing v2 attempt cannot dispatch again.
+Recovery is forward to the committed schema, not automatic restoration of the old
+application. Its separately authorized allowance is at most 600 seconds and
+preserves the original pause/start history.
+
+The implementation and fault-injection tests are candidate evidence. The native
+fixture now reproduces both historical failures using a database image missing
+only pgBackRest, waits for actual expiry and exercises the correction, current
+and frozen reads, encrypted paired recovery and completion observation. It
+simulates the historical absence of the new preflight guard only inside the
+fixture; production admission remains strict. Native qualification and production
+completion are still required before claiming restoration.
 
 ### Connect private pending-WAL preparation after native WAL readiness
 

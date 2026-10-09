@@ -14,6 +14,7 @@ from scripts.automation import storage_online_terminal as terminal
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image',required=True)
 parser.add_argument('--database-image',required=True)
+parser.add_argument('--archiver-replacement-image',help='reproduce a legacy missing-archiver image after completed repository preparation')
 parser.add_argument('--output-root',type=Path,required=True)
 parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
@@ -59,6 +60,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.archiver_replacement_image and not options.repository_config_failure:
+ parser.error('--archiver-replacement-image requires --repository-config-failure')
 if options.repository_config_failure and not options.full_operation:
  parser.error('--repository-config-failure requires --full-operation')
 if options.forward_retirement_recovery and not options.forward_retirement:
@@ -450,18 +453,22 @@ os.chown(root,70,70)
     if canonical:plan.update(deployment_environment=str(canonical['environment']),deployment_repository=str(options.canonical_deployment_repository.resolve()))
     operation_file=state/'operation.json'
     host_boundary.save_receipt(operation_file,plan,initial=True)
-    inspected=operation.run_operation_plan(operation_file)
+    from scripts.ci.online_operation_fixture import historical_archiver_preflight
+    with historical_archiver_preflight(bool(options.archiver_replacement_image)):
+     inspected=operation.run_operation_plan(operation_file)
     assert inspected['phase']=='inspected' and not (state/initial.STATE).exists()
     if options.repository_config_failure:
      from scripts.ci.online_operation_fixture import missing_repository_configuration, recover_missing_repository_configuration
      try:
-      with missing_repository_configuration():
+      with missing_repository_configuration(), historical_archiver_preflight(bool(options.archiver_replacement_image)):
        operation.run_operation_plan(operation_file,execute=True)
       raise AssertionError('missing repository configuration unexpectedly succeeded')
      except RuntimeError as exc:
       if not (state/final_host.STATE).exists(): raise
       assert final_host._load(state/final_host.STATE)['phase']=='recovery_repository_preparing', str(exc)
-     result=recover_missing_repository_configuration(operation_file,state=state,owned=owned,run=run)
+     result=recover_missing_repository_configuration(operation_file,state=state,owned=owned,run=run,
+       archiver_image=options.archiver_replacement_image)
+     report['missing_archiver_image_corrected']=bool(options.archiver_replacement_image)
      report['expired_committed_repository_continuation']=True
     else:
      result=operation.run_operation_plan(operation_file,execute=True)

@@ -14,7 +14,7 @@ concurrency:
 jobs:
   committed-recovery:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       QT_RECOVERY_FIXTURE_ROOT: /tmp/qt-committed-recovery
     strategy:
@@ -69,6 +69,9 @@ jobs:
             --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
             --tag qt-committed-recovery-runtime "$source_root"
           docker build --file docker/postgres/Dockerfile --tag quanttrad-postgres:2.14.2-pg15 .
+          # Reproduce the actual retained image's missing tool without changing PG.
+          printf 'FROM quanttrad-postgres:2.14.2-pg15\nRUN rm /usr/local/bin/pgbackrest\n' > "$RUNNER_TEMP/Dockerfile.missing-archiver"
+          docker build --file "$RUNNER_TEMP/Dockerfile.missing-archiver" --tag qt-postgres-missing-archiver .
           cat > "$RUNNER_TEMP/Dockerfile.recovery-guard" <<'DOCKERFILE'
           FROM qt-committed-recovery-runtime
           LABEL qt.guarded-source-fixture=true
@@ -77,7 +80,7 @@ jobs:
           COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/workers/market_data_collector.py
           DOCKERFILE
           docker build --file "$RUNNER_TEMP/Dockerfile.recovery-guard" --tag qt-committed-recovery-guard .
-      - name: Recover the actual missing-config failure after original expiry
+      - name: Recover missing configuration and missing database archiver after actual expiry
         env:
           QT_DISABLE_DOTENV: '1'
         run: |
@@ -91,7 +94,8 @@ jobs:
             env QT_DISABLE_DOTENV=1 DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" \
             bash -c 'cd "$1"; shift; exec "$@"' _ \
             "$QT_RECOVERY_FIXTURE_ROOT/source" "$(command -v python)" scripts/ci/rehearse_online_prepared.py \
-            --image qt-committed-recovery-runtime --database-image quanttrad-postgres:2.14.2-pg15 \
+            --image qt-committed-recovery-runtime --database-image qt-postgres-missing-archiver \
+            --archiver-replacement-image quanttrad-postgres:2.14.2-pg15 \
             --output-root "$QT_RECOVERY_FIXTURE_ROOT/evidence" --history-parent "$history_root" --require-distinct-devices \
             --prepare-source --worker-phases --initial-capture --final-pause --final-delta --switch-entry \
             --close-logins success --commit-switch --guarded-source-image qt-committed-recovery-guard \
