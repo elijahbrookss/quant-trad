@@ -156,6 +156,17 @@ The existing storage lifecycle supervisor performs history movement and local re
 copies under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
 
+## Current deployment and historical qualification
+
+The approved retained-header cutover is complete. The
+[deployed outcome in the implementation specification](../../engineering/research-data-evolution-spec.md#deployed-outcome--2026-10-09)
+records the serving release, 14-day policy, cache and matching recovery evidence.
+Sustained archival throughput and growth-horizon qualification remain open.
+The migration sections below preserve earlier design and qualification states;
+their historical release-status statements do not supersede that deployed
+outcome or authorize replay. Alternative operators still need their own
+applicable qualification.
+
 ## Proposed forward-only transition
 
 [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md)

@@ -1,6 +1,6 @@
 # Bounded Storage Migrations and Research Compatibility
 
-**Status: deployed; recovery and capacity qualification remain open. Updated 2026-10-09.**
+**Status: deployed; sustained capacity qualification remains open. Updated 2026-10-09.**
 Decision: [ADR 0078](../architecture/decisions/0078-evolve-research-within-existing-data-boundaries.md).
 This revision replaces this document's earlier H04-first implementation plan.
 It does not resume a migration, clear an operational hold, deploy a release or
@@ -9,8 +9,12 @@ restart research. Historical approvals and receipts remain evidence.
 ## Deployed outcome — 2026-10-09
 
 The separately approved schema cutover committed at 00:07 UTC. Release
-`f5096792481c96e6d42056ebaa127a771acc8787` deployed at 19:26 UTC after
-[all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/37971598094).
+`dfd717bed32ae5e132fbc20926b68166162e801c` deployed at 23:29 UTC after
+[all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/37997536272).
+This ordinary software update corrects archive packing and provenance lookup
+bounds. The database container, saved policy, environment and migration journals
+were unchanged; the preceding `f5096792` release remains the compatible rollback.
+All 17 collectors and the application services were healthy after deployment.
 The cutover is complete and must not be replayed. The dated planning and local
 qualification sections below describe earlier states, not outstanding deployment
 instructions or fresh operational authorization.
@@ -28,19 +32,38 @@ instructions or fresh operational authorization.
 - The disposable history cache is enabled with a **16 GiB quota** and **500 GiB
   minimum free-space floor**. One existing 2,948-row archive page passed direct,
   canonical and cached equality checks, with one fill and an identical-request
-  hit. This proves the cache path, not a general research speedup.
+  hit on the preceding release. The deployed correction also passed equality
+  and two cache-hit checks in 4.3 seconds, preserving the existing cache and HDD
+  source. Its first attempt refused a busy lifecycle lock before reading inputs;
+  one retry succeeded after normal shared-read admission became available.
+  This proves the cache path, not a general research speedup.
 - The authorized BTC2022 H04 Check and identical Replay completed with matching
   plan, result and evidence hashes, taking about 598 and 595 seconds respectively.
   They used SQL history and do not measure HDD/cache benefit. That allocation is
   complete; it must not be repeated or expanded implicitly.
 
-Remaining qualification is the matching post-placement backup/recovery evidence,
-retention throughput versus intake, and a full 24-hour filesystem-UUID growth
-baseline. The baseline producer began at 12:38 UTC on October 9; migration, WAL
-and backup growth must be separated from ordinary growth before projecting a
-capacity horizon. No additional historical rewrite or migration-copy deletion is
-implied. Private receipts are retained under
-`artifacts/storage-implementation/history-read-cache/`: `release-f5096792`,
+The matching post-placement encrypted database/archive pair completed at 21:03
+UTC, and both native repositories contained its referenced recovery points.
+Packaged restore tests passed on disposable resources; the whole production
+history has not been restored as a drill. Preserve the encryption keys, database
+chain dependencies and paired archive snapshot.
+
+Ordinary research can use the existing frozen-input and state-engine paths under
+its declared scientific/resource budgets and global one-job admission. Clearing
+all historical storage backlog is not a research prerequisite. Completed H04
+allocations stay completed; this status does not restart paused automations or
+admit a new scientific allocation.
+
+Remaining qualification is sustained retention throughput versus intake,
+whole-day reclamation, and a full 24-hour filesystem-UUID growth baseline. The
+new release completed its first maintenance cycle without failures and published
+one full 10,000-row archive page by 23:37 UTC. Prefix verification also advanced;
+these short observations do not establish sustainable throughput. The baseline
+producer began at 12:38 UTC on October 9; migration, WAL and backup growth must
+be separated from ordinary growth before projecting a capacity horizon. No
+additional historical rewrite or migration-copy deletion is implied. Private
+receipts are retained under `artifacts/storage-implementation/history-read-cache/`:
+`release-dfd717be` (current deployment and read/cache proof), `release-f5096792`,
 `release-f9d68118` (H04 evidence), and `retained-raw-history-placement`.
 
 ## What we are solving
