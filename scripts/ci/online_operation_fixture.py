@@ -113,7 +113,10 @@ def write_runtime_recipe(*, state, runtime_model, inventory, udev, image, passwo
        service_mounts.append(mounts['/var/lib/postgresql/data']);environment['QT_MARKET_DATA_ROOT']=str(history/'archives')
      if service_name!='initialize':
       probe=runtime_host._APPLICATION_HEALTH[service_name]
-      service['healthcheck']=dict(test=probe,interval='1s',timeout='3s',retries=15,start_period='2s')
+      # Match the production backend/maintenance startup grace. The same real
+      # readiness probe must pass; a cold multi-worker import can exceed 40s.
+      service['healthcheck']=dict(test=probe,interval='1s',timeout='3s',retries=15,
+        start_period='45s' if service_name in ('backend','storage-maintenance') else '2s')
      runtime_model['services'][service_name]=service
      owned.append(project+'-'+service_name+'-1')
     host_boundary.save_receipt(state/runtime_host.RUNTIME_RECIPE,runtime_model,initial=True)
