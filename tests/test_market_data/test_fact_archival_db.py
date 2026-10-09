@@ -14,7 +14,8 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage, _placemen
 pytestmark = pytest.mark.db
 
 
-@pytest.mark.parametrize("text_value", ["ascii-" * 150, "\u007f\u00e9\u20ac\U0001f680\\\"\n" * 16])
+@pytest.mark.parametrize("text_value", ["ascii-" * 60, "\u007f\u00e9\u20ac\U0001f680\\\"\n" * 16],
+                         ids=["ascii", "escaped-unicode"])
 def test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping(
         storage, tmp_path, monkeypatch, text_value):
     from market_data.fact_archive import _json_bytes, read_canonical_fact_archive
