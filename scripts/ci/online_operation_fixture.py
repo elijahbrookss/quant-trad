@@ -59,11 +59,11 @@ def recover_missing_database_archiver(operation_file, *, state, owned, run, imag
     old_id = saved['recovery']['replacement_id']
     old_details = host_boundary.database_details(old_id)
     helper = saved['repositories']['helper_id']
-    owned.append(helper)
     helper_state = run(['inspect', helper, '--format', '{{json .State}}']).stdout
     assert saved['repositories']['completed'] == list(repositories._ACTIONS)
-    assert json.loads(host_boundary.maintenance_query(old_id,
-        'SELECT to_json(archived_count)::text FROM pg_stat_archiver')) == 0
+    with host_boundary.docker_deadline(time.monotonic()+15):
+        assert json.loads(host_boundary.maintenance_query(old_id,
+            'SELECT to_json(archived_count)::text FROM pg_stat_archiver')) == 0
     assert 'pgbackrest: not found' in run(['logs', '--tail', '100', old_id]).stderr
     try:
         recovery.inspect_database_archiver(old_id)

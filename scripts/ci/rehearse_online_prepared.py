@@ -1604,7 +1604,12 @@ finally:
   retained_preparer=False
   if options.repository_config_failure and (state/recovery_host.CONTINUATION_STATE).exists():
    continuation=host_boundary.load_receipt(state/recovery_host.CONTINUATION_STATE)
-   retained_preparer=name==details['Id']==continuation['observation']['helper_id']
+   preparers={continuation['observation']['helper_id']}
+   if continuation['schema_version']=='qt.storage_repository_continuation.v2':
+    prior_path=Path(continuation['previous_records'][recovery_host.CONTINUATION_STATE])
+    assert prior_path.parent==state
+    preparers.add(host_boundary.load_receipt(prior_path)['observation']['helper_id'])
+   retained_preparer=name==details['Id'] and name in preparers
   if name==project+'-storage-repository-prepare' or retained_preparer:
    mine=details['Config']['Labels'].get('com.docker.compose.project') in {project+'-recovery',project+'-recovery-continuation'} and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)

@@ -500,3 +500,44 @@ def test_native_fixture_accepts_phase_timeout_then_waits_for_wall_expiry(tmp_pat
         fixture.recover_missing_repository_configuration(plan, state=tmp_path, owned=[],
             run=lambda *a: SimpleNamespace(stdout='{"com.docker.compose.project":"old"}'),
             archiver_image='candidate')
+
+
+def test_native_archiver_observation_is_bounded_without_shortening_recovery(tmp_path, monkeypatch):
+    from scripts.ci import online_operation_fixture as fixture
+    from scripts.automation import storage_online_final as final, storage_online_runtime as runtime
+    operation_file = tmp_path/'operation.json'
+    host.save_receipt(operation_file, {}, initial=True)
+    saved = dict(recovery=dict(replacement_id='old-database'),
+        repositories=dict(helper_id='completed-helper', completed=list(repositories._ACTIONS)))
+    for name, value in [(final.STATE,saved),(recovery.CONTINUATION_STATE,{}),
+                        (recovery.RECIPE,{}),(runtime.RUNTIME_RECIPE,{})]:
+        host.save_receipt(tmp_path/name, value, initial=True)
+    monkeypatch.setattr(final, '_load', lambda path: host.load_receipt(path))
+    monkeypatch.setattr(host, 'database_details', lambda *a: {})
+    calls = []
+    def docker(*args, **kwargs):
+        calls.append(args)
+        assert args[:3] == ('exec','-i','old-database')
+        assert 0 < host.current_docker_deadline()-time.monotonic() <= 15
+        assert kwargs['input'].startswith("SET statement_timeout='5s';")
+        return '0'
+    monkeypatch.setattr(host, 'docker', docker)
+    def missing(*a):
+        raise RuntimeError('storage_database_archiver_unavailable')
+    monkeypatch.setattr(recovery, 'inspect_database_archiver', missing)
+    class ReachedCorrection(Exception):
+        pass
+    def run_operation(*args, **kwargs):
+        assert host.current_docker_deadline() is None
+        if kwargs.get('execute'):
+            raise ReachedCorrection
+        return dict(storage_mutations_performed=False)
+    monkeypatch.setattr(operation, 'run_operation_plan', run_operation)
+    def run(args):
+        return SimpleNamespace(stdout='sha256:'+'a'*64 if args[0]=='image' else '{}',
+                               stderr='sh: pgbackrest: not found')
+    owned = []
+    with pytest.raises(ReachedCorrection):
+        fixture.recover_missing_database_archiver(operation_file, state=tmp_path,
+            owned=owned, run=run, image='candidate')
+    assert len(calls) == 1 and owned == []
