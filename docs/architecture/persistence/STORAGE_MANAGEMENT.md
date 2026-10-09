@@ -1244,6 +1244,12 @@ budget and checks actual free space/ownership during copying. Ordinary cache
 hits keep only an active-file lock. OS I/O stalls remain subject to host-level
 qualification, not a hard real-time guarantee from Python checkpoints.
 
+Cache admission reads the registered SSD target for identity and capacity; that
+target can be the backend's read-only PostgreSQL bind. The actual cache working
+directory must be writable and on the same UUID and device. An unavailable
+target or working mount bypasses this optional cache and keeps the authoritative
+archive reader available. No PostgreSQL directory permissions are expanded.
+
 The fixed server overlay enables global research serialization and one research
 worker. It leaves cache size zero until capacity qualification supplies an
 explicit cache byte budget, minimum-free floor and private runtime-owned
