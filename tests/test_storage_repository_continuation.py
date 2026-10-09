@@ -133,6 +133,47 @@ def test_inspection_is_read_only_and_any_existing_intent_refuses_replay(tmp_path
         recovery.continue_repositories(operation_file, request_file=request, execute=True)
 
 
+def test_execution_uses_recovery_allowance_after_inspection_scope_ends(tmp_path, monkeypatch):
+    from scripts.automation import storage_online_final as final
+    operation_file = tmp_path/'operation.json'
+    host.save_receipt(operation_file, {}, initial=True)
+    wall, boot, monotonic = time.time(), final._boot_seconds(), time.monotonic()
+    saved = dict(started_at=wall-200, started_boot=boot-200, duration_seconds=60,
+        deadline=wall-140, deadline_boot=boot-140, repositories={},
+        switch=dict(deadline_monotonic=monotonic-140))
+    host.save_receipt(tmp_path/final.STATE, saved, initial=True)
+    host.save_receipt(tmp_path/repositories.RECIPE, {}, initial=True)
+    request = tmp_path/'request.json'
+    host.save_receipt(request, dict(schema_version='qt.storage_repository_continuation.v1',
+        operation_sha256=hashlib.sha256(operation_file.read_bytes()).hexdigest(),
+        final_sha256=hashlib.sha256((tmp_path/final.STATE).read_bytes()).hexdigest(),
+        duration_seconds=120), initial=True)
+    plan = dict(state_root=str(tmp_path), project='fixture', source_image='owned',
+        limits=dict(preparation_seconds=30, final_seconds=120, recovery_seconds=30,
+            runtime_seconds=60, spool_max_bytes=100, spool_max_entries=10,
+            spool_reserve_bytes=10, repository_max_bytes=100,
+            repository_reserve_bytes=10, recent_free_bytes=10))
+    monkeypatch.setattr(operation, 'load_operation_plan', lambda path: plan)
+    monkeypatch.setattr(host, 'deployment_lock', lambda path: nullcontext())
+    inspection_deadlines = []
+    def inspect(*args):
+        inspection_deadlines.append(host.current_docker_deadline()-time.monotonic())
+        return saved, {}, {}, tmp_path, dict(plan_id='confirmed', helper_id='a'*64)
+    monkeypatch.setattr(recovery, '_inspect_continuation', inspect)
+    monkeypatch.setattr(recovery, '_held_continuation', lambda *a, **kw: nullcontext(lambda: None))
+    monkeypatch.setattr(host, 'docker', lambda *args: '')
+    class ReachedRepositoryPreparation(Exception):
+        pass
+    def prepare(*args, **kwargs):
+        assert 110 < host.current_docker_deadline()-time.monotonic() <= 120
+        raise ReachedRepositoryPreparation
+    monkeypatch.setattr(repositories, 'prepare_repositories', prepare)
+    with pytest.raises(ReachedRepositoryPreparation):
+        recovery.continue_repositories(operation_file, request_file=request, execute=True)
+    assert 0 < inspection_deadlines[0] <= 60
+    assert 110 < inspection_deadlines[1] <= 120
+
+
 @pytest.mark.parametrize('other', ['extend_attempt_seconds', 'capacity_file',
     'replacement_package_file', 'cancel_attempt_file', 'forward_package_file',
     'prepare_forward_keys_file', 'place_forward_lookups_file', 'reschedule_forward_file',

@@ -479,14 +479,17 @@ def continue_repositories(operation_path, *, request_file, execute=False):
         raise RuntimeError("storage_repository_continuation_operation_changed")
     plan=operation.load_operation_plan(operation_path)
     root=launch._canonical(plan["state_root"])
-    with host.deployment_lock(root),host.docker_deadline(time.monotonic()+60):
-        if os.path.lexists(root/CONTINUATION_STATE):
-            raise RuntimeError("storage_repository_continuation_intent_exists_reconcile_required")
-        saved,worker,preparation,source,observed=_inspect_continuation(root,plan,package)
-        proposal=dict(phase="committed_repository_recovery_inspected",observation_sha256=host.digest(observed),
-            plan_id=observed["plan_id"],duration_seconds=package["duration_seconds"],migration_replay_authorized=False,
-            storage_mutations_performed=False,original_final_deadline=saved["deadline"])
-        if not execute:return proposal
+    with host.deployment_lock(root):
+        with host.docker_deadline(time.monotonic()+60):
+            if os.path.lexists(root/CONTINUATION_STATE):
+                raise RuntimeError("storage_repository_continuation_intent_exists_reconcile_required")
+            saved,worker,preparation,source,observed=_inspect_continuation(root,plan,package)
+            proposal=dict(phase="committed_repository_recovery_inspected",observation_sha256=host.digest(observed),
+                plan_id=observed["plan_id"],duration_seconds=package["duration_seconds"],migration_replay_authorized=False,
+                storage_mutations_performed=False,original_final_deadline=saved["deadline"])
+            if not execute:return proposal
+        # Inspection has its own ceiling. Do not leave it on the deadline stack
+        # while executing the separately admitted recovery window below.
         # This is an explicitly admitted recovery extension, never a silent reset.
         # Preserve the original bytes and original start anchors/downtime evidence.
         # The capture plan and completed SQL work remain unchanged. The retained
