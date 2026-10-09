@@ -459,3 +459,44 @@ def test_archiver_publication_failure_retains_uncertain_intent(archiver_replacem
     assert (root/final.STATE).read_bytes() == original_final
     assert host.load_receipt(root/recovery.CONTINUATION_STATE)['database_replacement']['inflight'] == 'publish'
     assert audit['database_replacement']['finished_at'] is None
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('storage_pause_host_deadline_expired'),
+    recovery.subprocess.TimeoutExpired(['docker', 'inspect'], .002)])
+def test_native_fixture_accepts_phase_timeout_then_waits_for_wall_expiry(tmp_path, monkeypatch, failure):
+    from scripts.ci import online_operation_fixture as fixture
+    from scripts.automation import storage_online_final as final
+    wall = [100.0]
+    sleeps = []
+    def sleep(seconds):
+        sleeps.append(seconds)
+        wall[0] += seconds
+    monkeypatch.setattr(fixture, 'time', SimpleNamespace(time=lambda: wall[0],
+        monotonic=lambda: 300.0, sleep=sleep))
+    plan = tmp_path/'operation.json'
+    host.save_receipt(plan, {}, initial=True)
+    saved = dict(phase='recovery_repository_preparing', deadline=99.0,
+        repositories=dict(completed=['logins', 'create'], inflight='prepare', helper_id='old-helper'))
+    host.save_receipt(tmp_path/final.STATE, saved, initial=True)
+    host.save_receipt(tmp_path/recovery.launch._STATE, {}, initial=True)
+    monkeypatch.setattr(final, '_load', lambda path: host.load_receipt(path))
+    def run_operation(path, **kwargs):
+        if not kwargs.get('execute'):
+            return dict(storage_mutations_performed=False)
+        saved.update(deadline=100.01)
+        saved['repositories'].update(completed=list(repositories._ACTIONS),
+            inflight=None, deadline_monotonic=299.99)
+        host.save_receipt(tmp_path/final.STATE, saved, initial=False)
+        raise failure
+    monkeypatch.setattr(operation, 'run_operation_plan', run_operation)
+    class ReachedImageCorrection(Exception):
+        pass
+    def correction(*args, **kwargs):
+        assert sleeps and wall[0] > saved['deadline']
+        assert host.load_receipt(tmp_path/final.STATE)['deadline'] == 100.01
+        raise ReachedImageCorrection
+    monkeypatch.setattr(fixture, 'recover_missing_database_archiver', correction)
+    with pytest.raises(ReachedImageCorrection):
+        fixture.recover_missing_repository_configuration(plan, state=tmp_path, owned=[],
+            run=lambda *a: SimpleNamespace(stdout='{"com.docker.compose.project":"old"}'),
+            archiver_image='candidate')

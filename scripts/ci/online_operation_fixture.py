@@ -3,6 +3,7 @@ import json
 from contextlib import contextmanager
 import hashlib
 import inspect
+import subprocess
 from pathlib import Path
 import time
 from scripts.automation import storage_host_boundary as host_boundary
@@ -140,12 +141,18 @@ def recover_missing_repository_configuration(operation_file, *, state, owned, ru
             with historical_archiver_preflight(True):
                 operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
             raise AssertionError('database missing archiver unexpectedly completed')
-        except RuntimeError:
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
             failed_final = final._load(state/final.STATE)
             assert failed_final['phase'] == 'recovery_repository_preparing'
             assert failed_final['repositories']['completed'] == list(recovery_repositories._ACTIONS)
             assert failed_final['repositories']['inflight'] is None
-            assert time.time() >= failed_final['deadline']
+            assert isinstance(exc, subprocess.TimeoutExpired) or 'deadline' in str(exc)
+            # Docker uses the tighter monotonic phase ceiling; its final bounded
+            # call can time out before the wall-clock ceiling by milliseconds.
+            # Wait for actual wall expiry too; do not rewrite either clock.
+            assert time.monotonic() >= failed_final['repositories']['deadline_monotonic']
+            while time.time() <= failed_final['deadline']+.1:
+                time.sleep(min(.2, failed_final['deadline']+.2-time.time()))
         result = recover_missing_database_archiver(operation_file, state=state, owned=owned,
                                                   run=run, image=archiver_image)
         audit = host_boundary.load_receipt(Path(host_boundary.load_receipt(
