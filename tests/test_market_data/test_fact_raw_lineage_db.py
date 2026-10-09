@@ -342,6 +342,51 @@ def test_raw_position_batch_preserves_exact_scopes_and_bound_placements(storage,
             resolve([changed, *rows[1:]])
 
 
+def test_mixed_raw_witness_queries_keep_book_placement_bounds(storage, tmp_path, monkeypatch):
+    from market_data.archive import encode_raw_records_to_parquet
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_lineage
+
+    trade = _raw_trade_fixture(storage, tmp_path / "trade", monkeypatch)
+    book = _raw_book_fixture(storage, tmp_path / "book", monkeypatch, definition_id="mixed-bound-book",
+                             object_store=trade.store)
+    encoded = encode_raw_records_to_parquet(book.raws, archive_segment_id="mixed-book-copy",
+                                            temporary_directory=tmp_path / "compact")
+    ack = book.store.put_verified(object_key="mixed-book-copy.parquet", source_path=encoded.path,
+                                 expected_sha256=encoded.sha256)
+    book.structures.commit_compacted_archive(definition_id=book.claim.definition_id,
+        encoded=encoded, acknowledgement=ack, records=book.raws, source_manifest_ids=book.manifests)
+    raw_trade, raw_book = trade.raws[0], book.raws[-1]
+    trade_row = {"id": "mixed-trade", "fact_type": "market.trade",
+        "source_provider": raw_trade.provider, "source_venue": raw_trade.venue,
+        "received_at": raw_trade.received_at, "provenance": {"_qt_trade_evidence": {
+            name: getattr(raw_trade, name) for name in
+            ("raw_record_id", "provider_product_id", "connection_epoch", "receive_ordinal")}}}
+    book_row = {"id": "mixed-book", "fact_type": "market.bbo", "provenance": {
+        "_qt_bbo_evidence": {"source_position": {
+            name: getattr(raw_book, name) for name in (*fact_lineage.BOOK_SCOPE_FIELDS, "receive_ordinal")}}}}
+    bindings = {book_row["id"]: {book.manifests[-1]}}
+
+    def resolve(witnesses, **kwargs):
+        with storage.database.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[trade_row, book_row],
+                object_store=trade.store,
+                byte_verifier=ArchiveVerificationBatch(trade.store, limits=ArchiveVerificationLimits()),
+                max_mapping_rows=2, witness_manifest_ids=witnesses, **kwargs)
+
+    with pytest.raises(RuntimeError, match="mapping_budget_exceeded"):
+        resolve(None)
+    expected = {trade.manifests[0], book.manifests[-1]}
+    assert set(resolve(bindings)) == expected
+    assert set(resolve(bindings, bound_manifest_ids=iter(expected))) == expected
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        resolve({book_row["id"]: set()})
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        resolve(bindings, bound_manifest_ids=trade.manifests)
+    assert bindings == {book_row["id"]: {book.manifests[-1]}}
+
+
 def _publish_book_result(fixture, index):
     from market_data.order_book import BookLifecycle
     result = fixture.results[index]

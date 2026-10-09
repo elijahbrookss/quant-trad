@@ -87,6 +87,25 @@ def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path):
     assert len(verified.objects) == 1
 
 
+def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path)
+    book = {**rows[1], "fact_type": "market.bbo", "provenance": {
+        "_qt_bbo_evidence": {"source_position": {
+            name: getattr(records[1], name) for name in (*BOOK_SCOPE_FIELDS, "receive_ordinal")}}}}
+    # A later placement of this book frame is valid, but this root already
+    # pins its original placement. It must not consume the mixed page's budget.
+    extra = {**mappings[1], "id": "later-book-placement"}
+    session = _Session([*mappings, extra])
+    refs = resolve_canonical_raw_archive_refs(session, rows=[rows[0], book], object_store=store,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+        witness_manifest_ids={book["id"]: {"raw-manifest"}}, max_mapping_rows=2)
+    assert set(refs) == {"raw-manifest"}
+    record_params = next(params for _, params in session.calls if "ids" in params)
+    position_params = next(params for _, params in session.calls if "positions" in params)
+    assert "bound_ids" not in record_params, "the trade witness must remain unrestricted"
+    assert position_params["bound_ids"] == ["raw-manifest"]
+
+
 @pytest.mark.parametrize("ids", [["one"], ["one", 'quote"\\newline\n', "\u03b1\U0001f680"]])
 def test_streamed_content_fingerprint_preserves_exact_v1_identity(ids):
     hashes = [hashlib.sha256(identity.encode()).hexdigest() for identity in ids]

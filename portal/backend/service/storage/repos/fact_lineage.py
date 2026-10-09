@@ -150,19 +150,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                 wanted[("position", *key, ordinal)].append((None, {**scope, "receive_ordinal": ordinal}))
     if not wanted:
         return {}
-    # Prefix verification already pins eligible placements per witness. Apply
-    # their union before the SQL candidate limit, then retain the per-witness
-    # checks below. Incomplete bindings cannot restrict unbound witnesses.
-    witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
-                   for witnesses in wanted.values() for row, evidence in witnesses}
-    if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
-        eligible = {identity for witness_id in witness_ids
-                    for identity in witness_manifest_ids[witness_id]}
-        bound_manifest_ids = (eligible if bound_manifest_ids is None
-                              else eligible.intersection(bound_manifest_ids))
+    page_bound_ids = None if bound_manifest_ids is None else set(bound_manifest_ids)
     matches = []
-    bound_predicate = "" if bound_manifest_ids is None else "AND manifests.id = ANY(:bound_ids)"
-    bound_params = {} if bound_manifest_ids is None else {"bound_ids": sorted(set(bound_manifest_ids))}
     # Both predicates address the exact record mapping, never a manifest's
     # min/max ordinal range (which can contain holes or another reconnect).
     queries = [
@@ -209,6 +198,28 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     for predicate, params in queries:
         if not (record_ids if "ids" in params else positions if "positions" in params else prefixes):
             continue
+        if "ids" in params:
+            query_keys = (("record", identity) for identity in record_ids)
+        elif "positions" in params:
+            query_keys = (("position", *(position[name] for name in BOOK_SCOPE_FIELDS[:3]),
+                           position["receive_ordinal"]) for position in positions)
+        else:
+            query_keys = (("position", *(scope[name] for name in BOOK_SCOPE_FIELDS[:3]), ordinal)
+                          for scope in prefixes
+                          for ordinal in range(scope["first_receive_ordinal"], scope["receive_ordinal"] + 1))
+        # Bound each query by its own witnesses. Unbound trade records must not
+        # disable known book placements in a separate exact-position query.
+        # Partial bindings within this query still cannot restrict its unbound
+        # witnesses; the per-witness checks below remain authoritative.
+        witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
+                       for key in query_keys for row, evidence in wanted[key]}
+        query_bound_ids = page_bound_ids
+        if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
+            eligible = {identity for witness_id in witness_ids
+                        for identity in witness_manifest_ids[witness_id]}
+            query_bound_ids = eligible if page_bound_ids is None else eligible.intersection(page_bound_ids)
+        bound_predicate = "" if query_bound_ids is None else "AND manifests.id = ANY(:bound_ids)"
+        bound_params = {} if query_bound_ids is None else {"bound_ids": sorted(query_bound_ids)}
         found = session.execute(text(f"""
             SELECT manifests.*, mappings.raw_record_id, mappings.object_row_index, mappings.object_row_group,
                    mappings.spool_segment_id AS mapped_segment_id, mappings.session_id AS mapped_session_id,
