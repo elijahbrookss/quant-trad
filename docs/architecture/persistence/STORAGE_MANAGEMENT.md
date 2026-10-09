@@ -2721,8 +2721,13 @@ inspection; absence of the trigger refuses another dispatch. A disposable native
 rehearsal reproduced the rejected insert and verified restored ingestion,
 corrections, causal reads, frozen results and preservation of every other trigger.
 Production execution completed on October 9 with the same cluster and identity
-heap, and fresh accepted facts were observed. This manual repair does not yet fix
-the forward-switch implementation's omission or certify fleet-wide recovery.
+heap, and fresh accepted facts were observed. The forward-switch implementation
+now retires the exact source-bound row guards from the identity heap and any raw
+mapping heap it promotes, within the existing final transaction. It verifies the
+original proof, target OIDs and guard definitions while preserving the proof,
+functions, truncate guards and unpromoted copies. Failure restores guards with the
+transaction. Native qualification of that preventive change is pending; the
+manual repair alone does not certify fleet-wide recovery.
 
 Completion inspection preserves the immutable forward publication and all
 reschedule preimages. After a structurally complete `recovery_runtime_ready`

@@ -15,6 +15,7 @@ from scripts.db import fact_header_v2_handoff as handoff
 from scripts.db import fact_header_v2_references as references
 from scripts.db import fact_header_v2_copy as headers
 from scripts.db import raw_mapping_v2_copy as raw
+from scripts.db import fact_header_v2_online_proof as proof
 from tests.test_market_data.test_fact_storage_tiers_db import storage as native_storage, _placement, BASE
 from tests.test_market_data.test_fact_header_copy_placement_db import placed, source
 from tests.test_market_data.test_fact_header_forward_adoption_db import retained, _finish, _old, OPERATION
@@ -34,6 +35,7 @@ def storage(native_storage, monkeypatch):
     return native_storage
 
 
+@pytest.mark.parametrize("retained", [False, True], indirect=True)
 @pytest.mark.parametrize("retain_raw", [False, True])
 def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(retained, monkeypatch, retain_raw):
     engine = retained.database._engine
@@ -99,6 +101,16 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
         adoption.adopt_payload_references(conn, operation_sha256=OPERATION)
         admitted = adoption._state(conn)
         before = _headers(conn, headers.SOURCE)
+        if retained.online_copy_proof:
+            proof_before = conn.scalar(text("SELECT to_jsonb(p) FROM " + proof.STATE + " p"))
+            guards_before = conn.execute(text("SELECT oid,tgrelid,tgname FROM pg_trigger "
+                "WHERE tgname IN (:row,:truncate) ORDER BY oid"),
+                {"row":proof.ROW_TRIGGER,"truncate":proof.TRUNCATE_TRIGGER}).all()
+            promoted_oids = {handoff._oid(conn, adoption.IDENTITY)}
+            if not retain_raw:
+                promoted_oids.add(handoff._oid(conn, raw.TARGET))
+        with pytest.raises(RuntimeError, match="live_forward_switch_required"):
+            proof.release_forward_targets(conn)
     with pytest.raises(RuntimeError, match="utc_boundary_not_current"), engine.begin() as conn:
         handoff.stage_forward_tables(conn, **{**args, "end_day":today + timedelta(days=1)})
     # Missing the real UTC boundary must refuse, not redate source records.
@@ -150,6 +162,22 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
         assert adoption._state(conn)["terminal"] == result["receipt"]
         assert _old(conn) == original and _frozen_records(conn) == frozen
         assert _headers(conn, headers.SCHEMA + ".fact_versions") == old_copy
+        if retained.online_copy_proof and not getattr(retained, "reproduce_obsolete_guard", False):
+            assert conn.scalar(text("SELECT to_jsonb(p) FROM " + proof.STATE + " p")) == proof_before
+            assert conn.execute(text("SELECT oid,tgrelid,tgname FROM pg_trigger "
+                "WHERE tgname IN (:row,:truncate) ORDER BY oid"),
+                {"row":proof.ROW_TRIGGER,"truncate":proof.TRUNCATE_TRIGGER}).all() == [
+                    row for row in guards_before if not (row.tgrelid in promoted_oids and row.tgname == proof.ROW_TRIGGER)]
+            # Raw replacement must accept future provider mappings too. Roll back
+            # this controlled insert because it is only a guard-transition probe.
+            with conn.begin_nested() as probe:
+                projection = ["'raw-post-forward'" if c == "raw_record_id" else
+                    "object_row_index+100000" if c == "object_row_index" else c for c in raw.COLUMNS]
+                conn.exec_driver_sql("INSERT INTO " + raw.SOURCE + "(" + ",".join(raw.COLUMNS) +
+                    ") SELECT " + ",".join(projection) + " FROM " + raw.SOURCE + " LIMIT 1")
+                assert conn.scalar(text("SELECT count(*) FROM " + raw.SOURCE +
+                    " WHERE raw_record_id='raw-post-forward'")) == 1
+                probe.rollback()
         assert conn.scalar(text("SELECT count(*) FROM " + handoff.RETAINED + "." + raw.NAME)) > 0
         if retain_raw:
             assert handoff._oid(conn, raw.SOURCE) == original_raw_oid
@@ -172,7 +200,7 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
         restarted._reset_engine()
     _placement(monkeypatch, today)
     current = replace(retained.fact, observation_key="after-forward-switch", observation_time=BASE+timedelta(days=4))
-    if retained.online_copy_proof:
+    if getattr(retained, "reproduce_obsolete_guard", False):
         # Reproduce the committed production failure using the original private
         # proof guards, then qualify the explicit catalog-only repair.
         with pytest.raises(Exception, match="online_copy_proof_source_changed"):
@@ -211,4 +239,12 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
 
 @pytest.mark.parametrize("retained", [True], indirect=True)
 def test_explicit_repair_preserves_proof_and_restores_post_switch_ingestion(retained, monkeypatch):
+    # Scope the historical omission to this disposable fixture. The ordinary
+    # proof-bearing switch tests exercise the corrected production implementation.
+    retained.reproduce_obsolete_guard = True
+    original_release = proof.release_forward_targets
+    def historical_release(conn):
+        if conn.info.get("qt.forward_adoption.final_context") is None:
+            return original_release(conn)
+    monkeypatch.setattr(proof, "release_forward_targets", historical_release)
     test_forward_switch_rolls_back_interruptions_and_preserves_native_history(retained, monkeypatch, True)
