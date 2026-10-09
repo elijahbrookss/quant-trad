@@ -122,6 +122,10 @@ def test_material_selection_omits_only_impossible_legacy_joins(monkeypatch, fami
         assert "source.material_hash=requested.material_hash" in sql
         assert "SELECT DISTINCT root_id,role,id" in sql
         assert params["limit"] == 11
+        assert [json.loads(value) for value in params["legacy_witnesses"]] == (
+            [{"_qt_bbo_evidence": {"legacy_material_hash": legacy["material_hash"]}}]
+            if "legacy" in families else [])
+        assert ("hot.provenance @> ANY" in sql) is ("legacy" in families)
         return SimpleNamespace(all=lambda:[(name, "input", selected[name]["id"]) for name in families])
     monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda *a, **kw:rows)
     monkeypatch.setattr(admission, "record_from_storage_row", lambda row:None)

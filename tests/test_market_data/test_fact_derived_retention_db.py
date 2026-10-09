@@ -96,6 +96,25 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
     tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader)
     monkeypatch.setattr(market_data, "canonical_fact_storage_repository", tiered)
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", tiered)
+    # A single batch must retain the canonical-only input and every causal
+    # delivery of the legacy witness. The GIN prefilter must not narrow the
+    # canonical branch or admit the future-known/later-commit BBO revisions.
+    with storage.database.session() as session:
+        mixed_sources, mixed_edges = resolve_material_source_revisions(session, requests=[{
+            "root_id": "mixed", "role": "book", "series_id": futures.series_id,
+            "fact_type": "market.l2_book", "material_hash": futures.facts[0].material_hash,
+            "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
+        }, {
+            "root_id": "mixed", "role": "bbo", "series_id": features[0][0].series_id,
+            "fact_type": "market.bbo", "material_hash": features[0][0].material_hash,
+            "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
+        }], reader=tiered, max_rows=10, max_logical_bytes=64 * 1024**2)
+        assert len(mixed_sources) == 3
+        assert len(mixed_edges[("mixed", "book")]) == 1
+        assert len(mixed_edges[("mixed", "bbo")]) == 2
+        assert all(row["market_commit_seq"] not in {
+            future_known_outcome.max_commit_seq, late_outcome.max_commit_seq,
+        } for row in mixed_sources.values())
     request = DatasetSeriesRequest(series_id, BASE - timedelta(seconds=1), BASE + timedelta(minutes=1))
     with monkeypatch.context() as prior_selection:
         prior_selection.setattr(market_data, "_preserves_canonical_revision_history", lambda version: False)

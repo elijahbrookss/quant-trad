@@ -33,6 +33,7 @@ _LEGACY_MATERIAL_CANDIDATES = """
                     hot.provenance @> jsonb_build_object(requested.evidence_key,
                         jsonb_build_object('legacy_material_hash',requested.material_hash))
                     ELSE false END
+                  AND hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
                 UNION
                 SELECT requested.root_id,requested.role,source.id
                 FROM requested JOIN market.fact_archive_material_aliases AS aliases
@@ -78,8 +79,13 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         # Families without a legacy material hash cannot match either alias
         # branch. Omit those joins before planning; a CASE filter can otherwise
         # cause a full historical header scan even when every key is null.
-        legacy_candidates = _LEGACY_MATERIAL_CANDIDATES if any(
-            item["evidence_key"] is not None for item in batch) else ""
+        legacy_witnesses = sorted({json.dumps({item["evidence_key"]: {
+            "legacy_material_hash": item["material_hash"],
+        }}) for item in batch if item["evidence_key"] is not None})
+        # Bound constant witnesses expose the existing provenance GIN path.
+        # The exact per-request predicate still owns series, family and clocks;
+        # joining it alone can make PostgreSQL scan all historical headers.
+        legacy_candidates = _LEGACY_MATERIAL_CANDIDATES if legacy_witnesses else ""
         found = session.execute(text(f"""
             WITH requested AS (
                 SELECT * FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS item(
@@ -94,7 +100,8 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
 {legacy_candidates}
             )
             SELECT DISTINCT root_id,role,id FROM candidates ORDER BY root_id,role,id LIMIT :limit
-        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1}).all()
+        """), {"requests": json.dumps(batch), "legacy_witnesses": legacy_witnesses,
+               "limit": max_rows - count + 1}).all()
         count += len(found)
         if count > max_rows:
             raise RuntimeError("canonical_material_source_budget_exceeded: reduce archive page size")

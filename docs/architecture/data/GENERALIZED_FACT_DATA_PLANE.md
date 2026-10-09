@@ -1142,7 +1142,15 @@ complete L2/raw/checkpoint closure. Each declared material witness binds **all**
 matching revisions at or before the root's commit and known-at clocks, not the
 latest alias. Requests are batched at 128; total matched edges are bounded by
 the canonical source row budget. Hot lookup uses containment supported by the
-existing provenance GIN index; cold aliases are candidate locators only. Hydrated rows must
+existing provenance GIN index; cold aliases are candidate locators only.
+The batched material resolver also supplies the distinct legacy witnesses as a
+bound constant array prefilter. The exact per-request series, family, hash and
+causal predicates remain authoritative. This avoids the observed plan that
+scanned historical headers before testing provenance; it adds no index, stored
+alias or schema change. The October 9 three-root read-only probe returned three
+source revisions in 1.30 seconds under a two-second statement limit. That small
+sample is not an archive-throughput estimate, and normal maintenance budgets
+still apply. Hydrated rows must
 prove their actual material, series, family, observation and causal clocks.
 
 The existing BBO decoder and basis derivation owner validate the declared pair,
