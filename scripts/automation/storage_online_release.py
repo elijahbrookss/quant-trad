@@ -304,6 +304,13 @@ def compare_deployment_configuration(proposed, *, admitted, bindings, request,
         expected_env = current["environment"]
         expected_env.update(bindings)
         expected_env.pop("QT_STORAGE_SOURCE_FENCE_ROOT", None)
+        if name == "backend":
+            # These identify the selected software, not retained data or host
+            # configuration. Require the exact qualified candidate values;
+            # keeping the predecessor's values would mislabel new bot runs.
+            expected_env.update(SOURCE_REVISION=request["source_revision"],
+                SOURCE_TREE_HASH=request["source_tree_hash"],
+                QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+request["source_revision"])
         # The existing maintenance overlay explicitly uses the HDD as its working
         # filesystem, overriding the host application's SSD binding from env_file.
         if name == "storage-maintenance":

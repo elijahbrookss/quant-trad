@@ -281,7 +281,7 @@ def test_proposed_host_bindings_cannot_change_shell_or_dotenv_meaning(value):
 def configuration_pair():
     bindings={"QT_STORAGE_NETWORK":"qt_quanttrad", "QT_MARKET_DATA_WORKING_EXPECTED_UUID":"ssd-uuid",
               "QT_MARKET_DATA_EXPECTED_UUID":"hdd-uuid"}
-    request={"source_revision":"c"*40}
+    request={"source_revision":"c"*40, "source_tree_hash":"e"*64}
     services={}
     for name in ("tsdb", *release.runtime._APPLICATIONS):
         image="sha256:"+("d" if name=="tsdb" else "a")*64
@@ -291,6 +291,8 @@ def configuration_pair():
             networks={"quanttrad":{}},command=["unchanged"],user="70:70" if name=="tsdb" else "1000:1000",
             cap_drop=["ALL"],mem_limit=1024,healthcheck={"test":["CMD","unchanged"]})
     services["backend"]["volumes"].append(dict(type="bind",source="/active.env",target="/app/secrets.env",read_only=True))
+    services["backend"]["environment"].update(SOURCE_REVISION="b"*40,
+        SOURCE_TREE_HASH="f"*64, QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+"b"*40)
     admitted=dict(name="qt",services=services,volumes={"postgres-data":dict(name="pg",external=True),
         "storage-recovery-socket":dict(name="socket",external=True)},networks={"quanttrad":dict(name="qt_quanttrad",external=True)})
     proposed=copy.deepcopy(admitted)
@@ -302,6 +304,8 @@ def configuration_pair():
         if name=="storage-maintenance":service["environment"]["QT_MARKET_DATA_WORKING_EXPECTED_UUID"]="hdd-uuid"
         service["volumes"][0].update(source="/run/udev",target="/run/qt-host-udev")
     proposed["services"]["backend"]["volumes"][1]["source"]="/prepared.env"
+    proposed["services"]["backend"]["environment"].update(SOURCE_REVISION=request["source_revision"],
+        SOURCE_TREE_HASH=request["source_tree_hash"], QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+request["source_revision"])
     images={v["image"]:{"PATH":"/fixture","IMAGE_DEFAULT":"unchanged"} for v in services.values()}
     return proposed,dict(admitted=admitted,bindings=bindings,request=request,
         source_environment=Path("/active.env"),prepared_environment=Path("/prepared.env"),image_environments=images)
@@ -314,6 +318,18 @@ def test_canonical_comparison_accepts_only_explicit_proposal_differences(configu
     assert result==dict(storage_configuration_sha256=release.host.digest(args["admitted"]),
                         canonical_configuration_sha256=release.host.digest(proposed))
     assert (proposed,args)==before
+
+
+@pytest.mark.parametrize("key", ["SOURCE_REVISION", "SOURCE_TREE_HASH", "QT_BOT_RUNTIME_IMAGE"])
+@pytest.mark.parametrize("fault", ["old", "missing", "unqualified"])
+def test_release_identity_requires_exact_candidate_values(configuration_pair, key, fault):
+    proposed, args = configuration_pair
+    backend = proposed["services"]["backend"]["environment"]
+    if fault == "old": backend[key] = args["admitted"]["services"]["backend"]["environment"][key]
+    elif fault == "missing": backend.pop(key)
+    else: backend[key] = "unqualified"
+    with pytest.raises(RuntimeError, match="service_changed: service=backend fields=environment"):
+        release.compare_deployment_configuration(proposed, **args)
 
 
 def test_canonical_comparison_preserves_selected_runtime_controls(configuration_pair):
@@ -552,6 +568,8 @@ def test_repair_configuration_binds_clean_new_source_and_original_request(public
     original_request = (root/"storage-online-request.json").read_bytes()
     repair = repair_request(saved)
     repair.update(source_revision=revision, source_tree_hash=working_tree_hash(repository))
+    proposed["services"]["backend"]["environment"].update(SOURCE_REVISION=revision,
+        SOURCE_TREE_HASH=repair["source_tree_hash"], QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+revision)
     if fault == "dirty": (repository/"requirements.txt").write_text("changed")
     if fault == "wrong-revision": repair["source_revision"] = "0"*40
     if fault == "wrong-hash": repair["source_tree_hash"] = "0"*64

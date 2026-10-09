@@ -3249,8 +3249,12 @@ state throughout inspection. A bounded read-only backend probe checks the commit
 schema certificate, schema contract and current policy using existing database
 owners. It does not claim the maintenance-only physical/recovery checks passed.
 
-The original request and runtime recipe remain unchanged. The existing release
-section stores the repair request; canonical rendering still rejects changes to
+The original request and runtime recipe remain unchanged. Canonical rendering
+requires the backend's `SOURCE_REVISION`, `SOURCE_TREE_HASH`, and
+`QT_BOT_RUNTIME_IMAGE` to identify the exact selected release. It rejects stale,
+missing, or different release identifiers; these software bindings do not change
+historical run provenance. The existing release section stores the repair request;
+canonical rendering still rejects changes to
 storage definitions, private inputs, privileges, mounts, resources or database
 image. Publication reports `complete_backup_confirmed: false`. Interrupted file
 publication rechecks the same stopped runtime and exact proposal; after publication,
