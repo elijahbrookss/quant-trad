@@ -15,6 +15,8 @@ jobs:
   committed-recovery:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      QT_RECOVERY_FIXTURE_ROOT: /tmp/qt-committed-recovery
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +34,18 @@ jobs:
         run: |
           python -m pip install --no-deps -r requirements.lock
           python -m pip check
+      - name: Prepare an accessible private operator workspace
+        run: |
+          test ! -e "$QT_RECOVERY_FIXTURE_ROOT"
+          sudo install -d -o 1000 -g 1000 -m 0700 "$QT_RECOVERY_FIXTURE_ROOT" \
+            "$QT_RECOVERY_FIXTURE_ROOT/source" "$QT_RECOVERY_FIXTURE_ROOT/evidence" "$QT_RECOVERY_FIXTURE_ROOT/history"
+          git archive HEAD | sudo tar -x -C "$QT_RECOVERY_FIXTURE_ROOT/source"
+          sudo chown -R 1000:1000 "$QT_RECOVERY_FIXTURE_ROOT/source"
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env QT_DISABLE_DOTENV=1 "$(command -v python)" \
+            "$QT_RECOVERY_FIXTURE_ROOT/source/scripts/ci/rehearse_online_prepared.py" --help >/dev/null
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            docker info --format '{{.ServerVersion}}'
       - name: Build current or first-release runtime and guarded fixture
         env:
           RUNTIME_REF: ${{ matrix.runtime }}
@@ -58,25 +72,24 @@ jobs:
         env:
           QT_DISABLE_DOTENV: '1'
         run: |
-          mkdir -p "$RUNNER_TEMP/committed-recovery"
-          sudo chown 1000:1000 "$RUNNER_TEMP/committed-recovery"
-          history_root="$(mktemp -d "$RUNNER_TEMP/recovery-history.XXXXXX")"
+          history_root="$QT_RECOVERY_FIXTURE_ROOT/history"
           sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=1000,gid=1000" tmpfs "$history_root"
           trap 'sudo umount "$history_root"' EXIT
           # The private application spool deliberately belongs to UID/GID 1000.
           # Match that unprivileged operator in the fixture; grant only Docker's
           # existing socket group, without changing runtime admission or modes.
           sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
-            env QT_DISABLE_DOTENV=1 "$(command -v python)" scripts/ci/rehearse_online_prepared.py \
+            env QT_DISABLE_DOTENV=1 bash -c 'cd "$1"; shift; exec "$@"' _ \
+            "$QT_RECOVERY_FIXTURE_ROOT/source" "$(command -v python)" scripts/ci/rehearse_online_prepared.py \
             --image qt-committed-recovery-runtime --database-image quanttrad-postgres:2.14.2-pg15 \
-            --output-root "$RUNNER_TEMP/committed-recovery" --history-parent "$history_root" --require-distinct-devices \
+            --output-root "$QT_RECOVERY_FIXTURE_ROOT/evidence" --history-parent "$history_root" --require-distinct-devices \
             --prepare-source --worker-phases --initial-capture --final-pause --final-delta --switch-entry \
             --close-logins success --commit-switch --guarded-source-image qt-committed-recovery-guard \
             --recovery-mounts --recovery-repositories --recovery-spool --recovery-runtime \
             --operation-driver --full-operation --repository-config-failure --completion-observation
       - name: Pack disposable qualification evidence
         if: always()
-        run: sudo tar -C "$RUNNER_TEMP/committed-recovery" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .
+        run: sudo tar -C "$QT_RECOVERY_FIXTURE_ROOT/evidence" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .
       - name: Preserve disposable qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
