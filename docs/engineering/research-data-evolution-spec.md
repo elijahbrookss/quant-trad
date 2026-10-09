@@ -1,10 +1,47 @@
 # Bounded Storage Migrations and Research Compatibility
 
-**Status: implementation authorized; qualification in progress. Updated 2026-10-04.**
+**Status: deployed; recovery and capacity qualification remain open. Updated 2026-10-09.**
 Decision: [ADR 0078](../architecture/decisions/0078-evolve-research-within-existing-data-boundaries.md).
 This revision replaces this document's earlier H04-first implementation plan.
 It does not resume a migration, clear an operational hold, deploy a release or
 restart research. Historical approvals and receipts remain evidence.
+
+## Deployed outcome — 2026-10-09
+
+The separately approved schema cutover committed at 00:07 UTC. Release
+`f5096792481c96e6d42056ebaa127a771acc8787` deployed at 19:26 UTC after
+[all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/37971598094).
+The cutover is complete and must not be replayed. The dated planning and local
+qualification sections below describe earlier states, not outstanding deployment
+instructions or fresh operational authorization.
+
+- The saved policy is now **14 days** on SSD. Durable HDD history remains behind
+  the existing storage boundary. Archive conversion is progressing; a cleared
+  backlog and steady reclamation rate have not yet been demonstrated.
+- The existing raw mapping table and two secondary indexes moved to HDD without
+  replacing its logical identity or schema. The primary index remains on SSD.
+  Native post-commit verification passed at 19:55 UTC: **117.3 GB** copied in
+  **15 minutes 14 seconds**. Copy size is not net reclaimed SSD capacity; WAL and
+  backup allocations must also be measured. Temporary collector buffers were
+  restored, and all 17 collectors were healthy at 20:03 UTC. Controlled reconnects
+  remain in gap evidence; health alone does not prove uninterrupted acquisition.
+- The disposable history cache is enabled with a **16 GiB quota** and **500 GiB
+  minimum free-space floor**. One existing 2,948-row archive page passed direct,
+  canonical and cached equality checks, with one fill and an identical-request
+  hit. This proves the cache path, not a general research speedup.
+- The authorized BTC2022 H04 Check and identical Replay completed with matching
+  plan, result and evidence hashes, taking about 598 and 595 seconds respectively.
+  They used SQL history and do not measure HDD/cache benefit. That allocation is
+  complete; it must not be repeated or expanded implicitly.
+
+Remaining qualification is the matching post-placement backup/recovery evidence,
+retention throughput versus intake, and a full 24-hour filesystem-UUID growth
+baseline. The baseline producer began at 12:38 UTC on October 9; migration, WAL
+and backup growth must be separated from ordinary growth before projecting a
+capacity horizon. No additional historical rewrite or migration-copy deletion is
+implied. Private receipts are retained under
+`artifacts/storage-implementation/history-read-cache/`: `release-f5096792`,
+`release-f9d68118` (H04 evidence), and `retained-raw-history-placement`.
 
 ## What we are solving
 
@@ -92,7 +129,7 @@ key/identity/reference work or prove SSD relief. Production capacity, final
 pause/recovery admission and workload measurements remain open. Branch
 consolidation does not satisfy or authorize those operations.
 
-## Current state and why the original migration was large
+## Audit baseline and why the original migration was large
 
 Evidence comes from the prior audit and these inspected checkouts:
 
@@ -724,7 +761,7 @@ cancel/duplicate/stale-owner/publication tests; exact release compatibility; and
 unchanged protocols, holdouts and scientific budgets. Each requirement gates the
 affected capability only. Deployment and resumption remain separately authorized.
 
-## Implementation and release ledger
+## Implementation and release ledger — 2026-10-04
 
 The main candidate integrates S (including its R ancestor) in `89a6ba0f`; it is
 local source, not a deployed release. Original candidate checkouts are preserved.
