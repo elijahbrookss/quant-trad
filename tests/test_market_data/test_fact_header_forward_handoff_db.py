@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
+from pathlib import Path
 import os
 
 import pytest
@@ -37,7 +38,7 @@ def storage(native_storage, monkeypatch):
 def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(retained, monkeypatch, retain_raw):
     engine = retained.database._engine
     with engine.begin() as conn:
-        if retain_raw:
+        if retain_raw and not retained.online_copy_proof:
             # An untrusted private copy cannot affect canonical reads when it is
             # retained solely as evidence. The old path must prove it before use.
             conn.exec_driver_sql("UPDATE " + raw.TARGET + " SET raw_frame_sha256=repeat('f',64)")
@@ -158,7 +159,7 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
             for statement in ("UPDATE " + handoff.RETAINED + "." + raw.NAME + " SET object_row_index=0",
                               "DELETE FROM " + handoff.RETAINED + "." + raw.NAME,
                               "TRUNCATE " + handoff.RETAINED + "." + raw.NAME):
-                with pytest.raises(Exception, match="immutable"), conn.begin_nested():
+                with pytest.raises(Exception, match="immutable|online_copy_proof_"), conn.begin_nested():
                     conn.exec_driver_sql(statement)
         assert conn.scalar(text("SELECT market.fact_header_legacy_end_day()")) == today
         assert _headers(conn, "market.fact_versions_legacy") == _headers(conn, headers.SOURCE)
@@ -171,6 +172,23 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
         restarted._reset_engine()
     _placement(monkeypatch, today)
     current = replace(retained.fact, observation_key="after-forward-switch", observation_time=BASE+timedelta(days=4))
+    if retained.online_copy_proof:
+        # Reproduce the committed production failure using the original private
+        # proof guards, then qualify the explicit catalog-only repair.
+        with pytest.raises(Exception, match="online_copy_proof_source_changed"):
+            retained.repo.ingest_facts(series_id=retained.series_id, source_id=retained.source_id, facts=[current])
+        repair = Path("scripts/db/manual_retire_promoted_identity_proof_v1.sql").read_text()
+        repair = "\n".join(line for line in repair.splitlines()
+                           if not line.startswith("\\") and line not in ("BEGIN;", "COMMIT;"))
+        repair = repair.replace(":'operation_sha256'", "'" + OPERATION + "'")
+        with engine.begin() as conn:
+            before_proof = conn.scalar(text("SELECT to_jsonb(p) FROM qt_fact_header_cutover_v2.online_copy_proof p"))
+            before_triggers = conn.execute(text("SELECT oid,tgname FROM pg_trigger WHERE tgrelid='market.fact_identities'::regclass ORDER BY oid")).all()
+            conn.exec_driver_sql(repair, execution_options={"no_parameters": True})
+            assert conn.scalar(text("SELECT to_jsonb(p) FROM qt_fact_header_cutover_v2.online_copy_proof p")) == before_proof
+            assert conn.execute(text("SELECT oid,tgname FROM pg_trigger WHERE tgrelid='market.fact_identities'::regclass ORDER BY oid")).all() == [row for row in before_triggers if row.tgname != "trg_qt_online_row_guard"]
+        with pytest.raises(Exception, match="identity_proof_repair_guard_changed"), engine.begin() as conn:
+            conn.exec_driver_sql(repair, execution_options={"no_parameters": True})
     retained.repo.ingest_facts(series_id=retained.series_id, source_id=retained.source_id, facts=[current])
     assert retained.repo.read_dataset_fact_revisions(dataset_id=retained.frozen_dataset_id,
         series_id=retained.series_id) == retained.frozen_result
@@ -189,3 +207,8 @@ def test_forward_switch_rolls_back_interruptions_and_preserves_native_history(re
     assert retained.repo.read_dataset_fact_revisions(dataset_id=retained.frozen_dataset_id,
         series_id=retained.series_id) == retained.frozen_result
     assert retained.archive_path.read_bytes() == retained.archive_bytes
+
+
+@pytest.mark.parametrize("retained", [True], indirect=True)
+def test_explicit_repair_preserves_proof_and_restores_post_switch_ingestion(retained, monkeypatch):
+    test_forward_switch_rolls_back_interruptions_and_preserves_native_history(retained, monkeypatch, True)

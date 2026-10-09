@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/manual_retire_promoted_identity_proof_v1.sql
   - tests/test_storage_repository_continuation.py
   - scripts/db/raw_mapping_v2_placement.py
   - cli/storage_placement.py
@@ -2704,7 +2705,24 @@ same cluster, volumes, keys and runtime contract, requires identical PostgreSQL
 and Timescale binaries, journals replacement without volume removal, and verifies
 actual WAL delivery before continuing existing spool/runtime steps. Prior
 attempts remain evidence; uncertain outcomes refuse automatic replay. Native
-qualification and deployment of this correction remain pending.
+qualification passed for current and first-release application images, and the
+production correction reached `recovery_runtime_ready` on October 9. This does
+not establish fresh collection or a complete production backup pair.
+
+The first production write exposed a separate forward-handoff defect: a
+retained `online_guard_identity` trigger followed the promoted identity heap and
+still required the old header OID. The explicit operator repair
+`scripts/db/manual_retire_promoted_identity_proof_v1.sql` checks the committed
+operation, original proof OIDs, exact trigger body and permanent canonical
+guards before removing only that obsolete row trigger. It uses a non-waiting
+table lock and five-second SQL bounds, changes no rows, and preserves the proof,
+functions, truncate guard and other constraints. A lost reply requires catalog
+inspection; absence of the trigger refuses another dispatch. A disposable native
+rehearsal reproduced the rejected insert and verified restored ingestion,
+corrections, causal reads, frozen results and preservation of every other trigger.
+Production execution completed on October 9 with the same cluster and identity
+heap, and fresh accepted facts were observed. This manual repair does not yet fix
+the forward-switch implementation's omission or certify fleet-wide recovery.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.
