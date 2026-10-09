@@ -35,6 +35,7 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 ib-insync==0.9.86
+ijson==3.4.0
 idna==3.10
 iniconfig==2.1.0
 kiwisolver==1.4.9

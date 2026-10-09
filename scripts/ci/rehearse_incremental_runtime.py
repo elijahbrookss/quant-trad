@@ -141,7 +141,7 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                                  {"n":_LIFECYCLE_LOCK_NAME})
                     conn.commit()
         class ConcurrentAdmission(EncryptedRecoveryCopies):
-            def _run(self, command):
+            def _run(self, command, **kwargs):
                 if command[-1] == "backup" and str(command[0]) == str(self.pgbackrest):
                     with engine.connect() as contender:
                         assert not contender.scalar(text(
@@ -150,7 +150,7 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                     # A manifest admitted after the fence but before physical
                     # completion must be present in its matching archive snapshot.
                     add_object("during-backup")
-                return super()._run(command)
+                return super()._run(command, **kwargs)
         with snapshot() as session:
             first = manager(ConcurrentAdmission).create(session, objects=objects, keep_copies=2)
         assert first["archive_objects"] == 2
@@ -161,10 +161,10 @@ def rehearse(*, pg_bin, pgbackrest, restic):
         assert first["database_type"] == "full" and second["database_type"] == "incr"
         # A failed archive half leaves the earlier paired recovery points intact.
         class FailArchives(EncryptedRecoveryCopies):
-            def _run(self, command):
+            def _run(self, command, **kwargs):
                 if str(command[0]) == str(self.restic) and "backup" in command:
                     raise RuntimeError("injected_archive_failure")
-                return super()._run(command)
+                return super()._run(command, **kwargs)
         try:
             with snapshot() as session:
                 manager(FailArchives).create(session, objects=objects, keep_copies=2)
@@ -177,8 +177,8 @@ def rehearse(*, pg_bin, pgbackrest, restic):
         with snapshot() as session:
             third = manager().create(session, objects=objects, keep_copies=2)
         class InterruptRetirement(EncryptedRecoveryCopies):
-            def _run(self, command):
-                result = super()._run(command)
+            def _run(self, command, **kwargs):
+                result = super()._run(command, **kwargs)
                 if str(command[0]) == str(self.restic) and "forget" in command:
                     raise RuntimeError("injected_retirement_interruption")
                 return result

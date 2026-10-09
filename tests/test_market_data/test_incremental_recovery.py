@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import signal
 import sys
+import tracemalloc
 from time import monotonic, sleep
 
 import pytest
@@ -63,6 +64,63 @@ def test_tool_output_limit_names_stream_without_exposing_content(tmp_path, strea
         worker._run([sys.executable, "-c", script])
     assert str(failure.value) == (
         f"incremental_tool_output_limit:{Path(sys.executable).name}:stream={stream}")
+
+
+@pytest.mark.skipif(shutil.which("restic") is None, reason="requires pinned native restic")
+def test_native_snapshot_metadata_streams_large_path_lists(tmp_path):
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker.root, worker.restic = tmp_path, Path(shutil.which("restic"))
+    worker.env = {"PATH": os.defpath, "HOME": str(tmp_path),
+                  "RESTIC_PASSWORD": "disposable-test-key"}
+    worker.deadline = monotonic()+30
+
+    def check(*args):
+        if monotonic() >= worker.deadline:
+            raise RuntimeError("recovery_time_budget_exceeded")
+
+    worker.check = check
+    worker._run(worker._rs("init"))
+    source = tmp_path/("f"*230)
+    source.write_bytes(b"preserved archive")
+    listing = tmp_path/"files.list"
+    # Native snapshots preserve input paths, even repeated ones. Exercise real
+    # large metadata with a single tiny file rather than thousands of test files.
+    listing.write_bytes((os.fsencode(source)+b"\0")*32000)
+    tag = "copy_"+"1"*32
+    output = worker._run(worker._rs("backup", "--no-scan", "--files-from-raw",
+        str(listing), "--host", "qt-disposable", "--tag", tag))
+    snapshot_id = json.loads(output)["snapshot_id"]
+    with pytest.raises(RuntimeError, match="incremental_tool_output_limit:restic:stream=out"):
+        worker._run(worker._rs("snapshots"))
+    tracemalloc.start()
+    try:
+        snapshots = worker._native_snapshots()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert snapshots == [{"id": snapshot_id, "hostname": "qt-disposable", "tags": [tag]}]
+    assert peak < 8*1024*1024
+
+
+@pytest.mark.parametrize("document", [
+    b'{"secret": "private diagnostic"}', b'[1]', b'[{"id":null}]',
+    b'[{"id":"invalid"}]', b'[{"id":"private diagnostic"}',
+    b'[{"id":"'+b'a'*64+b'","id":"'+b'b'*64+b'"}]',
+    b'[{"id":"'+b'a'*64+b'","tags":[{}]}]',
+    b'[{"id":"'+b'a'*64+b'","hostname":{}}]',
+])
+def test_snapshot_metadata_rejects_malformed_or_ambiguous_output(document):
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker._rs = lambda *args: list(args)
+
+    def run(command, *, stdout_consumer):
+        for offset in range(0, len(document), 7):
+            stdout_consumer(document[offset:offset+7])
+
+    worker._run = run
+    with pytest.raises(RuntimeError, match="incremental_archive_snapshot_") as failure:
+        worker._native_snapshots()
+    assert "private diagnostic" not in str(failure.value)
 
 
 def test_private_keys_reject_aliases_permissions_and_unbounded_content(tmp_path):

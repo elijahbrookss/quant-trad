@@ -1407,12 +1407,20 @@ bounded by the existing cancellation, deadline and filesystem reserve checks.
 
 Restic runs with JSON output and quiet progress: native summaries and errors
 remain available, while periodic status messages cannot consume the bounded
-subprocess output buffer during long backups. Each output stream retains its
-8 MiB cap; an overflow identifies the tool and stream without exposing its
-contents. Nonzero native exits still fail the pair. The production-image native
-test exercises chunk processing before a delay, verifies summary publication
-and failure handling, and checks both output caps and child termination. This
-fix changes neither backup formats nor the paired-publication requirement.
+subprocess output buffer during long backups. Ordinary result and error output
+retain their 8 MiB caps; an overflow identifies the tool and stream without
+exposing contents. Nonzero native exits still fail the pair.
+
+Native snapshot listings include every original file path. The same recovery
+owner uses pinned `ijson` parsing to consume that listing incrementally and keep
+only complete snapshot IDs, hosts and tags, still capped at 8 MiB of metadata.
+This avoids both retaining an archive-sized JSON response and inventing a JSON
+parser. Truncated, ambiguous or malformed metadata refuses retirement; paths
+remain in the native snapshot and encrypted inventory. Cancellation, deadline
+and process-group cleanup apply while streaming. The production-image tests
+exercise real metadata above the ordinary output cap, bounded Python allocation,
+chunk-triggered progress, failure handling and child termination. Neither fix
+changes backup formats or the paired-publication requirement.
 
 Production images contain pinned tools. Image availability does not enable WAL
 archiving, provision keys, qualify a restore or activate a backup policy. Those

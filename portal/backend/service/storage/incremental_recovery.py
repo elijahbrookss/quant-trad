@@ -21,6 +21,7 @@ import subprocess
 from time import monotonic
 from uuid import uuid4
 
+import ijson
 from sqlalchemy import text
 
 from core.storage_targets import StorageLocation
@@ -194,7 +195,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         return [str(self.restic), "--repo", str(self.root/"archives"),
                 "--no-cache", "--json", "--quiet", *args]
 
-    def _run(self, command):
+    def _run(self, command, *, stdout_consumer=None):
         """Bounded subprocess, no secret-bearing diagnostics or ambient config."""
         self.check()
         captured = {"out": bytearray(), "err": bytearray()}
@@ -211,6 +212,9 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                             chunk = os.read(key.fileobj.fileno(), 65536)
                             if not chunk:
                                 streams.unregister(key.fileobj)
+                                continue
+                            if key.data == "out" and stdout_consumer is not None:
+                                stdout_consumer(chunk)
                                 continue
                             captured[key.data].extend(chunk)
                             if len(captured[key.data]) > 8*1024*1024:
@@ -231,6 +235,75 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                     process.wait(timeout=10)
         self.check()
         return bytes(captured["out"])
+
+    def _native_snapshots(self):
+        """Project native ownership metadata without retaining every archive path.
+
+        Restic's JSON listing includes all files-from-raw paths per snapshot.
+        Parse those incrementally; pruning needs only the full ID, host and tags.
+        No repository contents or snapshot formats are changed by this read.
+        """
+        events = ijson.sendable_list()
+        parser = ijson.parse_coro(events)
+        snapshots, current, keys = [], None, set()
+        started = finished = False
+        metadata_bytes = pending_bytes = 0
+
+        def consume(chunk):
+            nonlocal current, keys, started, finished, metadata_bytes, pending_bytes
+            parser.send(chunk)
+            pending_bytes = 0 if events else pending_bytes + len(chunk)
+            if pending_bytes > 65536:
+                raise RuntimeError("incremental_archive_snapshot_token_limit")
+            for prefix, event, value in events:
+                if len(prefix) > 1024 or (isinstance(value, str) and len(value) > 16384):
+                    raise RuntimeError("incremental_archive_snapshot_token_limit")
+                if prefix == "":
+                    if event == "start_array" and not started:
+                        started = True
+                    elif event == "end_array" and started and not finished:
+                        finished = True
+                    else:
+                        raise RuntimeError("incremental_archive_snapshot_shape_invalid")
+                elif prefix == "item":
+                    if event == "start_map":
+                        current, keys = {"hostname": "", "tags": []}, set()
+                    elif event == "map_key":
+                        if value in keys or len(keys) >= 128 or "." in value:
+                            raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                        keys.add(value)
+                    elif event == "end_map":
+                        if not _HASH.fullmatch(current.get("id", "")):
+                            raise RuntimeError("incremental_archive_snapshot_id_invalid")
+                        metadata_bytes += len(json.dumps(current).encode())
+                        if metadata_bytes > 8*1024*1024:
+                            raise RuntimeError("incremental_archive_snapshot_metadata_limit")
+                        snapshots.append(current)
+                        current = None
+                    else:
+                        raise RuntimeError("incremental_archive_snapshot_shape_invalid")
+                elif prefix in {"item.id", "item.hostname"}:
+                    if event != "string":
+                        raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                    current[prefix.split(".")[1]] = value
+                elif prefix == "item.tags":
+                    if event not in {"start_array", "end_array"}:
+                        raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                elif prefix.startswith("item.tags."):
+                    if prefix != "item.tags.item" or event != "string" or len(current["tags"]) >= 128:
+                        raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                    current["tags"].append(value)
+            events.clear()
+
+        try:
+            self._run(self._rs("snapshots"), stdout_consumer=consume)
+            parser.close()
+        except ijson.JSONError:
+            # Parser diagnostics can contain paths or other repository content.
+            raise RuntimeError("incremental_archive_snapshot_json_invalid") from None
+        if not finished or current is not None:
+            raise RuntimeError("incremental_archive_snapshot_json_invalid")
+        return snapshots
 
     def _native_backups(self):
         info = json.loads(self._run(self._br("--output=json", "info")))
@@ -368,7 +441,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         self._run(self._br("--repo1-retention-full=9999999",
                            "--repo1-retention-archive-type=incr",
                            "--repo1-retention-archive=1", "expire"))
-        native_snapshots = json.loads(self._run(self._rs("snapshots")))
+        native_snapshots = self._native_snapshots()
         if not snapshots <= {s["id"] for s in native_snapshots}:
             raise RuntimeError("incremental_published_archive_snapshot_missing")
         retired = []
@@ -399,7 +472,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             self._prune(keep_copies)
             backups = self._native_backups()
             self._run(self._rs("unlock"))
-            self._run(self._rs("snapshots"))
+            self._native_snapshots()
             versions = {
                 "pgbackrest": self._run([str(self.pgbackrest), "version"]).decode().strip(),
                 "restic": self._run([str(self.restic), "version"]).decode().strip(),
