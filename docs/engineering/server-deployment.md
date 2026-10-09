@@ -540,6 +540,17 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
+For the specific committed cutover whose repository helper failed because
+`/run/quanttrad/recovery/incremental-config.json` was absent, inspect with
+`qt storage migrate --operation-file <original-private-plan> --recover-repositories-file <private-request>`.
+The strict private JSON request has `schema_version` equal to
+`qt.storage_repository_continuation.v1`, `operation_sha256` and `final_sha256`
+computed from the exact original file bytes, and `duration_seconds` from 1 to 600.
+Only explicit `--execute` resumes recovery. Preserve every failed receipt and
+helper; never rerun the original migration, edit its clocks manually, or retry an
+uncertain continuation. The request does not imply deployment authorization or a
+complete backup. Follow the [bounded recovery decision](../architecture/decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure).
+
 The opt-in fixed layout is defined in `docker/docker-compose.storage-server.yml`.
 It is not automatically activated by the normal deployment helper. Its host
 inputs are prepared HDD root (`QT_STORAGE_HDD_ROOT`), that HDD's `archives`

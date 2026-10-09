@@ -1,7 +1,73 @@
 """Disposable runtime configuration shared by online host rehearsals."""
 import json
+from contextlib import contextmanager
+import hashlib
+import inspect
 from pathlib import Path
+import time
 from scripts.automation import storage_host_boundary as host_boundary
+
+
+@contextmanager
+def missing_repository_configuration():
+    """Reproduce the old host command against a fixture with only recovery keys."""
+    from scripts.automation import storage_online_repositories as repositories
+    original = repositories.prepare_repositories
+    source = inspect.getsource(original)
+    needle = 'incremental_configuration=incremental_configuration(state_root),'
+    assert source.count(needle) == 1
+    source = source.replace(needle, 'incremental_config="/run/quanttrad/recovery/incremental-config.json",')
+    helper = repositories._PREPARE
+    begin = helper.index('# Reuse the admitted maintenance configuration.')
+    end = helper.index("for name in ('inventory','incremental_config'", begin)
+    namespace = dict(vars(repositories), _PREPARE=helper[:begin]+helper[end:])
+    exec(compile(source, '<disposable-old-repository-preparer>', 'exec'), namespace)
+    repositories.prepare_repositories = namespace['prepare_repositories']
+    try:
+        yield
+    finally:
+        repositories.prepare_repositories = original
+
+
+def recover_missing_repository_configuration(operation_file, *, state, owned, run):
+    """Exercise the public recovery command after actual original-clock expiry."""
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_final as final
+    from scripts.automation import storage_online_recovery as recovery
+    from scripts.automation import storage_online_launch as launch
+    original = (state/final.STATE).read_bytes()
+    saved = final._load(state/final.STATE)
+    worker = host_boundary.load_receipt(state/launch._STATE)
+    assert saved['phase'] == 'recovery_repository_preparing'
+    assert saved['repositories']['completed'] == ['logins', 'create']
+    assert saved['repositories']['inflight'] == 'prepare'
+    failed = saved['repositories']['helper_id']
+    owned.append(failed)
+    while time.time() <= saved['deadline']+.1:
+        time.sleep(min(.2, saved['deadline']+.2-time.time()))
+    request = state/'repository-continuation-request.json'
+    host_boundary.save_receipt(request, dict(schema_version='qt.storage_repository_continuation.v1',
+        operation_sha256=hashlib.sha256(operation_file.read_bytes()).hexdigest(),
+        final_sha256=hashlib.sha256(original).hexdigest(), duration_seconds=120), initial=True)
+    observed = operation.run_operation_plan(operation_file, recover_repositories_file=request)
+    assert observed['storage_mutations_performed'] is False
+    assert not (state/recovery.CONTINUATION_STATE).exists()
+    assert (state/final.STATE).read_bytes() == original
+    result = operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+    audit = host_boundary.load_receipt(state/recovery.CONTINUATION_STATE)
+    assert Path(audit['original_final']).read_bytes() == original
+    assert host_boundary.load_receipt(state/launch._STATE) == worker
+    assert audit['phase'] == 'runtime_ready' and audit['deadline']-audit['started_at'] <= 120
+    current = final._load(state/final.STATE)
+    assert all(current[k] == saved[k] for k in ('started_at', 'started_boot', 'boot_id', 'commit', 'binding'))
+    status = json.loads(run(['inspect', failed, '--format', '{{json .State}}']).stdout)
+    assert status['Status'] == 'exited' and status['Pid'] == 0 and status['ExitCode'] == 1
+    try:
+        operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+        raise AssertionError('completed continuation replay admitted')
+    except RuntimeError as exc:
+        assert str(exc) == 'storage_repository_continuation_intent_exists_reconcile_required'
+    return result
 
 
 def write_runtime_recipe(*, state, runtime_model, inventory, udev, image, password,

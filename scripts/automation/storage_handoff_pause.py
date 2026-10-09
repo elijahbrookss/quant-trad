@@ -646,7 +646,9 @@ def _runtime_configuration_bytes(path: Path, maximum: int = 128*1024) -> bytes:
 _RUNTIME_MAINTENANCE_PROBE = """
 import json, sys
 from portal.backend.service.storage.maintenance_runtime import read_storage_maintenance_limits
-history, recovery, _ = read_storage_maintenance_limits(sys.argv[1])
+history, recovery, incremental = read_storage_maintenance_limits(sys.argv[1])
+if len(sys.argv) > 3 and sys.argv[3] == "require-incremental" and incremental is None:
+    raise ValueError("storage_runtime_incremental_configuration_required")
 ids = set(json.loads(sys.argv[2]))
 if any(set(history[key]) != ids for key in
        ("temporary_bytes", "growth_bytes_per_second", "maintenance_bytes")):
@@ -657,7 +659,7 @@ print(json.dumps({"validated": True}))
 """
 
 
-def _validate_runtime_maintenance(image: str, path: Path, target_ids: list[str]):
+def _validate_runtime_maintenance(image: str, path: Path, target_ids: list[str], require_incremental=False):
     """Use the pinned worker's routine parser without database, keys or network.
 
     Migration budgets belong to the original capture attempt. The independently
@@ -672,7 +674,8 @@ def _validate_runtime_maintenance(image: str, path: Path, target_ids: list[str])
         "--pids-limit", "64", "--env", "QT_DISABLE_DOTENV=1",
         "--mount", "type=bind,source="+str(path)+",target=/run/qt-maintenance.json,readonly",
         "--entrypoint", "python", image, "-c", _RUNTIME_MAINTENANCE_PROBE,
-        "/run/qt-maintenance.json", json.dumps(sorted(target_ids)))
+        "/run/qt-maintenance.json", json.dumps(sorted(target_ids)),
+        *(["require-incremental"] if require_incremental else []))
     if json.loads(output) != {"validated": True}:
         raise RuntimeError("storage_runtime_maintenance_validation_failed")
 

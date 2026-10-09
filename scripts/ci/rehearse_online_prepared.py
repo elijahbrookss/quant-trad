@@ -34,6 +34,7 @@ parser.add_argument('--deadline-amendment',action='store_true',help='qualify sto
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
 parser.add_argument('--full-operation',action='store_true',help='run the public operator before initial preparation with a retired seed fixture')
+parser.add_argument('--repository-config-failure',action='store_true',help='reproduce missing recovery configuration and explicitly recover after final expiry')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
@@ -58,6 +59,8 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.repository_config_failure and not options.full_operation:
+ parser.error('--repository-config-failure requires --full-operation')
 if options.forward_retirement_recovery and not options.forward_retirement:
  parser.error('--forward-retirement-recovery requires --forward-retirement')
 if options.forward_keys and not options.forward_worker:
@@ -185,8 +188,6 @@ try:
 root=Path('/keys')
 for name in ('database.key','archive.key'):
  p=root/name;p.write_text(secrets.token_hex(32));p.chmod(0o600);os.chown(p,70,70)
-config=dict(pgbackrest='/usr/local/bin/pgbackrest',restic='/usr/local/bin/restic',pg_path='/var/lib/postgresql/data',pg_socket_path='/var/run/postgresql',database_key_path='/run/quanttrad/recovery/database.key',archive_key_path='/run/quanttrad/recovery/archive.key',max_chain_backups=4)
-p=root/'incremental-config.json';p.write_text(json.dumps(config));p.chmod(0o600);os.chown(p,70,70)
 os.chown(root,70,70)
 """
   run(['run','--rm','--network','none','--user','0:0','--cap-drop','ALL','--cap-add','CHOWN','--cap-add','DAC_OVERRIDE','--cap-add','FOWNER',
@@ -446,10 +447,23 @@ os.chown(root,70,70)
     host_boundary.save_receipt(operation_file,plan,initial=True)
     inspected=operation.run_operation_plan(operation_file)
     assert inspected['phase']=='inspected' and not (state/initial.STATE).exists()
-    result=operation.run_operation_plan(operation_file,execute=True)
+    if options.repository_config_failure:
+     from scripts.ci.online_operation_fixture import missing_repository_configuration, recover_missing_repository_configuration
+     try:
+      with missing_repository_configuration():
+       operation.run_operation_plan(operation_file,execute=True)
+      raise AssertionError('missing repository configuration unexpectedly succeeded')
+     except RuntimeError as exc:
+      if not (state/final_host.STATE).exists(): raise
+      assert final_host._load(state/final_host.STATE)['phase']=='recovery_repository_preparing', str(exc)
+     result=recover_missing_repository_configuration(operation_file,state=state,owned=owned,run=run)
+     report['expired_committed_repository_continuation']=True
+    else:
+     result=operation.run_operation_plan(operation_file,execute=True)
     preparation=initial._load(state)
     prepared_bytes=(state/initial.STATE).read_bytes()
-    report['initial_preparation_seconds']=result['initial_preparation_seconds']
+    if 'initial_preparation_seconds' in result:
+     report['initial_preparation_seconds']=result['initial_preparation_seconds']
     report['single_operation_from_before_initial_preparation']=True
    else:
     result=operation.run_prepared_operation(state,**kwargs,source_image=source_image,limits=limits,
@@ -1145,6 +1159,11 @@ os.chown(root,70,70)
        raise AssertionError('completed recovery phase replay admitted')
       except RuntimeError as exc:assert str(exc)=='storage_online_recovery_committed_live_hold_required'
      if options.recovery_repositories:
+      from scripts.automation import storage_online_recovery as recovery_host
+      from scripts.ci.online_operation_fixture import write_runtime_recipe
+      write_runtime_recipe(state=state,runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE),
+        inventory=inventory,udev=udev,image=image,password=password,dbname=dbname,history=history,
+        project=project,candidate_working=state/'candidate-working',owned=owned)
       owned.append(project+'-storage-repository-prepare')
       before_repositories=final_host._load(state/final_host.STATE)
       start_repositories=time.monotonic()
@@ -1243,10 +1262,6 @@ os.chown(root,70,70)
      if options.recovery_runtime:
       from scripts.automation import storage_online_runtime as runtime_host
       from scripts.automation import storage_online_recovery as recovery_host
-      from scripts.ci.online_operation_fixture import write_runtime_recipe
-      write_runtime_recipe(state=state,runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE),
-        inventory=inventory,udev=udev,image=image,password=password,dbname=dbname,history=history,
-        project=project,candidate_working=candidate_working,owned=owned)
       started_runtime=time.monotonic()
       actual_runtime_action=host_boundary.supervised_source_action
       recovery_spec=json.loads((control/'runtime-recovery.json').read_text())

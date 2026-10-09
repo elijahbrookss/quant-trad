@@ -408,7 +408,7 @@ def inspect_runtime_configuration(state_root, *, database_model, image_id, reque
             if len(limits)!=1:raise RuntimeError("storage_online_runtime_limits_mount_missing")
             limit_path=Path(literal(limits[0]["source"]))
             limit_raw=preserving._runtime_configuration_bytes(limit_path)
-            preserving._validate_runtime_maintenance(image_id,limit_path,[t["target_id"] for t in targets])
+            preserving._validate_runtime_maintenance(image_id,limit_path,[t["target_id"] for t in targets],True)
             if preserving._runtime_configuration_bytes(limit_path)!=limit_raw:
                 raise RuntimeError("storage_online_runtime_limits_changed")
             files[str(limit_path)]=hashlib.sha256(limit_raw).hexdigest()

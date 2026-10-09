@@ -9,6 +9,7 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - tests/test_storage_repository_continuation.py
   - scripts/db/raw_mapping_v2_placement.py
   - cli/storage_placement.py
   - tests/test_cli/test_storage_placement.py
@@ -2680,6 +2681,17 @@ Production pause and resource admission still require the integrated measured op
 
 
 ### Repository preparation and native WAL continuation
+
+Online preflight requires typed incremental recovery settings before source stop.
+
+Incremental settings come from the admitted maintenance limits; the helper uses
+a private tmpfs input and does not require duplicate configuration beside keys.
+For the confirmed pre-preparation missing-config failure after commit, the
+existing recovery owner provides an explicit, bounded continuation. Its failed
+receipt and helper remain preserved, and ordinary migration replay stays closed.
+See [ADR 0073's recovery decision](../decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure)
+for the exact admission, clock and failure rules. This path is a local candidate
+until native qualification and deployment are recorded.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.

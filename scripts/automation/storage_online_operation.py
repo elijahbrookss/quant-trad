@@ -527,7 +527,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, reschedule_forward_file=None, prepare_forward_only=False):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, reschedule_forward_file=None, recover_repositories_file=None, prepare_forward_only=False):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -539,6 +539,12 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
         raise ValueError("storage_online_operation_execute_invalid")
     if type(prepare_forward_only) is not bool:
         raise ValueError("storage_forward_preparation_flag_invalid")
+    if recover_repositories_file is not None:
+        if prepare_forward_only or any(value is not None for value in (
+                extend_attempt_seconds, capacity_file, replacement_package_file, cancel_attempt_file,
+                forward_package_file, prepare_forward_keys_file, place_forward_lookups_file, reschedule_forward_file)):
+            raise ValueError("storage_repository_continuation_must_be_separate")
+        return recovery.continue_repositories(path,request_file=recover_repositories_file,execute=execute)
     if prepare_forward_only and any(value is not None for value in (
             extend_attempt_seconds, capacity_file, replacement_package_file,
             cancel_attempt_file, forward_package_file, prepare_forward_keys_file, place_forward_lookups_file, reschedule_forward_file)):

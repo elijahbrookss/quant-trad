@@ -9,6 +9,8 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_recovery.py
+  - tests/test_storage_repository_continuation.py
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward.py
@@ -1456,6 +1458,13 @@ qualified before release.
 
 ### Repository preparation and native WAL continuation
 
+Online preflight requires typed incremental recovery settings before source stop.
+
+The preparer obtains incremental recovery settings from the already admitted
+maintenance limits. It creates only a private temporary input file inside its
+tmpfs; operators need not provision a duplicate `incremental-config.json` beside
+the existing keys.
+
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.
 It independently rechecks migration-reader retirement, the committed binding,
@@ -1485,6 +1494,39 @@ pause and capacity admission remain unfinished. The runtime package explicitly
 includes the existing online worker/controller dependency closure, and those files
 participate in source attestation.
 
+
+### Explicit recovery after a committed missing-config failure
+
+Implemented candidate, pending native qualification and deployment. The October 9
+failure happened after the database commit: the repository helper exited before
+preparation because it expected a configuration file supplied only by the test
+fixture. A committed database cannot return to the old runtime by replaying the
+migration or treating its expired final window as still valid.
+
+The existing recovery owner accepts a separately invoked, inspect-first
+`--recover-repositories-file` request bound to the exact operation and failed final
+receipt. It supports only the confirmed missing-file exception from that exact
+stopped helper, before any repository preparation. Unknown outcomes, successful
+helpers with missing replies, changed configuration, running writers, reboot and
+an existing continuation intent refuse execution.
+
+Execution preserves the failed receipt, private recipe and helper; verifies the
+committed certificate, policy, cluster, mounts and stopped workers; and reacquires
+the deployment lock and archive namespace exclusion. An explicit allowance of at
+most 600 seconds extends only the final recovery window. The original start and
+pause times remain intact, and a separate audit records the original deadline and
+the extension. Capture clocks, committed SQL, keys and policy are unchanged. The
+existing repository, spool and runtime owners perform the remaining work. Their
+ordinary entrypoints cannot acquire this continuation authority independently.
+
+This narrow exception restores service without repeating historical work. Its
+cost is another auditable recovery path; an interruption retains both attempts
+and requires reconciliation rather than an automatic retry. Runtime readiness
+still does not prove a complete encrypted backup pair or authorize ordinary
+deployment. Native qualification must reproduce the failure and expiry, preserve
+frozen inputs and the original keys, restart the matching runtime, and prove the
+existing completion reader accepts the result. No general migration retry
+framework or second data authority is introduced.
 
 ### Connect private pending-WAL preparation after native WAL readiness
 
