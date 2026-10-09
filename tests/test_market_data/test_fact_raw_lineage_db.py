@@ -160,7 +160,7 @@ def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
 
 def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=False, replay_features=False,
                       definition_id="book-prefix", instrument_id="storage-fixture", provider_product_id="BTC-USD",
-                      response_window=False, event_start=None, continuous_sequence=False):
+                      response_window=False, event_start=None, continuous_sequence=False, object_store=None):
     from data_providers.streams.coinbase import CoinbaseMessageParser
     from data_providers.streams.contracts import ProviderRawMessage
     from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_l2_mutation_batch
@@ -198,7 +198,7 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
     claim = structures.claim_stream(definition_id=definition_id, owner_id="book-prefix-test", lease_seconds=600, bounded=True)
     parser = CoinbaseMessageParser(symbol_by_product_id={provider_product_id: provider_product_id})
     reducer = Level2BookReconstructor(series_id=series_id, contract=contract)
-    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    store = object_store or FilesystemRawArchiveObjectStore(tmp_path / "objects")
     raws, manifests, facts, results = [], [], [], []
     ordinals = (1, 2, 3, 4, 5) if response_window else ((1, 2, 3, 4) if trailing_heartbeat else (1, 2, 3))
     for ordinal in ordinals:
@@ -250,6 +250,42 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
     assert len(facts) == (5 if response_window else 2) and len(raws) == len(ordinals)
     return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id, store=store,
         raws=raws, manifests=manifests, facts=facts, results=results, structures=structures, claim=claim)
+
+
+def test_raw_position_batch_preserves_exact_scopes_and_bound_placements(storage, tmp_path, monkeypatch):
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_lineage
+
+    first = _raw_book_fixture(storage, tmp_path / "first", monkeypatch, definition_id="position-first")
+    second = _raw_book_fixture(storage, tmp_path / "second", monkeypatch, definition_id="position-second",
+                               object_store=first.store, provider_product_id="BTC-USD-ALT")
+    rows = []
+    for fixture in (first, second):
+        # Different scopes deliberately reuse ordinals. The manifest prefilter
+        # must not replace the exact definition/session/epoch/ordinal witness.
+        for raw in (fixture.raws[0], fixture.raws[-1]):
+            rows.append({"id": raw.raw_record_id, "fact_type": "market.bbo",
+                "source_provider": raw.provider, "source_venue": raw.venue, "received_at": raw.received_at,
+                "provenance": {"_qt_bbo_evidence": {"source_position": {
+                    name: getattr(raw, name) for name in (*fact_lineage.BOOK_SCOPE_FIELDS, "receive_ordinal")}}}})
+
+    def resolve(requested=rows, **kwargs):
+        with storage.database.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=requested,
+                object_store=first.store,
+                byte_verifier=ArchiveVerificationBatch(first.store, limits=ArchiveVerificationLimits()), **kwargs)
+
+    expected = {first.manifests[0], first.manifests[-1], second.manifests[0], second.manifests[-1]}
+    assert set(resolve()) == expected
+    assert set(resolve([*rows, rows[0]])) == expected, "duplicate witnesses must not multiply mappings"
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        resolve(bound_manifest_ids=first.manifests)
+    for field, value in (("session_id", "another-session"), ("connection_epoch", 7), ("receive_ordinal", 999)):
+        position = rows[0]["provenance"]["_qt_bbo_evidence"]["source_position"]
+        changed = {**rows[0], "provenance": {"_qt_bbo_evidence": {"source_position": {**position, field: value}}}}
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve([changed, *rows[1:]])
 
 
 def _publish_book_result(fixture, index):

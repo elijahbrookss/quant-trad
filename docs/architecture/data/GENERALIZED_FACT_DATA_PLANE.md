@@ -840,6 +840,17 @@ retry, not all size limits. Exact-position SQL also needs representative
 plan/capacity measurements before activation; small disposable fixtures do not
 prove production-scale throughput.
 
+The exact-position lookup supplies constant definition/session sets and the
+requested ordinal envelope to locate candidate manifests before their mappings.
+The full per-position definition, session, epoch and ordinal predicate still
+decides membership; range overlap cannot fill a missing raw row. Bound object
+selection, expiry exclusion and physical verification remain unchanged. This
+uses the existing manifest and mapping indexes without a schema change. An
+October 9 read-only plan probe reproduced a whole-mapping scan for one position;
+the scope prefilter avoided it and returned its one match in 1.49 seconds under
+a two-second limit. That observation does not establish full-page throughput or
+a sustained cold-storage speedup.
+
 RCA: the initial staging implementation reused a latest-by-material-hash lookup.
 Trade material hashes intentionally exclude delivery details. Two immutable
 revisions could therefore have identical trade values but different raw IDs;

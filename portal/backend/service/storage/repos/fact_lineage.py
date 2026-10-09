@@ -157,13 +157,24 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     # min/max ordinal range (which can contain holes or another reconnect).
     queries = [
         ("mappings.raw_record_id = ANY(:ids)", {"ids": record_ids}),
-        ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
+        # Constant scope/range bounds let PostgreSQL find candidate manifests
+        # before visiting their indexed mappings. The exact position predicate
+        # below still proves every witness; a range never fills a missing row.
+        ("manifests.definition_id = ANY(:position_definitions) "
+         "AND manifests.session_id = ANY(:position_sessions) "
+         "AND manifests.first_receive_ordinal<=:last_position "
+         "AND manifests.last_receive_ordinal>=:first_position "
+         "AND EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
          "AS positions(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
          "WHERE positions.definition_id=manifests.definition_id AND positions.session_id=mappings.session_id "
          "AND positions.session_id=manifests.session_id AND positions.connection_epoch=manifests.connection_epoch "
          "AND manifests.first_receive_ordinal<=positions.receive_ordinal AND manifests.last_receive_ordinal>=positions.receive_ordinal "
          "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
-         {"positions": json.dumps(positions)}),
+         {"positions": json.dumps(positions),
+          "position_definitions": sorted({item["definition_id"] for item in positions}),
+          "position_sessions": sorted({item["session_id"] for item in positions}),
+          "first_position": min((item["receive_ordinal"] for item in positions), default=0),
+          "last_position": max((item["receive_ordinal"] for item in positions), default=0)}),
     ]
     if prefixes:
         # Expose the bounded number of requested scopes to the planner. The
