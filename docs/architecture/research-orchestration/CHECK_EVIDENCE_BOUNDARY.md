@@ -150,6 +150,14 @@ the consumer's exact requirement range. Strict candle duration, known-at,
 continuity and frozen-range checks remain in force. Extra boundary candles do
 not extend the Check's decision window or admit future information.
 
+Candle planning and pre-freeze source resolution use the existing repository's
+[header selection projection](../data/DATA_BOUNDARY.md#candle-selection-for-research-planning).
+They avoid repeated payload hydration for coverage and source discovery. This
+projection retains source/revision and gap selection semantics but does not
+certify payload custody: freeze and frozen binding validation still read and
+validate the full material. Existing Check definitions, result hashes, scientific
+budgets, and the canonical state-engine timeline are unchanged.
+
 Planning never calls a provider. Preparation may call an existing acquisition
 service only when the operator explicitly authorizes network access and
 budgets. Check execution never acquires.

@@ -248,6 +248,19 @@ class MarketDataStore(Protocol):
     ) -> list[NumericFactRecord]:
         ...
 
+    def inspect_candle_selection(
+        self, *, series_id: int, start: datetime, end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> Mapping[str, Any]:
+        """Selected header counts/sources and contiguous observation intervals.
+
+        This ephemeral coverage projection is not payload integrity evidence or
+        a frozen Dataset. Source filtering and revision visibility match reads.
+        """
+        ...
+
     def read_series_records(
         self,
         *,

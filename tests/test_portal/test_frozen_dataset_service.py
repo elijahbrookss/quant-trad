@@ -231,3 +231,28 @@ def test_preparation_accepts_repository_series_id_projection() -> None:
 
     assert prepared["status"] == "ready_to_freeze"
     assert prepared["resolved_requirements"][0]["series_id"] == 9
+
+
+@pytest.mark.parametrize("stop", ["rows", "cancel"])
+def test_candle_calendar_expansion_stops_before_unbounded_allocation(stop):
+    from datetime import UTC, datetime, timedelta
+    from core.execution_control import (ExecutionControl, ExecutionBudgetExceededError,
+                                        ExecutionCancelledError, controlled_execution)
+
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    selection = {"timeframe_seconds": 60,
+                 "observation_intervals": [{"first": base, "last": base + timedelta(days=365)}]}
+    control = ExecutionControl()
+    control.limit(seconds=30, input_rows=100 if stop == "rows" else 600_000)
+    with controlled_execution(control, check_on_exit=False):
+        times = frozen_dataset_service.candle_selection_times(selection)
+        if stop == "rows":
+            with pytest.raises(ExecutionBudgetExceededError, match="resource=input_rows"):
+                next(times)
+        else:
+            assert next(times) == base
+            control.stop(ExecutionCancelledError("test cancellation"))
+            # The generator itself must observe cancellation while advancing.
+            with pytest.raises(ExecutionCancelledError):
+                for _ in range(512):
+                    next(times)

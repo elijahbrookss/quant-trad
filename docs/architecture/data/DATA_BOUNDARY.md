@@ -72,13 +72,15 @@ scanning history after 24 seconds. A single bounded candidate read took 19.982 m
 of database execution, with 299 shared block hits, 180 reads and no temporary
 blocks. This is query-level evidence under that cache/load state, not a research
 speedup claim. Cost still grows with series and header partitions. The repository
-change is implemented but not deployed; post-deployment collector cadence and
-repeated preparation measurements remain required.
+change was deployed with revision `9119b4e1` on October 9. All 17 collectors
+were healthy in the first post-deployment observations; repeated preparation
+measurements remain required.
 
 ## Candle coverage preflight cost
 
-Candle coverage uses the same canonical candle reader, including frozen/preview
-scope selection and recorded gap evidence. It omits runtime TR/ATR enrichment
+`candle_service.preflight_candle_coverage_by_instrument` continues to use the
+canonical candle reader, including frozen/preview scope selection and recorded
+gap evidence. It omits runtime TR/ATR enrichment
 and supplies epoch seconds directly to the existing continuity summarizer.
 Coverage counts, boundary ranges, duplicate handling and gap classifications are
 unchanged; the optimization does not infer completeness from row density or
@@ -90,6 +92,31 @@ not cancel server work; operators must reconcile completion before retrying or
 releasing a reservation. Set request-specific timeouts from measured duration,
 within the owner's bounded interval, without narrowing the declared research
 period merely to fit the request.
+
+## Candle selection for research planning
+
+Research requirement planning and pre-freeze source resolution use the canonical
+repository's ephemeral `inspect_candle_selection` projection. It selects the same
+revision headers as payload reads: range, commit watermark, known-at cutoff and
+source predicates apply before latest-revision selection, then inactive revisions
+are excluded. The repository returns source counts and contiguous observation
+ranges without joining payloads or decoding archives. Equal timestamps retain
+their record count; gaps and off-grid source cadence are not synthesized away.
+
+This answers which candle observations are selected, not whether their payloads
+are intact. Freeze, frozen binding validation and actual research reads still
+verify full Fact material and archive checksums. A corrupt archive can therefore
+pass header planning and fail freeze; `ready_to_freeze` is not research admission.
+No table, durable summary, Dataset format or evidence hash changes. Adapters
+without this optimization keep their canonical record reader; projection errors
+propagate rather than falling back silently.
+
+The execution budget accounts returned projection rows and logical bytes. Gap
+checking also charges the timestamps it expands against the existing row budget,
+with cancellation/deadline checks. These counters are not PostgreSQL scanned rows
+or physical device I/O. Database cancellation and statement deadlines still bound
+the SQL work. The optimization is implemented in this branch; production gains
+must be measured with the unchanged year-scale request before being claimed.
 
 ## Scientific protocol allocation
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from core.execution_control import execution_checkpoint, consume_execution_resource
 
 from market_data.range_evidence import is_complete_range_evidence
 from market_data.contracts import (
@@ -135,6 +137,13 @@ def matching_source_identity_keys(
         key, details = _record_source(record)
         if key:
             sources[key] = details
+    return matching_source_keys(sources, policy)
+
+
+def matching_source_keys(
+    sources: Mapping[str, Mapping[str, Any]], policy: Mapping[str, Any]
+) -> list[str]:
+    """Apply the same source policy to record or selected-header summaries."""
     available = sorted(sources)
     mode = str(policy.get("mode") or "").strip().lower()
     if mode == "exact":
@@ -166,6 +175,28 @@ def matching_source_identity_keys(
     raise ValueError(
         "frozen_dataset_preparation_invalid: source policy must be exact or allowlist"
     )
+
+
+def candle_selection_times(selection: Mapping[str, Any]) -> Iterator[datetime]:
+    """Expand compact runs only for a consumer that needs individual intervals.
+
+    The repository accounts projected rows/bytes; calendar expansion also uses
+    the existing row/deadline budget, so a tiny summary cannot admit an unbounded
+    in-memory calendar. These are observation timestamps, never synthetic Facts.
+    """
+    step = timedelta(seconds=int(selection["timeframe_seconds"]))
+    if step <= timedelta(0):
+        raise RuntimeError("candle_selection_timeframe_invalid")
+    for span in selection["observation_intervals"]:
+        first, last = span["first"], span["last"]
+        if last < first or (last - first) % step:
+            raise RuntimeError("candle_selection_interval_invalid")
+        count = (last - first) // step + 1
+        consume_execution_resource("input_rows", count)
+        for index in range(count):
+            if index % 512 == 0:
+                execution_checkpoint()
+            yield first + index * step
 
 
 def _requested_source_identity_keys(policy: Mapping[str, Any]) -> tuple[str, ...]:
@@ -320,34 +351,39 @@ def prepare_frozen_dataset_from_requirements(
         matches: list[dict[str, Any]] = []
         for candidate in candidates:
             requested_source_keys = _requested_source_identity_keys(policy)
-            records = list(
-                store.read_series_records(
-                    series_id=int(candidate["series_id"]),
-                    start=start,
-                    end=end,
-                    as_of_commit_seq=watermark,
-                    source_identity_keys=requested_source_keys,
-                )
+            selection_args = dict(
+                series_id=int(candidate["series_id"]), start=start, end=end,
+                as_of_commit_seq=watermark, source_identity_keys=requested_source_keys,
             )
-            if not records:
+            # Existing adapters without this read optimization retain their
+            # canonical record path. A projection error never falls back.
+            inspect_candles = (getattr(store, "inspect_candle_selection", None)
+                if str(requirement.get("fact_type")) == CANDLE_FACT_TYPE else None)
+            candle_selection = inspect_candles(**selection_args) if callable(inspect_candles) else None
+            records = [] if candle_selection is not None else list(store.read_series_records(**selection_args))
+            count = int(candle_selection["row_count"]) if candle_selection is not None else len(records)
+            if not count:
                 continue
-            source_keys = matching_source_identity_keys(records, policy)
+            source_keys = (matching_source_keys(candle_selection["source_summary"]["sources"], policy)
+                           if candle_selection is not None else matching_source_identity_keys(records, policy))
             if source_keys:
-                source_bound_records = list(
-                    store.read_series_records(
-                        series_id=int(candidate["series_id"]),
-                        start=start,
-                        end=end,
-                        as_of_commit_seq=watermark,
-                        source_identity_keys=tuple(source_keys),
-                    )
-                )
-                if not source_bound_records:
+                selection_args["source_identity_keys"] = tuple(source_keys)
+                if candle_selection is not None:
+                    if tuple(source_keys) != requested_source_keys:
+                        candle_selection = inspect_candles(**selection_args)
+                    count = int(candle_selection["row_count"])
+                    anchor = candle_selection["first_observation_at"]
+                else:
+                    source_bound_records = (records if tuple(source_keys) == requested_source_keys
+                                            else list(store.read_series_records(**selection_args)))
+                    count = len(source_bound_records)
+                    anchor = (min(record.fact.open_time for record in source_bound_records)
+                              if count and str(requirement.get("fact_type")) == CANDLE_FACT_TYPE else None)
+                if not count:
                     continue
                 snapshot_bounds: dict[str, str] = {}
                 if str(requirement.get("fact_type")) == CANDLE_FACT_TYPE:
                     step = timedelta(seconds=int(requirement["timeframe_seconds"]))
-                    anchor = min(record.fact.open_time for record in source_bound_records)
                     snapshot_start = start - ((start - anchor) % step)
                     snapshot_end = end + ((anchor - end) % step)
                     if snapshot_start != start or snapshot_end != end:
@@ -365,7 +401,7 @@ def prepare_frozen_dataset_from_requirements(
                         "required_start": _iso(start),
                         "required_end": _iso(end),
                         "resolved_source_identity_keys": source_keys,
-                        "record_count_at_watermark": len(source_bound_records),
+                        "record_count_at_watermark": count,
                     }
                 )
         if len(matches) != 1:
