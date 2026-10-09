@@ -57,6 +57,24 @@ through the existing Fact writer. It retains source timing and lineage, rejects
 source collisions without corrections, and never acquires or silently fills gaps.
 Checks continue to consume separately frozen, explicitly bound inputs.
 
+## Committed watermark lookup
+
+The canonical repository reads the latest visible Fact sequence with one indexed
+lookup per registered series, then takes their maximum in the same SQL statement.
+The existing `(series_id, market_commit_seq)` index supports this without a new
+index, table, cache or writer. Foreign keys keep every Fact attached to a series;
+empty series contribute no value. This preserves the calling transaction's MVCC
+snapshot and excludes uncommitted rows and sequence-allocation gaps. Dataset
+freeze still pins each series' visible watermark in its repeatable snapshot.
+
+A production observation on October 9 found the previous global aggregate still
+scanning history after 24 seconds. A single bounded candidate read took 19.982 ms
+of database execution, with 299 shared block hits, 180 reads and no temporary
+blocks. This is query-level evidence under that cache/load state, not a research
+speedup claim. Cost still grows with series and header partitions. The repository
+change is implemented but not deployed; post-deployment collector cadence and
+repeated preparation measurements remain required.
+
 ## Candle coverage preflight cost
 
 Candle coverage uses the same canonical candle reader, including frozen/preview

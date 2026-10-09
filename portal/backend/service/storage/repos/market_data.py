@@ -1343,8 +1343,16 @@ class PostgresMarketDataRepository:
         return int(
             session.execute(
                 text(
-                    "SELECT COALESCE(MAX(market_commit_seq), 0) "
-                    "FROM market.fact_versions"
+                    # The existing (series_id, market_commit_seq) index can find
+                    # one visible maximum per registered series. A global MAX
+                    # otherwise scans the entire historical composite index.
+                    # This remains one MVCC statement, never the sequence's
+                    # nontransactional last_value or a separately cached clock.
+                    "SELECT COALESCE(MAX(latest.market_commit_seq), 0) "
+                    "FROM market.series s CROSS JOIN LATERAL ("
+                    "SELECT f.market_commit_seq FROM market.fact_versions f "
+                    "WHERE f.series_id=s.id ORDER BY f.market_commit_seq DESC LIMIT 1"
+                    ") latest"
                 )
             ).scalar_one()
         )
