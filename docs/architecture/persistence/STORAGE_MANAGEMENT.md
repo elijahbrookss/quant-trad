@@ -3142,7 +3142,8 @@ alone do not authorize release, restart, or deletion of any migration journal.
 
 The existing operation plan may include `deployment_environment`, the absolute
 path of the existing private (0600) deployment environment. After a fresh
-`recovery_verified` observation, inspection computes a proposed environment
+`recovery_verified` observation, or the explicit software repair admission below,
+inspection computes a proposed environment
 fingerprint. `--execute` additionally preserves the exact original bytes as
 `storage-online-source.env` and creates `storage-online-deployment.env` in the
 private state directory. Both are 0600, created once, and refuse changed or
@@ -3181,7 +3182,7 @@ also excluded from remote pulls. Ordinary source-layout builds are unchanged.
 
 An operation plan may additionally name `deployment_repository`, an absolute
 clean checkout of the exact candidate revision and application source hash.
-With both deployment inputs present, the existing `--execute` path can publish
+With both deployment inputs present, the normal `--execute` path can publish
 the configuration only after fresh runtime and complete encrypted-pair admission.
 Inspection without `--execute` does not publish. This is the final-state owner's
 terminal file transition, not another deployment command or migration retry.
@@ -3223,6 +3224,45 @@ claiming fresh fleet health from obsolete migration container identities.
 This terminal path still requires integrated release qualification and review;
 component file/render tests do not establish production pause, capacity, workload
 or successful migration-plus-deployment outcomes.
+
+### Software repair before recovery completion
+
+`qt storage migrate --operation-file <existing-plan> --repair-release-file <request>`
+inspects an explicit software repair after a durably completed cutover/runtime
+activation. `--execute` publishes only its deployment configuration; the existing
+server deployer still owns service replacement. It cannot combine with migration,
+deadline, cancellation or repository-continuation options.
+
+The private request has exactly `schema_version: qt.storage_repair_release.v1`,
+`final_sha256`, `source_revision` and `source_tree_hash`. The final digest uses
+`storage_host_boundary.digest` over the original final journal, excluding a later
+`release` section. The revision must differ from the original migration candidate.
+The exact clean checkout and application hash are verified during configuration
+inspection; qualification and operator authorization remain prerequisites.
+
+Admission requires every migration/runtime action to be complete, the original
+reader/helpers retired, unchanged journal/configuration/volume/network identities,
+and the original database, backend, collectors and preserved clients healthy.
+Only the maintenance health condition changes: its exact original container must
+be cleanly stopped, with zero PID/exit code, no restart/OOM/dead state and a stable
+state throughout inspection. A bounded read-only backend probe checks the committed
+schema certificate, schema contract and current policy using existing database
+owners. It does not claim the maintenance-only physical/recovery checks passed.
+
+The original request and runtime recipe remain unchanged. The existing release
+section stores the repair request; canonical rendering still rejects changes to
+storage definitions, private inputs, privileges, mounts, resources or database
+image. Publication reports `complete_backup_confirmed: false`. Interrupted file
+publication rechecks the same stopped runtime and exact proposal; after publication,
+only the exact first software release can run through the normal deployer.
+
+Successful software deployment does not certify the encrypted database/archive
+pair, enable research, reclaim retained data or clear other target-state gates.
+Verify those outcomes separately through their existing owners. Preserve partial
+backup evidence; select the next native backup from verified chain state, not an
+invented completion marker. Recovery uses the existing deployer and compatible
+software fixes, never replay of the committed migration or rollback to the old
+source-layout release.
 
 
 The public storage composition also requires the existing read-only application

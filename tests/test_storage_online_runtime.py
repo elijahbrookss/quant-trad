@@ -502,7 +502,9 @@ def test_proposed_runtime_uses_complete_validator_without_publication(split_reci
 
 
 @pytest.mark.parametrize("forward_capture", [False, True])
-def test_completed_runtime_uses_bound_request_identity_for_both_capture_formats(tmp_path, monkeypatch, forward_capture):
+@pytest.mark.parametrize("repair_fault", [None, "valid", "running", "failed", "dead", "backend-stopped",
+    "changed-during-probe", "database", "layout"])
+def test_completed_runtime_uses_bound_request_identity_for_both_capture_formats(tmp_path, monkeypatch, forward_capture, repair_fault):
     """Exercise completion through its backup probe, with read-only Docker peers."""
     now = time.time()
     tmp_path.chmod(0o700)
@@ -547,8 +549,29 @@ def test_completed_runtime_uses_bound_request_identity_for_both_capture_formats(
     monkeypatch.setattr(runtime.host, "database_details", lambda *a: {})
     monkeypatch.setattr(runtime.host, "database_networks", lambda *a: [])
     monkeypatch.setattr(runtime.launch, "_admit", lambda *a: None)
+    repair_probes = []
     def inspect(*args, **kwargs):
+        if args[0] == "exec":
+            assert repair_fault and args[:4] == ("exec", "-i", candidate_ids["backend"], "python")
+            assert args[-1] == runtime._REPAIR_POLICY_PROBE
+            selected = json.loads(kwargs["input"])
+            assert selected["database_identity"] == request["database_identity"]
+            assert selected["confirmed_plan_id"] == saved["commit"]["confirmed_plan_id"]
+            repair_probes.append(selected)
+            return json.dumps(dict(database_identity="different" if repair_fault == "database" else request["database_identity"],
+                plan_id=selected["confirmed_plan_id"], policy_revision=1, storage_layout=dict(
+                    layout_version="changed" if repair_fault == "layout" else "market.fact_storage_tiers.v2",
+                    certificate_sha256="e"*64)))
         assert args[:3] == ("inspect", "--format", "{{json .State}}")
+        if repair_fault and args[-1] == candidate_ids["storage-maintenance"]:
+            state = dict(stopped)
+            if repair_fault == "running": state.update(Running=True, Pid=123)
+            if repair_fault == "failed": state["ExitCode"] = 1
+            if repair_fault == "dead": state["Dead"] = True
+            if repair_fault == "changed-during-probe" and repair_probes: state["StartedAt"] = "changed"
+            return json.dumps(state)
+        if repair_fault == "backend-stopped" and args[-1] == candidate_ids["backend"]:
+            return json.dumps(stopped)
         if args[-1] in {"worker", "spool", "repository", candidate_ids["initialize"]}:
             return json.dumps(stopped)
         return json.dumps({**stopped,"Running":True,"Health":{"Status":"healthy"}})
@@ -570,7 +593,18 @@ def test_completed_runtime_uses_bound_request_identity_for_both_capture_formats(
         return dict(ready=False, reason="current_layout_recovery_pending")
     monkeypatch.setattr(runtime.preserving, "_runtime_observation", probe)
     before = (tmp_path/final.STATE).read_bytes()
-    result = runtime.inspect_completed_runtime(tmp_path, saved=saved)
-    assert result["runtime_ready"] and not result["complete_backup_confirmed"]
-    assert not result["storage_mutations_performed"] and len(probes) == 1
+    if repair_fault not in (None, "valid"):
+        with pytest.raises(RuntimeError, match="maintenance_not_stopped|completion_unhealthy|maintenance_changed|policy_observation_invalid"):
+            runtime.inspect_completed_runtime(tmp_path, saved=saved, repair_release=True)
+        assert not probes
+    else:
+        result = runtime.inspect_completed_runtime(tmp_path, saved=saved, repair_release=bool(repair_fault))
+        assert not result["complete_backup_confirmed"] and not result["storage_mutations_performed"]
+        if repair_fault:
+            assert not result["ready"] and not result["runtime_ready"] and result["repair_release_admissible"]
+            assert len(repair_probes) == 1 and not probes
+            with pytest.raises(RuntimeError, match="completion_unhealthy"):
+                runtime.inspect_completed_runtime(tmp_path, saved=saved)
+        else:
+            assert result["runtime_ready"] and len(probes) == 1 and not repair_probes
     assert (tmp_path/final.STATE).read_bytes() == before

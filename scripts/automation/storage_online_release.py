@@ -28,6 +28,42 @@ logger = logging.getLogger(__name__)
 SOURCE_ENVIRONMENT = "storage-online-source.env"
 PREPARED_ENVIRONMENT = "storage-online-deployment.env"
 
+_REPAIR_FIELDS = {"schema_version", "final_sha256", "source_revision", "source_tree_hash"}
+
+
+def validate_repair_request(value, saved):
+    """Bind an explicit software repair to the unchanged completed migration.
+
+    The request changes only the release candidate. It cannot renew migration
+    authority, certify a backup, or amend the original runtime/request evidence.
+    """
+    original = {key: item for key, item in saved.items() if key != "release"}
+    if (not isinstance(value, dict) or set(value) != _REPAIR_FIELDS
+            or value.get("schema_version") != "qt.storage_repair_release.v1"
+            or value.get("final_sha256") != host.digest(original)
+            or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("source_revision")))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("source_tree_hash")))
+            or saved.get("phase") != "recovery_runtime_ready"):
+        raise RuntimeError("storage_online_repair_release_request_invalid")
+    if "release" in saved and saved["release"].get("repair") != value:
+        raise RuntimeError("storage_online_repair_release_request_changed")
+    return value
+
+
+def load_repair_request(path, saved):
+    return validate_repair_request(host.load_receipt(Path(path), max_bytes=16384), saved)
+
+
+def _deployment_request(request, saved, repair=None):
+    selected = saved.get("release", {}).get("repair") if repair is None else repair
+    if selected is None:
+        return request
+    validate_repair_request(selected, saved)
+    if selected["source_revision"] == request["source_revision"]:
+        raise RuntimeError("storage_online_repair_release_requires_new_revision")
+    return {**request, "source_revision":selected["source_revision"],
+            "source_tree_hash":selected["source_tree_hash"]}
+
 
 def read_private_environment(path):
     raw = preserving._runtime_configuration_bytes(path)
@@ -294,10 +330,11 @@ def deployment_storage_fingerprint(model, *, environment_path, prepared_path):
     return host.digest(value)
 
 
-def inspect_deployment_configuration(state_root, *, repository, environment_path, saved, timeout_seconds=60):
+def inspect_deployment_configuration(state_root, *, repository, environment_path, saved, timeout_seconds=60, repair=None):
     """Render only, against the exact checkout and staged private environment.
 
-    Caller owns the deployment lock and has freshly observed runtime/pair health.
+    Caller owns the deployment lock and has freshly observed runtime/pair health
+    or explicitly admitted the completed runtime with stopped maintenance for repair.
     No active file, receipt, image, container, volume or network is modified here.
     """
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
@@ -305,7 +342,8 @@ def inspect_deployment_configuration(state_root, *, repository, environment_path
     state_root, repository, environment_path = map(Path, (state_root, repository, environment_path))
     if repository.resolve(strict=True) != repository or not repository.is_absolute():
         raise RuntimeError("storage_online_deployment_repository_alias")
-    request = host.load_receipt(state_root/"storage-online-request.json")
+    original_request = host.load_receipt(state_root/"storage-online-request.json")
+    request = _deployment_request(original_request, saved, repair)
     admitted = host.load_receipt(state_root/runtime.RUNTIME_RECIPE, max_bytes=524288)
     if host.digest(admitted) != saved["runtime"]["admission"]["recipe_sha256"]:
         raise RuntimeError("storage_online_deployment_recipe_changed")
@@ -366,10 +404,10 @@ def inspect_deployment_configuration(state_root, *, repository, environment_path
             or read_private_environment(prepared_path) != prepared
             or host.load_receipt(state_root/"storage-online-final.json") != saved
             or host.load_receipt(state_root/runtime.RUNTIME_RECIPE, max_bytes=524288) != admitted
-            or host.load_receipt(state_root/"storage-online-request.json") != request
+            or host.load_receipt(state_root/"storage-online-request.json") != original_request
             or checkout_files() != files):
         raise RuntimeError("storage_online_deployment_inspection_changed")
-    result = dict(**result, request_sha256=host.digest(request), deployment_storage_sha256=deployment_storage_fingerprint(proposed,
+    result = dict(**result, request_sha256=host.digest(original_request), deployment_storage_sha256=deployment_storage_fingerprint(proposed,
         environment_path=environment_path, prepared_path=prepared_path),
         repository=str(repository), files=files, ordinary_relaunch_authorized=False)
     if "release" in saved and result != saved["release"]["configuration"]:
@@ -386,8 +424,14 @@ _RELEASE_FIELDS = {"status", "repository", "environment_path", "candidate_revisi
 
 def validate_release_journal(saved):
     value = saved["release"]
-    if not isinstance(value, dict) or set(value) != _RELEASE_FIELDS:
+    fields = _RELEASE_FIELDS | ({"repair"} if isinstance(value, dict) and "repair" in value else set())
+    if not isinstance(value, dict) or set(value) != fields:
         raise RuntimeError("storage_online_release_journal_invalid")
+    if "repair" in value:
+        repair = validate_repair_request(value["repair"], saved)
+        if (repair["source_revision"] != value["candidate_revision"]
+                or repair["source_tree_hash"] != value["candidate_source_hash"]):
+            raise RuntimeError("storage_online_repair_release_candidate_changed")
     configuration = value["configuration"]
     if (not isinstance(configuration, dict) or set(configuration) != {
             "storage_configuration_sha256", "canonical_configuration_sha256", "deployment_storage_sha256", "request_sha256", "repository", "files", "ordinary_relaunch_authorized"}
@@ -397,7 +441,7 @@ def validate_release_journal(saved):
             or configuration["storage_configuration_sha256"] != saved["runtime"]["admission"]["recipe_sha256"]):
         raise RuntimeError("storage_online_release_configuration_invalid")
     if (saved["phase"] != "recovery_runtime_ready" or not isinstance(value, dict)
-            or set(value) != _RELEASE_FIELDS or value["status"] not in {"publishing", "published", "deployed"}
+            or set(value) != fields or value["status"] not in {"publishing", "published", "deployed"}
             or not re.fullmatch(r"[0-9a-f]{40}", str(value["candidate_revision"]))
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(value[k])) for k in
                 ("candidate_source_hash", "source_environment_sha256", "prepared_environment_sha256",
@@ -470,11 +514,12 @@ def _admit_initial_hold(state_root, saved):
         raise RuntimeError("storage_online_release_initial_hold_changed")
 
 
-def publish_configuration(state_root, *, repository, environment_path, saved, configuration):
+def publish_configuration(state_root, *, repository, environment_path, saved, configuration, repair=None):
     """Publish only terminal configuration, under the existing final-state owner.
 
-    The caller freshly admitted runtime/pair/configuration under the deployment
-    lock. Intent precedes either atomic file replacement. The bridge explicitly
+    The caller freshly admitted runtime/recovery or explicit software repair,
+    and configuration under the deployment lock. Intent precedes either atomic
+    file replacement. The bridge explicitly
     records no completed fleet release and authorizes only the exact next deploy.
     """
     state_root,repository,environment_path=map(Path,(state_root,repository,environment_path))
@@ -498,6 +543,7 @@ def publish_configuration(state_root, *, repository, environment_path, saved, co
     request=host.load_receipt(state_root/"storage-online-request.json")
     if host.digest(request) != configuration["request_sha256"]:
         raise RuntimeError("storage_online_release_request_changed")
+    request = _deployment_request(request, saved, repair)
     bridge=("current_revision=\ncurrent_source_tree_hash=\nprevious_revision=\ndeployed_at=\n"
             "storage_layout=ssd-hdd-v1\npending_storage_revision="+request["source_revision"]+"\n").encode()
     _preserve_file(state_root/SOURCE_RELEASE,source_release)
@@ -510,9 +556,12 @@ def publish_configuration(state_root, *, repository, environment_path, saved, co
         source_environment_sha256=hashlib.sha256(original).hexdigest(),prepared_environment_sha256=hashlib.sha256(prepared).hexdigest(),
         source_release_sha256=hashlib.sha256(source_release).hexdigest(),bridge_release_sha256=hashlib.sha256(bridge).hexdigest(),
         configuration=configuration,requested_at=time.time(),published_at=None,deployed_release_sha256=None)
+    if repair is not None:
+        saved["release"]["repair"] = deepcopy(repair)
     validate_release_journal(saved)
     host.save_receipt(state_root/"storage-online-final.json",saved,initial=False)
-    logger.info("storage_online_release_publication_started | revision=%s intent_retained=true", request["source_revision"])
+    logger.info("storage_online_release_publication_started | revision=%s repair_release=%s intent_retained=true",
+        request["source_revision"], repair is not None)
     return reconcile_configuration_files(state_root,saved=saved)
 
 
@@ -553,8 +602,11 @@ def reconcile_configuration_files(state_root, *, saved):
     saved=deepcopy(saved);saved["release"].update(status="published",published_at=time.time())
     host.save_receipt(state_root/"storage-online-final.json",saved,initial=False)
     logger.info("storage_online_release_configuration_published | revision=%s migration_replay_authorized=false", value["candidate_revision"])
-    return dict(phase="deployment_configuration_published",ordinary_relaunch_authorized=False,
+    result = dict(phase="deployment_configuration_published",ordinary_relaunch_authorized=False,
         deployment_revision=value["candidate_revision"],migration_replay_authorized=False)
+    if "repair" in value:
+        result.update(complete_backup_confirmed=False, recovery_verification_required=True)
+    return result
 
 
 def admit_deployment(state_root, *, environment_path, repository, action, revision):
@@ -582,8 +634,9 @@ def admit_deployment(state_root, *, environment_path, repository, action, revisi
         if hashlib.sha256(read_private_environment(state_root/name)).hexdigest()!=value[key]:
             raise RuntimeError("storage_online_release_artifact_changed")
     request=host.load_receipt(state_root/"storage-online-request.json")
+    candidate = _deployment_request(request, saved)
     if (host.digest(request) != value["configuration"]["request_sha256"]
-            or request["source_revision"] != value["candidate_revision"] or request["source_tree_hash"] != value["candidate_source_hash"]
+            or candidate["source_revision"] != value["candidate_revision"] or candidate["source_tree_hash"] != value["candidate_source_hash"]
             or host.digest(host.load_receipt(state_root/runtime.RUNTIME_RECIPE, max_bytes=524288))
                 != value["configuration"]["storage_configuration_sha256"]):
         raise RuntimeError("storage_online_release_request_changed")

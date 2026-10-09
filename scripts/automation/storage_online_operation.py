@@ -528,7 +528,7 @@ def inspect_initial_operation(state_root, *, plan, deadline):
         return observed
 
 
-def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, reschedule_forward_file=None, recover_repositories_file=None, prepare_forward_only=False):
+def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capacity_file=None, replacement_package_file=None, cancel_attempt_file=None, forward_package_file=None, prepare_forward_keys_file=None, place_forward_lookups_file=None, reschedule_forward_file=None, recover_repositories_file=None, prepare_forward_only=False, repair_release_file=None):
     """Single local operator: inspect by default, execute the existing fixed owners.
 
     The plan supplies measured limits and prepared paths. Initial preparation's
@@ -540,6 +540,11 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
         raise ValueError("storage_online_operation_execute_invalid")
     if type(prepare_forward_only) is not bool:
         raise ValueError("storage_forward_preparation_flag_invalid")
+    if repair_release_file is not None and (prepare_forward_only or any(value is not None for value in (
+            extend_attempt_seconds, capacity_file, replacement_package_file, cancel_attempt_file,
+            forward_package_file, prepare_forward_keys_file, place_forward_lookups_file,
+            reschedule_forward_file, recover_repositories_file))):
+        raise ValueError("storage_repair_release_must_be_separate")
     if recover_repositories_file is not None:
         if prepare_forward_only or any(value is not None for value in (
                 extend_attempt_seconds, capacity_file, replacement_package_file, cancel_attempt_file,
@@ -592,6 +597,9 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     with host.deployment_lock(state_root):
         from scripts.automation.storage_online_deadline import require_settled, _retired
         from scripts.automation import storage_online_forward as forward_owner
+        if repair_release_file is not None and (not os.path.lexists(state_root/final.STATE)
+                or not all(key in plan for key in ("deployment_repository", "deployment_environment"))):
+            raise RuntimeError("storage_repair_release_requires_completed_runtime_and_deployment_inputs")
         if prepare_forward_only and os.path.lexists(state_root/final.STATE):
             raise ValueError("storage_forward_preparation_requires_pre_final_publication")
         published = None
@@ -617,6 +625,10 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                     or worker["binding"]["image"] != plan["image"] or request != effective_request
                     or saved.get("runtime_spool",{}).get("destination") != plan["spool_destination"]):
                 raise RuntimeError("storage_online_completion_plan_changed")
+            repair_options = {}
+            if repair_release_file is not None:
+                from scripts.automation.storage_online_release import load_repair_request
+                repair_options["repair"] = load_repair_request(repair_release_file, saved)
             if "release" in saved:
                 from scripts.automation import storage_online_release as release
                 value = saved["release"]
@@ -628,7 +640,7 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                 if value["status"] == "publishing":
                     if execute:
                         return final.publish_deployment_configuration_locked(state_root,
-                            repository=plan["deployment_repository"], environment_path=plan["deployment_environment"])
+                            repository=plan["deployment_repository"], environment_path=plan["deployment_environment"], **repair_options)
                     return dict(phase="deployment_configuration_unresolved", ordinary_relaunch_authorized=False,
                         migration_replay_authorized=False)
                 release.admit_deployment(state_root, environment_path=plan["deployment_environment"],
@@ -638,10 +650,11 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                 return dict(phase="deployment_recorded" if value["status"] == "deployed" else "deployment_configuration_published",
                     deployment_revision=value["candidate_revision"], migration_replay_authorized=False,
                     ordinary_relaunch_authorized=False, current_fleet_verified=False)
-            result = final.inspect_runtime_completion_locked(state_root)
+            result = final.inspect_runtime_completion_locked(state_root,
+                **({"repair_release":True} if repair_options else {}))
             if load_operation_plan(path) != plan:
                 raise RuntimeError("storage_online_operation_plan_changed")
-            if result["ready"] and "deployment_environment" in plan:
+            if (result["ready"] or repair_options and result.get("repair_release_admissible") is True) and "deployment_environment" in plan:
                 from scripts.automation.storage_online_release import prepare_deployment_environment
                 result["deployment"] = prepare_deployment_environment(state_root,
                     environment_path=plan["deployment_environment"], saved=saved, execute=execute)
@@ -653,13 +666,15 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
                             ordinary_relaunch_authorized=False)
                     else:
                         result["deployment"]["configuration"] = inspect_deployment_configuration(state_root,
-                            repository=plan["deployment_repository"], environment_path=plan["deployment_environment"], saved=saved)
+                            repository=plan["deployment_repository"], environment_path=plan["deployment_environment"], saved=saved, **repair_options)
                 if load_operation_plan(path) != plan:
                     raise RuntimeError("storage_online_operation_plan_changed")
                 if execute and "deployment_repository" in plan:
                     return final.publish_deployment_configuration_locked(state_root,
-                        repository=plan["deployment_repository"], environment_path=plan["deployment_environment"])
-            return dict(phase="recovery_verified" if result["ready"] else "runtime_ready", **result)
+                        repository=plan["deployment_repository"], environment_path=plan["deployment_environment"], **repair_options)
+            phase = "repair_release_ready" if repair_options and result.get("repair_release_admissible") else (
+                "recovery_verified" if result["ready"] else "runtime_ready")
+            return dict(phase=phase, **result)
         if published is not None:
             from scripts.automation import storage_online_terminal as terminal_owner
             if os.path.lexists(state_root/forward_owner.operation_file(

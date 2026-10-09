@@ -1877,8 +1877,9 @@ alone do not authorize release, restart, or deletion of any migration journal.
 
 ### Private environment proposal after verified recovery
 
-The one operation can stage a private environment proposal only after a fresh
-completed-runtime and encrypted-pair observation. Preserve original bytes and
+The normal operation stages a private environment proposal after a fresh
+completed-runtime and encrypted-pair observation. The explicit software repair
+exception below separates repair deployment from recovery readiness. Preserve original bytes and
 all journals; an existing partial or different proposal refuses replacement.
 The proposal derives storage bindings from the admitted runtime and grants no
 release or restart authority. This finite adapter connects migration to the
@@ -1892,7 +1893,7 @@ remain required before ordinary deployment resumes.
 
 An operation plan may additionally name `deployment_repository`, an absolute
 clean checkout of the exact candidate revision and application source hash.
-With both deployment inputs present, the existing `--execute` path can publish
+With both deployment inputs present, the normal `--execute` path can publish
 the configuration only after fresh runtime and complete encrypted-pair admission.
 Inspection without `--execute` does not publish. This is the final-state owner's
 terminal file transition, not another deployment command or migration retry.
@@ -1934,6 +1935,24 @@ claiming fresh fleet health from obsolete migration container identities.
 This terminal path still requires integrated release qualification and review;
 component file/render tests do not establish production pause, capacity, workload
 or successful migration-plus-deployment outcomes.
+
+### Software repair before recovery completion
+
+A failed backup implementation must not prevent deploying its repair. After all
+migration/runtime actions completed and the failed maintenance process is cleanly
+stopped, an explicit repair request may select a different qualified application
+revision through the existing final-state and deployment owners. Original request,
+runtime configuration, clocks, facts, storage placement and recovery evidence stay
+intact. Fresh observation still requires the original running database/collection
+composition, committed schema certificate and policy; the public configuration
+must preserve the same storage definitions. No new migration allowance is issued.
+
+The existing release record stores the repair request and publishes only the exact
+software candidate. Normal file-interruption recovery and full-fleet deployment
+checks apply. This exception certifies neither backup completion nor research
+readiness. A matching encrypted pair remains a separate recovery obligation; the
+old source-layout software remains unsuitable for rollback. See the
+[repair contract](../persistence/STORAGE_MANAGEMENT.md#software-repair-before-recovery-completion).
 
 ### Online baseline order and SSD headroom
 
