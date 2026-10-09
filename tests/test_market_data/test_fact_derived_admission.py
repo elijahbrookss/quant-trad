@@ -102,6 +102,35 @@ def test_material_selection_bounds_each_query_and_the_total_edge_count(monkeypat
     assert batches == [128, 128, 44] and len(edges) == 300 and len(sources) == 1
 
 
+@pytest.mark.parametrize("families", [("canonical",), ("legacy",), ("canonical", "legacy")])
+def test_material_selection_omits_only_impossible_legacy_joins(monkeypatch, families):
+    future, _, _ = _pair()
+    legacy = _row(canonicalize_bbo_feature(future, source=SOURCE), 20)
+    canonical = dict(id="canonical", series_id=12, fact_type="market.trade_flow", material_hash="a"*64,
+        provenance={}, known_at=BASE, market_commit_seq=1, observation_key="flow")
+    selected = {"canonical":canonical, "legacy":legacy}
+    rows = {selected[name]["id"]:selected[name] for name in families}
+    requests = [dict(root_id=name, role="input", series_id=selected[name]["series_id"],
+        fact_type=selected[name]["fact_type"], material_hash=selected[name]["material_hash"],
+        known_at=selected[name]["known_at"], commit_seq=selected[name]["market_commit_seq"]) for name in families]
+    def execute(statement, params):
+        sql = str(statement)
+        # The non-applicable branches caused a measured production plan to scan
+        # the historical header table before its false legacy-key filter.
+        assert ("fact_hot_payloads" in sql) is ("legacy" in families)
+        assert ("fact_archive_material_aliases" in sql) is ("legacy" in families)
+        assert "source.material_hash=requested.material_hash" in sql
+        assert "SELECT DISTINCT root_id,role,id" in sql
+        assert params["limit"] == 11
+        return SimpleNamespace(all=lambda:[(name, "input", selected[name]["id"]) for name in families])
+    monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda *a, **kw:rows)
+    monkeypatch.setattr(admission, "record_from_storage_row", lambda row:None)
+    sources, edges = admission.resolve_material_source_revisions(SimpleNamespace(execute=execute),
+        requests=requests, reader=None, max_rows=10, max_logical_bytes=1024)
+    assert sources == rows
+    assert edges == {(name, "input"):[selected[name]["id"]] for name in families}
+
+
 @pytest.mark.parametrize("mode", ["valid", "missing_mapping", "role", "root_instrument", "futures_instrument",
                                  "spot_instrument", "not_yet_effective", "expired", "input_value", "input_hash"])
 def test_basis_requires_immutable_mapping_scope_and_owner_derived_values(monkeypatch, mode):

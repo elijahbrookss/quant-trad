@@ -983,6 +983,15 @@ reverified under v10 to gain canonical source edges; original page bytes and
 older receipts remain unchanged. This family joins the default-disabled gate;
 Response and normalized-window admission are described below.
 
+Material-source selection omits the hot-provenance and cold-alias candidate
+branches when every request in its bounded batch belongs to a family with no
+legacy material evidence key. Those branches cannot match such facts, and leaving
+a false `CASE` predicate in the join can still produce a full historical-header
+scan. Canonical hash lookup retains its existing index, causal clocks, distinct
+root/source edges, hydration verification and row/byte limits. Batches containing
+legacy keys retain both alias paths; this changes no facts, archive formats,
+provenance meaning or recovery contracts.
+
 Version `market.canonical_archive_verification.v11` strengthens response archive
 publication with canonical source preservation. The declared flow-feature hash
 resolves every causal matching revision and its aggregate/trade closure. The
