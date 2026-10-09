@@ -102,6 +102,7 @@ def test_ci_topology_matches_workflow_jobs() -> None:
         "deployment-contract",
         "clean-database-bootstrap",
         "deployment-rehearsal",
+        "committed-recovery",
     )
     assert set(jobs) == set(expected_jobs)
 
@@ -125,11 +126,11 @@ def test_ci_topology_matches_workflow_jobs() -> None:
 
     topology = _read("docs/engineering/testing/ci-test-topology.md")
     documented_jobs = tuple(
-        re.findall(r"^\| [1-5] \| `([^`]+)` \|", topology, flags=re.MULTILINE)
+        re.findall(r"^\| [1-6] \| `([^`]+)` \|", topology, flags=re.MULTILINE)
     )
     assert documented_jobs == expected_jobs
     normalized = _squash(topology)
-    assert "the workflow defines exactly five jobs" in normalized
+    assert "the workflow defines exactly six jobs" in normalized
     assert "three sequential steps in this fourth job" in normalized
     assert "they are not separate workflow jobs" in normalized
 
