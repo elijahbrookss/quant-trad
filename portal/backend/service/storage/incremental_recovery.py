@@ -340,6 +340,18 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                 raise RuntimeError("incremental_pair_receipt_invalid")
         return results
 
+    def _archive_parent(self, snapshots):
+        points = self.completed()
+        if not points:
+            return None
+        receipt = points[-1][2]
+        expected = {"id": receipt["archive_snapshot"],
+                    "hostname": "qt-"+hashlib.sha256(self.identity.encode()).hexdigest()[:32],
+                    "tags": [receipt["name"]]}
+        if [s for s in snapshots if s["id"] == expected["id"]] != [expected]:
+            raise RuntimeError("incremental_archive_parent_not_owned_or_available")
+        return expected["id"]
+
     def _assert_fence(self, session):
         from .repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
         remaining = max(1, int((self.deadline-monotonic())*1000))
@@ -472,7 +484,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             self._prune(keep_copies)
             backups = self._native_backups()
             self._run(self._rs("unlock"))
-            self._native_snapshots()
+            parent = self._archive_parent(self._native_snapshots())
             versions = {
                 "pgbackrest": self._run([str(self.pgbackrest), "version"]).decode().strip(),
                 "restic": self._run([str(self.restic), "version"]).decode().strip(),
@@ -506,8 +518,12 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             inventory, count, archive_bytes = self._inventory(session, objects, partial)
             database_seconds = monotonic()-start
             output = self._run(self._rs(
+                # The per-generation inventory path prevents restic's default
+                # host+paths lookup from finding a parent. Reuse only a published
+                # owned point; the complete inventory is still hash-verified.
                 "backup", "--host", "qt-"+hashlib.sha256(self.identity.encode()).hexdigest()[:32],
                 "--tag", name, "--read-concurrency", "1", "--no-scan",
+                *(["--parent", parent] if parent is not None else []),
                 "--files-from-raw", str(partial/"files.list")))
             summaries = [item for line in output.splitlines()
                          if (item := json.loads(line)).get("message_type") == "summary"]

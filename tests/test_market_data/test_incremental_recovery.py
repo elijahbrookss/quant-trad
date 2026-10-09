@@ -1,4 +1,5 @@
 """Encrypted recovery key/configuration and bounded subprocess failure paths."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,37 @@ import pytest
 from portal.backend.service.storage.incremental_recovery import (
     EncryptedRecoveryCopies, _private_bytes, _root_label,
 )
+
+
+def test_archive_parent_uses_latest_published_point_instead_of_orphan():
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker.identity = "disposable/15"
+    host = "qt-"+hashlib.sha256(worker.identity.encode()).hexdigest()[:32]
+    receipts = [{"archive_snapshot": n*64, "name": "copy_"+n*32} for n in "123"]
+    snapshots = [{"id": r["archive_snapshot"], "hostname": host, "tags": [r["name"]]}
+                 for r in receipts]
+    worker.completed = lambda: []
+    assert worker._archive_parent(snapshots) is None
+    worker.completed = lambda: [(None, None, r) for r in receipts[:2]]
+    assert worker._archive_parent(snapshots) == receipts[1]["archive_snapshot"]
+
+
+@pytest.mark.parametrize("invalid", ["missing", "foreign_host", "wrong_generation", "duplicate"])
+def test_archive_parent_refuses_unavailable_or_misbound_snapshot(invalid):
+    worker = object.__new__(EncryptedRecoveryCopies)
+    worker.identity = "disposable/15"
+    receipt = {"archive_snapshot": "a"*64, "name": "copy_"+"1"*32}
+    worker.completed = lambda: [(None, None, receipt)]
+    snapshot = {"id": receipt["archive_snapshot"],
+                "hostname": "qt-"+hashlib.sha256(worker.identity.encode()).hexdigest()[:32],
+                "tags": [receipt["name"]]}
+    if invalid == "foreign_host":
+        snapshot["hostname"] = "another-database"
+    elif invalid == "wrong_generation":
+        snapshot["tags"] = ["copy_"+"2"*32]
+    snapshots = [] if invalid == "missing" else [snapshot]*(2 if invalid == "duplicate" else 1)
+    with pytest.raises(RuntimeError, match="incremental_archive_parent_not_owned_or_available"):
+        worker._archive_parent(snapshots)
 
 
 @pytest.mark.skipif(shutil.which("restic") is None, reason="requires pinned native restic")

@@ -124,6 +124,15 @@ then expires wholly unneeded physical chains and archive snapshots. Hidden
 owner-marked generations make forget-before-prune interruption resumable without
 creating another backup. Stale native locks use normal unlock, never remove-all.
 
+The follow-up implementation, not yet deployed, explicitly selects the newest
+published pair's owned restic snapshot as its parent. The per-generation inventory
+filename otherwise defeats restic's default host-and-path matching and causes
+unchanged objects to be reread. Source hash verification still covers the complete
+selected inventory. Added and retired objects follow that inventory, and retained
+snapshots remain independently restorable after parent retirement. This is a
+read optimization within the existing engine, with no receipt-format change;
+production improvement requires measurement after qualification and deployment.
+
 A mandatory bounded max_chain_backups operating limit triggers replacement
 baselines; it is not a weekly full-backup promise. Peak admitted allocation and
 existing reserve/deadline/cancellation checks cover subprocess work. Pinned tools
