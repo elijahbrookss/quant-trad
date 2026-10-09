@@ -2698,8 +2698,8 @@ See [ADR 0073's recovery decision](../decisions/0073-prepare-storage-migrations-
 for the exact admission, clock and failure rules. Native qualification passed for
 the current and first-release application versions on October 9. Production
 repository preparation subsequently succeeded, but WAL delivery remained blocked
-by missing pgBackRest in the retained database image. The production continuation
-has not completed. The same continuation owner implements an explicitly bound
+by missing pgBackRest in the retained database image. The first production continuation
+failed at that boundary. The same continuation owner implements an explicitly bound
 v2 image correction for that completed-preparation failure. It preserves the
 same cluster, volumes, keys and runtime contract, requires identical PostgreSQL
 and Timescale binaries, journals replacement without volume removal, and verifies
@@ -2723,6 +2723,19 @@ corrections, causal reads, frozen results and preservation of every other trigge
 Production execution completed on October 9 with the same cluster and identity
 heap, and fresh accepted facts were observed. This manual repair does not yet fix
 the forward-switch implementation's omission or certify fleet-wide recovery.
+
+Completion inspection preserves the immutable forward publication and all
+reschedule preimages. After a structurally complete `recovery_runtime_ready`
+receipt, the canonical operation reader binds the current runtime recipe to the
+final owner's recorded admission, including an explicitly corrected database
+image. Before completion, publication still requires the original recipe bytes.
+Plan, request, inventory, launch clocks and publication history remain checked in
+both cases. The existing runtime observer must then verify the actual containers,
+cluster, mounts, configuration and complete backup pair before deployment
+publication; matching a recipe alone grants no operational authority. Inspection
+never renews a deadline or dispatches the retired migration. This reader correction
+passed 651 focused host tests; production completion inspection and deployment
+publication remain unverified.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.

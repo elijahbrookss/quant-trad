@@ -331,3 +331,21 @@ def test_preparation_only_cli_uses_local_operation_without_http(monkeypatch, tmp
             "--prepare-forward-only", *(["--execute"] if execute else [])])
         assert args.func(args) == 0
     assert calls == [(str(path), dict(execute=e, prepare_forward_only=True)) for e in (False, True)]
+
+
+
+def test_unamended_completed_publication_keeps_original_evidence(published, monkeypatch):
+    a = published
+    model = deepcopy(a.publication["new_runtime"])
+    model["services"]["tsdb"]["image"] = "sha256:"+"d"*64
+    write(a.root/forward.runtime.RUNTIME_RECIPE, model)
+    final = dict(phase="recovery_runtime_ready", runtime=dict(admission=dict(
+        recipe_sha256=operation.host.digest(model))))
+    monkeypatch.setattr(operation.final, "_load", lambda path: final)
+    before = {p:p.read_bytes() for p in a.root.iterdir() if p.is_file()}
+    assert forward.inspect_published_operation(a.root, operation_path=a.forward_path,
+        completed_runtime=True) == a.publication
+    with pytest.raises(RuntimeError, match="published_file_changed"):
+        forward.inspect_published_operation(a.root, operation_path=a.forward_path)
+    assert all(p.read_bytes() == data for p, data in before.items())
+    assert not a.dispatches

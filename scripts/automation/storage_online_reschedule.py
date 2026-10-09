@@ -244,7 +244,7 @@ def _verify_journal(root, base, journal):
     return journal
 
 
-def inspect_published(root, base, *, request=None, operation_path=None):
+def inspect_published(root, base, *, request=None, operation_path=None, check_runtime=True):
     """Verify both original evidence and the exact completed publication."""
     forward._inspect_publication(root, base, active=False)
     path = root/state_file(base["forward"]["operation_sha256"], version=3)
@@ -259,10 +259,11 @@ def inspect_published(root, base, *, request=None, operation_path=None):
     if ((request is not None and request != journal["new_request"])
             or (operation_path is not None and launch._canonical(operation_path) != new_path)):
         raise RuntimeError("storage_forward_reschedule_request_changed")
-    for target, expected in (
-        (new_path,_bytes(journal["new_plan"])),
-        (root/publication.REQUEST,publication.request_bytes(journal["new_request"])),
-        (root/runtime.RUNTIME_RECIPE,_bytes(journal["new_runtime"]))):
+    checks = [(new_path, _bytes(journal["new_plan"])),
+        (root/publication.REQUEST, publication.request_bytes(journal["new_request"]))]
+    if check_runtime:
+        checks.append((root/runtime.RUNTIME_RECIPE, _bytes(journal["new_runtime"])))
+    for target, expected in checks:
         host.load_receipt(target,max_bytes=MAX_BYTES)
         if target.read_bytes() != expected:
             raise RuntimeError("storage_forward_reschedule_published_file_changed")

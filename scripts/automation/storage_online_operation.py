@@ -592,10 +592,13 @@ def run_operation_plan(path, *, execute=False, extend_attempt_seconds=None, capa
     with host.deployment_lock(state_root):
         from scripts.automation.storage_online_deadline import require_settled, _retired
         from scripts.automation import storage_online_forward as forward_owner
+        if prepare_forward_only and os.path.lexists(state_root/final.STATE):
+            raise ValueError("storage_forward_preparation_requires_pre_final_publication")
         published = None
         effective_request = plan["request"]
         if os.path.lexists(state_root/forward_owner.STATE):
-            published = forward_owner.inspect_published_operation(state_root, operation_path=path)
+            published = forward_owner.inspect_published_operation(state_root, operation_path=path,
+                completed_runtime=os.path.lexists(state_root/final.STATE))
             if published["new_plan"] != plan:
                 raise RuntimeError("storage_forward_operation_plan_changed")
             effective_request = published["new_request"]
