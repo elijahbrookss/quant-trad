@@ -107,6 +107,48 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
     assert any(record.revision == 3 for record in _read(storage))
 
 
+def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch):
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    assert day != BASE.date(), "placement day is not observation time"
+
+    def freeze(start, end):
+        return storage.repo.freeze_dataset([DatasetSeriesRequest(storage.series_id, start, end)])
+
+    # This binding predates the first Fact; later catalog overlap cannot admit it.
+    freeze(BASE - timedelta(seconds=20), BASE + timedelta(seconds=20))
+    for seconds in (0, 10):
+        observed = BASE + timedelta(seconds=seconds)
+        _ingest(storage, replace(storage.fact, observation_key=f"audit-{seconds}",
+            observation_time=observed, accepted_at=observed, known_at=observed,
+            received_at=observed, source_published_at=observed))
+    freeze(BASE - timedelta(seconds=1), BASE + timedelta(seconds=11))
+    freeze(BASE - timedelta(seconds=2), BASE + timedelta(seconds=12))
+    freeze(BASE + timedelta(seconds=10), BASE + timedelta(seconds=11))
+    freeze(BASE + timedelta(seconds=4), BASE + timedelta(seconds=6))  # Catalog range contains a hole.
+    freeze(BASE - timedelta(seconds=1), BASE)  # End is exclusive.
+    freeze(BASE + timedelta(seconds=12), BASE + timedelta(seconds=14))
+
+    archive = PostgresCanonicalFactArchiveRepository(database=storage.database,
+        object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        temporary_directory=tmp_path / "staging")
+    archive.seal_partition(day)
+    while archive.stage_next_page(day)["status"] != "source_exhausted":
+        pass
+    while archive.verify_next_page(day)["status"] != "no_unverified_pages":
+        pass
+    archive.verify_partition(day)
+    with storage.database.session() as session:
+        expected = session.execute(text("""
+            SELECT count(*) FROM market.dataset_series AS pins WHERE EXISTS (
+                SELECT 1 FROM market.fact_versions AS versions WHERE versions.storage_day=:day
+                  AND versions.series_id=pins.series_id AND versions.observation_time>=pins.range_start
+                  AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq)
+        """), {"day": day}).scalar_one()
+        assert expected == 3
+        assert PostgresCanonicalFactReclamationRepository._pinned_ranges(session, day) == expected
+
+
 def test_reclamation_failures_leave_hot_partition_and_progress_intact(storage, tmp_path, monkeypatch):
     day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
     initial = archive.inspect_partition(day)

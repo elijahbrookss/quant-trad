@@ -140,6 +140,9 @@ def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage,
     try:
         assert set(resolve()) == set(fixture.manifests)
         assert returned == [2], "overlapping requests must not multiply mapping candidates"
+        assert set(resolve([{**prefix, "first_receive_ordinal": 2}])) == {fixture.manifests[1]}
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve([{**prefix, "receive_ordinal": 3}])
         with pytest.raises(RuntimeError, match="mapping_missing"):
             resolve(bound_manifest_ids=fixture.manifests[:1])
         with pytest.raises(RuntimeError, match="mapping_missing"):

@@ -849,9 +849,11 @@ the fully decoded object; a fingerprint alone is not raw-frame verification.
 Raw-prefix lookup supplies its bounded scope list as typed, bound SQL `VALUES`,
 so PostgreSQL can plan using the requested scope count instead of a generic
 JSON-recordset estimate. The existing `EXISTS` predicate keeps overlapping
-requests from multiplying mapping candidates. Exact session/epoch/ordinal
-matching, placement bounds, expiry exclusion, deterministic ordering, and raw
-byte verification remain unchanged. This query change adds no index or backfill.
+requests from multiplying mapping candidates. Manifest ordinal bounds also
+exclude unrelated objects before visiting their mappings. Exact session/epoch/ordinal
+matching still proves every requested row; overlapping bounds cannot fill a gap.
+Placement bounds, expiry exclusion, deterministic ordering, and raw byte
+verification remain unchanged. These query changes add no index or backfill.
 
 Default per-call bounds are 50,000 mapping candidates, 1,000,000 decoded raw
 records, and 2 GiB logical data. Individual files are limited to 1 GiB and
@@ -1395,6 +1397,13 @@ It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
 table lock causes a safe retry rather than a queued ingestion stall.
+
+The audit count of overlapping Dataset bindings first uses the already verified
+archive-series bounds to exclude unrelated ranges, then checks exact canonical
+headers and each binding's frozen commit cutoff. Bounds are conservative: gaps
+are not matches, range ends stay exclusive, and placement day is not observation
+time. This reuses the existing catalog after complete evidence checks; it adds
+no authority to delete and does not exempt pinned data from preservation.
 
 The only destructive statement is `DROP TABLE` for that single daily hot-payload
 relation, without `CASCADE`. Table/index/TOAST allocation is reclaimed at commit.

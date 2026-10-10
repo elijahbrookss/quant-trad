@@ -179,7 +179,9 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         # Expose the bounded number of requested scopes to the planner. The
         # recordset function's generic row estimate can choose a full mapping
         # scan even for one prefix. Values remain bound, and EXISTS preserves
-        # one result per mapping when requested ranges overlap.
+        # one result per mapping when requested ranges overlap. Manifest bounds
+        # prune unrelated objects before their mappings; exact rows still prove
+        # every ordinal, including holes and reconnect boundaries.
         fields = (("definition_id", "text"), ("session_id", "text"),
                   ("connection_epoch", "bigint"), ("first_receive_ordinal", "bigint"),
                   ("receive_ordinal", "bigint"))
@@ -193,6 +195,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
             "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
             "AND prefixes.connection_epoch=mappings.connection_epoch "
+            "AND manifests.first_receive_ordinal<=prefixes.receive_ordinal "
+            "AND manifests.last_receive_ordinal>=prefixes.first_receive_ordinal "
             "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
             prefix_params))
     for predicate, params in queries:
