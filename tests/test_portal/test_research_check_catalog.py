@@ -149,3 +149,14 @@ def test_catalogue_assertion_missing_metric_matches_existing_semantics():
     result = evaluate_scalar_assertions({}, [ScalarAssertionSpec("absent", "gt", 0)])
     assert result["assertions"][0]["status"] == "indeterminate"
     assert "indeterminate" in constraint
+
+
+def test_model_metadata_labels_configurable_defaults():
+    request = catalog.get_check_definition("event_fact_analysis", "4")["examples"][0]["request"]
+    request["statistics"] = {"model": {"fit_intercept": False, "seed": 7}, "folds": [{"train": {"start": "2022-01-01T00:00:00Z", "end": "2022-01-01T06:00:00Z"}, "validation": {"start": "2022-01-01T06:00:00Z", "end": "2022-01-02T00:00:00Z"}}]}
+    _, normalized = normalize_check_request(request)
+    assert normalized.parameters["statistics"]["model"]["fit_intercept"] is False
+    assert normalized.parameters["statistics"]["model"]["seed"] == 7
+    description = catalog.get_check_definition("event_fact_analysis", "4")["settings"]["configurable"]["statistics.model"]["constraints"]
+    assert "default true, false allowed" in description
+    assert "seed any integer (default 0)" in description

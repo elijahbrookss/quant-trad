@@ -306,7 +306,7 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             "statistics.folds": {"fields": ["id", "train.start", "train.end", "validation.start", "validation.end"],
                 "constraints": "UTC train.start < train.end <= validation.start < validation.end; walk-forward only."},
             "statistics.model": {"fields": ["type", "c", "fit_intercept", "tolerance", "max_iterations", "seed"],
-                "constraints": "Only standardized_l2_logistic, with folds. c>0 (default 1), tolerance>0 (1e-9), max_iterations positive integer (1000), fit_intercept true, seed integer 0; training-fold standardization."},
+                "constraints": "Only standardized_l2_logistic, with folds. c>0 (default 1), tolerance>0 (1e-9), max_iterations positive integer (default 1000); fit_intercept boolean (default true, false allowed); seed any integer (default 0); training-fold standardization."},
             "statistics.bootstrap": {"fields": ["method", "replicates", "confidence", "seed"],
                 "constraints": "Only utc_day_cluster; positive replicates (default 2000), confidence strictly between 0 and 1 (0.95), integer seed (0)."},
             "statistics.direct_tests": {"fields": ["method", "multiplicity", "target"],
