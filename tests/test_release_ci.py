@@ -23,6 +23,7 @@ def response():
         labels.extend(f"{name} ({runtime})" for runtime in matrix) if matrix else labels.append(name)
     run = dict(id=10, head_sha=SHA, event="push", head_branch="develop", path=".github/workflows/test.yaml",
                status="completed", conclusion="success", run_attempt=2,
+               repository=dict(full_name=ci.REPOSITORY), head_repository=dict(full_name=ci.REPOSITORY),
                html_url=f"https://github.com/{ci.REPOSITORY}/actions/runs/10")
     jobs = [dict(id=index+1, name=name, head_sha=SHA, run_id=10, run_attempt=2,
                  status="completed", conclusion="success", started_at="2026-10-10T01:00:00Z",
@@ -114,12 +115,37 @@ def test_missing_run_or_job_fails_closed(monkeypatch):
         with pytest.raises(ValueError, match="required CI job"):
             ci.qualify(SHA)
     for field, value in (("expired", True), ("digest", ""), ("created_at", "2026-10-09T01:59:00Z"),
-                         ("workflow_run", {"id": 10, "head_sha": "c"*40})):
+                         ("workflow_run", {"id": 10, "head_sha": "c"*40}),
+                         ("digest", "sha256:malformed"), ("workflow_run", {"id": 9, "head_sha": SHA})):
         artifacts = deepcopy(original_artifacts)
         artifacts["artifacts"][0][field] = value
         mock_api(monkeypatch, run, original_jobs, artifacts)
         with pytest.raises(ValueError, match="required CI artifact"):
             ci.qualify(SHA)
+    for missing in ("digest", "workflow_run"):
+        artifacts = deepcopy(original_artifacts)
+        artifacts["artifacts"][0].pop(missing)
+        mock_api(monkeypatch, run, original_jobs, artifacts)
+        with pytest.raises(ValueError, match="required CI artifact"):
+            ci.qualify(SHA)
+    artifacts = deepcopy(original_artifacts)
+    artifacts["artifacts"] = []
+    artifacts["total_count"] = 0
+    mock_api(monkeypatch, run, original_jobs, artifacts)
+    with pytest.raises(ValueError, match="required CI artifact"):
+        ci.qualify(SHA)
+    for field, value in (("event", "pull_request"), ("head_sha", "d"*40),
+                         ("head_repository", {"full_name": "fork-owner/quant-trad"}),
+                         ("repository", {"full_name": "fork-owner/quant-trad"})):
+        candidate = {**run, "head_branch": "feature/handoff", field: value}
+        mock_api(monkeypatch, candidate, original_jobs, original_artifacts)
+        with pytest.raises(ValueError):
+            ci.qualify(SHA, handoff_branch="feature/handoff")
+    jobs = deepcopy(original_jobs)
+    jobs["jobs"][0]["name"] = "wrong-job"
+    mock_api(monkeypatch, run, jobs, original_artifacts)
+    with pytest.raises(ValueError, match="required CI job"):
+        ci.qualify(SHA)
     jobs = deepcopy(original_jobs)
     for job in jobs["jobs"]:
         job["steps"] = []

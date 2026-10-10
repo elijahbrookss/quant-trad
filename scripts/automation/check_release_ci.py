@@ -41,6 +41,8 @@ def qualify(revision: str, *, handoff_branch: str | None = None) -> dict:
     run = max(runs, key=lambda value: value["id"])
     if (run["head_sha"] != revision or run["event"] != "push"
             or run["head_branch"] != branch or run.get("path") != ".github/workflows/test.yaml"
+            or run.get("repository", {}).get("full_name") != REPOSITORY
+            or run.get("head_repository", {}).get("full_name") != REPOSITORY
             or run["status"] != "completed" or run["conclusion"] != "success"):
         raise ValueError("latest exact-commit push CI run is not successful or has wrong identity")
     jobs_response = api(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
