@@ -116,6 +116,28 @@ and debug details separate from values a Strategy may consume.
 A **Check** is a bounded analytical question over declared evidence. It is the
 bridge between “this looks interesting” and “this rule has measured support.”
 
+Discover an implemented method before writing a request:
+
+```bash
+qt research check definitions
+qt research check definition event_fact_analysis --version 11
+```
+
+The list identifies registered base versions and eligibility. Detail returns the
+method's purpose, required inputs, fixed and configurable settings, result
+schema and a request example. Replace the example's resource bindings with
+accessible server instrument/indicator/source IDs. Then use the ordinary
+requirements and preparation commands below; catalogue examples do not grant
+execution permission or claim those resources exist. Preparation returns
+`next_request` for an evidence run after a Dataset has been frozen.
+
+Definition 11 is deliberately a fixed Candle Stats ATR-crossing comparison.
+It exposes its pinned indicator parameters, horizons and matching constraints;
+it does not accept another indicator or a new matching threshold as a setting.
+Other supported methods can express different questions through their existing
+parameters. A genuinely new calculation is an ordinary reviewed Python method;
+see [extending analytical Checks](#extending-analytical-checks).
+
 Use a request file so the question is reviewable and repeatable:
 
 ```bash
@@ -441,3 +463,36 @@ Corrections publish another revision using the prior publication hash. The
 historical snapshot stays readable after later edits. Complete references mean
 an interpretation is durably recorded; actual replay, recovery and scientific
 authority remain separate evidence and operations.
+
+## Extending Analytical Checks
+
+A research question describes what we want to learn. A CheckDefinition identifies
+the analytical method; its evaluator is ordinary versioned Python code, not a
+new database entity. Reuse an existing method when its declared inputs and
+settings express the question. Changing a symbol or supported sample does not
+require another implementation.
+
+For a new method, implement the existing `CheckEvaluator` interface in
+`src/research_science/check.py`: `declare_requirements(definition, request)`
+describes needed evidence and `evaluate(plan, inputs)` computes the result from
+the resolved, owned inputs. Small pure functions can implement or share the
+calculation. Consume the canonical snapshots/Fact inputs supplied by execution;
+do not independently reconstruct an Indicator or read future data through a
+second engine.
+
+Register the evaluator ID/version and immutable CheckDefinition in the existing
+research registry. Put settings validation in that method's existing normalizer
+and wire explicit selection in `materialize_check_definition`. Changed scientific
+semantics need a new version; preserve old registrations for historical replay.
+Add a description and examples to the code-backed catalogue, keeping its
+metadata outside `material_rules` so documentation edits cannot change old
+definition hashes. The catalogue must cover every registered definition and
+label historical or preview-only methods honestly.
+
+Tests should cover deterministic results, known-at and missing-data boundaries,
+requirements, cancellation/resource limits, exact-version replay, and rejection
+of unsupported settings. Catalogue tests should verify that examples select the
+stated version through the real normalizer and reach the existing prepare
+contract, with API/CLI parity. Frozen data, scientific admission and accounting
+remain with their existing owners. There is no plugin installer, expression
+language, saved configuration resource or independent evaluator lifecycle.
