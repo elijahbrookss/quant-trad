@@ -20,6 +20,16 @@ class ResearchOperations:
             raise ValueError("research operation request must be an object")
         return dict(value)
 
+    def definitions(self) -> dict[str, Any]:
+        return self._client.request_json("GET", "/api/research/checks/definitions")
+
+    def definition(self, definition_id: str, version: str) -> dict[str, Any]:
+        from urllib.parse import quote
+
+        return self._client.request_json(
+            "GET", f"/api/research/checks/definitions/{quote(definition_id, safe='')}/{quote(version, safe='')}"
+        )
+
     def requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return self._client.request_json(
             "POST",

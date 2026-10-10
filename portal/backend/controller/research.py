@@ -15,6 +15,7 @@ from ..service.research import governance as research_governance
 from ..service.research import pass_gates as research_pass_gates
 
 
+from ..service.research import catalog as research_catalog
 from ..service.research import publication as research_publication
 
 router = APIRouter()
@@ -344,6 +345,19 @@ def create_research_link(body: ResearchLinkRequest) -> Dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/checks/definitions")
+def list_research_check_definitions() -> Dict[str, Any]:
+    return research_catalog.list_check_definitions()
+
+
+@router.get("/checks/definitions/{definition_id}/{definition_version}")
+def get_research_check_definition(definition_id: str, definition_version: str) -> Dict[str, Any]:
+    try:
+        return research_catalog.get_check_definition(definition_id, definition_version)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/checks/run", status_code=201)

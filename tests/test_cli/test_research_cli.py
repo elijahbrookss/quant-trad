@@ -761,3 +761,17 @@ def test_question_cli_uses_shared_contract(monkeypatch, action):
         "path": f"/api/research/items/study-1/{suffix}",
         "body": bodies[action],
     }
+
+
+@pytest.mark.parametrize("args,path", [
+    (["definitions"], "/api/research/checks/definitions"),
+    (["definition", "event_fact_analysis", "--version", "11"], "/api/research/checks/definitions/event_fact_analysis/11"),
+])
+def test_research_check_catalog_uses_shared_get_contract(monkeypatch, capsys, args, path):
+    from portal.backend.service.research import catalog
+
+    expected = catalog.list_check_definitions() if args == ["definitions"] else catalog.get_check_definition("event_fact_analysis", "11")
+    observed = _capture_request(monkeypatch, json.dumps(expected).encode())
+    assert main(["--no-audit-log", "research", "check", *args]) == 0
+    assert observed == {"method": "GET", "path": path, "body": None}
+    assert json.loads(capsys.readouterr().out) == expected

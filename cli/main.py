@@ -2042,6 +2042,16 @@ def _canonical_research_request(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _cmd_research_check_definitions(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).definitions())
+    return 0
+
+
+def _cmd_research_check_definition(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).definition(args.definition_id, args.version))
+    return 0
+
+
 def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
     _print_json(
         ResearchOperations(_client(args)).requirements(
@@ -4446,6 +4456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="Plan, preview, execute, and replay canonical analytical Checks."
     )
     research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_definitions = research_check_sub.add_parser("definitions", help="List registered analytical methods and eligibility.")
+    research_check_definitions.set_defaults(func=_cmd_research_check_definitions)
+    research_check_definition = research_check_sub.add_parser("definition", help="Inspect an exact method version, settings and request example.")
+    research_check_definition.add_argument("definition_id")
+    research_check_definition.add_argument("--version", required=True)
+    research_check_definition.set_defaults(func=_cmd_research_check_definition)
     research_check_requirements = research_check_sub.add_parser(
         "requirements",
         help="Resolve direct and transitive Check requirements without acquisition.",

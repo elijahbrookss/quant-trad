@@ -18,6 +18,7 @@ code_paths:
   - src/research_science/check.py
   - src/market_data/frozen.py
   - portal/backend/service/research/registry.py
+  - portal/backend/service/research/catalog.py
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
@@ -59,6 +60,29 @@ and the [bounded migration specification](../../engineering/research-data-evolut
 They add no new Check capability or scientific authority. Only actual schema,
 read or resource dependencies should couple research to a storage transition;
 passing storage gates does not resume paused research.
+
+## Discovering implemented methods
+
+The code-owned registry exposes its registered CheckDefinitions through read-only
+`GET /api/research/checks/definitions` and
+`GET /api/research/checks/definitions/{definition_id}/{definition_version}`.
+`qt research check definitions` and `qt research check definition ID --version V`
+use the same ResearchOperations adapter. No latest version is selected implicitly.
+
+Catalogue metadata describes purpose, eligibility, inputs, fixed/configurable
+settings, result shape and binding templates. It is separate from the scientific
+material rules and leaves definition hashes unchanged. Examples are checked by
+the existing request normalizer and requirement declaration; actual input
+resolution and freezing remain in requirements/prepare. Discovery performs no
+acquisition, evidence execution, publication or permission change. Historical
+base version 3 remains visible for replay but has no currently selectable request
+example. Preview-only families remain preview-only.
+
+The generic boundary is CheckDefinition/CheckRequest/ResolvedCheckPlan and
+CheckEvaluator. An evaluator is an ordinary Python implementation, not another
+managed entity. Definition 11/evaluator 10 remains a fixed volatility-specific
+method. Shared functions are appropriate when calculations actually recur;
+discovery adds no DSL, schema, new engine or configurable scientific policy.
 
 ## Purpose
 
