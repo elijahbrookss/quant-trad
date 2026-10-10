@@ -523,6 +523,20 @@ cutoffs, **all** family windows/admission, and writable filesystem/headroom
 checks; a previously returned plan cannot authorize a write. The final physical
 reclaimer independently repeats its exact-relation, pin and current-byte gates.
 
+The staging repository can retain one prepared sealed page while successive
+steps commit book/trade prefix certificates. Its key includes the day and seal,
+expected count, committed page cursor, page limits and verifier version. Each
+call still locks the partition and rechecks policy; publication resolves and
+checks raw/checkpoint dependencies again. A changed cursor or limit, failed
+transaction, cancellation or publication discards the buffer. The scheduled
+executor owns this repository only for its current bounded run, so a restart or
+next run resumes from PostgreSQL and reads the source again. This removes
+repeated hydration without another persisted cache, altered archive format or
+larger step/time budgets. Release qualification must exercise commit failure,
+concurrent publication, changed admission and resource limits in a disposable
+database. Reduced repeated queries alone do not prove sustainable reclamation
+throughput on a deployed host.
+
 The default page bounds are 10,000 rows and 64 MiB logical bytes, with a
 128 MiB encoded-file ceiling. Publication requires reserve for both the encoder
 file and atomic object-store temporary (256 MiB at defaults), in addition to

@@ -42,6 +42,7 @@ class CanonicalFactRetentionExecutor:
         self.use_saved_history_policy = use_saved_history_policy
         self._cursor = None
         self._run_lock = Lock()
+        self._archive = None
 
     def _require_archive(self, *, policy, storage_root, action):
         filesystem = self.repository._filesystem(storage_root)
@@ -65,19 +66,27 @@ class CanonicalFactRetentionExecutor:
             require_hot_window_elapsed(session, partition, policy=current_policy)
             self._require_archive(policy=current_policy, storage_root=storage_root, action=action)
 
-        archive = PostgresCanonicalFactArchiveRepository(
-            database=self.repository.database,
-            object_store=FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects"),
-            temporary_directory=Path(storage_root).expanduser().resolve() / "canonical-staging",
-            limits=FactArchiveLimits(max_rows=policy.max_page_rows,
-                row_group_size=min(512, policy.max_page_rows),
-                max_logical_bytes=policy.max_page_logical_bytes,
-                max_file_bytes=2 * policy.max_page_logical_bytes),
-            max_dependency_bytes=policy.max_verification_bytes,
-            max_dependency_objects=policy.max_verification_objects,
-            statement_timeout_ms=min(policy.execution_statement_timeout_ms, max(1, int(remaining_seconds * 1000))),
-            partition_guard=guard, check_budget=check_budget,
-        )
+        # Reuse only the current run's staging repository. Its one-page buffer
+        # avoids repeating hot hydration for each committed prefix interval.
+        archive = self._archive if action == "stage_page" else None
+        timeout = min(policy.execution_statement_timeout_ms, max(1, int(remaining_seconds * 1000)))
+        if archive is None:
+            archive = PostgresCanonicalFactArchiveRepository(
+                database=self.repository.database,
+                object_store=FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects"),
+                temporary_directory=Path(storage_root).expanduser().resolve() / "canonical-staging",
+                limits=FactArchiveLimits(max_rows=policy.max_page_rows,
+                    row_group_size=min(512, policy.max_page_rows),
+                    max_logical_bytes=policy.max_page_logical_bytes,
+                    max_file_bytes=2 * policy.max_page_logical_bytes),
+                max_dependency_bytes=policy.max_verification_bytes,
+                max_dependency_objects=policy.max_verification_objects,
+                statement_timeout_ms=timeout,
+                partition_guard=guard, check_budget=check_budget,
+            )
+        archive.partition_guard = guard
+        archive.statement_timeout_ms = timeout
+        self._archive = archive if action == "stage_page" else None
         verification = ArchiveVerificationLimits(max_bytes=policy.max_verification_bytes,
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
@@ -116,6 +125,8 @@ class CanonicalFactRetentionExecutor:
             return self._run(policy=policy, storage_root=storage_root, after_storage_day=after_storage_day,
                              cancelled=cancelled, storage_policy_witness=witness)
         finally:
+            # Committed catalog progress is the only state carried across runs.
+            self._archive = None
             self._run_lock.release()
 
     def _run(self, *, policy, storage_root, after_storage_day, cancelled, storage_policy_witness=None):

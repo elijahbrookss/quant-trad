@@ -334,3 +334,91 @@ def test_page_verification_fences_expiry_and_other_workers_but_allows_collection
     with storage.database.session() as session:
         assert session.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
                                {"name": _LIFECYCLE_LOCK_NAME}).scalar_one() is True
+
+
+@pytest.mark.parametrize("interruption", [None, "guard", "cancel", "commit", "cursor", "limits"])
+def test_prepared_page_reuse_rechecks_admission_and_durable_cursor(
+        storage, tmp_path, monkeypatch, interruption):
+    from portal.backend.service.market.canonical_retention import CanonicalRetentionStopRequested
+
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    for index in range(2):
+        _ingest(storage, replace(storage.fact, observation_key=f"prepared-{index}"))
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    kwargs = dict(database=storage.database, object_store=store,
+                  temporary_directory=tmp_path / "staging",
+                  limits=FactArchiveLimits(max_rows=1, row_group_size=1))
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(**kwargs)
+    archive.seal_partition(day)
+    source_reads, prefix_calls = [], []
+
+    def observe_sql(_conn, _cursor, statement, *_):
+        if "WITH candidates AS MATERIALIZED" in statement:
+            source_reads.append(statement)
+
+    def first_prefix(*args, **kw):
+        prefix_calls.append(True)
+        if len(prefix_calls) == 1:
+            return {"status": "book_prefix_verified", "storage_day": day.isoformat()}
+        return None
+
+    # Funding is self-contained. Force the same early return used by a committed
+    # book prefix, while exercising real page SQL, locks, publication and reads.
+    monkeypatch.setattr(archive, "_prepare_book_prefix", first_prefix)
+    event.listen(storage.database._engine, "after_cursor_execute", observe_sql)
+    try:
+        assert archive.stage_next_page(day)["status"] == "book_prefix_verified"
+        assert len(source_reads) == 1
+        if interruption in {"guard", "cancel"}:
+            error = CanonicalRetentionStopRequested if interruption == "cancel" else RuntimeError
+
+            def refuse(*_):
+                raise error("injected current admission refusal")
+
+            archive.partition_guard = refuse
+            with pytest.raises(error, match="current admission refusal"):
+                archive.stage_next_page(day)
+            assert len(source_reads) == 1  # Refuse before using cached input.
+            archive.partition_guard = None
+        elif interruption == "commit":
+            def fail_commit(session):
+                raise RuntimeError("injected prefix commit failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(archive, "_prepare_book_prefix", lambda *_, **__: {"status": "book_prefix_verified"})
+                event.listen(storage.database._session_factory, "before_commit", fail_commit)
+                try:
+                    with pytest.raises(RuntimeError, match="prefix commit failure"):
+                        archive.stage_next_page(day)
+                finally:
+                    event.remove(storage.database._session_factory, "before_commit", fail_commit)
+        elif interruption == "cursor":
+            other = fact_archival.PostgresCanonicalFactArchiveRepository(**kwargs)
+            assert other.stage_next_page(day)["page_ordinal"] == 0
+        elif interruption == "limits":
+            archive.limits = replace(archive.limits, max_logical_bytes=10)
+            with pytest.raises(RuntimeError, match="source_row_budget_exceeded"):
+                archive.stage_next_page(day)
+            archive.limits = kwargs["limits"]
+
+        result = archive.stage_next_page(day)
+        assert result["status"] == "page_acknowledged"
+        assert result["page_ordinal"] == (1 if interruption == "cursor" else 0)
+        assert len(source_reads) == (1 if interruption is None else 3 if interruption in {"cursor", "limits"} else 2)
+        if interruption != "cursor":
+            assert archive.stage_next_page(day)["page_ordinal"] == 1
+        assert archive.stage_next_page(day)["status"] == "source_exhausted"
+        with storage.database.session() as session:
+            rows = session.execute(text(
+                "SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day ORDER BY page_ordinal"
+            ), {"day": day}).mappings().all()
+        assert len(rows) == 2
+        restored = []
+        for row in rows:
+            manifest = fact_archival._catalog_manifest(row)
+            restored.extend(fact_archival.read_canonical_fact_archive(
+                store.local_path(manifest.object_key), expected=manifest, limits=archive.limits))
+        assert len(restored) == 2 and len({row["id"] for row in restored}) == 2
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", observe_sql)
