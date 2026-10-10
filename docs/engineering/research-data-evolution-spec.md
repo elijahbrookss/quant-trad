@@ -85,6 +85,16 @@ further canonical-prefix verification. Two post-deployment observations found
 zero live default-tablespace temporary files. These are initial observations,
 not a sustained throughput result or a bound on peak temporary allocation.
 
+A subsequent cycle at 07:40 UTC reached page publication and hit the existing
+statement timeout on a 1,000-row material-alias insert. An exact catalogue check
+confirmed that the page manifest and aliases were not committed and the August
+22 hot source partition remains sealed and present. Its foreign keys and indexes
+match the current identity model; there is no leftover reference to the old
+header table. Alias/identity heaps and the alias indexes are on HDD, but the
+specific cause of the slow write remains unproven. Resolve that bounded write
+failure before claiming sustainable reclamation; do not bypass the timeout or
+reclaim its source to obtain apparent progress.
+
 **Hard query limits remain open:** the ordinary archive-expiration path does not
 inherit `CanonicalFactRetentionPolicy` statement deadlines, and the query rewrite
 does not add a temporary-space cap. Close this gap at the existing lifecycle
