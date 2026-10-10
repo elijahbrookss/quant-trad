@@ -102,7 +102,13 @@ def resolve_reference(raw: Mapping[str, Any], session: Any) -> dict[str, Any]:
         else:
             # Existing report-bound Check evidence remains Check-owned; never
             # reinterpret RunReportDTO as a multi-Check interpretation.
-            dependency = {"run_id": binding.get("run_id"), "input_kind": binding.get("input_kind")}
+            from portal.backend.service.reports import contract as reports_contract
+            from .service import _immutable_run_binding
+            run_id = required(binding.get("run_id"), "run_id")
+            retained = _immutable_run_binding(reports_contract.get_run_research_dataset(run_id))
+            if retained != binding:
+                raise ValueError("question_evidence_hash_mismatch: retained run evidence binding")
+            dependency = {"run_id": run_id, "report_semantic_fingerprint": binding.get("report_semantic_fingerprint")}
         resolved.update({"evidence_classification": _definition_evidence_classification(definition),
                          "definition_hash": definition.definition_hash,
                          "request_hash": request.request_hash, "plan_hash": plan.plan_hash,
@@ -114,6 +120,7 @@ def resolve_reference(raw: Mapping[str, Any], session: Any) -> dict[str, Any]:
         if required(raw.get("content_hash"), "content_hash") != identity:
             raise ValueError("question_evidence_hash_mismatch: content_hash")
         resolved["content_hash"] = identity
+        resolved["assurance"] = "reasoning_snapshot_not_calculated_evidence"
         # Small reasoning records must remain interpretable after subsequent edits.
         snapshot = deepcopy(item)
         if kind == "study":

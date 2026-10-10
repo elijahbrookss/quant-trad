@@ -505,3 +505,13 @@ idempotent extraction and compatibility reads would be required; this change
 implements no extraction or additional resource. Lightweight future browsing can
 project question/latest revision descriptors using JSONB SQL operators instead
 of fetching the entire payload; existing inventory/detail reads still fetch it.
+
+
+Frozen market-data Check references also revalidate retained source material
+through the existing frozen-series data owner. Existing report-bound Checks
+instead resolve their exact retained run-report binding through the report owner;
+no Dataset semantics are forced onto them and RunReportDTO does not own the
+interpretation. Published references retain the Check owner's assurance
+classification. Small reasoning snapshots explicitly remain
+`reasoning_snapshot_not_calculated_evidence`, including manual/legacy findings;
+a copied result inside a note does not acquire canonical calculated authority.

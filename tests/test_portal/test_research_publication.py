@@ -140,6 +140,9 @@ def test_check_hashes_reject_without_executing_replay(memory, monkeypatch):
                  SimpleNamespace(result_hash="result"))
     monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _: contracts)
     monkeypatch.setattr(service, "replay_research_check", lambda _: pytest.fail("publication must never replay"))
+    from portal.backend.service.reports import contract as reports_contract
+    monkeypatch.setattr(reports_contract, "get_run_research_dataset", lambda _: {"retained": True})
+    monkeypatch.setattr(service, "_immutable_run_binding", lambda _: {"run_id": "run"})
     raw = {"item_id": "check", "kind": "research_check", "role": "contradicts", "result_hash": "result", "evidence_hash": "evidence"}
     resolved = publication.resolve_reference(raw, session)
     assert resolved["result_hash"] == "result"
@@ -147,6 +150,9 @@ def test_check_hashes_reject_without_executing_replay(memory, monkeypatch):
     assert "snapshot" not in resolved
     with pytest.raises(ValueError, match="hash_mismatch"):
         publication.resolve_reference(raw | {"evidence_hash": "wrong"}, session)
+    monkeypatch.setattr(service, "_immutable_run_binding", lambda _: {"run_id": "different"})
+    with pytest.raises(ValueError, match="retained run"):
+        publication.resolve_reference(raw, session)
 
 
 def test_capacity_rejection_preserves_existing_citations_atomically(memory, monkeypatch):
@@ -188,3 +194,49 @@ def test_generic_study_reads_cannot_bypass_history_custody(memory):
         service.get_research_item("question")
     with pytest.raises(ValueError, match="inaccessible"):
         publication.publish("question", request(items))
+
+
+def test_missing_required_target_never_appends(memory, monkeypatch):
+    record, session, items = memory
+    publication.adopt("question", {"question": "What changed?", "scope": "Development"})
+    raw = request(items)
+    monkeypatch.setattr(publication.repository, "get_item", lambda *args, **kwargs: (_ for _ in ()).throw(KeyError("missing")))
+    with pytest.raises(KeyError, match="missing"):
+        publication.publish("question", raw)
+    assert record.payload[publication.KEY]["publications"] == []
+
+
+def test_frozen_reference_requires_retained_material_without_replay(memory, monkeypatch):
+    from market_data.contracts import build_dataset_identity_hash, dataset_series_identity_payload
+    from portal.backend.service.storage.repos.market_data import market_data_repo
+    from portal.backend.service.market import backtest_dataset_service
+    record, session, items = memory
+    entry = {"series_id": 1, "range_start": "2026-01-01T00:00:00Z", "range_end": "2026-01-02T00:00:00Z",
+             "max_commit_seq": 1, "row_count": 1, "material_hash": "material", "provenance_hash": "provenance", "quality_hash": "quality"}
+    dataset_hash = build_dataset_identity_hash([dataset_series_identity_payload(entry)])
+    dataset = SimpleNamespace(dataset_id="dataset", dataset_hash=dataset_hash, series=[entry])
+    evidence = SimpleNamespace(evidence_hash="evidence", evidence_kind="frozen_market_data",
+        input_binding={"dataset_id": "dataset", "dataset_hash": dataset_hash}, code_revision="source")
+    contracts = (SimpleNamespace(definition_hash="definition", definition_id="event_fact_analysis"),
+        SimpleNamespace(request_hash="request"), SimpleNamespace(plan_hash="plan"), evidence,
+        SimpleNamespace(result_hash="result"))
+    items["check"] = {"id": "check", "kind": "research_check", "payload": {}}
+    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _: contracts)
+    monkeypatch.setattr(service, "replay_research_check", lambda _: pytest.fail("publication must not replay"))
+    monkeypatch.setattr(market_data_repo, "get_dataset", lambda _: dataset)
+    calls = []
+    def retained(**kwargs):
+        calls.append(kwargs)
+        return {}, {}, []
+    monkeypatch.setattr(backtest_dataset_service, "validate_frozen_dataset_series", retained)
+    raw = {"item_id": "check", "kind": "research_check", "role": "supports", "result_hash": "result", "evidence_hash": "evidence"}
+    resolved = publication.resolve_reference(raw, session)
+    assert resolved["dataset_hash"] == dataset_hash
+    assert resolved["replay_evidence"] == "not_established_by_publication"
+    assert calls[0]["entry"]["dataset_id"] == "dataset"
+    monkeypatch.setattr(backtest_dataset_service, "validate_frozen_dataset_series", lambda **kwargs: (_ for _ in ()).throw(ValueError("retained material missing")))
+    with pytest.raises(ValueError, match="retained material missing"):
+        publication.resolve_reference(raw, session)
+    monkeypatch.setattr(market_data_repo, "get_dataset", lambda _: (_ for _ in ()).throw(ValueError("retained source missing")))
+    with pytest.raises(ValueError, match="retained source missing"):
+        publication.resolve_reference(raw, session)
