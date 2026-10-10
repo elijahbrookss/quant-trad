@@ -178,29 +178,47 @@ class PostgresMarketStorageLifecycleRepository:
                       "l2": _json({"_qt_l2_evidence": scope}),
                       "bbo": _json({"_qt_bbo_evidence": {"source_position": scope}}),
                       "depth": _json({"_qt_depth_evidence": {"source_position": scope}})}
+        # EXISTS can otherwise choose a hot-table-first join and scan every
+        # payload partition for an absent coverage witness. Select the exact
+        # target's coverage IDs first, then probe the existing provenance GINs.
         scoped = session.execute(text(f"""
+            WITH coverage_candidates AS MATERIALIZED (
+                SELECT DISTINCT coverage.interval_id
+                FROM market.stream_coverage_interval_versions AS coverage
+                WHERE {coverage_scope}
+            )
             SELECT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
                 WHERE hot.provenance @> CAST(:collector AS jsonb)
                    OR hot.provenance @> CAST(:l2 AS jsonb)
                    OR hot.provenance @> CAST(:bbo AS jsonb)
                    OR hot.provenance @> CAST(:depth AS jsonb))
                 OR EXISTS (
-                    SELECT 1 FROM market.stream_coverage_interval_versions AS coverage
-                    JOIN market.fact_hot_payloads AS hot ON hot.provenance @>
-                        jsonb_build_object('_qt_trade_flow_evidence',
+                    SELECT 1 FROM coverage_candidates AS coverage
+                    JOIN LATERAL (
+                        SELECT 1 FROM market.fact_hot_payloads AS hot
+                        WHERE hot.provenance @> jsonb_build_object(
+                            '_qt_trade_flow_evidence',
                             jsonb_build_object('coverage_interval_id', coverage.interval_id))
-                    WHERE {coverage_scope})
+                        LIMIT 1
+                    ) AS witness ON true)
         """), parameters).scalar_one()
         if scoped or target_kind == "book_checkpoint":
             return bool(scoped)
         return bool(session.execute(text("""
-            SELECT EXISTS (SELECT 1 FROM market.raw_archive_record_mappings AS mappings
-                JOIN market.fact_hot_payloads AS hot ON
-                    hot.provenance @> jsonb_build_object('_qt_trade_evidence',
+            WITH mapping_candidates AS MATERIALIZED (
+                SELECT raw_record_id FROM market.raw_archive_record_mappings
+                WHERE manifest_id=:id
+            )
+            SELECT EXISTS (
+                SELECT 1 FROM mapping_candidates AS mappings
+                JOIN LATERAL (
+                    SELECT 1 FROM market.fact_hot_payloads AS hot
+                    WHERE hot.provenance @> jsonb_build_object('_qt_trade_evidence',
                         jsonb_build_object('raw_record_id', mappings.raw_record_id))
-                    OR hot.provenance @> jsonb_build_object('_qt_l2_evidence',
+                       OR hot.provenance @> jsonb_build_object('_qt_l2_evidence',
                         jsonb_build_object('raw_record_id', mappings.raw_record_id))
-                WHERE mappings.manifest_id=:id)
+                    LIMIT 1
+                ) AS witness ON true)
         """), {"id": target_id}).scalar_one())
 
     @contextmanager

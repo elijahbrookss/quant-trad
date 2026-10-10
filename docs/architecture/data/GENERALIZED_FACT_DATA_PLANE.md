@@ -636,8 +636,14 @@ session-scoped backlog protection; exact trade/L2 raw-ID mappings also cover
 generic canonical imports without collector-session metadata. Book/coverage
 scope deliberately protects earlier frames, not only the last source position.
 These checks use the existing JSON-containment GIN indexes and do not decode
-cold files. Planning lists `canonical_hot_backlog`; final expiry repeats the
-check. User-pin release cannot remove either class of canonical protection.
+cold files. Coverage IDs are selected from the immutable target's definition/session
+first; exact raw IDs are selected from its manifest. Materialized candidate sets
+and lateral existence probes keep those small sets outside the hot-payload lookup.
+This avoids a hot-table-first join that can scan every partition when no witness
+exists. All coverage revisions remain eligible witnesses; duplicate interval IDs
+do not alter the boolean hold. No new index, reference authority or historical
+backfill is introduced. Planning lists `canonical_hot_backlog`; final expiry
+repeats the check. User-pin release cannot remove either class of canonical protection.
 
 The final check alone is insufficient. `archive_expiration_lock` holds an
 `UPDATE` row lock on the exact immutable raw/checkpoint manifest through the

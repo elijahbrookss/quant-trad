@@ -9,12 +9,13 @@ restart research. Historical approvals and receipts remain evidence.
 ## Deployed outcome — 2026-10-10
 
 The separately approved schema cutover committed on October 9 at 00:07 UTC.
-Release `f19682d130c09f370764479869d7e2cf0bec1af5` deployed on October 10 at
-02:19 UTC after [all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38011564687).
-It retains the preceding archive-packing and provenance-lookup corrections and
-bounds calendar formatting so research can observe cancellation and ownership
-between batches. The database container, saved policy, environment and migration
-journals were unchanged. This was an ordinary software deployment.
+Release `37177f1c12ca08bbcddc971d34da6b746c267550` deployed on October 10 at
+05:43 UTC after [all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38024578676).
+It narrows frozen-range and raw-prefix lookups using existing catalogue bounds,
+and defers raw compaction until the receive-hour has settled. It retains the
+preceding streaming, cancellation and bounded calendar-formatting changes.
+The database container, saved policy, environment and migration journals were
+unchanged. This was an ordinary software deployment.
 All 17 collectors and the application services were healthy after deployment.
 The cutover is complete and must not be replayed. The dated planning and local
 qualification sections below describe earlier states, not outstanding deployment
@@ -31,13 +32,14 @@ instructions or fresh operational authorization.
   restored, and all 17 collectors were healthy at 20:03 UTC. Controlled reconnects
   remain in gap evidence; health alone does not prove uninterrupted acquisition.
 - The disposable history cache is enabled with a **16 GiB quota** and **500 GiB
-  minimum free-space floor**. One existing 2,948-row archive page passed direct,
-  canonical and cached equality checks, with one fill and an identical-request
-  hit on the preceding release. The deployed correction also passed equality
-  and two cache-hit checks in 4.3 seconds, preserving the existing cache and HDD
-  source. Its first attempt refused a busy lifecycle lock before reading inputs;
-  one retry succeeded after normal shared-read admission became available.
-  This proves the cache path, not a general research speedup.
+  minimum free-space floor**. After actual hot-partition reclamation, a 3,204-row,
+  1.19 MB archive page passed direct and canonical equality checks. The first
+  canonical request filled the SSD cache; the identical request reused it with
+  no measured physical reads in the probe process. Both preserved source bytes
+  and envelope/provenance equality. The requests took about 9 and 8 seconds;
+  decoding and hydration remain substantial. This proves cold routing and cache
+  reuse, not a general research speedup or an OS-cold benchmark. Prior lock and
+  stale-backup admission refusals remain in the receipts.
 - The authorized BTC2022 H04 Check and identical Replay completed with matching
   plan, result and evidence hashes, taking about 598 and 595 seconds respectively.
   They used SQL history and do not measure HDD/cache benefit. That allocation is
@@ -59,22 +61,32 @@ all historical storage backlog is not a research prerequisite. Completed H04
 allocations stay completed; this status does not restart paused automations or
 admit a new scientific allocation.
 
-Remaining qualification is sustained retention throughput versus intake,
-whole-day reclamation, and a full 24-hour filesystem-UUID growth baseline. The
-August 21 partition finished archive verification on October 10 at 03:56 UTC:
-752,156 rows in 92 pages. Its retention audit then hit the existing query deadline;
-the transaction rolled back and the SSD payload partition remains. Later raw-prefix
-lookups also timed out. Candidate fixes narrow those queries using existing verified
-catalogue and manifest bounds while retaining exact checks. A separate candidate
-prevents compaction from repeatedly repacking an unfinished receive-hour. These
-changes are not deployed, and verified archives alone do not prove reclamation.
+Remaining qualification is sustained retention throughput versus intake and a full
+24-hour filesystem-UUID growth baseline. The August 21 partition was reclaimed
+on October 10 at 05:44 UTC after verifying 752,156 rows in 92 archive pages. Its
+1,538,539,520-byte hot relation is absent; this allocation is no longer merely a
+predicted saving. Net filesystem growth still includes concurrent intake, WAL,
+archives and recovery work.
+
+A separate raw-expiration coverage lookup then held the lifecycle fence for over
+eight minutes. All 50 remaining hot partitions have valid provenance GIN indexes,
+but its coverage-to-hot join selected sequential scans. One positively identified
+read-only query was cancelled without terminating the worker. A candidate rewrite
+selects relevant coverage IDs before indexed existence probes; the observed
+negative lookup completed in 0.253 seconds under a one-second read-only limit.
+The matching raw-ID join is being corrected in the same existing owner.
+**These additional query changes are not deployed and require database qualification.**
+No index build, schema change or historical migration is justified by this evidence.
+
 The baseline producer began at 12:38 UTC on October 9; migration, WAL and backup
 growth must be separated from ordinary growth before projecting a capacity horizon.
 No additional historical rewrite or migration-copy deletion is implied. Private
 receipts are retained under `artifacts/storage-implementation/history-read-cache/`:
-`release-f19682d1` (current deployment and 2023 research measurements),
-`release-041e3c0a` (query/compaction qualification), `release-dfd717be` (read/cache
-proof), `release-f9d68118` (2022 H04 evidence), and `retained-raw-history-placement`.
+`release-37177f1c` (current deployment, actual reclaim/cold-cache proof and pending
+coverage-query measurements), `release-f19682d1` (2023 research measurements),
+`release-041e3c0a` (earlier query/compaction qualification), `release-dfd717be`
+(earlier read/cache proof), `release-f9d68118` (2022 H04 evidence), and
+`retained-raw-history-placement`.
 
 ## What we are solving
 
