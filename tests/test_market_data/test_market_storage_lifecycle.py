@@ -154,6 +154,78 @@ def test_lifecycle_plan_is_bounded_stable_and_pin_aware() -> None:
     assert plan["summary"]["estimated_reclaim_bytes"] == 4096
 
 
+@pytest.mark.parametrize(
+    ("observed_at", "minimum_age", "expected_count"),
+    [
+        ("2026-08-01T12:50:00+00:00", 15, 0),
+        ("2026-08-01T13:14:59.999999+00:00", 15, 0),
+        ("2026-08-01T13:15:00+00:00", 15, 1),
+        ("2026-08-01T08:15:00-05:00", 15, 1),
+        ("2026-08-01T13:15:00+00:00", 30, 0),
+        ("2026-08-01T13:30:00+00:00", 30, 1),
+        ("2026-08-01T12:59:59+00:00", 0, 0),
+        ("2026-08-01T13:00:00+00:00", 0, 1),
+    ],
+)
+def test_compaction_waits_for_hour_close_and_configured_age(
+    observed_at, minimum_age, expected_count
+):
+    plan = _service(_LifecycleRepository()).plan(
+        policy=MarketStorageLifecyclePolicy(compaction_min_age_minutes=minimum_age),
+        now=datetime.fromisoformat(observed_at),
+    )
+    assert len(plan["archive_compactions"]) == expected_count
+
+
+def test_compaction_defers_growing_hour_without_banning_later_replacements():
+    repository = _LifecycleRepository()
+    rows = repository.list_compaction_manifests()
+    base = datetime(2026, 8, 1, 12, tzinfo=UTC)
+    # A previous compaction plus a new small segment must not be rewritten
+    # again while this receive-hour is still accumulating records.
+    rows[0].update(id="previous-replacement", last_receive_ordinal=373,
+                   record_count=373, last_received_at=base + timedelta(minutes=19))
+    rows[1].update(first_receive_ordinal=374, last_receive_ordinal=434,
+                   record_count=61, first_received_at=base + timedelta(minutes=20),
+                   last_received_at=base + timedelta(minutes=25))
+    cutoffs = []
+
+    def eligible_rows(*, older_than):
+        cutoffs.append(older_than)
+        return [row for row in rows if row["last_received_at"] < older_than]
+
+    repository.list_compaction_manifests = eligible_rows
+    service = _service(repository)
+    policy = MarketStorageLifecyclePolicy()
+    assert service.plan(policy=policy, now=base + timedelta(minutes=50))[
+        "archive_compactions"
+    ] == []
+    assert cutoffs[-1] == base + timedelta(minutes=35)
+
+    ready = service.plan(policy=policy, now=base + timedelta(minutes=75))[
+        "archive_compactions"
+    ]
+    assert len(ready) == 1
+    assert ready[0]["source_manifest_ids"] == ["previous-replacement", "manifest-2"]
+    assert ready[0]["source_record_count"] == 434
+
+    # Delayed publication of an older segment may still require a later merge.
+    # The eligibility delay must not make that history unreadable or ineligible.
+    rows[:] = [dict(rows[0], id="completed-replacement", last_receive_ordinal=434,
+                    record_count=434, last_received_at=base + timedelta(minutes=25)),
+               dict(rows[1], id="delayed-segment", first_receive_ordinal=435,
+                    last_receive_ordinal=435, record_count=1,
+                    first_received_at=base + timedelta(minutes=59),
+                    last_received_at=base + timedelta(minutes=59))]
+    later = service.plan(policy=policy, now=base + timedelta(minutes=80))[
+        "archive_compactions"
+    ]
+    assert len(later) == 1
+    assert later[0]["source_manifest_ids"] == ["completed-replacement", "delayed-segment"]
+    assert later[0]["source_record_count"] == 435
+    assert later[0]["operation_id"] != ready[0]["operation_id"]
+
+
 def test_lifecycle_run_is_dry_by_default_and_never_takes_mutation_lock() -> None:
     repository = _LifecycleRepository()
     policy = MarketStorageLifecyclePolicy()
