@@ -29,12 +29,12 @@ pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_ONLINE_ENTRYPOINT
 
 
 @pytest.fixture
-def storage(monkeypatch):
+def storage(monkeypatch, request):
     if os.getenv("QT_ONLINE_HOST_FIXTURE") == "1":
         # The host owns this entire fresh cluster and binds POSTGRES_DB to this
         # database. Do not create a different database behind host admission.
         @contextmanager
-        def fresh_host_database(_label):
+        def fresh_host_database(_request):
             dsn = _isolated_parent_dsn()
             name = make_url(dsn).database
             assert name.startswith("qt_migration_online_") and len(name) == len("qt_migration_online_")+16
@@ -48,8 +48,8 @@ def storage(monkeypatch):
                 yield dsn
             finally:
                 engine.dispose()
-        monkeypatch.setattr(tiers, "fresh_migration_database", fresh_host_database)
-    yield from tiers.storage.__wrapped__(monkeypatch)
+        monkeypatch.setattr(tiers, "storage_behavior_database", fresh_host_database)
+    yield from tiers.storage.__wrapped__(monkeypatch, request)
 
 
 

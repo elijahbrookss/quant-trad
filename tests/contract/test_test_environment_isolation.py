@@ -153,3 +153,40 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
         identities.append((project, user, password, database))
 
     assert len(set(identities)) == len(identities)
+
+
+@pytest.mark.parametrize("database_name, namespace_exists", [
+    ("qt_migration_online_" + "a" * 16, False),
+    ("not_the_owned_host_database", False),
+    ("qt_migration_online_" + "a" * 16, True),
+])
+def test_online_host_fixture_retains_private_database_factory_boundary(
+    monkeypatch, database_name, namespace_exists,
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from tests.test_market_data import test_storage_online_entrypoint_db as entrypoint
+    request = object()
+    disposed = []
+    @contextmanager
+    def begin():
+        yield SimpleNamespace(scalar=lambda _: "market" if namespace_exists else None,
+                              execute=lambda _: None)
+    engine = SimpleNamespace(begin=begin, dispose=lambda: disposed.append(True))
+    monkeypatch.setenv("QT_ONLINE_HOST_FIXTURE", "1")
+    monkeypatch.setattr(entrypoint, "_isolated_parent_dsn",
+                        lambda: "postgresql://synthetic:synthetic@timescaledb/" + database_name)
+    monkeypatch.setattr(entrypoint, "create_engine", lambda _: engine)
+    def tier_storage(actual_monkeypatch, actual_request):
+        assert actual_monkeypatch is monkeypatch and actual_request is request
+        with entrypoint.tiers.storage_behavior_database(actual_request) as dsn:
+            yield dsn
+    monkeypatch.setattr(entrypoint.tiers, "storage", SimpleNamespace(__wrapped__=tier_storage))
+    fixture = entrypoint.storage.__wrapped__(monkeypatch, request)
+    if database_name.startswith("qt_migration_online_") and not namespace_exists:
+        assert next(fixture).endswith("/" + database_name)
+        fixture.close()
+        assert disposed == [True]
+    else:
+        with pytest.raises(AssertionError):
+            next(fixture)

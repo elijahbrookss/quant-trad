@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/"src"))
 from scripts.automation import storage_host_boundary as host_boundary
+from scripts.automation import storage_online_recovery as recovery_host
 from scripts.automation import storage_online_terminal as terminal
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image',required=True)
