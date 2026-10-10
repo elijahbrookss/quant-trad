@@ -32,6 +32,7 @@ def memory(monkeypatch):
     record.to_dict = lambda: {"id": record.id, "kind": record.kind, "payload": deepcopy(record.payload)}
     session = Session(record)
 
+    # This fixture simulates rollback; SQL atomicity belongs to the disposable DB case.
     @contextmanager
     def scope():
         before = deepcopy(record.payload)
@@ -155,7 +156,7 @@ def test_check_hashes_reject_without_executing_replay(memory, monkeypatch):
         publication.resolve_reference(raw, session)
 
 
-def test_capacity_rejection_preserves_existing_citations_atomically(memory, monkeypatch):
+def test_capacity_rejection_preserves_citations_under_simulated_rollback(memory, monkeypatch):
     record, session, items = memory
     publication.adopt("question", {"question": "What changed?", "scope": "Development"})
     first = publication.publish("question", request(items))
