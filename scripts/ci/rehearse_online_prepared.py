@@ -14,6 +14,7 @@ from scripts.automation import storage_online_terminal as terminal
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image',required=True)
 parser.add_argument('--database-image',required=True)
+parser.add_argument('--archiver-replacement-image',help='reproduce a legacy missing-archiver image after completed repository preparation')
 parser.add_argument('--output-root',type=Path,required=True)
 parser.add_argument('--history-parent',type=Path,required=True)
 parser.add_argument('--require-distinct-devices',action='store_true')
@@ -34,6 +35,7 @@ parser.add_argument('--deadline-amendment',action='store_true',help='qualify sto
 parser.add_argument('--final-pause',action='store_true',help='qualify interrupted final source stop only; no switch or resumption')
 parser.add_argument('--operation-driver',action='store_true',help='qualify the fixed prepared-operation driver through real runtime readiness')
 parser.add_argument('--full-operation',action='store_true',help='run the public operator before initial preparation with a retired seed fixture')
+parser.add_argument('--repository-config-failure',action='store_true',help='reproduce missing recovery configuration and explicitly recover after final expiry')
 parser.add_argument('--worker-phases',action='store_true',help='drive explicit preparation through the launched worker pipe')
 parser.add_argument('--worker-shutdown',choices=('clean','fail'),help='actual Docker worker/supervisor signal with controlled adapter; requires final pause')
 parser.add_argument('--final-delta',action='store_true',help='bounded held worker tail catch-up, no switch')
@@ -58,6 +60,10 @@ parser.add_argument("--recovery-runtime",action="store_true",help="start actual 
 parser.add_argument('--completion-observation',action='store_true',help='inspect actual paired recovery after the original final window expires, without replay')
 parser.add_argument('--canonical-deployment-repository',type=Path,help='complete owned operation into public recipe and existing deployer')
 options=parser.parse_args()
+if options.archiver_replacement_image and not options.repository_config_failure:
+ parser.error('--archiver-replacement-image requires --repository-config-failure')
+if options.repository_config_failure and not options.full_operation:
+ parser.error('--repository-config-failure requires --full-operation')
 if options.forward_retirement_recovery and not options.forward_retirement:
  parser.error('--forward-retirement-recovery requires --forward-retirement')
 if options.forward_keys and not options.forward_worker:
@@ -185,8 +191,6 @@ try:
 root=Path('/keys')
 for name in ('database.key','archive.key'):
  p=root/name;p.write_text(secrets.token_hex(32));p.chmod(0o600);os.chown(p,70,70)
-config=dict(pgbackrest='/usr/local/bin/pgbackrest',restic='/usr/local/bin/restic',pg_path='/var/lib/postgresql/data',pg_socket_path='/var/run/postgresql',database_key_path='/run/quanttrad/recovery/database.key',archive_key_path='/run/quanttrad/recovery/archive.key',max_chain_backups=4)
-p=root/'incremental-config.json';p.write_text(json.dumps(config));p.chmod(0o600);os.chown(p,70,70)
 os.chown(root,70,70)
 """
   run(['run','--rm','--network','none','--user','0:0','--cap-drop','ALL','--cap-add','CHOWN','--cap-add','DAC_OVERRIDE','--cap-add','FOWNER',
@@ -356,6 +360,11 @@ os.chown(root,70,70)
    if time.monotonic()>received_deadline:raise RuntimeError('real Docker collector did not receive frame')
    time.sleep(.05)
  request=json.loads((control/'request.json').read_text())
+ if options.repository_config_failure:
+  # Declare enough time for native preparation before creating the capture.
+  # The final 120s window and its real expiry remain unchanged; recovery gets
+  # its separate explicit allowance only after reproducing the missing file.
+  request['capture_preparation']['attempt_seconds']=600
  if options.initial_capture:
   if not options.full_operation:
    request['capture_preparation'].update(requested_at=time.time(),deadline=preparation['deadline'])
@@ -444,12 +453,29 @@ os.chown(root,70,70)
     if canonical:plan.update(deployment_environment=str(canonical['environment']),deployment_repository=str(options.canonical_deployment_repository.resolve()))
     operation_file=state/'operation.json'
     host_boundary.save_receipt(operation_file,plan,initial=True)
-    inspected=operation.run_operation_plan(operation_file)
+    from scripts.ci.online_operation_fixture import historical_archiver_preflight
+    with historical_archiver_preflight(bool(options.archiver_replacement_image)):
+     inspected=operation.run_operation_plan(operation_file)
     assert inspected['phase']=='inspected' and not (state/initial.STATE).exists()
-    result=operation.run_operation_plan(operation_file,execute=True)
+    if options.repository_config_failure:
+     from scripts.ci.online_operation_fixture import missing_repository_configuration, recover_missing_repository_configuration
+     try:
+      with missing_repository_configuration(), historical_archiver_preflight(bool(options.archiver_replacement_image)):
+       operation.run_operation_plan(operation_file,execute=True)
+      raise AssertionError('missing repository configuration unexpectedly succeeded')
+     except RuntimeError as exc:
+      if not (state/final_host.STATE).exists(): raise
+      assert final_host._load(state/final_host.STATE)['phase']=='recovery_repository_preparing', str(exc)
+     result=recover_missing_repository_configuration(operation_file,state=state,owned=owned,run=run,
+       archiver_image=options.archiver_replacement_image)
+     report['missing_archiver_image_corrected']=bool(options.archiver_replacement_image)
+     report['expired_committed_repository_continuation']=True
+    else:
+     result=operation.run_operation_plan(operation_file,execute=True)
     preparation=initial._load(state)
     prepared_bytes=(state/initial.STATE).read_bytes()
-    report['initial_preparation_seconds']=result['initial_preparation_seconds']
+    if 'initial_preparation_seconds' in result:
+     report['initial_preparation_seconds']=result['initial_preparation_seconds']
     report['single_operation_from_before_initial_preparation']=True
    else:
     result=operation.run_prepared_operation(state,**kwargs,source_image=source_image,limits=limits,
@@ -474,7 +500,8 @@ os.chown(root,70,70)
    report['operation_preflight_retired_worker_reentry']=True
   else:
    from datetime import datetime
-   assert worker_receipt['deadline']-datetime.fromisoformat(worker_receipt['capture']['started_at']).timestamp() <= 180
+   assert worker_receipt['capture']['seconds']==plan['attempt_seconds']
+   assert worker_receipt['deadline']-datetime.fromisoformat(worker_receipt['capture']['started_at']).timestamp() <= plan['attempt_seconds']
   retired=json.loads(run(['inspect',worker_receipt['container_id'],'--format','{{json .State}}']).stdout)
   assert not retired['Running'] and retired['Pid']==0
   assert original_source_metadata==[working.stat().st_uid,working.stat().st_gid,working.stat().st_mode]
@@ -507,6 +534,30 @@ os.chown(root,70,70)
     report['completion_observation']=dict(observed,after_original_final_deadline=True,
       repeated_without_dispatch=True,journals_unchanged=not bool(canonical))
    finally:host_boundary.supervised_source_action=actual_action
+   if not canonical:
+    # A software failure after committed runtime activation must not require
+    # replaying migration or pretending that stopped maintenance is healthy.
+    # Exercise the real read-only policy/schema probe in the running backend,
+    # including the pinned older image used by committed-recovery CI.
+    with host_boundary.deployment_lock(state):
+     maintenance=saved['runtime']['candidate_ids']['storage-maintenance']
+     run(['stop','--time','10',maintenance],timeout=30)
+     stopped=json.loads(run(['inspect',maintenance,'--format','{{json .State}}']).stdout)
+     assert not stopped['Running'] and stopped['Pid']==0 and stopped['ExitCode']==0
+     try:
+      final_host.inspect_runtime_completion_locked(state)
+      raise AssertionError('stopped maintenance unexpectedly certified recovery readiness')
+     except RuntimeError as exc:
+      assert str(exc)=='storage_online_completion_unhealthy', str(exc)
+     repair=final_host.inspect_runtime_completion_locked(state,repair_release=True)
+     assert repair['repair_release_admissible'] and not repair['ready'] and not repair['complete_backup_confirmed']
+     assert repair['database_identity']==observed['database_identity']
+     assert repair['plan_id']==observed['plan_id'] and repair['storage_layout']==observed['storage_layout']
+     assert (state/final_host.STATE).read_bytes()==final_bytes
+     assert host_boundary.database_query(pgid,frozen_sql)==before_final_frozen
+     report['stopped_maintenance_repair_observation']=dict(repair,journals_unchanged=True,
+       frozen_preserved=True,no_runtime_start=True,production_admission=False)
+
   if canonical:
    published=final_host._load(state/final_host.STATE)
    assert published['release']['status']=='published'
@@ -1145,6 +1196,11 @@ os.chown(root,70,70)
        raise AssertionError('completed recovery phase replay admitted')
       except RuntimeError as exc:assert str(exc)=='storage_online_recovery_committed_live_hold_required'
      if options.recovery_repositories:
+      from scripts.automation import storage_online_recovery as recovery_host
+      from scripts.ci.online_operation_fixture import write_runtime_recipe
+      write_runtime_recipe(state=state,runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE),
+        inventory=inventory,udev=udev,image=image,password=password,dbname=dbname,history=history,
+        project=project,candidate_working=state/'candidate-working',owned=owned)
       owned.append(project+'-storage-repository-prepare')
       before_repositories=final_host._load(state/final_host.STATE)
       start_repositories=time.monotonic()
@@ -1243,10 +1299,6 @@ os.chown(root,70,70)
      if options.recovery_runtime:
       from scripts.automation import storage_online_runtime as runtime_host
       from scripts.automation import storage_online_recovery as recovery_host
-      from scripts.ci.online_operation_fixture import write_runtime_recipe
-      write_runtime_recipe(state=state,runtime_model=host_boundary.load_receipt(state/recovery_host.RECIPE),
-        inventory=inventory,udev=udev,image=image,password=password,dbname=dbname,history=history,
-        project=project,candidate_working=candidate_working,owned=owned)
       started_runtime=time.monotonic()
       actual_runtime_action=host_boundary.supervised_source_action
       recovery_spec=json.loads((control/'runtime-recovery.json').read_text())
@@ -1573,17 +1625,25 @@ finally:
     mine=True
   if name==project+'-storage-spool-prepare':
    mine=details['Config']['Labels'].get('qt.storage-spool-operation')==final_host._load(state/final_host.STATE)['binding']['controller_id']
-  if name==project+'-storage-repository-prepare':
-   mine=details['Config']['Labels'].get('com.docker.compose.project')==project+'-recovery' and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
+  retained_preparer=False
+  if options.repository_config_failure and (state/recovery_host.CONTINUATION_STATE).exists():
+   continuation=host_boundary.load_receipt(state/recovery_host.CONTINUATION_STATE)
+   preparers={continuation['observation']['helper_id']}
+   if continuation['schema_version']=='qt.storage_repository_continuation.v2':
+    prior_path=Path(continuation['previous_records'][recovery_host.CONTINUATION_STATE])
+    assert prior_path.parent==state
+    preparers.add(host_boundary.load_receipt(prior_path)['observation']['helper_id'])
+   retained_preparer=name==details['Id'] and name in preparers
+  if name==project+'-storage-repository-prepare' or retained_preparer:
+   mine=details['Config']['Labels'].get('com.docker.compose.project') in {project+'-recovery',project+'-recovery-continuation'} and details['Config']['Labels'].get('com.docker.compose.service')=='prepare'
   if not mine or run(['rm','-f',details['Id']],check=False).returncode:cleanup_failures.append(name)
  if canonical:
   for name in run(['volume','ls','-q','--filter','label=com.docker.compose.project='+project]).stdout.split():
    details=json.loads(run(['volume','inspect',name]).stdout)[0]
    assert details['Labels'].get('com.docker.compose.project')==project
    run(['volume','rm',name])
- if created_volume:run(['volume','rm',volume])
- if created_recovery_socket:run(['volume','rm',recovery_socket])
- if created_network:run(['network','rm',network])
+ for created,kind,name in ((created_volume,'volume',volume),(created_recovery_socket,'volume',recovery_socket),(created_network,'network',network)):
+  if created and run([kind,'rm',name],check=False).returncode:cleanup_failures.append(kind+':'+name)
  if created_history:
   assert history.parent==history_parent and history.name==project
   cleanup=project+'-cleanup'

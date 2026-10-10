@@ -150,6 +150,14 @@ the consumer's exact requirement range. Strict candle duration, known-at,
 continuity and frozen-range checks remain in force. Extra boundary candles do
 not extend the Check's decision window or admit future information.
 
+Candle planning and pre-freeze source resolution use the existing repository's
+[header selection projection](../data/DATA_BOUNDARY.md#candle-selection-for-research-planning).
+They avoid repeated payload hydration for coverage and source discovery. This
+projection retains source/revision and gap selection semantics but does not
+certify payload custody: freeze and frozen binding validation still read and
+validate the full material. Existing Check definitions, result hashes, scientific
+budgets, and the canonical state-engine timeline are unchanged.
+
 Planning never calls a provider. Preparation may call an existing acquisition
 service only when the operator explicitly authorizes network access and
 budgets. Check execution never acquires.
@@ -481,6 +489,12 @@ versions reject that field. This version pins Candle Stats v1 defaults, 1m
 source candles, a 200-bar finite pre-period initialization and `reset_rewarm`.
 It supports one UTC calendar year or a bounded subwindow for qualification.
 It does not reconstruct an uninterrupted pre-seed EMA history.
+
+Calendar labels use the same UTC pandas formatting in batches of at most 2,048
+timestamps, with execution checkpoints between batches. This limits native
+formatting work that can delay ownership and cancellation helpers; it does not
+change calendar meaning, result hashes, scientific versions, or the materialized
+input contract. It is not a universal stop-latency guarantee.
 
 The collector optionally captures each public output's readiness from the
 canonical engine snapshot. Contiguous identical readiness and gap-segment

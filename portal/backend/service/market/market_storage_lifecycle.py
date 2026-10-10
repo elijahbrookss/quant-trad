@@ -22,6 +22,7 @@ from core.market_storage_lifecycle import (
 )
 
 from ..storage.repos.market_lifecycle import (
+    MarketArchiveWitnessLimitExceeded,
     MarketStorageLifecycleBusyError,
     PostgresMarketStorageLifecycleRepository,
     lifecycle_operation_id,
@@ -100,17 +101,29 @@ class MarketStorageLifecycleService:
         )
         return self._assemble_plan(policy=policy, observed_at=observed_at, canonical=canonical)
 
-    def _assemble_plan(self, *, policy, observed_at, canonical):
+    def _assemble_plan(self, *, policy, observed_at, canonical, defer_witness_limits=False):
         compactions = (
             self._plan_compactions(policy=policy, now=observed_at)
             if policy.archive_compaction_enabled
             else []
         )
-        archive_expirations = (
-            self._plan_archive_expirations(policy=policy, now=observed_at)
-            if policy.archive_expiration_enabled
-            else []
-        )
+        planning_failures = []
+        try:
+            archive_expirations = (
+                self._plan_archive_expirations(policy=policy, now=observed_at)
+                if policy.archive_expiration_enabled
+                else []
+            )
+        except MarketArchiveWitnessLimitExceeded as exc:
+            if not defer_witness_limits:
+                raise
+            # No partial expiration plan becomes deletion authority. Independent
+            # canonical archival may continue after the raw fence is released.
+            archive_expirations = []
+            planning_failures.append({
+                "action": "archive_expiration_plan", "status": "failed", "error": str(exc),
+            })
+            logger.warning("market_archive_expiration_plan_limited | error=%s", exc)
         chunk_compressions: list[dict[str, Any]] = []
         chunk_expirations: list[dict[str, Any]] = []
         actions = [
@@ -143,6 +156,7 @@ class MarketStorageLifecycleService:
             },
             "archive_compactions": compactions,
             "archive_expirations": archive_expirations,
+            "planning_failures": planning_failures,
             "chunk_compressions": chunk_compressions,
             "chunk_expirations": chunk_expirations,
         }
@@ -190,7 +204,11 @@ class MarketStorageLifecycleService:
             after_storage_day=canonical_after_storage_day,
         )
         with self.lifecycle_repository.lifecycle_lock(owner_id=owner):
-            plan = self._assemble_plan(policy=policy, observed_at=_utc(now or datetime.now(UTC)), canonical=canonical)
+            plan = self._assemble_plan(
+                policy=policy, observed_at=_utc(now or datetime.now(UTC)),
+                canonical=canonical, defer_witness_limits=True,
+            )
+            outcomes.extend(plan["planning_failures"])
             store = None
             if any(item["eligible"] for item in [*plan["archive_compactions"], *plan["archive_expirations"]]):
                 store = FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects")
@@ -244,8 +262,9 @@ class MarketStorageLifecycleService:
     def _plan_compactions(
         self, *, policy: MarketStorageLifecyclePolicy, now: datetime
     ) -> list[dict[str, Any]]:
+        minimum_age = timedelta(minutes=policy.compaction_min_age_minutes)
         rows = self.lifecycle_repository.list_compaction_manifests(
-            older_than=now - timedelta(minutes=policy.compaction_min_age_minutes)
+            older_than=now - minimum_age
         )
         grouped: dict[tuple[str, str, int, datetime], list[dict[str, Any]]] = (
             defaultdict(list)
@@ -253,6 +272,10 @@ class MarketStorageLifecycleService:
         for row in rows:
             received = _utc(row["first_received_at"])
             partition_hour = received.replace(minute=0, second=0, microsecond=0)
+            # Wait for the receive-hour to settle instead of repeatedly rewriting
+            # its replacement as new small segments arrive during the same hour.
+            if partition_hour + timedelta(hours=1) + minimum_age > now:
+                continue
             grouped[
                 (
                     str(row["definition_id"]),

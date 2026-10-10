@@ -21,6 +21,7 @@ import subprocess
 from time import monotonic
 from uuid import uuid4
 
+import ijson
 from sqlalchemy import text
 
 from core.storage_targets import StorageLocation
@@ -189,10 +190,12 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                 *["--"+key+"="+value for key, value in options.items()], command]
 
     def _rs(self, *args):
+        # Periodic JSON progress grows with backup duration. Keep summaries and
+        # errors, but do not consume the bounded output buffer with progress.
         return [str(self.restic), "--repo", str(self.root/"archives"),
-                "--no-cache", "--json", *args]
+                "--no-cache", "--json", "--quiet", *args]
 
-    def _run(self, command):
+    def _run(self, command, *, stdout_consumer=None):
         """Bounded subprocess, no secret-bearing diagnostics or ambient config."""
         self.check()
         captured = {"out": bytearray(), "err": bytearray()}
@@ -210,9 +213,13 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                             if not chunk:
                                 streams.unregister(key.fileobj)
                                 continue
+                            if key.data == "out" and stdout_consumer is not None:
+                                stdout_consumer(chunk)
+                                continue
                             captured[key.data].extend(chunk)
                             if len(captured[key.data]) > 8*1024*1024:
-                                raise RuntimeError("incremental_tool_output_limit")
+                                raise RuntimeError(
+                                    f"incremental_tool_output_limit:{Path(command[0]).name}:stream={key.data}")
                 code = process.wait(timeout=max(0.01, self.deadline-monotonic()))
                 if code:
                     # Even native error output may include file contents or keys.
@@ -228,6 +235,75 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                     process.wait(timeout=10)
         self.check()
         return bytes(captured["out"])
+
+    def _native_snapshots(self):
+        """Project native ownership metadata without retaining every archive path.
+
+        Restic's JSON listing includes all files-from-raw paths per snapshot.
+        Parse those incrementally; pruning needs only the full ID, host and tags.
+        No repository contents or snapshot formats are changed by this read.
+        """
+        events = ijson.sendable_list()
+        parser = ijson.parse_coro(events)
+        snapshots, current, keys = [], None, set()
+        started = finished = False
+        metadata_bytes = pending_bytes = 0
+
+        def consume(chunk):
+            nonlocal current, keys, started, finished, metadata_bytes, pending_bytes
+            parser.send(chunk)
+            pending_bytes = 0 if events else pending_bytes + len(chunk)
+            if pending_bytes > 65536:
+                raise RuntimeError("incremental_archive_snapshot_token_limit")
+            for prefix, event, value in events:
+                if len(prefix) > 1024 or (isinstance(value, str) and len(value) > 16384):
+                    raise RuntimeError("incremental_archive_snapshot_token_limit")
+                if prefix == "":
+                    if event == "start_array" and not started:
+                        started = True
+                    elif event == "end_array" and started and not finished:
+                        finished = True
+                    else:
+                        raise RuntimeError("incremental_archive_snapshot_shape_invalid")
+                elif prefix == "item":
+                    if event == "start_map":
+                        current, keys = {"hostname": "", "tags": []}, set()
+                    elif event == "map_key":
+                        if value in keys or len(keys) >= 128 or "." in value:
+                            raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                        keys.add(value)
+                    elif event == "end_map":
+                        if not _HASH.fullmatch(current.get("id", "")):
+                            raise RuntimeError("incremental_archive_snapshot_id_invalid")
+                        metadata_bytes += len(json.dumps(current).encode())
+                        if metadata_bytes > 8*1024*1024:
+                            raise RuntimeError("incremental_archive_snapshot_metadata_limit")
+                        snapshots.append(current)
+                        current = None
+                    else:
+                        raise RuntimeError("incremental_archive_snapshot_shape_invalid")
+                elif prefix in {"item.id", "item.hostname"}:
+                    if event != "string":
+                        raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                    current[prefix.split(".")[1]] = value
+                elif prefix == "item.tags":
+                    if event not in {"start_array", "end_array"}:
+                        raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                elif prefix.startswith("item.tags."):
+                    if prefix != "item.tags.item" or event != "string" or len(current["tags"]) >= 128:
+                        raise RuntimeError("incremental_archive_snapshot_fields_invalid")
+                    current["tags"].append(value)
+            events.clear()
+
+        try:
+            self._run(self._rs("snapshots"), stdout_consumer=consume)
+            parser.close()
+        except ijson.JSONError:
+            # Parser diagnostics can contain paths or other repository content.
+            raise RuntimeError("incremental_archive_snapshot_json_invalid") from None
+        if not finished or current is not None:
+            raise RuntimeError("incremental_archive_snapshot_json_invalid")
+        return snapshots
 
     def _native_backups(self):
         info = json.loads(self._run(self._br("--output=json", "info")))
@@ -263,6 +339,18 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                     or not _HASH.fullmatch(receipt.get("inventory_sha256", ""))):
                 raise RuntimeError("incremental_pair_receipt_invalid")
         return results
+
+    def _archive_parent(self, snapshots):
+        points = self.completed()
+        if not points:
+            return None
+        receipt = points[-1][2]
+        expected = {"id": receipt["archive_snapshot"],
+                    "hostname": "qt-"+hashlib.sha256(self.identity.encode()).hexdigest()[:32],
+                    "tags": [receipt["name"]]}
+        if [s for s in snapshots if s["id"] == expected["id"]] != [expected]:
+            raise RuntimeError("incremental_archive_parent_not_owned_or_available")
+        return expected["id"]
 
     def _assert_fence(self, session):
         from .repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
@@ -365,7 +453,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         self._run(self._br("--repo1-retention-full=9999999",
                            "--repo1-retention-archive-type=incr",
                            "--repo1-retention-archive=1", "expire"))
-        native_snapshots = json.loads(self._run(self._rs("snapshots")))
+        native_snapshots = self._native_snapshots()
         if not snapshots <= {s["id"] for s in native_snapshots}:
             raise RuntimeError("incremental_published_archive_snapshot_missing")
         retired = []
@@ -396,7 +484,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             self._prune(keep_copies)
             backups = self._native_backups()
             self._run(self._rs("unlock"))
-            self._run(self._rs("snapshots"))
+            parent = self._archive_parent(self._native_snapshots())
             versions = {
                 "pgbackrest": self._run([str(self.pgbackrest), "version"]).decode().strip(),
                 "restic": self._run([str(self.restic), "version"]).decode().strip(),
@@ -430,8 +518,12 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             inventory, count, archive_bytes = self._inventory(session, objects, partial)
             database_seconds = monotonic()-start
             output = self._run(self._rs(
+                # The per-generation inventory path prevents restic's default
+                # host+paths lookup from finding a parent. Reuse only a published
+                # owned point; the complete inventory is still hash-verified.
                 "backup", "--host", "qt-"+hashlib.sha256(self.identity.encode()).hexdigest()[:32],
                 "--tag", name, "--read-concurrency", "1", "--no-scan",
+                *(["--parent", parent] if parent is not None else []),
                 "--files-from-raw", str(partial/"files.list")))
             summaries = [item for line in output.splitlines()
                          if (item := json.loads(line)).get("message_type") == "summary"]

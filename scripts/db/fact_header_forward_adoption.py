@@ -705,6 +705,8 @@ def release_for_switch(conn):
     for family, relation, suffix in _owned_triggers(state):
         trigger = conn.dialect.identifier_preparer.quote(_trigger_name(family, suffix))
         conn.exec_driver_sql("DROP TRIGGER " + trigger + " ON " + relation)
+    from scripts.db.fact_header_v2_online_proof import release_forward_targets
+    release_forward_targets(conn)
     return context
 
 

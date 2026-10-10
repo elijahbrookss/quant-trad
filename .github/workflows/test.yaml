@@ -12,6 +12,106 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/') }}
 
 jobs:
+  committed-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      QT_RECOVERY_FIXTURE_ROOT: /tmp/qt-committed-recovery
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [current, '24357ff387776822f676ae2a8b1cce7f209c313e']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install isolated operator dependencies
+        run: |
+          python -m pip install --no-deps -r requirements.lock
+          python -m pip check
+      - name: Prepare an accessible private operator workspace
+        run: |
+          test ! -e "$QT_RECOVERY_FIXTURE_ROOT"
+          sudo install -d -o 1000 -g 1000 -m 0700 "$QT_RECOVERY_FIXTURE_ROOT" \
+            "$QT_RECOVERY_FIXTURE_ROOT/source" "$QT_RECOVERY_FIXTURE_ROOT/evidence" "$QT_RECOVERY_FIXTURE_ROOT/history"
+          git archive HEAD | sudo tar -x -C "$QT_RECOVERY_FIXTURE_ROOT/source"
+          sudo chown -R 1000:1000 "$QT_RECOVERY_FIXTURE_ROOT/source"
+          compose_plugin="$(docker info --format '{{json .ClientInfo.Plugins}}' | python -c \
+            'import json,sys; print(next(p["Path"] for p in json.load(sys.stdin) if p["Name"] == "compose"))')"
+          test -f "$compose_plugin"
+          sudo install -d -o 1000 -g 1000 -m 0700 \
+            "$QT_RECOVERY_FIXTURE_ROOT/docker-config" "$QT_RECOVERY_FIXTURE_ROOT/docker-config/cli-plugins"
+          sudo install -o 1000 -g 1000 -m 0700 "$compose_plugin" \
+            "$QT_RECOVERY_FIXTURE_ROOT/docker-config/cli-plugins/docker-compose"
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env QT_DISABLE_DOTENV=1 "$(command -v python)" \
+            "$QT_RECOVERY_FIXTURE_ROOT/source/scripts/ci/rehearse_online_prepared.py" --help >/dev/null
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" docker info --format '{{.ServerVersion}}'
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" docker compose version
+      - name: Build current or first-release runtime and guarded fixture
+        env:
+          RUNTIME_REF: ${{ matrix.runtime }}
+        run: |
+          revision="$RUNTIME_REF"
+          if [[ "$revision" == current ]]; then revision="$(git rev-parse HEAD)"; fi
+          source_root="$RUNNER_TEMP/recovery-runtime-source"
+          mkdir "$source_root"
+          git archive "$revision" | tar -x -C "$source_root"
+          tree_hash="$(python scripts/provenance/source_tree_hash.py --root "$source_root")"
+          docker build --file "$source_root/portal/backend/Dockerfile" --target storage-test \
+            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
+            --tag qt-committed-recovery-runtime "$source_root"
+          docker build --file docker/postgres/Dockerfile --tag quanttrad-postgres:2.14.2-pg15 .
+          # Reproduce the actual retained image's missing tool without changing PG.
+          printf 'FROM quanttrad-postgres:2.14.2-pg15\nRUN rm /usr/local/bin/pgbackrest\n' > "$RUNNER_TEMP/Dockerfile.missing-archiver"
+          docker build --file "$RUNNER_TEMP/Dockerfile.missing-archiver" --tag qt-postgres-missing-archiver .
+          cat > "$RUNNER_TEMP/Dockerfile.recovery-guard" <<'DOCKERFILE'
+          FROM qt-committed-recovery-runtime
+          LABEL qt.guarded-source-fixture=true
+          COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/run_backend.py
+          COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/workers/single_node_initializer.py
+          COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/workers/market_data_collector.py
+          DOCKERFILE
+          docker build --file "$RUNNER_TEMP/Dockerfile.recovery-guard" --tag qt-committed-recovery-guard .
+      - name: Recover missing configuration and missing database archiver after actual expiry
+        env:
+          QT_DISABLE_DOTENV: '1'
+        run: |
+          history_root="$QT_RECOVERY_FIXTURE_ROOT/history"
+          sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=1000,gid=1000" tmpfs "$history_root"
+          trap 'sudo umount "$history_root"' EXIT
+          # The private application spool deliberately belongs to UID/GID 1000.
+          # Match that unprivileged operator in the fixture; grant only Docker's
+          # existing socket group, without changing runtime admission or modes.
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env QT_DISABLE_DOTENV=1 DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" \
+            bash -c 'cd "$1"; shift; exec "$@"' _ \
+            "$QT_RECOVERY_FIXTURE_ROOT/source" "$(command -v python)" scripts/ci/rehearse_online_prepared.py \
+            --image qt-committed-recovery-runtime --database-image qt-postgres-missing-archiver \
+            --archiver-replacement-image quanttrad-postgres:2.14.2-pg15 \
+            --output-root "$QT_RECOVERY_FIXTURE_ROOT/evidence" --history-parent "$history_root" --require-distinct-devices \
+            --prepare-source --worker-phases --initial-capture --final-pause --final-delta --switch-entry \
+            --close-logins success --commit-switch --guarded-source-image qt-committed-recovery-guard \
+            --recovery-mounts --recovery-repositories --recovery-spool --recovery-runtime \
+            --operation-driver --full-operation --repository-config-failure --completion-observation
+      - name: Pack disposable qualification evidence
+        if: always()
+        run: sudo tar -C "$QT_RECOVERY_FIXTURE_ROOT/evidence" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .
+      - name: Preserve disposable qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: committed-recovery-${{ matrix.runtime }}
+          path: ${{ runner.temp }}/committed-recovery.tar.gz
+          retention-days: 7
+
   pr-suite:
     runs-on: ubuntu-latest
 
@@ -122,6 +222,12 @@ jobs:
           docker build --file portal/backend/Dockerfile --target storage-test \
             --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
             --tag qt-incremental-runtime-proof .
+          docker run --rm --network none --user postgres --cpus 2 --memory 512m --pids-limit 64 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
+            qt-incremental-runtime-proof \
+            python -m pytest -q tests/test_market_data/test_incremental_recovery.py \
+            -o cache_dir=/tmp/qt-incremental-output-pytest-cache
           docker run --rm --network none --user postgres --cpus 2 --memory 2g --pids-limit 128 \
             --cap-drop ALL --security-opt no-new-privileges \
             --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \

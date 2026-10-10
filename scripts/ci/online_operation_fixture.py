@@ -1,7 +1,182 @@
 """Disposable runtime configuration shared by online host rehearsals."""
 import json
+from contextlib import contextmanager
+import hashlib
+import inspect
+import subprocess
 from pathlib import Path
+import time
 from scripts.automation import storage_host_boundary as host_boundary
+
+
+@contextmanager
+def missing_repository_configuration():
+    """Reproduce the old host command against a fixture with only recovery keys."""
+    from scripts.automation import storage_online_repositories as repositories
+    original = repositories.prepare_repositories
+    source = inspect.getsource(original)
+    needle = 'incremental_configuration=incremental_configuration(state_root),'
+    assert source.count(needle) == 1
+    source = source.replace(needle, 'incremental_config="/run/quanttrad/recovery/incremental-config.json",')
+    helper = repositories._PREPARE
+    begin = helper.index('# Reuse the admitted maintenance configuration.')
+    end = helper.index("for name in ('inventory','incremental_config'", begin)
+    namespace = dict(vars(repositories), _PREPARE=helper[:begin]+helper[end:])
+    exec(compile(source, '<disposable-old-repository-preparer>', 'exec'), namespace)
+    repositories.prepare_repositories = namespace['prepare_repositories']
+    try:
+        yield
+    finally:
+        repositories.prepare_repositories = original
+
+
+@contextmanager
+def historical_archiver_preflight(enabled):
+    """Fixture-only reproduction of an already-committed pre-guard deployment.
+
+    The initial legacy attempt predates archiver admission. Production guards
+    remain unchanged; the correcting v2 request uses the real guard and Docker.
+    """
+    from scripts.automation import storage_online_recovery as recovery
+    original = recovery.inspect_database_archiver
+    if enabled:
+        recovery.inspect_database_archiver = lambda *args: {'pgbackrest_version': 'fixture historical preflight'}
+    try:
+        yield
+    finally:
+        recovery.inspect_database_archiver = original
+
+
+def recover_missing_database_archiver(operation_file, *, state, owned, run, image):
+    """Real expired WAL-wait failure, image replacement and normal runtime recovery."""
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_final as final, storage_online_runtime as runtime
+    from scripts.automation import storage_online_recovery as recovery
+    from scripts.automation import storage_online_repositories as repositories
+    names = (final.STATE, recovery.CONTINUATION_STATE, recovery.RECIPE, runtime.RUNTIME_RECIPE)
+    prior = {name: (state/name).read_bytes() for name in names}
+    saved = final._load(state/final.STATE)
+    old_id = saved['recovery']['replacement_id']
+    old_details = host_boundary.database_details(old_id)
+    helper = saved['repositories']['helper_id']
+    helper_state = run(['inspect', helper, '--format', '{{json .State}}']).stdout
+    assert saved['repositories']['completed'] == list(repositories._ACTIONS)
+    with host_boundary.docker_deadline(time.monotonic()+15):
+        assert json.loads(host_boundary.maintenance_query(old_id,
+            'SELECT to_json(archived_count)::text FROM pg_stat_archiver')) == 0
+    assert 'pgbackrest: not found' in run(['logs', '--tail', '100', old_id]).stderr
+    try:
+        recovery.inspect_database_archiver(old_id)
+        raise AssertionError('missing tool passed normal preflight')
+    except RuntimeError as exc:
+        assert 'storage_database_archiver_unavailable' in str(exc)
+    image = run(['image', 'inspect', '--format', '{{.Id}}', image]).stdout.strip()
+    request = state/'archiver-continuation-request.json'
+    host_boundary.save_receipt(request, dict(schema_version='qt.storage_repository_continuation.v2',
+        operation_sha256=hashlib.sha256(operation_file.read_bytes()).hexdigest(),
+        final_sha256=hashlib.sha256(prior[final.STATE]).hexdigest(), duration_seconds=300,
+        previous_continuation_sha256=hashlib.sha256(prior[recovery.CONTINUATION_STATE]).hexdigest(),
+        database_image=image), initial=True)
+    observed = operation.run_operation_plan(operation_file, recover_repositories_file=request)
+    assert observed['storage_mutations_performed'] is False
+    assert {name: (state/name).read_bytes() for name in names} == prior
+    result = operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+    audit = host_boundary.load_receipt(state/recovery.CONTINUATION_STATE)
+    current = final._load(state/final.STATE)
+    assert audit['phase'] == 'runtime_ready'
+    assert audit['database_replacement']['completed'] == ['stop', 'remove', 'create', 'start', 'publish']
+    assert audit['deadline']-audit['started_at'] <= 300
+    for name in names:
+        assert Path(audit['previous_records'][name]).read_bytes() == prior[name]
+    new_id = current['recovery']['replacement_id']
+    owned.append(new_id)
+    details = host_boundary.database_details(new_id)
+    assert details['image'] == image and new_id != old_id
+    assert host_boundary.database_contract(details) == host_boundary.database_contract(old_details)
+    assert sorted(details['mounts'], key=lambda v:v['Destination']) == sorted(old_details['mounts'], key=lambda v:v['Destination'])
+    assert current['repositories']['completed'] == saved['repositories']['completed']
+    assert current['repositories']['helper_id'] == helper
+    assert run(['inspect', helper, '--format', '{{json .State}}']).stdout == helper_state
+    assert all(current[k] == saved[k] for k in ('started_at', 'started_boot', 'boot_id', 'commit', 'binding'))
+    try:
+        operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+        raise AssertionError('archiver correction replay admitted')
+    except RuntimeError as exc:
+        assert str(exc) == 'storage_archiver_recovery_previous_attempt_unresolved'
+    return result
+
+
+def recover_missing_repository_configuration(operation_file, *, state, owned, run, archiver_image=None):
+    """Exercise the public recovery command after actual original-clock expiry."""
+    from scripts.automation import storage_online_operation as operation
+    from scripts.automation import storage_online_final as final
+    from scripts.automation import storage_online_recovery as recovery
+    from scripts.automation import storage_online_launch as launch
+    from scripts.automation import storage_online_repositories as recovery_repositories
+    # Includes actual application startup and encrypted recovery checks; native
+    # runners measured about 120s through the last UI restoration check.
+    recovery_seconds = 90 if archiver_image else 180
+    original = (state/final.STATE).read_bytes()
+    saved = final._load(state/final.STATE)
+    worker = host_boundary.load_receipt(state/launch._STATE)
+    assert saved['phase'] == 'recovery_repository_preparing'
+    assert saved['repositories']['completed'] == ['logins', 'create']
+    assert saved['repositories']['inflight'] == 'prepare'
+    failed = saved['repositories']['helper_id']
+    failed_project = json.loads(run(['inspect', failed, '--format', '{{json .Config.Labels}}']).stdout)['com.docker.compose.project']
+    owned.append(failed)
+    while time.time() <= saved['deadline']+.1:
+        time.sleep(min(.2, saved['deadline']+.2-time.time()))
+    request = state/'repository-continuation-request.json'
+    host_boundary.save_receipt(request, dict(schema_version='qt.storage_repository_continuation.v1',
+        operation_sha256=hashlib.sha256(operation_file.read_bytes()).hexdigest(),
+        final_sha256=hashlib.sha256(original).hexdigest(), duration_seconds=recovery_seconds), initial=True)
+    with historical_archiver_preflight(bool(archiver_image)):
+        observed = operation.run_operation_plan(operation_file, recover_repositories_file=request)
+    assert observed['storage_mutations_performed'] is False
+    assert not (state/recovery.CONTINUATION_STATE).exists()
+    assert (state/final.STATE).read_bytes() == original
+    if archiver_image:
+        try:
+            with historical_archiver_preflight(True):
+                operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+            raise AssertionError('database missing archiver unexpectedly completed')
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            failed_final = final._load(state/final.STATE)
+            assert failed_final['phase'] == 'recovery_repository_preparing'
+            assert failed_final['repositories']['completed'] == list(recovery_repositories._ACTIONS)
+            assert failed_final['repositories']['inflight'] is None
+            assert isinstance(exc, subprocess.TimeoutExpired) or 'deadline' in str(exc)
+            # Docker uses the tighter monotonic phase ceiling; its final bounded
+            # call can time out before the wall-clock ceiling by milliseconds.
+            # Wait for actual wall expiry too; do not rewrite either clock.
+            assert time.monotonic() >= failed_final['repositories']['deadline_monotonic']
+            while time.time() <= failed_final['deadline']+.1:
+                time.sleep(min(.2, failed_final['deadline']+.2-time.time()))
+        result = recover_missing_database_archiver(operation_file, state=state, owned=owned,
+                                                  run=run, image=archiver_image)
+        audit = host_boundary.load_receipt(Path(host_boundary.load_receipt(
+            state/recovery.CONTINUATION_STATE)['previous_records'][recovery.CONTINUATION_STATE]))
+    else:
+        result = operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+        audit = host_boundary.load_receipt(state/recovery.CONTINUATION_STATE)
+    assert Path(audit['original_final']).read_bytes() == original
+    assert host_boundary.load_receipt(state/launch._STATE) == worker
+    assert audit['phase'] == ('preparing' if archiver_image else 'runtime_ready')
+    assert audit['deadline']-audit['started_at'] <= recovery_seconds
+    current = final._load(state/final.STATE)
+    replacement_project = json.loads(run(['inspect', current['repositories']['helper_id'],
+        '--format', '{{json .Config.Labels}}']).stdout)['com.docker.compose.project']
+    assert replacement_project != failed_project
+    assert all(current[k] == saved[k] for k in ('started_at', 'started_boot', 'boot_id', 'commit', 'binding'))
+    status = json.loads(run(['inspect', failed, '--format', '{{json .State}}']).stdout)
+    assert status['Status'] == 'exited' and status['Pid'] == 0 and status['ExitCode'] == 1
+    try:
+        operation.run_operation_plan(operation_file, recover_repositories_file=request, execute=True)
+        raise AssertionError('completed continuation replay admitted')
+    except RuntimeError as exc:
+        assert str(exc) == 'storage_repository_continuation_intent_exists_reconcile_required'
+    return result
 
 
 def write_runtime_recipe(*, state, runtime_model, inventory, udev, image, password,
@@ -40,7 +215,10 @@ def write_runtime_recipe(*, state, runtime_model, inventory, udev, image, passwo
        service_mounts.append(mounts['/var/lib/postgresql/data']);environment['QT_MARKET_DATA_ROOT']=str(history/'archives')
      if service_name!='initialize':
       probe=runtime_host._APPLICATION_HEALTH[service_name]
-      service['healthcheck']=dict(test=probe,interval='1s',timeout='3s',retries=15,start_period='2s')
+      # Match the production backend/maintenance startup grace. The same real
+      # readiness probe must pass; a cold multi-worker import can exceed 40s.
+      service['healthcheck']=dict(test=probe,interval='1s',timeout='3s',retries=15,
+        start_period='45s' if service_name in ('backend','storage-maintenance') else '2s')
      runtime_model['services'][service_name]=service
      owned.append(project+'-'+service_name+'-1')
     host_boundary.save_receipt(state/runtime_host.RUNTIME_RECIPE,runtime_model,initial=True)

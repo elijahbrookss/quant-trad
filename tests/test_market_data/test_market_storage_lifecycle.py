@@ -154,6 +154,78 @@ def test_lifecycle_plan_is_bounded_stable_and_pin_aware() -> None:
     assert plan["summary"]["estimated_reclaim_bytes"] == 4096
 
 
+@pytest.mark.parametrize(
+    ("observed_at", "minimum_age", "expected_count"),
+    [
+        ("2026-08-01T12:50:00+00:00", 15, 0),
+        ("2026-08-01T13:14:59.999999+00:00", 15, 0),
+        ("2026-08-01T13:15:00+00:00", 15, 1),
+        ("2026-08-01T08:15:00-05:00", 15, 1),
+        ("2026-08-01T13:15:00+00:00", 30, 0),
+        ("2026-08-01T13:30:00+00:00", 30, 1),
+        ("2026-08-01T12:59:59+00:00", 0, 0),
+        ("2026-08-01T13:00:00+00:00", 0, 1),
+    ],
+)
+def test_compaction_waits_for_hour_close_and_configured_age(
+    observed_at, minimum_age, expected_count
+):
+    plan = _service(_LifecycleRepository()).plan(
+        policy=MarketStorageLifecyclePolicy(compaction_min_age_minutes=minimum_age),
+        now=datetime.fromisoformat(observed_at),
+    )
+    assert len(plan["archive_compactions"]) == expected_count
+
+
+def test_compaction_defers_growing_hour_without_banning_later_replacements():
+    repository = _LifecycleRepository()
+    rows = repository.list_compaction_manifests()
+    base = datetime(2026, 8, 1, 12, tzinfo=UTC)
+    # A previous compaction plus a new small segment must not be rewritten
+    # again while this receive-hour is still accumulating records.
+    rows[0].update(id="previous-replacement", last_receive_ordinal=373,
+                   record_count=373, last_received_at=base + timedelta(minutes=19))
+    rows[1].update(first_receive_ordinal=374, last_receive_ordinal=434,
+                   record_count=61, first_received_at=base + timedelta(minutes=20),
+                   last_received_at=base + timedelta(minutes=25))
+    cutoffs = []
+
+    def eligible_rows(*, older_than):
+        cutoffs.append(older_than)
+        return [row for row in rows if row["last_received_at"] < older_than]
+
+    repository.list_compaction_manifests = eligible_rows
+    service = _service(repository)
+    policy = MarketStorageLifecyclePolicy()
+    assert service.plan(policy=policy, now=base + timedelta(minutes=50))[
+        "archive_compactions"
+    ] == []
+    assert cutoffs[-1] == base + timedelta(minutes=35)
+
+    ready = service.plan(policy=policy, now=base + timedelta(minutes=75))[
+        "archive_compactions"
+    ]
+    assert len(ready) == 1
+    assert ready[0]["source_manifest_ids"] == ["previous-replacement", "manifest-2"]
+    assert ready[0]["source_record_count"] == 434
+
+    # Delayed publication of an older segment may still require a later merge.
+    # The eligibility delay must not make that history unreadable or ineligible.
+    rows[:] = [dict(rows[0], id="completed-replacement", last_receive_ordinal=434,
+                    record_count=434, last_received_at=base + timedelta(minutes=25)),
+               dict(rows[1], id="delayed-segment", first_receive_ordinal=435,
+                    last_receive_ordinal=435, record_count=1,
+                    first_received_at=base + timedelta(minutes=59),
+                    last_received_at=base + timedelta(minutes=59))]
+    later = service.plan(policy=policy, now=base + timedelta(minutes=80))[
+        "archive_compactions"
+    ]
+    assert len(later) == 1
+    assert later[0]["source_manifest_ids"] == ["completed-replacement", "delayed-segment"]
+    assert later[0]["source_record_count"] == 435
+    assert later[0]["operation_id"] != ready[0]["operation_id"]
+
+
 def test_lifecycle_run_is_dry_by_default_and_never_takes_mutation_lock() -> None:
     repository = _LifecycleRepository()
     policy = MarketStorageLifecyclePolicy()
@@ -343,3 +415,78 @@ def test_lifecycle_rejects_retired_legacy_fact_table_controls() -> None:
     ):
         with pytest.raises(ValueError, match=f"unsupported fields={field_name}"):
             MarketStorageLifecyclePolicy.from_mapping({field_name: 1})
+
+
+@pytest.mark.parametrize("code,primary,limited", [
+    ("57014", "canceling statement due to statement timeout", True),
+    ("53400", "temporary file size exceeds temp_file_limit (16kB)", True),
+    ("57014", "canceling statement due to user request", False),
+    ("42501", "permission denied to set parameter temp_file_limit", False),
+])
+def test_archive_witness_limits_do_not_reclassify_cancellation_or_permissions(monkeypatch, code, primary, limited):
+    from sqlalchemy.exc import DBAPIError
+    from portal.backend.service.storage.repos import market_lifecycle
+    original = RuntimeError(primary)
+    original.pgcode = code
+    original.diag = SimpleNamespace(message_primary=primary)
+    failure = DBAPIError("query", {}, original)
+    exited = []
+
+    @contextmanager
+    def session():
+        try:
+            yield SimpleNamespace(execute=lambda *_args, **_kwargs: None)
+        finally:
+            exited.append(True)
+
+    monkeypatch.setattr(market_lifecycle, "db", SimpleNamespace(session=session))
+    expected = market_lifecycle.MarketArchiveWitnessLimitExceeded if limited else DBAPIError
+    with pytest.raises(expected) as caught:
+        with market_lifecycle.PostgresMarketStorageLifecycleRepository()._archive_witness_session(operation="test-target"):
+            raise failure
+    assert exited == [True]
+    if limited:
+        assert "operation=test-target" in str(caught.value)
+        assert caught.value.__cause__ is failure
+    else:
+        assert caught.value is failure
+
+
+def test_expiration_query_limit_preserves_sources_and_does_not_starve_canonical_work(tmp_path):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from portal.backend.service.storage.repos.market_lifecycle import MarketArchiveWitnessLimitExceeded
+    repository = _LifecycleRepository()
+    service = _service(repository)
+
+    def limited(**_kwargs):
+        raise MarketArchiveWitnessLimitExceeded("test witness budget")
+
+    @contextmanager
+    def lock(**_kwargs):
+        repository.lock_entered = True
+        try:
+            yield
+        finally:
+            repository.lock_entered = False
+
+    repository.list_archive_expiration_candidates = limited
+    repository.lifecycle_lock = lock
+    calls = []
+
+    def canonical(**_kwargs):
+        assert not repository.lock_entered
+        calls.append("canonical")
+        return {"outcomes": [{"action": "stage_page", "status": "page_acknowledged"}]}
+
+    service.canonical_executor = SimpleNamespace(run=canonical)
+    service._execute_archive_expiration = lambda **_: pytest.fail("Unproven expiration must not execute")
+    policy = MarketStorageLifecyclePolicy(execution_enabled=True, archive_compaction_enabled=False,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
+    with pytest.raises(MarketArchiveWitnessLimitExceeded):
+        service.plan(policy=policy, storage_root=tmp_path)
+    result = service.run(policy=policy, execute=True, storage_root=tmp_path)
+    assert result["status"] == "degraded" and result["failure_count"] == 1
+    assert result["plan"]["archive_expirations"] == []
+    assert result["plan"]["planning_failures"] == [result["outcomes"][0]]
+    assert result["outcomes"][0]["action"] == "archive_expiration_plan"
+    assert result["outcomes"][1]["status"] == "page_acknowledged" and calls == ["canonical"]

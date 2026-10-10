@@ -43,9 +43,10 @@ _CANONICAL_HOT_JOIN = """
       ON hot.storage_day = versions.storage_day AND hot.id = versions.id
 """
 CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + _CANONICAL_HOT_JOIN
-CANONICAL_RANGE_ROW_FROM = """
+CANONICAL_RANGE_HEADER_FROM = """
     FROM market.read_fact_headers_in_range(:series_id, :start, :end) AS versions
-""" + _CANONICAL_ENVELOPE_JOINS + _CANONICAL_HOT_JOIN
+""" + _CANONICAL_ENVELOPE_JOINS
+CANONICAL_RANGE_ROW_FROM = CANONICAL_RANGE_HEADER_FROM + _CANONICAL_HOT_JOIN
 _DOCUMENTS = frozenset(("payload", "provenance", "quality"))
 logger = logging.getLogger(__name__)
 

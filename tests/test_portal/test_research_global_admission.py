@@ -173,7 +173,7 @@ def test_stalled_ownership_probe_stops_work_before_connection_returns(admission)
     control = ExecutionControl()
     entered, release, interrupted = Event(), Event(), Event()
     try:
-        with pytest.raises(limits.ResearchAdmissionError, match="ownership_probe_stale"):
+        with pytest.raises(limits.ResearchAdmissionError, match="ownership_probe_stale") as stopped_error:
             with controlled_execution(control), limits._global_admission(control, session_factory=factory):
                 control.register("fixture-io", interrupted.set)
                 original = sessions[0].scalar
@@ -188,5 +188,8 @@ def test_stalled_ownership_probe_stops_work_before_connection_returns(admission)
                 control.unregister("fixture-io")
                 assert stopped, "work continued while ownership observation was stale"
                 control.check()
+        assert "probe_in_flight=True" in str(stopped_error.value)
+        assert "observation_age_seconds=" in str(stopped_error.value)
+        assert "completed_probes=" in str(stopped_error.value)
     finally:
         release.set()

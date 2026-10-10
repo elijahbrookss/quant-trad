@@ -21,6 +21,9 @@ from ._shared import db
 
 
 _LIFECYCLE_LOCK_NAME = "quant-trad:market-storage-lifecycle:v1"
+# Fixed safety ceilings for metadata witnesses, not an end-to-end cycle SLA.
+_ARCHIVE_WITNESS_STATEMENT_MS = 5000
+_ARCHIVE_WITNESS_TEMP_KIB = 64 * 1024
 _ALLOWED_TABLES = {
     policy.table_name: policy.time_column for policy in DEFAULT_HOT_TABLE_POLICIES
 }
@@ -30,6 +33,10 @@ for _policy in DEFAULT_HOT_TABLE_POLICIES:
 
 class MarketStorageLifecycleBusyError(RuntimeError):
     """Raised when another process owns the global lifecycle fence."""
+
+
+class MarketArchiveWitnessLimitExceeded(RuntimeError):
+    """An expiration witness could not be established within its query budget."""
 
 
 def lifecycle_operation_id(
@@ -69,6 +76,42 @@ def _relation(table_name: str) -> tuple[str, str]:
 
 class PostgresMarketStorageLifecycleRepository:
     """Fenced planning and evidence for object and Timescale lifecycle work."""
+
+    @contextmanager
+    def _archive_witness_session(self, *, operation: str):
+        # This repository owns the whole transaction. SET LOCAL disappears on
+        # either commit or rollback and cannot leak to a later pool borrower.
+        try:
+            with db.session() as session:
+                session.execute(text("""
+                    SELECT set_config('statement_timeout',
+                        LEAST(CASE WHEN setting::bigint=0 THEN :limit ELSE setting::bigint END,
+                              :limit)::text, true)
+                    FROM pg_settings WHERE name='statement_timeout'
+                """), {"limit": _ARCHIVE_WITNESS_STATEMENT_MS})
+                session.execute(text("""
+                    SELECT set_config('temp_file_limit',
+                        LEAST(CASE WHEN setting::bigint<0 THEN :limit ELSE setting::bigint END,
+                              :limit)::text, true)
+                    FROM pg_settings WHERE name='temp_file_limit'
+                """), {"limit": _ARCHIVE_WITNESS_TEMP_KIB})
+                # PostgreSQL's temp limit is per process; do not multiply this
+                # witness budget across parallel query workers.
+                session.execute(text("SET LOCAL max_parallel_workers_per_gather=0"))
+                yield session
+        except DBAPIError as exc:
+            primary = getattr(getattr(exc.orig, "diag", None), "message_primary", "") or ""
+            code = getattr(exc.orig, "pgcode", None)
+            if ((code == "57014" and primary == "canceling statement due to statement timeout")
+                    or (code == "53400" and primary.startswith("temporary file size exceeds temp_file_limit"))):
+                raise MarketArchiveWitnessLimitExceeded(
+                    f"market_archive_witness_limit_exceeded: operation={operation} sqlstate={code} "
+                    f"statement_ms={_ARCHIVE_WITNESS_STATEMENT_MS} temp_kib={_ARCHIVE_WITNESS_TEMP_KIB}; "
+                    "expiration remains unproven; retry bounded work without removing its source"
+                ) from exc
+            # User cancellation, permission failures and unrelated database
+            # errors retain their original meaning; never grant or fall back.
+            raise
 
     @staticmethod
     def dataset_snapshot_session(*, database=db):
@@ -178,29 +221,47 @@ class PostgresMarketStorageLifecycleRepository:
                       "l2": _json({"_qt_l2_evidence": scope}),
                       "bbo": _json({"_qt_bbo_evidence": {"source_position": scope}}),
                       "depth": _json({"_qt_depth_evidence": {"source_position": scope}})}
+        # EXISTS can otherwise choose a hot-table-first join and scan every
+        # payload partition for an absent coverage witness. Select the exact
+        # target's coverage IDs first, then probe the existing provenance GINs.
         scoped = session.execute(text(f"""
+            WITH coverage_candidates AS MATERIALIZED (
+                SELECT DISTINCT coverage.interval_id
+                FROM market.stream_coverage_interval_versions AS coverage
+                WHERE {coverage_scope}
+            )
             SELECT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
                 WHERE hot.provenance @> CAST(:collector AS jsonb)
                    OR hot.provenance @> CAST(:l2 AS jsonb)
                    OR hot.provenance @> CAST(:bbo AS jsonb)
                    OR hot.provenance @> CAST(:depth AS jsonb))
                 OR EXISTS (
-                    SELECT 1 FROM market.stream_coverage_interval_versions AS coverage
-                    JOIN market.fact_hot_payloads AS hot ON hot.provenance @>
-                        jsonb_build_object('_qt_trade_flow_evidence',
+                    SELECT 1 FROM coverage_candidates AS coverage
+                    JOIN LATERAL (
+                        SELECT 1 FROM market.fact_hot_payloads AS hot
+                        WHERE hot.provenance @> jsonb_build_object(
+                            '_qt_trade_flow_evidence',
                             jsonb_build_object('coverage_interval_id', coverage.interval_id))
-                    WHERE {coverage_scope})
+                        LIMIT 1
+                    ) AS witness ON true)
         """), parameters).scalar_one()
         if scoped or target_kind == "book_checkpoint":
             return bool(scoped)
         return bool(session.execute(text("""
-            SELECT EXISTS (SELECT 1 FROM market.raw_archive_record_mappings AS mappings
-                JOIN market.fact_hot_payloads AS hot ON
-                    hot.provenance @> jsonb_build_object('_qt_trade_evidence',
+            WITH mapping_candidates AS MATERIALIZED (
+                SELECT raw_record_id FROM market.raw_archive_record_mappings
+                WHERE manifest_id=:id
+            )
+            SELECT EXISTS (
+                SELECT 1 FROM mapping_candidates AS mappings
+                JOIN LATERAL (
+                    SELECT 1 FROM market.fact_hot_payloads AS hot
+                    WHERE hot.provenance @> jsonb_build_object('_qt_trade_evidence',
                         jsonb_build_object('raw_record_id', mappings.raw_record_id))
-                    OR hot.provenance @> jsonb_build_object('_qt_l2_evidence',
+                       OR hot.provenance @> jsonb_build_object('_qt_l2_evidence',
                         jsonb_build_object('raw_record_id', mappings.raw_record_id))
-                WHERE mappings.manifest_id=:id)
+                    LIMIT 1
+                ) AS witness ON true)
         """), {"id": target_id}).scalar_one())
 
     @contextmanager
@@ -446,7 +507,7 @@ class PostgresMarketStorageLifecycleRepository:
         limit: int,
     ) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 5000))
-        with db.session() as session:
+        with self._archive_witness_session(operation="archive_expiration_plan") as session:
             raw_rows = session.execute(
                 text(
                     """
@@ -581,7 +642,7 @@ class PostgresMarketStorageLifecycleRepository:
             raise ValueError(
                 f"market_storage_lifecycle_target_invalid: kind={kind}"
             )
-        with db.session() as session:
+        with self._archive_witness_session(operation=f"archive_target_status:{kind}:{target_id}") as session:
             target = session.execute(
                 text(
                     f"SELECT id, object_key, object_uri, object_sha256, byte_count "

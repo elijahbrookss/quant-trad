@@ -453,3 +453,101 @@ def test_guarded_continuation_does_not_relax_other_admission(rescheduling, fault
     with pytest.raises((ValueError, RuntimeError)):
         a.change()
     assert a.apply_action not in a.actions and not a.reschedule_state.exists()
+
+
+@pytest.fixture
+def completed_reschedule(rescheduling, monkeypatch):
+    """A recovery owns the changed recipe; publication evidence stays immutable."""
+    a = rescheduling
+    a.change()
+    a.selected = forward.inspect_published_operation(a.root)
+    a.completed_path = Path(a.reschedule_package["forward_plan_path"])
+    a.completed_plan = a.selected["new_plan"]
+    model = deepcopy(a.selected["new_runtime"])
+    model["services"]["tsdb"]["image"] = "sha256:"+"d"*64
+    write(a.root/publication.runtime.RUNTIME_RECIPE, model)
+    a.final_saved = dict(phase="recovery_runtime_ready",
+        binding={k:a.completed_plan[k] for k in ("project", "source_revision")},
+        commit=dict(source_image=a.completed_plan["source_image"]),
+        runtime_spool=dict(destination=a.completed_plan["spool_destination"]),
+        runtime=dict(admission=dict(recipe_sha256=host.digest(model))))
+    write(a.root/operation.final.STATE, a.final_saved)
+    # Publication/driver tests isolate final journal validation, whose structural
+    # and live-container checks have separate native and fault coverage.
+    a.real_final_load = operation.final._load
+    monkeypatch.setattr(operation.final, "_load", host.load_receipt)
+    a.completion_reads = []
+    def observe(root):
+        assert root == a.root
+        a.completion_reads.append(root)
+        return dict(ready=False, complete_backup_confirmed=False)
+    monkeypatch.setattr(operation.final, "inspect_runtime_completion_locked", observe)
+    monkeypatch.setattr(operation, "run_prepared_operation_locked",
+        lambda *args, **kwargs: pytest.fail("completed migration dispatched again"))
+    a.before_completion = {p:p.read_bytes() for p in a.root.iterdir() if p.is_file()}
+    a.prior_actions = list(a.actions)
+    return a
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_completed_forward_uses_final_recipe_without_renewal_or_dispatch(completed_reschedule, execute):
+    a = completed_reschedule
+    # Ordinary forward launch must still reject the changed pre-switch recipe.
+    with pytest.raises(RuntimeError, match="published_file_changed"):
+        forward.inspect_published_operation(a.root, operation_path=a.completed_path)
+    for _ in range(2):
+        result = operation.run_operation_plan(a.completed_path, execute=execute)
+        assert result["phase"] == "runtime_ready" and not result["ready"]
+    assert len(a.completion_reads) == 2
+    assert a.actions == a.prior_actions
+    assert all(p.read_bytes() == data for p, data in a.before_completion.items())
+
+
+@pytest.mark.parametrize("fault", ["unfinished", "recipe", "request", "plan", "launch", "publication"])
+def test_completed_forward_preserves_all_other_admission(completed_reschedule, fault):
+    a = completed_reschedule
+    if fault == "unfinished":
+        write(a.root/operation.final.STATE, {**a.final_saved, "phase":"recovery_runtime_starting"})
+    elif fault == "recipe":
+        model = host.load_receipt(a.root/publication.runtime.RUNTIME_RECIPE)
+        model["services"]["tsdb"]["image"] = "sha256:"+"e"*64
+        write(a.root/publication.runtime.RUNTIME_RECIPE, model)
+    elif fault == "request":
+        value = host.load_receipt(a.root/publication.REQUEST)
+        value["max_objects"] += 1
+        write(a.root/publication.REQUEST, value)
+    elif fault == "plan":
+        value = host.load_receipt(a.completed_path)
+        value["descriptor_limit"] += 1
+        write(a.completed_path, value)
+    elif fault == "launch":
+        path = a.root/forward.operation_file(forward.LAUNCH_STATE, request=a.selected["new_request"])
+        value = host.load_receipt(path)
+        value["started_at"] += 1
+        write(path, value)
+    else:
+        value = host.load_receipt(a.reschedule_state)
+        value["intent_sha256"] = "f"*64
+        write(a.reschedule_state, value)
+    with pytest.raises((RuntimeError, ValueError)):
+        operation.run_operation_plan(a.completed_path, execute=True)
+    assert not a.completion_reads and a.actions == a.prior_actions
+
+
+def test_completed_forward_still_requires_live_runtime_observation(completed_reschedule, monkeypatch):
+    a = completed_reschedule
+    def refuse(root):
+        raise RuntimeError("storage_online_completion_unhealthy")
+    monkeypatch.setattr(operation.final, "inspect_runtime_completion_locked", refuse)
+    with pytest.raises(RuntimeError, match="completion_unhealthy"):
+        operation.run_operation_plan(a.completed_path, execute=True)
+    assert a.actions == a.prior_actions
+    assert all(p.read_bytes() == data for p, data in a.before_completion.items())
+
+
+def test_completed_forward_cannot_use_a_skeletal_final_receipt(completed_reschedule, monkeypatch):
+    a = completed_reschedule
+    monkeypatch.setattr(operation.final, "_load", a.real_final_load)
+    with pytest.raises(RuntimeError, match="final_receipt_invalid"):
+        operation.run_operation_plan(a.completed_path, execute=True)
+    assert not a.completion_reads and a.actions == a.prior_actions

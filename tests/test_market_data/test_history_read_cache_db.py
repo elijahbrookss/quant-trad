@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from core.execution_control import ExecutionControl
 from core.settings import get_settings
-from core.storage_mounts import FilesystemEvidence
+from core.storage_mounts import FilesystemEvidence, StorageMountError
 from core.storage_targets import StorageTarget
 from portal.backend.db.storage_target_models import StorageTargetRecord
 from portal.backend.service.storage.history_policy import configured_history_read_cache
@@ -70,6 +70,43 @@ def test_cache_fill_excludes_new_maintenance(configured):
             assert not peer.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))"))
     with service.database.session() as peer:
         assert peer.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))"))
+
+
+def test_cache_fills_beside_read_only_registered_target(configured, monkeypatch):
+    service,cache,source,digest=configured
+    inspect = StorageTarget.inspect
+
+    def read_only_target(target, *, require_writable=False):
+        if require_writable:
+            raise StorageMountError("storage_mount_read_only: registered PGDATA bind")
+        return replace(inspect(target), read_only=True)
+
+    monkeypatch.setattr(StorageTarget, "inspect", read_only_target)
+    with cache.open_copy(source, digest=digest, size=source.stat().st_size) as handle:
+        assert handle.read() == source.read_bytes()
+    with cache.open_copy(source, digest=digest, size=source.stat().st_size) as handle:
+        assert handle.read() == source.read_bytes()
+
+    # A read-only working mount still refuses even an existing cache entry.
+    import core.storage_mounts as mounts
+    def read_only_working(*args, **kwargs):
+        raise StorageMountError("storage_mount_read_only: cache working mount")
+    monkeypatch.setattr(mounts, "require_configured_working_mount", read_only_working)
+    unavailable = configured_history_read_cache()
+    with unavailable.open_copy(source, digest=digest, size=source.stat().st_size) as handle:
+        assert handle is None
+    assert source.read_bytes() == b"source bytes"
+
+
+def test_cache_bypasses_unavailable_registered_target(configured, monkeypatch):
+    service,cache,source,digest=configured
+    def unavailable(*args, **kwargs):
+        raise StorageMountError("storage_mount_unavailable: registered target")
+    monkeypatch.setattr(StorageTarget, "inspect", unavailable)
+    with cache.open_copy(source, digest=digest, size=source.stat().st_size) as handle:
+        assert handle is None
+    assert not list(cache.root.iterdir())
+    assert source.read_bytes() == b"source bytes"
 
 
 def test_research_global_admission_uses_real_postgres_exclusion(service,monkeypatch):

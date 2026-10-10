@@ -1,10 +1,143 @@
 # Bounded Storage Migrations and Research Compatibility
 
-**Status: implementation authorized; qualification in progress. Updated 2026-10-04.**
+**Status: deployed; sustained capacity qualification remains open. Updated 2026-10-10.**
 Decision: [ADR 0078](../architecture/decisions/0078-evolve-research-within-existing-data-boundaries.md).
 This revision replaces this document's earlier H04-first implementation plan.
 It does not resume a migration, clear an operational hold, deploy a release or
 restart research. Historical approvals and receipts remain evidence.
+
+## Deployed outcome — 2026-10-10
+
+The separately approved schema cutover committed on October 9 at 00:07 UTC.
+Release `89912f167e19f5255fb4ee1ddcf64c92f155d2b2` deployed on October 10 at
+07:34 UTC after [all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38030048205).
+It corrects archive-expiration coverage and raw-ID existence queries to use
+existing provenance indexes. It retains `37177f1c`'s narrowed frozen-range and
+raw-prefix lookups and receive-hour compaction guard, plus the preceding
+streaming, cancellation and bounded calendar-formatting changes.
+The database container, saved policy, environment and migration journals were
+unchanged. This was an ordinary software deployment.
+All 17 collectors and the application services were healthy after deployment.
+The cutover is complete and must not be replayed. The dated planning and local
+qualification sections below describe earlier states, not outstanding deployment
+instructions or fresh operational authorization.
+
+- The saved policy is now **14 days** on SSD. Durable HDD history remains behind
+  the existing storage boundary. Archive conversion is progressing; a cleared
+  backlog and steady reclamation rate have not yet been demonstrated.
+- The existing raw mapping table and two secondary indexes moved to HDD without
+  replacing its logical identity or schema. The primary index remains on SSD.
+  Native post-commit verification passed on October 9 at 19:55 UTC: **117.3 GB** copied in
+  **15 minutes 14 seconds**. Copy size is not net reclaimed SSD capacity; WAL and
+  backup allocations must also be measured. Temporary collector buffers were
+  restored, and all 17 collectors were healthy at 20:03 UTC. Controlled reconnects
+  remain in gap evidence; health alone does not prove uninterrupted acquisition.
+- The disposable history cache is enabled with a **16 GiB quota** and **500 GiB
+  minimum free-space floor**. After actual hot-partition reclamation, a 3,204-row,
+  1.19 MB archive page passed direct and canonical equality checks. The first
+  canonical request filled the SSD cache; the identical request reused it with
+  no measured physical reads in the probe process. Both preserved source bytes
+  and envelope/provenance equality. The requests took about 9 and 8 seconds;
+  decoding and hydration remain substantial. This proves cold routing and cache
+  reuse, not a general research speedup or an OS-cold benchmark. Prior lock and
+  stale-backup admission refusals remain in the receipts.
+- The authorized BTC2022 H04 Check and identical Replay completed with matching
+  plan, result and evidence hashes, taking about 598 and 595 seconds respectively.
+  They used SQL history and do not measure HDD/cache benefit. That allocation is
+  complete; it must not be repeated or expanded implicitly. The authorized
+  BTC/ETH 2023 pair subsequently completed on `f19682d1` in about 592 and 565
+  seconds, with exact Replays matching plan, result and evidence hashes. Those
+  Check metrics do not establish archive-cache benefit. The earlier failed BTC
+  attempt remains in the scientific budget; successful replacement did not erase it.
+
+The matching post-placement encrypted database/archive pair completed on October 9
+at 21:03 UTC, and both native repositories contained its referenced recovery points.
+Packaged restore tests passed on disposable resources; the whole production
+history has not been restored as a drill. Preserve the encryption keys, database
+chain dependencies and paired archive snapshot.
+
+Ordinary research can use the existing frozen-input and state-engine paths under
+its declared scientific/resource budgets and global one-job admission. Clearing
+all historical storage backlog is not a research prerequisite. Completed H04
+allocations stay completed; this status does not restart paused automations or
+admit a new scientific allocation.
+
+Remaining qualification is sustained retention throughput versus intake and a full
+24-hour filesystem-UUID growth baseline. The August 21 partition was reclaimed
+on October 10 at 05:44 UTC after verifying 752,156 rows in 92 archive pages. Its
+1,538,539,520-byte hot relation is absent; this allocation is no longer merely a
+predicted saving. Net filesystem growth still includes concurrent intake, WAL,
+archives and recovery work.
+
+A separate raw-expiration coverage lookup ran for about 29 minutes and allocated
+100.6 GB of temporary files. All 50 remaining hot partitions had valid provenance
+GIN indexes, but its coverage-to-hot join selected sequential scans. The dedicated
+worker was gracefully drained and the positively identified read-only query was
+cancelled; PostgreSQL released its temporary allocation. No historical facts were
+deleted by this intervention.
+
+The deployed rewrite selects relevant coverage/raw IDs before indexed existence
+probes. The observed negative coverage lookup completed in 0.253 seconds under a
+one-second read-only limit; the exact database qualification passed 443 tests,
+including source-reclamation and coverage-revision protection. The new worker's
+first ordinary cycle completed with 12 outcomes and zero failures, including
+further canonical-prefix verification. Two post-deployment observations found
+zero live default-tablespace temporary files. These are initial observations,
+not a sustained throughput result or a bound on peak temporary allocation.
+
+A subsequent cycle at 07:40 UTC reached page publication and hit the existing
+statement timeout on a 1,000-row material-alias insert. An exact catalogue check
+confirmed that the page manifest and aliases were not committed and the August
+22 hot source partition remains sealed and present. Its foreign keys and indexes
+match the current identity model; there is no leftover reference to the old
+header table. Alias/identity heaps and the alias indexes are on HDD, but the
+specific cause of the slow write remains unproven. Resolve that bounded write
+failure before claiming sustainable reclamation; do not bypass the timeout or
+reclaim its source to obtain apparent progress. Catalogue observations at 07:36
+and 08:21 UTC both contained 122 pages and 845,469 archived rows: no additional
+page was published in that interval, despite advancing prefix verification.
+All 17 collectors were healthy at the later observation; the eight stream spools
+held about 1 MB with no partial files. These are bounded observations, not a
+sustained collector-lag or archival-throughput guarantee.
+
+**Pending source candidate, not deployed:** repeated raw-prefix SQL locators are
+now deduplicated while retaining all root witnesses and the original conservative
+work budget. A later deployed-worker failure at 08:15 UTC again contained
+thousands of range entries. The candidate also bounds expiration-witness
+transactions to 5 seconds per statement and 64 MiB of temporary files, preserves
+stricter settings and disables parallel query workers for those queries. The
+existing production role was checked read-only and can set that parameter; no
+permission change is required there. Other installations must have that privilege
+before using this path; a permission failure stays explicit.
+
+If a witness exceeds its resource limit, execution preserves all affected sources,
+reports a failed expiration plan and a degraded cycle, and can continue independent
+canonical work after releasing the raw fence. Dry planning still fails. Local
+settings disappear on commit/rollback. There is no schema, archive, scientific
+protocol or persisted policy change; rollback uses the existing formats but loses
+these resource protections. No new scheduler, index build or migration is needed.
+
+The candidate passed 103 focused non-database tests, including conflicting root
+witnesses, unchanged requested-work limits, error classification and independent
+canonical continuation. The full non-database backend check passed 5,232 tests
+with 7 skips; documentation/index checks passed 10 tests. Documentation sync is
+unavailable because this machine has no configured destination. Actual PostgreSQL
+regressions for duplicate locators, statement cancellation, temporary-file
+cancellation and connection-setting reset are written but not yet run. Database
+and release qualification and deployment remain pending;
+this source status does not resolve the alias-publication failure or demonstrate
+sustainable throughput.
+
+The baseline producer began at 12:38 UTC on October 9; migration, WAL and backup
+growth must be separated from ordinary growth before projecting a capacity horizon.
+No additional historical rewrite or migration-copy deletion is implied. Private
+receipts are retained under `artifacts/storage-implementation/history-read-cache/`:
+`release-89912f16` (current deployment, query correction and initial maintenance/
+collector observations), `release-37177f1c` (actual reclaim/cold-cache proof and
+coverage-query measurements), `release-f19682d1` (2023 research measurements),
+`release-041e3c0a` (earlier query/compaction qualification), `release-dfd717be`
+(earlier read/cache proof), `release-f9d68118` (2022 H04 evidence), and
+`retained-raw-history-placement`.
 
 ## What we are solving
 
@@ -92,7 +225,7 @@ key/identity/reference work or prove SSD relief. Production capacity, final
 pause/recovery admission and workload measurements remain open. Branch
 consolidation does not satisfy or authorize those operations.
 
-## Current state and why the original migration was large
+## Audit baseline and why the original migration was large
 
 Evidence comes from the prior audit and these inspected checkouts:
 
@@ -724,7 +857,7 @@ cancel/duplicate/stale-owner/publication tests; exact release compatibility; and
 unchanged protocols, holdouts and scientific budgets. Each requirement gates the
 affected capability only. Deployment and resumption remain separately authorized.
 
-## Implementation and release ledger
+## Implementation and release ledger — 2026-10-04
 
 The main candidate integrates S (including its R ancestor) in `89a6ba0f`; it is
 local source, not a deployed release. Original candidate checkouts are preserved.

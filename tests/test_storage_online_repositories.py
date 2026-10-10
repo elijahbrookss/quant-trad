@@ -97,3 +97,38 @@ def test_preparer_contract_only_normalizes_exact_container_hostname(monkeypatch)
     started["config"]["Hostname"] = "another-host"
     with pytest.raises(RuntimeError, match="hostname_changed"):
         repositories._preparer_contract(started, database)
+
+
+def maintenance_configuration(tmp_path):
+    import json
+    from tests.test_storage_maintenance_runtime import configuration
+    from scripts.automation.storage_online_runtime import RUNTIME_RECIPE
+    config = configuration()
+    config["schema_version"] = "qt.storage_maintenance_limits.v2"
+    incremental = dict(pgbackrest="/usr/local/bin/pgbackrest", restic="/usr/local/bin/restic",
+        pg_path="/var/lib/postgresql/data", pg_socket_path="/var/run/postgresql",
+        database_key_path="/run/quanttrad/recovery/database-key",
+        archive_key_path="/run/quanttrad/recovery/archive-key", max_chain_backups=4)
+    config["recovery"]["incremental"] = incremental
+    path = tmp_path/"maintenance.json"
+    path.write_text(json.dumps(config)); path.chmod(0o600)
+    recipe = {"services": {"storage-maintenance": {"volumes": [dict(type="bind",
+        source=str(path), target="/run/quanttrad/storage-maintenance.json", read_only=True)]}}}
+    repositories.host.save_receipt(tmp_path/RUNTIME_RECIPE, recipe, initial=True)
+    return path, config, incremental
+
+
+def test_preparer_reuses_admitted_maintenance_without_separate_recovery_config(tmp_path):
+    _, _, expected = maintenance_configuration(tmp_path)
+    assert not (tmp_path/"incremental-config.json").exists()
+    assert repositories.incremental_configuration(tmp_path) == expected
+    assert not (tmp_path/"incremental-config.json").exists()
+
+
+def test_preparer_refuses_invalid_encrypted_maintenance_configuration(tmp_path):
+    import json
+    path, config, _ = maintenance_configuration(tmp_path)
+    config["recovery"]["incremental"]["max_chain_backups"] = True
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="incremental_chain_limit_invalid"):
+        repositories.incremental_configuration(tmp_path)

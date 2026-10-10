@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import math
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from market_data.frozen import semantic_hash
@@ -253,3 +254,42 @@ def test_decision_calendar_clock_and_source_coverage_are_explicit():
     assert analysis["coverage"]["coverage_clock"] == "source_candle_open"
     assert sum(r["observable_decisions"] for r in analysis["months"]) == analysis["coverage"]["detector_observable_minutes"]
     assert analysis["coverage"]["undetectable_intervals"][-1]["preceding_observable_context"]["known_at"] == clock(2879)
+
+
+@pytest.mark.parametrize("pattern", ["%Y-%m", "%Y-%m-%d", "%G-W%V"])
+def test_batched_calendar_labels_preserve_leap_and_iso_week_boundaries(pattern):
+    from portal.backend.service.research.forward_risk_evaluator import _calendar_labels
+
+    dates = pd.date_range("2019-12-29", periods=10000, freq="h", tz="UTC")
+    dates = dates.append(pd.DatetimeIndex(["2021-01-01", "2020-02-29", "2021-01-01"], tz="UTC"))
+    np.testing.assert_array_equal(_calendar_labels(dates, pattern), np.asarray(dates.strftime(pattern)))
+
+
+def test_calendar_formatting_observes_cancellation_before_the_next_batch(monkeypatch):
+    from core.execution_control import ExecutionControl, ExecutionCancelledError, controlled_execution
+    from portal.backend.service.research.forward_risk_evaluator import _calendar_labels
+
+    control = ExecutionControl()
+    original = pd.DatetimeIndex.strftime
+    batch_sizes = []
+
+    def cancel_after_format(dates, pattern):
+        batch_sizes.append(len(dates))
+        result = original(dates, pattern)
+        control.stop(ExecutionCancelledError("calendar fixture cancelled"))
+        return result
+
+    monkeypatch.setattr(pd.DatetimeIndex, "strftime", cancel_after_format)
+    with pytest.raises(ExecutionCancelledError, match="calendar fixture cancelled"):
+        with controlled_execution(control):
+            _calendar_labels(pd.date_range("2023-01-01", periods=10000, freq="min", tz="UTC"), "%G-W%V")
+    assert batch_sizes == [2048]
+
+
+def test_calendar_batching_preserves_complete_evaluator_result(monkeypatch):
+    from portal.backend.service.research import forward_risk_evaluator as evaluator
+
+    inputs, plan = case()
+    actual = run(inputs, plan)
+    monkeypatch.setattr(evaluator, "_calendar_labels", lambda dates, pattern: np.asarray(dates.strftime(pattern)))
+    assert run(inputs, plan) == actual

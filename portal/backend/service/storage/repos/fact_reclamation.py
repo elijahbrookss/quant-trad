@@ -111,11 +111,26 @@ class PostgresCanonicalFactReclamationRepository:
         # A pin prevents evidence expiry, not verified tier movement. All
         # headers and their complete cold payloads survive, so no pinned range
         # is subtracted from the source. Count overlapping bindings for audit.
+        # Both callers have just checked complete partition/catalog evidence.
+        # Materialize the cheap conservative overlap first: a direct semi-join
+        # can hash every header in the day just to audit unrelated Datasets.
+        # Bounds can contain gaps; the per-binding header check remains exact.
         return session.execute(text("""
-            SELECT count(*) FROM market.dataset_series AS pins WHERE EXISTS (
+            WITH candidates AS MATERIALIZED (
+                SELECT pins.series_id, pins.range_start, pins.range_end, pins.max_commit_seq
+                FROM market.dataset_series AS pins WHERE EXISTS (
+                    SELECT 1 FROM market.fact_archive_series AS bounds
+                    JOIN market.fact_archive_manifests AS pages ON pages.id=bounds.manifest_id
+                    WHERE pages.storage_day=:day AND bounds.series_id=pins.series_id
+                      AND bounds.first_observation_at<pins.range_end
+                      AND bounds.last_observation_at>=pins.range_start)
+            )
+            SELECT count(*) FROM candidates AS pins CROSS JOIN LATERAL (
                 SELECT 1 FROM market.fact_versions AS versions WHERE versions.storage_day=:day
                   AND versions.series_id=pins.series_id AND versions.observation_time>=pins.range_start
-                  AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq)
+                  AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq
+                LIMIT 1
+            ) AS matched
         """), {"day": day}).scalar_one()
 
     def reclaim_partition(self, day: date, *, eligible_before: date, execute: bool = False,

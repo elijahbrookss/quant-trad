@@ -150,31 +150,84 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                 wanted[("position", *key, ordinal)].append((None, {**scope, "receive_ordinal": ordinal}))
     if not wanted:
         return {}
+    page_bound_ids = None if bound_manifest_ids is None else set(bound_manifest_ids)
     matches = []
-    bound_predicate = "" if bound_manifest_ids is None else "AND manifests.id = ANY(:bound_ids)"
-    bound_params = {} if bound_manifest_ids is None else {"bound_ids": sorted(set(bound_manifest_ids))}
     # Both predicates address the exact record mapping, never a manifest's
     # min/max ordinal range (which can contain holes or another reconnect).
     queries = [
         ("mappings.raw_record_id = ANY(:ids)", {"ids": record_ids}),
-        ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
+        # Constant scope/range bounds let PostgreSQL find candidate manifests
+        # before visiting their indexed mappings. The exact position predicate
+        # below still proves every witness; a range never fills a missing row.
+        ("manifests.definition_id = ANY(:position_definitions) "
+         "AND manifests.session_id = ANY(:position_sessions) "
+         "AND manifests.first_receive_ordinal<=:last_position "
+         "AND manifests.last_receive_ordinal>=:first_position "
+         "AND EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
          "AS positions(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
          "WHERE positions.definition_id=manifests.definition_id AND positions.session_id=mappings.session_id "
          "AND positions.session_id=manifests.session_id AND positions.connection_epoch=manifests.connection_epoch "
          "AND manifests.first_receive_ordinal<=positions.receive_ordinal AND manifests.last_receive_ordinal>=positions.receive_ordinal "
          "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
-         {"positions": json.dumps(positions)}),
-        ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:prefixes AS jsonb)) "
-         "AS prefixes(definition_id text, session_id text, connection_epoch bigint, first_receive_ordinal bigint, receive_ordinal bigint) "
-         "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
-         "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
-         "AND prefixes.connection_epoch=mappings.connection_epoch "
-         "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
-         {"prefixes": json.dumps(prefixes)}),
+         {"positions": json.dumps(positions),
+          "position_definitions": sorted({item["definition_id"] for item in positions}),
+          "position_sessions": sorted({item["session_id"] for item in positions}),
+          "first_position": min((item["receive_ordinal"] for item in positions), default=0),
+          "last_position": max((item["receive_ordinal"] for item in positions), default=0)}),
     ]
+    if prefixes:
+        # Expose the bounded number of requested scopes to the planner. The
+        # recordset function's generic row estimate can choose a full mapping
+        # scan even for one prefix. Values remain bound, and EXISTS preserves
+        # one result per mapping when requested ranges overlap. Manifest bounds
+        # prune unrelated objects before their mappings; exact rows still prove
+        # every ordinal, including holes and reconnect boundaries.
+        fields = (("definition_id", "text"), ("session_id", "text"),
+                  ("connection_epoch", "bigint"), ("first_receive_ordinal", "bigint"),
+                  ("receive_ordinal", "bigint"))
+        # Collapse SQL locators only. Every root witness and the conservative
+        # requested-work budget above still apply, including differing bindings.
+        lookup_prefixes = list({tuple(scope[name] for name, _ in fields): scope
+                                for scope in prefixes}.values())
+        prefix_values = ",".join("(" + ",".join(
+            f"CAST(:prefix_{index}_{name} AS {kind})" for name, kind in fields) + ")"
+            for index in range(len(lookup_prefixes)))
+        prefix_params = {f"prefix_{index}_{name}": scope[name]
+                         for index, scope in enumerate(lookup_prefixes) for name, _ in fields}
+        queries.append((f"EXISTS (SELECT 1 FROM (VALUES {prefix_values}) "
+            "AS prefixes(definition_id, session_id, connection_epoch, first_receive_ordinal, receive_ordinal) "
+            "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
+            "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
+            "AND prefixes.connection_epoch=mappings.connection_epoch "
+            "AND manifests.first_receive_ordinal<=prefixes.receive_ordinal "
+            "AND manifests.last_receive_ordinal>=prefixes.first_receive_ordinal "
+            "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
+            prefix_params))
     for predicate, params in queries:
         if not (record_ids if "ids" in params else positions if "positions" in params else prefixes):
             continue
+        if "ids" in params:
+            query_keys = (("record", identity) for identity in record_ids)
+        elif "positions" in params:
+            query_keys = (("position", *(position[name] for name in BOOK_SCOPE_FIELDS[:3]),
+                           position["receive_ordinal"]) for position in positions)
+        else:
+            query_keys = (("position", *(scope[name] for name in BOOK_SCOPE_FIELDS[:3]), ordinal)
+                          for scope in lookup_prefixes
+                          for ordinal in range(scope["first_receive_ordinal"], scope["receive_ordinal"] + 1))
+        # Bound each query by its own witnesses. Unbound trade records must not
+        # disable known book placements in a separate exact-position query.
+        # Partial bindings within this query still cannot restrict its unbound
+        # witnesses; the per-witness checks below remain authoritative.
+        witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
+                       for key in dict.fromkeys(query_keys) for row, evidence in wanted[key]}
+        query_bound_ids = page_bound_ids
+        if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
+            eligible = {identity for witness_id in witness_ids
+                        for identity in witness_manifest_ids[witness_id]}
+            query_bound_ids = eligible if page_bound_ids is None else eligible.intersection(page_bound_ids)
+        bound_predicate = "" if query_bound_ids is None else "AND manifests.id = ANY(:bound_ids)"
+        bound_params = {} if query_bound_ids is None else {"bound_ids": sorted(query_bound_ids)}
         found = session.execute(text(f"""
             SELECT manifests.*, mappings.raw_record_id, mappings.object_row_index, mappings.object_row_group,
                    mappings.spool_segment_id AS mapped_segment_id, mappings.session_id AS mapped_session_id,

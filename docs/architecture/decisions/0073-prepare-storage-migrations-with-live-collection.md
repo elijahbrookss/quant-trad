@@ -9,6 +9,8 @@ tags:
   - storage
   - migration
 code_paths:
+  - scripts/automation/storage_online_recovery.py
+  - tests/test_storage_repository_continuation.py
   - scripts/automation/storage_online_keys.py
   - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward.py
@@ -1456,6 +1458,13 @@ qualified before release.
 
 ### Repository preparation and native WAL continuation
 
+Online preflight requires typed incremental recovery settings before source stop.
+
+The preparer obtains incremental recovery settings from the already admitted
+maintenance limits. It creates only a private temporary input file inside its
+tmpfs; operators need not provision a duplicate `incremental-config.json` beside
+the existing keys.
+
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.
 It independently rechecks migration-reader retirement, the committed binding,
@@ -1485,6 +1494,84 @@ pause and capacity admission remain unfinished. The runtime package explicitly
 includes the existing online worker/controller dependency closure, and those files
 participate in source attestation.
 
+
+### Explicit recovery after a committed missing-config failure
+
+Implemented candidate, pending native qualification and deployment. The October 9
+failure happened after the database commit: the repository helper exited before
+preparation because it expected a configuration file supplied only by the test
+fixture. A committed database cannot return to the old runtime by replaying the
+migration or treating its expired final window as still valid.
+
+The existing recovery owner accepts a separately invoked, inspect-first
+`--recover-repositories-file` request bound to the exact operation and failed final
+receipt. It supports only the confirmed missing-file exception from that exact
+stopped helper, before any repository preparation. Unknown outcomes, successful
+helpers with missing replies, changed configuration, running writers, reboot and
+an existing continuation intent refuse execution.
+
+Execution preserves the failed receipt, private recipe and helper; verifies the
+committed certificate, policy, cluster, mounts and stopped workers; and reacquires
+the deployment lock and archive namespace exclusion. The replacement helper has
+a separate Compose project identity: renaming the failed container alone would
+still let Compose replace it through its original project/service labels.
+An explicit allowance of at
+most 600 seconds extends only the final recovery window. The original start and
+pause times remain intact, and a separate audit records the original deadline and
+the extension. Capture clocks, committed SQL, keys and policy are unchanged. The
+existing repository, spool and runtime owners perform the remaining work. Their
+ordinary entrypoints cannot acquire this continuation authority independently.
+
+This narrow exception restores service without repeating historical work. Its
+cost is another auditable recovery path; an interruption retains both attempts
+and requires reconciliation rather than an automatic retry. Runtime readiness
+still does not prove a complete encrypted backup pair or authorize ordinary
+deployment. Native qualification must reproduce the failure and expiry, preserve
+frozen inputs and the original keys, restart the matching runtime, and prove the
+existing completion reader accepts the result. No general migration retry
+framework or second data authority is introduced.
+
+The October 9 execution exposed a second deployment mismatch after repository
+preparation succeeded: the retained PostgreSQL image lacked `pgbackrest`, although
+the application and disposable database images included it. The database's WAL
+archive command could not execute. Native recovery qualification therefore did
+not establish compatibility with that retained production image. Collection
+remained stopped; no successful production recovery is claimed.
+
+Preflight now probes the database container's pinned pgBackRest executable as its
+ordinary UID70 before source pause and before committed repository recovery. It
+reads no keys or data and cannot install tools. A missing or incompatible tool
+requires a separately qualified preserving database-image correction. Replaying
+the migration, bypassing WAL verification, or modifying an active operation's
+receipts outside the recovery owner is not a correction.
+
+The same continuation owner now implements a v2 request for this exact second
+failure. It additionally binds the expired v1 continuation and an immutable
+replacement database image. Admission requires all repository actions confirmed,
+no action in flight, the retired successful helper, the unchanged archive
+configuration and zero archived WAL segments. The candidate must contain the
+pinned tool, byte-identical PostgreSQL/Timescale binaries and the same image
+configuration apart from Compose build provenance labels. This is not a database
+upgrade route.
+
+Execution preserves all previous receipts and recipes, then journals a clean
+stop, container removal without volumes, recreation and start. Complete mounts,
+networks and the runtime contract must match. The original cluster and actual
+native WAL delivery are required before publishing the new image/container
+binding and invoking the existing spool/runtime owners. Preparation, SQL cutover,
+keys and archive settings are not repeated. A lost daemon reply or interrupted
+publication remains unresolved; an existing v2 attempt cannot dispatch again.
+Recovery is forward to the committed schema, not automatic restoration of the old
+application. Its separately authorized allowance is at most 600 seconds and
+preserves the original pause/start history.
+
+The implementation and fault-injection tests are candidate evidence. The native
+fixture now reproduces both historical failures using a database image missing
+only pgBackRest, waits for actual expiry and exercises the correction, current
+and frozen reads, encrypted paired recovery and completion observation. It
+simulates the historical absence of the new preflight guard only inside the
+fixture; production admission remains strict. Native qualification and production
+completion are still required before claiming restoration.
 
 ### Connect private pending-WAL preparation after native WAL readiness
 
@@ -1790,8 +1877,9 @@ alone do not authorize release, restart, or deletion of any migration journal.
 
 ### Private environment proposal after verified recovery
 
-The one operation can stage a private environment proposal only after a fresh
-completed-runtime and encrypted-pair observation. Preserve original bytes and
+The normal operation stages a private environment proposal after a fresh
+completed-runtime and encrypted-pair observation. The explicit software repair
+exception below separates repair deployment from recovery readiness. Preserve original bytes and
 all journals; an existing partial or different proposal refuses replacement.
 The proposal derives storage bindings from the admitted runtime and grants no
 release or restart authority. This finite adapter connects migration to the
@@ -1805,7 +1893,7 @@ remain required before ordinary deployment resumes.
 
 An operation plan may additionally name `deployment_repository`, an absolute
 clean checkout of the exact candidate revision and application source hash.
-With both deployment inputs present, the existing `--execute` path can publish
+With both deployment inputs present, the normal `--execute` path can publish
 the configuration only after fresh runtime and complete encrypted-pair admission.
 Inspection without `--execute` does not publish. This is the final-state owner's
 terminal file transition, not another deployment command or migration retry.
@@ -1847,6 +1935,24 @@ claiming fresh fleet health from obsolete migration container identities.
 This terminal path still requires integrated release qualification and review;
 component file/render tests do not establish production pause, capacity, workload
 or successful migration-plus-deployment outcomes.
+
+### Software repair before recovery completion
+
+A failed backup implementation must not prevent deploying its repair. After all
+migration/runtime actions completed and the failed maintenance process is cleanly
+stopped, an explicit repair request may select a different qualified application
+revision through the existing final-state and deployment owners. Original request,
+runtime configuration, clocks, facts, storage placement and recovery evidence stay
+intact. Fresh observation still requires the original running database/collection
+composition, committed schema certificate and policy; the public configuration
+must preserve the same storage definitions. No new migration allowance is issued.
+
+The existing release record stores the repair request and publishes only the exact
+software candidate. Normal file-interruption recovery and full-fleet deployment
+checks apply. This exception certifies neither backup completion nor research
+readiness. A matching encrypted pair remains a separate recovery obligation; the
+old source-layout software remains unsuitable for rollback. See the
+[repair contract](../persistence/STORAGE_MANAGEMENT.md#software-repair-before-recovery-completion).
 
 ### Online baseline order and SSD headroom
 

@@ -128,3 +128,29 @@ def test_worker_stop_request_preserves_resume_cursor_and_starts_no_more_work(tmp
     assert result["stop_reason"] == "stop_requested" and result["failure_count"] == 0
     assert result["outcomes"][0]["status"] == "deferred"
     assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
+
+
+def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    instances, calls = [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            instances.append(self)
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            self.check_budget()
+            calls.append(self)
+            return {"status": "book_prefix_verified", "storage_day": day.isoformat()}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2)
+    for _ in range(2):
+        result = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+        assert result["stop_reason"] == "step_budget" and len(result["outcomes"]) == 2
+        assert executor._archive is None
+    assert len(instances) == 2
+    assert calls == [instances[0], instances[0], instances[1], instances[1]]

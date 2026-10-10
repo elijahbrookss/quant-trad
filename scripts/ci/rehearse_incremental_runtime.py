@@ -112,7 +112,16 @@ def rehearse(*, pg_bin, pgbackrest, restic):
             with conn.connection.driver_connection.cursor() as cursor:
                 cursor.execute(sql.SQL("ALTER SYSTEM SET archive_command = {}").format(sql.Literal(command)))
             conn.exec_driver_sql("SELECT pg_reload_conf()")
-        def manager(cls=EncryptedRecoveryCopies, **overrides):
+        archive_calls = []
+        class CaptureArchives(EncryptedRecoveryCopies):
+            def _run(self, command, **kwargs):
+                result = super()._run(command, **kwargs)
+                if str(command[0]) == str(self.restic) and "backup" in command:
+                    summary = json.loads(result)
+                    archive_calls.append({**summary, "requested_parent":
+                        command[command.index("--parent")+1] if "--parent" in command else None})
+                return result
+        def manager(cls=CaptureArchives, **overrides):
             return cls(incremental=config, connection_url=url, **{**limits, **overrides})
         objects = FilesystemRawArchiveObjectStore(root/"objects")
         def add_object(name):
@@ -140,8 +149,8 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                     conn.execute(text("SELECT pg_advisory_unlock_shared(hashtextextended(:n,0))"),
                                  {"n":_LIFECYCLE_LOCK_NAME})
                     conn.commit()
-        class ConcurrentAdmission(EncryptedRecoveryCopies):
-            def _run(self, command):
+        class ConcurrentAdmission(CaptureArchives):
+            def _run(self, command, **kwargs):
                 if command[-1] == "backup" and str(command[0]) == str(self.pgbackrest):
                     with engine.connect() as contender:
                         assert not contender.scalar(text(
@@ -150,21 +159,25 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                     # A manifest admitted after the fence but before physical
                     # completion must be present in its matching archive snapshot.
                     add_object("during-backup")
-                return super()._run(command)
+                return super()._run(command, **kwargs)
         with snapshot() as session:
             first = manager(ConcurrentAdmission).create(session, objects=objects, keep_copies=2)
         assert first["archive_objects"] == 2
+        assert archive_calls[-1]["requested_parent"] is None
         with engine.begin() as conn:
             conn.exec_driver_sql("INSERT INTO observations VALUES (1001,'incremental')")
         with snapshot() as session:
             second = manager().create(session, objects=objects, keep_copies=2)
         assert first["database_type"] == "full" and second["database_type"] == "incr"
+        assert archive_calls[-1]["requested_parent"] == first["archive_snapshot"]
+        assert archive_calls[-1]["files_unmodified"] == 2
+        assert archive_calls[-1]["files_new"] == 1  # This generation's inventory.
         # A failed archive half leaves the earlier paired recovery points intact.
-        class FailArchives(EncryptedRecoveryCopies):
-            def _run(self, command):
+        class FailArchives(CaptureArchives):
+            def _run(self, command, **kwargs):
                 if str(command[0]) == str(self.restic) and "backup" in command:
                     raise RuntimeError("injected_archive_failure")
-                return super()._run(command)
+                return super()._run(command, **kwargs)
         try:
             with snapshot() as session:
                 manager(FailArchives).create(session, objects=objects, keep_copies=2)
@@ -174,11 +187,20 @@ def rehearse(*, pg_bin, pgbackrest, restic):
             raise AssertionError("failure was not exercised")
         assert [r[2]["name"] for r in manager().completed()] == [first["name"], second["name"]]
         # Renewal/rotation leaves two points and their necessary native chain.
+        add_object("added-after-pair")
         with snapshot() as session:
             third = manager().create(session, objects=objects, keep_copies=2)
-        class InterruptRetirement(EncryptedRecoveryCopies):
-            def _run(self, command):
-                result = super()._run(command)
+        assert archive_calls[-1]["requested_parent"] == second["archive_snapshot"]
+        assert archive_calls[-1]["files_unmodified"] == 2
+        assert archive_calls[-1]["files_new"] == 2
+        # Remove an owned disposable source object between copies. Selecting a
+        # parent must not reintroduce it into the new inventory or snapshot.
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DELETE FROM market.raw_archive_manifests WHERE id='first'")
+        (objects.root/"first").unlink()
+        class InterruptRetirement(CaptureArchives):
+            def _run(self, command, **kwargs):
+                result = super()._run(command, **kwargs)
                 if str(command[0]) == str(self.restic) and "forget" in command:
                     raise RuntimeError("injected_retirement_interruption")
                 return result
@@ -191,6 +213,9 @@ def rehearse(*, pg_bin, pgbackrest, restic):
             raise AssertionError("retirement interruption was not exercised")
         current = manager()
         fourth = current.completed()[-1][2]
+        assert archive_calls[-1]["requested_parent"] == third["archive_snapshot"]
+        assert archive_calls[-1]["files_unmodified"] == 2
+        assert archive_calls[-1]["files_new"] == 1
         assert list(current.root.glob(".copy_*"))
         with current.lock():
             current._prune(2)
@@ -202,6 +227,9 @@ def rehearse(*, pg_bin, pgbackrest, restic):
         # Restore the selected complete pair; later source writes stay outside.
         with engine.begin() as conn:
             conn.exec_driver_sql("INSERT INTO observations VALUES (999999,'after recovery point')")
+        # Each independent restore/retirement gets its own unchanged operation
+        # budget, rather than sharing the preceding reconciliation's deadline.
+        current = manager()
         older, older_socket = root/"older", root/"older-socket"
         older_socket.mkdir(mode=0o700)
         current._run(current._br("--pg1-path="+str(older), "--set="+third["database_label"],
@@ -214,6 +242,10 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                 assert conn.scalar(text("SELECT count(*) FROM observations")) == 1001
         finally:
             older_engine.dispose()
+        older_files = root/"older-archives"
+        current._run(current._rs("restore", third["archive_snapshot"], "--target", str(older_files)))
+        assert (older_files/str(objects.root).lstrip("/")/"first").read_bytes() == b"immutable first"
+        current = manager()
         restored, restored_socket = root/"restored", root/"restored-socket"
         restored_socket.mkdir(mode=0o700)
         current._run(current._br("--pg1-path="+str(restored), "--set="+fourth["database_label"],
@@ -236,6 +268,19 @@ def rehearse(*, pg_bin, pgbackrest, restic):
         inventory = destination/fourth["inventory_snapshot_path"].lstrip("/")
         assert hashlib.sha256(inventory.read_bytes()).hexdigest() == fourth["inventory_sha256"]
         assert len(rows) == 2
+        assert not (destination/str(objects.root).lstrip("/")/"first").exists()
+        # The parent is a reuse hint, not an additional recovery dependency.
+        current = manager()
+        with current.lock():
+            current._prune(1)
+        assert [s["id"] for s in current._native_snapshots()] == [fourth["archive_snapshot"]]
+        current = manager()
+        after_parent_retirement = root/"after-parent-retirement"
+        current._run(current._rs("restore", fourth["archive_snapshot"],
+                                "--target", str(after_parent_retirement)))
+        for name, digest in rows:
+            recovered = after_parent_retirement/str(objects.root).lstrip("/")/name
+            assert hashlib.sha256(recovered.read_bytes()).hexdigest() == digest
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT count(*) FROM observations")) == 1002
         print(json.dumps({
@@ -250,6 +295,9 @@ def rehearse(*, pg_bin, pgbackrest, restic):
             "older_and_latest_points_survive_wal_expiry":True,
             "interrupted_retirement_reconciled_without_new_backup":True,
             "later_writes_excluded":True,
+            "archive_parent_reuses_unchanged_objects":True,
+            "archive_parent_handles_added_and_retired_objects":True,
+            "archive_restores_after_parent_snapshot_retirement":True,
             "full_qt_frozen_reader_qualified":False,
             "points":[{"type":r["database_type"],"seconds":r["elapsed_seconds"]}
                       for r in (first,second,third,fourth)],

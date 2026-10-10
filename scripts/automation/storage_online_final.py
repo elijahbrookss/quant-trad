@@ -1381,7 +1381,7 @@ def activate_online_runtime_locked(state_root, *, worker_process, max_duration_s
         source_check=check,max_duration_seconds=max_duration_seconds)
 
 
-def inspect_runtime_completion_locked(state_root, *, timeout_seconds=60):
+def inspect_runtime_completion_locked(state_root, *, timeout_seconds=60, repair_release=False):
     """Observe a fully journaled runtime; never resolve or replay uncertain actions.
 
     Original clocks remain unchanged. Expiry is allowed only for this bounded
@@ -1397,15 +1397,24 @@ def inspect_runtime_completion_locked(state_root, *, timeout_seconds=60):
         raise RuntimeError("storage_online_final_boot_changed")
     if time.time() < saved["runtime"]["finished_at"] or _boot_seconds() < saved["started_boot"]:
         raise RuntimeError("storage_online_final_clock_moved_backwards")
-    return inspect_completed_runtime(state_root, saved=saved, timeout_seconds=timeout_seconds)
+    options = {"repair_release":repair_release} if repair_release is not False else {}
+    return inspect_completed_runtime(state_root, saved=saved, timeout_seconds=timeout_seconds, **options)
 
 
-def publish_deployment_configuration_locked(state_root, *, repository, environment_path):
+def publish_deployment_configuration_locked(state_root, *, repository, environment_path, repair=None):
     """Terminal metadata transition; all migration actions must already be complete."""
     from scripts.automation import storage_online_release as release
     state_root=launch._canonical(state_root)
-    observed=inspect_runtime_completion_locked(state_root)
-    if observed.get("ready") is not True:
+    saved=_load(state_root/STATE)
+    if repair is None:
+        repair = saved.get("release", {}).get("repair")
+    options = {}
+    if repair is not None:
+        release.validate_repair_request(repair, saved)
+        options["repair"] = repair
+    observed=inspect_runtime_completion_locked(state_root, **({"repair_release":True} if options else {}))
+    if (observed.get("ready") is not True
+            and not (options and observed.get("repair_release_admissible") is True)):
         raise RuntimeError("storage_online_release_complete_recovery_required")
     saved=_load(state_root/STATE)
     if "release" in saved:
@@ -1415,9 +1424,9 @@ def publish_deployment_configuration_locked(state_root, *, repository, environme
                 or saved["release"]["environment_path"]!=str(environment_path)):
             raise RuntimeError("storage_online_release_binding_changed")
         release.inspect_deployment_configuration(state_root, repository=repository,
-            environment_path=environment_path, saved=saved)
+            environment_path=environment_path, saved=saved, **options)
         return release.reconcile_configuration_files(state_root,saved=saved)
     configuration=release.inspect_deployment_configuration(state_root,
-        repository=repository,environment_path=environment_path,saved=saved)
+        repository=repository,environment_path=environment_path,saved=saved, **options)
     return release.publish_configuration(state_root,repository=repository,
-        environment_path=environment_path,saved=saved,configuration=configuration)
+        environment_path=environment_path,saved=saved,configuration=configuration, **options)

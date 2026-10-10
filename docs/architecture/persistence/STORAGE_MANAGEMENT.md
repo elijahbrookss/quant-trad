@@ -9,6 +9,8 @@ tags:
   - postgres
   - recovery
 code_paths:
+  - scripts/db/manual_retire_promoted_identity_proof_v1.sql
+  - tests/test_storage_repository_continuation.py
   - scripts/db/raw_mapping_v2_placement.py
   - cli/storage_placement.py
   - tests/test_cli/test_storage_placement.py
@@ -153,6 +155,17 @@ blocked: a UI confirmation cannot prepare a database or prove a migration.
 The existing storage lifecycle supervisor performs history movement and local recovery
 copies under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
+
+## Current deployment and historical qualification
+
+The approved retained-header cutover is complete. The
+[deployed outcome in the implementation specification](../../engineering/research-data-evolution-spec.md#deployed-outcome--2026-10-09)
+records the serving release, 14-day policy, cache and matching recovery evidence.
+Sustained archival throughput and growth-horizon qualification remain open.
+The migration sections below preserve earlier design and qualification states;
+their historical release-status statements do not supersede that deployed
+outcome or authorize replay. Alternative operators still need their own
+applicable qualification.
 
 ## Proposed forward-only transition
 
@@ -1242,6 +1255,12 @@ budget and checks actual free space/ownership during copying. Ordinary cache
 hits keep only an active-file lock. OS I/O stalls remain subject to host-level
 qualification, not a hard real-time guarantee from Python checkpoints.
 
+Cache admission reads the registered SSD target for identity and capacity; that
+target can be the backend's read-only PostgreSQL bind. The actual cache working
+directory must be writable and on the same UUID and device. An unavailable
+target or working mount bypasses this optional cache and keeps the authoritative
+archive reader available. No PostgreSQL directory permissions are expanded.
+
 The fixed server overlay enables global research serialization and one research
 worker. It leaves cache size zero until capacity qualification supplies an
 explicit cache byte budget, minimum-free floor and private runtime-owned
@@ -1402,6 +1421,23 @@ Retirement keeps every physical dependency needed by the retained usable points;
 interrupted cleanup resumes before reporting a point as not_due. Native tools
 inherit no ambient credentials or configuration, and their child processes are
 bounded by the existing cancellation, deadline and filesystem reserve checks.
+
+Restic runs with JSON output and quiet progress: native summaries and errors
+remain available, while periodic status messages cannot consume the bounded
+subprocess output buffer during long backups. Ordinary result and error output
+retain their 8 MiB caps; an overflow identifies the tool and stream without
+exposing contents. Nonzero native exits still fail the pair.
+
+Native snapshot listings include every original file path. The same recovery
+owner uses pinned `ijson` parsing to consume that listing incrementally and keep
+only complete snapshot IDs, hosts and tags, still capped at 8 MiB of metadata.
+This avoids both retaining an archive-sized JSON response and inventing a JSON
+parser. Truncated, ambiguous or malformed metadata refuses retirement; paths
+remain in the native snapshot and encrypted inventory. Cancellation, deadline
+and process-group cleanup apply while streaming. The production-image tests
+exercise real metadata above the ordinary output cap, bounded Python allocation,
+chunk-triggered progress, failure handling and child termination. Neither fix
+changes backup formats or the paired-publication requirement.
 
 Production images contain pinned tools. Image availability does not enable WAL
 archiving, provision keys, qualify a restore or activate a backup policy. Those
@@ -2681,6 +2717,71 @@ Production pause and resource admission still require the integrated measured op
 
 ### Repository preparation and native WAL continuation
 
+Online preflight requires typed incremental recovery settings before source stop.
+It also executes `pgbackrest version` as UID70 in the retained database container,
+requiring the pinned 2.59.1 tooling. Tools in the application image do not prove
+the separately retained database image can archive WAL. The probe reads no keys
+or data and performs no installation.
+
+Incremental settings come from the admitted maintenance limits; the helper uses
+a private tmpfs input and does not require duplicate configuration beside keys.
+For the confirmed pre-preparation missing-config failure after commit, the
+existing recovery owner provides an explicit, bounded continuation. Its failed
+receipt and helper remain preserved, and ordinary migration replay stays closed.
+See [ADR 0073's recovery decision](../decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure)
+for the exact admission, clock and failure rules. Native qualification passed for
+the current and first-release application versions on October 9. Production
+repository preparation subsequently succeeded, but WAL delivery remained blocked
+by missing pgBackRest in the retained database image. The first production continuation
+failed at that boundary. The same continuation owner implements an explicitly bound
+v2 image correction for that completed-preparation failure. It preserves the
+same cluster, volumes, keys and runtime contract, requires identical PostgreSQL
+and Timescale binaries, journals replacement without volume removal, and verifies
+actual WAL delivery before continuing existing spool/runtime steps. Prior
+attempts remain evidence; uncertain outcomes refuse automatic replay. Native
+qualification passed for current and first-release application images, and the
+production correction reached `recovery_runtime_ready` on October 9. This does
+not establish fresh collection or a complete production backup pair.
+
+The first production write exposed a separate forward-handoff defect: a
+retained `online_guard_identity` trigger followed the promoted identity heap and
+still required the old header OID. The explicit operator repair
+`scripts/db/manual_retire_promoted_identity_proof_v1.sql` checks the committed
+operation, original proof OIDs, exact trigger body and permanent canonical
+guards before removing only that obsolete row trigger. It uses a non-waiting
+table lock and five-second SQL bounds, changes no rows, and preserves the proof,
+functions, truncate guard and other constraints. A lost reply requires catalog
+inspection; absence of the trigger refuses another dispatch. A disposable native
+rehearsal reproduced the rejected insert and verified restored ingestion,
+corrections, causal reads, frozen results and preservation of every other trigger.
+Production execution completed on October 9 with the same cluster and identity
+heap, and fresh accepted facts were observed. The forward-switch implementation
+now retires the exact source-bound row guards from the identity heap and any raw
+mapping heap it promotes, within the existing final transaction. It verifies the
+original proof, target OIDs and guard definitions while preserving the proof,
+functions, truncate guards and unpromoted copies. Failure restores guards with the
+transaction. Native qualification of that preventive change is pending; the
+manual repair alone does not certify fleet-wide recovery.
+
+Completion inspection preserves the immutable forward publication and all
+reschedule preimages. After a structurally complete `recovery_runtime_ready`
+receipt, the canonical operation reader binds the current runtime recipe to the
+final owner's recorded admission, including an explicitly corrected database
+image. Before completion, publication still requires the original recipe bytes.
+Plan, request, inventory, launch clocks and publication history remain checked in
+both cases. Database identity comes from the authenticated operation request for
+both original and forward capture formats; forward capture receipts own proof
+and clocks, not a duplicate database identity. The existing runtime observer must
+then verify the actual containers,
+cluster, mounts, configuration and complete backup pair before deployment
+publication; matching a recipe alone grants no operational authority. Inspection
+never renews a deadline or dispatches the retired migration. This reader correction
+passed 651 focused host tests; the identity-reader correction passed its 74-test
+runtime suite. Read-only production completion inspection now verifies the actual
+runtime and leaves the journals unchanged, returning
+`current_layout_recovery_pending` until a complete backup pair exists. Deployment
+publication remains unverified.
+
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.
 It independently rechecks migration-reader retirement, the committed binding,
@@ -3058,7 +3159,8 @@ alone do not authorize release, restart, or deletion of any migration journal.
 
 The existing operation plan may include `deployment_environment`, the absolute
 path of the existing private (0600) deployment environment. After a fresh
-`recovery_verified` observation, inspection computes a proposed environment
+`recovery_verified` observation, or the explicit software repair admission below,
+inspection computes a proposed environment
 fingerprint. `--execute` additionally preserves the exact original bytes as
 `storage-online-source.env` and creates `storage-online-deployment.env` in the
 private state directory. Both are 0600, created once, and refuse changed or
@@ -3097,7 +3199,7 @@ also excluded from remote pulls. Ordinary source-layout builds are unchanged.
 
 An operation plan may additionally name `deployment_repository`, an absolute
 clean checkout of the exact candidate revision and application source hash.
-With both deployment inputs present, the existing `--execute` path can publish
+With both deployment inputs present, the normal `--execute` path can publish
 the configuration only after fresh runtime and complete encrypted-pair admission.
 Inspection without `--execute` does not publish. This is the final-state owner's
 terminal file transition, not another deployment command or migration retry.
@@ -3113,7 +3215,13 @@ owns their build. Non-storage UI and observability profiles remain deployer-owne
 Before either active file changes, a `release` section in the existing final
 receipt records exact proposal, original-file, configuration and request hashes.
 Original environment and `release.env` bytes are preserved as private create-once
-artifacts. Atomic replacements publish the proposed environment and a bridge
+artifacts. Source metadata accepts the older four-field deployer record or the
+later record with an empty `storage_layout`; both must identify the original
+source revision. Unknown fields, missing required fields, duplicates and any
+claimed layout refuse. The read-only configuration inspection checks this before
+rendering and detects metadata changes during rendering; publication repeats the
+check under the deployment lock. It preserves the original bytes without adding
+fields to historical evidence. Atomic replacements publish the proposed environment and a bridge
 release record with the fixed layout and exact pending candidate, but no completed
 current/previous revision. An old source-layout revision is not a rollback target.
 All original migration journals and clocks remain unchanged and retained.
@@ -3139,6 +3247,49 @@ claiming fresh fleet health from obsolete migration container identities.
 This terminal path still requires integrated release qualification and review;
 component file/render tests do not establish production pause, capacity, workload
 or successful migration-plus-deployment outcomes.
+
+### Software repair before recovery completion
+
+`qt storage migrate --operation-file <existing-plan> --repair-release-file <request>`
+inspects an explicit software repair after a durably completed cutover/runtime
+activation. `--execute` publishes only its deployment configuration; the existing
+server deployer still owns service replacement. It cannot combine with migration,
+deadline, cancellation or repository-continuation options.
+
+The private request has exactly `schema_version: qt.storage_repair_release.v1`,
+`final_sha256`, `source_revision` and `source_tree_hash`. The final digest uses
+`storage_host_boundary.digest` over the original final journal, excluding a later
+`release` section. The revision must differ from the original migration candidate.
+The exact clean checkout and application hash are verified during configuration
+inspection; qualification and operator authorization remain prerequisites.
+
+Admission requires every migration/runtime action to be complete, the original
+reader/helpers retired, unchanged journal/configuration/volume/network identities,
+and the original database, backend, collectors and preserved clients healthy.
+Only the maintenance health condition changes: its exact original container must
+be cleanly stopped, with zero PID/exit code, no restart/OOM/dead state and a stable
+state throughout inspection. A bounded read-only backend probe checks the committed
+schema certificate, schema contract and current policy using existing database
+owners. It does not claim the maintenance-only physical/recovery checks passed.
+
+The original request and runtime recipe remain unchanged. Canonical rendering
+requires the backend's `SOURCE_REVISION`, `SOURCE_TREE_HASH`, and
+`QT_BOT_RUNTIME_IMAGE` to identify the exact selected release. It rejects stale,
+missing, or different release identifiers; these software bindings do not change
+historical run provenance. The existing release section stores the repair request;
+canonical rendering still rejects changes to
+storage definitions, private inputs, privileges, mounts, resources or database
+image. Publication reports `complete_backup_confirmed: false`. Interrupted file
+publication rechecks the same stopped runtime and exact proposal; after publication,
+only the exact first software release can run through the normal deployer.
+
+Successful software deployment does not certify the encrypted database/archive
+pair, enable research, reclaim retained data or clear other target-state gates.
+Verify those outcomes separately through their existing owners. Preserve partial
+backup evidence; select the next native backup from verified chain state, not an
+invented completion marker. Recovery uses the existing deployer and compatible
+software fixes, never replay of the committed migration or rollback to the old
+source-layout release.
 
 
 The public storage composition also requires the existing read-only application
@@ -3586,9 +3737,15 @@ The bounded JSON request has `schema_version: qt.retained_raw_history.v1`, exact
 The adapter requires the dedicated database UID, matching immutable image
 attestation (the image's `QT_IMAGE_SOURCE_*`, without requiring research `SOURCE_*` settings),
 archive/working mounts and a live maintenance heartbeat. It opens only `PG_DSN`
-without schema bootstrap. Signals request cancellation through the existing move
-watcher; failed/disconnected dispatch is inspected with the same request before
-retry. No callback silently renews an expired intent. The existing
+without schema bootstrap. During this dedicated CLI's ordinary SQL, psycopg2's
+`wait_select` callback lets Python receive SIGINT/SIGTERM while the database call
+waits, so signals request cancellation through the existing move watcher. The
+adapter restores the previous callback and signal handlers on success or failure;
+it does not use driver COPY or large-object APIs. The native CLI regression sends
+real signals only after PostgreSQL reports the child query active, and verifies
+the existing watcher cancels it before the statement timeout. Failed/disconnected
+dispatch is inspected with the same request before retry. No callback silently
+renews an expired intent. The existing
 `scripts/automation/server_deploy.sh qt storage place-retained-raw --request-file -`
 route holds the deployment lock and selects maintenance only when the recorded
 SSD/HDD release, clean checkout and running image match. Ordinary `qt` commands
