@@ -490,6 +490,12 @@ source candles, a 200-bar finite pre-period initialization and `reset_rewarm`.
 It supports one UTC calendar year or a bounded subwindow for qualification.
 It does not reconstruct an uninterrupted pre-seed EMA history.
 
+Calendar labels use the same UTC pandas formatting in batches of at most 2,048
+timestamps, with execution checkpoints between batches. This limits native
+formatting work that can delay ownership and cancellation helpers; it does not
+change calendar meaning, result hashes, scientific versions, or the materialized
+input contract. It is not a universal stop-latency guarantee.
+
 The collector optionally captures each public output's readiness from the
 canonical engine snapshot. Contiguous identical readiness and gap-segment
 states compress into half-open candle-open intervals. Missing candles are not

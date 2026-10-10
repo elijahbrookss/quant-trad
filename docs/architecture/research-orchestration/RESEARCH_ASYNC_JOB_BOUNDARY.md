@@ -99,6 +99,10 @@ check the execution-local stop signal. This is cooperative: a native computation
 must return to a checkpoint; one second is the polling interval, not a universal
 stop-latency guarantee. SQL interruption is bound to the owning connection until
 its statement releases, preventing a cancellation from following pooled reuse.
+The global admission helper's three-second observation limit remains independent
+of the job lease. A stale-probe error reports observation age, the latest probe's
+age and in-flight state, and completed probe count. These diagnose delayed
+observation; they do not establish that the database lock was lost.
 Worker shutdown unwinds execution and uses the existing bounded retry policy;
 an explicit cancellation never retries or publishes partial evidence.
 

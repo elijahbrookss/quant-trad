@@ -22,6 +22,7 @@ from .event_fact_evaluator import EventFactEvaluator, _candle_rows
 GROUPS = ("ordinary", "shock_crossing", "persistent_high")
 RMS_BINS_BPS = (0, 1, 2, 4, 8, 16, 32)
 MAX_MINUTES = 370 * 24 * 60
+_CALENDAR_LABEL_BATCH_SIZE = 2048
 PINNED_PARAMS = {"atr_short_window": 14, "atr_long_window": 50, "atr_z_window": 100,
     "directional_efficiency_window": 20, "slope_window": 20, "range_window": 20,
     "expansion_window": 20, "volume_window": 50, "overlap_window": 8,
@@ -37,6 +38,17 @@ def _seconds(value: Any) -> int:
 
 def _iso(seconds: int) -> str:
     return datetime.fromtimestamp(int(seconds), timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _calendar_labels(dates: pd.DatetimeIndex, pattern: str) -> np.ndarray:
+    """Keep native date formatting from starving ownership and stop helpers."""
+    labels = np.empty(len(dates), dtype=object)
+    for start in range(0, len(dates), _CALENDAR_LABEL_BATCH_SIZE):
+        execution_checkpoint()
+        end = start + _CALENDAR_LABEL_BATCH_SIZE
+        labels[start:end] = dates[start:end].strftime(pattern)
+    execution_checkpoint()
+    return labels
 
 
 def normalize_forward_risk(config: Any, *, detector: Mapping[str, Any],
@@ -309,8 +321,10 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         where = where[(bad[where] - bad[where-120]) == 0]
         baseline[where] = (prefix[where] - prefix[where-120]) / 120
         dates = pd.to_datetime(np.where(present, known, times), unit="s", utc=True)
-        source_months = np.asarray(pd.to_datetime(times, unit="s", utc=True).strftime("%Y-%m"))
-        months = np.asarray(dates.strftime("%Y-%m")); days = np.asarray(dates.strftime("%Y-%m-%d")); weeks = np.asarray(dates.strftime("%G-W%V"))
+        source_months = _calendar_labels(pd.to_datetime(times, unit="s", utc=True), "%Y-%m")
+        months = _calendar_labels(dates, "%Y-%m")
+        days = _calendar_labels(dates, "%Y-%m-%d")
+        weeks = _calendar_labels(dates, "%G-W%V")
         stratum = np.full(n, -1, dtype=int)
         baseline_ok = observable & np.isfinite(baseline)
         bins = np.searchsorted(np.asarray(RMS_BINS_BPS), np.sqrt(baseline[baseline_ok])*10000, side="right") - 1
