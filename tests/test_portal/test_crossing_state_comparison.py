@@ -126,6 +126,33 @@ def test_exclusions_and_no_support_are_explicit(change):
     assert finish(data, actual)["analysis_status"] == "unsupported"
 
 
+def test_unmatched_crossing_identities_are_complete_ordered_and_deterministic():
+    from core.execution_control import (
+        ExecutionControl, ExecutionBudgetExceededError,
+        consume_execution_json, controlled_execution,
+    )
+
+    data = fixture()
+    data["metric"][~data["shock"] & (data["metric"] > 2)] = 4
+    prepared = owner.prepare_pairs(**data)
+    result = finish(data, prepared)
+    identities = result["matching"]["unmatched_crossing_identities"]
+    assert identities == [
+        {"source_open_epoch": i * 60, "decision_known_at_epoch": (i + 1) * 60,
+         "reason": "no_unused_control_satisfies_all_fixed_constraints"}
+        for i in (30, 240, 480)
+    ]
+    assert result["matching"]["unmatched_crossings"] == len(identities) == 3
+    assert semantic_hash(finish(data, owner.prepare_pairs(**data))) == semantic_hash(result)
+    assert finish(data, prepared, np.full(900, 50))["matching"]["unmatched_crossing_identities"] == identities
+    control = ExecutionControl()
+    control.limit(seconds=10, result_bytes=1)
+    with pytest.raises(ExecutionBudgetExceededError, match="resource=result_bytes"):
+        with controlled_execution(control):
+            consume_execution_json("result_bytes", result)
+    assert result["matching"]["unmatched_crossing_identities"] == identities
+
+
 def test_caliper_inclusive_and_exact_context_pinned():
     data = fixture()
     data["metric"][~data["shock"] & (data["metric"] > 2)] = 3.25
@@ -173,6 +200,21 @@ def test_full_evaluator_freezes_new_pairs_and_preserves_legacy_result():
     assert result["crossing_state_comparison"]["primary"]["pair_count"] == 2
     assert result["crossing_state_comparison"]["primary"]["raw_risk_contrast"] == pytest.approx(0, abs=1e-18)
     assert result["promotion_authority"] is False
+    unmatched_inputs = deepcopy(new)
+    for output in unmatched_inputs["indicator_evidence"]["outputs"]:
+        if output["output_name"] == "candle_stats":
+            i = int((pd.Timestamp(output["time"])-pd.Timestamp(clock(0))).total_seconds()/60)
+            if i not in (30, 240) and output["value"]["atr_zscore"] > 2:
+                output["value"]["atr_zscore"] = 3.5
+    unmatched_result = evaluator.evaluate(inputs=unmatched_inputs, plan=plan)
+    matching = unmatched_result["crossing_state_comparison"]["matching"]
+    assert matching["matched_pairs"] == 0
+    assert matching["unmatched_crossing_identities"] == [
+        {"source_open_epoch": int(pd.Timestamp(clock(i)).timestamp()),
+         "decision_known_at_epoch": int(pd.Timestamp(clock(i + 1)).timestamp()),
+         "reason": "no_unused_control_satisfies_all_fixed_constraints"}
+        for i in (30, 240)
+    ]
     assert inputs == before
     assert ForwardRiskEvaluator().evaluate(inputs=inputs, plan=plan) == legacy
     with pytest.raises(ValueError, match="forward_risk_invalid"):

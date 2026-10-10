@@ -100,6 +100,14 @@ def prepare_pairs(*, times, known, observable, metric, shock, segment, baseline,
         execution_checkpoint()
         row = [int(times[i]), int(times[j]), int(known[i]), int(known[j])]
         digest.update(json.dumps(row, separators=(",", ":")).encode()+b"\n")
+    unmatched_identities = []
+    for i in unmatched:
+        execution_checkpoint()
+        unmatched_identities.append({
+            "source_open_epoch": int(times[i]),
+            "decision_known_at_epoch": int(known[i]),
+            "reason": "no_unused_control_satisfies_all_fixed_constraints",
+        })
     strata_rows = []
     matched_crossings = pairs[:, 0]
     for s in sorted(set(strata[crossing])):
@@ -127,6 +135,7 @@ def prepare_pairs(*, times, known, observable, metric, shock, segment, baseline,
     return {"pairs": pairs, "episodes": episodes, "rms": rms,
         "accounting": {"eligible_crossings": int(crossing.size), "eligible_controls": int(controls.size),
             "matched_pairs": len(pairs), "unmatched_crossings": len(unmatched),
+            "unmatched_crossing_identities": unmatched_identities,
             "unmatched_reason": "no_unused_control_satisfies_all_fixed_constraints",
             "match_fraction": len(pairs)/len(crossing) if len(crossing) else None,
             "monthly": monthly, "strata": strata_rows, "current_z_support": z_support,
