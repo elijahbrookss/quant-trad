@@ -126,16 +126,17 @@ def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage,
         "requested_channel": "market_trades",
     }
     prefixes = [prefix, {**prefix, "first_receive_ordinal": 2, "root_fact_version_id": "overlapping-root"}]
-    returned = []
+    returned, prefix_parameter_counts = [], []
     def observe(conn, cursor, statement, parameters, context, executemany):
         if "raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement:
             returned.append(cursor.rowcount)
-    def resolve(ranges=prefixes, **kwargs):
+            prefix_parameter_counts.append(sum(name.startswith("prefix_") for name in parameters))
+    def resolve(ranges=prefixes, max_mapping_rows=3, **kwargs):
         with storage.database.session() as session:
             market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
             return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=fixture.store,
                 byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()),
-                book_prefix_ranges=ranges, max_mapping_rows=3, **kwargs)
+                book_prefix_ranges=ranges, max_mapping_rows=max_mapping_rows, **kwargs)
     event.listen(storage.database._engine, "after_cursor_execute", observe)
     try:
         assert set(resolve()) == set(fixture.manifests)
@@ -147,6 +148,15 @@ def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage,
             resolve(bound_manifest_ids=fixture.manifests[:1])
         with pytest.raises(RuntimeError, match="mapping_missing"):
             resolve([prefix, {**prefixes[1], "session_id": "another-connection"}])
+        repeated = [{**prefix, "root_fact_version_id": f"repeated-root-{index}"} for index in range(600)]
+        bindings = {item["root_fact_version_id"]: set(fixture.manifests) for item in repeated}
+        assert set(resolve(repeated, max_mapping_rows=1200, witness_manifest_ids=bindings)) == set(fixture.manifests)
+        assert returned[-1] == 2 and prefix_parameter_counts[-1] == 5
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve(repeated, max_mapping_rows=1200,
+                    witness_manifest_ids={**bindings, "repeated-root-0": set()})
+        with pytest.raises(RuntimeError, match="prefix_budget_exceeded"):
+            resolve(repeated, max_mapping_rows=1199)
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe)
 

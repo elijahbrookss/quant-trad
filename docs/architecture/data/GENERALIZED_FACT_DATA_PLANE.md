@@ -645,10 +645,28 @@ do not alter the boolean hold. No new index, reference authority or historical
 backfill is introduced. Planning lists `canonical_hot_backlog`; final expiry
 repeats the check. User-pin release cannot remove either class of canonical protection.
 
-The indexed query shape is not a hard resource bound. The ordinary expiration
-path does not currently inherit the separate canonical-retention statement
-deadlines or impose a temporary-space cap. Those limits remain follow-up work
-at this lifecycle repository boundary, not a new maintenance framework.
+The indexed query shape is not a hard resource bound. The lifecycle repository
+owns expiration-planning and final-target witness transactions with `SET LOCAL`
+ceilings of 5 seconds per statement and 64 MiB of temporary files. Stricter caller
+settings remain stricter; parallel query workers are disabled for these witnesses
+because PostgreSQL's temporary-file limit applies per process. These are metadata
+query safety ceilings, not a whole-cycle deadline or a throughput promise. Commit
+or rollback removes the local settings before the connection returns to the pool.
+The database role must already be allowed to set `temp_file_limit`; runtime does
+not grant permissions or silently fall back. See PostgreSQL 15's
+[resource limits](https://www.postgresql.org/docs/15/runtime-config-resource.html)
+and [statement timeouts](https://www.postgresql.org/docs/15/runtime-config-client.html).
+
+An identified statement-timeout or temporary-file-limit failure invalidates the
+whole expiration plan. Dry planning fails loudly. An executing cycle records a
+failed `archive_expiration_plan` in additive `planning_failures` and run outcomes,
+preserves its sources, and may continue independent canonical archival after
+releasing the raw lifecycle fence. The cycle remains `degraded`, never successful.
+Manual cancellation, permission errors and unrelated database failures retain
+their original meaning. Retrying requires a fresh witness; a failed plan confers
+no deletion authority. No schema, policy format or recovery-data change is needed.
+These guards are implemented in the source candidate; deployed `89912f16` does
+not contain them yet.
 
 The final check alone is insufficient. `archive_expiration_lock` holds an
 `UPDATE` row lock on the exact immutable raw/checkpoint manifest through the
@@ -856,6 +874,14 @@ or decoding large raw frames twice. The same physical-schema, row-group and
 file/logical-byte bounds apply, with cooperative cancellation during hashing.
 The surrounding checksum and file-stability gates still bind those columns to
 the fully decoded object; a fingerprint alone is not raw-frame verification.
+
+Raw-prefix lookup deduplicates identical five-field SQL locators (definition,
+session, connection epoch, first ordinal and final ordinal). It still charges
+the original requested-work budget and validates every root's product, channel
+and manifest binding; a conflicting witness cannot disappear through deduplication.
+Overlapping but unequal ranges remain separate. This changes neither proof hashes
+nor persisted certificates or archives. The source candidate includes this
+optimization; deployed `89912f16` still repeats identical locators.
 
 Raw-prefix lookup supplies its bounded scope list as typed, bound SQL `VALUES`,
 so PostgreSQL can plan using the requested scope count instead of a generic

@@ -93,13 +93,40 @@ match the current identity model; there is no leftover reference to the old
 header table. Alias/identity heaps and the alias indexes are on HDD, but the
 specific cause of the slow write remains unproven. Resolve that bounded write
 failure before claiming sustainable reclamation; do not bypass the timeout or
-reclaim its source to obtain apparent progress.
+reclaim its source to obtain apparent progress. Catalogue observations at 07:36
+and 08:21 UTC both contained 122 pages and 845,469 archived rows: no additional
+page was published in that interval, despite advancing prefix verification.
+All 17 collectors were healthy at the later observation; the eight stream spools
+held about 1 MB with no partial files. These are bounded observations, not a
+sustained collector-lag or archival-throughput guarantee.
 
-**Hard query limits remain open:** the ordinary archive-expiration path does not
-inherit `CanonicalFactRetentionPolicy` statement deadlines, and the query rewrite
-does not add a temporary-space cap. Close this gap at the existing lifecycle
-repository boundary; it does not justify a new scheduler, index build, schema
-change or historical migration.
+**Pending source candidate, not deployed:** repeated raw-prefix SQL locators are
+now deduplicated while retaining all root witnesses and the original conservative
+work budget. A later deployed-worker failure at 08:15 UTC again contained
+thousands of range entries. The candidate also bounds expiration-witness
+transactions to 5 seconds per statement and 64 MiB of temporary files, preserves
+stricter settings and disables parallel query workers for those queries. The
+existing production role was checked read-only and can set that parameter; no
+permission change is required there. Other installations must have that privilege
+before using this path; a permission failure stays explicit.
+
+If a witness exceeds its resource limit, execution preserves all affected sources,
+reports a failed expiration plan and a degraded cycle, and can continue independent
+canonical work after releasing the raw fence. Dry planning still fails. Local
+settings disappear on commit/rollback. There is no schema, archive, scientific
+protocol or persisted policy change; rollback uses the existing formats but loses
+these resource protections. No new scheduler, index build or migration is needed.
+
+The candidate passed 103 focused non-database tests, including conflicting root
+witnesses, unchanged requested-work limits, error classification and independent
+canonical continuation. The full non-database backend check passed 5,232 tests
+with 7 skips; documentation/index checks passed 10 tests. Documentation sync is
+unavailable because this machine has no configured destination. Actual PostgreSQL
+regressions for duplicate locators, statement cancellation, temporary-file
+cancellation and connection-setting reset are written but not yet run. Database
+and release qualification and deployment remain pending;
+this source status does not resolve the alias-publication failure or demonstrate
+sustainable throughput.
 
 The baseline producer began at 12:38 UTC on October 9; migration, WAL and backup
 growth must be separated from ordinary growth before projecting a capacity horizon.

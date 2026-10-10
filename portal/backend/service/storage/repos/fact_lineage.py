@@ -185,11 +185,15 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         fields = (("definition_id", "text"), ("session_id", "text"),
                   ("connection_epoch", "bigint"), ("first_receive_ordinal", "bigint"),
                   ("receive_ordinal", "bigint"))
+        # Collapse SQL locators only. Every root witness and the conservative
+        # requested-work budget above still apply, including differing bindings.
+        lookup_prefixes = list({tuple(scope[name] for name, _ in fields): scope
+                                for scope in prefixes}.values())
         prefix_values = ",".join("(" + ",".join(
             f"CAST(:prefix_{index}_{name} AS {kind})" for name, kind in fields) + ")"
-            for index in range(len(prefixes)))
+            for index in range(len(lookup_prefixes)))
         prefix_params = {f"prefix_{index}_{name}": scope[name]
-                         for index, scope in enumerate(prefixes) for name, _ in fields}
+                         for index, scope in enumerate(lookup_prefixes) for name, _ in fields}
         queries.append((f"EXISTS (SELECT 1 FROM (VALUES {prefix_values}) "
             "AS prefixes(definition_id, session_id, connection_epoch, first_receive_ordinal, receive_ordinal) "
             "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
@@ -209,14 +213,14 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                            position["receive_ordinal"]) for position in positions)
         else:
             query_keys = (("position", *(scope[name] for name in BOOK_SCOPE_FIELDS[:3]), ordinal)
-                          for scope in prefixes
+                          for scope in lookup_prefixes
                           for ordinal in range(scope["first_receive_ordinal"], scope["receive_ordinal"] + 1))
         # Bound each query by its own witnesses. Unbound trade records must not
         # disable known book placements in a separate exact-position query.
         # Partial bindings within this query still cannot restrict its unbound
         # witnesses; the per-witness checks below remain authoritative.
         witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
-                       for key in query_keys for row, evidence in wanted[key]}
+                       for key in dict.fromkeys(query_keys) for row, evidence in wanted[key]}
         query_bound_ids = page_bound_ids
         if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
             eligible = {identity for witness_id in witness_ids

@@ -21,6 +21,9 @@ from ._shared import db
 
 
 _LIFECYCLE_LOCK_NAME = "quant-trad:market-storage-lifecycle:v1"
+# Fixed safety ceilings for metadata witnesses, not an end-to-end cycle SLA.
+_ARCHIVE_WITNESS_STATEMENT_MS = 5000
+_ARCHIVE_WITNESS_TEMP_KIB = 64 * 1024
 _ALLOWED_TABLES = {
     policy.table_name: policy.time_column for policy in DEFAULT_HOT_TABLE_POLICIES
 }
@@ -30,6 +33,10 @@ for _policy in DEFAULT_HOT_TABLE_POLICIES:
 
 class MarketStorageLifecycleBusyError(RuntimeError):
     """Raised when another process owns the global lifecycle fence."""
+
+
+class MarketArchiveWitnessLimitExceeded(RuntimeError):
+    """An expiration witness could not be established within its query budget."""
 
 
 def lifecycle_operation_id(
@@ -69,6 +76,42 @@ def _relation(table_name: str) -> tuple[str, str]:
 
 class PostgresMarketStorageLifecycleRepository:
     """Fenced planning and evidence for object and Timescale lifecycle work."""
+
+    @contextmanager
+    def _archive_witness_session(self, *, operation: str):
+        # This repository owns the whole transaction. SET LOCAL disappears on
+        # either commit or rollback and cannot leak to a later pool borrower.
+        try:
+            with db.session() as session:
+                session.execute(text("""
+                    SELECT set_config('statement_timeout',
+                        LEAST(CASE WHEN setting::bigint=0 THEN :limit ELSE setting::bigint END,
+                              :limit)::text, true)
+                    FROM pg_settings WHERE name='statement_timeout'
+                """), {"limit": _ARCHIVE_WITNESS_STATEMENT_MS})
+                session.execute(text("""
+                    SELECT set_config('temp_file_limit',
+                        LEAST(CASE WHEN setting::bigint<0 THEN :limit ELSE setting::bigint END,
+                              :limit)::text, true)
+                    FROM pg_settings WHERE name='temp_file_limit'
+                """), {"limit": _ARCHIVE_WITNESS_TEMP_KIB})
+                # PostgreSQL's temp limit is per process; do not multiply this
+                # witness budget across parallel query workers.
+                session.execute(text("SET LOCAL max_parallel_workers_per_gather=0"))
+                yield session
+        except DBAPIError as exc:
+            primary = getattr(getattr(exc.orig, "diag", None), "message_primary", "") or ""
+            code = getattr(exc.orig, "pgcode", None)
+            if ((code == "57014" and primary == "canceling statement due to statement timeout")
+                    or (code == "53400" and primary.startswith("temporary file size exceeds temp_file_limit"))):
+                raise MarketArchiveWitnessLimitExceeded(
+                    f"market_archive_witness_limit_exceeded: operation={operation} sqlstate={code} "
+                    f"statement_ms={_ARCHIVE_WITNESS_STATEMENT_MS} temp_kib={_ARCHIVE_WITNESS_TEMP_KIB}; "
+                    "expiration remains unproven; retry bounded work without removing its source"
+                ) from exc
+            # User cancellation, permission failures and unrelated database
+            # errors retain their original meaning; never grant or fall back.
+            raise
 
     @staticmethod
     def dataset_snapshot_session(*, database=db):
@@ -464,7 +507,7 @@ class PostgresMarketStorageLifecycleRepository:
         limit: int,
     ) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 5000))
-        with db.session() as session:
+        with self._archive_witness_session(operation="archive_expiration_plan") as session:
             raw_rows = session.execute(
                 text(
                     """
@@ -599,7 +642,7 @@ class PostgresMarketStorageLifecycleRepository:
             raise ValueError(
                 f"market_storage_lifecycle_target_invalid: kind={kind}"
             )
-        with db.session() as session:
+        with self._archive_witness_session(operation=f"archive_target_status:{kind}:{target_id}") as session:
             target = session.execute(
                 text(
                     f"SELECT id, object_key, object_uri, object_sha256, byte_count "

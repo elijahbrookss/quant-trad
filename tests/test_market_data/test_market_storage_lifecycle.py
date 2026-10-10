@@ -415,3 +415,78 @@ def test_lifecycle_rejects_retired_legacy_fact_table_controls() -> None:
     ):
         with pytest.raises(ValueError, match=f"unsupported fields={field_name}"):
             MarketStorageLifecyclePolicy.from_mapping({field_name: 1})
+
+
+@pytest.mark.parametrize("code,primary,limited", [
+    ("57014", "canceling statement due to statement timeout", True),
+    ("53400", "temporary file size exceeds temp_file_limit (16kB)", True),
+    ("57014", "canceling statement due to user request", False),
+    ("42501", "permission denied to set parameter temp_file_limit", False),
+])
+def test_archive_witness_limits_do_not_reclassify_cancellation_or_permissions(monkeypatch, code, primary, limited):
+    from sqlalchemy.exc import DBAPIError
+    from portal.backend.service.storage.repos import market_lifecycle
+    original = RuntimeError(primary)
+    original.pgcode = code
+    original.diag = SimpleNamespace(message_primary=primary)
+    failure = DBAPIError("query", {}, original)
+    exited = []
+
+    @contextmanager
+    def session():
+        try:
+            yield SimpleNamespace(execute=lambda *_args, **_kwargs: None)
+        finally:
+            exited.append(True)
+
+    monkeypatch.setattr(market_lifecycle, "db", SimpleNamespace(session=session))
+    expected = market_lifecycle.MarketArchiveWitnessLimitExceeded if limited else DBAPIError
+    with pytest.raises(expected) as caught:
+        with market_lifecycle.PostgresMarketStorageLifecycleRepository()._archive_witness_session(operation="test-target"):
+            raise failure
+    assert exited == [True]
+    if limited:
+        assert "operation=test-target" in str(caught.value)
+        assert caught.value.__cause__ is failure
+    else:
+        assert caught.value is failure
+
+
+def test_expiration_query_limit_preserves_sources_and_does_not_starve_canonical_work(tmp_path):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from portal.backend.service.storage.repos.market_lifecycle import MarketArchiveWitnessLimitExceeded
+    repository = _LifecycleRepository()
+    service = _service(repository)
+
+    def limited(**_kwargs):
+        raise MarketArchiveWitnessLimitExceeded("test witness budget")
+
+    @contextmanager
+    def lock(**_kwargs):
+        repository.lock_entered = True
+        try:
+            yield
+        finally:
+            repository.lock_entered = False
+
+    repository.list_archive_expiration_candidates = limited
+    repository.lifecycle_lock = lock
+    calls = []
+
+    def canonical(**_kwargs):
+        assert not repository.lock_entered
+        calls.append("canonical")
+        return {"outcomes": [{"action": "stage_page", "status": "page_acknowledged"}]}
+
+    service.canonical_executor = SimpleNamespace(run=canonical)
+    service._execute_archive_expiration = lambda **_: pytest.fail("Unproven expiration must not execute")
+    policy = MarketStorageLifecyclePolicy(execution_enabled=True, archive_compaction_enabled=False,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
+    with pytest.raises(MarketArchiveWitnessLimitExceeded):
+        service.plan(policy=policy, storage_root=tmp_path)
+    result = service.run(policy=policy, execute=True, storage_root=tmp_path)
+    assert result["status"] == "degraded" and result["failure_count"] == 1
+    assert result["plan"]["archive_expirations"] == []
+    assert result["plan"]["planning_failures"] == [result["outcomes"][0]]
+    assert result["outcomes"][0]["action"] == "archive_expiration_plan"
+    assert result["outcomes"][1]["status"] == "page_acknowledged" and calls == ["canonical"]
