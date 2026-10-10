@@ -181,6 +181,67 @@ forced drop; failures report remaining session types and waits without query
 text or credentials. These settings apply only to the test stack.
 
 
+### Exact-source CI equivalence for broad DB/recovery handoff
+
+Run focused local checks while iterating. Once the final integrated commit has
+one successful complete CI attempt, use that evidence for the broad DB and
+prescribed recovery handoff row instead of repeating the same whole suite
+locally. Until that receipt exists, report broad qualification pending; a
+focused/component pass or a predecessor's green run cannot substitute.
+
+For a pushed work branch, save the helper's JSON receipt:
+
+```bash
+python scripts/automation/check_release_ci.py <final-full-commit> --handoff-branch feature/<branch>
+```
+
+The caller must compare the receipt revision with the clean final tree being
+handed off. The helper requires the latest exact-commit push, all seven expanded
+job labels in the same workflow attempt, and both unexpired recovery artifacts
+with SHA-256 digests and creation times bound to their producing jobs. Each
+recovery bundle includes `qualification-source.json`, binding the full workflow
+commit, run ID, attempt, runtime variant and verified runtime-image attestation.
+A runtime source hash alone excludes tests/workflow files and cannot certify
+this handoff. Archive the JSON receipt, job logs and source-attested bundles
+before their seven-day retention expires; retain artifact IDs/digests as well as
+URLs. The helper verifies successful source-attestation steps and artifact
+metadata; it does not independently download/revalidate the bundle contents.
+
+The coverage map is explicit:
+
+| CI proof | Scope and exclusions |
+| --- | --- |
+| `clean-database-bootstrap` | Broad `pytest -m db` with isolated DB inputs; clean-bootstrap and header-namespace files are excluded there and executed separately in this same job. `QT_CLEAN_BOOTSTRAP_TEST_DSN` enables the clean-install case. |
+| `deployment-contract` | `incremental-recovery` enables `QT_STORAGE_DEMO=1`, `QT_INCREMENTAL_APPLICATION_TEST=1`, production-derived test images, UID/PID ownership and private storage/restore volumes. Runs the application restore and retained-raw-placement cases separately. Its `storage-demo` selection includes the default `test_storage_end_to_end_db.py` plus the explicitly listed online copy/switch cases, with owned storage topology. Other named worker/core/storage-layout rehearsals remain required. |
+| `committed-recovery (current)` and `committed-recovery (24357ff387776822f676ae2a8b1cce7f209c313e)` | Both actual expiry/committed-switch recovery variants and their independently bound evidence bundles are mandatory. |
+| `pr-suite`, `frontend`, `deployment-rehearsal` | Remain mandatory companions; they do not replace DB/recovery scope. |
+
+This is equivalent to the ordinary broad DB row plus the prescribed CI recovery
+proofs, not certification of every optional test that skips without a specialized
+topology. The storage-demo command is an explicit selection. For changes touching
+an omitted storage-worker, working-root, archive-reference/root-copy,
+history/recovery-maintenance, header-supervision, or standalone storage-restore
+case, run the relevant owned focused topology and retain its result; do not
+infer coverage from a green broad job or add another whole-suite cycle by habit.
+
+Keep inexpensive local documentation, shell/configuration, diff and clean-tree
+checks. Record known failures with source, node ID, traceback and disposition.
+Unresolved failures and local/host-specific issues require focused reproduction
+or explicit reconciliation; CI success does not erase an earlier failure. The
+helper receipt deliberately records local failure review as unassessed.
+
+Deployment remains separate and stricter:
+
+```bash
+python scripts/automation/check_release_ci.py <final-full-commit>
+```
+
+Only an exact successful `develop` push can satisfy this mode; work-branch or PR
+receipts cannot. Existing compatibility, deployment authorization, image checks,
+post-deploy readiness and recovery requirements remain in force. No active run
+is cancelled when this equivalence path is adopted.
+
+
 For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component
 docs, refresh the index, and run `make sync-docs`.

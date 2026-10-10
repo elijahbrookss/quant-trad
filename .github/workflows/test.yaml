@@ -101,9 +101,27 @@ jobs:
             --close-logins success --commit-switch --guarded-source-image qt-committed-recovery-guard \
             --recovery-mounts --recovery-repositories --recovery-spool --recovery-runtime \
             --operation-driver --full-operation --repository-config-failure --completion-observation
-      - name: Pack disposable qualification evidence
+      - name: Attest and pack disposable qualification evidence
         if: always()
-        run: sudo tar -C "$QT_RECOVERY_FIXTURE_ROOT/evidence" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .
+        env:
+          RUNTIME_REF: ${{ matrix.runtime }}
+        run: |
+          # Preserve partial failure evidence even when attestation cannot complete.
+          trap 'sudo tar -C "$QT_RECOVERY_FIXTURE_ROOT/evidence" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .' EXIT
+          docker run --rm --network none --entrypoint cat qt-committed-recovery-runtime \
+            /app/.qt-source-attestation.json > "$RUNNER_TEMP/runtime-source-attestation.json"
+          python - "$RUNNER_TEMP/runtime-source-attestation.json" "$RUNNER_TEMP/qualification-source.json" <<'PY'
+          import json, os, re, sys
+          runtime = json.load(open(sys.argv[1]))
+          expected = os.environ['GITHUB_SHA'] if os.environ['RUNTIME_REF'] == 'current' else os.environ['RUNTIME_REF']
+          if runtime.get('source_revision') != expected or not re.fullmatch(r'[a-f0-9]{64}', runtime.get('source_tree_hash', '')):
+              raise SystemExit('qualification_runtime_attestation_mismatch')
+          with open(sys.argv[2], 'w') as destination:
+              json.dump({'source_revision': os.environ['GITHUB_SHA'], 'workflow': '.github/workflows/test.yaml',
+                         'run_id': int(os.environ['GITHUB_RUN_ID']), 'attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                         'runtime_variant': os.environ['RUNTIME_REF'], 'runtime_attestation': runtime}, destination, sort_keys=True)
+          PY
+          sudo install -m 0644 "$RUNNER_TEMP/qualification-source.json" "$QT_RECOVERY_FIXTURE_ROOT/evidence/qualification-source.json"
       - name: Preserve disposable qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -276,7 +294,7 @@ jobs:
         run: ./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_raw_placement_db.py -s -o cache_dir=/tmp/qt-incremental-raw-pytest-cache
 
       - name: Prove bounded online copy and protected exact switch with concurrent intake
-        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_fact_header_copy_placement_db.py tests/test_market_data/test_raw_mapping_copy_db.py tests/test_market_data/test_fact_header_forward_adoption_db.py tests/test_market_data/test_fact_header_online_prepare_db.py tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py tests/test_market_data/test_archive_online_copy_db.py tests/test_market_data/test_fact_header_online_references_db.py tests/test_market_data/test_fact_header_cancel_db.py tests/test_market_data/test_storage_online_controller_db.py tests/test_market_data/test_storage_online_collector_drain_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_worker_initialization_owns_clock_and_atomic_commit tests/test_market_data/test_fact_header_forward_handoff_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_archives_preserve_canceled_work_and_fence_final_switch[retain_raw] tests/test_market_data/test_raw_mapping_history_placement_db.py
+        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_storage_end_to_end_db.py tests/test_market_data/test_fact_header_copy_placement_db.py tests/test_market_data/test_raw_mapping_copy_db.py tests/test_market_data/test_fact_header_forward_adoption_db.py tests/test_market_data/test_fact_header_online_prepare_db.py tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py tests/test_market_data/test_archive_online_copy_db.py tests/test_market_data/test_fact_header_online_references_db.py tests/test_market_data/test_fact_header_cancel_db.py tests/test_market_data/test_storage_online_controller_db.py tests/test_market_data/test_storage_online_collector_drain_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_worker_initialization_owns_clock_and_atomic_commit tests/test_market_data/test_fact_header_forward_handoff_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_archives_preserve_canceled_work_and_fence_final_switch[retain_raw] tests/test_market_data/test_raw_mapping_history_placement_db.py
 
       - name: Recreate actual QT core on disposable storage without provider egress
         run: python3 scripts/ci/test_server_core_recreation.py

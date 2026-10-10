@@ -124,6 +124,17 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     assert f"./scripts/ci/run_test_suite.sh db {namespace_test}" in commands["Verify PostgreSQL filesystem namespace"]
     assert f"--ignore={namespace_test}" in commands["Run PostgreSQL-backed contract tests"]
 
+    runtime_matrix = jobs["committed-recovery"]["strategy"]["matrix"]["runtime"]
+    assert runtime_matrix == ["current", "24357ff387776822f676ae2a8b1cce7f209c313e"]
+    recovery_steps = {step.get("name"): step for step in jobs["committed-recovery"]["steps"]}
+    attestation = recovery_steps["Attest and pack disposable qualification evidence"]["run"]
+    assert "GITHUB_SHA" in attestation and "GITHUB_RUN_ATTEMPT" in attestation
+    assert "qualification-source.json" in attestation and ".qt-source-attestation.json" in attestation
+    deployment_commands = [step.get("run", "") for step in jobs["deployment-contract"]["steps"]]
+    storage_commands = [command for command in deployment_commands if "run_test_suite.sh storage-demo " in command]
+    assert len(storage_commands) == 1
+    assert "tests/test_market_data/test_storage_end_to_end_db.py" in storage_commands[0]
+
     topology = _read("docs/engineering/testing/ci-test-topology.md")
     documented_jobs = tuple(
         re.findall(r"^\| [1-6] \| `([^`]+)` \|", topology, flags=re.MULTILINE)
