@@ -109,14 +109,23 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
 
 def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch):
     day = storage.today - timedelta(days=2)
-    _placement(monkeypatch, day)
     assert day != BASE.date(), "placement day is not observation time"
 
     def freeze(start, end):
         return storage.repo.freeze_dataset([DatasetSeriesRequest(storage.series_id, start, end)])
 
-    # This binding predates the first Fact; later catalog overlap cannot admit it.
+    # Public freeze rejects empty ranges. Facts in another partition make every
+    # binding valid without filling the target partition's gaps or cutoffs.
+    _placement(monkeypatch, day - timedelta(days=1))
+    for seconds in (-1, 5, 13):
+        observed = BASE + timedelta(seconds=seconds)
+        _ingest(storage, replace(storage.fact, observation_key=f"other-day-{seconds}",
+            observation_time=observed, accepted_at=observed, known_at=observed,
+            received_at=observed, source_published_at=observed))
+    # This binding predates the target partition's Facts. Later catalog overlap
+    # cannot admit commits above its frozen watermark.
     freeze(BASE - timedelta(seconds=20), BASE + timedelta(seconds=20))
+    _placement(monkeypatch, day)
     for seconds in (0, 10):
         observed = BASE + timedelta(seconds=seconds)
         _ingest(storage, replace(storage.fact, observation_key=f"audit-{seconds}",

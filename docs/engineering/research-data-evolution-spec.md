@@ -1,19 +1,20 @@
 # Bounded Storage Migrations and Research Compatibility
 
-**Status: deployed; sustained capacity qualification remains open. Updated 2026-10-09.**
+**Status: deployed; sustained capacity qualification remains open. Updated 2026-10-10.**
 Decision: [ADR 0078](../architecture/decisions/0078-evolve-research-within-existing-data-boundaries.md).
 This revision replaces this document's earlier H04-first implementation plan.
 It does not resume a migration, clear an operational hold, deploy a release or
 restart research. Historical approvals and receipts remain evidence.
 
-## Deployed outcome — 2026-10-09
+## Deployed outcome — 2026-10-10
 
-The separately approved schema cutover committed at 00:07 UTC. Release
-`dfd717bed32ae5e132fbc20926b68166162e801c` deployed at 23:29 UTC after
-[all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/37997536272).
-This ordinary software update corrects archive packing and provenance lookup
-bounds. The database container, saved policy, environment and migration journals
-were unchanged; the preceding `f5096792` release remains the compatible rollback.
+The separately approved schema cutover committed on October 9 at 00:07 UTC.
+Release `f19682d130c09f370764479869d7e2cf0bec1af5` deployed on October 10 at
+02:19 UTC after [all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38011564687).
+It retains the preceding archive-packing and provenance-lookup corrections and
+bounds calendar formatting so research can observe cancellation and ownership
+between batches. The database container, saved policy, environment and migration
+journals were unchanged. This was an ordinary software deployment.
 All 17 collectors and the application services were healthy after deployment.
 The cutover is complete and must not be replayed. The dated planning and local
 qualification sections below describe earlier states, not outstanding deployment
@@ -24,7 +25,7 @@ instructions or fresh operational authorization.
   backlog and steady reclamation rate have not yet been demonstrated.
 - The existing raw mapping table and two secondary indexes moved to HDD without
   replacing its logical identity or schema. The primary index remains on SSD.
-  Native post-commit verification passed at 19:55 UTC: **117.3 GB** copied in
+  Native post-commit verification passed on October 9 at 19:55 UTC: **117.3 GB** copied in
   **15 minutes 14 seconds**. Copy size is not net reclaimed SSD capacity; WAL and
   backup allocations must also be measured. Temporary collector buffers were
   restored, and all 17 collectors were healthy at 20:03 UTC. Controlled reconnects
@@ -40,10 +41,14 @@ instructions or fresh operational authorization.
 - The authorized BTC2022 H04 Check and identical Replay completed with matching
   plan, result and evidence hashes, taking about 598 and 595 seconds respectively.
   They used SQL history and do not measure HDD/cache benefit. That allocation is
-  complete; it must not be repeated or expanded implicitly.
+  complete; it must not be repeated or expanded implicitly. The authorized
+  BTC/ETH 2023 pair subsequently completed on `f19682d1` in about 592 and 565
+  seconds, with exact Replays matching plan, result and evidence hashes. Those
+  Check metrics do not establish archive-cache benefit. The earlier failed BTC
+  attempt remains in the scientific budget; successful replacement did not erase it.
 
-The matching post-placement encrypted database/archive pair completed at 21:03
-UTC, and both native repositories contained its referenced recovery points.
+The matching post-placement encrypted database/archive pair completed on October 9
+at 21:03 UTC, and both native repositories contained its referenced recovery points.
 Packaged restore tests passed on disposable resources; the whole production
 history has not been restored as a drill. Preserve the encryption keys, database
 chain dependencies and paired archive snapshot.
@@ -56,15 +61,20 @@ admit a new scientific allocation.
 
 Remaining qualification is sustained retention throughput versus intake,
 whole-day reclamation, and a full 24-hour filesystem-UUID growth baseline. The
-new release completed its first maintenance cycle without failures and published
-one full 10,000-row archive page by 23:37 UTC. Prefix verification also advanced;
-these short observations do not establish sustainable throughput. The baseline
-producer began at 12:38 UTC on October 9; migration, WAL and backup growth must
-be separated from ordinary growth before projecting a capacity horizon. No
-additional historical rewrite or migration-copy deletion is implied. Private
+August 21 partition finished archive verification on October 10 at 03:56 UTC:
+752,156 rows in 92 pages. Its retention audit then hit the existing query deadline;
+the transaction rolled back and the SSD payload partition remains. Later raw-prefix
+lookups also timed out. Candidate fixes narrow those queries using existing verified
+catalogue and manifest bounds while retaining exact checks. A separate candidate
+prevents compaction from repeatedly repacking an unfinished receive-hour. These
+changes are not deployed, and verified archives alone do not prove reclamation.
+The baseline producer began at 12:38 UTC on October 9; migration, WAL and backup
+growth must be separated from ordinary growth before projecting a capacity horizon.
+No additional historical rewrite or migration-copy deletion is implied. Private
 receipts are retained under `artifacts/storage-implementation/history-read-cache/`:
-`release-dfd717be` (current deployment and read/cache proof), `release-f5096792`,
-`release-f9d68118` (H04 evidence), and `retained-raw-history-placement`.
+`release-f19682d1` (current deployment and 2023 research measurements),
+`release-041e3c0a` (query/compaction qualification), `release-dfd717be` (read/cache
+proof), `release-f9d68118` (2022 H04 evidence), and `retained-raw-history-placement`.
 
 ## What we are solving
 
