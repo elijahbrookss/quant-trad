@@ -240,3 +240,13 @@ def test_frozen_reference_requires_retained_material_without_replay(memory, monk
     monkeypatch.setattr(market_data_repo, "get_dataset", lambda _: (_ for _ in ()).throw(ValueError("retained source missing")))
     with pytest.raises(ValueError, match="retained source missing"):
         publication.resolve_reference(raw, session)
+
+
+def test_reasoning_content_identity_binds_source_scope_and_tags(memory):
+    record, session, items = memory
+    original = items["claim"]
+    identity = publication.content_identity(original)
+    for field in ("datasource", "exchange", "tags"):
+        changed = deepcopy(original)
+        changed[field] = ["changed"] if field == "tags" else "changed"
+        assert publication.content_identity(changed) != identity

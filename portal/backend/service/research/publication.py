@@ -41,7 +41,7 @@ def content_identity(item: Mapping[str, Any]) -> str:
     # Metadata timestamps are not interpretation identity.
     return semantic_hash({key: item.get(key) for key in (
         "id", "kind", "title", "status", "body", "payload", "instrument_id",
-        "symbol", "timeframe", "window_start", "window_end", "source_revision",
+        "symbol", "timeframe", "datasource", "exchange", "tags", "window_start", "window_end", "source_revision",
     )})
 
 
