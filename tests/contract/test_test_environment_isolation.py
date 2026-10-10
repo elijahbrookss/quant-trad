@@ -233,3 +233,34 @@ def test_ci_pilot_wiring_binds_checkout_before_disposable_tests(tmp_path, identi
             "-m", "pytest", "-q", "-m", "db",
             "--ignore=tests/test_portal/test_clean_database_bootstrap_db.py",
             "--ignore=tests/test_market_data/test_header_namespace_db.py"]
+
+
+def test_held_cutover_seed_uses_owned_database_with_current_fixture_signature(monkeypatch):
+    from types import SimpleNamespace
+    from scripts.ci import test_storage_database_preparation as preparation
+    from tests.test_market_data import test_fact_storage_tiers_db as tiers
+
+    dsn = "postgresql://synthetic:synthetic@timescaledb/qt_migration_held_" + "a" * 12
+    monkeypatch.setenv("PG_DSN", dsn)
+    closed = []
+    def tier_storage(actual_monkeypatch, request):
+        assert isinstance(actual_monkeypatch, pytest.MonkeyPatch)
+        assert request is None
+        with tiers.storage_behavior_database(request) as actual_dsn:
+            assert actual_dsn == dsn
+            try:
+                yield SimpleNamespace(dsn=actual_dsn)
+            finally:
+                closed.append(True)
+
+    monkeypatch.setattr(tiers, "storage", SimpleNamespace(__wrapped__=tier_storage))
+    # Execute the real host seed's binding prefix; no database or Docker is used.
+    prefix = preparation._SEED.split("    current=storage.today", 1)[0]
+    namespace = {}
+    with monkeypatch.context() as restore_environment:
+        restore_environment.setenv("MARKET_STRUCTURE_STORAGE_ROOT", "synthetic-prior")
+        restore_environment.setenv("QT_MARKET_DATA_EXPECTED_UUID", "synthetic-prior")
+        exec(compile(prefix, "<held-cutover-seed-prefix>", "exec"), namespace)
+        assert namespace["storage"].dsn == dsn
+        namespace["fixture"].close()
+    assert closed == [True]

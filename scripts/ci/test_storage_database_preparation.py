@@ -268,8 +268,8 @@ from tests.test_market_data import test_fact_storage_tiers_db as tiers
 from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture
 root=Path('/app/logs/market-structure')
 with pytest.MonkeyPatch.context() as mp:
-    mp.setattr(tiers,'fresh_migration_database',lambda label:contextlib.nullcontext(os.environ['PG_DSN']))
-    fixture=tiers.storage.__wrapped__(mp)
+    mp.setattr(tiers,'storage_behavior_database',lambda request:contextlib.nullcontext(os.environ['PG_DSN']))
+    fixture=tiers.storage.__wrapped__(mp,None)
     storage=next(fixture)
     current=storage.today
     storage.today=current-timedelta(days=31)
