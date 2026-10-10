@@ -190,3 +190,46 @@ def test_online_host_fixture_retains_private_database_factory_boundary(
     else:
         with pytest.raises(AssertionError):
             next(fixture)
+
+
+@pytest.mark.parametrize("identity_failure", ["", "git", "hash"])
+def test_ci_pilot_wiring_binds_checkout_before_disposable_tests(tmp_path, identity_failure):
+    workflow = yaml.safe_load((_ROOT / ".github/workflows/test.yaml").read_text())
+    steps = workflow["jobs"]["clean-database-bootstrap"]["steps"]
+    step = next(step for step in steps if step["name"] == "Run PostgreSQL-backed contract tests")
+    assert step["env"]["QT_SCHEMA_TEMPLATE_PILOT"] == "1"
+    assert "QT_SCHEMA_TEMPLATE_PILOT" not in workflow.get("env", {})
+    for job in workflow["jobs"].values():
+        assert "QT_SCHEMA_TEMPLATE_PILOT" not in job.get("env", {})
+        for other in job["steps"]:
+            if other is not step:
+                assert "QT_SCHEMA_TEMPLATE_PILOT" not in other.get("env", {})
+    revision, tree_hash = "a" * 40, "b" * 64
+    observed = tmp_path / "pytest-observed"
+    git = tmp_path / "git"
+    git.write_text("#!/usr/bin/env bash\n"
+        '[[ "$*" == "rev-parse HEAD" && "$IDENTITY_FAILURE" != "git" ]] || exit 19\n'
+        + "printf '%s\\n' " + revision + "\n")
+    python = tmp_path / "python"
+    python.write_text("#!/usr/bin/env bash\n"
+        'if [[ "$1" == "scripts/provenance/source_tree_hash.py" ]]; then\n'
+        '  [[ "$2" == "--git-revision" && "$3" == "' + revision + '" && "$IDENTITY_FAILURE" != "hash" ]] || exit 23\n'
+        + "  printf '%s\\n' " + tree_hash + "\n"
+        'elif [[ "$1 $2" == "-m pytest" ]]; then\n'
+        '  printf "%s\\n" "$SOURCE_REVISION" "$SOURCE_TREE_HASH" "$QT_SCHEMA_TEMPLATE_PILOT" "$QT_DB_TEST_ISOLATED" "$RUN_DB_TESTS" "$@" > "$OBSERVED"\n'
+        'else exit 29; fi\n')
+    git.chmod(0o755)
+    python.chmod(0o755)
+    result = subprocess.run(["bash", "-ec", step["run"]], cwd=_ROOT,
+        env={**os.environ, **step["env"], "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+             "IDENTITY_FAILURE": identity_failure, "OBSERVED": str(observed)},
+        capture_output=True, text=True, timeout=10)
+    if identity_failure:
+        assert result.returncode != 0
+        assert not observed.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert observed.read_text().splitlines() == [revision, tree_hash, "1", "1", "1",
+            "-m", "pytest", "-q", "-m", "db",
+            "--ignore=tests/test_portal/test_clean_database_bootstrap_db.py",
+            "--ignore=tests/test_market_data/test_header_namespace_db.py"]
