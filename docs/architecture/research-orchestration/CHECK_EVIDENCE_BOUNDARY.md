@@ -24,6 +24,7 @@ code_paths:
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/forward_risk_evaluator.py
+  - portal/backend/service/research/crossing_state_comparison.py
   - portal/backend/service/research/service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
@@ -541,3 +542,17 @@ and bounded chronological examples, not a second year-sized observation copy;
 exact frozen inputs, source version and result hashes own replay.
 
 See [ADR 0076](../decisions/0076-declare-candle-risk-observability-and-calendar-boundaries.md).
+
+## Current-state matched candle risk
+
+The opt-in definition 11 / evaluator 10 compares public ATR crossings with
+persistent-high observations using a fixed outcome-blind pair map. The existing
+Candle Stats engine owns both states and the existing Check owns prior/future
+risk. Original immutable Datasets can be reused when the same exact requirements
+fit their binding; a new analytical definition does not authorize range expansion
+or re-freezing. Matching, common-support rejection, whole-pair missingness and
+cross-arm dependence rules are specified in
+[ADR 0076](../decisions/0076-declare-candle-risk-observability-and-calendar-boundaries.md#fixed-crossing-versus-persistent-high-comparison).
+Full pair provenance and diagnostics are canonical Check output, subject to the
+normal evidence/result budgets. Observations and Studies interpret that output;
+they do not recalculate it.

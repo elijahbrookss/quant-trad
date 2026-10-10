@@ -53,10 +53,13 @@ def _calendar_labels(dates: pd.DatetimeIndex, pattern: str) -> np.ndarray:
 
 def normalize_forward_risk(config: Any, *, detector: Mapping[str, Any],
                            outcomes: Mapping[str, Any], statistics: Mapping[str, Any],
-                           gap_policy: str) -> dict[str, Any]:
+                           gap_policy: str, paired_state: bool = False) -> dict[str, Any]:
     expected = {"schema_version": "candle_risk_comparison.v1",
                 "baseline_bars": 120, "readiness_contract": "candle_stats.public_outputs.v1",
                 "outcome_boundary": "evaluation_end_exclusive"}
+    if paired_state:
+        expected["schema_version"] = "candle_risk_matched_state.v1"
+        expected["matching_contract"] = "crossing_state_matched_pairs.v1"
     if not isinstance(config, Mapping) or dict(config) != expected:
         raise ValueError("forward_risk_invalid: explicit fixed candle_risk_comparison.v1 configuration required")
     if (detector.get("type") != "indicator_event" or detector.get("output_name") != "atr_expansion"
@@ -182,6 +185,7 @@ def _take_nonoverlapping(cohorts: np.ndarray, starts: np.ndarray, valid: np.ndar
 class ForwardRiskEvaluator(EventFactEvaluator):
     version: str = "9"
     result_schema_version: str = "event_fact_analysis_result.v9"
+    paired_state_enabled: bool = False
 
     def declare_requirements(self, *, definition, request):
         base = dict(super().declare_requirements(definition=definition, request=request))
@@ -197,7 +201,8 @@ class ForwardRiskEvaluator(EventFactEvaluator):
     def evaluate(self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
         config = normalize_forward_risk(inputs["outcomes"].get("forward_risk"),
             detector=inputs["detector"], outcomes=inputs["outcomes"],
-            statistics=inputs.get("statistics", {}), gap_policy=plan.gap_policy)
+            statistics=inputs.get("statistics", {}), gap_policy=plan.gap_policy,
+            paired_state=self.paired_state_enabled)
         if (int(plan.warmup["timeframe_seconds"]) != 60 or int(plan.warmup["bars"]) != 200
                 or plan.materialization_range["end_exclusive"] != plan.evaluation_range["end_exclusive"]):
             raise ValueError("forward_risk_invalid: pinned one-minute/200-bar/no-tail plan required")
@@ -252,6 +257,7 @@ class ForwardRiskEvaluator(EventFactEvaluator):
             segment[a:b] = int(interval["segment"])
         if (seen & ~present).any():
             raise ValueError("forward_risk_invalid: readiness evidence invents a missing candle")
+        atr_ratio = np.full(n, np.nan) if self.paired_state_enabled else None
         metric = np.full(n, np.nan); shock = np.zeros(n, dtype=bool); metric_seen = shock.copy()
         for output in evidence.get("outputs") or []:
             execution_checkpoint()
@@ -267,6 +273,8 @@ class ForwardRiskEvaluator(EventFactEvaluator):
                 value = output.get("value") or {}; fields = value.get("fields", value)
                 if metric_seen[index]:
                     raise ValueError("forward_risk_invalid: duplicate public metric")
+                if self.paired_state_enabled:
+                    atr_ratio[index] = float(fields["atr_ratio"]) if fields.get("atr_ratio") is not None else np.nan
                 metric_seen[index] = True
                 metric[index] = float(fields["atr_zscore"]) if fields.get("atr_zscore") is not None else np.nan
             if output.get("output_name") == "atr_expansion":
@@ -338,6 +346,13 @@ class ForwardRiskEvaluator(EventFactEvaluator):
         sample_ok = observable & (sample >= 0)
         sample_times = np.full(n, -1, dtype=np.int64)
         sample_times[sample_ok] = times[sample[sample_ok]]+60
+        prepared_pairs = None
+        if self.paired_state_enabled:
+            from .crossing_state_comparison import prepare_pairs
+            prepared_pairs = prepare_pairs(times=times, known=known, observable=observable,
+                metric=metric, shock=shock, segment=segment, baseline=baseline,
+                sample_times=sample_times, strata=stratum, months=months, stop=stop,
+                evaluation_year=datetime.fromtimestamp(start, timezone.utc).year)
         outcome_values: dict[str, np.ndarray] = {}; outcome_ranges: dict[str, np.ndarray] = {}; outcome_reasons: dict[str, np.ndarray] = {}; range_reasons: dict[str, np.ndarray] = {}; outcome_known: dict[str, np.ndarray] = {}
         for seconds in (1800, 7200, 21600):
             execution_checkpoint()
@@ -372,6 +387,27 @@ class ForwardRiskEvaluator(EventFactEvaluator):
                 future_known[sample[candidate[clock_complete]]], known[sample[candidate[clock_complete]]])
             outcome_known[str(seconds)] = available_at
             outcome_values[str(seconds)] = values; outcome_ranges[str(seconds)] = ranges; outcome_reasons[str(seconds)] = why
+        if self.paired_state_enabled:
+            from .crossing_state_comparison import finish_pairs
+            paired = finish_pairs(prepared=prepared_pairs, times=times, known=known,
+                metric=metric, atr_ratio=atr_ratio, baseline=baseline, sample_times=sample_times,
+                months=months, days=days, weeks=weeks, values=outcome_values["7200"],
+                outcome_known=outcome_known["7200"], outcome_reasons=outcome_reasons["7200"], overlap=_overlap)
+            paired["period"] = dict(plan.evaluation_range)
+            paired["configuration"] = config
+            paired["coverage"] = {"expected_minutes": int(in_period.sum()),
+                "observed_source_minutes": int((present & in_period).sum()),
+                "detector_observable_minutes": int(observable.sum()),
+                "first_blocking_stage_counts": dict(Counter(reasons[in_period & ~observable])),
+                "undetectable_intervals": _intervals(times[in_period], reasons[in_period]),
+                "unknown_event_count": None}
+            return {"schema_version": self.result_schema_version, "check_family": self.evaluator_id,
+                "status": "completed", "analysis_status": paired["analysis_status"],
+                "sample_count": paired["primary"]["pair_count"], "verdict": "descriptive_only",
+                "summary": "Fixed current-state matched crossing comparison; inspect support and dependence.",
+                "crossing_state_comparison": paired, "data_quality": dict(inputs.get("data_quality") or {}),
+                "hashes": {"crossing_state_comparison_hash": semantic_hash(paired)},
+                "promotion_authority": False, "execution_authority": False}
         # Bounded examples plus an ordered all-observation digest avoid storing a second
         # year-sized copy of candles/results. Frozen inputs and versions own replay.
         digest = hashlib.sha256(); examples = {name: [] for name in GROUPS}
