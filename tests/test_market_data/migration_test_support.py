@@ -146,6 +146,18 @@ _PRISTINE_TEMPLATE = pytest.StashKey()
 _PILOT_CASES = frozenset({
     "tests/test_market_data/test_fact_storage_tiers_db.py::test_hot_history_preserves_identity_clocks_and_corrections_across_days",
     "tests/test_market_data/test_fact_storage_tiers_db.py::test_candle_paging_summaries_and_causal_selection_survive_cooling",
+    # Canonical archive behavior only; raw-book lineage and schema creation stay fresh.
+    'tests/test_market_data/test_fact_archival_db.py::test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping[ascii]',
+    'tests/test_market_data/test_fact_archival_db.py::test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping[escaped-unicode]',
+    'tests/test_market_data/test_fact_archival_db.py::test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_publication',
+    'tests/test_market_data/test_fact_archival_db.py::test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs',
+    'tests/test_market_data/test_fact_archival_db.py::test_page_verification_fences_expiry_and_other_workers_but_allows_collection',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[None]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[guard]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[cancel]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[commit]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[cursor]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[limits]',
 })
 
 
@@ -187,7 +199,8 @@ def _pilot_identity():
     root = Path(__file__).resolve().parents[2]
     digest = hashlib.sha256()
     for relative in ("tests/test_market_data/migration_test_support.py",
-                     "tests/test_market_data/test_fact_storage_tiers_db.py", "tests/conftest.py"):
+                     "tests/test_market_data/test_fact_storage_tiers_db.py",
+                     "tests/test_market_data/test_fact_archival_db.py", "tests/conftest.py"):
         digest.update(relative.encode())
         digest.update((root / relative).read_bytes())
     attestation = root / ".qt-source-attestation.json"
