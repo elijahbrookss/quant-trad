@@ -143,5 +143,14 @@ class ResearchOperations:
             "GET", f"/api/research/items/{normalized}/trail"
         )
 
+    def adopt_question(self, item_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        return self._client.request_json("POST", f"/api/research/items/{item_id}/question", payload=self._payload(request))
+
+    def publish_interpretation(self, item_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        return self._client.request_json("POST", f"/api/research/items/{item_id}/publications", payload=self._payload(request))
+
+    def publication_history(self, item_id: str) -> dict[str, Any]:
+        return self._client.request_json("GET", f"/api/research/items/{item_id}/publications")
+
 
 __all__ = ["ResearchOperations"]

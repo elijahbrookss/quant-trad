@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import json
 import urllib.parse
 import urllib.request
@@ -734,3 +736,28 @@ def test_single_attempt_cli_uses_distinct_fail_closed_route(monkeypatch):
 def test_single_attempt_without_dispatch_fails_before_network(monkeypatch):
     monkeypatch.setattr(urllib.request,"urlopen",lambda *a,**kw: (_ for _ in ()).throw(AssertionError("network must not be called")))
     assert main(["--no-audit-log","research","check","run","--request-json",'{"scope":{},"detector":{}}',"--single-attempt"]) != 0
+
+
+@pytest.mark.parametrize("action", ["adopt", "publish", "history"])
+def test_question_cli_uses_shared_contract(monkeypatch, action):
+    observed = _capture_request(monkeypatch, b'{"publications":[]}')
+    bodies = {
+        "adopt": {"question": "Q", "scope": "S"},
+        "publish": {
+            "request_id": "publication-1", "expected_previous_hash": None,
+            "conclusion": "Inconclusive", "limitations": "Synthetic evidence", "scope": "S",
+            "references": [{"item_id": "claim-1", "kind": "hypothesis", "role": "contradicts",
+                            "content_hash": "a" * 64}],
+        },
+        "history": None,
+    }
+    args = ["--no-audit-log", "research", "question", action, "study-1"]
+    if action != "history":
+        args += ["--request-json", json.dumps(bodies[action])]
+    assert main(args) == 0
+    suffix = "question" if action == "adopt" else "publications"
+    assert observed == {
+        "method": "GET" if action == "history" else "POST",
+        "path": f"/api/research/items/study-1/{suffix}",
+        "body": bodies[action],
+    }

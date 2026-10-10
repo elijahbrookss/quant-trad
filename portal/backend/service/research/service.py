@@ -155,6 +155,9 @@ class ResearchEvaluationCache:
 
 
 def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
+    from .publication import KEY
+    if KEY in _mapping_or_empty(payload.get("payload")):
+        raise ValueError("question_contract_write_reserved: use explicit question adoption/publication")
     kind = _normalize_choice(payload.get("kind"), "kind", RESEARCH_ITEM_KINDS)
     if kind == "research_check":
         raise ValueError(
@@ -183,7 +186,11 @@ def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def get_research_item(item_id: str) -> dict[str, Any]:
-    return _project_evidence_classification(repository.get_item(item_id))
+    from .publication import content_identity
+    item = _project_evidence_classification(repository.get_item(item_id))
+    if item.get("kind") != "research_check":
+        item["content_hash"] = content_identity(item)
+    return item
 
 
 def list_research_items(
@@ -499,6 +506,15 @@ def _definition_evidence_classification(definition: CheckDefinition) -> str:
 def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
     projected = dict(item)
     if str(projected.get("kind") or "") != "research_check":
+        if projected.get("kind") == "study":
+            from .publication import KEY, SCHEMA, verify_history, _assert_access
+            contract = (projected.get("payload") or {}).get(KEY)
+            projected["question_classification"] = "legacy_uncontracted"
+            if isinstance(contract, Mapping) and contract.get("schema_version") == SCHEMA:
+                verify_history(contract, str(projected["id"]))
+                with db.session() as session:
+                    _assert_access(projected, session)
+                projected["question_classification"] = "contracted_question"
         return projected
     payload = projected.get("payload")
     schema_version = (

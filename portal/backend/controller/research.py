@@ -15,6 +15,8 @@ from ..service.research import governance as research_governance
 from ..service.research import pass_gates as research_pass_gates
 
 
+from ..service.research import publication as research_publication
+
 router = APIRouter()
 
 
@@ -527,6 +529,8 @@ def get_research_item(item_id: str) -> Dict[str, Any]:
         return research_service.get_research_item(item_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(403 if "inaccessible" in str(exc) else 409, str(exc)) from exc
 
 
 @router.get("/items/{item_id}/trail")
@@ -535,6 +539,8 @@ def get_research_trail(item_id: str) -> Dict[str, Any]:
         return research_service.get_research_trail(item_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(403 if "inaccessible" in str(exc) else 409, str(exc)) from exc
 
 
 @router.get("/items/{item_id}/links")
@@ -544,3 +550,47 @@ def list_research_links(item_id: str, include_inbound: bool = True) -> Dict[str,
         return {"schema_version": "research_link_list.v1", "item_id": item_id, "items": links, "total": len(links)}
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+class ResearchQuestionAdoptionRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=8192)
+    scope: str = Field(min_length=1, max_length=8192)
+
+
+class ResearchPublicationRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    expected_previous_hash: Optional[str] = None
+    conclusion: str = Field(min_length=1, max_length=8192)
+    limitations: str = Field(min_length=1, max_length=8192)
+    scope: str = Field(min_length=1, max_length=8192)
+    references: List[Dict[str, Any]] = Field(min_length=1, max_length=100)
+
+
+@router.post("/items/{item_id}/question")
+def adopt_research_question(item_id: str, body: ResearchQuestionAdoptionRequest) -> Dict[str, Any]:
+    try:
+        return research_publication.adopt(item_id, _model_payload(body))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/items/{item_id}/publications", status_code=201)
+def publish_research_interpretation(item_id: str, body: ResearchPublicationRequest) -> Dict[str, Any]:
+    try:
+        return research_publication.publish(item_id, _model_payload(body))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/items/{item_id}/publications")
+def research_interpretation_history(item_id: str) -> Dict[str, Any]:
+    try:
+        return research_publication.history(item_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc

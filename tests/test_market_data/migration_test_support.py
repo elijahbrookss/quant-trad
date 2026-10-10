@@ -113,6 +113,10 @@ def fresh_migration_database(label: str, *, install_extensions: bool = True) -> 
                         f"ALTER DATABASE {quoted_name} ALLOW_CONNECTIONS false"
                     )
                     try:
+                        # DROP can require an immediate checkpoint. Give only
+                        # this owned cleanup operation a bounded longer wait;
+                        # retain the shorter connection-fence budget above.
+                        conn.exec_driver_sql("SET statement_timeout = '60s'")
                         conn.exec_driver_sql(
                             f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
                         )
