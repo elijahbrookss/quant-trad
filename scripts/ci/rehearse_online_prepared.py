@@ -1561,7 +1561,9 @@ finally:
  # Publication renames the retired predecessor; retain exact worker receipts
  # for fixture cleanup even when successor preparation fails before returning.
  forward_workers=[]
- if options.forward_package_image:
+ # Before fixture readiness no request or forward worker has been published.
+ # Still clean the already tracked disposable containers below.
+ if options.forward_package_image and (state/'storage-online-request.json').exists():
   from scripts.automation import storage_online_forward as forward_owner
   from scripts.automation import storage_online_reschedule as reschedule_owner
   current_request=host_boundary.load_receipt(state/'storage-online-request.json')
