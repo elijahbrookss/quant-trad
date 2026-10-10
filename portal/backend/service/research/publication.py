@@ -122,10 +122,9 @@ def resolve_reference(raw: Mapping[str, Any], session: Any) -> dict[str, Any]:
         resolved["content_hash"] = identity
         resolved["assurance"] = "reasoning_snapshot_not_calculated_evidence"
         # Small reasoning records must remain interpretable after subsequent edits.
-        snapshot = deepcopy(item)
-        if kind == "study":
-            snapshot["payload"] = {key: value for key, value in snapshot["payload"].items() if key != KEY}
-        resolved["snapshot"] = snapshot
+        # Retain the exact hashed content, including an adopted Study's question
+        # and prior interpretation history. The publication size bound applies.
+        resolved["snapshot"] = deepcopy(item)
     links = session.scalars(select(ResearchLinkRecord).where(
         (ResearchLinkRecord.source_item_id == identifier) |
         ((ResearchLinkRecord.target_type == "research_item") & (ResearchLinkRecord.target_id == identifier))

@@ -454,7 +454,10 @@ A reference names a Research Memory target ID, expected kind and role
 `replay_dependency`). Check references require exact result and evidence hashes;
 the service validates the canonical frozen Check contract and retained Dataset
 identity without executing a Check or replay. Other reasoning references require
-the content hash returned by the item read and preserve a small content snapshot.
+the content hash returned by the item read and preserve the exact hashed content
+snapshot. An adopted Study snapshot includes its question and prior interpretation
+history; later source publications cannot change that citation. Nested histories
+count toward the same 1 MiB publication bound and are never truncated to fit.
 Local paths and caller-provided result envelopes are not evidence locators.
 Additional decisions or deviations can be retained in existing Study/Observation
 records and referenced by exact content identity; no new artifact platform is

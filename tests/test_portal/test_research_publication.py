@@ -251,3 +251,50 @@ def test_reasoning_content_identity_binds_source_scope_and_tags(memory):
         changed = deepcopy(original)
         changed[field] = ["changed"] if field == "tags" else "changed"
         assert publication.content_identity(changed) != identity
+
+
+def test_adopted_study_snapshot_rehashes_after_later_source_publication(memory):
+    record, session, items = memory
+    publication.adopt("question", {"question": "What changed?", "scope": "Development"})
+    initial = publication.publish("question", request(items))
+    source = record.to_dict()
+    raw = request(items) | {"request_id": "study-reference", "expected_previous_hash": initial["publication_hash"],
+        "references": [{"item_id": "question", "kind": "study", "role": "context",
+                        "content_hash": publication.content_identity(source)}]}
+    cited = publication.publish("question", raw)
+    reference = cited["references"][0]
+    assert reference["snapshot"] == source
+    assert publication.content_identity(reference["snapshot"]) == reference["content_hash"]
+    assert reference["snapshot"]["payload"][publication.KEY]["question"]["question"] == "What changed?"
+    assert reference["snapshot"]["payload"][publication.KEY]["publications"] == [initial]
+    publication.publish("question", request(items) | {"request_id": "later-source",
+        "expected_previous_hash": cited["publication_hash"], "conclusion": "Later interpretation."})
+    retained = publication.history("question")["publications"][1]["references"][0]
+    assert retained == reference
+    assert publication.content_identity(retained["snapshot"]) == retained["content_hash"]
+    assert publication.content_identity(record.to_dict()) != retained["content_hash"]
+
+
+def test_nested_study_snapshots_hit_real_history_bound_without_truncation(memory):
+    record, session, items = memory
+    publication.adopt("question", {"question": "What changed?", "scope": "Development"})
+    prior = publication.publish("question", request(items))
+    for attempt in range(20):
+        source = record.to_dict()
+        before = deepcopy(record.payload)
+        flushes = session.flushed
+        raw = request(items) | {"request_id": f"nested-study-{attempt}",
+            "expected_previous_hash": prior["publication_hash"],
+            "references": [{"item_id": "question", "kind": "study", "role": "context",
+                            "content_hash": publication.content_identity(source)}]}
+        try:
+            prior = publication.publish("question", raw)
+        except ValueError as exc:
+            assert "question_publication_history_limit" in str(exc)
+            assert record.payload == before
+            assert session.flushed == flushes
+            publication.verify_history(record.payload[publication.KEY], "question")
+            break
+        assert publication.content_identity(prior["references"][0]["snapshot"]) == prior["references"][0]["content_hash"]
+    else:
+        pytest.fail("nested retained histories must hit the existing 1 MiB bound")
