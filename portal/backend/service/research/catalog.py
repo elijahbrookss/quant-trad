@@ -290,19 +290,19 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
                        "constraints": "Evidence requires an explicit policy. Fact snapshots do not support reset_rewarm."},
         "gap_rewarm_bars": {"type": "integer", "minimum": 0, "default": 0},
         "assertions[]": {"fields": ["metric_path", "operator", "threshold"],
-                         "operators": sorted(ASSERTION_OPERATORS), "constraints": "Nonempty result metric_path and scalar threshold; missing metric is an explicit assertion failure.",
+                         "operators": sorted(ASSERTION_OPERATORS), "constraints": "Nonempty result metric_path and scalar threshold; missing/null metric or incompatible threshold is indeterminate.",
                          "meaning": "Scalar result assertions; no inference or execution permission."},
     }
     if family == "event_fact_analysis":
         fields.update({
             "detector": {"choices": ["indicator_event", "fact_snapshot"] if version in {"4", "5"} else ["indicator_event"],
                 "fields": {"indicator_event": ["type", "output_name", "event_keys"], "fact_snapshot": ["type", "input_alias", "sampling", "where", "evaluation_trigger"]},
-                "constraints": "Indicator output_name is nonempty; event_keys are unique {key,direction,alias?}, direction long/short. Fact input_alias must resolve; sampling is primary_bar_close. Version 5 requires fact_snapshot with required_facts_available; other methods use primary_available."},
+                "constraints": "Indicator output_name is nonempty; event_keys are unique {key,direction,alias?}, direction long/short. Fact input_alias must resolve; sampling is primary_bar_close; where is at most eight payload.<top_level_field> -> non-null scalar equality filters. Version 5 requires fact_snapshot with required_facts_available; other methods use primary_available."},
             "outcomes": {"fields": ["horizons", "required_horizons", "horizon_kind", "primary_horizon", "entry_lag_bars", "invalidation"],
                 "constraints": "Nonempty positive integer horizons; kind bars or elapsed_time (seconds), default bars. Primary defaults to first horizon and must be declared. Required horizons default to all and must be a nonempty subset. Entry lag defaults 0 and is nonnegative. Invalidation is indicator-only {type:close_crosses_event_reference,reference_path:metadata.*,max_bars:positive integer}."},
             "statistics.features": {"fields": ["baseline", "enriched"],
                 "baseline_operators": sorted(event._BASELINE_OPERATORS), "enriched_operators": sorted(event._FACT_OPERATORS | event._STRUCTURED_FACT_OPERATORS),
-                "constraints": "Unique names; enriched inputs require input_alias. Returns/volume_ratio require positive lookback_bars; atr_fraction period defaults 14; metadata numbers require metadata.* path and finite scale (default 1); payload numbers require schema-valid path/where; update windows require positive window_seconds. Fact snapshots exclude directional features/update_agreement."},
+                "constraints": "Unique names; enriched inputs require input_alias. Returns/volume_ratio require positive lookback_bars; atr_fraction period defaults 14; metadata numbers require metadata.* path and finite scale (default 1); payload numbers require one top-level payload.<field> path and at most eight non-null scalar equality filters; update windows require positive window_seconds. Fact snapshots exclude directional features/update_agreement."},
             "statistics.folds": {"fields": ["id", "train.start", "train.end", "validation.start", "validation.end"],
                 "constraints": "UTC train.start < train.end <= validation.start < validation.end; walk-forward only."},
             "statistics.model": {"fields": ["type", "c", "fit_intercept", "tolerance", "max_iterations", "seed"],

@@ -140,3 +140,12 @@ def test_paired_metadata_explains_real_support_missingness_and_units():
     assert "not effective sample size" in fields["dependence"]["meaning"]
     assert "unmatched_crossing_identities[]" in fields["matching"]["fields"]
     assert "leave_one_day_out[]/leave_one_week_out[]" in fields
+
+
+def test_catalogue_assertion_missing_metric_matches_existing_semantics():
+    from research_science.check import ScalarAssertionSpec, evaluate_scalar_assertions
+
+    constraint = catalog.get_check_definition("event_fact_analysis", "11")["settings"]["configurable"]["assertions[]"]["constraints"]
+    result = evaluate_scalar_assertions({}, [ScalarAssertionSpec("absent", "gt", 0)])
+    assert result["assertions"][0]["status"] == "indeterminate"
+    assert "indeterminate" in constraint
