@@ -645,6 +645,11 @@ do not alter the boolean hold. No new index, reference authority or historical
 backfill is introduced. Planning lists `canonical_hot_backlog`; final expiry
 repeats the check. User-pin release cannot remove either class of canonical protection.
 
+The indexed query shape is not a hard resource bound. The ordinary expiration
+path does not currently inherit the separate canonical-retention statement
+deadlines or impose a temporary-space cap. Those limits remain follow-up work
+at this lifecycle repository boundary, not a new maintenance framework.
+
 The final check alone is insufficient. `archive_expiration_lock` holds an
 `UPDATE` row lock on the exact immutable raw/checkpoint manifest through the
 final status check, verified unlink, and recorded completion. It uses `NOWAIT`:

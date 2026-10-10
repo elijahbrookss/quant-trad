@@ -9,11 +9,12 @@ restart research. Historical approvals and receipts remain evidence.
 ## Deployed outcome — 2026-10-10
 
 The separately approved schema cutover committed on October 9 at 00:07 UTC.
-Release `37177f1c12ca08bbcddc971d34da6b746c267550` deployed on October 10 at
-05:43 UTC after [all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38024578676).
-It narrows frozen-range and raw-prefix lookups using existing catalogue bounds,
-and defers raw compaction until the receive-hour has settled. It retains the
-preceding streaming, cancellation and bounded calendar-formatting changes.
+Release `89912f167e19f5255fb4ee1ddcf64c92f155d2b2` deployed on October 10 at
+07:34 UTC after [all seven qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38030048205).
+It corrects archive-expiration coverage and raw-ID existence queries to use
+existing provenance indexes. It retains `37177f1c`'s narrowed frozen-range and
+raw-prefix lookups and receive-hour compaction guard, plus the preceding
+streaming, cancellation and bounded calendar-formatting changes.
 The database container, saved policy, environment and migration journals were
 unchanged. This was an ordinary software deployment.
 All 17 collectors and the application services were healthy after deployment.
@@ -68,21 +69,34 @@ on October 10 at 05:44 UTC after verifying 752,156 rows in 92 archive pages. Its
 predicted saving. Net filesystem growth still includes concurrent intake, WAL,
 archives and recovery work.
 
-A separate raw-expiration coverage lookup then held the lifecycle fence for over
-eight minutes. All 50 remaining hot partitions have valid provenance GIN indexes,
-but its coverage-to-hot join selected sequential scans. One positively identified
-read-only query was cancelled without terminating the worker. A candidate rewrite
-selects relevant coverage IDs before indexed existence probes; the observed
-negative lookup completed in 0.253 seconds under a one-second read-only limit.
-The matching raw-ID join is being corrected in the same existing owner.
-**These additional query changes are not deployed and require database qualification.**
-No index build, schema change or historical migration is justified by this evidence.
+A separate raw-expiration coverage lookup ran for about 29 minutes and allocated
+100.6 GB of temporary files. All 50 remaining hot partitions had valid provenance
+GIN indexes, but its coverage-to-hot join selected sequential scans. The dedicated
+worker was gracefully drained and the positively identified read-only query was
+cancelled; PostgreSQL released its temporary allocation. No historical facts were
+deleted by this intervention.
+
+The deployed rewrite selects relevant coverage/raw IDs before indexed existence
+probes. The observed negative coverage lookup completed in 0.253 seconds under a
+one-second read-only limit; the exact database qualification passed 443 tests,
+including source-reclamation and coverage-revision protection. The new worker's
+first ordinary cycle completed with 12 outcomes and zero failures, including
+further canonical-prefix verification. Two post-deployment observations found
+zero live default-tablespace temporary files. These are initial observations,
+not a sustained throughput result or a bound on peak temporary allocation.
+
+**Hard query limits remain open:** the ordinary archive-expiration path does not
+inherit `CanonicalFactRetentionPolicy` statement deadlines, and the query rewrite
+does not add a temporary-space cap. Close this gap at the existing lifecycle
+repository boundary; it does not justify a new scheduler, index build, schema
+change or historical migration.
 
 The baseline producer began at 12:38 UTC on October 9; migration, WAL and backup
 growth must be separated from ordinary growth before projecting a capacity horizon.
 No additional historical rewrite or migration-copy deletion is implied. Private
 receipts are retained under `artifacts/storage-implementation/history-read-cache/`:
-`release-37177f1c` (current deployment, actual reclaim/cold-cache proof and pending
+`release-89912f16` (current deployment, query correction and initial maintenance/
+collector observations), `release-37177f1c` (actual reclaim/cold-cache proof and
 coverage-query measurements), `release-f19682d1` (2023 research measurements),
 `release-041e3c0a` (earlier query/compaction qualification), `release-dfd717be`
 (earlier read/cache proof), `release-f9d68118` (2022 H04 evidence), and
