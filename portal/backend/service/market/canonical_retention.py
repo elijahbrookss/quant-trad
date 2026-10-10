@@ -23,6 +23,7 @@ from ..storage.repos.fact_retention import (
     archive_admission_blockers, canonical_fact_retention_repository, require_hot_window_elapsed,
 )
 from ..storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+from ..storage.history_policy import saved_canonical_policy, require_saved_history_policy
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,12 @@ class CanonicalRetentionStopRequested(CanonicalRetentionBudgetExceeded):
 
 
 class CanonicalFactRetentionExecutor:
-    def __init__(self, *, repository=canonical_fact_retention_repository):
+    def __init__(self, *, repository=canonical_fact_retention_repository, use_saved_history_policy=False):
         self.repository = repository
+        self.use_saved_history_policy = use_saved_history_policy
         self._cursor = None
         self._run_lock = Lock()
+        self._archive = None
 
     def _require_archive(self, *, policy, storage_root, action):
         filesystem = self.repository._filesystem(storage_root)
@@ -48,29 +51,42 @@ class CanonicalFactRetentionExecutor:
         if blockers:
             raise RuntimeError(f"canonical_retention_archive_admission_failed: action={action} blockers={blockers}")
 
-    def _execute_step(self, *, item, policy, storage_root, check_budget, remaining_seconds):
+    def _execute_step(self, *, item, policy, storage_root, check_budget, remaining_seconds,
+                      storage_policy_witness=None):
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         self._require_archive(policy=policy, storage_root=storage_root, action=action)
 
         def guard(session, partition):
             check_budget()
-            require_hot_window_elapsed(session, partition, policy=policy)
-            self._require_archive(policy=policy, storage_root=storage_root, action=action)
+            current_policy = policy
+            if self.use_saved_history_policy:
+                current_policy = require_saved_history_policy(session,
+                    witness=storage_policy_witness, policy=policy, storage_root=storage_root)
+            require_hot_window_elapsed(session, partition, policy=current_policy)
+            self._require_archive(policy=current_policy, storage_root=storage_root, action=action)
 
-        archive = PostgresCanonicalFactArchiveRepository(
-            database=self.repository.database,
-            object_store=FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects"),
-            temporary_directory=Path(storage_root).expanduser().resolve() / "canonical-staging",
-            limits=FactArchiveLimits(max_rows=policy.max_page_rows,
-                row_group_size=min(512, policy.max_page_rows),
-                max_logical_bytes=policy.max_page_logical_bytes,
-                max_file_bytes=2 * policy.max_page_logical_bytes),
-            max_dependency_bytes=policy.max_verification_bytes,
-            max_dependency_objects=policy.max_verification_objects,
-            statement_timeout_ms=min(policy.execution_statement_timeout_ms, max(1, int(remaining_seconds * 1000))),
-            partition_guard=guard, check_budget=check_budget,
-        )
+        # Reuse only the current run's staging repository. Its one-page buffer
+        # avoids repeating hot hydration for each committed prefix interval.
+        archive = self._archive if action == "stage_page" else None
+        timeout = min(policy.execution_statement_timeout_ms, max(1, int(remaining_seconds * 1000)))
+        if archive is None:
+            archive = PostgresCanonicalFactArchiveRepository(
+                database=self.repository.database,
+                object_store=FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects"),
+                temporary_directory=Path(storage_root).expanduser().resolve() / "canonical-staging",
+                limits=FactArchiveLimits(max_rows=policy.max_page_rows,
+                    row_group_size=min(512, policy.max_page_rows),
+                    max_logical_bytes=policy.max_page_logical_bytes,
+                    max_file_bytes=2 * policy.max_page_logical_bytes),
+                max_dependency_bytes=policy.max_verification_bytes,
+                max_dependency_objects=policy.max_verification_objects,
+                statement_timeout_ms=timeout,
+                partition_guard=guard, check_budget=check_budget,
+            )
+        archive.partition_guard = guard
+        archive.statement_timeout_ms = timeout
+        self._archive = archive if action == "stage_page" else None
         verification = ArchiveVerificationLimits(max_bytes=policy.max_verification_bytes,
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
@@ -94,6 +110,10 @@ class CanonicalFactRetentionExecutor:
             execute: bool = False, after_storage_day: date | None = None, cancelled=None):
         if type(execute) is not bool or (after_storage_day is not None and type(after_storage_day) is not date):
             raise ValueError("canonical_retention_request_invalid")
+        witness = None
+        if self.use_saved_history_policy:
+            policy, witness = saved_canonical_policy(self.repository.database,
+                policy=policy, storage_root=storage_root)
         if not execute or not policy.execution_enabled:
             return {"schema_version": "market.canonical_retention_run.v1",
                     "status": "dry_run" if not execute else "disabled", "outcomes": [], "failure_count": 0,
@@ -102,11 +122,14 @@ class CanonicalFactRetentionExecutor:
         if not self._run_lock.acquire(blocking=False):
             raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
         try:
-            return self._run(policy=policy, storage_root=storage_root, after_storage_day=after_storage_day, cancelled=cancelled)
+            return self._run(policy=policy, storage_root=storage_root, after_storage_day=after_storage_day,
+                             cancelled=cancelled, storage_policy_witness=witness)
         finally:
+            # Committed catalog progress is the only state carried across runs.
+            self._archive = None
             self._run_lock.release()
 
-    def _run(self, *, policy, storage_root, after_storage_day, cancelled):
+    def _run(self, *, policy, storage_root, after_storage_day, cancelled, storage_policy_witness=None):
         started = monotonic()
         deadline = started + policy.max_run_seconds
         cursor = after_storage_day if after_storage_day is not None else self._cursor
@@ -151,7 +174,8 @@ class CanonicalFactRetentionExecutor:
             cursor = day - timedelta(days=1)
             try:
                 result = self._execute_step(item=item, policy=policy, storage_root=storage_root,
-                                           check_budget=check_budget, remaining_seconds=deadline - monotonic())
+                                           check_budget=check_budget, remaining_seconds=deadline - monotonic(),
+                                           storage_policy_witness=storage_policy_witness)
                 outcomes.append({**result, "action": item["action"], "storage_day": day.isoformat()})
                 if result["status"] in {"partition_reclaimed", "already_reclaimed"}:
                     cursor = day
@@ -185,6 +209,8 @@ class CanonicalFactRetentionExecutor:
                   "planning_pages": scans, "elapsed_seconds": monotonic() - started,
                   "next_after_storage_day": cursor.isoformat() if cursor else None,
                   "resume_authority": "committed_partition_pages_and_verifications"}
+        if self.use_saved_history_policy:
+            result["storage_policy"] = storage_policy_witness
         logger.info("canonical_retention_run_finished | status=%s steps=%s scans=%s failures=%s next_after_storage_day=%s",
                     result["status"], len(outcomes), scans, failures, result["next_after_storage_day"])
         return result

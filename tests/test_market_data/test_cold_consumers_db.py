@@ -110,6 +110,87 @@ def test_collector_recent_fact_plan_seeks_short_suffix(storage):
         assert scans and all("Index" in node["Node Type"] for node in scans)
         assert sum(node["Actual Rows"] * node["Actual Loops"] for node in scans) < 100
 
+def test_collector_telemetry_preserves_active_revision_semantics(storage, monkeypatch):
+    monkeypatch.setattr(collector_operations, "db", storage.database)
+    operations = collector_operations.PostgresCollectorOperationsRepository()
+    assert operations.fact_series_telemetry(series_ids=[]) == {}
+    assert operations.fact_series_telemetry(series_ids=[storage.series_id]) == {}
+    _ingest(storage)
+    _ingest(storage, replace(storage.fact, state="invalidated",
+                            accepted_at=BASE + timedelta(seconds=50),
+                            known_at=BASE + timedelta(seconds=50)))
+    result = operations.fact_series_telemetry(series_ids=[storage.series_id] * 2)
+    assert len(result) == 1
+    # Later invalidation does not erase the earlier active revision's telemetry.
+    assert result[storage.series_id]["last_observation_time"] == BASE.isoformat()
+    assert result[storage.series_id]["last_accepted_at"] == storage.fact.accepted_at.isoformat()
+    assert result[storage.series_id]["accepted_last_minute"] == 0
+    assert result[storage.series_id]["accepted_last_five_minutes"] == 0
+
+
+def test_collector_telemetry_window_boundaries_and_indexed_history(storage):
+    query = collector_operations.FACT_SERIES_TELEMETRY_SQL.replace(
+        "market.fact_versions", "telemetry_fixture"
+    )
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE telemetry_fixture (
+                series_id bigint NOT NULL, observation_time timestamptz NOT NULL,
+                accepted_at timestamptz NOT NULL, state text NOT NULL
+            ) ON COMMIT DROP;
+            INSERT INTO telemetry_fixture
+            SELECT 1, now() - interval '30 days', now() - interval '30 days', 'active'
+            FROM generate_series(1, 10000);
+            INSERT INTO telemetry_fixture VALUES
+                (1, now() - interval '2 days', now(), 'active'),
+                (1, now() - interval '2 days', now() + interval '1 second', 'active'),
+                (1, now() - interval '2 days', now() + interval '2 seconds', 'invalidated'),
+                (1, now() - interval '1 day', now() - interval '1 minute', 'active'),
+                (1, now(), now() - interval '5 minutes', 'active'),
+                (1, now() + interval '1 day', now() + interval '1 day', 'invalidated'),
+                (2, now(), now(), 'invalidated'),
+                (3, now() - interval '1 day', now() - interval '1 day', 'active');
+            CREATE INDEX telemetry_fixture_observation
+                ON telemetry_fixture(series_id, observation_time DESC);
+            CREATE INDEX telemetry_fixture_acceptance
+                ON telemetry_fixture(series_id, accepted_at);
+            ANALYZE telemetry_fixture;
+        """))
+        params = {"series_ids": [1, 2, 3, 4]}
+        actual = session.execute(text(query), params).mappings().all()
+        expected = session.execute(text("""
+            SELECT series_id,
+                max(observation_time) FILTER (WHERE state = 'active') AS last_observation_time,
+                max(accepted_at) FILTER (WHERE state = 'active') AS last_accepted_at,
+                count(*) FILTER (WHERE state = 'active' AND accepted_at >= now() - interval '1 minute') AS accepted_last_minute,
+                count(*) FILTER (WHERE state = 'active' AND accepted_at >= now() - interval '5 minutes') AS accepted_last_five_minutes
+            FROM telemetry_fixture WHERE series_id = ANY(:series_ids) GROUP BY series_id
+        """), params).mappings().all()
+        assert {row["series_id"]: dict(row) for row in actual} == {
+            row["series_id"]: dict(row) for row in expected
+        }
+        by_id = {row["series_id"]: row for row in actual}
+        assert by_id[1]["accepted_last_minute"] == 3
+        assert by_id[1]["accepted_last_five_minutes"] == 4
+        assert by_id[2]["last_accepted_at"] is None
+        assert by_id[2]["accepted_last_five_minutes"] == 0
+        assert by_id[3]["last_accepted_at"] is not None
+        assert by_id[3]["accepted_last_five_minutes"] == 0
+        assert 4 not in by_id
+        plan = session.execute(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query), params).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        scans = [node for node in nodes(plan[0]["Plan"])
+                 if node.get("Relation Name") == "telemetry_fixture"]
+        assert scans and all("Index" in node["Node Type"] for node in scans)
+        assert sum((node["Actual Rows"] + node.get("Rows Removed by Filter", 0))
+                   * node["Actual Loops"] for node in scans) < 100
+
+
 def _normalization_spec():
     return NormalizationSpec(
         feature_name="cold_funding", semantic_version="1.0.0",
@@ -317,7 +398,9 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
     assert before[0]["complete_bucket_count"] == 0
     assert before[0]["incomplete_bucket_count"] == 1
     replay_args = dict(definition_id=position["definition_id"], session_id=position["session_id"],
-                       snapshot_ids=[snapshot.snapshot_id], batch_ids=[], final_state_hash=None)
+                       snapshot_ids=[snapshot.snapshot_id], batch_ids=[], final_state_hash=snapshot.state_hash)
+    with pytest.raises(RuntimeError, match="market_book_replay_reconciliation_failed"):
+        repo.reconcile_book_replay(**{**replay_args, "final_state_hash": None})
     replay_before = repo.reconcile_book_replay(**replay_args)
     _verified_cold_fixture(storage, tmp_path, monkeypatch)
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", market_data.canonical_fact_storage_repository)

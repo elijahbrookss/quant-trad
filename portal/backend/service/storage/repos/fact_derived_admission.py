@@ -22,6 +22,39 @@ from .fact_storage import PostgresCanonicalFactStorageRepository
 DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state", "market.trade_flow", "market.trade_flow_feature", "market.market_response"})
 
 
+_LEGACY_MATERIAL_CANDIDATES = """
+                UNION
+                SELECT requested.root_id,requested.role,source.id
+                FROM requested JOIN market.fact_hot_payloads AS hot
+                  ON CASE WHEN requested.evidence_key IS NOT NULL THEN
+                    hot.provenance @> jsonb_build_object(requested.evidence_key,
+                        jsonb_build_object('legacy_material_hash',requested.material_hash))
+                    ELSE false END
+                JOIN LATERAL (
+                    SELECT headers.id,headers.series_id,headers.fact_type,
+                           headers.market_commit_seq,headers.known_at
+                    FROM market.fact_versions AS headers
+                    WHERE headers.storage_day=hot.storage_day AND headers.id=hot.id
+                    OFFSET 0
+                ) AS source ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
+                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
+                WHERE hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
+                UNION
+                SELECT requested.root_id,requested.role,source.id
+                FROM requested JOIN market.fact_archive_material_aliases AS aliases
+                  ON aliases.series_id=requested.series_id AND aliases.evidence_key=requested.evidence_key
+                  AND aliases.material_hash=requested.material_hash
+                JOIN market.fact_versions AS source ON source.id=aliases.fact_version_id
+                  AND source.series_id=requested.series_id AND source.fact_type=requested.fact_type
+                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
+                JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
+                  AND manifest.storage_day=source.storage_day
+                JOIN market.fact_retention_partitions AS partition ON partition.storage_day=source.storage_day
+                  AND partition.state IN ('verified','reclaimed')
+                WHERE NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                    WHERE hot.storage_day=source.storage_day AND hot.id=source.id)
+"""
+
 def resolve_material_source_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
     """Resolve bounded (root, role) witnesses without selecting latest aliases.
 
@@ -48,7 +81,20 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         batch = [{**request, "known_at": request["known_at"].isoformat(),
                   "evidence_key": legacy_material_evidence_key(request["fact_type"])}
                  for request in requests[offset:offset + 128]]
-        found = session.execute(text("""
+        # Families without a legacy material hash cannot match either alias
+        # branch. Omit those joins before planning; a CASE filter can otherwise
+        # cause a full historical header scan even when every key is null.
+        legacy_witnesses = sorted({json.dumps({item["evidence_key"]: {
+            "legacy_material_hash": item["material_hash"],
+        }}) for item in batch if item["evidence_key"] is not None})
+        # Bound constant witnesses expose the existing provenance GIN path.
+        # The exact per-request predicate still owns series, family and clocks;
+        # joining it alone can make PostgreSQL scan all historical headers.
+        # LATERAL with OFFSET 0 keeps each hot match's header lookup parameterized
+        # by id/day instead of a merge against the whole header history. OFFSET
+        # does not truncate matches or choose one correction revision.
+        legacy_candidates = _LEGACY_MATERIAL_CANDIDATES if legacy_witnesses else ""
+        found = session.execute(text(f"""
             WITH requested AS (
                 SELECT * FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS item(
                     root_id text,role text,series_id bigint,fact_type text,material_hash text,
@@ -59,33 +105,11 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
                   ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
                   AND source.material_hash=requested.material_hash
                   AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
-                UNION
-                SELECT requested.root_id,requested.role,source.id
-                FROM requested JOIN market.fact_versions AS source
-                  ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
-                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
-                JOIN market.fact_hot_payloads AS hot ON hot.storage_day=source.storage_day AND hot.id=source.id
-                WHERE CASE WHEN requested.evidence_key IS NOT NULL THEN
-                    hot.provenance @> jsonb_build_object(requested.evidence_key,
-                        jsonb_build_object('legacy_material_hash',requested.material_hash))
-                    ELSE false END
-                UNION
-                SELECT requested.root_id,requested.role,source.id
-                FROM requested JOIN market.fact_archive_material_aliases AS aliases
-                  ON aliases.series_id=requested.series_id AND aliases.evidence_key=requested.evidence_key
-                  AND aliases.material_hash=requested.material_hash
-                JOIN market.fact_versions AS source ON source.id=aliases.fact_version_id
-                  AND source.series_id=requested.series_id AND source.fact_type=requested.fact_type
-                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
-                JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
-                  AND manifest.storage_day=source.storage_day
-                JOIN market.fact_retention_partitions AS partition ON partition.storage_day=source.storage_day
-                  AND partition.state IN ('verified','reclaimed')
-                WHERE NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
-                    WHERE hot.storage_day=source.storage_day AND hot.id=source.id)
+{legacy_candidates}
             )
-            SELECT root_id,role,id FROM candidates ORDER BY root_id,role,id LIMIT :limit
-        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1}).all()
+            SELECT DISTINCT root_id,role,id FROM candidates ORDER BY root_id,role,id LIMIT :limit
+        """), {"requests": json.dumps(batch), "legacy_witnesses": legacy_witnesses,
+               "limit": max_rows - count + 1}).all()
         count += len(found)
         if count > max_rows:
             raise RuntimeError("canonical_material_source_budget_exceeded: reduce archive page size")

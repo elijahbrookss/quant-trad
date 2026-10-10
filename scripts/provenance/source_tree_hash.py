@@ -10,7 +10,41 @@ from pathlib import Path, PurePosixPath
 
 
 ROOTS = ("config", "src", "cli", "portal", "scripts/provenance")
-ROOT_FILES = ("requirements.txt", "requirements.lock", "scripts/qt")
+# The fixed preserving operator is packaged with the matching runtime. Keep
+# this inventory aligned with Dockerfile COPY; unrelated manual SQL stays out.
+OPERATOR_FILES = (
+    "scripts/automation/storage_online_controller.py",
+    "scripts/automation/storage_online_terminal.py",
+    "scripts/automation/storage_online_keys.py",
+    "scripts/automation/storage_online_launch.py",
+    "scripts/automation/storage_host_boundary.py",
+    "scripts/automation/storage_online_drain.py",
+    "scripts/automation/storage_online_worker.py",
+    "scripts/automation/storage_online_forward_worker.py",
+    "scripts/db/archive_file_v2_proof.py",
+    "scripts/db/archive_root_v2_online.py",
+    "scripts/db/fact_header_v2_cancel.py",
+    "scripts/db/fact_header_v2_deadline.py",
+    "scripts/db/fact_header_v2_online.py",
+    "scripts/db/fact_header_v2_online_proof.py",
+    "scripts/automation/storage_recovery_prepare.py",
+    "scripts/automation/storage_host_prepare.py",
+    "scripts/automation/storage_device_audit.py",
+    "scripts/db/fact_header_v2_handoff.py",
+    "scripts/db/fact_header_v2_capture.py",
+    "scripts/db/fact_header_v2_copy.py",
+    "scripts/db/fact_header_v2_admission.py",
+    "scripts/db/fact_header_forward_keys.py",
+    "scripts/db/fact_header_forward_adoption.py",
+    "scripts/db/fact_header_forward_placement.py",
+    "scripts/db/fact_header_v2_placement.py",
+    "scripts/db/fact_header_v2_references.py",
+    "scripts/db/raw_mapping_v2_copy.py",
+    "scripts/db/raw_mapping_v2_placement.py",
+    "scripts/db/archive_root_v2_copy.py",
+    "scripts/db/archive_reference_v2_placement.py",
+)
+ROOT_FILES = ("requirements.txt", "requirements.lock", "scripts/qt", *OPERATOR_FILES)
 IGNORED_PARTS = {"__pycache__", "node_modules", "dist", ".vite", ".npm-cache"}
 IGNORED_PART_SUFFIXES = (".egg-info",)
 IGNORED_SUFFIXES = {".pyc", ".pyo"}

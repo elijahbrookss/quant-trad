@@ -15,6 +15,16 @@ from sqlalchemy import text
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
 
+def lock_stream_raw_mapping_access(session):
+    """Wait for raw-table maintenance before holding a stream's lease row.
+
+    ACCESS SHARE permits ordinary readers and inserts. Holding it through the
+    publishing transaction prevents an exclusive move from entering after the
+    lease check; waiting for it leaves the heartbeat free to renew ownership.
+    """
+    session.execute(text("LOCK TABLE market.raw_archive_record_mappings IN ACCESS SHARE MODE"))
+
+
 def _book_position(position, *, observation_key):
     if (not isinstance(position, Mapping)
             or not isinstance(position.get("definition_id"), str)
@@ -54,6 +64,30 @@ def _unprotected_book_prefixes(session, prefixes):
                 WHERE prefixes.definition_id=requested.definition_id AND prefixes.session_id=requested.session_id)
     """), {"prefixes": json.dumps(list(prefixes.values()))}).scalars())
     return {key: value for key, value in prefixes.items() if key not in protected}
+
+
+def _held_trade_coverage_endpoints(session, coverages):
+    """Reuse the lifecycle owner's existing hot coverage hold.
+
+    Any hot flow for the interval holds raw objects for its session, including
+    later deliveries. Reading the hot parent retains relation locks until this
+    writer commits, excluding reclamation of that holder. Check the requested
+    immutable revision and its endpoint mappings; do not enumerate the growing
+    connection prefix again. First/late imports without a hot holder retain the
+    complete bounded mapping/expiry check below.
+    """
+    if not coverages:
+        return []
+    return session.execute(text("""
+        SELECT requested.request_key,coverage.opening_raw_record_id,coverage.last_raw_record_id
+        FROM jsonb_to_recordset(CAST(:coverages AS jsonb))
+            AS requested(request_key text,interval_id text,revision bigint)
+        JOIN market.stream_coverage_interval_versions AS coverage
+          ON coverage.interval_id=requested.interval_id AND coverage.revision=requested.revision
+        WHERE EXISTS (SELECT 1 FROM market.fact_hot_payloads AS coverage_holds
+            WHERE coverage_holds.provenance @> jsonb_build_object('_qt_trade_flow_evidence',
+                jsonb_build_object('coverage_interval_id',coverage.interval_id)))
+    """), {"coverages": json.dumps(list(coverages.values()))}).mappings().all()
 
 
 def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
@@ -106,6 +140,12 @@ def lock_canonical_raw_references(session, facts, *, max_mapping_rows=50_000):
     isolation = session.execute(text("SHOW transaction_isolation")).scalar_one()
     if isolation != "read committed":
         raise RuntimeError("canonical_raw_reference_isolation_invalid: writes require READ COMMITTED")
+    for held in _held_trade_coverage_endpoints(session, coverages):
+        del coverages[held["request_key"]]
+        raw_ids.update((held["opening_raw_record_id"], held["last_raw_record_id"]))
+    requested = {"record:" + identity for identity in raw_ids} | set(positions) | set(coverages)
+    if len(requested) > max_mapping_rows:
+        raise RuntimeError("canonical_raw_reference_budget_exceeded: reduce canonical batch size")
     prefixes = _unprotected_book_prefixes(session, prefixes)
     if sum(prefix["receive_ordinal"] for prefix in prefixes.values()) > max_mapping_rows:
         raise RuntimeError("canonical_raw_reference_prefix_budget_exceeded: late book import requires a bounded complete prefix")

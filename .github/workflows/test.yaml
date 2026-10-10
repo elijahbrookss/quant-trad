@@ -2,11 +2,134 @@ name: Tests with Coverage
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, 'feature/**', 'hotfix/**']
   pull_request:
     branches: [develop, main]
 
+# Keep the final integrated work-branch run; preserve develop/main run behavior.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/') }}
+
 jobs:
+  committed-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      QT_RECOVERY_FIXTURE_ROOT: /tmp/qt-committed-recovery
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [current, '24357ff387776822f676ae2a8b1cce7f209c313e']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install isolated operator dependencies
+        run: |
+          python -m pip install --no-deps -r requirements.lock
+          python -m pip check
+      - name: Prepare an accessible private operator workspace
+        run: |
+          test ! -e "$QT_RECOVERY_FIXTURE_ROOT"
+          sudo install -d -o 1000 -g 1000 -m 0700 "$QT_RECOVERY_FIXTURE_ROOT" \
+            "$QT_RECOVERY_FIXTURE_ROOT/source" "$QT_RECOVERY_FIXTURE_ROOT/evidence" "$QT_RECOVERY_FIXTURE_ROOT/history"
+          git archive HEAD | sudo tar -x -C "$QT_RECOVERY_FIXTURE_ROOT/source"
+          sudo chown -R 1000:1000 "$QT_RECOVERY_FIXTURE_ROOT/source"
+          compose_plugin="$(docker info --format '{{json .ClientInfo.Plugins}}' | python -c \
+            'import json,sys; print(next(p["Path"] for p in json.load(sys.stdin) if p["Name"] == "compose"))')"
+          test -f "$compose_plugin"
+          sudo install -d -o 1000 -g 1000 -m 0700 \
+            "$QT_RECOVERY_FIXTURE_ROOT/docker-config" "$QT_RECOVERY_FIXTURE_ROOT/docker-config/cli-plugins"
+          sudo install -o 1000 -g 1000 -m 0700 "$compose_plugin" \
+            "$QT_RECOVERY_FIXTURE_ROOT/docker-config/cli-plugins/docker-compose"
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env QT_DISABLE_DOTENV=1 "$(command -v python)" \
+            "$QT_RECOVERY_FIXTURE_ROOT/source/scripts/ci/rehearse_online_prepared.py" --help >/dev/null
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" docker info --format '{{.ServerVersion}}'
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" docker compose version
+      - name: Build current or first-release runtime and guarded fixture
+        env:
+          RUNTIME_REF: ${{ matrix.runtime }}
+        run: |
+          revision="$RUNTIME_REF"
+          if [[ "$revision" == current ]]; then revision="$(git rev-parse HEAD)"; fi
+          source_root="$RUNNER_TEMP/recovery-runtime-source"
+          mkdir "$source_root"
+          git archive "$revision" | tar -x -C "$source_root"
+          tree_hash="$(python scripts/provenance/source_tree_hash.py --root "$source_root")"
+          docker build --file "$source_root/portal/backend/Dockerfile" --target storage-test \
+            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
+            --tag qt-committed-recovery-runtime "$source_root"
+          docker build --file docker/postgres/Dockerfile --tag quanttrad-postgres:2.14.2-pg15 .
+          # Reproduce the actual retained image's missing tool without changing PG.
+          printf 'FROM quanttrad-postgres:2.14.2-pg15\nRUN rm /usr/local/bin/pgbackrest\n' > "$RUNNER_TEMP/Dockerfile.missing-archiver"
+          docker build --file "$RUNNER_TEMP/Dockerfile.missing-archiver" --tag qt-postgres-missing-archiver .
+          cat > "$RUNNER_TEMP/Dockerfile.recovery-guard" <<'DOCKERFILE'
+          FROM qt-committed-recovery-runtime
+          LABEL qt.guarded-source-fixture=true
+          COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/run_backend.py
+          COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/workers/single_node_initializer.py
+          COPY scripts/ci/online_guarded_source_fixture.py /app/portal/backend/workers/market_data_collector.py
+          DOCKERFILE
+          docker build --file "$RUNNER_TEMP/Dockerfile.recovery-guard" --tag qt-committed-recovery-guard .
+      - name: Recover missing configuration and missing database archiver after actual expiry
+        env:
+          QT_DISABLE_DOTENV: '1'
+        run: |
+          history_root="$QT_RECOVERY_FIXTURE_ROOT/history"
+          sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=1000,gid=1000" tmpfs "$history_root"
+          trap 'sudo umount "$history_root"' EXIT
+          # The private application spool deliberately belongs to UID/GID 1000.
+          # Match that unprivileged operator in the fixture; grant only Docker's
+          # existing socket group, without changing runtime admission or modes.
+          sudo setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" \
+            env QT_DISABLE_DOTENV=1 DOCKER_CONFIG="$QT_RECOVERY_FIXTURE_ROOT/docker-config" \
+            bash -c 'cd "$1"; shift; exec "$@"' _ \
+            "$QT_RECOVERY_FIXTURE_ROOT/source" "$(command -v python)" scripts/ci/rehearse_online_prepared.py \
+            --image qt-committed-recovery-runtime --database-image qt-postgres-missing-archiver \
+            --archiver-replacement-image quanttrad-postgres:2.14.2-pg15 \
+            --output-root "$QT_RECOVERY_FIXTURE_ROOT/evidence" --history-parent "$history_root" --require-distinct-devices \
+            --prepare-source --worker-phases --initial-capture --final-pause --final-delta --switch-entry \
+            --close-logins success --commit-switch --guarded-source-image qt-committed-recovery-guard \
+            --recovery-mounts --recovery-repositories --recovery-spool --recovery-runtime \
+            --operation-driver --full-operation --repository-config-failure --completion-observation
+      - name: Attest and pack disposable qualification evidence
+        if: always()
+        env:
+          RUNTIME_REF: ${{ matrix.runtime }}
+        run: |
+          # Preserve partial failure evidence even when attestation cannot complete.
+          trap 'sudo tar -C "$QT_RECOVERY_FIXTURE_ROOT/evidence" -czf "$RUNNER_TEMP/committed-recovery.tar.gz" .' EXIT
+          docker run --rm --network none --entrypoint cat qt-committed-recovery-runtime \
+            /app/.qt-source-attestation.json > "$RUNNER_TEMP/runtime-source-attestation.json"
+          python - "$RUNNER_TEMP/runtime-source-attestation.json" "$RUNNER_TEMP/qualification-source.json" <<'PY'
+          import json, os, re, sys
+          runtime = json.load(open(sys.argv[1]))
+          expected = os.environ['GITHUB_SHA'] if os.environ['RUNTIME_REF'] == 'current' else os.environ['RUNTIME_REF']
+          if runtime.get('source_revision') != expected or not re.fullmatch(r'[a-f0-9]{64}', runtime.get('source_tree_hash', '')):
+              raise SystemExit('qualification_runtime_attestation_mismatch')
+          with open(sys.argv[2], 'w') as destination:
+              json.dump({'source_revision': os.environ['GITHUB_SHA'], 'workflow': '.github/workflows/test.yaml',
+                         'run_id': int(os.environ['GITHUB_RUN_ID']), 'attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                         'runtime_variant': os.environ['RUNTIME_REF'], 'runtime_attestation': runtime}, destination, sort_keys=True)
+          PY
+          sudo install -m 0644 "$RUNNER_TEMP/qualification-source.json" "$QT_RECOVERY_FIXTURE_ROOT/evidence/qualification-source.json"
+      - name: Preserve disposable qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: committed-recovery-${{ matrix.runtime }}
+          path: ${{ runner.temp }}/committed-recovery.tar.gz
+          retention-days: 7
+
   pr-suite:
     runs-on: ubuntu-latest
 
@@ -52,7 +175,9 @@ jobs:
 
   deployment-contract:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Online proofs take ~33 minutes; retain room for the separately bounded
+    # 40-minute operator rehearsal, image builds and runtime checks.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -101,8 +226,87 @@ jobs:
             --file docker/docker-compose.server.yml \
             build tsdb backend frontend frontend-v2
 
+      - name: Prove production worker encrypted pairing and dependency retirement
+        run: |
+          revision="$(git rev-parse HEAD)"
+          tree_hash="$(python3 scripts/provenance/source_tree_hash.py --root . --git-revision "$revision")"
+          docker build --file portal/backend/Dockerfile --target production \
+            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
+            --tag qt-terminal-runtime-proof .
+          docker run --rm --network none --read-only --user 70:70 --cpus 1 --memory 512m --pids-limit 64 \
+            --cap-drop ALL --security-opt no-new-privileges --env QT_DISABLE_DOTENV=1 \
+            --entrypoint python qt-terminal-runtime-proof -c \
+            "from scripts.automation.storage_online_terminal import worker_main; from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK; print('production terminal imports available')"
+          docker build --file portal/backend/Dockerfile --target storage-test \
+            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
+            --tag qt-incremental-runtime-proof .
+          docker run --rm --network none --user postgres --cpus 2 --memory 512m --pids-limit 64 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
+            qt-incremental-runtime-proof \
+            python -m pytest -q tests/test_market_data/test_incremental_recovery.py \
+            -o cache_dir=/tmp/qt-incremental-output-pytest-cache
+          docker run --rm --network none --user postgres --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
+            qt-incremental-runtime-proof \
+            python /app/scripts/ci/rehearse_incremental_runtime.py \
+            --pg-bin /usr/lib/postgresql/15/bin --pgbackrest /usr/local/bin/pgbackrest \
+            --restic /usr/local/bin/restic
+
+      - name: Prove online worker reads legacy archives without changing ownership
+        run: python3 scripts/ci/rehearse_online_worker.py --image qt-incremental-runtime-proof
+      - name: Prove confined online worker launch and refusal
+        run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
+
+      - name: Prove retired key inspection handoff and bounded preparation recovery
+        env:
+          QT_DISABLE_DOTENV: "1"
+        run: |
+          mkdir -p "$RUNNER_TEMP/qt-forward-keys"
+          history_root="$(mktemp -d "$RUNNER_TEMP/qt-forward-keys-history.XXXXXX")"
+          # Separate disposable filesystem; the tiny fixture must exercise placement.
+          # This is a ceiling, not a reservation or a production capacity claim.
+          sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$history_root"
+          trap 'sudo umount "$history_root"' EXIT
+          python3 -m venv "$RUNNER_TEMP/qt-storage-operator-python"
+          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip install --no-deps -r requirements.lock
+          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip check
+          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" scripts/ci/rehearse_online_prepared.py \
+            --image qt-incremental-runtime-proof \
+            --database-image quanttrad-postgres:2.14.2-pg15 \
+            --output-root "$RUNNER_TEMP/qt-forward-keys" \
+            --history-parent "$history_root" --require-distinct-devices \
+            --prepare-source --worker-phases --initial-capture \
+            --terminal-cancellation --terminal-image qt-terminal-runtime-proof \
+            --forward-package-image qt-terminal-runtime-proof \
+            --forward-keys --forward-worker --forward-retirement --forward-operation --forward-retirement-recovery
+
+      - name: Prove interrupted initial storage preparation and source resumption
+        env:
+          QT_STORAGE_TEST_CLIENT_IMAGE: qt-incremental-runtime-proof
+        run: python3 scripts/ci/test_storage_database_preparation.py --online-source
+
+      - name: Prove encrypted restore through actual QT current and frozen readers
+        run: ./scripts/ci/run_test_suite.sh incremental-recovery
+
+      - name: Prove packaged retained raw placement through encrypted restore
+        run: ./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_raw_placement_db.py -s -o cache_dir=/tmp/qt-incremental-raw-pytest-cache
+
+      - name: Prove bounded online copy and protected exact switch with concurrent intake
+        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_storage_end_to_end_db.py tests/test_market_data/test_fact_header_copy_placement_db.py tests/test_market_data/test_raw_mapping_copy_db.py tests/test_market_data/test_fact_header_forward_adoption_db.py tests/test_market_data/test_fact_header_online_prepare_db.py tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py tests/test_market_data/test_archive_online_copy_db.py tests/test_market_data/test_fact_header_online_references_db.py tests/test_market_data/test_fact_header_cancel_db.py tests/test_market_data/test_storage_online_controller_db.py tests/test_market_data/test_storage_online_collector_drain_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_worker_initialization_owns_clock_and_atomic_commit tests/test_market_data/test_fact_header_forward_handoff_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_archives_preserve_canceled_work_and_fence_final_switch[retain_raw] tests/test_market_data/test_raw_mapping_history_placement_db.py
+
       - name: Recreate actual QT core on disposable storage without provider egress
         run: python3 scripts/ci/test_server_core_recreation.py
+
+      - name: Prove fixed SSD/HDD runtime and held preserving cutover
+        run: |
+          python3 scripts/ci/test_server_core_recreation.py --storage-layout
+          docker pull python:3.12.3-slim
+          revision="$(git rev-parse HEAD)"
+          python3 scripts/ci/test_storage_database_preparation.py \
+            --runtime-images qt-incremental-runtime-proof \
+            "quanttrad-frontend:$revision" "quanttrad-frontend-v2:$revision"
 
   deployment-rehearsal:
     runs-on: ubuntu-latest
@@ -151,6 +355,10 @@ jobs:
       - name: Prepare isolated database contracts
         run: |
           docker exec "${{ job.services.timescaledb.id }}" \
+            psql -v ON_ERROR_STOP=1 -U quanttrad -d quanttrad_bootstrap \
+            -c "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" \
+            -c "SELECT pg_reload_conf()"
+          docker exec "${{ job.services.timescaledb.id }}" \
             createdb -U quanttrad quanttrad_contracts
           for database in quanttrad_bootstrap quanttrad_contracts; do
             docker exec "${{ job.services.timescaledb.id }}" \
@@ -169,13 +377,29 @@ jobs:
           QT_LOGGING_DEBUG: 'false'
         run: python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
 
+      - name: Verify PostgreSQL filesystem namespace
+        run: ./scripts/ci/run_test_suite.sh db tests/test_market_data/test_header_namespace_db.py
+
+      - name: Prove encrypted incremental database and archive recovery
+        run: |
+          docker build --file docker/test/incremental-recovery.Dockerfile \
+            --tag qt-incremental-recovery-proof .
+          docker run --rm --network none --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            qt-incremental-recovery-proof
+
       - name: Run PostgreSQL-backed contract tests
         env:
           PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts
           RUN_DB_TESTS: '1'
           QT_DB_TEST_ISOLATED: '1'
+          QT_SCHEMA_TEMPLATE_PILOT: '1'
           QT_LOGGING_LOKI_URL: ''
           QT_LOGGING_DEBUG: 'false'
-        run: >-
-          python -m pytest -q -m db
-          --ignore=tests/test_portal/test_clean_database_bootstrap_db.py
+        run: |
+          SOURCE_REVISION="$(git rev-parse HEAD)"
+          SOURCE_TREE_HASH="$(python scripts/provenance/source_tree_hash.py --git-revision "$SOURCE_REVISION")"
+          export SOURCE_REVISION SOURCE_TREE_HASH
+          python -m pytest -q -m db \
+            --ignore=tests/test_portal/test_clean_database_bootstrap_db.py \
+            --ignore=tests/test_market_data/test_header_namespace_db.py

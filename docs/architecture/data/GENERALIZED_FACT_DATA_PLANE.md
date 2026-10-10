@@ -20,6 +20,7 @@ code_paths:
   - src/market_data/canonical.py
   - src/market_data/canonical_storage.py
   - src/market_data/fact_archive.py
+  - src/market_data/history_read_cache.py
   - src/market_data/archive.py
   - src/market_data/archive_verification.py
   - src/market_data/book_archive.py
@@ -64,6 +65,29 @@ code_paths:
   - tests/test_market_data
 ---
 # Generalized Fact Data Plane
+
+## Frozen commit visibility
+
+New freezes pin each series' visible committed high-water mark inside the existing
+repeatable snapshot. The Dataset-wide sequence remains an upper bound and
+informational clock, not the individual series selection boundary. Canonical
+ingestion already holds the per-series transaction lock before allocating Fact
+sequences; later commits on that series therefore cannot appear below its frozen
+high-water mark. This avoids a global ingestion fence or a per-Fact membership
+table. Direct SQL that bypasses canonical ingestion is not an admitted writer.
+
+The source summary records `commit_selection=per_series_committed.v1`, which
+distinguishes the new frozen identity from older selection guarantees without
+rewriting existing Datasets. Existing frozen manifests and hashes are preserved;
+validation still fails if their actual rows disagree. A new freeze is required
+for stronger selection guarantees. Disposable barrier tests exercise a delayed
+insert and correction while another series commits a larger sequence.
+
+Proposed storage evolution is tracked in [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+and the [bounded migration specification](../../engineering/research-data-evolution-spec.md).
+They require justified historical scope, compatible reads and bounded migration
+interruptions. They preserve the current research architecture and do not describe
+a completed storage cutover.
 
 ## Status
 
@@ -264,6 +288,46 @@ equal its archived copy. Missing, corrupt, overlapping, or inconsistent evidence
 fails loud. Hot-only reads do not open or create the archive root. Indexed
 metadata/dedupe/watermark queries stay on the permanent envelope.
 
+Canonical hydration can use an explicitly enabled disposable SSD copy cache.
+`QT_HISTORY_READ_CACHE_BYTES=0` keeps the original reader. A positive budget
+requires `QT_HISTORY_READ_CACHE_MIN_FREE_BYTES`, an explicit working root/UUID,
+and an operator-prepared private `history-read-cache` directory (runtime owner,
+mode 0700) beneath that SSD root. Runtime never creates or repairs that root.
+The cache is not an archive, SQL table, backup dependency or source of Dataset
+identity; lifecycle/recovery verification always bypasses it.
+
+Copies are named by immutable object SHA-256. The canonical codec verifies the
+whole chosen copy, schema, contents and requested envelopes exactly as on HDD.
+A corrupt SSD checksum is logged and the original HDD object is read normally;
+corrupt source data still fails. A cache hit does not attest HDD source health.
+The shared filesystem implementation bounds cache bytes (including allocation
+rounding), entries (8,192), fill time (30 seconds) and per-operation fill bytes.
+It prunes inactive copies by last use, with a 14-day inactivity expiry and earlier
+quota/headroom eviction. These clocks are independent of Fact placement age.
+
+A directory flock serializes fills and accounting across processes; active
+readers hold shared file locks, so eviction can skip them. Contention, oversized
+objects or exhausted fill budget bypass caching explicitly instead of queuing
+another fill. Publication uses a checksummed partial and atomic rename. Under
+exclusive directory ownership, abandoned partials can be removed; archive/spool
+paths, aliases, hardlinks and unexpected files are never cleanup candidates.
+Disabling the cache restores direct reads and leaves durable data untouched.
+
+New fills take the existing storage-management transaction lock in a fresh
+READ COMMITTED session. They respect saved SSD identity, policy reserve and
+reserved/auxiliary claims plus the explicit minimum-free floor. Each bounded
+copy step checks ownership, free space and execution cancellation. Cache hits
+do not allocate a new copy or hold a storage-management transaction. Lost
+admission aborts copying; failed optional-cache admission remains observable.
+
+Archive reads report application-level source/cache read bytes, cache write
+bytes, hits/misses/fills/evictions/bypasses through existing execution metrics.
+These byte counts include verification/repeated reads, not physical disk reads
+through the OS cache. Research separately bounds archive-read and cache-write
+bytes using its configured input-byte ceiling. Read timing is nested inside
+hydration, and fill timing includes its source read; do not sum nested timings.
+An object cache does not cache SQL headers/indexes or research computation.
+
 Mixed pages can include spec-bound normalized features that were not selected by
 the caller. Before decoding, the reader reloads every such page schema from the
 immutable normalization spec and checks its identity/hash, repository-built
@@ -370,6 +434,17 @@ PostgreSQL bytes.
 
 ### Canonical Retention Planning
 
+Storage totals include all dated header relations and their indexes/TOAST,
+including headers whose hot payloads have already been reclaimed. The global
+identity registry and its indexes are reported separately as
+`global_identity_bytes`; they are neither hot payloads nor reclaimable header
+bytes. Header inventory uses the same partition-count budget independently of
+the hot inventory and fails rather than reporting a partial total. These
+relation totals are components of `database_bytes`, not additional bytes to
+add to the whole database size. They do not replace filesystem or backup
+capacity accounting. The series/day lookup directory is separately reported as
+`series_day_directory_bytes` and grows with series/day combinations.
+
 `market_data_lifecycle.canonical_retention` is the typed policy for generalized
 hot payloads. The default hot window is 30 complete UTC placement days, with
 exact `hot_days_by_fact_type` overrides. A daily partition waits for the longest
@@ -448,6 +523,20 @@ cutoffs, **all** family windows/admission, and writable filesystem/headroom
 checks; a previously returned plan cannot authorize a write. The final physical
 reclaimer independently repeats its exact-relation, pin and current-byte gates.
 
+The staging repository can retain one prepared sealed page while successive
+steps commit book/trade prefix certificates. Its key includes the day and seal,
+expected count, committed page cursor, page limits and verifier version. Each
+call still locks the partition and rechecks policy; publication resolves and
+checks raw/checkpoint dependencies again. A changed cursor or limit, failed
+transaction, cancellation or publication discards the buffer. The scheduled
+executor owns this repository only for its current bounded run, so a restart or
+next run resumes from PostgreSQL and reads the source again. This removes
+repeated hydration without another persisted cache, altered archive format or
+larger step/time budgets. Release qualification must exercise commit failure,
+concurrent publication, changed admission and resource limits in a disposable
+database. Reduced repeated queries alone do not prove sustainable reclamation
+throughput on a deployed host.
+
 The default page bounds are 10,000 rows and 64 MiB logical bytes, with a
 128 MiB encoded-file ceiling. Publication requires reserve for both the encoder
 file and atomic object-store temporary (256 MiB at defaults), in addition to
@@ -503,7 +592,14 @@ records the source count and physical allocation.
 Each staging call reads the next ordered source page after the last acknowledged
 cursor. Both row count and a conservative SQL-side JSON byte allowance bound
 transfer to Python; a first row outside the byte allowance fails explicitly and
-never advances the cursor. Exact canonical hashes are checked before dependency
+never advances the cursor. The allowance counts PostgreSQL JSON bytes, reserves
+ASCII escape expansion only for non-printable/non-ASCII characters, and allows
+for the five clocks' fixed microsecond rendering. It no longer multiplies every
+ASCII byte by six. The codec still enforces the same 64 MiB default logical-byte
+limit; fuller pages do not enlarge the existing reader's budget or change the
+archive format. Acknowledged pages keep their bytes and cursor boundaries when
+the packing estimate changes, and subsequent publication resumes after them.
+Exact canonical hashes are checked before dependency
 resolution. Object count and cumulative bytes bound raw dependency verification.
 Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit
@@ -540,8 +636,37 @@ session-scoped backlog protection; exact trade/L2 raw-ID mappings also cover
 generic canonical imports without collector-session metadata. Book/coverage
 scope deliberately protects earlier frames, not only the last source position.
 These checks use the existing JSON-containment GIN indexes and do not decode
-cold files. Planning lists `canonical_hot_backlog`; final expiry repeats the
-check. User-pin release cannot remove either class of canonical protection.
+cold files. Coverage IDs are selected from the immutable target's definition/session
+first; exact raw IDs are selected from its manifest. Materialized candidate sets
+and lateral existence probes keep those small sets outside the hot-payload lookup.
+This avoids a hot-table-first join that can scan every partition when no witness
+exists. All coverage revisions remain eligible witnesses; duplicate interval IDs
+do not alter the boolean hold. No new index, reference authority or historical
+backfill is introduced. Planning lists `canonical_hot_backlog`; final expiry
+repeats the check. User-pin release cannot remove either class of canonical protection.
+
+The indexed query shape is not a hard resource bound. The lifecycle repository
+owns expiration-planning and final-target witness transactions with `SET LOCAL`
+ceilings of 5 seconds per statement and 64 MiB of temporary files. Stricter caller
+settings remain stricter; parallel query workers are disabled for these witnesses
+because PostgreSQL's temporary-file limit applies per process. These are metadata
+query safety ceilings, not a whole-cycle deadline or a throughput promise. Commit
+or rollback removes the local settings before the connection returns to the pool.
+The database role must already be allowed to set `temp_file_limit`; runtime does
+not grant permissions or silently fall back. See PostgreSQL 15's
+[resource limits](https://www.postgresql.org/docs/15/runtime-config-resource.html)
+and [statement timeouts](https://www.postgresql.org/docs/15/runtime-config-client.html).
+
+An identified statement-timeout or temporary-file-limit failure invalidates the
+whole expiration plan. Dry planning fails loudly. An executing cycle records a
+failed `archive_expiration_plan` in additive `planning_failures` and run outcomes,
+preserves its sources, and may continue independent canonical archival after
+releasing the raw lifecycle fence. The cycle remains `degraded`, never successful.
+Manual cancellation, permission errors and unrelated database failures retain
+their original meaning. Retrying requires a fresh witness; a failed plan confers
+no deletion authority. No schema, policy format or recovery-data change is needed.
+These guards are implemented in the source candidate; deployed `89912f16` does
+not contain them yet.
 
 The final check alone is insufficient. `archive_expiration_lock` holds an
 `UPDATE` row lock on the exact immutable raw/checkpoint manifest through the
@@ -559,6 +684,17 @@ reference cannot be published to deleted evidence. Each raw record needs a live
 placement; a surviving compacted copy can satisfy it, but an unrelated live
 object cannot. This catalog/lifetime check does not replace deep byte, mapping,
 causal, or complete-chain verification during archive admission.
+
+Trade-flow admission reuses the existing hot coverage hold after resolving the
+exact requested immutable coverage revision. A hot flow for that interval already
+prevents expiry of its session's raw objects; the reader's relation locks prevent
+reclamation of the holder before this transaction commits. Admission checks the
+opening and last raw-record mappings through the same manifest locks and fresh
+expiry checks. It does not enumerate the entire growing connection history for
+every new bucket. The existing request/mapping budget still applies to these
+endpoints. A first or late import without a hot holder retains the full bounded
+reference check, and an unknown coverage revision still fails. No new hold,
+schema, archive format, evidence hash or semantic coverage rule is introduced.
 
 For a book reference, an existing immutable hot L2/BBO/depth row in the same
 definition/session already protects the session's raw objects. The writer's
@@ -676,6 +812,17 @@ an immutable page. A missing/corrupt selected copy fails without silently
 switching to another copy. Multiple different raw IDs at the same claimed book
 position are ambiguous and rejected.
 
+When every witness in an individual SQL lookup already has pinned raw
+placements, that lookup restricts candidates to their union before applying
+the mapping-row budget. Record IDs, exact book positions, and prefix ranges
+each use their own requested witnesses: unbound trade records on a mixed page
+must not disable known book-placement bounds in the separate position lookup.
+An existing page-wide bound further intersects each union; each witness still
+checks its own binding afterward. Partial bindings within a lookup leave its
+unbound witnesses unrestricted, and an empty eligible set fails closed. This
+avoids considering unrelated placements during trade-prefix endpoint checks without changing raw
+identity, ambiguity checks, byte verification, or archive formats.
+
 Every selected object receives a fresh byte checksum and bounded streaming
 decode. The complete object's row count, order, source session/epoch, and ordinal
 bounds must agree with its manifest. Each requested physical row must match its
@@ -728,6 +875,23 @@ file/logical-byte bounds apply, with cooperative cancellation during hashing.
 The surrounding checksum and file-stability gates still bind those columns to
 the fully decoded object; a fingerprint alone is not raw-frame verification.
 
+Raw-prefix lookup deduplicates identical five-field SQL locators (definition,
+session, connection epoch, first ordinal and final ordinal). It still charges
+the original requested-work budget and validates every root's product, channel
+and manifest binding; a conflicting witness cannot disappear through deduplication.
+Overlapping but unequal ranges remain separate. This changes neither proof hashes
+nor persisted certificates or archives. The source candidate includes this
+optimization; deployed `89912f16` still repeats identical locators.
+
+Raw-prefix lookup supplies its bounded scope list as typed, bound SQL `VALUES`,
+so PostgreSQL can plan using the requested scope count instead of a generic
+JSON-recordset estimate. The existing `EXISTS` predicate keeps overlapping
+requests from multiplying mapping candidates. Manifest ordinal bounds also
+exclude unrelated objects before visiting their mappings. Exact session/epoch/ordinal
+matching still proves every requested row; overlapping bounds cannot fill a gap.
+Placement bounds, expiry exclusion, deterministic ordering, and raw byte
+verification remain unchanged. These query changes add no index or backfill.
+
 Default per-call bounds are 50,000 mapping candidates, 1,000,000 decoded raw
 records, and 2 GiB logical data. Individual files are limited to 1 GiB and
 declared row groups to 256 MiB; decoding uses 128-row batches, with additional
@@ -746,6 +910,17 @@ still apply. Shared interval progress removes full-prefix re-decoding on every
 retry, not all size limits. Exact-position SQL also needs representative
 plan/capacity measurements before activation; small disposable fixtures do not
 prove production-scale throughput.
+
+The exact-position lookup supplies constant definition/session sets and the
+requested ordinal envelope to locate candidate manifests before their mappings.
+The full per-position definition, session, epoch and ordinal predicate still
+decides membership; range overlap cannot fill a missing raw row. Bound object
+selection, expiry exclusion and physical verification remain unchanged. This
+uses the existing manifest and mapping indexes without a schema change. An
+October 9 read-only plan probe reproduced a whole-mapping scan for one position;
+the scope prefilter avoided it and returned its one match in 1.49 seconds under
+a two-second limit. That observation does not establish full-page throughput or
+a sustained cold-storage speedup.
 
 RCA: the initial staging implementation reused a latest-by-material-hash lookup.
 Trade material hashes intentionally exclude delivery details. Two immutable
@@ -897,6 +1072,15 @@ reverified under v10 to gain canonical source edges; original page bytes and
 older receipts remain unchanged. This family joins the default-disabled gate;
 Response and normalized-window admission are described below.
 
+Material-source selection omits the hot-provenance and cold-alias candidate
+branches when every request in its bounded batch belongs to a family with no
+legacy material evidence key. Those branches cannot match such facts, and leaving
+a false `CASE` predicate in the join can still produce a full historical-header
+scan. Canonical hash lookup retains its existing index, causal clocks, distinct
+root/source edges, hydration verification and row/byte limits. Batches containing
+legacy keys retain both alias paths; this changes no facts, archive formats,
+provenance meaning or recovery contracts.
+
 Version `market.canonical_archive_verification.v11` strengthens response archive
 publication with canonical source preservation. The declared flow-feature hash
 resolves every causal matching revision and its aggregate/trade closure. The
@@ -1040,7 +1224,17 @@ complete L2/raw/checkpoint closure. Each declared material witness binds **all**
 matching revisions at or before the root's commit and known-at clocks, not the
 latest alias. Requests are batched at 128; total matched edges are bounded by
 the canonical source row budget. Hot lookup uses containment supported by the
-existing provenance GIN index; cold aliases are candidate locators only. Hydrated rows must
+existing provenance GIN index; cold aliases are candidate locators only.
+The batched material resolver also supplies the distinct legacy witnesses as a
+bound constant array prefilter. The exact per-request series, family, hash and
+causal predicates remain authoritative. Each hot match obtains its header through
+an ID/day-parameterized lateral lookup, with an `OFFSET 0` boundary to prevent
+pulling it into a merge against the entire header history. This retains all
+matching revisions and adds no index, stored alias or schema change. The earlier
+October 9 three-root read-only probe returned three
+source revisions in 1.30 seconds under a two-second statement limit. That small
+sample is not an archive-throughput estimate, and normal maintenance budgets
+still apply. Hydrated rows must
 prove their actual material, series, family, observation and causal clocks.
 
 The existing BBO decoder and basis derivation owner validate the declared pair,
@@ -1240,6 +1434,13 @@ It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
 table lock causes a safe retry rather than a queued ingestion stall.
+
+The audit count of overlapping Dataset bindings first uses the already verified
+archive-series bounds to exclude unrelated ranges, then checks exact canonical
+headers and each binding's frozen commit cutoff. Bounds are conservative: gaps
+are not matches, range ends stay exclusive, and placement day is not observation
+time. This reuses the existing catalog after complete evidence checks; it adds
+no authority to delete and does not exempt pinned data from preservation.
 
 The only destructive statement is `DROP TABLE` for that single daily hot-payload
 relation, without `CASCADE`. Table/index/TOAST allocation is reclaimed at commit.
@@ -1502,6 +1703,41 @@ See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
 [Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
 and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).
 
+### Saved Storage policy and canonical archival
+
+In a worker configured with explicit storage-maintenance limits, canonical
+payload archival and historical-header movement use the same saved recent-days
+window. Paused or missing saved policy cannot execute canonical archival, and
+the saved policy cannot override disabled deployment execution gates. The archive
+transaction and final reclamation handoff fence and recheck the policy revision,
+movement switch and assigned archive filesystem. Policy changes require replanning;
+they do not change Fact identity, causal selection or frozen Dataset binding.
+Unconfigured/manual canonical retention retains its existing explicit policy.
+
+### Historical book replay and disposable current state
+
+Book replay reconciliation reads retained canonical snapshot/update identities
+through the same hot/cold reader and lifecycle snapshot. Its terminal hash comes
+from the last accepted canonical event in source-position order. The latest
+immutable validity revision for that event's interval distinguishes a clean
+close from invalidation: a matching clean close retains the last accepted replay
+hash, while a matching invalidated close requires no valid terminal state.
+Closure scope, last position/hash and closing position must agree with retained
+canonical evidence. Incorrect hashes, missing event identities or inconsistent
+terminal evidence fail reconciliation.
+
+The mutable book_reconstruction_state row remains a current per-series
+projection. A later collector session replaces it, and clean shutdown may clear
+its live hash. Neither event changes the authority or readability of an older
+session's immutable history. Replay no longer uses this disposable projection
+as the historical terminal reference. No new history table, alternate reducer,
+schema migration, hash rule or weakened archive verification is introduced.
+
+Disposable coverage includes actual lease release and same-series session
+rollover with later event times; preserved cold history and frozen results;
+loss of the current projection; clean and invalidated terminal intervals; and
+rejection of incorrect hashes, missing events and mismatched terminal evidence.
+
 
 ### Registered series discovery
 
@@ -1514,3 +1750,11 @@ source-bound window reads and gap checks. Registration alone never admits data.
 The existing exact-count `/series` catalog remains compatible and explicit.
 `qt data series --metadata-only` and `quanttrad://data/series` delegate to this
 same backend contract; MCP does not maintain its own catalog or count cache.
+
+
+Cache read instrumentation records application bytes by source/cache, copied
+bytes, fills/hits/bypasses/evictions and `archive_cache_fill`, `archive_verify`,
+`archive_decode`, and `archive_read` elapsed stages through the existing execution
+control. These stages are nested: do not sum them as independent wall time.
+Application read bytes are not physical disk I/O; OS cache and device counters
+must be measured separately. Cache-hit reads still verify content and semantics.

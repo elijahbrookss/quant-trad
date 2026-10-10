@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import uuid
 
 import pytest
@@ -227,6 +229,125 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
             series_id=series_id,
             start=_BASE - timedelta(hours=1),
         )
+
+
+def test_current_commit_seq_preserves_visible_max_and_snapshot(canonical_series, monkeypatch):
+    from sqlalchemy import text
+
+    _ingest(canonical_series, [_fact(0)], source_revision="visible-watermark")
+    # Empty registered series contribute no invented commit. Sequence allocation
+    # and an uncommitted Fact must likewise never become a committed watermark.
+    market_data_repo.register_series(
+        instrument_id=str(canonical_series["instrument_id"]),
+        fact_type=OPEN_INTEREST_FACT_TYPE, timeframe_seconds=None,
+        contract_version=OPEN_INTEREST_FACT_VERSION,
+    )
+    with db.session() as session:
+        before = int(session.execute(text(
+            "SELECT COALESCE(MAX(market_commit_seq),0) FROM market.fact_versions"
+        )).scalar_one())
+        assert market_data_repo._current_commit_seq_with_session(session) == before
+        assert session.execute(text("SELECT nextval('market.fact_commit_seq')")).scalar_one() > before
+    assert market_data_repo.current_commit_seq() == before
+    pending, release = threading.Event(), threading.Event()
+    original = market_data_repo._ingest_canonical_rows_with_session
+    def delayed(session, **kwargs):
+        result = original(session, **kwargs)
+        pending.set()
+        assert release.wait(30), "watermark writer was not released"
+        return result
+    monkeypatch.setattr(market_data_repo, "_ingest_canonical_rows_with_session", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(_ingest, canonical_series, [_fact(1)], source_revision="pending-watermark")
+        try:
+            assert pending.wait(15)
+            with db.session() as session:
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+                assert market_data_repo._current_commit_seq_with_session(session) == before
+                release.set()
+                writer.result(timeout=15)
+                assert market_data_repo.current_commit_seq() > before
+                assert market_data_repo._current_commit_seq_with_session(session) == before
+                assert int(session.execute(text(
+                    "SELECT COALESCE(MAX(market_commit_seq),0) FROM market.fact_versions"
+                )).scalar_one()) == before
+        finally:
+            release.set()
+        writer.result(timeout=15)
+    with db.session() as session:
+        assert market_data_repo._current_commit_seq_with_session(session) == int(session.execute(text(
+            "SELECT COALESCE(MAX(market_commit_seq),0) FROM market.fact_versions"
+        )).scalar_one())
+
+
+@pytest.mark.parametrize("correction", [False, True])
+def test_freeze_excludes_late_cross_series_commit(canonical_series, monkeypatch, correction):
+    """A sequence allocated before freeze is not necessarily visible at freeze."""
+    series_id = int(canonical_series["series_id"])
+    _ingest(canonical_series, [_fact(0), _fact(1)], source_revision="before-freeze")
+    other_series = market_data_repo.register_series(
+        instrument_id=str(canonical_series["instrument_id"]),
+        fact_type=OPEN_INTEREST_FACT_TYPE, timeframe_seconds=None,
+        contract_version=OPEN_INTEREST_FACT_VERSION,
+    )
+    pending, release = threading.Event(), threading.Event()
+    original = market_data_repo._ingest_canonical_rows_with_session
+
+    def delayed(session, **kwargs):
+        result = original(session, **kwargs)
+        if kwargs["series_id"] == series_id:
+            pending.set()
+            assert release.wait(30), "late transaction was not released"
+        return result
+
+    monkeypatch.setattr(market_data_repo, "_ingest_canonical_rows_with_session", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        late = pool.submit(_ingest, canonical_series,
+                           [_fact(0, close=101.75) if correction else _fact(2)],
+                           source_revision="late-commit")
+        try:
+            assert pending.wait(15)
+            # A different series commits a larger global sequence first.
+            market_data_repo.ingest_open_interest(
+                series_id=other_series, source_id=int(canonical_series["source_id"]),
+                facts=[OpenInterestFact(sample_time=_BASE, value=1000,
+                    received_at=_BASE, accepted_at=_BASE, known_at=_BASE,
+                    known_at_method="platform_acceptance")],
+                source_revision="higher-sequence-first",
+            )
+            frozen = market_data_repo.freeze_dataset([_request(series_id)])
+            before = market_data_repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id)
+        finally:
+            release.set()
+        late.result(timeout=15)
+    after = market_data_repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id)
+    # Reproduce the old global-watermark predicate, demonstrating why it is
+    # insufficient without calling the delayed transaction a pre-freeze commit.
+    global_selection = market_data_repo.read_candles(series_id=series_id,
+        start=_BASE, end=_BASE+timedelta(hours=3), as_of_commit_seq=frozen.max_commit_seq)
+    assert [(r.revision, r.fact.row_hash) for r in global_selection] != [(r.revision, r.fact.row_hash) for r in before]
+    assert [(r.revision, r.fact.row_hash) for r in after] == [(r.revision, r.fact.row_hash) for r in before]
+
+
+def test_canonical_cursor_hydrates_bounded_pages_and_preserves_revision_choice(canonical_series, monkeypatch):
+    from portal.backend.service.storage.repos.fact_storage import canonical_fact_storage_repository
+    _ingest(canonical_series, [_fact(i) for i in range(7)], source_revision="initial")
+    _ingest(canonical_series, [_fact(0, close=101.5)], source_revision="corrected")
+    selection = dict(series_id=int(canonical_series["series_id"]), start=_BASE,
+                     end=_BASE+timedelta(hours=7), as_of_commit_seq=None, known_at_lte=None)
+    original = canonical_fact_storage_repository.hydrate_rows
+    sizes = []
+    def hydrate(session, rows):
+        sizes.append(len(rows))
+        return original(session, rows)
+    monkeypatch.setattr(canonical_fact_storage_repository, "hydrate_rows", hydrate)
+    with db.session() as session:
+        streamed = list(market_data_repo._iter_canonical_rows_with_session(session, **selection, batch_rows=2))
+    assert max(sizes) <= 2 and len(sizes) == 4
+    assert streamed[0]["revision"] == 2
+    with db.session() as session:
+        whole = market_data_repo._read_canonical_rows_with_session(session, **selection)
+    assert streamed == whole
 
 
 def test_series_catalog_preserves_exact_counts_and_bounds_across_corrections(

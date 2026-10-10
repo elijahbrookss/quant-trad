@@ -18,6 +18,15 @@ backend:
     - http://127.0.0.1:5173
     - http://127.0.0.1:5174
 
+storage:
+  # Disabled until a prepared SSD cache root and measured headroom are admitted.
+  history_cache_bytes: 0
+  history_cache_min_free_bytes: 0
+  maintenance_owner: collector
+  archive_shared_group_id: null
+  inventory_path: /run/quanttrad/storage-inventory.json
+  maintenance_limits_path: null
+
 database:
   dsn: null
   application_name: quant_trad_portal
@@ -52,6 +61,13 @@ observability:
   capacity_sample_retention_days: 30
 
 async_jobs:
+  # Execution safety ceilings, not measured production performance targets.
+  research_execution_seconds: 3600
+  research_global_serialization: false
+  research_input_rows: 5000000
+  research_input_bytes: 2147483648
+  research_evidence_bytes: 268435456
+  research_result_bytes: 16777216
   running_timeout_seconds: 1800
   quantlab_job_wait_timeout_seconds: 180
   quantlab_job_poll_interval_seconds: 0.2

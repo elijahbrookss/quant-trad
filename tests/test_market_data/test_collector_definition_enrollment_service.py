@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from portal.backend.service.market.collector_definition_enrollment_service import (
@@ -188,3 +191,19 @@ def test_product_enrollment_rejects_collector_outside_registered_pack() -> None:
                 product_id="LNP-20DEC30-CDE",
             ),
         )
+
+
+@pytest.mark.parametrize("channel", ["trade", "l2"])
+def test_product_pack_preserves_reviewed_template_queue_limit(tmp_path, channel):
+    raw = json.loads(Path(f"config/market_data/coinbase_perpetual_{channel}_fleet.v1.json").read_text())
+    raw.pop("manifest_hash", None)
+    raw["enrollments"][0]["max_inflight_segments"] = 64
+    template = tmp_path / "fleet.json"
+    template.write_text(json.dumps(raw))
+    product = "LNP-20DEC30-CDE"
+    contract = CoinbaseFuturesCollectorPack._instrument_contract(_instrument(), product_id=product)
+    manifest = CoinbaseFuturesCollectorPack._single_product_manifest(
+        template_path=template, instrument_id=_instrument()["id"],
+        product_id=product, product_contract=contract,
+    )
+    assert manifest.enrollments[0].max_inflight_segments == 64

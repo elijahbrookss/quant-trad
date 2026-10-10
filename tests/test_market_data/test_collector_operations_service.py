@@ -666,3 +666,18 @@ def test_history_catalog_rejects_unregistered_definition(monkeypatch):
         with pytest.raises(ValueError, match="collector_unknown"):
             method(collector_kind=CollectorKind.CONTINUOUS_STREAM,
                    collector_id=row["id"])
+
+
+@pytest.mark.parametrize("collector_present", [False, True])
+def test_maintenance_liveness_cannot_impersonate_collection(monkeypatch, collector_present):
+    service = _service()
+    collectors = service.collection_repository.list_worker_states()
+    maintenance = {**collectors[0], "worker_id": "maintenance-only",
+                   "worker_role": "market_storage_maintenance", "context": {}}
+    monkeypatch.setattr(service.collection_repository, "list_worker_states",
+                        lambda: [maintenance] + (collectors if collector_present else []))
+    snapshot = service.fleet_snapshot()
+    if collector_present:
+        assert all(item["actual_state"] == "HEALTHY" for item in snapshot["collectors"])
+    else:
+        assert all(item["actual_state"] != "HEALTHY" for item in snapshot["collectors"])

@@ -235,6 +235,27 @@ Grafana routing owns notifications. The disposable storage-alert proof exercises
 the actual provisioned Loki queries and Grafana math at exact thresholds, with
 per-disk failure, missing samples, and virtual-guest rejection.
 
+Native capacity panels also compare fresh two-minute endpoints 24 hours apart,
+matching resource, filesystem UUID, device and total size before calculating net
+physical growth and time to the existing 85% usage threshold. Missing or failed
+health, stale endpoints, changed identity/size, guest evidence and unknown UUID
+produce no projection; flat/falling growth does not become infinite runway.
+The estimate is a dashboard planning aid, not the policy reserve or storage-job
+admission. Negative projected days mean usage is already above the threshold.
+Shared-device resource series must not be summed as independent capacity.
+The filesystem boundary discovers an available, unambiguous udev UUID even when
+the observer has no configured expected UUID, including the Docker engine disk.
+Missing or ambiguous optional identity stays unknown; configured UUID checks
+remain mandatory. Forecasts need matching identified samples 24 hours apart
+after rollout; older UUID-less samples cannot supply that baseline.
+
+A database-sample-age panel makes stale SQL telemetry explicit; the largest
+relations table includes TOAST alongside table/index bytes. These additions
+reuse existing sources and change no telemetry schema or cadence. The actual
+native LogQL expressions are exercised by the existing disposable storage-alert
+proof. See the [capacity plan](../../engineering/research-data-evolution-spec.md#storage-growth-plan-and-release-acceptance)
+for the physical byte ledger, preservation rules and release decision.
+
 ## Grafana Dashboard Lifecycle
 
 The checked-in JSON files under
@@ -406,3 +427,15 @@ consequence warrants the additional service and ownership.
 - [ADR 0033: Use Promtail as Runtime Loki Ingress](../decisions/0033-use-promtail-as-runtime-loki-ingress.md)
 - [Grafana dashboard provisioning](../../../docker/grafana/provisioning/dashboards/README.md)
 - [Operator email alerting](../../operators/alerting.md)
+
+
+### Research archive-cache measurements
+
+Existing research execution metrics include `archive_read_bytes`,
+`archive_source_bytes`, `archive_cache_bytes`, `archive_cache_write_bytes` and
+cache hits/misses/fills/evictions/bypasses. Synchronous outer operations log one
+`research_execution_metrics` summary; async results retain their original
+execution metrics. These are application-level byte counters, not physical
+reads after OS caching. Compare them with existing filesystem/database growth,
+collector lag/spool, RSS and disk I/O evidence. Read/fill stage timers are nested
+within hydration and must not be added as independent end-to-end costs.

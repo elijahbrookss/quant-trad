@@ -1,0 +1,42 @@
+.qt2-storage { max-width: 860px; margin: 0 auto; padding: 32px; color: var(--text-primary, #e5e7eb); }
+.qt2-storage-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
+.qt2-storage h1 { margin: 4px 0; font-size: 26px; }
+.qt2-storage-eyebrow, .qt2-storage small, .qt2-storage-muted { opacity: .68; font-size: 12px; }
+.qt2-storage button, .qt2-storage-dialog button { display: inline-flex; align-items: center; gap: 8px; padding: 9px 13px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }
+.qt2-storage button:disabled, .qt2-storage-dialog button:disabled { opacity: .45; cursor: default; }
+.qt2-storage button:focus-visible, .qt2-storage-dialog button:focus-visible, .qt2-storage input:focus-visible, .qt2-storage summary:focus-visible { outline: 2px solid var(--accent-color, #37bfa7); outline-offset: 3px; }
+.qt2-storage-drive { display: grid; grid-template-columns: 24px 1fr 220px; align-items: center; gap: 16px; padding: 18px 0; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+.qt2-storage-drive small, .qt2-storage-candidate small { display: block; margin-top: 4px; }
+.qt2-storage-capacity meter { width: 100%; height: 9px; display: block; accent-color: var(--accent-color, #37bfa7); }
+.qt2-storage-drives { margin-bottom: 14px; }
+.qt2-storage-assignments { margin-top: 30px; }
+.qt2-storage fieldset { display: grid; grid-template-columns: 120px 1fr; border: 0; padding: 13px 0; margin: 0; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+.qt2-storage legend { float: left; width: 120px; font-size: 14px; font-weight: 600; }
+.qt2-storage-options { display: flex; flex-wrap: wrap; gap: 12px 20px; }
+.qt2-storage-options label, .qt2-storage-advanced label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+.qt2-storage input { accent-color: var(--accent-color, #37bfa7); }
+.qt2-storage-health { margin: 24px 0; font-size: 13px; opacity: .75; }
+.qt2-storage-advanced { padding: 16px 0; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+.qt2-storage-advanced summary { cursor: pointer; font-size: 14px; }
+.qt2-storage-advanced > div { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
+.qt2-storage-advanced input[type=number] { margin-left: auto; width: 70px; background: transparent; color: inherit; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 4px; padding: 6px; }
+.qt2-storage footer { display: flex; justify-content: flex-end; margin-top: 20px; }
+.qt2-storage .qt2-storage-primary, .qt2-storage-dialog .qt2-storage-primary { background: var(--accent-color, #37bfa7); color: #071511; font-weight: 600; border-color: transparent; }
+.qt2-storage-error, .qt2-storage-dialog [role=alert] { color: #ed947e; font-size: 14px; }
+.qt2-storage-error { padding: 12px; border: 1px solid currentColor; border-radius: 6px; margin-bottom: 16px; overflow-wrap: anywhere; }
+.qt2-storage-dialog { position: relative; z-index: 90; }
+.qt2-storage-backdrop { position: fixed; inset: 0; background: #0008; }
+.qt2-storage-dialog-position { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; overflow-y: auto; }
+.qt2-storage-dialog-position > div { width: min(100%, 520px); max-height: calc(100dvh - 40px); overflow-y: auto; padding: 24px; border-radius: 12px; background: var(--bg-secondary, #151c27); color: var(--text-primary, #e5e7eb); box-shadow: 0 20px 80px #0006; }
+.qt2-storage-dialog h2 { font-size: 20px; margin: 0 0 20px; }
+.qt2-storage-dialog p { line-height: 1.5; font-size: 14px; }
+.qt2-storage-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+.qt2-storage-candidate { display: flex; justify-content: space-between; gap: 16px; margin: 18px 0; }
+@media (max-width: 640px) {
+  .qt2-storage { padding: 20px 16px; }
+  .qt2-storage-drive { grid-template-columns: 24px 1fr; gap: 10px; }
+  .qt2-storage-capacity { grid-column: 2; }
+  .qt2-storage fieldset { display: block; }
+  .qt2-storage legend { float: none; width: auto; margin-bottom: 10px; }
+  .qt2-storage-advanced > div { grid-template-columns: 1fr; }
+}

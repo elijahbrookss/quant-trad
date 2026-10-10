@@ -59,7 +59,10 @@ class _Session:
                 (item["definition_id"], item["session_id"], item["connection_epoch"], item["receive_ordinal"])
                 for item in wanted)]
         else:
-            prefixes = json.loads(params["prefixes"])
+            prefixes = []
+            while f"prefix_{len(prefixes)}_definition_id" in params:
+                prefixes.append({name: params[f"prefix_{len(prefixes)}_{name}"] for name in
+                    ("definition_id", "session_id", "connection_epoch", "first_receive_ordinal", "receive_ordinal")})
             found = [row for row in self.mappings if any(
                 (row["definition_id"], row["mapped_session_id"], row["mapped_epoch"]) ==
                 (item["definition_id"], item["session_id"], item["connection_epoch"])
@@ -76,12 +79,63 @@ def _resolve(store, mappings, rows, **kwargs):
     return result, verified
 
 
+
+def test_repeated_prefix_locators_preserve_each_witness_and_requested_budget(tmp_path):
+    store, records, mappings, _ = _fixture(tmp_path)
+    scope = {name: getattr(records[0], name) for name in BOOK_SCOPE_FIELDS} | {
+        "first_receive_ordinal": 1, "receive_ordinal": 2, "requested_channel": "market_trades",
+    }
+    prefixes = [{**scope, "root_fact_version_id": f"root-{index}"} for index in range(600)]
+    bindings = {item["root_fact_version_id"]: {"raw-manifest"} for item in prefixes}
+    session = _Session(mappings)
+    result = resolve_canonical_raw_archive_refs(session, rows=[], object_store=store,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+        book_prefix_ranges=prefixes, max_mapping_rows=1200, witness_manifest_ids=bindings)
+    assert set(result) == {"raw-manifest"}
+    assert len(session.calls) == 1
+    assert sum(name.startswith("prefix_") for name in session.calls[0][1]) == 5
+    assert session.calls[0][1]["bound_ids"] == ["raw-manifest"]
+
+    # Deduplicating the locator must not discount the declared witness work.
+    with pytest.raises(RuntimeError, match="prefix_budget_exceeded"):
+        _resolve(store, mappings, [], book_prefix_ranges=prefixes, max_mapping_rows=1199)
+    # The first root must still be checked even when later identical SQL scopes
+    # carry different product/channel evidence or a different allowed placement.
+    bad = [{**prefixes[0], "provider_product_id": "different-product"}, *prefixes[1:]]
+    with pytest.raises(RuntimeError, match="witness_mismatch.*fact_version_id=root-0.*provider_product_id"):
+        _resolve(store, mappings, [], book_prefix_ranges=bad, max_mapping_rows=1200)
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        _resolve(store, mappings, [], book_prefix_ranges=prefixes, max_mapping_rows=1200,
+                 witness_manifest_ids={**bindings, "root-0": set()})
+    assert len(prefixes) == len(bindings) == 600
+    assert bindings["root-0"] == {"raw-manifest"}
+
+
 def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path):
     store, _, mappings, rows = _fixture(tmp_path)
     refs, verified = _resolve(store, mappings, rows)
     assert list(refs) == ["raw-manifest"]
     assert verified.byte_count == mappings[0]["byte_count"]
     assert len(verified.objects) == 1
+
+
+def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path)
+    book = {**rows[1], "fact_type": "market.bbo", "provenance": {
+        "_qt_bbo_evidence": {"source_position": {
+            name: getattr(records[1], name) for name in (*BOOK_SCOPE_FIELDS, "receive_ordinal")}}}}
+    # A later placement of this book frame is valid, but this root already
+    # pins its original placement. It must not consume the mixed page's budget.
+    extra = {**mappings[1], "id": "later-book-placement"}
+    session = _Session([*mappings, extra])
+    refs = resolve_canonical_raw_archive_refs(session, rows=[rows[0], book], object_store=store,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+        witness_manifest_ids={book["id"]: {"raw-manifest"}}, max_mapping_rows=2)
+    assert set(refs) == {"raw-manifest"}
+    record_params = next(params for _, params in session.calls if "ids" in params)
+    position_params = next(params for _, params in session.calls if "positions" in params)
+    assert "bound_ids" not in record_params, "the trade witness must remain unrestricted"
+    assert position_params["bound_ids"] == ["raw-manifest"]
 
 
 @pytest.mark.parametrize("ids", [["one"], ["one", 'quote"\\newline\n', "\u03b1\U0001f680"]])
@@ -284,14 +338,16 @@ def test_qt_authored_book_features_bind_provider_frames_without_relabeling_the_a
     assert list(_resolve(store, mappings, [row])[0]) == ["raw-manifest"]
 
 
-def test_aliases_with_different_raw_bytes_at_one_book_position_are_ambiguous(tmp_path):
+@pytest.mark.parametrize("bound_witness", [False, True])
+def test_aliases_with_different_raw_bytes_at_one_book_position_are_ambiguous(tmp_path, bound_witness):
     store, records, mappings, rows = _fixture(tmp_path)
     extra = {**mappings[0], "id": "other-manifest", "raw_record_id": "another-raw-id"}
     evidence = {"definition_id": records[0].definition_id, "session_id": records[0].session_id,
                 "connection_epoch": 0, "receive_ordinal": 1, "provider_product_id": "BTC-USD"}
     row = {**rows[0], "fact_type": "market.bbo", "provenance": {"_qt_bbo_evidence": {"source_position": evidence}}}
+    bindings = {row["id"]: {"raw-manifest", "other-manifest"}} if bound_witness else None
     with pytest.raises(RuntimeError, match="position_ambiguous"):
-        _resolve(store, [*mappings, extra], [row])
+        _resolve(store, [*mappings, extra], [row], witness_manifest_ids=bindings)
 
 
 @pytest.mark.parametrize("limit", ["max_rows", "max_file_bytes", "max_logical_bytes", "max_row_group_bytes"])

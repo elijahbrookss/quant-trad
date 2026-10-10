@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from core.execution_control import execution_checkpoint
+
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from statistics import median
@@ -252,6 +254,7 @@ def evaluate_run_signal_summary(
     trade_counts: Counter[str] = Counter()
     examples: list[dict[str, Any]] = []
     for signal in filtered:
+        execution_checkpoint()
         buckets[_bucket_key(signal, bucket_fields)] += 1
         decision = decision_by_signal.get(str(signal.get("signal_id") or ""))
         decision_id = str((decision or {}).get("decision_id") or signal.get("decision_id") or "").strip()
@@ -316,6 +319,7 @@ def evaluate_run_decision_trade_comparison(
     examples: list[dict[str, Any]] = []
 
     for decision in decisions:
+        execution_checkpoint()
         state = _decision_state(decision) or "unknown"
         decision_id = str(decision.get("decision_id") or decision.get("id") or "").strip()
         linked_trades = trades_by_decision.get(decision_id, []) if decision_id else []
@@ -388,6 +392,7 @@ def evaluate_indicator_forward_outcome(
     examples: list[dict[str, Any]] = []
     buckets: Counter[str] = Counter()
     for row in rows:
+        execution_checkpoint()
         bar_index = int(row.get("bar_index") or 0)
         if bar_index < 0 or bar_index >= len(frame):
             continue
@@ -974,6 +979,7 @@ def _audit_signal_expectations(
     excluded_candidates: list[dict[str, Any]] = []
     by_expectation: dict[str, dict[str, int]] = {}
     for expectation in expectations:
+        execution_checkpoint()
         expectation_name = str(expectation["name"])
         expectation_expected, expectation_excluded = _expected_signal_events_for_expectation(
             rows_by_output,
@@ -1057,6 +1063,7 @@ def _emitted_signal_events_for_expectation(
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for row in rows_by_output.get(str(expectation["signal_output"])) or []:
+        execution_checkpoint()
         if str(row.get("output_type") or "") != "signal":
             continue
         if not _values_equal(row.get("event_key"), expectation["event_key"]):
@@ -1297,6 +1304,7 @@ def _audit_candidate_lifecycle(
     open_candidate_count = 0
     lifecycle_issues: list[dict[str, Any]] = []
     for candidate_id, rows in rows_by_candidate.items():
+        execution_checkpoint()
         terminal_rows = [row for row in rows if str(row.get("stage") or "") in terminal_stages]
         if not terminal_rows:
             open_candidate_count += 1
@@ -1379,6 +1387,7 @@ def _audit_lifecycle_signal_links(
 ) -> dict[str, Any]:
     expected: list[dict[str, Any]] = []
     for row in lifecycle_rows:
+        execution_checkpoint()
         if str(row.get("stage") or "") not in signal_stages:
             continue
         signal_output = _lifecycle_signal_field(row, detector, "signal_output")
@@ -1409,6 +1418,7 @@ def _audit_lifecycle_signal_links(
         }
     emitted: list[dict[str, Any]] = []
     for row in signal_rows:
+        execution_checkpoint()
         output_name = str(row.get("output_name") or "").strip()
         event_key = str(row.get("event_key") or "").strip()
         if expected_pairs and (output_name, event_key) not in expected_pairs:
@@ -1926,6 +1936,7 @@ def _event_outcome(
     sign = -1.0 if direction == "short" else 1.0
     outcomes: dict[int, dict[str, float]] = {}
     for bars in forward_bars:
+        execution_checkpoint()
         end_idx = entry_idx + int(bars)
         if end_idx >= len(frame):
             continue
@@ -1968,6 +1979,7 @@ def _summarize_outcomes(
     best_edge: float | None = None
     any_positive = False
     for bars in forward_bars:
+        execution_checkpoint()
         values = [event.outcomes[bars]["forward_return_pct"] for event in events if bars in event.outcomes]
         baseline_values = [
             event.outcomes[bars]["forward_return_pct"]

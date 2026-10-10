@@ -210,3 +210,35 @@ or unordered mapping iteration.
 
 - Full indicator tutorials are intentionally deferred to guide docs.
 - Existing indicator families may need focused architecture notes only if they introduce distinct runtime contracts.
+
+## Versioned original-range returns
+
+Market Profile keeps v1 as its default and offers explicit v2 first-return
+outputs. The record's immutable runtime version selects its complete manifest
+at creation, planning and replay; consumers still select outputs without changing
+Indicator truth. See [ADR 0075](../decisions/0075-pin-first-return-to-original-range-and-indicator-version.md)
+for original-range memory, expiry, gap and strictly prior ATR semantics.
+
+
+### Bounded research source pages
+
+Output evidence can consume an ordered `candle_frames` iterator. Page boundaries
+never reinitialize the engine or reset readiness, gaps, event availability or
+indicator commit clocks. Evidence retains its existing schema and exact ordering.
+The collector no longer builds a second complete list of Candle objects beside
+the source frames. It configures one bar of render history because this consumer
+never requests overlays; algorithm warmup and typed outputs remain unchanged.
+Output/candle evidence required by evaluators still occupies memory and needs
+the research execution budget. This is not a constant-memory claim for arbitrary
+Indicator algorithms or complete research results.
+
+### Optional research readiness evidence
+
+The Check evidence collector may request `capture_output_readiness`. It reads
+`ready` from every declared root output in the same canonical engine frame and
+compresses adjacent equal states into candle-open intervals with a gap segment
+number. It retains both ready and nonready intervals; holes have no fabricated
+snapshot. This is an evidence projection, not a new Indicator output or an
+alternate computation path. Default collection and historical output material
+remain unchanged. Checks consuming the optional projection include it in their
+input hash and use source candle known-at clocks separately.

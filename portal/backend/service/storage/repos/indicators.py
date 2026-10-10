@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ...indicators.persistence_payload import merge_indicator_payload, split_indicator_payload
+from ...indicators.persistence_payload import merge_indicator_payload, split_indicator_payload, indicator_payload_version
 from ._shared import (
     IndicatorRecord,
     SQLAlchemyError,
@@ -24,6 +24,7 @@ def _record_to_indicator_payload(record: IndicatorRecord) -> Dict[str, Any]:
         "id": record.id,
         "name": record.name,
         "type": record.type,
+        "version": indicator_payload_version(record.params),
         "params": params,
         "dependencies": dependencies,
         "color": record.color,
@@ -82,6 +83,7 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
             params_to_store = merge_indicator_payload(
                 meta.get("params"),
                 meta.get("dependencies"),
+                version=meta.get("version") or "v1",
             )
             logger.info(
                 "event=upsert_indicator_params_assignment indicator_id=%s params_keys=%s params=%s",

@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from core.settings import get_settings
+from core.execution_control import ExecutionCancelledError, ExecutionStopUncertainError, ExecutionControl, controlled_execution
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -26,7 +27,9 @@ STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_RETRY = "retry"
-TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_FAILED}
+STATUS_CANCELLED = "cancelled"
+TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED}
+_CANCELLATION_SCHEMA = "async_job_cancellation.v1"
 INFLIGHT_STATUSES = {STATUS_QUEUED, STATUS_RUNNING, STATUS_RETRY}
 DEFAULT_RUNNING_TIMEOUT_SECONDS = float(_ASYNC_SETTINGS.running_timeout_seconds)
 _IDEMPOTENCY_CONFLICT_RETRY_LIMIT = 3
@@ -66,6 +69,7 @@ class ClaimHeartbeat:
         job: ClaimedJob,
         *,
         interval_seconds: Optional[float] = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         self._job = job
         timeout_seconds = _running_timeout_seconds()
@@ -79,8 +83,18 @@ class ClaimHeartbeat:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._error: Optional[BaseException] = None
+        self.control = ExecutionControl()
+        self._execution_scope = controlled_execution(self.control)
+        self._stop_requested = stop_requested
 
     def __enter__(self) -> "ClaimHeartbeat":
+        self._execution_scope.__enter__()
+        try:
+            if heartbeat_job(self._job):
+                raise ExecutionCancelledError(f"async_job_cancel_requested: {self._job.id}")
+        except Exception:
+            self._execution_scope.__exit__(None, None, None)
+            raise
         if self._interval_seconds <= 0:
             return self
         self._thread = threading.Thread(
@@ -92,13 +106,23 @@ class ClaimHeartbeat:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
+        try:
+            self._finish(exc_type, exc, traceback)
+        except BaseException as finish_error:
+            # Pass the actual shutdown error through the scope so its final
+            # checkpoint cannot replace uncertainty with a normal stop signal.
+            self._execution_scope.__exit__(type(finish_error), finish_error, finish_error.__traceback__)
+            raise
+        return self._execution_scope.__exit__(exc_type, exc, traceback)
+
+    def _finish(self, exc_type, exc, traceback) -> bool:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(
                 timeout=max(1.0, min(5.0, self._interval_seconds * 2.0))
             )
-            if self._thread.is_alive() and self._error is None:
-                self._error = RuntimeError(
+            if self._thread.is_alive():
+                raise ExecutionStopUncertainError(
                     f"async_job_heartbeat_shutdown_timeout: {self._job.id}"
                 )
         if self._error is not None:
@@ -118,9 +142,18 @@ class ClaimHeartbeat:
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
             try:
-                heartbeat_job(self._job)
+                if heartbeat_job(self._job):
+                    self.control.stop(ExecutionCancelledError(
+                        f"async_job_cancel_requested: {self._job.id}"
+                    ))
+                elif self._stop_requested is not None and self._stop_requested():
+                    self.control.stop(RuntimeError(f"async_job_worker_stopping: {self._job.id}"))
             except Exception as exc:  # noqa: BLE001 - cross-thread handoff
                 self._error = exc
+                try:
+                    self.control.stop(exc)
+                except Exception:
+                    logger.exception("async_job_interrupt_failed | job_id=%s", self._job.id)
                 self._stop.set()
                 return
 
@@ -210,6 +243,10 @@ def _reclaim_stale_running_jobs(
     common_filters = (
         AsyncJobRecord.status == STATUS_RUNNING,
         AsyncJobRecord.job_type.in_(list(job_types)),
+        # A stale lease does not prove that cancelled work stopped. Keep its
+        # in-flight identity until the owning worker can acknowledge shutdown.
+        or_(AsyncJobRecord.result.is_(None),
+            AsyncJobRecord.result["schema_version"].astext.is_distinct_from(_CANCELLATION_SCHEMA)),
         or_(
             AsyncJobRecord.heartbeat_at.is_(None),
             AsyncJobRecord.heartbeat_at < stale_before,
@@ -720,7 +757,7 @@ def _require_current_claim(*, session, job: ClaimedJob) -> AsyncJobRecord:
     return record
 
 
-def heartbeat_job(job: ClaimedJob) -> None:
+def heartbeat_job(job: ClaimedJob) -> bool:
     if not db.available:
         raise RuntimeError("async_jobs_unavailable: database unavailable")
     with db.session() as session:
@@ -728,20 +765,72 @@ def heartbeat_job(job: ClaimedJob) -> None:
         now = _database_now(session)
         record.heartbeat_at = now
         record.updated_at = now
+        cancelled = _cancellation_requested(record)
     logger.debug(
         "async_job_heartbeat | job_id=%s owner=%s generation=%s",
         job.id,
         job.lock_owner,
         job.claim_generation,
     )
+    return cancelled
+
+
+def _cancellation_requested(record: AsyncJobRecord) -> bool:
+    return isinstance(record.result, dict) and record.result.get("schema_version") == _CANCELLATION_SCHEMA
+
+
+def _mark_job_cancelled(record: AsyncJobRecord, *, now: datetime) -> None:
+    record.status = STATUS_CANCELLED
+    record.result = {**dict(record.result or {}), "execution_stopped": True}
+    record.error = "async_job_cancelled"
+    record.finished_at = now
+    record.updated_at = now
+    record.lock_owner = None
+    record.locked_at = None
+    record.heartbeat_at = None
+    record.claim_token_hash = None
+
+
+def request_job_cancellation(job_id: str, *, job_types: Sequence[str]) -> Dict[str, Any]:
+    """Request a stop without releasing a running claim or mutating its request."""
+    with db.session() as session:
+        record = session.execute(select(AsyncJobRecord).where(
+            AsyncJobRecord.id == str(job_id), AsyncJobRecord.job_type.in_(list(job_types))
+        ).with_for_update()).scalar_one_or_none()
+        if record is None:
+            raise KeyError(f"async_job_not_found: {job_id}")
+        if record.status in TERMINAL_STATUSES:
+            return record.to_dict()
+        now = _database_now(session)
+        if not _cancellation_requested(record):
+            record.result = {"schema_version": _CANCELLATION_SCHEMA,
+                             "requested_at": now.isoformat() + "Z",
+                             "execution_stopped": False}
+            record.updated_at = now
+        if record.status in {STATUS_QUEUED, STATUS_RETRY}:
+            _mark_job_cancelled(record, now=now)
+        outcome = record.to_dict()
+    logger.info("async_job_cancellation_requested | job_id=%s status=%s", job_id, outcome["status"])
+    return outcome
+
+
+def acknowledge_job_cancellation(job: ClaimedJob) -> None:
+    """Only call after the owner's computation and I/O have fully unwound."""
+    with db.session() as session:
+        record = _require_current_claim(session=session, job=job)
+        if not _cancellation_requested(record):
+            raise ValueError(f"async_job_cancellation_not_requested: {job.id}")
+        _mark_job_cancelled(record, now=_database_now(session))
+    logger.info("async_job_cancelled | job_id=%s generation=%s", job.id, job.claim_generation)
 
 
 def maintain_job_heartbeat(
     job: ClaimedJob,
     *,
     interval_seconds: Optional[float] = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> ClaimHeartbeat:
-    return ClaimHeartbeat(job, interval_seconds=interval_seconds)
+    return ClaimHeartbeat(job, interval_seconds=interval_seconds, stop_requested=stop_requested)
 
 
 def _mark_job_succeeded(
@@ -771,6 +860,8 @@ def complete_job_with_owned_effect(
         raise RuntimeError("async_jobs_unavailable: database unavailable")
     with db.session() as session:
         record = _require_current_claim(session=session, job=job)
+        if _cancellation_requested(record):
+            raise ExecutionCancelledError(f"async_job_cancel_requested: {job.id}")
         result = dict(effect(session) or {})
         now = _database_now(session)
         _mark_job_succeeded(record, result=result, now=now)
@@ -793,15 +884,19 @@ def fail_job(
     *,
     error: str,
     retry_delay_seconds: float = 0.0,
+    retryable: bool = True,
 ) -> None:
     if not db.available:
         raise RuntimeError("async_jobs_unavailable: database unavailable")
     with db.session() as session:
         record = _require_current_claim(session=session, job=job)
         now = _database_now(session)
+        if _cancellation_requested(record):
+            _mark_job_cancelled(record, now=now)
+            return
         attempts = int(record.attempts or 0)
         max_attempts = int(record.max_attempts or 0)
-        exhausted = attempts >= max_attempts
+        exhausted = not retryable or attempts >= max_attempts
         if exhausted:
             record.status = STATUS_FAILED
             record.finished_at = now

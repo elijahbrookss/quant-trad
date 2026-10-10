@@ -110,6 +110,7 @@ class StreamEnrollment:
     max_segment_bytes: int
     continuous: bool
     product_contract: ProductContract
+    max_inflight_segments: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -136,6 +137,11 @@ class StreamEnrollment:
             raise ValueError("stream enrollment spool limits are invalid")
         object.__setattr__(self, "max_spool_bytes", spool)
         object.__setattr__(self, "max_segment_bytes", segment)
+        if self.max_inflight_segments is not None and (
+            type(self.max_inflight_segments) is not int
+            or self.max_inflight_segments < 1
+        ):
+            raise ValueError("stream enrollment max_inflight_segments must be a positive integer")
         if not isinstance(self.product_contract, ProductContract):
             raise TypeError("stream enrollment requires ProductContract")
         if self.product_contract.provider_product_id not in self.enrollment_id:
@@ -143,6 +149,9 @@ class StreamEnrollment:
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
+        if self.max_inflight_segments is None:
+            # Preserve the material and hashes of existing reviewed manifests.
+            result.pop("max_inflight_segments")
         result["product_contract"]["provider_size_unit"] = (
             self.product_contract.provider_size_unit.value
         )

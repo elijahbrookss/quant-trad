@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Internal recovery mode is never selected by an inherited environment value.
+recovery_config_frozen=false
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 repo_root="$(cd "$script_dir/../.." >/dev/null 2>&1 && pwd)"
 deployment_root="$(dirname "$repo_root")"
@@ -359,9 +362,54 @@ select_release() {
   compute_release_material
 }
 
+# Only the preserving cutover may first record this field. Ordinary deployments
+# retain it; operator environment overrides cannot turn an active layout off.
+recorded_storage_layout() {
+  local layout
+  layout="$(state_value storage_layout)"
+  case "$layout" in
+    ""|ssd-hdd-v1) printf '%s' "$layout" ;;
+    *) die "unsupported recorded storage layout: $layout" ;;
+  esac
+}
+
+# An old source fence is incompatible with the split archive/working layout.
+# Compose resolves null/reset values through env_file too; never pretend those
+# spellings remove a source-only input. Reviewed completion must retire it from
+# the private deployment environment, preserving its original evidence.
+require_storage_runtime_environment() {
+  if test "${QT_STORAGE_SOURCE_FENCE_ROOT+x}" = x \
+    || grep -Eq '^[[:space:]]*(export[[:space:]]+)?QT_STORAGE_SOURCE_FENCE_ROOT[[:space:]]*=' "$env_file"; then
+    die "source-only storage fence remains configured; preserve the original environment and complete the reviewed storage environment transition"
+  fi
+  local database_image
+  database_image="$(first_value "${QT_STORAGE_DATABASE_IMAGE:-}" "$(env_value QT_STORAGE_DATABASE_IMAGE)")"
+  [[ "$database_image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "storage deployment requires the qualified immutable database image"
+}
+
+storage_overlay_for() {
+  local source_root="$1"
+  local layout
+  layout="$(recorded_storage_layout)" || return
+  if test "$layout" = ssd-hdd-v1; then
+    test -f "$source_root/docker/docker-compose.storage-server.yml" \
+      || die "recorded SSD/HDD layout is not supported by this checkout"
+    printf '%s' "$source_root/docker/docker-compose.storage-server.yml"
+  fi
+}
+
 compose() {
   local profile_args=()
   local compose_file_args=(--file "$compose_file")
+  local storage_overlay
+  if test "${recovery_config_frozen:-false}" != true; then
+    storage_overlay="$(storage_overlay_for "$repo_root")" || return
+    if test -n "$storage_overlay"; then
+      compose_file_args+=(--file "$storage_overlay")
+      require_storage_runtime_environment
+    fi
+  fi
   local profile
   local profiles="${single_node_profiles//,/ }"
   for profile in $profiles; do
@@ -385,7 +433,7 @@ compose_from_repo_root() {
   local source_compose_file="$source_root/docker/docker-compose.server.yml"
   local source_alerting_file="$source_root/docker/docker-compose.alert-email.yml"
   local cleanup_provisioning_root="$repo_root/docker/grafana/server-alerting/cleanup-provisioning"
-  local source_revision source_tree_hash
+  local source_revision source_tree_hash storage_overlay
   local compose_file_args=(--file "$source_compose_file")
   local profile_args=()
   local profile
@@ -404,6 +452,11 @@ compose_from_repo_root() {
   done
   if test "$alerts_enabled" = "true" && test -f "$source_alerting_file"; then
     compose_file_args+=(--file "$source_alerting_file")
+  fi
+  storage_overlay="$(storage_overlay_for "$source_root")" || return
+  if test -n "$storage_overlay"; then
+    compose_file_args+=(--file "$storage_overlay")
+    require_storage_runtime_environment
   fi
   if test -n "$extra_compose_file"; then
     test -f "$extra_compose_file" \
@@ -430,11 +483,34 @@ build_release_images() {
       "$(env_value QT_REBUILD_DATABASE_IMAGE)" \
       "0"
   )"
-  compose pull --ignore-buildable
-
-  if ! docker image inspect quanttrad-postgres:2.14.2-pg15 >/dev/null 2>&1 \
-    || test "$rebuild_database_image" = "1"; then
-    compose build --pull tsdb
+  if test "$(recorded_storage_layout)" = "ssd-hdd-v1"; then
+    local database_image service
+    local -a pull_services=()
+    database_image="$(first_value "${QT_STORAGE_DATABASE_IMAGE:-}" "$(env_value QT_STORAGE_DATABASE_IMAGE)")"
+    [[ "$database_image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || die "storage deployment requires the qualified immutable database image"
+    test "$rebuild_database_image" != "1" \
+      || die "storage database replacement requires a separately qualified preserving procedure"
+    docker image inspect "$database_image" >/dev/null 2>&1 \
+      || die "qualified storage database image is unavailable locally"
+    # Explicit pull never gets the database: application deployment cannot
+    # fetch, rebuild or retag the already qualified PostgreSQL runtime.
+    # Maintenance shares the backend image built below; it is not a remote pull.
+    local configured_services
+    configured_services="$(compose config --services)" || return
+    while IFS= read -r service; do
+      if test -n "$service" && test "$service" != "tsdb" && test "$service" != "storage-maintenance"; then
+        pull_services+=("$service")
+      fi
+    done <<<"$configured_services"
+    test "${#pull_services[@]}" -gt 0 || die "storage application services are missing"
+    compose pull --ignore-buildable "${pull_services[@]}"
+  else
+    compose pull --ignore-buildable
+    if ! docker image inspect quanttrad-postgres:2.14.2-pg15 >/dev/null 2>&1 \
+      || test "$rebuild_database_image" = "1"; then
+      compose build --pull tsdb
+    fi
   fi
 
   compose build --pull backend frontend frontend-v2
@@ -479,7 +555,8 @@ state_value() {
 }
 
 record_release() {
-  local prior_current prior_previous next_previous deployed_at temporary
+  local prior_current prior_previous next_previous deployed_at temporary layout
+  layout="$(recorded_storage_layout)" || return
   mkdir -p "$state_root"
   prior_current="$(state_value current_revision)"
   prior_previous="$(state_value previous_revision)"
@@ -496,6 +573,7 @@ record_release() {
     printf 'current_source_tree_hash=%s\n' "$QT_SOURCE_TREE_HASH"
     printf 'previous_revision=%s\n' "$next_previous"
     printf 'deployed_at=%s\n' "$deployed_at"
+    printf 'storage_layout=%s\n' "$layout"
   } >"$temporary"
   mv "$temporary" "$state_file"
   printf '{"deployed_at":"%s","revision":"%s","source_tree_hash":"%s","previous_revision":"%s"}\n' \
@@ -540,6 +618,18 @@ require_no_alert_preview() {
 }
 
 show_release() {
+  if storage_online_pending; then
+    echo "Storage online receipts retained; deployment admission checks the terminal handoff."
+    echo "Receipt presence alone does not confirm migration or fleet health."
+  fi
+  if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
+    if storage_online_pending; then
+      echo "Initial preparation receipt retained; exact terminal admission determines deployment access."
+    else
+      echo "Storage handoff hold: active; ordinary deployment/recovery is blocked."
+      echo "Use the preserving storage procedure to reconcile database and runtime state."
+    fi
+  fi
   if ! test -f "$state_file"; then
     echo "No successful release has been recorded at $state_file"
     return 0
@@ -549,6 +639,8 @@ show_release() {
     -e 's/^current_source_tree_hash=/source tree hash: /p' \
     -e 's/^previous_revision=/previous revision: /p' \
     -e 's/^deployed_at=/deployed at: /p' \
+    -e 's/^storage_layout=/storage layout: /p' \
+    -e 's/^pending_storage_revision=/pending storage deployment: /p' \
     "$state_file"
   if test -f "$state_root/promotion.env"; then
     echo "unfinished promotion candidate: $(promotion_value candidate_revision)"
@@ -740,8 +832,27 @@ restore_alerting_preview() {
   echo "Grafana alerting restored to production revision $base_revision."
 }
 
+run_qt_command() {
+  require_runtime
+  compute_release_material
+  test "$#" -gt 0 || die "qt action requires at least one qt argument"
+  local service=backend
+  if test "${1:-}" = storage && test "${2:-}" = place-retained-raw; then
+    test "$(recorded_storage_layout)" = ssd-hdd-v1 \
+      || die "raw placement requires the deployed SSD/HDD layout"
+    test "$(state_value current_revision)" = "$QT_RELEASE_REVISION" \
+      || die "raw placement requires the recorded deployed checkout"
+    verify_release_image storage-maintenance
+    service=storage-maintenance
+  fi
+  # The qt dispatch already holds the existing host deployment lock. Keep stdin
+  # for the bounded request; never mount source into an older runtime image.
+  compose exec -T "$service" /app/scripts/qt "$@"
+}
+
 deploy_release() {
   local requested_ref="${1:-}"
+  require_no_storage_handoff "$requested_ref"
   require_no_alert_preview
   if test -f "$state_root/promotion.env" && test "${promotion_in_progress:-false}" != "true"; then
     die "an unfinished promotion is recorded; run recover before another deployment"
@@ -756,6 +867,17 @@ deploy_release() {
   fi
   # Building can take minutes. Recheck before replacing any running services.
   validate_storage_root
+  if storage_online_pending; then
+    compose config --format json | PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import json, sys
+from scripts.automation.storage_online_release import check_deployment_render
+raw=sys.stdin.read(524289)
+if len(raw.encode()) > 524288:
+    raise RuntimeError("storage_online_release_render_too_large")
+check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3],
+    revision=sys.argv[4], source_hash=sys.argv[5], model=json.loads(raw))
+' "$state_root" "$env_file" "$repo_root" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH"
+  fi
   if test "${promotion_in_progress:-false}" = "true" && test "${reuse_release_images:-false}" != "true"; then
     printf 'activation_started=true\n' >>"$state_root/promotion.env"
   fi
@@ -764,12 +886,22 @@ deploy_release() {
   verify_initializer
   verify_release_image backend
   verify_release_image market-data-collector
+  if test "$(recorded_storage_layout)" = ssd-hdd-v1; then
+    verify_release_image storage-maintenance
+  fi
   verify_release_image docker-stats
   verify_release_image frontend
   verify_release_image frontend-v2
   compose exec -T backend /app/scripts/qt data collectors fleet >/dev/null
   compose ps
   record_release
+  if storage_online_pending; then
+    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH" <<'PY'
+import sys
+from scripts.automation.storage_online_release import record_deployment
+record_deployment(sys.argv[1], environment_path=sys.argv[2], revision=sys.argv[3], source_hash=sys.argv[4])
+PY
+  fi
   show_release
 }
 
@@ -782,6 +914,36 @@ acquire_deployment_lock() {
   mkdir -p "$state_root"
   exec 9>"$state_root/deployment.lock"
   flock --exclusive --nonblock 9 || die "another server operation holds the deployment lock"
+}
+
+# A lost controller releases the process lock, not the durable migration intent.
+# The request precedes the worker receipt; neither expiry nor SQL cancellation
+# proves that an old runtime/recipe can safely serve retained or relocated data.
+storage_online_pending() {
+  local marker
+  for marker in storage-online-preparation.json storage-online-request.json storage-online-worker.json storage-online-final.json; do
+    if test -e "$state_root/$marker" || test -L "$state_root/$marker"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Presence alone is a hold: corrupt/partial state must never permit a restart.
+require_no_storage_handoff() {
+  if storage_online_pending; then
+    PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$repo_root" "${action:-}" "${1:-}" <<'PY' || die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
+import sys
+from scripts.automation.storage_online_release import admit_deployment
+admit_deployment(sys.argv[1], environment_path=sys.argv[2], repository=sys.argv[3], action=sys.argv[4], revision=sys.argv[5])
+PY
+    # The terminal grant also verifies the exact retained initial hold. A separate
+    # or changed legacy hold cannot pass that admission; no marker is removed.
+    return 0
+  fi
+  if test -e "$state_root/storage-handoff.json" || test -L "$state_root/storage-handoff.json"; then
+    die "storage handoff hold is active; reconcile the preserving storage procedure before resuming server operations"
+  fi
 }
 
 promotion_value() {
@@ -798,8 +960,9 @@ prepare_recovery() {
 }
 
 recover_promotion() {
+  require_no_storage_handoff
   test -f "$state_root/promotion.env" || die "no unfinished promotion is recorded"
-  local previous candidate activation
+  local previous candidate activation layout snapshot_hash actual_hash
   previous="$(promotion_value previous_revision)"
   candidate="$(promotion_value candidate_revision)"
   activation="$(promotion_value activation_started)"
@@ -807,6 +970,19 @@ recover_promotion() {
   [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
     || die "invalid promotion recovery state"
   test -f "$state_root/recovery.compose.json" || die "recovery Compose snapshot is missing"
+  layout="$(recorded_storage_layout)" || return
+  test "$(promotion_value storage_layout)" = "$layout" \
+    || die "recovery storage layout does not match the recorded release"
+  snapshot_hash="$(promotion_value recovery_compose_sha256)"
+  # Legacy compatible promotions without fixed storage can predate this field.
+  # A fixed-layout recovery must bind the exact rendered mounts and image tags.
+  if test -n "$layout" || test -n "$snapshot_hash"; then
+    [[ "$snapshot_hash" =~ ^[0-9a-f]{64}$ ]] \
+      || die "recovery Compose fingerprint is missing or invalid"
+    actual_hash="$(sha256sum "$state_root/recovery.compose.json")"
+    test "${actual_hash%% *}" = "$snapshot_hash" \
+      || die "recovery Compose snapshot changed; evidence retained"
+  fi
   echo "event=promotion_recovery_started candidate=$candidate previous=$previous" >&2
   # Run outside a shell conditional: Bash otherwise disables errexit inside
   # called functions and can record a failed deployment as successful.
@@ -816,6 +992,9 @@ recover_promotion() {
     reuse_release_images=true
     compose_file="$state_root/recovery.compose.json"
     alerts_enabled=false
+    recovery_config_frozen=true
+    # Snapshot already contains the original layout; never merge current
+    # operator values/overlays into that pinned recovery configuration.
     # Select locally before consulting source-owned runtime admission helpers.
     select_release "$previous"
     if test "$activation" = "true"; then
@@ -833,6 +1012,7 @@ recover_promotion() {
 }
 
 promote_release() {
+  require_no_storage_handoff
   local candidate="${1:-}" flag="${2:-}" previous="${3:-}"
   [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$previous" =~ ^[0-9a-f]{40}$ ]] \
     && test "$flag" = --compatible-with && test "$#" = 3 \
@@ -856,10 +1036,14 @@ promote_release() {
     verify_release_image "$service"
   done
   prepare_recovery
-  local temporary
+  local temporary layout snapshot_hash
+  layout="$(recorded_storage_layout)" || return
+  snapshot_hash="$(sha256sum "$state_root/recovery.compose.json")"
+  snapshot_hash="${snapshot_hash%% *}"
   temporary="$(mktemp "$state_root/promotion.XXXXXX")"
   chmod 0600 "$temporary"
-  printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\n' "$previous" "$candidate" >"$temporary"
+  printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\nstorage_layout=%s\nrecovery_compose_sha256=%s\n' \
+    "$previous" "$candidate" "$layout" "$snapshot_hash" >"$temporary"
   mv "$temporary" "$state_root/promotion.env"
   echo "event=promotion_started candidate=$candidate previous=$previous"
   (
@@ -882,8 +1066,9 @@ action="${1:-}"
 shift || true
 
 case "$action" in
-  deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
+  init-env|deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
     acquire_deployment_lock
+    require_no_storage_handoff "${1:-}"
     ;;
 esac
 
@@ -950,10 +1135,7 @@ case "$action" in
     compose exec -T backend /app/scripts/qt data collectors fleet
     ;;
   qt)
-    require_runtime
-    compute_release_material
-    test "$#" -gt 0 || die "qt action requires at least one qt argument"
-    compose exec -T backend /app/scripts/qt "$@"
+    run_qt_command "$@"
     ;;
   credentials-coinbase)
     require_runtime

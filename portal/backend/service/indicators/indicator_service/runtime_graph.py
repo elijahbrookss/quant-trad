@@ -262,7 +262,7 @@ def collect_runtime_indicator_metas(
         if not bool(meta.get("runtime_supported")):
             raise RuntimeError(f"Indicator is not runtime-supported: {normalized_id}")
         indicator_type = str(meta.get("type") or "").strip()
-        manifest = get_indicator_manifest(indicator_type)
+        manifest = get_indicator_manifest(indicator_type, meta.get("version"))
         resolved_dependencies = validate_dependency_bindings(
             manifest=manifest,
             bindings=meta.get("dependencies"),

@@ -1,7 +1,11 @@
 services:
   loki:
     image: grafana/loki:3.7.6
-    command: [-config.file=/etc/loki/server-config.yml]
+    # Synthetic 24h-old samples have just arrived and are still in the ingester.
+    command:
+      - -config.file=/etc/loki/server-config.yml
+      - -querier.query-ingesters-within=48h
+      - -ingester.query-store-max-look-back-period=48h
     ports:
       - "127.0.0.1::3100"
     volumes:
@@ -19,13 +23,16 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_SMTP_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
     ports:
       - "127.0.0.1::3000"
+    # Disposable SQLite bootstrap needs no durable fsync-backed data volume.
+    tmpfs:
+      - /var/lib/grafana:uid=472,gid=0,size=256m
     volumes:
-      - grafana-data:/var/lib/grafana
       - ../grafana/provisioning/datasources/loki.yml:/etc/grafana/provisioning/datasources/loki.yml:ro
       - ../grafana/provisioning/alerting/storage-safety.yml:/etc/grafana/provisioning/alerting/storage-safety.yml:ro
 
 volumes:
   loki-data:
-  grafana-data:

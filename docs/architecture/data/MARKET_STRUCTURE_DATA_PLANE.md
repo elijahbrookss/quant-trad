@@ -1495,3 +1495,43 @@ The actual-core disposable rehearsal verifies clean collector stop and renewed
 heartbeat with enrollment disabled. It does not certify active provider-stream
 continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
+
+### Live working files and finished archives
+
+The continuous runtime and bounded stream-capture path can keep live spool and
+raw encoding scratch on SSD while publishing immutable objects to HDD.
+MARKET_STRUCTURE_WORKING_ROOT selects the existing live working directory;
+QT_MARKET_DATA_WORKING_EXPECTED_UUID identifies its filesystem. Archive root and
+identity remain MARKET_STRUCTURE_STORAGE_ROOT and QT_MARKET_DATA_EXPECTED_UUID.
+These filesystem settings remain owned by core.storage_mounts, alongside the
+existing archive mount configuration; they are not additional portal placement
+controls.
+
+Without an explicit working root, spool/scratch paths and archive admission
+retain their existing behavior. In dedicated archive mode, an explicit working
+root requires its own UUID. Startup checks both mounts; spool creation and reads
+(including crash-tail repair) enforce the working boundary. A missing/wrong mount
+never creates a fallback directory. Raw publication admits staging on the
+configured working filesystem or the archive filesystem; a failed working-mount
+check cannot fall back to archive admission. Canonical historical staging and
+existing raw compaction placement remain unchanged.
+
+For a preserving cutover, retain the old working-root path and move/verify only
+the intended archived objects before changing the archive root. Existing spool
+paths and raw record identities remain valid. Private file ownership must also
+be qualified across API, initializer and collector processes; the root separation
+does not itself establish production permissions or authorize a server change.
+
+Raw publication and fenced stream Fact writes acquire raw-mapping relation
+access before locking the stream lease row. An exclusive physical move can then
+delay publication without holding the row needed by capture's heartbeat. Lease
+expiry is checked against the actual wall clock after that wait; ownership,
+generation, token and source checks remain mandatory. Heartbeats themselves do
+not acquire the raw relation lock.
+
+Capture still has the existing finite `max_inflight_segments` queue and spool
+byte limits. The native raw-placement regression crosses heartbeat intervals
+while publication is blocked, then requires complete archive/canonical
+acknowledgement and preserved known-at timing. This does not choose a production
+queue size or admit a move duration. Changing a definition's runtime policy
+changes its generation and requires coordinated lifecycle handling.

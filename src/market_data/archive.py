@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading
 from collections.abc import Iterable, Iterator, Mapping
@@ -20,9 +21,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
-from core.storage_mounts import require_configured_archive_mount
+from core.settings import get_settings
+from core.storage_mounts import (
+    require_configured_archive_mount, require_configured_working_mount,
+    require_configured_staging_mount,
+)
+from .archive_namespace import archive_namespace
 from .structure import RawStreamRecord, build_spool_segment_id
 
 
@@ -134,10 +140,15 @@ def raw_archive_content_fingerprint(*, raw_record_ids: Iterable[str], raw_frame_
     return digest.hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, *, check_budget: Callable[[], None] | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        while True:
+            if check_budget is not None:
+                check_budget()
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -389,7 +400,7 @@ class DurableRawSpoolSegment:
             / _safe_component(self.session_id)
             / f"epoch={self.connection_epoch}"
         )
-        require_configured_archive_mount(directory)
+        require_configured_working_mount(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self.open_path = directory / f"{self.spool_segment_id}.open"
         self.sealed_path = directory / f"{self.spool_segment_id}.sealed"
@@ -668,6 +679,7 @@ def _infer_spool_root(path: Path, header: Mapping[str, Any]) -> Path:
 def _read_spool_file(
     path: Path, *, repair_tail: bool
 ) -> tuple[Mapping[str, Any], list[Mapping[str, Any]], int]:
+    require_configured_working_mount(path, require_writable=repair_tail)
     raw = Path(path).read_bytes()
     truncated = 0
     if raw and not raw.endswith(b"\n"):
@@ -740,38 +752,105 @@ class FilesystemRawArchiveObjectStore:
     """Local immutable object-store semantics for implementation and tests."""
 
     def __init__(self, root: Path, *, writable: bool = True) -> None:
+        self.shared_group = get_settings().storage.archive_shared_group_id
         self.root = Path(root).resolve()
         self.writable = writable
         require_configured_archive_mount(self.root, require_writable=writable)
-        if writable:
+        if self.shared_group is not None:
+            if Path(root).absolute() != self.root:
+                raise PermissionError("market_archive_shared_root_alias")
+            # Shared publication is explicit and only accepts an operator-prepared
+            # root. Never repair existing directories/files in a runtime path.
+            self._shared_directory(self.root)
+            if self.shared_group not in {os.getegid(), *os.getgroups()}:
+                raise PermissionError("market_archive_shared_group_membership_required")
+        elif writable:
             self.root.mkdir(parents=True, exist_ok=True)
         elif not self.root.is_dir():
             raise FileNotFoundError(f"market_archive_root_missing: root={self.root}")
+
+    def _shared_directory(self, path: Path) -> None:
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_gid != self.shared_group
+                or stat.S_IMODE(info.st_mode) != 0o2770):
+            raise PermissionError(f"market_archive_shared_directory_invalid: path={path}")
+
+    def _prepare_parent(self, destination: Path) -> None:
+        if self.shared_group is None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            return
+        self._shared_directory(self.root)
+        parent = self.root
+        for component in destination.relative_to(self.root).parts[:-1]:
+            parent = parent / component
+            try:
+                parent.mkdir(mode=0o2770)
+            except FileExistsError:
+                pass
+            else:
+                # Only the directory just created by this process is adjusted;
+                # an existing private or malformed path is never widened.
+                fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    info = os.fstat(fd)
+                    if info.st_uid != os.geteuid() or info.st_gid != self.shared_group:
+                        raise PermissionError("market_archive_shared_new_directory_owner")
+                    os.fchmod(fd, 0o2770)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                _fsync_directory(parent.parent)
+            self._shared_directory(parent)
+
+    def _shared_object(self, path: Path) -> None:
+        if self.shared_group is None:
+            return
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_gid != self.shared_group
+                or stat.S_IMODE(info.st_mode) != 0o640):
+            raise PermissionError(f"market_archive_shared_object_invalid: path={path}")
 
     def local_path(self, object_key: str) -> Path:
         parts = Path(str(object_key or "")).parts
         if not parts or any(part in {"", ".", ".."} for part in parts):
             raise ValueError("market_archive_invalid: object key is unsafe")
-        target = (self.root / Path(*parts)).resolve()
+        unresolved = self.root / Path(*parts)
+        target = unresolved.resolve()
+        if self.shared_group is not None and target != unresolved:
+            raise PermissionError("market_archive_shared_object_alias")
         if self.root not in target.parents:
             raise ValueError("market_archive_invalid: object key escapes root")
         require_configured_archive_mount(target, require_writable=False)
         return target
 
     def put_verified(
-        self, *, object_key: str, source_path: Path, expected_sha256: str
+        self, *, object_key: str, source_path: Path, expected_sha256: str,
+        check_budget: Callable[[], None] | None = None
+    ) -> ArchiveObjectAcknowledgement:
+        with archive_namespace(self.root):
+            return self._put_verified(object_key=object_key, source_path=source_path,
+                expected_sha256=expected_sha256, check_budget=check_budget)
+
+    def _put_verified(
+        self, *, object_key: str, source_path: Path, expected_sha256: str,
+        check_budget: Callable[[], None] | None = None
     ) -> ArchiveObjectAcknowledgement:
         if not self.writable:
             raise PermissionError("market_archive_read_only: publication is disabled")
+        if check_budget is not None and not callable(check_budget):
+            raise ValueError("market_archive_budget_check_invalid")
+        check = check_budget or (lambda: None)
+        check()
         source = Path(source_path)
         expected = str(expected_sha256 or "").strip().lower()
-        if _sha256_file(source) != expected:
+        if _sha256_file(source, check_budget=check_budget) != expected:
             raise ValueError("market_archive_upload_invalid: source checksum mismatch")
         destination = self.local_path(object_key)
         require_configured_archive_mount(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._prepare_parent(destination)
         if destination.exists():
-            existing_hash = _sha256_file(destination)
+            self._shared_object(destination)
+            existing_hash = _sha256_file(destination, check_budget=check_budget)
             if existing_hash != expected:
                 raise RuntimeError(
                     "market_archive_object_conflict: immutable key has different bytes"
@@ -779,6 +858,7 @@ class FilesystemRawArchiveObjectStore:
             # A competing publisher may have linked the object but not yet
             # synced the directory. Reuse must itself establish a durable ack.
             _fsync_directory(destination.parent)
+            check()
             return ArchiveObjectAcknowledgement(
                 object_key=str(object_key),
                 object_uri=f"market-archive://{object_key}",
@@ -787,6 +867,7 @@ class FilesystemRawArchiveObjectStore:
                 acknowledged_at=datetime.now(UTC),
                 reused_existing=True,
             )
+        check()
         descriptor, temporary_path = tempfile.mkstemp(
             prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
         )
@@ -794,17 +875,33 @@ class FilesystemRawArchiveObjectStore:
         reused_existing = False
         try:
             with os.fdopen(descriptor, "wb") as target, source.open("rb") as source_handle:
-                shutil.copyfileobj(source_handle, target, length=1024 * 1024)
+                if check_budget is None:
+                    shutil.copyfileobj(source_handle, target, length=1024 * 1024)
+                else:
+                    while True:
+                        check()
+                        data = source_handle.read(1024 * 1024)
+                        if not data:
+                            break
+                        target.write(data)
                 target.flush()
+                if self.shared_group is not None:
+                    if os.fstat(target.fileno()).st_gid != self.shared_group:
+                        raise PermissionError("market_archive_shared_new_object_group")
+                    # The inode is prepared before atomic publication; no world
+                    # access, executable bits, or group write permission.
+                    os.fchmod(target.fileno(), 0o640)
                 os.fsync(target.fileno())
-            if _sha256_file(temporary) != expected:
+            if _sha256_file(temporary, check_budget=check_budget) != expected:
                 raise RuntimeError("market_archive_upload_invalid: copied checksum mismatch")
             # Linking is atomic create-if-absent on this same filesystem. A
             # check followed by replace could overwrite a concurrent publisher.
+            check()
             try:
                 os.link(temporary, destination)
             except FileExistsError:
-                if _sha256_file(destination) != expected:
+                self._shared_object(destination)
+                if _sha256_file(destination, check_budget=check_budget) != expected:
                     raise RuntimeError(
                         "market_archive_object_conflict: immutable key has different bytes"
                     ) from None
@@ -813,8 +910,10 @@ class FilesystemRawArchiveObjectStore:
         finally:
             if temporary.exists():
                 temporary.unlink()
-        if _sha256_file(destination) != expected:
+        self._shared_object(destination)
+        if _sha256_file(destination, check_budget=check_budget) != expected:
             raise RuntimeError("market_archive_upload_invalid: acknowledgement checksum mismatch")
+        check()
         return ArchiveObjectAcknowledgement(
             object_key=str(object_key),
             object_uri=f"market-archive://{object_key}",
@@ -825,6 +924,13 @@ class FilesystemRawArchiveObjectStore:
         )
 
     def delete_verified(
+        self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
+    ) -> ArchiveObjectDeletionAcknowledgement:
+        with archive_namespace(self.root):
+            return self._delete_verified(object_key=object_key,
+                expected_sha256=expected_sha256, allow_missing=allow_missing)
+
+    def _delete_verified(
         self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
     ) -> ArchiveObjectDeletionAcknowledgement:
         if not self.writable:
@@ -984,7 +1090,7 @@ def encode_raw_records_to_parquet(
         schema=schema,
     )
     temporary_root = Path(temporary_directory) if temporary_directory else Path(tempfile.gettempdir())
-    require_configured_archive_mount(temporary_root)
+    require_configured_staging_mount(temporary_root)
     temporary_root.mkdir(parents=True, exist_ok=True)
     descriptor, raw_path = tempfile.mkstemp(
         prefix=f"{segment_id}.", suffix=".parquet", dir=temporary_root

@@ -267,3 +267,13 @@ Rules:
 - continuity summaries must stay scoped by run and series so the next fresh-run audit can identify the first broken boundary directly.
 
 Standalone gap facts such as `CANDLE_GAP_OBSERVED` are a projection-extension item, not a license to infer or synthesize missing OHLCV rows. Until that fact exists, runtime and BotLens paths must preserve classified continuity summaries and diagnostics so provider-backed sparse calendars remain visible without changing the candle series.
+
+## Explicit Indicator runtime versions
+
+An Indicator instance may explicitly select a registered runtime version at
+creation. The version is immutable on update and is pinned with its complete
+manifest in frozen evidence plans. Missing historical metadata selects the
+legacy v1 behavior. Adding a new manifest must not mutate a retained version's
+outputs, parameters or replay meaning. Version selection is not an output
+visibility preference. Market Profile v2 adds original-range first-return
+outputs; v1 remains the default.

@@ -121,6 +121,9 @@ dashboard are not the supported authoring path.
 
 Primary operator dashboards:
 
+- `capacity-database-growth.json` (`uid=quanttrad-capacity-growth`) — physical
+  SSD/HDD headroom, 24-hour growth, planning runway and database/index/TOAST
+  attribution; estimates do not authorize maintenance or data deletion;
 - `runtime-hotpath-control.json` (`uid=qt-runtime-hotpath-control`) — per-bar
   runtime attribution and worst-bar context;
 - `botlens-transport-control.json` (`uid=qt-botlens-transport-control`) —

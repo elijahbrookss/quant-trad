@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from core.execution_control import execution_checkpoint
+
 import heapq
 import math
 from bisect import bisect_left, bisect_right
@@ -823,6 +825,7 @@ def _causal_snapshot_series(
         key=lambda row: (row[0], row[1] is None, row[1] or row[0]),
     )
     for decision_time, expected_sample in requests:
+        execution_checkpoint()
         request_key = (decision_time, expected_sample)
         while cursor < len(revisions) and _record_known_at(
             revisions[cursor]
@@ -1155,6 +1158,7 @@ def _fact_features_for_event(
     exclusions: list[str] = []
     selected: dict[tuple[Any, ...], dict[str, Any]] = {}
     for spec in specs:
+        execution_checkpoint()
         name = str(spec["name"])
         alias = str(spec["input_alias"])
         requirement = requirements.get(alias)
@@ -1406,6 +1410,7 @@ def _required_fact_decisions(
     requests_by_open: dict[datetime, list[tuple[datetime, datetime]]] = {}
     total_requests = 0
     for candle in candles:
+        execution_checkpoint()
         opened = _utc(candle.get("open_time") or candle.get("time"), field="candle.open_time")
         sample = _utc(candle.get("close_time"), field="candle.close_time")
         start = max(sample, _utc(candle.get("known_at") or sample, field="candle.known_at"))
@@ -1468,6 +1473,7 @@ def _required_fact_decisions(
     references: dict[datetime, list[dict[str, Any]]] = {}
     readiness: dict[datetime, dict[str, Any]] = {}
     for opened, requests in requests_by_open.items():
+        execution_checkpoint()
         for decision, sample in requests:
             details = {
                 "checked_at": _iso(decision),
@@ -1556,6 +1562,7 @@ def _fact_snapshot_outputs(
     )
     candidates: list[tuple[dict[str, Any], datetime, datetime, datetime]] = []
     for candle in ordered_candles:
+        execution_checkpoint()
         event_time = _utc(
             candle.get("open_time") or candle.get("time"),
             field="candle.open_time",
@@ -1590,6 +1597,7 @@ def _fact_snapshot_outputs(
     outputs: list[dict[str, Any]] = []
     source_step = timedelta(seconds=int(requirement.get("timeframe_seconds") or 0))
     for _candle, event_time, decision_time, sample_time in candidates:
+        execution_checkpoint()
         selected = snapshots.get(
             (
                 decision_time,
@@ -2015,6 +2023,7 @@ class EventFactEvaluator:
         ) if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE else []
         available_price_times = [row[0] for row in available_price_candles]
         for output in event_rows:
+            execution_checkpoint()
             event_time = _utc(output.get("time"), field="event.time")
             event_payload = dict(output.get("event") or {})
             event_decision_time = _known_at(
@@ -2620,6 +2629,7 @@ class EventFactEvaluator:
                 else int(outcomes["primary_horizon"])
             )
             for fold in folds:
+                execution_checkpoint()
                 train_start = _utc(fold["train"]["start"], field="fold.train.start")
                 train_end = _utc(fold["train"]["end"], field="fold.train.end")
                 validation_start = _utc(
@@ -2847,6 +2857,7 @@ class EventFactEvaluator:
         bin_config = dict(statistics.get("feature_bins") or {})
         if bin_config and complete_rows and not eligibility_reasons:
             for spec in enriched_specs:
+                execution_checkpoint()
                 name = str(spec["name"])
                 values = np.asarray(
                     [float(row["features"][name]) for row in complete_rows],

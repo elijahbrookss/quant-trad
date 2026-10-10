@@ -87,6 +87,7 @@ class PostgresCanonicalFactArchiveRepository:
         self.statement_timeout_ms = statement_timeout_ms
         self.partition_guard = partition_guard
         self.check_budget = check_budget
+        self._prepared_page = None
 
     def _check_budget(self):
         if self.check_budget is not None:
@@ -336,10 +337,20 @@ class PostgresCanonicalFactArchiveRepository:
 
         Missing book/trade prefix evidence advances one committed interval first
         and returns its prefix status; a later call publishes the same hot page.
+        This repository may retain one bounded prepared page between those calls;
+        the scheduled executor confines its lifetime to one bounded run.
         An interrupted publication can leave an unreferenced immutable object.
         Retrying reads the same source cursor and safely reuses identical bytes;
         progress advances only in the catalog transaction.
         """
+        try:
+            return self._stage_next_page(day)
+        except BaseException:
+            # A failed transaction or cancellation cannot retain prepared input.
+            self._prepared_page = None
+            raise
+
+    def _stage_next_page(self, day: date) -> dict:
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
@@ -350,48 +361,72 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"day": day}).mappings().one_or_none()
             cursor = _catalog_manifest(previous).last_cursor if previous else (0, "")
             ordinal = previous["page_ordinal"] + 1 if previous else 0
-            params = {"day": day, "seq": cursor[0], "id": cursor[1], "limit": self.limits.max_rows,
-                      "max_bytes": self.limits.max_logical_bytes}
-            source = session.execute(text(f"""
-                WITH candidates AS MATERIALIZED (
-                    SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
-                    WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
-                    ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
-                ), budget AS (
-                    SELECT id, sum(6::bigint * octet_length(to_jsonb(candidates)::text))
-                        OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM candidates
-                )
-                SELECT candidates.* FROM candidates JOIN budget USING(id)
-                WHERE budget.cumulative_bytes <= :max_bytes
-                ORDER BY candidates.market_commit_seq,candidates.id
-            """), params).mappings().all()
-            if not source:
-                # PostgreSQL sizes a conservative ASCII-escape allowance before
-                # transferring JSON to Python. Oversized first rows cannot be
-                # mistaken for an exhausted source or skipped behind a cursor.
-                remaining = session.execute(text(
-                    "SELECT EXISTS (SELECT 1 FROM market.fact_versions WHERE storage_day=:day "
-                    "AND (market_commit_seq,id) > (:seq,:id))"
-                ), params).scalar_one()
-                if remaining:
-                    raise RuntimeError(f"canonical_archive_source_row_budget_exceeded: storage_day={day}; raise the explicit logical-byte budget")
-                count = session.execute(text(
-                    "SELECT coalesce(sum(row_count),0) FROM market.fact_archive_manifests WHERE storage_day=:day"
-                ), {"day": day}).scalar_one()
-                if count != partition["expected_rows"]:
-                    raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day}")
-                return {"storage_day": day, "status": "source_exhausted", "archived_rows": count}
-            rows = [{key: value for key, value in row.items() if key != "storage_day"} for row in source]
-            ensure_payload_contracts(session, [(row["payload_schema_id"], row["payload_contract_hash"]) for row in rows])
-            # Validate canonical payload/provenance hashes before following any
-            # claimed source reference or publishing bytes.
-            for row in rows:
-                self._check_budget()
-                record_from_storage_row(row)
-            source_rows = self._source_revisions(session, rows)
+            # Source rows are immutable and the sealed day rejects new inserts.
+            # Every call still locks/rechecks the partition, policy and committed
+            # page cursor. Raw/checkpoint dependencies are resolved afresh below.
+            key = (day, partition["sealed_at"], partition["expected_rows"], cursor,
+                   ordinal, self.limits, self.max_raw_mapping_rows, FACT_ARCHIVE_VERIFIER_VERSION)
+            if self._prepared_page is not None and self._prepared_page[0] == key:
+                _, rows, source_rows = self._prepared_page
+                logger.debug("canonical_archive_prepared_page_reused | storage_day=%s page_ordinal=%s rows=%s",
+                             day, ordinal, len(rows))
+            else:
+                self._prepared_page = None
+                params = {"day": day, "seq": cursor[0], "id": cursor[1], "limit": self.limits.max_rows,
+                          "max_bytes": self.limits.max_logical_bytes}
+                # Bound the ASCII JSON used by the archive codec before hydration.
+                # Printable ASCII already has its JSON escaping in PostgreSQL's
+                # text. Every other character needs at most 12 ASCII bytes (a UTF-16
+                # surrogate pair); reserve 11 beyond its existing UTF-8 bytes.
+                # Five typed timestamps may each gain seven microsecond characters.
+                # The C collation keeps the printable range independent of locale.
+                source = session.execute(text(f"""
+                    WITH candidates AS MATERIALIZED (
+                        SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
+                        WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
+                        ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
+                    ), documents AS MATERIALIZED (
+                        SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
+                        FROM candidates
+                    ), budget AS (
+                        SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
+                            char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
+                            OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
+                    )
+                    SELECT candidates.* FROM candidates JOIN budget USING(id)
+                    WHERE budget.cumulative_bytes <= :max_bytes
+                    ORDER BY candidates.market_commit_seq,candidates.id
+                """), params).mappings().all()
+                if not source:
+                    # PostgreSQL sizes a conservative ASCII-escape allowance before
+                    # transferring JSON to Python. Oversized first rows cannot be
+                    # mistaken for an exhausted source or skipped behind a cursor.
+                    remaining = session.execute(text(
+                        "SELECT EXISTS (SELECT 1 FROM market.fact_versions WHERE storage_day=:day "
+                        "AND (market_commit_seq,id) > (:seq,:id))"
+                    ), params).scalar_one()
+                    if remaining:
+                        raise RuntimeError(f"canonical_archive_source_row_budget_exceeded: storage_day={day}; raise the explicit logical-byte budget")
+                    count = session.execute(text(
+                        "SELECT coalesce(sum(row_count),0) FROM market.fact_archive_manifests WHERE storage_day=:day"
+                    ), {"day": day}).scalar_one()
+                    if count != partition["expected_rows"]:
+                        raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day}")
+                    return {"storage_day": day, "status": "source_exhausted", "archived_rows": count}
+                rows = [{key: value for key, value in row.items() if key != "storage_day"} for row in source]
+                ensure_payload_contracts(session, [(row["payload_schema_id"], row["payload_contract_hash"]) for row in rows])
+                # Validate canonical payload/provenance hashes before following any
+                # claimed source reference or publishing bytes.
+                for row in rows:
+                    self._check_budget()
+                    record_from_storage_row(row)
+                source_rows = self._source_revisions(session, rows)
+                self._prepared_page = (key, rows, source_rows)
             progress = self._prepare_book_prefix(session, (*rows, *source_rows), day)
             if progress is not None:
                 return progress
+            # Publication/verification never retain a second prepared page.
+            self._prepared_page = None
             dependencies, source_rows = self._dependencies(session, rows, source_rows=source_rows)
             manifest = publish_canonical_fact_archive(
                 rows, object_store=self.object_store, temporary_directory=self.temporary_directory, limits=self.limits,
