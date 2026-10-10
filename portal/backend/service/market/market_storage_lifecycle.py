@@ -244,8 +244,9 @@ class MarketStorageLifecycleService:
     def _plan_compactions(
         self, *, policy: MarketStorageLifecyclePolicy, now: datetime
     ) -> list[dict[str, Any]]:
+        minimum_age = timedelta(minutes=policy.compaction_min_age_minutes)
         rows = self.lifecycle_repository.list_compaction_manifests(
-            older_than=now - timedelta(minutes=policy.compaction_min_age_minutes)
+            older_than=now - minimum_age
         )
         grouped: dict[tuple[str, str, int, datetime], list[dict[str, Any]]] = (
             defaultdict(list)
@@ -253,6 +254,10 @@ class MarketStorageLifecycleService:
         for row in rows:
             received = _utc(row["first_received_at"])
             partition_hour = received.replace(minute=0, second=0, microsecond=0)
+            # Wait for the receive-hour to settle instead of repeatedly rewriting
+            # its replacement as new small segments arrive during the same hour.
+            if partition_hour + timedelta(hours=1) + minimum_age > now:
+                continue
             grouped[
                 (
                     str(row["definition_id"]),
