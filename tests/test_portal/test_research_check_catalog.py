@@ -93,3 +93,50 @@ def test_discovered_example_reaches_existing_prepare_without_execution(monkeypat
     assert rejected.status_code == 400
     assert "forward_risk_invalid" in rejected.json()["detail"]
     assert observed == {}
+
+
+def test_descriptive_metadata_covers_settings_and_analytical_results():
+    from portal.backend.service.research import checks, event_fact_evaluator
+
+    for item in catalog.list_check_definitions()["items"]:
+        d = item["definition"]
+        detail = catalog.get_check_definition(d["definition_id"], d["definition_version"])
+        if detail["eligibility"]["request_selectable"]:
+            settings = detail["settings"]["configurable"]
+            assert "scope" in settings
+            assert detail["result_shape"]["analytical_fields"]
+            assert "accepted by" not in str(settings)
+    typed = catalog.get_check_definition("event_fact_analysis", "4")["settings"]["configurable"]
+    assert typed["statistics.features"]["baseline_operators"] == sorted(event_fact_evaluator._BASELINE_OPERATORS)
+    assert typed["statistics.features"]["enriched_operators"] == sorted(event_fact_evaluator._FACT_OPERATORS | event_fact_evaluator._STRUCTURED_FACT_OPERATORS)
+    assert "strictly between 0 and 1" in typed["statistics.bootstrap"]["constraints"]
+    raw = catalog.get_check_definition("raw_forward_outcome", "2")
+    assert raw["settings"]["configurable"]["detector"]["field_choices"] == sorted(checks._RAW_DETECTOR_FIELDS)
+    assert raw["settings"]["configurable"]["outcomes"]["defaults"]["forward_bars"] == checks._forward_bars({})
+    assert catalog.get_check_definition("signal_audit", "2")["result_shape"]["payload_schema"] == checks.SIGNAL_AUDIT_SCHEMA_VERSION
+    assert catalog.get_check_definition("candidate_lifecycle", "2")["result_shape"]["payload_schema"] == checks.CANDIDATE_LIFECYCLE_SCHEMA_VERSION
+
+
+def test_paired_metadata_explains_real_support_missingness_and_units():
+    from tests.test_portal.test_crossing_state_comparison import fixture, finish
+    from portal.backend.service.research import crossing_state_comparison
+
+    detail = catalog.get_check_definition("event_fact_analysis", "11")
+    fields = detail["result_shape"]["analytical_fields"]["crossing_state_comparison"]["fields"]
+    data = fixture()
+    actual = finish(data, crossing_state_comparison.prepare_pairs(**data))
+    thresholds = fields["support_gates"]["thresholds"]
+    assert set(thresholds) == set(actual["support_gates"])
+    assert {k: v.get("minimum", v.get("maximum")) for k, v in thresholds.items()} == {
+        "overall_matching": .70, "every_month_matching": .50, "outcome_completeness": .95,
+        "complete_pairs": 200, "every_month_pairs": 10, "current_z_balance": .10, "log_prior_rms_balance": .10,
+    }
+    assert actual["support_gates"]["complete_pairs"] == (actual["primary"]["pair_count"] >= thresholds["complete_pairs"]["minimum"])
+    assert actual["support_gates"]["outcome_completeness"] == (actual["outcome_missingness"]["complete_fraction"] >= thresholds["outcome_completeness"]["minimum"])
+    assert fields["joint_nonoverlap"]["support"] == {"minimum_pairs": 50, "minimum_months": 6}
+    assert "squared" in fields["primary"]["fields"]["raw_risk_contrast"]["unit"]
+    assert fields["primary"]["fields"]["ratio_contrast"]["unit"] == "dimensionless"
+    assert "without rematching" in fields["outcome_missingness"]["fields"]["rematched"]
+    assert "not effective sample size" in fields["dependence"]["meaning"]
+    assert "unmatched_crossing_identities[]" in fields["matching"]["fields"]
+    assert "leave_one_day_out[]/leave_one_week_out[]" in fields
