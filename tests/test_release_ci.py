@@ -152,3 +152,35 @@ def test_missing_run_or_job_fails_closed(monkeypatch):
     mock_api(monkeypatch, run, jobs, original_artifacts)
     with pytest.raises(ValueError, match="source attestation"):
         ci.qualify(SHA)
+
+
+@pytest.mark.parametrize("conclusion", ["success", "failure"])
+def test_promotion_rehearsal_fixture_matches_strict_admission(tmp_path, monkeypatch, conclusion):
+    import json
+    import os
+    import subprocess
+    import sys
+    rehearsal_spec = importlib.util.spec_from_file_location(
+        "test_server_promotion_fixture", ROOT / "scripts/ci/test_server_promotion.py")
+    rehearsal = importlib.util.module_from_spec(rehearsal_spec)
+    rehearsal_spec.loader.exec_module(rehearsal)
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(rehearsal.GITHUB_API_FIXTURE)
+    calls = []
+    def fixture_api(path):
+        calls.append(path)
+        result = subprocess.run([sys.executable, str(fake_gh), "api", path], check=True,
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "QT_FIXTURE_CI": conclusion})
+        return json.loads(result.stdout)
+    monkeypatch.setattr(ci, "api", fixture_api)
+    if conclusion == "failure":
+        with pytest.raises(ValueError, match="not successful or has wrong identity"):
+            ci.qualify(SHA)
+    else:
+        receipt = ci.qualify(SHA)
+        assert receipt["revision"] == SHA
+        assert receipt["event"] == "release_ci_qualified"
+        assert {job["name"] for job in receipt["jobs"]} == ci.REQUIRED_JOBS
+        assert len(receipt["artifacts"]) == 2
+        assert any("attempts/1/jobs" in path for path in calls)
