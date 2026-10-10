@@ -15,7 +15,7 @@ from portal.backend.service.storage.repos.market_data import market_data_repo
 pytestmark = pytest.mark.db
 
 
-@pytest.mark.parametrize("forward_risk", [False, True])
+@pytest.mark.parametrize("forward_risk", [False, True, "matched_state"])
 def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch, forward_risk):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
@@ -104,6 +104,27 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch, fo
         assert evaluated["sample_count"] > 0
         assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
         assert all(event["fact_references"] == {} for event in evaluated["events"])
+
+    if forward_risk == "matched_state":
+        # Reuse the already frozen v9 Dataset: no re-freeze or mutable data substitute.
+        from copy import deepcopy
+        matched_request = deepcopy(prepared["next_request"])
+        matched_request["outcomes"]["forward_risk"].update(
+            schema_version="candle_risk_matched_state.v1",
+            matching_contract="crossing_state_matched_pairs.v1")
+        matched_request.pop("definition_version", None)
+        matched_request.pop("definition_hash", None)
+        original_binding = run["evidence"]["input_binding"]
+        run = service.run_research_check(matched_request)
+        assert run["evidence"]["input_binding"] == original_binding
+        assert run["result"]["evaluator_version"] == "10"
+        paired = run["result"]["result"]["crossing_state_comparison"]
+        assert paired["analysis_status"] == "unsupported"  # Constant-price synthetic baseline.
+        assert paired["matching"]["eligible_crossings"] == 0
+        assert paired["coverage"]["first_blocking_stage_counts"]["missing_source_candle"] == 1
+        observation = service.create_observation_from_check_evidence(run["check"]["id"], {
+            "title": "Synthetic matched-state frozen evidence", "body": "Qualification only; no market inference."})
+        assert observation is not None
 
     market_data_repo.ingest_candles(
         series_id=series, source_id=source_id,

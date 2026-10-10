@@ -383,3 +383,15 @@ An event-fact request with `outcomes.first_return` pins definition 9 / evaluator
 The sample must follow classification and precede every original endpoint.
 Keep classification within the Indicator's declared origin lifetime. Outcomes
 are descriptive distance-to-original-POC changes, not trading returns.
+
+### Fixed current-state risk comparison
+
+An explicit `outcomes.forward_risk.schema_version: candle_risk_matched_state.v1`
+and `matching_contract: crossing_state_matched_pairs.v1` select definition 11 /
+evaluator 10. Retain the fixed baseline, readiness, no-tail and horizon fields
+from the existing candle-risk configuration. Old definitions reject this mode.
+Use an existing compatible frozen Dataset; no new acquisition or freeze is
+needed merely to change the analytical question. Qualification must prove
+original-Dataset reuse, public-state eligibility, outcome-blind matching,
+whole-pair missingness/deletions, cross-arm nonoverlap, bounded cancellation,
+Observation admission and provider-free replay before empirical admission.
