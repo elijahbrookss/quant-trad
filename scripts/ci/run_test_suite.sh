@@ -12,9 +12,31 @@ if [[ "$SUITE" == "db" || "$SUITE" == "storage-demo" || "$SUITE" == "incremental
   USE_DOCKER=1
 fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
+SCOPE="$SUITE"
+if [[ "$SUITE" == "db" ]]; then
+  SCOPE="all-db"
+  [[ "$#" -eq 1 ]] || SCOPE="focused-db"
+fi
+export QT_CI_IMMEDIATE_FAILURE=1
+export QT_CI_TEST_PHASES="${QT_CI_TEST_PHASES:-0}"
+phase_start() {
+  current_phase="$1"
+  phase_started=$SECONDS
+  printf 'ci_phase event=start phase=%s suite=%s scope=%s source_revision=%s source_tree_hash=%s project=%s\n' \
+    "$current_phase" "$SUITE" "$SCOPE" "${SOURCE_REVISION:-unknown}" "${SOURCE_TREE_HASH:-unknown}" "${test_project:-host}"
+}
+phase_end() {
+  printf 'ci_phase event=end phase=%s elapsed_seconds=%s status=%s\n' \
+    "$current_phase" "$((SECONDS-phase_started))" "$1"
+  current_phase=""
+}
 run_pytest_host() {
   local cmd="$1"
-  bash -lc "$cmd"
+  local status=0
+  phase_start execution
+  bash -lc "$cmd" || status=$?
+  phase_end "$status"
+  return "$status"
 }
 
 run_pytest_docker() (
@@ -51,6 +73,8 @@ run_pytest_docker() (
   cleanup_test_stack() {
     original_status=$?
     trap - EXIT
+    if [[ -n "${current_phase:-}" ]]; then phase_end "$original_status"; fi
+    phase_start cleanup
     cleanup_status=0
     if [[ "$original_status" -ne 0 ]]; then
       # This project has only generated test credentials/data. Preserve startup
@@ -67,6 +91,7 @@ run_pytest_docker() (
       fi
     fi
     "${compose[@]}" down --volumes --remove-orphans --rmi local || cleanup_status=$?
+    phase_end "$cleanup_status"
     if [[ "$original_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
       original_status=$cleanup_status
     fi
@@ -74,12 +99,17 @@ run_pytest_docker() (
   }
   trap cleanup_test_stack EXIT
 
+  phase_start build
   if [[ "$SUITE" == "incremental-recovery" ]]; then
     "${compose[@]}" build timescaledb test
   else
     "${compose[@]}" build test
   fi
+  phase_end 0
+  phase_start execution
   "${compose[@]}" run --rm \
+    -e QT_CI_IMMEDIATE_FAILURE=1 -e QT_CI_TEST_PHASES="$QT_CI_TEST_PHASES" \
+    -e QT_SCHEMA_TEMPLATE_PILOT="${QT_SCHEMA_TEMPLATE_PILOT:-0}" \
     -e SOURCE_REVISION="$source_revision" \
     -e SOURCE_TREE_HASH="$source_tree_hash" \
     test bash -lc '
@@ -88,12 +118,21 @@ run_pytest_docker() (
       echo "ci_runner_wait_script_missing_or_unreadable: path=/app/scripts/wait-for-db.sh" >&2
       exit 1
     fi
-    bash /app/scripts/wait-for-db.sh bash -lc "$1"
+    export QT_CI_READY_STARTED="$(date +%s)"
+    printf "ci_phase event=start phase=readiness\n"
+    bash /app/scripts/wait-for-db.sh bash -lc '\''
+      printf "ci_phase event=end phase=readiness elapsed_seconds=%s status=0\n" "$(($(date +%s)-QT_CI_READY_STARTED))"
+      exec bash -lc "$1"
+    '\'' _ "$1"
   ' _ "$cmd"
+  phase_end 0
 )
 
 run_suite() {
   local cmd="$1"
+  export SOURCE_REVISION="${SOURCE_REVISION:-$(git rev-parse HEAD)}"
+  export SOURCE_TREE_HASH="${SOURCE_TREE_HASH:-$(python scripts/provenance/source_tree_hash.py --git-revision "$SOURCE_REVISION")}"
+  printf 'ci_scope suite=%s scope=%s broad_db=%s\n' "$SUITE" "$SCOPE" "$([[ "$SCOPE" == all-db ]] && echo true || echo false)"
   if [[ "$USE_DOCKER" == "1" ]]; then
     run_pytest_docker "$cmd"
   else

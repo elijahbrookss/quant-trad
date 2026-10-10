@@ -61,6 +61,8 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
         "if [[ \" $* \" == *\" run \"* ]]; then exit \"${QT_TEST_FAKE_RUN_STATUS:-0}\"; fi\n",
         encoding="utf-8",
     )
+    fake_docker.write_text(fake_docker.read_text() +
+        'if [[ " $* " == *" down "* ]]; then exit "${QT_TEST_FAKE_CLEANUP_STATUS:-0}"; fi\n')
     fake_docker.chmod(0o755)
     environment = {
         **os.environ,
@@ -79,18 +81,33 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
 
     invocations = []
     offset = 0
-    for expected_status in (0, 23):
+    for run_status, cleanup_status in ((0, 0), (23, 0), (0, 31), (23, 31)):
+        expected_status = run_status or cleanup_status
         completed = subprocess.run(
             ["bash", str(_RUNNER), "db", *pytest_args],
             cwd=_ROOT,
-            env={**environment, "QT_TEST_FAKE_RUN_STATUS": str(expected_status)},
+            env={**environment, "QT_TEST_FAKE_RUN_STATUS": str(run_status),
+                 "QT_TEST_FAKE_CLEANUP_STATUS": str(cleanup_status)},
             check=False,
             capture_output=True,
             text=True,
         )
         assert completed.returncode == expected_status, completed.stdout + completed.stderr
         rows = [line.split("\t") for line in docker_log.read_text(encoding="utf-8").splitlines()]
-        invocations.append((expected_status, rows[offset:]))
+        stdout = completed.stdout
+        scope = "focused-db" if pytest_args else "all-db"
+        assert f"scope={scope}" in stdout
+        assert f"broad_db={str(not pytest_args).lower()}" in stdout
+        assert "source_revision=" + "a" * 40 in stdout
+        assert "source_tree_hash=" + "b" * 64 in stdout
+        for phase in ("build", "execution", "cleanup"):
+            assert f"event=start phase={phase}" in stdout
+            assert f"event=end phase={phase}" in stdout
+        assert f"status={run_status}" in stdout
+        assert f"status={cleanup_status}" in stdout
+        assert "must-not-appear" not in stdout + completed.stderr
+        assert all(row[2] not in stdout + completed.stderr for row in rows[offset:])
+        invocations.append((run_status, rows[offset:]))
         offset = len(rows)
 
     identities: list[tuple[str, str, str, str]] = []
@@ -135,4 +152,4 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
         assert "ambient" not in database
         identities.append((project, user, password, database))
 
-    assert identities[0] != identities[1]
+    assert len(set(identities)) == len(identities)
