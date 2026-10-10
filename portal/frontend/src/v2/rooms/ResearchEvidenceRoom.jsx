@@ -56,6 +56,8 @@ export function ResearchEvidenceRoom() {
   if (loading && !item) return <div className="qt2-room"><div className="qt2-empty">Loading research evidence…</div></div>
   if (!item) return <div className="qt2-room"><div className="qt2-error">{errors.join(' · ') || 'Research evidence not found.'}</div></div>
 
+  const question = item.payload?.question_contract
+  const publications = question?.publications || []
   const relatedItems = trail?.related_items || []
   const runs = trail?.runs || []
 
@@ -108,6 +110,23 @@ export function ResearchEvidenceRoom() {
             ))}
           </div>
         </section>
+
+        {item.kind === 'study' ? <section className="qt2-stat-card">
+          <span className="qt2-kicker">Research question · distinct from executable StudyDefinition</span>
+          <p>{question?.question?.question || 'Legacy Study: no adopted question contract.'}</p>
+          <p>{question?.question?.scope}</p>
+          {!publications.length ? <p>No published interpretations.</p> : null}
+          {publications.map((publication) => <article key={publication.publication_hash}>
+            <h3>Published interpretation {publication.revision}</h3>
+            <p>{publication.published_at} · {publication.completion_meaning}</p>
+            <p>{publication.conclusion}</p>
+            <p>Scope: {publication.scope}</p>
+            <p>Limitations: {publication.limitations}</p>
+            <p>Publication records completeness; scientific validity and actual replay/recovery require separate evidence.</p>
+            <pre>{JSON.stringify(publication.references, null, 2)}</pre>
+            <small className="qt-mono">{publication.publication_hash}</small>
+          </article>)}
+        </section> : null}
 
         <section className="qt2-stat-card qt2-raw-evidence">
           <div className="qt2-card-heading-row"><span className="qt2-kicker">Persisted payload</span><span className="qt2-muted">Provider-free evidence</span></div>

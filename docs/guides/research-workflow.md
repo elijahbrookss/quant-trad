@@ -417,3 +417,27 @@ Keep enough identity to reproduce the reasoning:
 - [Scientific research authority](../architecture/research-orchestration/SCIENTIFIC_RESEARCH_AUTHORITY.md)
 - [System architecture internals](../architecture/system/SYSTEM_MODEL.md)
 - [Platform contracts](../contracts/README.md)
+
+
+## Publish what a question has taught you
+
+Keep one Research Memory Study for a durable question and scope. Connect testable
+hypotheses, admitted findings and exact Checks to it rather than creating a Study
+for every stage. The executable `StudyDefinition` is a different composition.
+
+Create a draft Study through the existing item operation, then explicitly adopt
+its question with `qt research question adopt <study-id> --request-json <file>`.
+The request contains `question` and `scope`. Adoption preserves legacy payloads
+and is not preregistration. Item reads return `content_hash` for small reasoning
+records. Publish using `qt research question publish <study-id> --request-json
+<file>`, with `request_id`, `expected_previous_hash`, `conclusion`, `limitations`,
+`scope` and `references`. Each reference requires `item_id`, `kind`, `role` and
+an exact `content_hash`, or Check `result_hash` and `evidence_hash`. Preserve
+supporting, contradicting, negative and inconclusive evidence, decisions and
+deviations explicitly; publication cannot detect omitted scientific context.
+
+Read `qt research question history <study-id>` or inspect the Study in V2.
+Corrections publish another revision using the prior publication hash. The
+historical snapshot stays readable after later edits. Complete references mean
+an interpretation is durably recorded; actual replay, recovery and scientific
+authority remain separate evidence and operations.

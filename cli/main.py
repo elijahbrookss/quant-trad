@@ -1912,6 +1912,18 @@ def _research_item_payload(
     return payload
 
 
+def _cmd_research_question(args: argparse.Namespace) -> int:
+    operations = ResearchOperations(_client(args))
+    if args.question_action == "history":
+        result = operations.publication_history(args.item_id)
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        operation = operations.adopt_question if args.question_action == "adopt" else operations.publish_interpretation
+        result = operation(args.item_id, request)
+    _print_json(result)
+    return 0
+
+
 def _cmd_research_items_create(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("POST", "/api/research/items", payload=_research_item_payload(args)))
     return 0
@@ -4302,6 +4314,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history; distinct from executable StudyDefinition.")
+    research_question_sub = research_question.add_subparsers(dest="question_action", required=True)
+    for action in ("adopt", "publish", "history"):
+        command = research_question_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action != "history":
+            command.add_argument("--request-json", required=True)
+        command.set_defaults(func=_cmd_research_question)
     research_items = research_sub.add_parser("items", help="Research memory item commands.")
     research_items_sub = research_items.add_subparsers(dest="research_items_command", required=True)
     research_items_list = research_items_sub.add_parser("list", help="List research memory items.")
