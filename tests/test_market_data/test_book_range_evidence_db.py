@@ -232,3 +232,145 @@ def test_compacted_proof_rejects_incomplete_conflicting_and_late_lineage(storage
                 assert witnesses._processing(manifest) is None
             savepoint.rollback()
     assert len(quality(storage, book)) == 1
+
+
+@pytest.fixture
+def stopped_book(storage, book, tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+    from dataclasses import replace
+    from market_data.order_book import BookLifecycle
+
+    position = replace(book.results[-1].state.source_position,
+        receive_ordinal=book.raws[-1].receive_ordinal, event_ordinal=0, provider_sequence_num=3)
+    closure = book.reducer.close_valid_at(position=position, effective_at=book.raws[-1].received_at,
+        known_at=datetime.now(UTC), reason="continuous collector stopped at a proven transport boundary")
+    book.structures.ingest_book_facts(book.claim, snapshots=[], batches=[],
+        validity_versions=closure.validity_versions, lifecycle=BookLifecycle.AWAITING_SNAPSHOT,
+        final_validity_interval_id=None, checkpoint_id=None, final_state_hash=None,
+        final_connection_epoch=0, final_receive_ordinal=position.receive_ordinal,
+        final_event_ordinal=position.event_ordinal, final_sequence_num=position.provider_sequence_num)
+    book.stop_id = book.structures.append_session_event(book.claim, event_ordinal=200, connection_epoch=0,
+        event_type="continuous_capture_stopped", occurred_at=datetime.now(UTC),
+        reason="supervisor_stop_requested", evidence={"raw_record_count": 4, "invalid_stream_state": False})
+    book.terminal_time = datetime.now(UTC)
+    book.terminal_id = book.structures.append_session_event(book.claim, event_ordinal=201, connection_epoch=0,
+        event_type="book_segment_canonicalized", occurred_at=book.terminal_time,
+        evidence={"manifest_id": book.manifests[-1], "record_count": 1,
+                  "book_ingest_commit_seq": book.watermark, "terminal": True,
+                  "lifecycle": "awaiting_snapshot", "state_hash": None})
+    book.closed = closure.validity_versions[0]
+    book.structures.release(book.claim)
+    second = _raw_book_fixture(storage, tmp_path / "second", monkeypatch, trailing_heartbeat=True,
+        replay_features=True, continuous_sequence=True, provider_product_id="EXAMPLE-USD",
+        event_start=BASE + timedelta(seconds=10), object_store=book.store)
+    for index in range(len(second.results)):
+        _publish_book_result(second, index)
+    config = second.claim.config
+    bbo, depth = derive_book_features((item.state for item in second.results),
+        contract=MarketStateValuationContract(product_definition_version_id=config["product_definition_version_id"],
+            provider_size_unit="base", base_currency="BTC", quote_currency="USD"),
+        bbo_series_id=config["bbo_series_id"], depth_series_id=config["depth_series_id"],
+        computed_at=BASE + timedelta(minutes=1))
+    second.structures.ingest_market_state_features(bbo_facts=bbo, depth_facts=depth)
+    book.second = second
+    book.start = BASE.replace(microsecond=0) + timedelta(seconds=3)
+    book.end = BASE.replace(microsecond=0) + timedelta(seconds=12)
+    book.watermark = storage.repo.current_commit_seq()
+    return book
+
+
+def test_clean_stop_retains_interruption_and_frozen_replay(storage, stopped_book, monkeypatch):
+    book = stopped_book
+    from market_data.range_evidence import utc
+    from portal.backend.service.research.execution import _quality
+    from types import SimpleNamespace
+
+    evidence = quality(storage, book, as_of_commit_seq=book.watermark)
+    assert len(evidence) == 1
+    row = evidence[0]
+    assert row["classification"] == "source_interrupted" and not is_complete_range_evidence(row)
+    assert row["evidence"]["capture_stop"]["reason"] == "collector_capture_stopped"
+    assert utc(row["start"]) == BASE + timedelta(seconds=4)
+    assert utc(row["end"]) == BASE + timedelta(seconds=11)
+    assert utc(row["known_at"]) >= book.terminal_time
+    assert evidence == quality(storage, book, as_of_commit_seq=book.watermark)
+    assert _quality(SimpleNamespace(quality_evidence=evidence, gap_policy="continue_degraded",
+                                   missing_coverage=[]))["status"] == "degraded"
+    assert _quality(SimpleNamespace(quality_evidence=evidence, gap_policy="reject",
+                                   missing_coverage=[]))["recorded_gap_count"] == 1
+    assert quality(storage, book, known_at_lte=book.terminal_time - timedelta(microseconds=1)) == []
+    series_id = book.claim.config["bbo_series_id"]
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series_id, book.start, book.end)])
+    entry = frozen.series[0]
+    assert entry["row_count"] == 2 and entry["quality_evidence"] == evidence
+    requirement = {"alias": "book", "instrument_id": "storage-fixture", "fact_type": "market.bbo",
+        "contract_version": "market.bbo.v1", "timeframe_seconds": 1, "dimensions": {},
+        "required_start": book.start, "required_end": book.end,
+        "source_policy": {"mode": "exact", "source_identity_key": next(iter(entry["source_summary"]["counts"]))}}
+    def resolve():
+        return resolve_frozen_dataset_read_binding(dataset_id=frozen.dataset_id, requirements=[requirement],
+            store=storage.repo, instrument_loader=lambda key: {"id": key, "symbol": "EXAMPLE-USD"})
+    pinned = resolve()
+    assert pinned["recorded_gaps"]
+    def forbidden(*args, **kwargs):
+        raise AssertionError("frozen quality must not be reprojected")
+    monkeypatch.setattr(storage.repo, "list_gap_evidence", forbidden)
+    assert resolve() == pinned
+
+
+def test_clean_stop_missing_conflicting_and_late_provenance_stays_unresolved(storage, stopped_book):
+    book = stopped_book
+    assert len(quality(storage, book)) == 1
+    # Deliberate corruption is confined to the disposable test database. Roll
+    # back each mutation, exercising the real SQL reader and receipt guards.
+    from portal.backend.service.storage.repos.book_range_evidence import BookRangeWitnesses
+    def proof(session):
+        w = BookRangeWitnesses(session, object_store=book.store, watermark=book.watermark, known_at_lte=None)
+        before = w.validity(book.closed.interval_id)
+        after = w.validity(book.second.results[0].state.validity_interval_id)
+        return w.capture_stop(before, after, book.results[-1].state.source_position.material(),
+                              book.second.results[0].state.source_position.material())
+    changes = [
+        ("DELETE FROM market.stream_session_events WHERE id=:id", {"id": book.stop_id}),
+        ("DELETE FROM market.stream_session_events WHERE id=:id", {"id": book.terminal_id}),
+        ("UPDATE market.stream_session_events SET evidence=jsonb_set(evidence,'{book_ingest_commit_seq}',to_jsonb(CAST(:wm AS bigint))) WHERE id=:id",
+         {"id": book.terminal_id, "wm": book.watermark + 1}),
+        ("UPDATE market.stream_session_events SET evidence=jsonb_set(evidence,'{terminal}','false') WHERE id=:id", {"id": book.terminal_id}),
+        ("UPDATE market.raw_archive_ranges SET provider_product_id='WRONG' WHERE manifest_id=:id", {"id": book.manifests[-1]}),
+        ("UPDATE market.book_validity_interval_versions SET reason='bounded capture ended cleanly' WHERE id=:id", {"id": book.closed.version_id}),
+        ("UPDATE market.book_validity_interval_versions SET closing_receive_ordinal=999 WHERE id=:id", {"id": book.closed.version_id}),
+        ("UPDATE market.book_validity_interval_versions SET opening_snapshot_id='missing' WHERE id=:id", {"id": book.closed.version_id}),
+        ("UPDATE market.stream_session_events SET definition_id=:definition WHERE id=:id", {"id": book.stop_id, "definition": book.claim.definition_id}),
+    ]
+    # The last no-op is a positive control after every rollback.
+    for index, (sql, args) in enumerate(changes):
+        with storage.database.session() as session:
+            nested = session.begin_nested()
+            # This fixture owns an isolated generated database. Disable only
+            # its immutable-table guard inside the rollback-only fault scope;
+            # production never mutates these records.
+            for table in ("stream_session_events", "raw_archive_ranges", "book_validity_interval_versions"):
+                session.execute(text(f"ALTER TABLE market.{table} DISABLE TRIGGER USER"))
+            session.execute(text(sql), args)
+            assert (proof(session) is not None) == (index == len(changes) - 1)
+            nested.rollback()
+    # A retained opening between the two selected feature rows cannot be skipped.
+    with storage.database.session() as session:
+        nested = session.begin_nested()
+        session.execute(text("""INSERT INTO market.book_validity_interval_versions
+            SELECT (jsonb_populate_record(NULL::market.book_validity_interval_versions,
+                    to_jsonb(v) || jsonb_build_object('id','intervening','interval_id','intervening',
+                    'opening_effective_at',CAST(:at AS timestamptz)))).*
+            FROM market.book_validity_interval_versions v WHERE id=:id"""),
+            {"id": book.closed.version_id, "at": BASE + timedelta(seconds=8)})
+        assert proof(session) is None
+        nested.rollback()
+    with storage.database.session() as session:
+        nested = session.begin_nested()
+        session.execute(text("""INSERT INTO market.stream_session_events
+            SELECT (jsonb_populate_record(NULL::market.stream_session_events,
+                    to_jsonb(e) || jsonb_build_object('id','duplicate-stop','event_ordinal',202))).*
+            FROM market.stream_session_events e WHERE id=:id"""), {"id": book.stop_id})
+        with pytest.raises(RuntimeError, match="multiple stop receipts"):
+            proof(session)
+        nested.rollback()

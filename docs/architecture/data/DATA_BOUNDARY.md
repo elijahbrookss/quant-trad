@@ -507,6 +507,24 @@ replacing source provenance and quality.
 
 ## Sparse Book Range Evidence
 
+A continuous collector's clean stop is an interruption of capture, even when
+its preceding book interval remains valid. The existing projection emits
+`source_interrupted` with a `collector_capture_stopped` witness only when the
+immutable supervisor-stop event, terminal processing receipt, closing raw
+manifest position/product and next canonical snapshot agree. It checks both
+opening snapshot headers against the pinned watermark/cutoff and rejects an
+intervening visible validity interval. Metadata proves capture absence; no raw
+files are hydrated to infer market behavior. The closing and opening timestamps
+bound a half-open range, clipped to the request without rounding partial seconds.
+All referenced timestamps contribute conservatively to known-at. Missing,
+conflicting or later evidence cannot supply this proof.
+
+This applies equally to retained and future lifecycle records without gap-table
+writes or historical migration. Existing frozen datasets keep their pinned
+quality. `reject` still rejects interruptions; `continue_degraded` retains gaps
+and excludes affected samples. Request edges without bracketing facts and missing
+native heartbeat proof remain unresolved. There is no quietness fallback.
+
 Book BBO/depth production is event-driven within one-second buckets. Research
 coverage consumes producer-owned range evidence; it must not treat bucket width
 as proof of dense sampling. A quiet range requires exact source lineage, a valid

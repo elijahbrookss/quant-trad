@@ -49,6 +49,13 @@ normalized proof and its archive dependencies; replay does not consult current
 collector health or regenerate quality. Existing datasets retain their original
 pinned interpretation.
 
+On 2026-10-11 this decision was clarified to include documented continuous
+collector stops. Extend the existing projection with terminal lifecycle and
+canonical snapshot metadata, exact source lineage, bounded pairing and causal
+visibility. A clean prior book remains valid; the capture absence until the next
+qualified snapshot is interrupted evidence. This adds no persisted structure or
+migration. Deployment state belongs to release receipts, not this ADR.
+
 ## Consequences
 
 No rows or samples are manufactured, no sampling alignment is relaxed, and dense

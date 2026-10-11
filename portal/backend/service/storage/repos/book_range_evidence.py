@@ -34,6 +34,7 @@ class BookRangeWitnesses:
         self.archives = {}
         self.manifests = {}
         self.processing = {}
+        self.capture_stops = {}
         self.bytes_read = 0
         self.records_read = 0
         self.mapping_rows = 0
@@ -47,6 +48,144 @@ class BookRangeWitnesses:
             """), {"id": interval_id, "cutoff": self.cutoff}).mappings().first()
             self.validities[interval_id] = dict(row) if row else None
         return self.validities[interval_id]
+
+    def _opening_header(self, validity, position):
+        # Canonical headers survive physical tier changes. A single timestamp
+        # and exact source-position key avoid loading a snapshot's book payload.
+        opening = utc(validity["opening_effective_at"])
+        key = (f"{position['definition_id']}:{validity['opening_session_id']}:"
+               f"{validity['opening_connection_epoch']}:{validity['opening_receive_ordinal']}:"
+               f"{validity['opening_event_ordinal']}")
+        rows = [dict(row) for row in self.session.execute(text("""
+            SELECT id,row_hash,source_id,state,revision,known_at,market_commit_seq,
+                   external_event_component_key,external_event_group_key,transformation_id
+            FROM market.read_fact_headers_in_range(:series,:start,:end)
+            WHERE observation_key=:key AND market_commit_seq<=:watermark AND known_at<=:cutoff
+            ORDER BY revision DESC LIMIT :limit
+        """), {"series": validity["series_id"], "start": opening,
+                 "end": opening + timedelta(microseconds=1), "key": key,
+                 "watermark": self.watermark, "cutoff": self.cutoff,
+                 "limit": MAX_OBJECTS + 1}).mappings()]
+        if len(rows) > MAX_OBJECTS:
+            raise RuntimeError("book_range_evidence_budget_exceeded: too many opening revisions")
+        if not rows:
+            return None
+        row = rows[0]
+        if (row["state"] != "active"
+                or row["external_event_component_key"] != validity["opening_snapshot_id"]
+                or row["external_event_group_key"] != position["provider_product_id"]
+                or row["transformation_id"] != "market.l2_snapshot.canonicalization.v1"):
+            return None
+        return row
+
+    def capture_stop(self, before, after, left, right):
+        """Explain capture absence from immutable metadata, never market quietness."""
+        key = (before["id"], after["id"],
+               tuple(left[name] for name in (*BOOK_SCOPE_FIELDS, "receive_ordinal")),
+               tuple(right[name] for name in (*BOOK_SCOPE_FIELDS, "receive_ordinal")))
+        if key in self.capture_stops:
+            return self.capture_stops[key]
+        if len(self.capture_stops) >= MAX_OBJECTS:
+            raise RuntimeError("book_range_evidence_budget_exceeded: too many capture boundaries")
+        self.capture_stops[key] = None
+        closed, opened = utc(before["closing_effective_at"]), utc(after["opening_effective_at"])
+        if (before["reason"] != "continuous collector stopped at a proven transport boundary"
+                or before["series_id"] != after["series_id"]
+                or any(left[name] != right[name] for name in ("definition_id", "provider_product_id"))
+                or (left["session_id"], left["connection_epoch"]) ==
+                   (right["session_id"], right["connection_epoch"])
+                or before["closing_session_id"] != left["session_id"]
+                or before["closing_connection_epoch"] != left["connection_epoch"]
+                or before["last_session_id"] != left["session_id"]
+                or before["last_connection_epoch"] != left["connection_epoch"]
+                or not left["receive_ordinal"] <= before["last_receive_ordinal"] <= before["closing_receive_ordinal"]
+                or not after["opening_receive_ordinal"] <= right["receive_ordinal"]
+                or not utc(before["opening_effective_at"]) <= utc(before["last_valid_effective_at"]) <= closed < opened):
+            return None
+        # Adjacent sparse feature rows alone do not establish adjacent capture.
+        # Any other visible opening in this bounded interval makes the pairing
+        # ambiguous, even if that interval emitted no selected feature rows.
+        intervening = self.session.execute(text("""
+            SELECT id FROM market.book_validity_interval_versions
+            WHERE series_id=:series AND opening_effective_at>=:start AND opening_effective_at<=:end
+              AND interval_id NOT IN (:before,:after) AND known_at<=:cutoff LIMIT 1
+        """), {"series": before["series_id"], "start": before["opening_effective_at"],
+                 "end": opened, "before": before["interval_id"], "after": after["interval_id"],
+                 "cutoff": self.cutoff}).first()
+        if intervening:
+            return None
+        openings = [self._opening_header(validity, position)
+                    for validity, position in ((before, left), (after, right))]
+        if any(row is None for row in openings) or openings[0]["source_id"] != openings[1]["source_id"]:
+            return None
+        events = [dict(row) for row in self.session.execute(text("""
+            SELECT id,definition_id,event_ordinal,event_type,occurred_at,known_at,reason,evidence_hash,evidence
+            FROM market.stream_session_events
+            WHERE session_id=:session_id AND connection_epoch=:connection_epoch AND known_at<=:cutoff
+              AND (event_type='continuous_capture_stopped' OR
+                   (event_type='book_segment_canonicalized' AND evidence->'terminal'='true'::jsonb))
+            ORDER BY event_ordinal LIMIT :limit
+        """), {**left, "cutoff": self.cutoff, "limit": MAX_OBJECTS + 1}).mappings()]
+        if len(events) > MAX_OBJECTS:
+            raise RuntimeError("book_range_evidence_budget_exceeded: too many terminal receipts")
+        stops = [row for row in events if row["event_type"] == "continuous_capture_stopped"]
+        if len(stops) > 1:
+            raise RuntimeError("book_range_capture_stop_conflict: multiple stop receipts")
+        if not stops:
+            return None
+        stop = stops[0]
+        if (stop["definition_id"] != left["definition_id"]
+                or stop["reason"] != "supervisor_stop_requested"
+                or stop["evidence"].get("invalid_stream_state") is not False
+                or utc(stop["occurred_at"]) < closed):
+            return None
+        terminals = []
+        for event in events:
+            if event["event_type"] != "book_segment_canonicalized":
+                continue
+            manifest = self._manifest(event["evidence"].get("manifest_id"))
+            if manifest is None:
+                continue
+            if (any(manifest[name] != left[name] for name in BOOK_SCOPE_FIELDS[:3])
+                    or manifest["last_receive_ordinal"] != before["closing_receive_ordinal"]
+                    or utc(manifest["last_received_at"]) != closed):
+                continue
+            proof = self._processing(manifest)
+            if proof is None:
+                continue
+            if (event["definition_id"] != left["definition_id"]
+                    or event["event_ordinal"] <= stop["event_ordinal"]
+                    or utc(event["known_at"]) < max(utc(stop["known_at"]), utc(before["known_at"]))
+                    or event["evidence"].get("lifecycle") != "awaiting_snapshot"
+                    or event["evidence"].get("state_hash") is not None):
+                continue
+            ranges = [dict(row) for row in self.session.execute(text("""
+                SELECT provider_product_id,record_count,max_received_at,last_provider_sequence_num
+                FROM market.raw_archive_ranges WHERE manifest_id=:id LIMIT :limit
+            """), {"id": manifest["id"], "limit": MAX_OBJECTS + 1}).mappings()]
+            if len(ranges) > MAX_OBJECTS:
+                raise RuntimeError("book_range_evidence_budget_exceeded: too many terminal product ranges")
+            if (not ranges or any(row["provider_product_id"] != left["provider_product_id"] for row in ranges)
+                    or sum(row["record_count"] for row in ranges) != manifest["record_count"]
+                    or not any(utc(row["max_received_at"]) == closed and
+                               row["last_provider_sequence_num"] == before["closing_sequence_num"] for row in ranges)):
+                continue
+            terminals.append((manifest, event, proof))
+        if len(terminals) > 1:
+            raise RuntimeError("book_range_capture_stop_conflict: multiple terminal receipts")
+        if not terminals:
+            return None
+        manifest, terminal, proof = terminals[0]
+        # Metadata proves the capture boundary. It makes no assertion about
+        # missing market events and needs no raw-object hydration or new pin.
+        result = {"reason": "collector_capture_stopped", "stop_receipt": stop,
+                  "terminal_receipt": terminal, "terminal_manifest": manifest,
+                  "opening_headers": openings,
+                  "known_at": max(utc(proof["known_at"]), utc(stop["known_at"]),
+                                  utc(terminal["known_at"]), utc(manifest["acknowledged_at"]),
+                                  *(utc(row["known_at"]) for row in openings))}
+        self.capture_stops[key] = result
+        return result
 
     def _manifest(self, identity):
         if identity not in self.manifests:
@@ -291,20 +430,29 @@ def project_book_range_evidence(*, rows, start, end, watermark, witnesses):
                     or after["opening_connection_epoch"] != right["connection_epoch"]):
                 raise RuntimeError("book_range_validity_lineage_disagreement")
             if before["interval_id"] != after["interval_id"]:
-                # Only a recorded invalidation followed by a recovery snapshot
-                # can explain an interruption. A clean stop is not inferred loss.
                 closed = before.get("closing_effective_at")
-                if before["status"] != "closed_invalidated" or closed is None:
+                if closed is None or before["status"] not in {"closed_invalidated", "closed_valid"}:
                     continue
+                capture = None
+                if before["status"] == "closed_valid":
+                    capture = witnesses.capture_stop(before, after, left, right)
+                    if capture is None:
+                        continue
                 gap_start = max(start, utc(closed))
                 gap_end = min(end, utc(after["opening_effective_at"]))
                 if gap_start < gap_end and before["series_id"] == after["series_id"]:
                     result.append(producer_range_evidence(
                         series_id=prior["series_id"], source_id=source_id, source_identity_key=source_key,
                         start=gap_start, end=gap_end, status="interrupted", commit_seq=watermark,
-                        known_at=max(before["known_at"], after["opening_known_at"]),
+                        known_at=(max(utc(before["known_at"]), utc(after["known_at"]),
+                                      utc(prior["known_at"]), utc(following["known_at"]),
+                                      utc(capture["known_at"])) if capture else
+                                  max(before["known_at"], after["opening_known_at"])),
                         witness={"producer": "book_event_buckets.v1", "closing_validity": before,
-                                 "recovery_validity": after}))
+                                 "recovery_validity": after, **({"capture_stop": capture,
+                                 "left_fact_id": prior["id"], "right_fact_id": following["id"],
+                                 "left_row_hash": prior["row_hash"], "right_row_hash": following["row_hash"]}
+                                 if capture else {})}))
                 continue
             if upper <= lower:
                 continue
