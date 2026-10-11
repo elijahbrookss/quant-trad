@@ -540,6 +540,8 @@ expired originals contribute immutable metadata and receipts, never file reads.
 Exact requested-position mappings across eligible overlapping copies must agree
 on raw identity and hash before selection; unselected files are not decoded.
 Unexpected loss or corruption of a selected file fails instead of falling back.
+The canonical book freeze dependency query also excludes recorded expired objects;
+an unrecorded missing file still fails verification.
 Frozen quality retains the complete lineage witness and pins the actual selected
 objects through existing dataset archive references. Old frozen proofs remain
 unchanged. Whole-object byte/record limits still apply across a projection;

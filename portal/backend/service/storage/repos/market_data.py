@@ -846,6 +846,10 @@ def _resolve_canonical_book_archive_positions(
                  AND manifests.connection_epoch = positions.connection_epoch
                  AND manifests.first_receive_ordinal <= positions.receive_ordinal
                  AND manifests.last_receive_ordinal >= positions.receive_ordinal
+                 AND NOT EXISTS (
+                     SELECT 1 FROM market.storage_lifecycle_events AS expired
+                     WHERE expired.action='archive_expire' AND expired.event_type='completed'
+                       AND expired.target_kind='raw_manifest' AND expired.target_id=manifests.id)
             )
             SELECT (SELECT count(*) FROM raw_positions) AS fact_count,
                    (SELECT count(*) FROM classified WHERE NOT position_valid)

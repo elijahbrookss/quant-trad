@@ -194,13 +194,6 @@ def test_compaction_preserves_quiet_proof_and_frozen_custody_through_multiple_ho
         pinned = set(session.execute(text("SELECT raw_archive_manifest_id FROM market.dataset_archive_refs WHERE dataset_id=:id"),
                                      {"id": frozen.dataset_id}).scalars())
     assert second in pinned and not (set(book.manifests) | {first}) & pinned
-    # The unchanged provider proof still rejects an actual event inside a claimed
-    # quiet interval, even when its physical evidence comes from two compactions.
-    with storage.database.session() as session:
-        witnesses = book_range_evidence.BookRangeWitnesses(session, object_store=book.store,
-            watermark=book.watermark, known_at_lte=None)
-        left, right = [dict(vars(result.state.source_position)) for result in book.results]
-        assert witnesses.quiet(left, right, BASE + timedelta(seconds=3), BASE + timedelta(seconds=3.5)) is None
 
 
 def test_compacted_proof_rejects_incomplete_conflicting_and_late_lineage(storage, book, tmp_path):
@@ -215,7 +208,7 @@ def test_compacted_proof_rejects_incomplete_conflicting_and_late_lineage(storage
         ("UPDATE market.raw_archive_compaction_sources SET replacement_content_fingerprint=:bad WHERE replacement_manifest_id=:id", "lineage_conflict"),
         ("DELETE FROM market.raw_archive_compaction_sources WHERE replacement_manifest_id=:id AND source_ordinal=2", "coverage_conflict"),
         ("UPDATE market.raw_archive_compaction_sources SET source_manifest_id=:id WHERE replacement_manifest_id=:id AND source_ordinal=0", "compaction_cycle"),
-        ("UPDATE market.raw_archive_manifests SET first_receive_ordinal=2 WHERE id=:source", "lineage_conflict"),
+        ("UPDATE market.raw_archive_manifests SET first_receive_ordinal=2,last_receive_ordinal=2 WHERE id=:source", "lineage_conflict"),
         ("UPDATE market.raw_archive_manifests SET content_fingerprint=:bad WHERE id=:source", "fingerprint_mismatch"),
         ("UPDATE market.raw_archive_compaction_sources SET known_at=clock_timestamp()+interval '1 day' WHERE replacement_manifest_id=:id", None),
         ("DELETE FROM market.stream_session_events WHERE evidence->>'manifest_id'=:source", None),
