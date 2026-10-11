@@ -185,3 +185,38 @@ def test_mixed_timestamp_update_cannot_certify_a_quiet_second():
     records[-1].raw_frame = json.dumps(frame).encode()
     assert quiet_transport_witness(records, left=position(1), right=position(4),
         start=BASE + timedelta(seconds=1), end=BASE + timedelta(seconds=2)) is None
+
+
+@pytest.mark.parametrize("bounds", [(0, 3, .8, 1.2), (.9, 1.1, .9, 1.1)])
+def test_qualified_clean_stop_preserves_partial_bounds_and_causal_clock(bounds):
+    start, end, expected_start, expected_end = bounds
+    witnesses = Witnesses()
+    witnesses.intervals["valid"].update(status="closed_valid",
+        closing_effective_at=BASE + timedelta(seconds=.8), known_at=BASE + timedelta(seconds=1))
+    witnesses.intervals["recovered"] = {**witnesses.intervals["valid"], "interval_id": "recovered",
+        "opening_effective_at": BASE + timedelta(seconds=1.2), "opening_known_at": BASE + timedelta(seconds=2),
+        "known_at": BASE + timedelta(seconds=8), "opening_connection_epoch": 2,
+        "status": "open_valid", "closing_effective_at": None}
+    witnesses.capture_stop = lambda *args: {"reason": "collector_capture_stopped",
+                                           "known_at": BASE + timedelta(seconds=7)}
+    rows = [fact(0, 1), fact(1, 4, interval="recovered", epoch=2)]
+    evidence = project_book_range_evidence(rows=rows, start=BASE + timedelta(seconds=start),
+        end=BASE + timedelta(seconds=end), watermark=77, witnesses=witnesses)
+    assert len(evidence) == 1
+    from market_data.range_evidence import utc
+    assert not is_complete_range_evidence(evidence[0])
+    assert utc(evidence[0]["start"]) == BASE + timedelta(seconds=expected_start)
+    assert utc(evidence[0]["end"]) == BASE + timedelta(seconds=expected_end)
+    assert utc(evidence[0]["known_at"]) == BASE + timedelta(seconds=8)
+    witnesses.capture_stop = lambda *args: None
+    assert project(witnesses, rows) == []
+    assert project(witnesses, rows[:1]) == []  # no invented request-edge witness
+
+
+def test_missing_in_second_heartbeat_remains_unproven():
+    # Consecutive frames received inside the hole can carry an earlier event;
+    # a heartbeat in the following second does not establish quietness here.
+    records = [raw(1, .2), raw(2, 1.1, event_offset=.9),
+               raw(3, 2.1, heartbeat=True, counter=50), raw(4, 2.2)]
+    assert quiet_transport_witness(records, left=position(1), right=position(4),
+        start=BASE + timedelta(seconds=1), end=BASE + timedelta(seconds=2)) is None

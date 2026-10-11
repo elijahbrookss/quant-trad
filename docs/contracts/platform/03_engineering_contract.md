@@ -42,7 +42,9 @@ types, row density, or current health.
 A producer may explain an empty range as complete and legitimately quiet only
 with retained continuity, validity, acquisition/archive, and processing evidence
 appropriate to that fact contract. Interrupted or invalid ranges remain gaps;
-unknown evidence cannot prove coverage. Empty-range evidence never manufactures
+unknown evidence cannot prove coverage. A proven collector stop followed by the
+next qualified snapshot may explain unavailable capture as interrupted, without
+invalidating earlier valid state or asserting market quietness. Empty-range evidence never manufactures
 Facts or changes a consumer's alignment/staleness policy. Consumers own whether
 the available evidence is suitable for their requested sample or study.
 

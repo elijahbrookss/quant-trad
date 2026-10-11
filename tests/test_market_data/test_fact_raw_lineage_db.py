@@ -316,7 +316,7 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
                          else canonicalize_l2_mutation_batch(result.batch, source=source))
     assert len(facts) == (5 if response_window else 2) and len(raws) == len(ordinals)
     return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id, store=store,
-        raws=raws, manifests=manifests, facts=facts, results=results, structures=structures, claim=claim)
+        raws=raws, manifests=manifests, facts=facts, results=results, structures=structures, claim=claim, reducer=reducer)
 
 
 def test_raw_position_batch_preserves_exact_scopes_and_bound_placements(storage, tmp_path, monkeypatch):
