@@ -220,3 +220,29 @@ def test_missing_in_second_heartbeat_remains_unproven():
                raw(3, 2.1, heartbeat=True, counter=50), raw(4, 2.2)]
     assert quiet_transport_witness(records, left=position(1), right=position(4),
         start=BASE + timedelta(seconds=1), end=BASE + timedelta(seconds=2)) is None
+
+
+@pytest.mark.parametrize("change", ["product", "definition", "same_capture", "closing_session", "closing_epoch",
+                                    "preceding_position", "following_position", "reversed_clock"])
+def test_clean_stop_rejects_unrelated_or_reversed_boundaries_before_database_reads(change):
+    from portal.backend.service.storage.repos.book_range_evidence import BookRangeWitnesses
+    left, right = position(2), {**position(1), "session_id": "restart"}
+    before = {"id": "close", "interval_id": "old", "series_id": 16,
+        "reason": "continuous collector stopped at a proven transport boundary",
+        "opening_effective_at": BASE, "last_valid_effective_at": BASE + timedelta(seconds=.5),
+        "closing_effective_at": BASE + timedelta(seconds=.8), "closing_session_id": "session",
+        "closing_connection_epoch": 1, "last_session_id": "session", "last_connection_epoch": 1,
+        "last_receive_ordinal": 2, "closing_receive_ordinal": 3}
+    after = {"id": "open", "interval_id": "new", "series_id": 16,
+             "opening_effective_at": BASE + timedelta(seconds=1.2), "opening_receive_ordinal": 1}
+    if change == "product": right["provider_product_id"] = "OTHER"
+    elif change == "definition": right["definition_id"] = "other"
+    elif change == "same_capture": right["session_id"] = "session"
+    elif change == "closing_session": before["closing_session_id"] = "other"
+    elif change == "closing_epoch": before["closing_connection_epoch"] = 7
+    elif change == "preceding_position": left["receive_ordinal"] = 4
+    elif change == "following_position": after["opening_receive_ordinal"] = 2
+    else: after["opening_effective_at"] = BASE
+    # A missing session deliberately fails any attempted SQL read.
+    witnesses = BookRangeWitnesses(None, object_store=None, watermark=77, known_at_lte=BASE + timedelta(minutes=1))
+    assert witnesses.capture_stop(before, after, left, right) is None

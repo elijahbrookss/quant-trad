@@ -339,12 +339,18 @@ def test_clean_stop_missing_conflicting_and_late_provenance_stays_unresolved(sto
         ("UPDATE market.raw_archive_ranges SET provider_product_id='WRONG' WHERE manifest_id=:id", {"id": book.manifests[-1]}),
         ("UPDATE market.book_validity_interval_versions SET reason='bounded capture ended cleanly' WHERE id=:id", {"id": book.closed.version_id}),
         ("UPDATE market.book_validity_interval_versions SET closing_receive_ordinal=999 WHERE id=:id", {"id": book.closed.version_id}),
+        ("UPDATE market.book_validity_interval_versions SET opening_snapshot_id='missing' WHERE id=:id", {"id": book.closed.version_id}),
         ("UPDATE market.stream_session_events SET definition_id=:definition WHERE id=:id", {"id": book.stop_id, "definition": book.claim.definition_id}),
     ]
     # The last no-op is a positive control after every rollback.
     for index, (sql, args) in enumerate(changes):
         with storage.database.session() as session:
             nested = session.begin_nested()
+            # This fixture owns an isolated generated database. Disable only
+            # its immutable-table guard inside the rollback-only fault scope;
+            # production never mutates these records.
+            for table in ("stream_session_events", "raw_archive_ranges", "book_validity_interval_versions"):
+                session.execute(text(f"ALTER TABLE market.{table} DISABLE TRIGGER USER"))
             session.execute(text(sql), args)
             assert (proof(session) is not None) == (index == len(changes) - 1)
             nested.rollback()
