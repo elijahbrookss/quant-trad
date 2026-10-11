@@ -148,17 +148,24 @@ def test_compaction_preserves_quiet_proof_and_frozen_custody_through_multiple_ho
     receipts(book)
     original = quality(storage, book)[0]
     first = compact(book, tmp_path, sources=book.manifests[:3], records=book.raws[:3], name="first-compaction")
-    # A retained original remains a valid, cheaper physical placement. Do not
-    # decode overlapping originals plus their replacement for the same witness.
-    assert {row["manifest_id"] for row in quality(storage, book)[0]["evidence"]["archives"]} == set(book.manifests[:3])
+    # Tiny fixtures can compress into fewer bytes than a single source file.
+    # Selection may use originals, replacements, or both, but must not read the
+    # entire overlapping set after the requested raw positions are covered.
+    retained = quality(storage, book)[0]
+    assert retained["evidence"]["transport"] == original["evidence"]["transport"]
+    selected = {row["manifest_id"] for row in retained["evidence"]["archives"]}
+    candidates = set(book.manifests[:3]) | {first}
+    unselected = sorted(candidates - selected)[0]
     with storage.database.session() as session:
-        session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=2"),
-                        {"id": first, "hash": "a" * 64})
+        ordinal = session.execute(text("SELECT first_receive_ordinal FROM market.raw_archive_manifests WHERE id=:id"),
+                                  {"id": unselected}).scalar_one()
+        session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=:ordinal"),
+                        {"id": unselected, "ordinal": ordinal, "hash": "a" * 64})
     with pytest.raises(RuntimeError, match="identity_conflict"):
-        quality(storage, book)  # Conflict in an unselected replacement is still visible.
+        quality(storage, book)  # An unselected copy cannot hide a scoped conflict.
     with storage.database.session() as session:
-        session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=2"),
-                        {"id": first, "hash": book.raws[1].raw_frame_sha256})
+        session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=:ordinal"),
+                        {"id": unselected, "ordinal": ordinal, "hash": book.raws[ordinal - 1].raw_frame_sha256})
     expire_fixture_objects(storage, book, book.manifests[:3])
     one_hop = quality(storage, book)[0]
     assert one_hop["start"] == original["start"] and one_hop["end"] == original["end"]
