@@ -113,3 +113,108 @@ def test_frozen_quality_retains_quiet_proof_and_heartbeat_archive_without_new_sa
         raise AssertionError("frozen replay must not reevaluate mutable range quality")
     monkeypatch.setattr(storage.repo, "list_gap_evidence", mutable_forbidden)
     assert resolve() == before
+
+
+
+def compact(book, tmp_path, *, sources, records, name):
+    from market_data.archive import encode_raw_records_to_parquet
+    encoded = encode_raw_records_to_parquet(records, archive_segment_id=name,
+                                            temporary_directory=tmp_path / "compact")
+    ack = book.store.put_verified(object_key=f"{name}.parquet", source_path=encoded.path,
+                                  expected_sha256=encoded.sha256)
+    return book.structures.commit_compacted_archive(definition_id=book.claim.definition_id,
+        encoded=encoded, acknowledgement=ack, records=records, source_manifest_ids=sources).manifest_id
+
+
+def expire_fixture_objects(storage, book, identities):
+    # Model completed expiry in this disposable database; no lifecycle worker or
+    # production archive is touched. Metadata and original receipts are retained.
+    with storage.database.session() as session:
+        for identity in identities:
+            session.execute(text("""
+                INSERT INTO market.storage_lifecycle_events
+                    (id,operation_id,event_ordinal,policy_version,action,event_type,
+                     target_kind,target_id,occurred_at,known_at,evidence_hash,evidence)
+                VALUES (:id,:id,0,'fixture','archive_expire','completed','raw_manifest',
+                        :manifest,clock_timestamp(),clock_timestamp(),:hash,'{}')
+            """), {"id": f"expired-{identity}", "manifest": identity, "hash": "e" * 64})
+            key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+                                  {"id": identity}).scalar_one()
+            book.store.local_path(key).unlink()
+
+
+def test_compaction_preserves_quiet_proof_and_frozen_custody_through_multiple_hops(storage, book, tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos import book_range_evidence
+    receipts(book)
+    original = quality(storage, book)[0]
+    first = compact(book, tmp_path, sources=book.manifests[:3], records=book.raws[:3], name="first-compaction")
+    # A retained original remains a valid, cheaper physical placement. Do not
+    # decode overlapping originals plus their replacement for the same witness.
+    assert {row["manifest_id"] for row in quality(storage, book)[0]["evidence"]["archives"]} == set(book.manifests[:3])
+    expire_fixture_objects(storage, book, book.manifests[:3])
+    one_hop = quality(storage, book)[0]
+    assert one_hop["start"] == original["start"] and one_hop["end"] == original["end"]
+    archives = one_hop["evidence"]["archives"]
+    assert [row["manifest_id"] for row in archives] == [first]
+    assert {row["manifest_id"] for row in archives[0]["source_processing_receipts"]} == set(book.manifests[:3])
+    second = compact(book, tmp_path, sources=[first, book.manifests[3]], records=book.raws, name="second-compaction")
+    expire_fixture_objects(storage, book, [first, book.manifests[3]])
+    multi_hop = quality(storage, book)[0]
+    assert is_complete_range_evidence(multi_hop)
+    assert multi_hop["evidence"]["transport"] == original["evidence"]["transport"]
+    assert len(multi_hop["evidence"]["archives"][0]["compaction_sources"]) == 5
+    assert multi_hop["known_at"] >= one_hop["known_at"]
+    with monkeypatch.context() as bounded:
+        bounded.setattr(book_range_evidence, "MAX_RECORDS", 3)
+        with pytest.raises(RuntimeError, match="budget_exceeded"):
+            quality(storage, book)
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(book.claim.config["bbo_series_id"], book.start, book.end)])
+    assert frozen.series[0]["row_count"] == 2
+    assert frozen.series[0]["quality_evidence"][0]["evidence"]["archives"][0]["manifest_id"] == second
+    with storage.database.session() as session:
+        pinned = set(session.execute(text("SELECT raw_archive_manifest_id FROM market.dataset_archive_refs WHERE dataset_id=:id"),
+                                     {"id": frozen.dataset_id}).scalars())
+    assert second in pinned and not (set(book.manifests) | {first}) & pinned
+    # The unchanged provider proof still rejects an actual event inside a claimed
+    # quiet interval, even when its physical evidence comes from two compactions.
+    with storage.database.session() as session:
+        witnesses = book_range_evidence.BookRangeWitnesses(session, object_store=book.store,
+            watermark=book.watermark, known_at_lte=None)
+        left, right = [dict(vars(result.state.source_position)) for result in book.results]
+        assert witnesses.quiet(left, right, BASE + timedelta(seconds=3), BASE + timedelta(seconds=3.5)) is None
+
+
+def test_compacted_proof_rejects_incomplete_conflicting_and_late_lineage(storage, book, tmp_path):
+    from portal.backend.service.storage.repos.book_range_evidence import BookRangeWitnesses
+    receipts(book)
+    replacement = compact(book, tmp_path, sources=book.manifests[:3], records=book.raws[:3], name="lineage-faults")
+    expire_fixture_objects(storage, book, book.manifests[:3])
+    assert len(quality(storage, book)) == 1
+    # Roll back each injected metadata fault. The reader uses this same session,
+    # so there is no corrupted committed fixture or cross-test cleanup dependency.
+    cases = [
+        ("UPDATE market.raw_archive_compaction_sources SET replacement_content_fingerprint=:bad WHERE replacement_manifest_id=:id", "lineage_conflict"),
+        ("DELETE FROM market.raw_archive_compaction_sources WHERE replacement_manifest_id=:id AND source_ordinal=2", "coverage_conflict"),
+        ("UPDATE market.raw_archive_compaction_sources SET source_manifest_id=:id WHERE replacement_manifest_id=:id AND source_ordinal=0", "compaction_cycle"),
+        ("UPDATE market.raw_archive_manifests SET first_receive_ordinal=2 WHERE id=:source", "lineage_conflict"),
+        ("UPDATE market.raw_archive_manifests SET content_fingerprint=:bad WHERE id=:source", "fingerprint_mismatch"),
+        ("UPDATE market.raw_archive_compaction_sources SET known_at=clock_timestamp()+interval '1 day' WHERE replacement_manifest_id=:id", None),
+        ("DELETE FROM market.stream_session_events WHERE evidence->>'manifest_id'=:source", None),
+        ("UPDATE market.stream_session_events SET known_at=clock_timestamp()+interval '1 day' WHERE evidence->>'manifest_id'=:source", None),
+        ("UPDATE market.stream_session_events SET evidence=jsonb_set(evidence,'{book_ingest_commit_seq}',to_jsonb(CAST(:future AS bigint))) WHERE evidence->>'manifest_id'=:source", None),
+    ]
+    for sql, error in cases:
+        with storage.database.session() as session:
+            savepoint = session.begin_nested()
+            session.execute(text(sql), {"id": replacement, "source": book.manifests[0], "bad": "0" * 64,
+                                        "future": book.watermark + 1})
+            witnesses = BookRangeWitnesses(session, object_store=book.store, watermark=book.watermark, known_at_lte=None)
+            manifest = witnesses._manifest(replacement)
+            if error:
+                with pytest.raises(RuntimeError, match=error):
+                    proof = witnesses._processing(manifest)
+                    witnesses._read(manifest, proof)
+            else:
+                assert witnesses._processing(manifest) is None
+            savepoint.rollback()
+    assert len(quality(storage, book)) == 1

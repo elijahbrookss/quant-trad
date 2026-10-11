@@ -524,3 +524,22 @@ and trade-flow contracts remain unchanged.
 Normalization treats complete range evidence as quality proof, not an input gap.
 Interruptions retain their evidence hash, commit watermark and known-at clock
 when propagating invalid-input status to derived output.
+
+
+Book range witnesses resolve compacted archive lineage to the original
+`book_segment_canonicalized` receipts. They verify ordered source ranges, record
+counts, scope and content fingerprints, including every intermediate compaction,
+against the selected retained bytes. Original receipts must satisfy the pinned
+commit watermark and metadata known-at cutoff; compaction is not processing.
+Missing or conflicting lineage cannot certify quietness. The provider transport
+proof remains unchanged.
+
+As in canonical raw admission, the projection selects the smallest acknowledged,
+unexpired placement needed for each range. Retained originals remain eligible;
+expired originals contribute immutable metadata and receipts, never file reads.
+Unexpected loss or corruption of a selected file fails instead of falling back.
+Frozen quality retains the complete lineage witness and pins the actual selected
+objects through existing dataset archive references. Old frozen proofs remain
+unchanged. Whole-object byte/record limits still apply across a projection;
+compaction can exceed those limits when only large replacements remain. This
+repair does not add partial Parquet reads, raise caps or change archive formats.
