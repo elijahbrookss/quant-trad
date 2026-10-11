@@ -159,13 +159,17 @@ def test_compaction_preserves_quiet_proof_and_frozen_custody_through_multiple_ho
     with storage.database.session() as session:
         ordinal = session.execute(text("SELECT first_receive_ordinal FROM market.raw_archive_manifests WHERE id=:id"),
                                   {"id": unselected}).scalar_one()
+        session.execute(text("ALTER TABLE market.raw_archive_record_mappings DISABLE TRIGGER USER"))
         session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=:ordinal"),
                         {"id": unselected, "ordinal": ordinal, "hash": "a" * 64})
+        session.execute(text("ALTER TABLE market.raw_archive_record_mappings ENABLE TRIGGER USER"))
     with pytest.raises(RuntimeError, match="identity_conflict"):
         quality(storage, book)  # An unselected copy cannot hide a scoped conflict.
     with storage.database.session() as session:
+        session.execute(text("ALTER TABLE market.raw_archive_record_mappings DISABLE TRIGGER USER"))
         session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=:ordinal"),
                         {"id": unselected, "ordinal": ordinal, "hash": book.raws[ordinal - 1].raw_frame_sha256})
+        session.execute(text("ALTER TABLE market.raw_archive_record_mappings ENABLE TRIGGER USER"))
     expire_fixture_objects(storage, book, book.manifests[:3])
     one_hop = quality(storage, book)[0]
     assert one_hop["start"] == original["start"] and one_hop["end"] == original["end"]
@@ -221,6 +225,8 @@ def test_compacted_proof_rejects_incomplete_conflicting_and_late_lineage(storage
     for sql, error in cases:
         with storage.database.session() as session:
             savepoint = session.begin_nested()
+            for table in ("raw_archive_compaction_sources", "raw_archive_manifests", "stream_session_events"):
+                session.execute(text(f"ALTER TABLE market.{table} DISABLE TRIGGER USER"))
             session.execute(text(sql), {"id": replacement, "source": book.manifests[0], "bad": "0" * 64,
                                         "future": book.watermark + 1})
             witnesses = BookRangeWitnesses(session, object_store=book.store, watermark=book.watermark, known_at_lte=None)

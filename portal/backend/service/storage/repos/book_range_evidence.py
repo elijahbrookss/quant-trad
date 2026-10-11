@@ -192,11 +192,12 @@ class BookRangeWitnesses:
         # selected placements, matching canonical raw admission's custody rule.
         mappings = self.session.execute(text("""
             SELECT manifest_id,raw_record_id,raw_frame_sha256,receive_ordinal,
-                   session_id,connection_epoch,object_row_index,spool_segment_id
+                   session_id,connection_epoch,object_row_index,object_row_group,spool_segment_id,known_at
             FROM market.raw_archive_record_mappings
             WHERE manifest_id=ANY(:ids) AND receive_ordinal BETWEEN :first AND :last
+              AND known_at<=:cutoff
             ORDER BY manifest_id,object_row_index LIMIT :limit
-        """), {"ids": [row["id"] for row in manifests], "first": first, "last": last,
+        """), {"ids": [row["id"] for row in manifests], "first": first, "last": last, "cutoff": self.cutoff,
                  "limit": MAX_RECORDS - self.mapping_rows + 1}).mappings().all() if manifests else []
         self.mapping_rows += len(mappings)
         if self.mapping_rows > MAX_RECORDS:
@@ -242,10 +243,11 @@ class BookRangeWitnesses:
             for index, record in enumerate(records):
                 if first <= record.receive_ordinal <= last:
                     mapping = placements.get((manifest["id"], record.receive_ordinal))
-                    if (mapping is None or mapping["object_row_index"] != index
+                    if (mapping is None or mapping["object_row_index"] != index or mapping["object_row_group"] != 0
                             or mapping["spool_segment_id"] != record.spool_segment_id
                             or (mapping["raw_record_id"], mapping["raw_frame_sha256"]) != (record.raw_record_id, record.raw_frame_sha256)):
                         raise RuntimeError("book_range_archive_mapping_mismatch")
+                    known.append(mapping["known_at"])
                     previous = selected.get(record.receive_ordinal)
                     if previous is not None and (previous.raw_record_id, previous.raw_frame_sha256) != (record.raw_record_id, record.raw_frame_sha256):
                         raise RuntimeError("book_range_archive_identity_conflict")
