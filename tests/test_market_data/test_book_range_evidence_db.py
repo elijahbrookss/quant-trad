@@ -369,7 +369,7 @@ def test_clean_stop_missing_conflicting_and_late_provenance_stays_unresolved(sto
         nested = session.begin_nested()
         session.execute(text("""INSERT INTO market.stream_session_events
             SELECT (jsonb_populate_record(NULL::market.stream_session_events,
-                    to_jsonb(e) || '{"id":"duplicate-stop","event_ordinal":202}'::jsonb)).*
+                    to_jsonb(e) || jsonb_build_object('id','duplicate-stop','event_ordinal',202))).*
             FROM market.stream_session_events e WHERE id=:id"""), {"id": book.stop_id})
         with pytest.raises(RuntimeError, match="multiple stop receipts"):
             proof(session)
