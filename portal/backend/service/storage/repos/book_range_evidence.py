@@ -36,6 +36,7 @@ class BookRangeWitnesses:
         self.processing = {}
         self.bytes_read = 0
         self.records_read = 0
+        self.mapping_rows = 0
 
     def validity(self, interval_id):
         if interval_id not in self.validities:
@@ -186,6 +187,32 @@ class BookRangeWitnesses:
             raise RuntimeError("book_range_evidence_budget_exceeded: narrow the requested range")
         selected, witnesses, known = {}, [], []
         first, last = left["receive_ordinal"], right["receive_ordinal"]
+        # Check exact placement identities across overlapping eligible copies
+        # before choosing one physical file. File integrity is checked only for
+        # selected placements, matching canonical raw admission's custody rule.
+        mappings = self.session.execute(text("""
+            SELECT manifest_id,raw_record_id,raw_frame_sha256,receive_ordinal,
+                   session_id,connection_epoch,object_row_index,spool_segment_id
+            FROM market.raw_archive_record_mappings
+            WHERE manifest_id=ANY(:ids) AND receive_ordinal BETWEEN :first AND :last
+            ORDER BY manifest_id,object_row_index LIMIT :limit
+        """), {"ids": [row["id"] for row in manifests], "first": first, "last": last,
+                 "limit": MAX_RECORDS - self.mapping_rows + 1}).mappings().all() if manifests else []
+        self.mapping_rows += len(mappings)
+        if self.mapping_rows > MAX_RECORDS:
+            raise RuntimeError("book_range_evidence_budget_exceeded: too many witness mappings")
+        identities, placements = {}, {}
+        for mapping in mappings:
+            ordinal = mapping["receive_ordinal"]
+            identity = (mapping["raw_record_id"], mapping["raw_frame_sha256"])
+            prior = identities.setdefault(ordinal, identity)
+            if (prior != identity or mapping["session_id"] != left["session_id"]
+                    or mapping["connection_epoch"] != left["connection_epoch"]):
+                raise RuntimeError("book_range_archive_identity_conflict")
+            key = (mapping["manifest_id"], ordinal)
+            if key in placements:
+                raise RuntimeError("book_range_archive_identity_conflict")
+            placements[key] = mapping
         if last - first + 1 > MAX_RECORDS:
             raise RuntimeError("book_range_evidence_budget_exceeded: narrow the requested range")
         needed = set(range(first, last + 1))
@@ -212,8 +239,13 @@ class BookRangeWitnesses:
                      "completion_receipt_hash": receipt["evidence_hash"], "known_at": receipt["known_at"]}
                     for source, receipt in proof["receipts"]]
             witnesses.append(witness)
-            for record in records:
+            for index, record in enumerate(records):
                 if first <= record.receive_ordinal <= last:
+                    mapping = placements.get((manifest["id"], record.receive_ordinal))
+                    if (mapping is None or mapping["object_row_index"] != index
+                            or mapping["spool_segment_id"] != record.spool_segment_id
+                            or (mapping["raw_record_id"], mapping["raw_frame_sha256"]) != (record.raw_record_id, record.raw_frame_sha256)):
+                        raise RuntimeError("book_range_archive_mapping_mismatch")
                     previous = selected.get(record.receive_ordinal)
                     if previous is not None and (previous.raw_record_id, previous.raw_frame_sha256) != (record.raw_record_id, record.raw_frame_sha256):
                         raise RuntimeError("book_range_archive_identity_conflict")

@@ -151,6 +151,14 @@ def test_compaction_preserves_quiet_proof_and_frozen_custody_through_multiple_ho
     # A retained original remains a valid, cheaper physical placement. Do not
     # decode overlapping originals plus their replacement for the same witness.
     assert {row["manifest_id"] for row in quality(storage, book)[0]["evidence"]["archives"]} == set(book.manifests[:3])
+    with storage.database.session() as session:
+        session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=2"),
+                        {"id": first, "hash": "a" * 64})
+    with pytest.raises(RuntimeError, match="identity_conflict"):
+        quality(storage, book)  # Conflict in an unselected replacement is still visible.
+    with storage.database.session() as session:
+        session.execute(text("UPDATE market.raw_archive_record_mappings SET raw_frame_sha256=:hash WHERE manifest_id=:id AND receive_ordinal=2"),
+                        {"id": first, "hash": book.raws[1].raw_frame_sha256})
     expire_fixture_objects(storage, book, book.manifests[:3])
     one_hop = quality(storage, book)[0]
     assert one_hop["start"] == original["start"] and one_hop["end"] == original["end"]

@@ -537,6 +537,8 @@ proof remains unchanged.
 As in canonical raw admission, the projection selects the smallest acknowledged,
 unexpired placement needed for each range. Retained originals remain eligible;
 expired originals contribute immutable metadata and receipts, never file reads.
+Exact requested-position mappings across eligible overlapping copies must agree
+on raw identity and hash before selection; unselected files are not decoded.
 Unexpected loss or corruption of a selected file fails instead of falling back.
 Frozen quality retains the complete lineage witness and pins the actual selected
 objects through existing dataset archive references. Old frozen proofs remain
