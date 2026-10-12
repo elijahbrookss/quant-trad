@@ -592,7 +592,8 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
     assert fixture.read() == fixture.before
 
 
-def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(storage, monkeypatch):
+@pytest.mark.parametrize("path", ["final_verification", "publication"])
+def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(storage, tmp_path, monkeypatch, path):
     from portal.backend.service.storage.repos import market_lifecycle
     from portal.backend.service.market.canonical_retention import (
         CanonicalRetentionBudgetExceeded, CanonicalRetentionStopRequested,
@@ -611,6 +612,29 @@ def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(stor
     ):
         lifecycle.append_event(operation_id=operation, action=action, event_type=state,
                                target_kind=kind, target_id=identity, evidence={})
+    archive = None
+    if path == "publication":
+        import hashlib
+        from types import SimpleNamespace
+        from tests.test_market_data.test_canonical_fact_archive import _row
+        data = b"shared immutable archive"
+        raw_path = tmp_path / "raw.parquet"
+        raw_path.write_bytes(data)
+        reference = {"object_key": "raw.parquet", "object_sha256": hashlib.sha256(data).hexdigest()}
+        refs = {item["target_id"]: reference for item in dependencies}
+        archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+            database=storage.database, object_store=SimpleNamespace(local_path=lambda _: raw_path),
+            temporary_directory=tmp_path / "staging")
+        monkeypatch.setattr(archive, "_flow_references", lambda *args, **kwargs: refs)
+    def check(session, check_budget=None):
+        if archive is None:
+            fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
+                session, dependencies, check_budget=check_budget)
+        else:
+            archive.check_budget = check_budget
+            admitted, sources = archive._dependencies(session, [{**_row(), "fact_type": "market.market_response"}])
+            assert [{key: row[key] for key in ("target_kind", "target_id")} for row in admitted] == dependencies
+            assert sources == []
     batches = []
     def observe(_conn, _cursor, statement, parameters, *_):
         if "WITH ORDINALITY AS requested" in statement:
@@ -619,8 +643,7 @@ def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(stor
     try:
         with storage.database.session() as session:
             lifecycle.acquire_dataset_pin_lock(session)
-            fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
-                session, dependencies)
+            check(session)
         # Fixed workload: at most two SQL round trips for 129 exact key pairs.
         assert len(batches) <= 2 and sum(batches) == len(dependencies)
         for error in (CanonicalRetentionBudgetExceeded, CanonicalRetentionStopRequested):
@@ -631,15 +654,13 @@ def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(stor
             with pytest.raises(error, match="stop between expiration batches"):
                 with storage.database.session() as session:
                     lifecycle.acquire_dataset_pin_lock(session)
-                    fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
-                        session, dependencies, check_budget=cancelled)
+                    check(session, check_budget=cancelled)
             assert len(batches) == 1 and sum(batches) < len(dependencies)
         lifecycle.append_event(operation_id="tail-expiry", action="archive_expire", event_type="completed",
             target_kind="raw_manifest", target_id=dependencies[-1]["target_id"], evidence={})
         with pytest.raises(RuntimeError, match="canonical_archive_dependency_expired: target_id=expiration-128"):
             with storage.database.session() as session:
                 lifecycle.acquire_dataset_pin_lock(session)
-                fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
-                    session, dependencies)
+                check(session)
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe)

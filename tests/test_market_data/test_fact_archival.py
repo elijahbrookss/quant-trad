@@ -42,7 +42,8 @@ def test_dependency_acknowledgement_requires_available_verified_bytes_within_bud
     refs = {"raw-id": reference}
     if mode == "objects":
         refs["second-id"] = reference
-    session = SimpleNamespace(execute=lambda *_: SimpleNamespace(scalar_one=lambda: mode == "expired"))
+    session = SimpleNamespace(execute=lambda *_: SimpleNamespace(
+        scalar_one_or_none=lambda: "raw-id" if mode == "expired" else None))
     archive = PostgresCanonicalFactArchiveRepository(
         database=None, object_store=SimpleNamespace(local_path=lambda _: path),
         temporary_directory=tmp_path / "staging", max_dependency_objects=1,
@@ -78,3 +79,48 @@ def test_dependency_budgets_require_explicit_positive_integers(tmp_path, value):
         PostgresCanonicalFactArchiveRepository(
             database=None, object_store=None, temporary_directory=tmp_path, max_dependency_bytes=value,
         )
+
+
+@pytest.mark.parametrize("mode", ["valid", "expired_tail", "stop", "deadline"])
+def test_publication_batches_expiry_checks_and_stops_before_reading_bytes(tmp_path, monkeypatch, mode):
+    from portal.backend.service.market.canonical_retention import (
+        CanonicalRetentionBudgetExceeded, CanonicalRetentionStopRequested,
+    )
+    data = b"shared immutable archive"
+    path = tmp_path / "raw.parquet"
+    path.write_bytes(data)
+    reference = {"object_key": "raw.parquet", "object_sha256": hashlib.sha256(data).hexdigest()}
+    refs = {f"raw-{index:03d}": reference for index in range(129)}
+    queries, byte_reads = [], []
+    def execute(statement, parameters):
+        identities = parameters.get("ids", [parameters.get("id")])
+        queries.append(identities)
+        expired = "raw-128" if mode == "expired_tail" and "raw-128" in identities else None
+        return SimpleNamespace(scalar_one=lambda: expired is not None, scalar_one_or_none=lambda: expired)
+    def check_budget():
+        if queries and mode in {"stop", "deadline"}:
+            error = CanonicalRetentionStopRequested if mode == "stop" else CanonicalRetentionBudgetExceeded
+            raise error("publication expiry interrupted")
+    def local_path(key):
+        byte_reads.append(key)
+        return path
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=SimpleNamespace(local_path=local_path),
+        temporary_directory=tmp_path / "staging", check_budget=check_budget,
+    )
+    monkeypatch.setattr(archive, "_flow_references", lambda *args, **kwargs: refs)
+    row = {**_row(), "fact_type": "market.market_response"}
+    if mode == "valid":
+        dependencies, sources = archive._dependencies(SimpleNamespace(execute=execute), [row])
+        assert [item["target_id"] for item in dependencies] == sorted(refs)
+        assert sources == [] and byte_reads
+        assert len(queries) <= 2 and sum(map(len, queries)) == len(refs)
+    else:
+        error = {"expired_tail": RuntimeError, "stop": CanonicalRetentionStopRequested,
+                 "deadline": CanonicalRetentionBudgetExceeded}[mode]
+        match = "dependency_expired: target_id=raw-128" if mode == "expired_tail" else "publication expiry interrupted"
+        with pytest.raises(error, match=match):
+            archive._dependencies(SimpleNamespace(execute=execute), [row])
+        assert not byte_reads
+        if mode in {"stop", "deadline"}:
+            assert len(queries) == 1 and len(queries[0]) < len(refs)
