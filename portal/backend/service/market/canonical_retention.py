@@ -192,7 +192,22 @@ class CanonicalFactRetentionExecutor:
                 logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s", day, item["action"], exc)
                 cursor = day
             except Exception as exc:
-                if getattr(getattr(exc, "orig", None), "pgcode", None) == "55P03":
+                sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
+                if sqlstate == "57014":
+                    # The archive owner has already rolled back. A statement
+                    # cancelled at the run boundary must retain this day's
+                    # resume cursor; a query timeout with budget left is still
+                    # a real failure, as are non-cancellation errors.
+                    try:
+                        check_budget()
+                    except CanonicalRetentionBudgetExceeded as budget:
+                        outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
+                                         "status": "deferred", "reason": str(budget)})
+                        stop_reason = budget.stop_reason
+                        logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s sqlstate=57014",
+                                    day, item["action"], stop_reason)
+                        break
+                if sqlstate == "55P03":
                     outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
                                      "status": "deferred", "reason": "canonical_retention_relation_busy"})
                     logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=relation_busy", day, item["action"])

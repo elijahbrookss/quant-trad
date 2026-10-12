@@ -136,3 +136,69 @@ def test_expiration_query_limits_cancel_work_and_reset_after_transaction(storage
     with storage.database.session() as session:
         assert settings(session) == baseline
         assert session.scalar(text("SELECT 1")) == 1
+
+
+@pytest.mark.parametrize("deadline_elapsed", [True, False])
+def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
+    storage, tmp_path, monkeypatch, deadline_elapsed,
+):
+    from sqlalchemy.exc import DBAPIError
+    from portal.backend.service.market import canonical_retention as module
+    from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
+
+    day = storage.today - timedelta(days=31)
+    _placement(monkeypatch, day)
+    _ingest(storage)
+    request = DatasetSeriesRequest(storage.series_id, BASE - timedelta(days=1), BASE + timedelta(days=1))
+    frozen = storage.repo.freeze_dataset([request])
+    before = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id)
+    repository = PostgresCanonicalFactRetentionRepository(database=storage.database)
+    executor = module.CanonicalFactRetentionExecutor(repository=repository)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1,
+                                         max_run_seconds=60, archive_min_free_bytes=0)
+    assert executor.run(policy=policy, storage_root=tmp_path, execute=True)["outcomes"][0]["status"] == "partition_sealed"
+    physical = _physical(storage, day)
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    original = PostgresCanonicalFactArchiveRepository._stage_catalog_rows
+    cancellations = []
+
+    def cancel_after_catalog_write(archive, session, record_type, manifest_id, rows):
+        original(archive, session, record_type, manifest_id, rows)
+        # Apply the artificial timeout only to the intended statement. Source
+        # selection and catalog setup retain the ordinary SQL policy.
+        session.execute(text("SET LOCAL statement_timeout='25ms'"))
+        try:
+            session.execute(text("SELECT pg_sleep(0.2)"))
+        except DBAPIError as exc:
+            cancellations.append(exc.orig.pgcode)
+            clock[0] = 60.0 if deadline_elapsed else 1.0
+            raise
+        pytest.fail("The disposable PostgreSQL statement must time out")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PostgresCanonicalFactArchiveRepository, "_stage_catalog_rows", cancel_after_catalog_write)
+        failed = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    assert cancellations == ["57014"]
+    assert failed["outcomes"][0]["status"] == ("deferred" if deadline_elapsed else "failed")
+    assert failed["failure_count"] == (0 if deadline_elapsed else 1)
+    assert failed["next_after_storage_day"] == (day - timedelta(days=1) if deadline_elapsed else day).isoformat()
+    if deadline_elapsed:
+        assert failed["stop_reason"] == "time_budget"
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.fact_archive_manifests WHERE storage_day=:day"),
+                              {"day": day}) == 0
+    assert _state(storage)[0]["state"] == "sealed"
+    assert _physical(storage, day) == physical
+    assert executor._archive is None
+
+    # A later bounded attempt uses only committed progress. The uncertain object
+    # from the rolled-back publication cannot serve as catalog acknowledgement.
+    retry = executor.run(policy=policy, storage_root=tmp_path, execute=True,
+                         after_storage_day=None if deadline_elapsed else day - timedelta(days=1))
+    assert retry["failure_count"] == 0
+    assert retry["outcomes"][0]["status"] == "page_acknowledged"
+    assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.fact_archive_manifests WHERE storage_day=:day"),
+                              {"day": day}) == 1

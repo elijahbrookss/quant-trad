@@ -573,7 +573,12 @@ can supply `lifecycle-run --canonical-after-storage-day YYYY-MM-DD`; returned
 does not lose storage progress or weaken admission.
 
 Run outcomes distinguish step/time bounds, stop requests, deferred conflicts,
-blocked scans and failures. Genuine step failures log their storage day/action,
+blocked scans and failures. After a step's SQL cancellation (`57014`) rolls back,
+the executor checks the current run deadline and stop request. An elapsed budget
+or requested stop defers that day and retains its resume cursor. A SQL timeout
+with budget remaining still fails; non-cancellation errors remain failures even
+when the deadline has elapsed. This classification does not extend SQL limits or
+acknowledge uncommitted pages. Genuine step failures log their storage day/action,
 return an error outcome and make the lifecycle result degraded; `lifecycle-run`
 prints that result and exits nonzero. Progress remains
 in the existing storage tables; the raw `lifecycle-events` ledger does not claim
