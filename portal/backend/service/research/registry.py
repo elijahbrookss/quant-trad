@@ -305,6 +305,20 @@ def _register_event_fact_family() -> None:
             "input_policy": "candle_only_indicator.v1", "operator_model": "crossing_state_matched_pairs.v1",
             "outcome_boundary": "evaluation_end_exclusive", "inference": "descriptive_only"},
     ))
+    atr_filtered_evaluator = ForwardRiskEvaluator(version="11",
+        result_schema_version="event_fact_analysis_result.v11", paired_state_enabled=True,
+        atr_ratio_filter_enabled=True)
+    CHECK_REGISTRY.register_evaluator(atr_filtered_evaluator)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=EVENT_FACT_ANALYSIS,
+        definition_version="12", evaluator_id=atr_filtered_evaluator.evaluator_id,
+        evaluator_version=atr_filtered_evaluator.version,
+        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION, result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={"family": EVENT_FACT_ANALYSIS, "event_ownership": "check_candle_snapshot",
+            "input_policy": "candle_only_indicator.v1", "operator_model": "crossing_state_matched_pairs.v2",
+            "filter_contract": "crossing_state_atr_ratio_filter.v1",
+            "outcome_boundary": "evaluation_end_exclusive", "inference": "descriptive_only"},
+    ))
     first_return_evaluator = FirstReturnEvaluator()
     CHECK_REGISTRY.register_evaluator(first_return_evaluator)
     CHECK_REGISTRY.register_definition(CheckDefinition(
@@ -774,7 +788,8 @@ def materialize_check_definition(
     first_return = _mapping(payload.get("outcomes"), field="outcomes").get("first_return")
     forward_risk = _mapping(payload.get("outcomes"), field="outcomes").get("forward_risk")
     paired_state = isinstance(forward_risk, Mapping) and forward_risk.get("schema_version") == "candle_risk_matched_state.v1"
-    risk_version = "11" if paired_state else "10"
+    atr_filter = isinstance(forward_risk, Mapping) and forward_risk.get("schema_version") == "candle_risk_matched_state.v2"
+    risk_version = "12" if atr_filter else "11" if paired_state else "10"
     default_version = risk_version if forward_risk is not None else "9" if first_return is not None else "8" if shared_landmark is not None else "7" if matched_origin is not None else "5" if availability_trigger else "6" if candle_only else "4"
     resolved_base_version = str(
         base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
@@ -806,7 +821,7 @@ def materialize_check_definition(
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10", "11"} and (
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10", "11", "12"} and (
         inputs or detector.get("type") != "indicator_event"
     ):
         raise ValueError(
@@ -820,14 +835,14 @@ def materialize_check_definition(
         outcomes["shared_landmark"] = normalize_shared_landmark(
             shared_landmark, outcomes=outcomes, gap_policy=str(payload.get("gap_policy") or ""),
         )
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"10", "11"}:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"10", "11", "12"}:
         outcomes["forward_risk"] = normalize_forward_risk(forward_risk, detector=detector,
             outcomes=outcomes, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""),
-            paired_state=resolved_base_version == "11")
+            paired_state=resolved_base_version in {"11", "12"}, atr_ratio_filter=resolved_base_version == "12")
     if family == EVENT_FACT_ANALYSIS and resolved_base_version == "9":
         outcomes["first_return"] = normalize_first_return(first_return, outcomes=outcomes,
             detector=detector, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
-    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11"}:
+    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11", "12"}:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
     if family == EVENT_FACT_ANALYSIS:
         detector, statistics, inputs = _validate_event_fact_bindings(
