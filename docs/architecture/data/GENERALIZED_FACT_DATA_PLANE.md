@@ -605,6 +605,14 @@ Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit
 leaves no acknowledged progress; retry reuses identical immutable bytes.
 
+Catalog publication flushes series, alias, raw-dependency and canonical-dependency
+rows in batches of at most 128 inside that same transaction. The existing
+statement deadline applies to each batch, and the run-budget/cancellation check
+runs between batches and after the final flush. A stop or failed batch rolls back
+the manifest and every catalog row together. Archive page size, file format,
+identity and foreign-key checks are unchanged. This bounds SQL work and improves
+cancellation opportunities; sustained HDD throughput still requires measurement.
+
 `fact_archive_material_aliases` indexes legacy typed material hashes retained in
 canonical provenance. Aliases are derived from verified page rows, not invented
 identities. Typed lineage combines hot provenance lookup with the cold alias

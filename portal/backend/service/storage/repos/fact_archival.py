@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
 FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
+# Keep cold catalog/FK work below the per-statement ceiling without shrinking
+# immutable archive pages or committing partial page metadata.
+_CATALOG_WRITE_BATCH_ROWS = 128
 
 
 def _series_catalog(manifest):
@@ -350,6 +353,22 @@ class PostgresCanonicalFactArchiveRepository:
             self._prepared_page = None
             raise
 
+    def _stage_catalog_rows(self, session, record_type, manifest_id, rows):
+        """Bound each write and observe cancellation within the page transaction."""
+        batch = []
+        for values in rows:
+            self._check_budget()
+            batch.append(record_type(manifest_id=manifest_id, **values))
+            if len(batch) == _CATALOG_WRITE_BATCH_ROWS:
+                session.add_all(batch)
+                session.flush()
+                self._check_budget()
+                batch = []
+        if batch:
+            session.add_all(batch)
+            session.flush()
+        self._check_budget()
+
     def _stage_next_page(self, day: date) -> dict:
         with self.database.session() as session:
             partition = self._lock(session, day)
@@ -442,17 +461,17 @@ class PostgresCanonicalFactArchiveRepository:
                 last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1], descriptor=manifest.to_dict(),
             ))
             session.flush()
-            for values in _series_catalog(manifest):
-                session.add(MarketFactArchiveSeriesRecord(manifest_id=manifest.manifest_id, **values))
-            for row in rows:
-                alias = legacy_material_alias(row)
-                if alias is not None:
-                    session.add(MarketFactArchiveMaterialAliasRecord(manifest_id=manifest.manifest_id, **alias))
-            for dependency in dependencies:
-                session.add(MarketFactArchiveDependencyRecord(manifest_id=manifest.manifest_id, **dependency))
-            for source in source_rows:
-                session.add(MarketFactArchiveCanonicalDependencyRecord(manifest_id=manifest.manifest_id,
-                    fact_version_id=source["id"], row_hash=source["row_hash"]))
+            self._stage_catalog_rows(session, MarketFactArchiveSeriesRecord,
+                                     manifest.manifest_id, _series_catalog(manifest))
+            self._stage_catalog_rows(session, MarketFactArchiveMaterialAliasRecord,
+                                     manifest.manifest_id,
+                                     (alias for row in rows if (alias := legacy_material_alias(row)) is not None))
+            self._stage_catalog_rows(session, MarketFactArchiveDependencyRecord,
+                                     manifest.manifest_id, dependencies)
+            self._stage_catalog_rows(session, MarketFactArchiveCanonicalDependencyRecord,
+                                     manifest.manifest_id,
+                                     ({"fact_version_id": row["id"], "row_hash": row["row_hash"]}
+                                      for row in source_rows))
         logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s bytes=%s dependencies=%s",
                     day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies))
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,

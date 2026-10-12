@@ -422,3 +422,143 @@ def test_prepared_page_reuse_rechecks_admission_and_durable_cursor(
         assert len(restored) == 2 and len({row["id"] for row in restored}) == 2
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe_sql)
+
+
+
+def _alias_catalog_page(storage, tmp_path, monkeypatch, *, count):
+    """Real BBO correction history with one shared, proven book dependency."""
+    from types import SimpleNamespace
+    from market_data.canonical_adapters import DERIVED_MARKET_STATE_SOURCE, canonicalize_bbo_feature
+    from market_data.contracts import DatasetSeriesRequest
+    from market_data.market_state import MarketStateValuationContract, derive_book_features
+    from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture, _publish_book_result
+    from tests.test_market_data.test_fact_storage_tiers_db import BASE
+    from portal.backend.service.storage.repos import market_data, market_structure
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    fixture = _raw_book_fixture(storage, tmp_path, monkeypatch, replay_features=True)
+    reader = FilesystemRawArchiveObjectStore(fixture.store.root, writable=False)
+    tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader)
+    monkeypatch.setattr(market_data, "canonical_fact_storage_repository", tiered)
+    monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", tiered)
+    for index in range(len(fixture.results)):
+        _publish_book_result(fixture, index)
+    config = fixture.claim.config
+    bbo, _ = derive_book_features((item.state for item in fixture.results),
+        contract=MarketStateValuationContract(
+            product_definition_version_id=config["product_definition_version_id"],
+            provider_size_unit="base", base_currency="BTC", quote_currency="USD"),
+        bbo_series_id=config["bbo_series_id"], depth_series_id=config["depth_series_id"],
+        computed_at=BASE + timedelta(minutes=1))
+    root = canonicalize_bbo_feature(bbo[0], source=DERIVED_MARKET_STATE_SOURCE)
+    day = fixture.day + timedelta(days=1)
+    _placement(monkeypatch, day)
+    source_id = storage.repo.register_source(DERIVED_MARKET_STATE_SOURCE)
+    for index in range(count):
+        # One delivery per commit: ingestion rejects duplicate observation keys
+        # within a single batch, and every correction must retain its history.
+        storage.repo.ingest_facts(series_id=bbo[0].series_id, source_id=source_id,
+            facts=[replace(root, provenance={**root.provenance, "fixture_delivery": index})])
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(
+        bbo[0].series_id, BASE - timedelta(seconds=1), BASE + timedelta(minutes=2))])
+    read = lambda: storage.repo.read_dataset_fact_revisions(
+        dataset_id=frozen.dataset_id, series_id=bbo[0].series_id)
+    before = read()
+    assert len(before) == count
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database, object_store=fixture.store,
+        temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=count, row_group_size=min(128, count)))
+    assert archive.seal_partition(day)["expected_rows"] == count
+    return SimpleNamespace(archive=archive, day=day, store=fixture.store,
+                           read=read, before=before, count=count)
+
+
+def _acknowledge_alias_page(fixture):
+    for _ in range(8):
+        result = fixture.archive.stage_next_page(fixture.day)
+        if result["status"] == "page_acknowledged":
+            return result
+        assert result["status"] in {"book_prefix_verified", "trade_prefix_verified"}
+    pytest.fail("fixture exceeded its bounded prefix preparation count")
+
+
+def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
+        storage, tmp_path, monkeypatch):
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=320)
+    # Model a cold per-row write cost on a disposable DB. This is a timeout
+    # regression, not an HDD benchmark or a production throughput estimate.
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE FUNCTION market.test_slow_alias_insert() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.01); RETURN NEW; END $$
+        """))
+        session.execute(text("""
+            CREATE TRIGGER test_slow_alias_insert BEFORE INSERT
+            ON market.fact_archive_material_aliases FOR EACH ROW
+            EXECUTE FUNCTION market.test_slow_alias_insert()
+        """))
+    fixture.archive.statement_timeout_ms = 2000
+    # A coarse batch is the control under the same row cost and deadline. It
+    # must fail at the actual alias INSERT, leaving the entire page uncommitted.
+    with monkeypatch.context() as coarse:
+        coarse.setattr(fact_archival, "_CATALOG_WRITE_BATCH_ROWS", 1000)
+        with pytest.raises(DBAPIError) as failed:
+            _acknowledge_alias_page(fixture)
+    assert failed.value.orig.pgcode == "57014"
+    assert failed.value.statement.startswith("INSERT INTO market.fact_archive_material_aliases")
+    assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
+    result = _acknowledge_alias_page(fixture)
+    assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
+    with storage.database.session() as session:
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_material_aliases WHERE manifest_id=:id"
+        ), {"id": result["manifest_id"]}).scalar_one() == fixture.count
+    assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
+    assert fixture.read() == fixture.before
+
+
+@pytest.mark.parametrize("stop", ["cancel", "budget"])
+def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
+        storage, tmp_path, monkeypatch, stop):
+    from portal.backend.service.market.canonical_retention import (
+        CanonicalRetentionBudgetExceeded, CanonicalRetentionStopRequested,
+    )
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=129)
+    wrote_aliases = False
+
+    def inserted(_conn, _cursor, statement, *_):
+        nonlocal wrote_aliases
+        if statement.startswith("INSERT INTO market.fact_archive_material_aliases"):
+            wrote_aliases = True
+
+    error = CanonicalRetentionStopRequested if stop == "cancel" else CanonicalRetentionBudgetExceeded
+
+    def check_budget():
+        if wrote_aliases:
+            raise error("injected stop after an alias write")
+
+    fixture.archive.check_budget = check_budget
+    event.listen(storage.database._engine, "after_cursor_execute", inserted)
+    try:
+        with pytest.raises(error, match="injected stop after an alias write"):
+            _acknowledge_alias_page(fixture)
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", inserted)
+        fixture.archive.check_budget = None
+    assert wrote_aliases
+    assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases")).scalar_one() == 0
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_series")).scalar_one() == 0
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies")).scalar_one() == 0
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"
+        ), {"day": fixture.day}).scalar_one() == fixture.count
+    objects = set(fixture.store.root.rglob("*.parquet"))
+    result = _acknowledge_alias_page(fixture)
+    assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
+    assert set(fixture.store.root.rglob("*.parquet")) == objects
+    assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
+    assert fixture.read() == fixture.before
