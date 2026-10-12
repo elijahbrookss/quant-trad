@@ -244,14 +244,10 @@ class PostgresCanonicalFactArchiveRepository:
         result = []
         if len(references) > self.max_dependency_objects:
             raise RuntimeError("canonical_archive_dependency_object_budget_exceeded: reduce page row limit")
+        self._assert_dependencies_unexpired(session,
+            [{"target_kind": "raw_manifest", "target_id": identity} for identity in sorted(references)],
+            check_budget=self.check_budget)
         for identity, reference in sorted(references.items()):
-            expired = session.execute(text("""
-                SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
-                    WHERE action='archive_expire' AND target_kind='raw_manifest'
-                      AND target_id=:id AND event_type='completed')
-            """), {"id": identity}).scalar_one()
-            if expired:
-                raise RuntimeError(f"canonical_archive_dependency_expired: target_id={identity}")
             # The lifecycle shared fence remains held while bytes are read and
             # permanent hold edges commit. Expiry cannot race this admission.
             objects.verify(reference["object_key"], reference["object_sha256"])
