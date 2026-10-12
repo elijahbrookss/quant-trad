@@ -624,6 +624,22 @@ not permission to drop it. This owner does not perform reclamation. A normalized
 page requires the recursive input-window proof below and cannot be admitted with
 an unresolved, empty dependency set. Reviewed activation remains separate.
 
+### Sparse prefix lookup
+
+Raw-prefix lookups first restrict manifests by each complete requested
+`definition_id`/`session_id`/connection-epoch/ordinal-range tuple, then prove the
+exact mapping against that same tuple. Independent scope arrays and the overall
+minimum/maximum ordinal remain coarse filters only: they can include many
+intervening objects when a request contains sparse endpoints. Both filters use
+`EXISTS`, so overlapping witnesses do not multiply placements. Existing frozen
+bindings, missing-position failures, byte verification, expiry checks and mapping
+budgets remain unchanged; this query change creates no index or historical work.
+A bounded production comparison using 14 sparse scopes and 610 current prefix
+bindings timed out at 2 seconds with the prior shape; the paired-manifest shape
+returned 14 mappings in 278 ms. The bindings were reconstructed from current
+prefix metadata because the failure log truncated its list, so this is a
+representative observation, not an exact replay or a throughput guarantee.
+
 ### Exact Raw-Revision Evidence
 
 #### Hot Backlog And Reference Lifetime

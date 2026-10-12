@@ -203,17 +203,25 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             first_requested_ordinal=min(item["first_receive_ordinal"] for item in lookup_prefixes),
             last_requested_ordinal=max(item["receive_ordinal"] for item in lookup_prefixes),
         )
+        prefix_relation = (f"(VALUES {prefix_values}) AS prefixes("
+            "definition_id, session_id, connection_epoch, first_receive_ordinal, receive_ordinal)")
+        manifest_scope = (
+            "prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
+            "AND prefixes.connection_epoch=manifests.connection_epoch "
+            "AND manifests.first_receive_ordinal<=prefixes.receive_ordinal "
+            "AND manifests.last_receive_ordinal>=prefixes.first_receive_ordinal")
+        # Sparse endpoints can have a wide overall ordinal envelope. Prune by
+        # each paired manifest scope before touching its mappings, independently
+        # of the mapping-correlated proof. Both EXISTS clauses preserve one row
+        # per placement when requested scopes overlap.
         queries.append(("manifests.definition_id = ANY(:requested_definitions) "
             "AND manifests.session_id = ANY(:requested_sessions) "
             "AND manifests.first_receive_ordinal<=:last_requested_ordinal "
             "AND manifests.last_receive_ordinal>=:first_requested_ordinal "
-            f"AND EXISTS (SELECT 1 FROM (VALUES {prefix_values}) "
-            "AS prefixes(definition_id, session_id, connection_epoch, first_receive_ordinal, receive_ordinal) "
-            "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
-            "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
+            f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope}) "
+            f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope} "
+            "AND prefixes.session_id=mappings.session_id "
             "AND prefixes.connection_epoch=mappings.connection_epoch "
-            "AND manifests.first_receive_ordinal<=prefixes.receive_ordinal "
-            "AND manifests.last_receive_ordinal>=prefixes.first_receive_ordinal "
             "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
             prefix_params))
     for predicate, params in queries:

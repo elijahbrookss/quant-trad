@@ -19,7 +19,7 @@ from tests.test_market_data.test_market_state_phase3 import _trade
 pytestmark = pytest.mark.db
 
 
-def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-lineage"):
+def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-lineage", ordinals=(1, 2)):
     monkeypatch.setattr(market_structure, "db", storage.database)
     structures = market_structure.market_structure_repository
     day = storage.today - timedelta(days=2)
@@ -38,7 +38,7 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-l
     claim = structures.claim_stream(definition_id=definition_id, owner_id="exact-lineage-test", lease_seconds=600, bounded=True)
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     raws, manifests = [], []
-    for ordinal in (1, 2):
+    for ordinal in ordinals:
         segment = DurableRawSpoolSegment(root=tmp_path / "spool", definition_id=claim.definition_id,
                                         session_id=claim.session_id, connection_epoch=0, segment_ordinal=ordinal - 1)
         raw = _record(segment, ordinal)
@@ -114,6 +114,50 @@ def test_trade_prefix_progress_holds_raw_evidence_and_resumes_after_interruption
         verify()
     path.write_bytes(original)
     assert set(verify()) == set(fixture.manifests)
+
+
+def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archives(storage, tmp_path, monkeypatch):
+    from sqlalchemy import event
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_lineage
+
+    fixtures = [_raw_trade_fixture(storage, tmp_path, monkeypatch,
+        definition_id=f"sparse-prefix-{index}", ordinals=range(1, 6)) for index in range(4)]
+    prefixes, expected = [], set()
+    for index, fixture in enumerate(fixtures):
+        endpoints = (0, 4) if index % 2 == 0 else (1, 3)
+        for position in endpoints:
+            raw = fixture.raws[position]
+            prefixes.append({name: getattr(raw, name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+                "first_receive_ordinal": raw.receive_ordinal, "receive_ordinal": raw.receive_ordinal,
+                "requested_channel": "market_trades", "root_fact_version_id": f"root-{index}-{position}",
+            })
+            expected.add(fixture.manifests[position])
+        # Unrequested objects within the overall ordinal envelope must not be
+        # decoded or required merely because their manifests remain bound.
+        for position in set(range(5)) - set(endpoints):
+            with storage.database.session() as session:
+                key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+                    {"id": fixture.manifests[position]}).scalar_one()
+            fixture.store.local_path(key).unlink()
+    prefixes += [{**scope, "root_fact_version_id": f"overlap-{index}"}
+                 for index, scope in enumerate(prefixes[:6])]
+    bound = {identity for fixture in fixtures for identity in fixture.manifests}
+    returned = []
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if "raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement:
+            returned.append(cursor.rowcount)
+    event.listen(storage.database._engine, "after_cursor_execute", observe)
+    try:
+        with storage.database.session() as session:
+            references = fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[],
+                object_store=fixtures[0].store,
+                byte_verifier=ArchiveVerificationBatch(fixtures[0].store, limits=ArchiveVerificationLimits()),
+                book_prefix_ranges=prefixes, max_mapping_rows=len(prefixes), bound_manifest_ids=bound)
+        assert set(references) == expected
+        assert returned == [len(expected)], "overlapping sparse witnesses must not duplicate placements"
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", observe)
 
 
 def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage, tmp_path, monkeypatch):
