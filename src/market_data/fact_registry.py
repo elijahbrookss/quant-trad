@@ -326,7 +326,7 @@ class FactPayloadSchema:
     def __post_init__(self) -> None:
         schema_id = str(self.schema_id or "").strip().lower()
         fact_type = str(self.fact_type or "").strip().lower()
-        fields = tuple(self.fields)
+        fields = tuple(self.fields or ())
         if not schema_id or not fact_type or not fields:
             raise ValueError("market_fact_payload_schema_invalid: identity and fields are required")
         names = tuple(field.name for field in fields)

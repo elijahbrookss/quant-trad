@@ -124,6 +124,12 @@ def test_payload_schema_is_strict_versioned_and_hash_addressed() -> None:
         )
 
 
+@pytest.mark.parametrize("fields", [None, (), []])
+def test_empty_schema_fields_keep_contextual_validation_error(fields) -> None:
+    with pytest.raises(ValueError, match="market_fact_payload_schema_invalid: identity and fields are required"):
+        replace(get_fact_payload_schema("derivatives.funding_rate.v2"), fields=fields)
+
+
 def test_schema_contract_hash_matches_existing_canonical_encoding() -> None:
     for schema in supported_fact_payload_schemas():
         expected = hashlib.sha256(json.dumps(
