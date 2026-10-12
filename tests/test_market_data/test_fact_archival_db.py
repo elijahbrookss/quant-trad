@@ -513,7 +513,21 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
             ON market.fact_archive_material_aliases FOR EACH ROW
             EXECUTE FUNCTION market.test_slow_alias_insert()
         """))
-    fixture.archive.statement_timeout_ms = 2000
+    # Apply the artificial deadline only to the writes under test. Source
+    # selection retains the repository's normal timeout on slower CI hosts.
+    stage_rows = fixture.archive._stage_catalog_rows
+    def stage_with_alias_deadline(session, record_type, manifest_id, rows):
+        is_alias = record_type is fact_archival.MarketFactArchiveMaterialAliasRecord
+        if is_alias:
+            previous_timeout = session.execute(text("SHOW statement_timeout")).scalar_one()
+            session.execute(text("SELECT set_config('statement_timeout', '2000', true)"))
+        stage_rows(session, record_type, manifest_id, rows)
+        if is_alias:
+            session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                            {"timeout": previous_timeout})
+        # A failed INSERT aborts and rolls back the transaction, including its
+        # local timeout. Do not mask that failure with a reset in finally.
+    monkeypatch.setattr(fixture.archive, "_stage_catalog_rows", stage_with_alias_deadline)
     # A coarse batch is the control under the same row cost and deadline. It
     # must fail at the actual alias INSERT, leaving the entire page uncommitted.
     with monkeypatch.context() as coarse:
