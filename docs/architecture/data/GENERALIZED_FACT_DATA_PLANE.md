@@ -687,6 +687,17 @@ returned 14 mappings in 278 ms. The bindings were reconstructed from current
 prefix metadata because the failure log truncated its list, so this is a
 representative observation, not an exact replay or a throughput guarantee.
 
+The prefix query materializes the paired manifest selection before joining its
+mappings. PostgreSQL could otherwise flatten the semijoin and apply the exact
+manifest filter after mapping expansion. A later 19-endpoint lookup exceeded the
+five-second production statement limit with that flattened plan. Its bounded
+metadata reconstruction selected 19 manifests (1,219 declared records), compared
+with 352 manifests (22,281 records) before paired filtering; the materialized
+candidate returned 19 mappings in 404 ms in one read-only diagnostic. This is
+query-level evidence, not a whole-retention speedup or deployment receipt. The
+native sparse-prefix test checks the executed manifest subplan as well as exact
+references, overlapping witnesses and inaccessible intervening archive files.
+
 ### Exact Raw-Revision Evidence
 
 #### Hot Backlog And Reference Lifetime
