@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from functools import cached_property
 from typing import Any, Mapping, Sequence
 
 
@@ -325,9 +326,10 @@ class FactPayloadSchema:
     def __post_init__(self) -> None:
         schema_id = str(self.schema_id or "").strip().lower()
         fact_type = str(self.fact_type or "").strip().lower()
-        if not schema_id or not fact_type or not self.fields:
+        fields = tuple(self.fields or ())
+        if not schema_id or not fact_type or not fields:
             raise ValueError("market_fact_payload_schema_invalid: identity and fields are required")
-        names = tuple(field.name for field in self.fields)
+        names = tuple(field.name for field in fields)
         if len(names) != len(set(names)):
             raise ValueError(
                 f"market_fact_payload_schema_invalid: schema_id={schema_id} has duplicate fields"
@@ -350,6 +352,7 @@ class FactPayloadSchema:
                 )
         object.__setattr__(self, "schema_id", schema_id)
         object.__setattr__(self, "fact_type", fact_type)
+        object.__setattr__(self, "fields", fields)
         object.__setattr__(self, "query_fields", query_fields)
 
     @property
@@ -367,8 +370,9 @@ class FactPayloadSchema:
             "dataset_eligible": bool(self.dataset_eligible),
         }
 
-    @property
+    @cached_property
     def contract_hash(self) -> str:
+        # This definition is immutable; Fact documents and their hashes are not cached.
         encoded = json.dumps(
             self.contract, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )

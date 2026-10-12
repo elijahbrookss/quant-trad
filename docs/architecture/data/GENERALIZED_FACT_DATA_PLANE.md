@@ -163,6 +163,15 @@ The code and database share an immutable registry. Each row contains at least:
 - typed codec ID;
 - query-field declarations and required index/projection identities.
 
+The immutable in-memory payload schema defensively copies its field sequence to
+an immutable tuple and reuses its computed contract hash. `contract` still
+returns an independent document. This avoids rebuilding the same schema for
+every decoded Fact; it introduces no persisted cache or new registry. Fact
+payload, provenance, quality and row hashes remain freshly evaluated. Existing
+contract bytes, schema IDs, archive formats and frozen evidence are unchanged.
+This optimization is locally implemented; deployment and production performance
+qualification are separate.
+
 Registration fails when the code-owned contract hash differs from PostgreSQL.
 A write fails before persistence for an unknown schema, missing/unknown field,
 wrong JSON kind, invalid decimal/timestamp representation, domain violation,
