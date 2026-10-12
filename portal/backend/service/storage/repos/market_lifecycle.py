@@ -625,9 +625,13 @@ class PostgresMarketStorageLifecycleRepository:
             for row in [*raw_rows, *checkpoint_rows]:
                 held_count = int(row["canonical_dependency_count"]) or int(self.canonical_book_session_held(
                     session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"])))
+                # An immutable canonical hold already forbids expiration. Avoid
+                # probing every hot partition for a second, redundant blocker.
+                # None means not inspected, never proof that backlog is absent.
+                backlog = None if held_count else self.canonical_backlog_present(
+                    session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"]))
                 results.append({**dict(row), "canonical_dependency_count": held_count,
-                    "canonical_backlog_present": self.canonical_backlog_present(
-                    session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"]))})
+                    "canonical_backlog_present": backlog})
         return results
 
     def archive_target_status(

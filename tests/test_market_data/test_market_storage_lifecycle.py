@@ -340,15 +340,26 @@ def test_archive_expiration_rechecks_new_retention_pin_before_deletion() -> None
     assert repository.events[0]["reason"] == "retention pin appeared after planning"
 
 
-def test_canonical_archive_hold_blocks_planning_without_user_or_dataset_pins():
+@pytest.mark.parametrize("backlog", [None, False])
+def test_canonical_archive_hold_blocks_planning_without_user_or_dataset_pins(backlog):
     repository = _LifecycleRepository()
     rows = repository.list_archive_expiration_candidates()
     rows[0]["canonical_dependency_count"] = 1
+    rows[0]["canonical_backlog_present"] = backlog
     repository.list_archive_expiration_candidates = lambda **_: rows
     plan = _service(repository).plan(policy=MarketStorageLifecyclePolicy(), now=datetime(2026, 8, 5, tzinfo=UTC))
     held = next(item for item in plan["archive_expirations"] if item["target_id"] == "manifest-unpinned")
     assert held["eligible"] is False
     assert held["blockers"] == ["canonical_archive_dependency"]
+
+
+def test_unverified_backlog_without_a_canonical_hold_cannot_authorize_expiration():
+    repository = _LifecycleRepository()
+    rows = repository.list_archive_expiration_candidates()
+    rows[0]["canonical_backlog_present"] = None
+    repository.list_archive_expiration_candidates = lambda **_: rows
+    with pytest.raises(RuntimeError, match="market_storage_lifecycle_backlog_unverified.*manifest-unpinned"):
+        _service(repository).plan(policy=MarketStorageLifecyclePolicy(), now=datetime(2026, 8, 5, tzinfo=UTC))
 
 
 @pytest.mark.parametrize("kind", ["raw_manifest", "book_checkpoint"])

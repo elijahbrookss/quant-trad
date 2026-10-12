@@ -400,9 +400,16 @@ class MarketStorageLifecycleService:
                 blockers.append("explicit_retention_pin")
             if int(row.get("dataset_pin_count") or 0):
                 blockers.append("frozen_dataset_pin")
-            if int(row.get("canonical_dependency_count") or 0):
+            canonical_held = int(row.get("canonical_dependency_count") or 0) > 0
+            if canonical_held:
                 blockers.append("canonical_archive_dependency")
-            if bool(row.get("canonical_backlog_present")):
+            backlog = row.get("canonical_backlog_present", False)
+            if backlog is None and not canonical_held:
+                raise RuntimeError(
+                    "market_storage_lifecycle_backlog_unverified: "
+                    f"kind={row['target_kind']} id={row['target_id']}"
+                )
+            if bool(backlog):
                 blockers.append("canonical_hot_backlog")
             target_id = str(row["target_id"])
             operation_id = lifecycle_operation_id(

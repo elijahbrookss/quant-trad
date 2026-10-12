@@ -661,6 +661,16 @@ do not alter the boolean hold. No new index, reference authority or historical
 backfill is introduced. Planning lists `canonical_hot_backlog`; final expiry
 repeats the check. User-pin release cannot remove either class of canonical protection.
 
+Expiration planning skips the hot-backlog probe when an exact canonical edge or
+immutable book-session hold has already made the target ineligible. The internal
+candidate uses `canonical_backlog_present=null` to mean not inspected; it does
+not claim that hot references are absent. Such a candidate remains blocked by
+`canonical_archive_dependency`. An uninspected backlog without that hold fails
+planning loudly. Unheld candidates, target-status inspection and final expiration
+still perform the existing bounded witness checks. This avoids a measured
+5-second timeout across hot partitions for an already protected archive without
+changing retention authority, archive formats or historical data.
+
 The indexed query shape is not a hard resource bound. The lifecycle repository
 owns expiration-planning and final-target witness transactions with `SET LOCAL`
 ceilings of 5 seconds per statement and 64 MiB of temporary files. Stricter caller
