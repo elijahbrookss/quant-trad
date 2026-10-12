@@ -60,6 +60,7 @@ def _indicator_instance_section(meta: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": meta.get("id"),
         "type": meta.get("type"),
+        "version": meta.get("version") or "v1",
         "name": meta.get("name"),
         "params": dict(meta.get("params") or {}),
         "dependencies": list(meta.get("dependencies") or []),
@@ -200,6 +201,7 @@ def _raise_failed_job(
 # ===== Schemas =====
 class IndicatorInstanceIn(BaseModel):
     type: str
+    version: Optional[str] = None
     name: Optional[str] = None
     params: Dict[str, Any]
     dependencies: List[Dict[str, Any]] = Field(default_factory=list)
@@ -207,6 +209,7 @@ class IndicatorInstanceIn(BaseModel):
     color_palette: Optional[str] = None
 
 class IndicatorInstanceOut(BaseModel):
+    version: str = "v1"
     id: str
     type: str
     name: str
@@ -310,6 +313,7 @@ def create(body: IndicatorInstanceIn):
             dependencies=list(body.dependencies or []),
             color=body.color,
             color_palette=body.color_palette,
+            version=body.version,
         )
         return _indicator_read(meta)
     except ValueError as e:
@@ -328,6 +332,7 @@ def validate_config(body: IndicatorInstanceIn):
             dependencies=list(body.dependencies or []),
             color=body.color,
             color_palette=body.color_palette,
+            version=body.version,
         )
         return _indicator_read(meta)
     except ValueError as e:
@@ -339,6 +344,8 @@ def validate_config(body: IndicatorInstanceIn):
 @router.put("/{inst_id}", response_model=IndicatorReadOut)
 def update(inst_id: str, body: IndicatorInstanceIn):
     try:
+        if body.version is not None and body.version != get_instance_meta(inst_id).get("version", "v1"):
+            raise ValueError("Cannot change indicator version; create a new instance instead")
         color_provided = "color" in body.__fields_set__
         color_palette_provided = "color_palette" in body.__fields_set__
         logger.info(

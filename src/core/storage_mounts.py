@@ -58,20 +58,24 @@ def inspect_filesystem(
         capacity = os.statvfs(root)
         device_id = f"{os.major(device)}:{os.minor(device)}"
         actual_uuid = None
-        if expected_uuid:
-            properties = (udev_root / f"b{device_id}").read_text(encoding="utf-8")
+        # Observers need actual identity even without an operator-pinned UUID.
+        # Missing optional udev evidence stays unknown; required identity remains strict.
+        record = udev_root / f"b{device_id}"
+        if expected_uuid or record.exists():
+            properties = record.read_text(encoding="utf-8")
             uuids = [
                 line.removeprefix("E:ID_FS_UUID=")
                 for line in properties.splitlines()
                 if line.startswith("E:ID_FS_UUID=")
             ]
-            if len(uuids) != 1 or uuids[0] != expected_uuid:
+            if expected_uuid and (len(uuids) != 1 or uuids[0] != expected_uuid):
                 raise StorageMountError(
                     "storage_mount_identity_mismatch: "
                     f"path={root} device={device_id} expected_uuid={expected_uuid} "
                     f"actual_uuid={uuids}"
                 )
-            actual_uuid = uuids[0]
+            if len(uuids) == 1 and re.fullmatch(r"[A-Za-z0-9-]{4,128}", uuids[0]):
+                actual_uuid = uuids[0]
         read_only = bool(capacity.f_flag & os.ST_RDONLY)
         if require_writable and (
             read_only or not os.access(root, os.W_OK | os.X_OK)
@@ -114,13 +118,50 @@ def require_configured_archive_mount(
     on the same filesystem, including through symlinks and nested mounts.
     """
 
-    expected_uuid = os.environ.get("QT_MARKET_DATA_EXPECTED_UUID", "").strip()
+    return _require_mount(
+        configured_archive_root(),
+        os.environ.get("QT_MARKET_DATA_EXPECTED_UUID", "").strip(),
+        path=path, require_writable=require_writable, kind="archive",
+    )
+
+
+def configured_working_root(archive_root: Path | None = None) -> Path:
+    """Live spool/scratch placement; preserve the old paths unless configured."""
+    configured = os.environ.get("MARKET_STRUCTURE_WORKING_ROOT", "").strip()
+    if configured:
+        return Path(configured)
+    return Path(archive_root) if archive_root is not None else configured_archive_root()
+
+
+def require_configured_working_mount(
+    path: Path | None = None, *, require_writable: bool = True
+) -> FilesystemEvidence | None:
+    configured = os.environ.get("MARKET_STRUCTURE_WORKING_ROOT", "").strip()
+    expected = os.environ.get("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "").strip()
+    if not configured:
+        if expected:
+            raise StorageMountError("storage_working_root_required: UUID requires an explicit working root")
+        return require_configured_archive_mount(path, require_writable=require_writable)
+    if not expected and os.environ.get("QT_MARKET_DATA_EXPECTED_UUID", "").strip():
+        raise StorageMountError("storage_working_uuid_required: dedicated archive mode requires working filesystem identity")
+    return _require_mount(Path(configured), expected, path=path,
+                          require_writable=require_writable, kind="working")
+
+
+def require_configured_staging_mount(path: Path) -> FilesystemEvidence | None:
+    """Raw and checkpoint encoding stage on an admitted working or archive filesystem."""
+    configured = os.environ.get("MARKET_STRUCTURE_WORKING_ROOT", "").strip()
+    if configured and Path(path).resolve().is_relative_to(Path(configured).resolve()):
+        return require_configured_working_mount(path)
+    return require_configured_archive_mount(path)
+
+
+def _require_mount(configured_root, expected_uuid, *, path, require_writable, kind):
     if not expected_uuid:
         return None
-    configured_root = configured_archive_root()
     if not configured_root.is_absolute() or configured_root == Path("/"):
         raise StorageMountError(
-            "storage_mount_invalid: dedicated archive root must be absolute and not /"
+            f"storage_mount_invalid: dedicated {kind} root must be absolute and not /"
         )
     evidence = inspect_filesystem(
         configured_root,
@@ -129,14 +170,14 @@ def require_configured_archive_mount(
         require_writable=require_writable,
     )
     if Path(evidence.path) == Path("/"):
-        raise StorageMountError("storage_mount_invalid: archive root resolves to /")
+        raise StorageMountError(f"storage_mount_invalid: {kind} root resolves to /")
     if path is not None:
         try:
             root = Path(evidence.path)
             candidate = Path(path).resolve()
             if candidate != root and root not in candidate.parents:
                 raise StorageMountError(
-                    f"storage_path_outside_archive: path={candidate} root={root}"
+                    f"storage_path_outside_{kind}: path={candidate} root={root}"
                 )
             while not candidate.exists():
                 candidate = candidate.parent

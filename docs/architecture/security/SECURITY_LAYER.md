@@ -175,3 +175,14 @@ Quant-Trad risk points:
 - [ADR 0024: Provider Credential References](../decisions/0024-use-provider-credential-references.md)
 - [ADR 0048: Gate Agent Mutation And Research Promotion](../decisions/0048-gate-agent-mutation-and-research-promotion.md)
 - [ADR 0049: Keep Live Order Submission Closed](../decisions/0049-keep-live-order-submission-closed.md)
+
+## Runtime archive filesystem access
+
+For the single-node server, the trusted Docker runner grants bot containers a
+read-only bind of the configured archive directory and, in dedicated drive mode,
+read-only udev identity metadata. It does not share the backend's Docker socket,
+database files or live spool. The host path comes from operator-owned
+QT_MARKET_DATA_ROOT, never bot parameters. Mount path validation rejects root,
+relative, traversal and mount-option separator values. Archive readers retain
+checksum and filesystem UUID checks. This narrow read view does not change the
+existing trusted-worker database and credential boundaries described above.

@@ -64,6 +64,19 @@ def test_image_evidence_requires_matching_build_source_attestation(
     with pytest.raises(RuntimeError, match="source_attestation_mismatch"):
         provenance._verified_image_source_revision(tmp_path, revision)
 
+    # Maintenance has the immutable image environment, but intentionally no
+    # research SOURCE_* configuration and no Git checkout inside its image.
+    monkeypatch.delenv("SOURCE_TREE_HASH")
+    assert provenance._verified_image_source_revision(tmp_path, revision,
+        configured_tree_hash=tree_hash) == revision
+    with pytest.raises(RuntimeError, match="source_attestation_mismatch"):
+        provenance._verified_image_source_revision(tmp_path, "different-image",
+            configured_tree_hash=tree_hash)
+    monkeypatch.setenv("QT_IMAGE_SOURCE_TREE_HASH", "0"*64)
+    with pytest.raises(RuntimeError, match="source_attestation_mismatch"):
+        provenance._verified_image_source_revision(tmp_path, revision,
+            configured_tree_hash=tree_hash)
+
 
 def test_source_tree_attestation_covers_runtime_dependencies(tmp_path) -> None:
     for relative in source_tree_hash.ROOTS:

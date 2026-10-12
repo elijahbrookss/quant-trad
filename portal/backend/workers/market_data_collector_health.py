@@ -3,31 +3,58 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from portal.backend.service.storage.repos.market_collection import (
-    PostgresMarketCollectionRepository,
-    market_collection_repo,
-)
+if TYPE_CHECKING:
+    from portal.backend.service.storage.repos.market_collection import PostgresMarketCollectionRepository
+
+
+def _read_live_heartbeat(worker_prefix: str) -> list[dict[str, Any]]:
+    # A health check must not initialize/provision the application schema on
+    # every invocation. The worker owns startup validation and its heartbeat.
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import NullPool
+
+    dsn = os.environ.get("PG_DSN", "").strip()
+    if not dsn:
+        raise RuntimeError("market_data_collector_health_failed: PG_DSN is not configured")
+    engine = create_engine(dsn, poolclass=NullPool, hide_parameters=True,
+        connect_args={"connect_timeout": 2,
+            "options": "-c default_transaction_read_only=on -c statement_timeout=1500 -c lock_timeout=1000"})
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(text("""
+                SELECT worker_id, state, started_at, heartbeat_at, context, true AS alive
+                FROM market.collector_worker_state
+                WHERE expires_at > now() AND state NOT IN ('stopping', 'stopped')
+                  AND left(worker_id, length(:prefix)) = :prefix
+                ORDER BY heartbeat_at DESC, worker_id LIMIT 1
+            """), {"prefix": worker_prefix}).mappings().all()
+            return [dict(row) for row in rows]
+    finally:
+        engine.dispose()
 
 
 def live_worker_for_host(
     *,
-    repository: PostgresMarketCollectionRepository = market_collection_repo,
+    repository: PostgresMarketCollectionRepository | None = None,
     hostname: str | None = None,
+    storage_maintenance: bool = False,
 ) -> dict[str, Any]:
     """Return this container's live worker row or fail the health probe."""
 
     normalized_host = str(hostname or socket.gethostname()).strip()
     if not normalized_host:
         raise RuntimeError("market_data_collector_health_invalid: hostname is empty")
-    worker_prefix = f"market-data:{normalized_host}:"
+    worker_prefix = f"{'storage-maintenance' if storage_maintenance else 'market-data'}:{normalized_host}:"
+    rows = repository.list_worker_states(limit=1000) if repository is not None else _read_live_heartbeat(worker_prefix)
     matches = [
         dict(row)
-        for row in repository.list_worker_states(limit=1000)
+        for row in rows
         if isinstance(row, Mapping)
         and str(row.get("worker_id") or "").startswith(worker_prefix)
         and bool(row.get("alive"))
@@ -39,6 +66,11 @@ def live_worker_for_host(
         )
     latest = max(matches, key=lambda row: row.get("heartbeat_at"))
     context = dict(latest.get("context") or {})
+    if storage_maintenance:
+        lifecycle = dict(context.get("storage_lifecycle") or {})
+        if lifecycle.get("state") not in {"running", "degraded"}:
+            raise RuntimeError("storage_maintenance_health_failed: lifecycle is not running")
+        return latest
     continuous = dict(context.get("continuous_collectors") or {})
     if str(continuous.get("state") or "").lower() == "failed":
         raise RuntimeError(
@@ -50,7 +82,9 @@ def live_worker_for_host(
 
 def main() -> int:
     try:
-        row = live_worker_for_host()
+        if sys.argv[1:] not in ([], ["--storage-maintenance"]):
+            raise ValueError("worker_health_arguments_invalid")
+        row = live_worker_for_host(storage_maintenance=sys.argv[1:] == ["--storage-maintenance"])
     except Exception as exc:  # noqa: BLE001 - health probes fail closed
         print(str(exc), file=sys.stderr)
         return 1

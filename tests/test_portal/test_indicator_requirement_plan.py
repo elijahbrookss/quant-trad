@@ -77,7 +77,7 @@ def test_indicator_requirement_plan_includes_transitive_graph_warmup_and_stalene
     monkeypatch.setattr(
         requirements,
         "get_indicator_manifest",
-        lambda _type: SimpleNamespace(market_inputs=(_Input(),)),
+        lambda _type, version=None: SimpleNamespace(market_inputs=(_Input(),)),
     )
     monkeypatch.setattr(
         requirements,

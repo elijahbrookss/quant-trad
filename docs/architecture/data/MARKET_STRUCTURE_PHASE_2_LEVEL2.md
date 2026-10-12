@@ -206,6 +206,15 @@ only after replaying the same BIP session before and after backend replacement
 with an identical fingerprint. Missing old objects were not regenerated or
 silently replaced.
 
+## Checkpoint staging placement
+
+Book-checkpoint encoding uses the existing admitted staging boundary: temporary
+Parquet files may live on the configured working filesystem or archive filesystem.
+Final immutable checkpoints still publish through the archive object store. A
+wrong working-filesystem identity refuses before creating temporary files and
+cannot fall back to archive admission. This applies to both live collection and
+normal retained-spool recovery.
+
 ## Verification And Remaining Work
 
 Phase 2 tests prove deterministic randomized replay, exact duplicate and

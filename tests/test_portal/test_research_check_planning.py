@@ -459,3 +459,73 @@ def test_off_grid_requirement_excludes_end_boundary_and_keeps_real_interior_gap(
     ) == [{"start": _iso(base + timedelta(minutes=60)),
            "end": _iso(base + timedelta(minutes=90)),
            "reason": "source_bound_interval_unrecorded"}]
+
+
+@pytest.mark.parametrize("policy", [
+    {"mode": "current"}, {"mode": "exact"},
+    {"mode": "exact", "source_identity_key": "source-a"},
+    {"mode": "exact", "provider_binding": {"provider": "provider-a"}},
+    {"mode": "allowlist", "source_identity_keys": ["source-a"]},
+])
+@pytest.mark.parametrize("offset_minutes", [0, 15])
+def test_candle_header_planning_matches_record_gaps_and_source_policy(policy, offset_minutes):
+    base = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=offset_minutes)
+    source = SimpleNamespace(identity_key="source-a", provider="provider-a", venue="venue-a",
+                             source_kind="test", adapter_version="test.v1")
+    times = [base + timedelta(minutes=minute) for minute in (30, 90)]
+
+    class RecordStore(_Store):
+        def read_series_records(self, **kwargs):
+            return [SimpleNamespace(source_identity_key="source-a", source=source,
+                                    fact=SimpleNamespace(open_time=value)) for value in times]
+
+        def list_gap_evidence(self, **kwargs):
+            return []
+
+    class HeaderStore(RecordStore):
+        calls = 0
+
+        def read_series_records(self, **kwargs):
+            raise AssertionError("candle planning must not hydrate payloads")
+
+        def inspect_candle_selection(self, **kwargs):
+            assert kwargs["as_of_commit_seq"] == 77
+            self.calls += 1
+            return {"row_count": 2, "timeframe_seconds": 1800,
+                    "first_observation_at": times[0],
+                    "source_summary": {"sources": {"source-a": {
+                        "provider": source.provider, "venue": source.venue,
+                        "source_kind": source.source_kind, "adapter_version": source.adapter_version,
+                    }}, "counts": {"source-a": 2}},
+                    "observation_intervals": [{"first": value, "last": value} for value in times]}
+
+    requirement = {"alias": "bars", "instrument_id": "instrument-1", "fact_type": "candle.ohlcv",
+                   "contract_version": "candle.ohlcv.v1", "timeframe_seconds": 1800,
+                   "dimensions": {}, "alignment": "exact_interval",
+                   "required_start": base + timedelta(minutes=5),
+                   "required_end": base + timedelta(minutes=120), "source_policy": policy}
+    expected = _coverage_for_requirement(requirement, store=RecordStore(), as_of_commit_seq=77)
+    projected = HeaderStore()
+    actual = _coverage_for_requirement(requirement, store=projected, as_of_commit_seq=77)
+    assert actual == expected
+    assert actual[0][0]["start"] == _iso(base + timedelta(minutes=60))
+    assert projected.calls == (1 if policy["mode"] in {"current", "allowlist"}
+                               or policy.get("source_identity_key") else 2)
+
+
+def test_candle_header_projection_failure_never_falls_back_to_payloads():
+    class BrokenStore(_Store):
+        def inspect_candle_selection(self, **kwargs):
+            raise RuntimeError("projection unavailable")
+
+        def read_series_records(self, **kwargs):
+            raise AssertionError("must not hide projection errors")
+
+    with pytest.raises(RuntimeError, match="projection unavailable"):
+        _coverage_for_requirement({
+            "alias": "bars", "instrument_id": "instrument-1", "fact_type": "candle.ohlcv",
+            "contract_version": "candle.ohlcv.v1", "timeframe_seconds": 1800,
+            "dimensions": {}, "alignment": "exact_interval",
+            "required_start": datetime(2026, 1, 1, tzinfo=UTC),
+            "required_end": datetime(2026, 1, 2, tzinfo=UTC), "source_policy": {"mode": "current"},
+        }, store=BrokenStore(), as_of_commit_seq=77)

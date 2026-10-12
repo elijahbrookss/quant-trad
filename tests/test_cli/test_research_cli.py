@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import json
 import urllib.parse
 import urllib.request
@@ -721,3 +723,55 @@ def test_canonical_research_check_cli_uses_shared_operation_routes(monkeypatch):
     assert calls[3][2]["mode"] == "evidence"
     assert calls[3][2]["dataset_id"] == "mds_1"
     assert calls[5][2] == {"title": "Evidence-backed"}
+
+
+def test_single_attempt_cli_uses_distinct_fail_closed_route(monkeypatch):
+    observed = _capture_request(monkeypatch, b'{"job_id":"job-1","status":"queued","attempts":0,"max_attempts":1}')
+    request = {"scope":{},"detector":{},"dataset_id":"mds_1"}
+    assert main(["--no-audit-log","research","check","run","--request-json",json.dumps(request),"--dispatch","--single-attempt"]) == 0
+    assert observed["path"] == "/api/research/jobs/checks/run-once"
+    assert observed["body"] == {**request,"mode":"evidence"}
+
+
+def test_single_attempt_without_dispatch_fails_before_network(monkeypatch):
+    monkeypatch.setattr(urllib.request,"urlopen",lambda *a,**kw: (_ for _ in ()).throw(AssertionError("network must not be called")))
+    assert main(["--no-audit-log","research","check","run","--request-json",'{"scope":{},"detector":{}}',"--single-attempt"]) != 0
+
+
+@pytest.mark.parametrize("action", ["adopt", "publish", "history"])
+def test_question_cli_uses_shared_contract(monkeypatch, action):
+    observed = _capture_request(monkeypatch, b'{"publications":[]}')
+    bodies = {
+        "adopt": {"question": "Q", "scope": "S"},
+        "publish": {
+            "request_id": "publication-1", "expected_previous_hash": None,
+            "conclusion": "Inconclusive", "limitations": "Synthetic evidence", "scope": "S",
+            "references": [{"item_id": "claim-1", "kind": "hypothesis", "role": "contradicts",
+                            "content_hash": "a" * 64}],
+        },
+        "history": None,
+    }
+    args = ["--no-audit-log", "research", "question", action, "study-1"]
+    if action != "history":
+        args += ["--request-json", json.dumps(bodies[action])]
+    assert main(args) == 0
+    suffix = "question" if action == "adopt" else "publications"
+    assert observed == {
+        "method": "GET" if action == "history" else "POST",
+        "path": f"/api/research/items/study-1/{suffix}",
+        "body": bodies[action],
+    }
+
+
+@pytest.mark.parametrize("args,path", [
+    (["definitions"], "/api/research/checks/definitions"),
+    (["definition", "event_fact_analysis", "--version", "11"], "/api/research/checks/definitions/event_fact_analysis/11"),
+])
+def test_research_check_catalog_uses_shared_get_contract(monkeypatch, capsys, args, path):
+    from portal.backend.service.research import catalog
+
+    expected = catalog.list_check_definitions() if args == ["definitions"] else catalog.get_check_definition("event_fact_analysis", "11")
+    observed = _capture_request(monkeypatch, json.dumps(expected).encode())
+    assert main(["--no-audit-log", "research", "check", *args]) == 0
+    assert observed == {"method": "GET", "path": path, "body": None}
+    assert json.loads(capsys.readouterr().out) == expected

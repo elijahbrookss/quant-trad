@@ -305,7 +305,9 @@ def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     assert "previous_revision" in deploy
     assert "credentials-coinbase)" in deploy
     assert "qt)" in deploy
-    assert 'compose exec -T backend /app/scripts/qt "$@"' in deploy
+    # Executable routing tests cover ordinary backend commands and the one
+    # explicitly admitted maintenance operation through the same host lock.
+    assert 'run_qt_command "$@"' in deploy
     assert "will be enrolled without credentials" in deploy
     assert "credentials are optional" in deploy
     assert "load provider credentials before judging" not in deploy
@@ -593,3 +595,10 @@ def test_alert_preview_cleanup_replaces_legacy_provisioning_root_mount() -> None
 
     deploy = (ROOT / "scripts/automation/server_deploy.sh").read_text()
     assert 'QT_ALERT_CLEANUP_PROVISIONING_ROOT="$cleanup_provisioning_root"' in deploy
+
+
+def test_database_readiness_uses_application_transport_not_bootstrap_socket():
+    health = _server_compose()["services"]["tsdb"]["healthcheck"]["test"]
+    # The pinned image's initialization server explicitly disables TCP; a
+    # socket-only probe can report healthy before initialization completes.
+    assert health == ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']

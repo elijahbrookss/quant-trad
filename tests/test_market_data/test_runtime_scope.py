@@ -117,8 +117,9 @@ def _binding(runtime_config: dict | None = None) -> dict:
     }
 
 
+@pytest.mark.parametrize("include_runtime_features", [True, False])
 def test_market_data_scope_reads_only_the_bound_dataset_and_restores_context(
-    monkeypatch,
+    monkeypatch, include_runtime_features,
 ) -> None:
     observed: dict = {}
     monkeypatch.setattr(
@@ -151,6 +152,7 @@ def test_market_data_scope_reads_only_the_bound_dataset_and_restores_context(
             "2026-01-01T00:00:00Z",
             "2026-01-02T00:00:00Z",
             "1h",
+            include_runtime_features=include_runtime_features,
         )
 
     assert observed["dataset_id"] == _binding()["dataset_id"]

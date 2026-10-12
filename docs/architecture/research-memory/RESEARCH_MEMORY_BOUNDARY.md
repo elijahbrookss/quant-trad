@@ -72,6 +72,16 @@ Research memory must not:
 - fetch provider data outside existing data-boundary services,
 - reconstruct report truth or runtime truth.
 
+## Research Memory Text Admission
+
+Item creation and explicit Check-to-Observation admission accept an optional
+body of at most 8,192 characters, matching the existing persistence column.
+Their HTTP request contracts reject an oversized body with a field-specific
+422 response before invoking the service. Accepted text is never truncated;
+non-ASCII characters count as characters, not encoded bytes. Keep long Study
+material in its structured payload or linked evidence and use the body for a
+readable summary. This does not change stored records or database schema.
+
 ## Research Check Semantics
 
 A research check is a bounded analytical run that asks:
@@ -331,6 +341,14 @@ fallback rank metric when intent is missing. Missing rank keys, metric
 directions, grouping fields, or required dimensions fail loud before presenting
 misleading evidence.
 
+Saved Check comparisons expose each result's emitted `descriptive_outcomes`
+and `outcome_resolution` alongside its timeframe. These projections preserve
+population definitions, unresolved values, horizon kinds and inference limits
+without recalculating events or treating absent values as zero. Legacy
+`forward_summary` deltas still apply only to legacy `outcomes.summary` metrics;
+the descriptive projection does not create paired-population, common-clock or
+causal-effect statistics. Those calculations remain Check-owned work.
+
 ## Memory Graph
 
 The storage model is intentionally small:
@@ -402,3 +420,101 @@ Useful relations include:
 - [ADR 0037: Keep Research Presentations Metric-Contract Driven](../decisions/0037-keep-research-presentations-metric-contract-driven.md)
 - [ADR 0062: Use Frozen Bindings For Durable Check Evidence](../decisions/0062-use-frozen-bindings-for-durable-check-evidence.md)
 - [ADR 0065: Use Explicit Frozen-Check Admission For New Research Observations](../decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md)
+
+## First-return comparison
+
+Definition 9 / evaluator 8 of `event_fact_analysis` owns original-POC distance
+outcomes for Market Profile v2 public first returns. Fixed classification and
+sample lags preserve original endpoints. It exposes initial distance, entry and
+center state, unresolved reasons, group eligibility, profile/day contributions,
+overlap and leave-one-profile-out influence. Earlier definition versions retain
+their pinned meaning. See [ADR 0075](../decisions/0075-pin-first-return-to-original-range-and-indicator-version.md).
+
+
+## Question-owned interpretation publication
+
+A Research Memory Study may be explicitly adopted as a question using
+`POST /api/research/items/{id}/question` with `question` and `scope`. This is
+separate from the executable `research_science.study.StudyDefinition`. A
+hypothesis remains a testable claim; an Observation remains a finding under its
+existing admission classification. Neither adoption nor publication grants
+execution permission, changes scientific accounting, or certifies causality,
+statistical validity, profitability or trading authority.
+
+The existing Study JSONB owns `question_contract` (`research_question.v1`).
+Generic item creation cannot write that reserved envelope. Existing Study IDs,
+prior payload fields and scientific records remain untouched. Unadopted Studies
+are `legacy_uncontracted`; adoption is explicit and idempotent and makes no
+retroactive preregistration claim. Runtime performs no adoption or backfill.
+
+`POST /api/research/items/{id}/publications` appends a published interpretation
+revision containing conclusion, limitations, scope and exact required references.
+A reference names a Research Memory target ID, expected kind and role
+(`supports`, `contradicts`, `context`, `decision`, `deviation` or
+`replay_dependency`). Check references require exact result and evidence hashes;
+the service validates the canonical frozen Check contract and retained Dataset
+identity without executing a Check or replay. Other reasoning references require
+the content hash returned by the item read and preserve the exact hashed content
+snapshot. An adopted Study snapshot includes its question and prior interpretation
+history; later source publications cannot change that citation. Nested histories
+count toward the same 1 MiB publication bound and are never truncated to fit.
+Local paths and caller-provided result envelopes are not evidence locators.
+Additional decisions or deviations can be retained in existing Study/Observation
+records and referenced by exact content identity; no new artifact platform is
+introduced.
+
+Publication retains selected graph relationships and target relationship snapshots
+as they existed at publication. Later claim, finding, or link edits cannot alter
+that history. New findings or corrections require another revision; previous
+publication hashes remain citable. Canonical Check payloads are referenced rather
+than copied. Publication does not assert that an actual replay or recovery ran.
+Completeness means `reference_complete_interpretation` only.
+
+A PostgreSQL row lock serializes publication for a question. Each request includes
+a request ID and expected previous publication hash (null for the first revision).
+Matching retries return the original revision; conflicting retries and stale
+writers fail. The complete append occurs in one transaction, so interruption
+cannot leave a partial completed revision. History is bounded to 1 MiB per
+question and 100 references per revision; reaching the bound rejects the write
+without discarding history. Larger histories require an explicit future storage
+decision, not silent truncation. Sealed Dataset identities in private scientific
+protocol manifests are denied at publication; protocol custody remains authoritative.
+
+API publication history, `qt research question history <id>`, and V2 Study
+inspection expose the same stored revisions and completion meaning. CLI adoption
+and publication use `--request-json` and the shared `ResearchOperations` adapter.
+Draft prose remains flexible outside the reserved envelope.
+
+### Adoption and rollout plan
+
+This implementation requires no table/column migration, DSN, or data backfill.
+Before any separately approved deployment, qualify disposable DB concurrency and
+recovery, retain the intended source revision, and review exact rollout action.
+Adopt individual legacy Studies only with an explicit question/scope request;
+repeat identical adoption safely, and resolve conflicting adoption manually.
+Do not reinterpret legacy Check hashes or refund failed scientific attempts.
+An older application can still read the JSON payload but cannot provide the new
+publication workflow. Rolling back code preserves stored histories; it does not
+retract published citations or authorize deleting the reserved envelope.
+
+
+The 1 MiB bound is an initial resource limit, not a new question lifecycle. At
+capacity publication fails atomically with `question_publication_history_limit`,
+preserving every existing citation and the durable question. Do not split or
+abandon a question merely to bypass the bound. A reviewed expansion can move the
+existing revisions into a question-owned append-only revision table, retaining
+question IDs, revision numbers, publication hashes and snapshot bytes. Explicit
+idempotent extraction and compatibility reads would be required; this change
+implements no extraction or additional resource. Lightweight future browsing can
+project question/latest revision descriptors using JSONB SQL operators instead
+of fetching the entire payload; existing inventory/detail reads still fetch it.
+
+
+Frozen market-data Check references also revalidate retained source material
+through the existing frozen-series data owner. Existing report-bound Checks
+instead resolve their exact retained run-report binding through the report owner;
+no Dataset semantics are forced onto them and RunReportDTO does not own the
+interpretation. Published references retain the Check owner's assurance
+classification. Small reasoning snapshots explicitly remain
+`reasoning_snapshot_not_calculated_evidence`, including manual/legacy findings;
+a copied result inside a note does not acquire canonical calculated authority.

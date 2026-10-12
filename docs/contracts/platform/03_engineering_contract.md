@@ -123,3 +123,14 @@ healthy state.
 
 Preserve correctness and determinism first.
 Performance work is valid when semantics remain unchanged.
+
+## Explicit candle coarsening
+
+Canonical candle coarsening is an explicit preparation mutation over a verified
+frozen source Dataset, never a consumer read fallback. Complete same-source slots
+are required. Output known-at cannot precede any pinned input known-at or target
+interval close. Persist the exact source snapshot and per-bucket input lineage;
+do not replace provider Facts, fill gaps, or reconstruct unpinned correction
+history. An immutable derivation must reject a different existing source even
+when the legacy candle value hash matches. Existing unguarded ingest behavior
+and historical hashes remain unchanged.

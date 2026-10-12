@@ -211,9 +211,12 @@ def test_schema_contract_conflicts_are_rejected_without_a_database_query():
 def test_selected_identity_reads_deduplicate_overlaps_and_bound_queries():
     class IdSession(Session):
         def execute(self, query, parameters):
-            assert "WHERE versions.id = ANY(:fact_ids)" in str(query)
+            if "FROM market.fact_identities" not in str(query):
+                assert "WHERE versions.id = ANY(:fact_ids)" in str(query)
+                assert "versions.storage_day = ANY(:storage_days)" in str(query)
+                assert parameters["storage_days"] == [BASE.date()]
             self.calls.append((str(query), parameters))
-            self.matches = [{**_row(), "id": identity} for identity in parameters["fact_ids"]]
+            self.matches = [{**_row(), "id": identity, "storage_day": BASE.date()} for identity in parameters["fact_ids"]]
             return self
 
     session = IdSession()
@@ -222,7 +225,7 @@ def test_selected_identity_reads_deduplicate_overlaps_and_bound_queries():
     assert reader.read_rows_by_ids(session, []) == {}
     actual = reader.read_rows_by_ids(session, [*identities, identities[0]])
     assert set(actual) == set(identities)
-    assert [len(params["fact_ids"]) for _, params in session.calls] == [1000, 1]
+    assert [len(params["fact_ids"]) for _, params in session.calls] == [1000, 1000, 1, 1]
 
 
 @pytest.mark.parametrize("returned_count", [0, 2])

@@ -28,6 +28,12 @@ _DEFAULTS_FILE = _CONFIG_DIR / "defaults.yaml"
 _ENV_LOADED = False
 _SETTINGS_CACHE: "AppSettings | None" = None
 _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
+    ("QT_STORAGE_INVENTORY_PATH", ("storage", "inventory_path")),
+    ("QT_STORAGE_MAINTENANCE_LIMITS_PATH", ("storage", "maintenance_limits_path")),
+    ("QT_ARCHIVE_SHARED_GROUP_ID", ("storage", "archive_shared_group_id")),
+    ("QT_STORAGE_MAINTENANCE_OWNER", ("storage", "maintenance_owner")),
+    ("QT_HISTORY_READ_CACHE_BYTES", ("storage", "history_cache_bytes")),
+    ("QT_HISTORY_READ_CACHE_MIN_FREE_BYTES", ("storage", "history_cache_min_free_bytes")),
     ("QT_LOGGING_LEVEL", ("logging", "level")),
     ("QT_LOGGING_DEBUG", ("logging", "debug")),
     ("QT_LOGGING_ENV_NAME", ("logging", "env_name")),
@@ -62,6 +68,12 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_OBSERVABILITY_CAPACITY_SAMPLE_ENABLED", ("observability", "capacity_sample_enabled")),
     ("QT_OBSERVABILITY_CAPACITY_SAMPLE_INTERVAL_SECONDS", ("observability", "capacity_sample_interval_seconds")),
     ("QT_OBSERVABILITY_CAPACITY_SAMPLE_RETENTION_DAYS", ("observability", "capacity_sample_retention_days")),
+    ("QT_RESEARCH_GLOBAL_SERIALIZATION", ("async_jobs", "research_global_serialization")),
+    ("QT_RESEARCH_EXECUTION_SECONDS", ("async_jobs", "research_execution_seconds")),
+    ("QT_RESEARCH_INPUT_ROWS", ("async_jobs", "research_input_rows")),
+    ("QT_RESEARCH_INPUT_BYTES", ("async_jobs", "research_input_bytes")),
+    ("QT_RESEARCH_EVIDENCE_BYTES", ("async_jobs", "research_evidence_bytes")),
+    ("QT_RESEARCH_RESULT_BYTES", ("async_jobs", "research_result_bytes")),
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
@@ -538,6 +550,12 @@ class AsyncJobSettings:
     quantlab_job_poll_interval_seconds: float
     quantlab_result_cache_ttl_seconds: float
     reclaim_interval_seconds: float
+    research_execution_seconds: float = 3600.0
+    research_global_serialization: bool = False
+    research_input_rows: int = 5000000
+    research_input_bytes: int = 2147483648
+    research_evidence_bytes: int = 268435456
+    research_result_bytes: int = 16777216
 
 
 @dataclass(frozen=True)
@@ -754,6 +772,39 @@ class ReportSettings:
     materialization: ReportMaterializationSettings
 
 
+def _archive_shared_group(value):
+    if value is None:
+        return None
+    if type(value) is str and value.isascii() and value.isdecimal():
+        value = int(value)
+    if type(value) is not int or not 0 < value < 2**32 - 1:
+        raise ValueError("storage_archive_shared_group_invalid")
+    return value
+
+
+@dataclass(frozen=True)
+class StorageSettings:
+    inventory_path: str = "/run/quanttrad/storage-inventory.json"
+    maintenance_limits_path: str | None = None
+    archive_shared_group_id: int | None = None
+    maintenance_owner: str = "collector"
+    history_cache_bytes: int = 0
+    history_cache_min_free_bytes: int = 0
+
+    def __post_init__(self):
+        for name in ("history_cache_bytes", "history_cache_min_free_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int or not 0 <= value < 2**63:
+                raise ValueError(f"history_cache_configuration_invalid: field={name}")
+        if self.history_cache_bytes and not self.history_cache_min_free_bytes:
+            raise ValueError("history_cache_configuration_invalid: explicit minimum free bytes required")
+        if self.maintenance_owner not in ("collector", "dedicated"):
+            raise ValueError("storage_maintenance_owner_invalid")
+        value = self.archive_shared_group_id
+        if value is not None and (type(value) is not int or not 0 < value < 2**32 - 1):
+            raise ValueError("storage_archive_shared_group_invalid")
+
+
 @dataclass(frozen=True)
 class AppSettings:
     profile: str
@@ -764,6 +815,7 @@ class AppSettings:
     async_jobs: AsyncJobSettings
     workers: WorkersSettings
     market_data_lifecycle: MarketStorageLifecyclePolicy
+    storage: StorageSettings
     bot_runtime: BotRuntimeSettings
     providers: ProviderSettings
     security: SecuritySettings
@@ -901,6 +953,12 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             reclaim_interval_seconds=_coerce_float(
                 async_jobs_payload.get("reclaim_interval_seconds"), 30.0, minimum=0.0
             ),
+            research_global_serialization=_coerce_bool(async_jobs_payload.get("research_global_serialization"), False),
+            research_execution_seconds=_coerce_float(async_jobs_payload.get("research_execution_seconds"), 3600.0, minimum=0.1),
+            research_input_rows=_coerce_int(async_jobs_payload.get("research_input_rows"), 5000000, minimum=1),
+            research_input_bytes=_coerce_int(async_jobs_payload.get("research_input_bytes"), 2147483648, minimum=1),
+            research_evidence_bytes=_coerce_int(async_jobs_payload.get("research_evidence_bytes"), 268435456, minimum=1),
+            research_result_bytes=_coerce_int(async_jobs_payload.get("research_result_bytes"), 16777216, minimum=1),
         ),
         workers=WorkersSettings(
             indicators=WorkerGroupSettings(
@@ -950,6 +1008,18 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                     minimum=1.0,
                 ),
             ),
+        ),
+        storage=StorageSettings(
+            history_cache_bytes=int(str(_coerce_mapping(payload.get("storage")).get("history_cache_bytes", 0))),
+            history_cache_min_free_bytes=int(str(_coerce_mapping(payload.get("storage")).get("history_cache_min_free_bytes", 0))),
+            maintenance_owner=_coerce_mapping(payload.get("storage")).get(
+                "maintenance_owner", "collector"),
+            archive_shared_group_id=_archive_shared_group(
+                _coerce_mapping(payload.get("storage")).get("archive_shared_group_id")),
+            inventory_path=_coerce_str(_coerce_mapping(payload.get("storage")).get("inventory_path"),
+                                       "/run/quanttrad/storage-inventory.json"),
+            maintenance_limits_path=_coerce_optional_str(
+                _coerce_mapping(payload.get("storage")).get("maintenance_limits_path")),
         ),
         market_data_lifecycle=MarketStorageLifecyclePolicy.from_mapping(
             market_data_lifecycle_payload

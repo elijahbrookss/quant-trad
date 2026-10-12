@@ -66,3 +66,36 @@ def test_manifest_rejects_mutation_after_hashing() -> None:
 
     with pytest.raises(ValueError, match="manifest_hash_mismatch"):
         StreamEnrollmentManifest.from_dict(raw)
+
+
+@pytest.mark.parametrize("path,expected", [
+    (MANIFEST, "a39169ad14ee3fde29d732781776cfcf5c001e3b595ae7f19618ffcddb9c9db9"),
+    (L2_MANIFEST, "fa29d8793e00d61828762e4fd3be766cbd8e383fe82f8656a48440615532b762"),
+])
+def test_existing_reviewed_manifest_hash_does_not_gain_an_optional_field(path, expected):
+    manifest = load_stream_enrollment_manifest(path)
+    assert manifest.manifest_hash == expected
+    assert all("max_inflight_segments" not in row for row in manifest.to_dict()["enrollments"])
+
+
+def test_reviewed_queue_limit_roundtrips_and_is_part_of_manifest_identity():
+    raw = load_stream_enrollment_manifest(MANIFEST).to_dict()
+    original_hash = raw.pop("manifest_hash")
+    raw["enrollments"][0]["max_inflight_segments"] = 64
+    manifest = StreamEnrollmentManifest.from_dict(raw)
+    assert manifest.manifest_hash != original_hash
+    restored = StreamEnrollmentManifest.from_dict(manifest.to_dict())
+    assert restored.enrollments[0].max_inflight_segments == 64
+    assert restored.manifest_hash == manifest.manifest_hash
+    changed = manifest.to_dict()
+    changed["enrollments"][0]["max_inflight_segments"] = 65
+    with pytest.raises(ValueError, match="manifest_hash_mismatch"):
+        StreamEnrollmentManifest.from_dict(changed)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "64"])
+def test_reviewed_queue_limit_rejects_invalid_values(value):
+    raw = json.loads(MANIFEST.read_text())
+    raw["enrollments"][0]["max_inflight_segments"] = value
+    with pytest.raises(ValueError, match="max_inflight_segments must be a positive integer"):
+        StreamEnrollmentManifest.from_dict(raw)

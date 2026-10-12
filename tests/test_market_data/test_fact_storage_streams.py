@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -11,7 +11,7 @@ def _stream_fixture(monkeypatch, batches):
     selected = session.execute.return_value
     selected.scalars.return_value.partitions.return_value = iter(batches)
     storage = PostgresCanonicalFactStorageRepository()
-    hydrate = MagicMock(side_effect=lambda _session, ids: {identity: {"id": identity} for identity in reversed(ids)})
+    hydrate = MagicMock(side_effect=lambda _session, ids, **kwargs: {identity: {"id": identity} for identity in reversed(ids)})
     monkeypatch.setattr(storage, "read_rows_by_ids", hydrate)
     return storage, session, selected, hydrate
 
@@ -23,7 +23,7 @@ def test_stream_hydrates_lazily_in_selected_order_and_closes_early(monkeypatch):
         hydrate.assert_not_called()
         assert next(rows) == {"id": "b"}
         assert next(rows) == {"id": "a"}
-        hydrate.assert_called_once_with(session, ["b", "a"])
+        hydrate.assert_called_once_with(session, ["b", "a"], _decoded_page=ANY)
     selected.close.assert_called_once()
     assert list(rows) == []
     session.execute.assert_called_once_with(statement, {"scope": 1}, execution_options={"stream_results": True, "yield_per": 2})

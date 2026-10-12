@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+import threading
+
+import pytest
 
 from market_data.structure import ProductContract
 
@@ -211,3 +214,113 @@ def test_supervisor_adapters_supply_domain_projection_to_generic_runtime() -> No
             "channels": ("level2", "heartbeats"),
         }
     )
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_supervisor_stop_propagates_finalizer_failure(cancelled):
+    entered = threading.Event()
+
+    class FailingDrain(_Adapter):
+        async def run(self, *, stop_requested, **kwargs):
+            entered.set()
+            while not stop_requested():
+                await asyncio.sleep(0.01)
+            if cancelled:
+                raise asyncio.CancelledError("fixture interrupted finalizer")
+            raise RuntimeError("fixture canonical acknowledgement failed")
+
+    supervisor = ContinuousCollectorSupervisor(
+        owner_id="failed-drain", repository=_Repository(),
+        operations_repository=_OperationsRepository(),
+        registry=CollectorAdapterRegistry((FailingDrain(),)), poll_seconds=0.25)
+    supervisor.start()
+    assert entered.wait(3)
+    with pytest.raises(RuntimeError, match="supervisor_stop_failed"):
+        supervisor.stop(timeout_seconds=3)
+    snapshot = supervisor.snapshot()
+    assert snapshot["state"] == "failed"
+    assert "supported" in snapshot["errors"]
+    assert not supervisor._thread.is_alive()
+    # Repeated stop cannot turn a completed failed drain into success.
+    with pytest.raises(RuntimeError, match="supervisor_stop_failed"):
+        supervisor.stop(timeout_seconds=3)
+
+
+def test_supervisor_stop_propagates_supervisor_thread_failure():
+    entered = threading.Event()
+    class FailedRepository(_Repository):
+        def list_stream_definitions(self):
+            entered.set()
+            raise RuntimeError("fixture discovery failed")
+
+    supervisor = ContinuousCollectorSupervisor(owner_id="failed-thread",
+        repository=FailedRepository(), registry=CollectorAdapterRegistry((_Adapter(),)))
+    supervisor.start()
+    assert entered.wait(3)
+    with pytest.raises(RuntimeError, match="supervisor_stop_failed"):
+        supervisor.stop(timeout_seconds=3)
+    assert supervisor.snapshot()["state"] == "failed"
+
+
+def test_supervisor_stop_refuses_unrecovered_failure_during_restart_backoff():
+    class FailedRun(_Adapter):
+        async def run(self, **kwargs):
+            raise RuntimeError("fixture retained unpublished WAL")
+
+    supervisor = ContinuousCollectorSupervisor(owner_id="backoff-drain",
+        repository=_Repository(), operations_repository=_OperationsRepository(),
+        registry=CollectorAdapterRegistry((FailedRun(),)), poll_seconds=0.25)
+    supervisor.start()
+    deadline = time.monotonic()+3
+    while "supported" not in supervisor.snapshot()["errors"] and time.monotonic()<deadline:
+        time.sleep(0.01)
+    with pytest.raises(RuntimeError, match="supervisor_stop_failed"):
+        supervisor.stop(timeout_seconds=3)
+    assert "retained unpublished WAL" in supervisor.snapshot()["errors"]["supported"]
+
+
+def test_supervisor_cancelled_drain_timeout_is_not_a_clean_stop(monkeypatch):
+    entered = threading.Event()
+    original_wait = asyncio.wait
+    async def bounded_wait(tasks, *, timeout):
+        assert timeout == 30.0
+        return await original_wait(tasks, timeout=0.01)
+    monkeypatch.setattr(asyncio, "wait", bounded_wait)
+
+    class StalledDrain(_Adapter):
+        async def run(self, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+    supervisor = ContinuousCollectorSupervisor(owner_id="timed-out-drain",
+        repository=_Repository(), operations_repository=_OperationsRepository(),
+        registry=CollectorAdapterRegistry((StalledDrain(),)), poll_seconds=0.25)
+    supervisor.start()
+    assert entered.wait(3)
+    with pytest.raises(RuntimeError, match="supervisor_stop_failed"):
+        supervisor.stop(timeout_seconds=3)
+    assert "drain_timeout" in supervisor.snapshot()["errors"]["supported"]
+
+
+def test_supervisor_successful_recovery_clears_prior_runtime_failure():
+    recovered = threading.Event()
+    class Recovers(_Adapter):
+        attempts = 0
+        async def run(self, *, stop_requested, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("fixture recoverable prior failure")
+            recovered.set()
+            while not stop_requested():
+                await asyncio.sleep(0.01)
+            return {"status": "stopped"}
+    supervisor = ContinuousCollectorSupervisor(owner_id="recovered-drain",
+        repository=_Repository(), operations_repository=_OperationsRepository(),
+        registry=CollectorAdapterRegistry((Recovers(),)), poll_seconds=0.25)
+    supervisor.start()
+    try:
+        assert recovered.wait(5)
+    finally:
+        supervisor.stop(timeout_seconds=3)
+    assert supervisor.snapshot()["state"] == "stopped"
+    assert "supported" not in supervisor.snapshot()["errors"]

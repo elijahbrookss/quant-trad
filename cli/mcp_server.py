@@ -542,6 +542,10 @@ class QuantTradMcpServer:
             _required_str(arguments, "job_id")
         )
 
+    def _tool_cancel_research_job(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        _require_confirm(arguments, "cancelling a research job interrupts its computation")
+        return self._research_operations().cancel_job(_required_str(arguments, "job_id"))
+
     def _tool_get_research_job_result(
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1296,6 +1300,14 @@ class QuantTradMcpServer:
                     {"job_id": _string_schema()}, required=["job_id"]
                 ),
                 "handler": self._tool_get_research_job_status,
+            },
+            "cancel_research_job": {
+                "description": "Request an individual research job stop. A request is not acknowledgement of stopped execution. Requires confirm=true.",
+                "inputSchema": _object_schema(
+                    {"job_id": _string_schema(), "confirm": _boolean_schema(default=False)},
+                    required=["job_id"],
+                ),
+                "handler": self._tool_cancel_research_job,
             },
             "get_research_job_result": {
                 "description": "Read the canonical result of a completed asynchronous research operation.",

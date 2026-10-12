@@ -8,12 +8,13 @@ from typing import Any, Mapping
 from indicators.config import DataContext, IndicatorExecutionContext
 from indicators.manifest import resolve_manifest_params
 
-from .manifest import MANIFEST
+from .manifest import MANIFEST, FIRST_RETURN_MANIFEST
 
 
 class MarketProfileIndicator:
     NAME = MANIFEST.type
     MANIFEST = MANIFEST
+    MANIFEST_VERSIONS = {"v1": MANIFEST, "v2": FIRST_RETURN_MANIFEST}
 
     @classmethod
     def resolve_config(

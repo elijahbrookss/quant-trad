@@ -221,7 +221,7 @@ def _resolve_indicator_graph(
                 "backtest_strategy_identity_invalid: "
                 f"indicator {normalized_id} has no type"
             )
-        manifest = get_indicator_manifest(indicator_type)
+        manifest = get_indicator_manifest(indicator_type, meta.get("version"))
         bindings = normalize_dependency_bindings(meta.get("dependencies"))
         expected_dependencies = list(manifest.dependencies)
         resolved_bindings: list[dict[str, str]] = []

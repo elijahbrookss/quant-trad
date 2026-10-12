@@ -1,6 +1,9 @@
 """Research memory service and check orchestration."""
 
 from __future__ import annotations
+from .execution_limits import bounded_research_execution, research_execution_scope
+from core.execution_control import measured_execution, consume_execution_json, execution_checkpoint
+from portal.backend.db.session import db
 
 import logging
 import uuid
@@ -152,6 +155,9 @@ class ResearchEvaluationCache:
 
 
 def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
+    from .publication import KEY
+    if KEY in _mapping_or_empty(payload.get("payload")):
+        raise ValueError("question_contract_write_reserved: use explicit question adoption/publication")
     kind = _normalize_choice(payload.get("kind"), "kind", RESEARCH_ITEM_KINDS)
     if kind == "research_check":
         raise ValueError(
@@ -180,7 +186,11 @@ def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def get_research_item(item_id: str) -> dict[str, Any]:
-    return _project_evidence_classification(repository.get_item(item_id))
+    from .publication import content_identity
+    item = _project_evidence_classification(repository.get_item(item_id))
+    if item.get("kind") != "research_check":
+        item["content_hash"] = content_identity(item)
+    return item
 
 
 def list_research_items(
@@ -496,6 +506,15 @@ def _definition_evidence_classification(definition: CheckDefinition) -> str:
 def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
     projected = dict(item)
     if str(projected.get("kind") or "") != "research_check":
+        if projected.get("kind") == "study":
+            from .publication import KEY, SCHEMA, verify_history, _assert_access
+            contract = (projected.get("payload") or {}).get(KEY)
+            projected["question_classification"] = "legacy_uncontracted"
+            if isinstance(contract, Mapping) and contract.get("schema_version") == SCHEMA:
+                verify_history(contract, str(projected["id"]))
+                with db.session() as session:
+                    _assert_access(projected, session)
+                projected["question_classification"] = "contracted_question"
         return projected
     payload = projected.get("payload")
     schema_version = (
@@ -866,6 +885,7 @@ def _evaluate_legacy_research_check(
     }
 
 
+@bounded_research_execution
 def get_research_check_requirements(payload: Mapping[str, Any]) -> dict[str, Any]:
     mode = str(payload.get("mode") or CHECK_MODE_PREVIEW).strip().lower()
     family = str(payload.get("check_family") or SUPPORTED_CHECK_FAMILY).strip()
@@ -903,6 +923,7 @@ def get_research_check_requirements(payload: Mapping[str, Any]) -> dict[str, Any
     }
 
 
+@bounded_research_execution
 def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Resolve a durable Check plan and optionally freeze its exact inputs."""
 
@@ -1036,6 +1057,7 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
     }
 
 
+@bounded_research_execution
 def evaluate_research_check(
     payload: Mapping[str, Any],
     *,
@@ -1067,10 +1089,24 @@ def run_research_check(
 ) -> dict[str, Any]:
     """Persist explicit frozen evidence; preview has its own evaluate operation."""
 
-    built = build_research_check_evidence(payload)
-    return persist_built_research_check_evidence(built, session=session)
+    # One deadline/admission slot spans computation and the owned transaction.
+    # Validate before commit; do not reinterpret an acknowledged commit as a
+    # failure merely because the deadline expires on the return path.
+    with research_execution_scope(check_on_exit=False):
+        built = build_research_check_evidence(payload)
+        if session is not None:
+            result = persist_built_research_check_evidence(built, session=session)
+            consume_execution_json("result_bytes", result)
+            execution_checkpoint()
+            return result
+        with db.session() as owned_session:
+            result = persist_built_research_check_evidence(built, session=owned_session)
+            consume_execution_json("result_bytes", result)
+            execution_checkpoint()
+        return result
 
 
+@bounded_research_execution
 def build_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Compute one evidence envelope without holding a persistence transaction."""
 
@@ -1101,6 +1137,7 @@ def build_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+@measured_execution("persistence")
 def persist_built_research_check_evidence(
     built: Mapping[str, Any],
     *,
@@ -1398,6 +1435,7 @@ def create_observation_from_check_evidence(
     }
 
 
+@bounded_research_execution
 def replay_research_check(check_id: str) -> dict[str, Any]:
     """Replay v2 evidence through the same provider-free canonical execution path."""
 
@@ -1547,6 +1585,7 @@ def _prepare_check_request_payload(
     )
 
 
+@bounded_research_execution
 def sweep_research_checks(payload: Mapping[str, Any]) -> dict[str, Any]:
     request = dict(payload or {})
     check_family = str(request.get("check_family") or "").strip()
@@ -2124,6 +2163,9 @@ def _check_comparison_side(item: Mapping[str, Any], result: Mapping[str, Any]) -
         "recommendation": result.get("recommendation"),
         "detector": dict(result.get("detector") or {}),
         "outcomes": dict(result.get("outcomes") or {}),
+        "descriptive_outcomes": dict(result.get("descriptive_outcomes") or {}),
+        "outcome_resolution": dict(result.get("outcome_resolution") or {}),
+        "timeframe": item.get("timeframe"),
     }
 
 

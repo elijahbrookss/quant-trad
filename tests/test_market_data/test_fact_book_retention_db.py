@@ -19,8 +19,7 @@ from tests.test_market_data.test_fact_reclamation_db import _physical
 pytestmark = pytest.mark.db
 
 
-@pytest.mark.parametrize("split_sources", [False, True, "handoff", "legacy", "paged"])
-def test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(storage, tmp_path, monkeypatch, split_sources):
+def _cold_book_handoff(storage, tmp_path, monkeypatch, split_sources):
     legacy_page = split_sources == "legacy"
     paged = split_sources == "paged"
     if legacy_page or paged:
@@ -209,14 +208,25 @@ def test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(stora
     from portal.backend.service.storage.repos import market_lifecycle
     monkeypatch.setattr(market_lifecycle, "db", storage.database)
     cutoff = BASE + timedelta(days=1)
-    candidates = market_storage_lifecycle_repository.list_archive_expiration_candidates(
-        raw_trade_cutoff=cutoff, raw_l2_cutoff=cutoff, checkpoint_cutoff=cutoff,
-        compacted_source_cutoff=cutoff, limit=20)
+    with monkeypatch.context() as planning:
+        def redundant_backlog(*args, **kwargs):
+            pytest.fail("a permanent canonical hold must avoid the hot-backlog probe during planning")
+        planning.setattr(PostgresMarketStorageLifecycleRepository, "canonical_backlog_present",
+                         staticmethod(redundant_backlog))
+        candidates = market_storage_lifecycle_repository.list_archive_expiration_candidates(
+            raw_trade_cutoff=cutoff, raw_l2_cutoff=cutoff, checkpoint_cutoff=cutoff,
+            compacted_source_cutoff=cutoff, limit=20)
     assert len(candidates) == 5
     assert all(row["canonical_dependency_count"] > 0 for row in candidates)
-    assert not any(row["canonical_backlog_present"] for row in candidates)
+    assert all(row["canonical_backlog_present"] is None for row in candidates)
     # The anchor is session-scoped, not a blanket "archives exist" hold.
     from tests.test_market_data.test_fact_raw_lineage_db import _raw_trade_fixture
     unrelated = _raw_trade_fixture(storage, tmp_path, monkeypatch)
     status = unrelated.structures.archive_retention_status(target_kind="raw_manifest", target_id=unrelated.manifests[0])
     assert status["canonical_dependency_count"] == 0 and status["pinned"] is False
+    return fixture
+
+
+@pytest.mark.parametrize("split_sources", [False, True, "handoff", "legacy", "paged"])
+def test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(storage, tmp_path, monkeypatch, split_sources):
+    _cold_book_handoff(storage, tmp_path, monkeypatch, split_sources)

@@ -661,7 +661,7 @@ def test_plan_resolves_open_interest_as_latest_known_primary_fact(monkeypatch) -
             ),
         ),
     )
-    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type: manifest)
+    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type, version=None: manifest)
     plan = derive_backtest_dataset_plan(
         bot=_bot(),
         strategy=strategy,
@@ -711,7 +711,7 @@ def test_plan_resolves_funding_as_latest_known_primary_fact(monkeypatch) -> None
             ),
         ),
     )
-    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type: manifest)
+    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type, version=None: manifest)
     plan = derive_backtest_dataset_plan(
         bot=_bot(),
         strategy=strategy,

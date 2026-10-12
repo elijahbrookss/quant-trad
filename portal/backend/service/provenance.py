@@ -20,8 +20,14 @@ REPORT_INPUT_FINGERPRINT_SCHEMA_VERSION = "report_input_fingerprint.v1"
 REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION = "portal_report_materialization_storage.v2"
 
 
-def _verified_image_source_revision(repo_root: Path, configured: str) -> str:
-    configured_tree_hash = str(os.getenv("SOURCE_TREE_HASH") or "").strip()
+def _verified_image_source_revision(repo_root: Path, configured: str, *,
+                                    configured_tree_hash: str | None = None) -> str:
+    # Research normally supplies SOURCE_TREE_HASH. A fixed image-only operator
+    # can supply the already admitted image hash without inventing research env
+    # settings in a maintenance container; the immutable attestation and image
+    # environment must still agree with both requested values.
+    configured_tree_hash = (str(os.getenv("SOURCE_TREE_HASH") or "").strip()
+                            if configured_tree_hash is None else configured_tree_hash)
     attestation_path = repo_root / ".qt-source-attestation.json"
     try:
         attestation = json.loads(attestation_path.read_text(encoding="utf-8"))

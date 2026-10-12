@@ -102,6 +102,7 @@ def test_ci_topology_matches_workflow_jobs() -> None:
         "deployment-contract",
         "clean-database-bootstrap",
         "deployment-rehearsal",
+        "committed-recovery",
     )
     assert set(jobs) == set(expected_jobs)
 
@@ -110,18 +111,38 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     )
     assert "Prove clean current-schema bootstrap" in bootstrap_steps
     assert "Run PostgreSQL-backed contract tests" in bootstrap_steps
+    assert "Verify PostgreSQL filesystem namespace" in bootstrap_steps
     assert bootstrap_steps.index("Prove clean current-schema bootstrap") < bootstrap_steps.index(
         "Run PostgreSQL-backed contract tests"
     )
 
+    assert bootstrap_steps.index("Prove clean current-schema bootstrap") < bootstrap_steps.index(
+        "Verify PostgreSQL filesystem namespace"
+    ) < bootstrap_steps.index("Run PostgreSQL-backed contract tests")
+    commands = {step["name"]: step.get("run", "") for step in jobs["clean-database-bootstrap"]["steps"]}
+    namespace_test = "tests/test_market_data/test_header_namespace_db.py"
+    assert f"./scripts/ci/run_test_suite.sh db {namespace_test}" in commands["Verify PostgreSQL filesystem namespace"]
+    assert f"--ignore={namespace_test}" in commands["Run PostgreSQL-backed contract tests"]
+
+    runtime_matrix = jobs["committed-recovery"]["strategy"]["matrix"]["runtime"]
+    assert runtime_matrix == ["current", "24357ff387776822f676ae2a8b1cce7f209c313e"]
+    recovery_steps = {step.get("name"): step for step in jobs["committed-recovery"]["steps"]}
+    attestation = recovery_steps["Attest and pack disposable qualification evidence"]["run"]
+    assert "GITHUB_SHA" in attestation and "GITHUB_RUN_ATTEMPT" in attestation
+    assert "qualification-source.json" in attestation and ".qt-source-attestation.json" in attestation
+    deployment_commands = [step.get("run", "") for step in jobs["deployment-contract"]["steps"]]
+    storage_commands = [command for command in deployment_commands if "run_test_suite.sh storage-demo " in command]
+    assert len(storage_commands) == 1
+    assert "tests/test_market_data/test_storage_end_to_end_db.py" in storage_commands[0]
+
     topology = _read("docs/engineering/testing/ci-test-topology.md")
     documented_jobs = tuple(
-        re.findall(r"^\| [1-5] \| `([^`]+)` \|", topology, flags=re.MULTILINE)
+        re.findall(r"^\| [1-6] \| `([^`]+)` \|", topology, flags=re.MULTILINE)
     )
     assert documented_jobs == expected_jobs
     normalized = _squash(topology)
-    assert "the workflow defines exactly five jobs" in normalized
-    assert "two sequential steps in this fourth job" in normalized
+    assert "the workflow defines exactly six jobs" in normalized
+    assert "three sequential steps in this fourth job" in normalized
     assert "they are not separate workflow jobs" in normalized
 
 

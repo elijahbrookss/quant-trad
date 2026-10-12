@@ -3,18 +3,40 @@ set -euo pipefail
 
 SUITE="${1:-}"
 if [[ -z "$SUITE" ]]; then
-  echo "usage: $0 <pr|contracts|runtime-reporting|backend|full|db|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
+  echo "usage: $0 <pr|contracts|runtime-reporting|backend|full|db|storage-demo|incremental-recovery|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
   exit 2
 fi
 
 USE_DOCKER="${CI_USE_DOCKER:-0}"
-if [[ "$SUITE" == "db" ]]; then
+if [[ "$SUITE" == "db" || "$SUITE" == "storage-demo" || "$SUITE" == "incremental-recovery" ]]; then
   USE_DOCKER=1
 fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
+SCOPE="$SUITE"
+if [[ "$SUITE" == "db" ]]; then
+  SCOPE="all-db"
+  [[ "$#" -eq 1 ]] || SCOPE="focused-db"
+fi
+export QT_CI_IMMEDIATE_FAILURE=1
+export QT_CI_TEST_PHASES="${QT_CI_TEST_PHASES:-0}"
+phase_start() {
+  current_phase="$1"
+  phase_started=$SECONDS
+  printf 'ci_phase event=start phase=%s suite=%s scope=%s source_revision=%s source_tree_hash=%s project=%s\n' \
+    "$current_phase" "$SUITE" "$SCOPE" "${SOURCE_REVISION:-unknown}" "${SOURCE_TREE_HASH:-unknown}" "${test_project:-host}"
+}
+phase_end() {
+  printf 'ci_phase event=end phase=%s elapsed_seconds=%s status=%s\n' \
+    "$current_phase" "$((SECONDS-phase_started))" "$1"
+  current_phase=""
+}
 run_pytest_host() {
   local cmd="$1"
-  bash -lc "$cmd"
+  local status=0
+  phase_start execution
+  bash -lc "$cmd" || status=$?
+  phase_end "$status"
+  return "$status"
 }
 
 run_pytest_docker() (
@@ -40,12 +62,36 @@ run_pytest_docker() (
   export QT_TEST_POSTGRES_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
   export QT_TEST_POSTGRES_DB="qt_test_${test_token}"
   compose=(docker compose --project-name "$test_project" -f "$COMPOSE_FILE")
+  if [[ "$SUITE" == "storage-demo" || "$SUITE" == "incremental-recovery" ]]; then
+    compose+=(-f docker/test/storage-demo.compose.yml)
+  fi
+
+  if [[ "$SUITE" == "incremental-recovery" ]]; then
+    compose+=(-f docker/test/incremental-application.compose.yml)
+  fi
 
   cleanup_test_stack() {
     original_status=$?
     trap - EXIT
+    if [[ -n "${current_phase:-}" ]]; then phase_end "$original_status"; fi
+    phase_start cleanup
     cleanup_status=0
+    if [[ "$original_status" -ne 0 ]]; then
+      # This project has only generated test credentials/data. Preserve startup
+      # diagnostics before removing its failed database; never inspect peers.
+      if ! "${compose[@]}" logs --no-color --tail 120 timescaledb >&2; then
+        echo "ci_runner_database_logs_unavailable: project=$test_project" >&2
+      fi
+      local database_id
+      database_id="$("${compose[@]}" ps --all --quiet timescaledb)" || database_id=""
+      if [[ "$database_id" =~ ^[0-9a-f]{64}$ ]]; then
+        if ! docker inspect --format '{{json .State}}' "$database_id" >&2; then
+          echo "ci_runner_database_status_unavailable: project=$test_project" >&2
+        fi
+      fi
+    fi
     "${compose[@]}" down --volumes --remove-orphans --rmi local || cleanup_status=$?
+    phase_end "$cleanup_status"
     if [[ "$original_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
       original_status=$cleanup_status
     fi
@@ -53,8 +99,17 @@ run_pytest_docker() (
   }
   trap cleanup_test_stack EXIT
 
-  "${compose[@]}" build test
+  phase_start build
+  if [[ "$SUITE" == "incremental-recovery" ]]; then
+    "${compose[@]}" build timescaledb test
+  else
+    "${compose[@]}" build test
+  fi
+  phase_end 0
+  phase_start execution
   "${compose[@]}" run --rm \
+    -e QT_CI_IMMEDIATE_FAILURE=1 -e QT_CI_TEST_PHASES="$QT_CI_TEST_PHASES" \
+    -e QT_SCHEMA_TEMPLATE_PILOT="${QT_SCHEMA_TEMPLATE_PILOT:-0}" \
     -e SOURCE_REVISION="$source_revision" \
     -e SOURCE_TREE_HASH="$source_tree_hash" \
     test bash -lc '
@@ -63,12 +118,21 @@ run_pytest_docker() (
       echo "ci_runner_wait_script_missing_or_unreadable: path=/app/scripts/wait-for-db.sh" >&2
       exit 1
     fi
-    bash /app/scripts/wait-for-db.sh bash -lc "$1"
+    export QT_CI_READY_STARTED="$(date +%s)"
+    printf "ci_phase event=start phase=readiness\n"
+    bash /app/scripts/wait-for-db.sh bash -lc '\''
+      printf "ci_phase event=end phase=readiness elapsed_seconds=%s status=0\n" "$(($(date +%s)-QT_CI_READY_STARTED))"
+      exec bash -lc "$1"
+    '\'' _ "$1"
   ' _ "$cmd"
+  phase_end 0
 )
 
 run_suite() {
   local cmd="$1"
+  export SOURCE_REVISION="${SOURCE_REVISION:-$(git rev-parse HEAD)}"
+  export SOURCE_TREE_HASH="${SOURCE_TREE_HASH:-$(python scripts/provenance/source_tree_hash.py --git-revision "$SOURCE_REVISION")}"
+  printf 'ci_scope suite=%s scope=%s broad_db=%s\n' "$SUITE" "$SCOPE" "$([[ "$SCOPE" == all-db ]] && echo true || echo false)"
   if [[ "$USE_DOCKER" == "1" ]]; then
     run_pytest_docker "$cmd"
   else
@@ -102,12 +166,19 @@ case "$SUITE" in
   full)
     run_suite "pytest -q"
     ;;
-  db)
+  db|storage-demo|incremental-recovery)
     # Optional pytest arguments narrow a disposable DB iteration without
     # weakening isolation or relying on a developer's ambient PG_DSN.
     shift
     printf -v db_pytest_args '%q ' "$@"
-    if [[ "$#" -eq 0 ]]; then db_pytest_args=""; fi
+    if [[ "$#" -eq 0 ]]; then
+      db_pytest_args=""
+      if [[ "$SUITE" == "storage-demo" ]]; then
+        db_pytest_args="tests/test_market_data/test_storage_end_to_end_db.py -s -o cache_dir=/tmp/qt-storage-demo-pytest-cache"
+      elif [[ "$SUITE" == "incremental-recovery" ]]; then
+        db_pytest_args="tests/test_market_data/test_incremental_application_db.py -s -o cache_dir=/tmp/qt-incremental-pytest-cache"
+      fi
+    fi
     run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db ${db_pytest_args}"
     ;;
   core)

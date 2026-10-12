@@ -1,0 +1,211 @@
+# Fixed first-release SSD/HDD wiring. The preserving cutover owns activation;
+# this file alone is not permission to restart clients or skip host admission.
+# All host directories/files must already exist. No fallback mount creation.
+x-storage-environment: &storage-environment
+  # Compose env_file supplies values; runtimes do not read the host secrets file.
+  QT_DISABLE_DOTENV: "1"
+  QT_STORAGE_MAINTENANCE_OWNER: dedicated
+  QT_ARCHIVE_SHARED_GROUP_ID: ${QT_ARCHIVE_SHARED_GROUP_ID:?Prepared archive shared group is required}
+  MARKET_STRUCTURE_STORAGE_ROOT: /qt-history/archives
+  MARKET_STRUCTURE_WORKING_ROOT: /app/logs/market-structure
+  QT_MARKET_DATA_EXPECTED_UUID: ${QT_MARKET_DATA_EXPECTED_UUID:?HDD filesystem UUID is required}
+  QT_MARKET_DATA_WORKING_EXPECTED_UUID: ${QT_MARKET_DATA_WORKING_EXPECTED_UUID:?SSD filesystem UUID is required}
+  QT_STORAGE_INVENTORY_PATH: /run/quanttrad/storage-inventory.json
+
+x-existing-secrets: &existing-secrets
+  type: bind
+  source: ${QT_SERVER_ENV_FILE:-../secrets.env}
+  target: /app/secrets.env
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-history-mount: &history-mount
+  type: bind
+  source: ${QT_STORAGE_HDD_ROOT:?Prepared HDD root is required}
+  target: /qt-history
+  bind:
+    create_host_path: false
+
+x-working-mount: &working-mount
+  type: bind
+  source: ${QT_MARKET_DATA_WORKING_ROOT:?Existing SSD working root is required}
+  # Preserve existing absolute spool references.
+  target: /app/logs/market-structure
+  bind:
+    create_host_path: false
+
+x-inventory-mount: &inventory-mount
+  type: bind
+  source: ${QT_STORAGE_INVENTORY_HOST_PATH:?Prepared storage inventory file is required}
+  target: /run/quanttrad/storage-inventory.json
+  read_only: true
+  bind:
+    create_host_path: false
+
+# Operator-provisioned private SSD directory. Never place these keys on the HDD.
+x-recovery-secrets: &recovery-secrets
+  type: bind
+  source: ${QT_STORAGE_RECOVERY_SECRETS_ROOT:?Prepared private SSD recovery key directory is required}
+  target: /run/quanttrad/recovery
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  tsdb:
+    # Preserve the qualified database image; ordinary application builds cannot replace it.
+    image: ${QT_STORAGE_DATABASE_IMAGE:?Qualified immutable database image is required}
+    build: !reset null
+    pull_policy: never
+    volumes:
+      - *history-mount
+      - *recovery-secrets
+      - storage-recovery-socket:/var/run/postgresql
+
+  backend:
+    pull_policy: never
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Candidate application account; activation must separately admit source ownership.
+    user: "1000:1000"
+    group_add:
+      - ${QT_ARCHIVE_SHARED_GROUP_ID:?Prepared archive shared group is required}
+      - ${QT_DOCKER_SOCKET_GID:?Docker socket group is required for backend}
+    environment:
+      <<: *storage-environment
+      # Bot readers receive the HDD archive subtree, read-only, through the
+      # existing runner. This host path must equal QT_STORAGE_HDD_ROOT/archives.
+      QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:?HDD archive host path is required}
+      QT_BOT_RUNTIME_NETWORK: ${QT_STORAGE_NETWORK:?Existing application network is required}
+      # Optional disposable history cache; the SSD root must be prepared separately.
+      QT_RESEARCH_GLOBAL_SERIALIZATION: "true"
+      QT_WORKERS_RESEARCH_PROCESSES: "1"
+      QT_HISTORY_READ_CACHE_BYTES: ${QT_HISTORY_READ_CACHE_BYTES:-0}
+      QT_HISTORY_READ_CACHE_MIN_FREE_BYTES: ${QT_HISTORY_READ_CACHE_MIN_FREE_BYTES:-0}
+    # Capacity status uses the registered SSD mount. UID1000 cannot traverse
+    # its private UID70 PostgreSQL directories; physical inspection is maintenance-only.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - *history-mount
+      - *working-mount
+      - *inventory-mount
+      - *existing-secrets
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+
+  initialize:
+    pull_policy: never
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "1000:1000"
+    group_add:
+      - ${QT_ARCHIVE_SHARED_GROUP_ID:?Prepared archive shared group is required}
+    environment: *storage-environment
+    volumes:
+      - *history-mount
+      - *working-mount
+      - *inventory-mount
+      - *existing-secrets
+
+  market-data-collector:
+    pull_policy: never
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "1000:1000"
+    group_add:
+      - ${QT_ARCHIVE_SHARED_GROUP_ID:?Prepared archive shared group is required}
+    environment: *storage-environment
+    volumes:
+      - *history-mount
+      - *working-mount
+      - *inventory-mount
+      - *existing-secrets
+
+  storage-maintenance:
+    pull_policy: never
+    image: quanttrad-backend:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: storage-maintenance.quanttrad
+    user: "70:70"
+    group_add:
+      - ${QT_ARCHIVE_SHARED_GROUP_ID:?Prepared archive shared group is required}
+    pid: "service:tsdb"
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 1m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      <<: *storage-environment
+      PYTHONPATH: /app/src:/app
+      PG_DSN: "postgresql+psycopg2://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@tsdb:5432/${POSTGRES_DB:?POSTGRES_DB is required}"
+      QT_CONFIG_PROFILE: prod
+      QT_LOGGING_DEBUG: "false"
+      QT_LOGGING_LOKI_URL: ""
+      QT_STORAGE_UDEV_ROOT: /run/qt-host-udev/data
+      # Maintenance never mounts or opens the original private SSD spool.
+      MARKET_STRUCTURE_WORKING_ROOT: /qt-history/archives
+      QT_MARKET_DATA_WORKING_EXPECTED_UUID: ${QT_MARKET_DATA_EXPECTED_UUID:?HDD filesystem UUID is required}
+      QT_MARKET_DATA_LIFECYCLE_ENABLED: "true"
+      QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED: "true"
+      QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED: "true"
+      QT_STORAGE_MAINTENANCE_LIMITS_PATH: /run/quanttrad/storage-maintenance.json
+    command: [python, -m, portal.backend.workers.storage_maintenance]
+    depends_on:
+      tsdb:
+        condition: service_healthy
+      initialize:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -m, portal.backend.workers.market_data_collector_health, --storage-maintenance]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - *history-mount
+      - *inventory-mount
+      - *recovery-secrets
+      - storage-recovery-socket:/var/run/postgresql
+      - type: bind
+        source: /run/udev
+        target: /run/qt-host-udev
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH:?Reviewed storage maintenance limits file is required}
+        target: /run/quanttrad/storage-maintenance.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [quanttrad]
+    labels:
+      loki.job: quanttrad
+      loki.service: storage-maintenance
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  postgres-data:
+    name: ${QT_STORAGE_POSTGRES_VOLUME:?Existing PostgreSQL volume is required}
+    external: true
+  storage-recovery-socket:
+    name: ${QT_STORAGE_RECOVERY_SOCKET_VOLUME:?Prepared recovery socket volume is required}
+    external: true
+
+networks:
+  quanttrad:
+    # Clear the base driver: this overlay uses an existing external network.
+    driver: ""
+    name: ${QT_STORAGE_NETWORK:?Existing application network is required}
+    external: true

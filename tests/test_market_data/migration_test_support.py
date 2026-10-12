@@ -3,13 +3,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
+import hashlib
+import json
+from contextlib import ExitStack
+from time import monotonic
+from pathlib import Path
 import re
-from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 
 from portal.backend.db import (
     InstrumentRecord,
@@ -58,9 +63,16 @@ def _isolated_parent_dsn() -> str:
 
 
 @contextmanager
-def fresh_migration_database(label: str) -> Iterator[str]:
-    """Yield an empty, uniquely named database and always remove it afterward."""
+def fresh_migration_database(label: str, *, install_extensions: bool = True,
+                             _template_name: str | None = None) -> Iterator[str]:
+    """Yield an isolated database and remove it afterward.
 
+    Catalog/query-only fixtures may omit extension installation; existing
+    migration fixtures retain the TimescaleDB/pgcrypto default.
+    """
+
+    if _template_name is not None and not re.fullmatch(r"qt_migration_pristine_[a-f0-9]{16}", _template_name):
+        raise ValueError("private_schema_template_name_invalid")
     safe_label = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:16]
     if not safe_label:
         raise ValueError("migration database label must contain a letter or digit")
@@ -82,16 +94,18 @@ def fresh_migration_database(label: str) -> Iterator[str]:
     try:
         with admin_engine.connect() as conn:
             conn.exec_driver_sql(
-                f"CREATE DATABASE {quoted_name} TEMPLATE template0"
+                f'CREATE DATABASE {quoted_name} TEMPLATE "{_template_name}"'
+                if _template_name else f"CREATE DATABASE {quoted_name} TEMPLATE template0"
             )
         database_created = True
 
-        target_engine = create_engine(target_url, future=True)
-        with target_engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-        target_engine.dispose()
-        target_engine = None
+        if install_extensions:
+            target_engine = create_engine(target_url, future=True)
+            with target_engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+            target_engine.dispose()
+            target_engine = None
 
         yield target_url.render_as_string(hide_password=False)
     finally:
@@ -100,39 +114,181 @@ def fresh_migration_database(label: str) -> Iterator[str]:
         try:
             if database_created:
                 with admin_engine.connect() as conn:
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) "
-                            "FROM pg_stat_activity "
-                            "WHERE datname = :database_name "
-                            "AND pid <> pg_backend_pid()"
-                        ),
-                        {"database_name": database_name},
-                    ).all()
-                    deadline = monotonic() + 5
-                    while True:
-                        remaining_pids = conn.execute(
-                            text(
-                                "SELECT array_agg(pid ORDER BY pid) "
-                                "FROM pg_stat_activity "
-                                "WHERE datname = :database_name "
-                                "AND pid <> pg_backend_pid()"
-                            ),
-                            {"database_name": database_name},
-                        ).scalar_one()
-                        if not remaining_pids:
-                            break
-                        if monotonic() >= deadline:
-                            raise RuntimeError(
-                                "migration_database_cleanup_timeout: "
-                                f"database={database_name} pids={remaining_pids}"
-                            )
-                        sleep(0.05)
+                    # Fence new user connections before PostgreSQL owns the
+                    # termination/drop sequence. Waiting for a manually sampled
+                    # zero-session window can race extension worker restarts.
+                    conn.exec_driver_sql("SET statement_timeout = '15s'")
                     conn.exec_driver_sql(
-                        f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
+                        f"ALTER DATABASE {quoted_name} ALLOW_CONNECTIONS false"
                     )
+                    try:
+                        # DROP can require an immediate checkpoint. Give only
+                        # this owned cleanup operation a bounded longer wait;
+                        # retain the shorter connection-fence budget above.
+                        conn.exec_driver_sql("SET statement_timeout = '60s'")
+                        conn.exec_driver_sql(
+                            f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
+                        )
+                    except DBAPIError as exc:
+                        remaining = [dict(row) for row in conn.execute(text(
+                            "SELECT pid,backend_type,state,wait_event_type,wait_event "
+                            "FROM pg_stat_activity WHERE datname=:name ORDER BY pid"
+                        ), {"name": database_name}).mappings()]
+                        raise RuntimeError(
+                            f"migration_database_cleanup_failed: database={database_name} sessions={remaining}"
+                        ) from exc
         finally:
             admin_engine.dispose()
+
+
+
+_PRISTINE_TEMPLATE = pytest.StashKey()
+_PILOT_CASES = frozenset({
+    "tests/test_market_data/test_fact_storage_tiers_db.py::test_hot_history_preserves_identity_clocks_and_corrections_across_days",
+    "tests/test_market_data/test_fact_storage_tiers_db.py::test_candle_paging_summaries_and_causal_selection_survive_cooling",
+    # Canonical archive behavior only; raw-book lineage and schema creation stay fresh.
+    'tests/test_market_data/test_fact_archival_db.py::test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping[ascii]',
+    'tests/test_market_data/test_fact_archival_db.py::test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping[escaped-unicode]',
+    'tests/test_market_data/test_fact_archival_db.py::test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_publication',
+    'tests/test_market_data/test_fact_archival_db.py::test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs',
+    'tests/test_market_data/test_fact_archival_db.py::test_page_verification_fences_expiry_and_other_workers_but_allows_collection',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[None]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[guard]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[cancel]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[commit]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[cursor]',
+    'tests/test_market_data/test_fact_archival_db.py::test_prepared_page_reuse_rechecks_admission_and_durable_cursor[limits]',
+})
+
+
+def _schema_fingerprint(connection):
+    # Compare portable catalog definitions, never OIDs or database-local identity.
+    queries = (
+        "SELECT extname, extversion FROM pg_extension ORDER BY extname",
+        "SELECT table_schema,table_name,column_name,data_type,is_nullable,column_default "
+        "FROM information_schema.columns WHERE table_schema IN ('market','public','observability_events','observability_metrics') "
+        "ORDER BY table_schema,table_name,ordinal_position",
+        "SELECT schemaname,tablename,indexname,indexdef FROM pg_indexes "
+        "WHERE schemaname IN ('market','public','observability_events','observability_metrics') ORDER BY schemaname,indexname",
+        "SELECT n.nspname,c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid) "
+        "FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE NOT t.tgisinternal AND n.nspname IN ('market','public','observability_events','observability_metrics') "
+        "ORDER BY n.nspname,c.relname,t.tgname",
+        "SELECT n.nspname,c.relname,k.conname,pg_get_constraintdef(k.oid) FROM pg_constraint k "
+        "JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname IN ('market','public','observability_events','observability_metrics') "
+        "ORDER BY n.nspname,c.relname,k.conname",
+        "SELECT n.nspname,p.proname,pg_get_functiondef(p.oid) FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='market' AND p.prokind IN ('f','p') "
+        "ORDER BY n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)",
+        "SELECT count(*) FROM public.portal_instruments",
+        "SELECT count(*) FROM market.sources",
+        "SELECT count(*) FROM market.series",
+        "SELECT count(*) FROM market.fact_versions",
+        "SELECT count(*) FROM market.datasets",
+        "SELECT last_value,is_called FROM market.fact_commit_seq",
+    )
+    rows = [[list(row) for row in connection.execute(text(query))] for query in queries]
+    return hashlib.sha256(json.dumps(rows, default=str, sort_keys=True).encode()).hexdigest()
+
+
+def _pilot_identity():
+    revision, source_hash = os.getenv("SOURCE_REVISION", ""), os.getenv("SOURCE_TREE_HASH", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", revision) or not re.fullmatch(r"[a-f0-9]{64}", source_hash):
+        raise RuntimeError("schema_template_pilot_requires_source_identity")
+    root = Path(__file__).resolve().parents[2]
+    digest = hashlib.sha256()
+    for relative in ("tests/test_market_data/migration_test_support.py",
+                     "tests/test_market_data/test_fact_storage_tiers_db.py",
+                     "tests/test_market_data/test_fact_archival_db.py", "tests/conftest.py"):
+        digest.update(relative.encode())
+        digest.update((root / relative).read_bytes())
+    attestation = root / ".qt-source-attestation.json"
+    if attestation.exists():
+        recorded = json.loads(attestation.read_text())
+        if recorded.get("source_revision") != revision or recorded.get("source_tree_hash") != source_hash:
+            raise RuntimeError("schema_template_image_identity_mismatch")
+    return revision, source_hash, digest.hexdigest(), os.getpid(), _isolated_parent_dsn()
+
+
+class _PristineSchemaTemplate:
+    def __init__(self, identity):
+        from portal.backend.db.session import Database
+        self.identity = identity
+        self.stack = ExitStack()
+        try:
+            dsn = self.stack.enter_context(fresh_migration_database("pristine"))
+            self.name = make_url(dsn).database
+            database = Database(dsn)
+            try:
+                assert database.ensure_schema(), str(database.last_error)
+                with database.session() as session:
+                    self.day = session.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
+                    self.fingerprint = _schema_fingerprint(session.connection())
+            finally:
+                database._reset_engine()
+            # Only this session's randomly named private template is fenced.
+            admin = create_engine(make_url(dsn).set(database="postgres"), isolation_level="AUTOCOMMIT")
+            try:
+                with admin.connect() as connection:
+                    connection.exec_driver_sql(f'ALTER DATABASE "{self.name}" ALLOW_CONNECTIONS false')
+                    connection.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                                            "WHERE datname=:name AND pid<>pg_backend_pid()"), {"name": self.name})
+            finally:
+                admin.dispose()
+        except BaseException:
+            self.stack.close()
+            raise
+
+    def close(self):
+        started = monotonic()
+        try:
+            self.stack.close()
+        finally:
+            print("ci_schema_template " + json.dumps({"phase": "template_cleanup",
+                  "duration_seconds": round(monotonic()-started, 6)}))
+
+
+@contextmanager
+def storage_behavior_database(request):
+    enabled = os.getenv("QT_SCHEMA_TEMPLATE_PILOT", "") == "1"
+    if not enabled or request.node.nodeid not in _PILOT_CASES:
+        with fresh_migration_database("fact_storage") as dsn:
+            yield dsn
+        return
+    identity = _pilot_identity()
+    template = request.config.stash.get(_PRISTINE_TEMPLATE, None)
+    if template is None:
+        started = monotonic()
+        template = _PristineSchemaTemplate(identity)
+        print("ci_schema_template " + json.dumps({"phase": "create", "duration_seconds": round(monotonic()-started, 6),
+              "source_revision": identity[0], "source_tree_hash": identity[1], "fixture_hash": identity[2]}))
+        request.config.stash[_PRISTINE_TEMPLATE] = template
+        request.session.addfinalizer(template.close)
+    if template.identity != identity:
+        raise RuntimeError("schema_template_source_identity_changed")
+    started = monotonic()
+    clone_stack = ExitStack()
+    try:
+        dsn = clone_stack.enter_context(fresh_migration_database("fact_storage", install_extensions=False,
+                                  _template_name=template.name))
+        engine = create_engine(dsn)
+        try:
+            with engine.connect() as connection:
+                day = connection.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date"))
+                if day != template.day or _schema_fingerprint(connection) != template.fingerprint:
+                    raise RuntimeError("schema_template_catalog_or_day_changed")
+        finally:
+            engine.dispose()
+        print("ci_schema_template " + json.dumps({"phase": "clone", "duration_seconds": round(monotonic()-started, 6)}))
+        yield dsn
+    finally:
+        cleanup_started = monotonic()
+        try:
+            clone_stack.close()
+        finally:
+            print("ci_schema_template " + json.dumps({"phase": "clone_cleanup",
+                  "duration_seconds": round(monotonic()-cleanup_started, 6)}))
 
 
 def _prepare_shared_schema(dsn: str, *, include_datasets: bool) -> None:

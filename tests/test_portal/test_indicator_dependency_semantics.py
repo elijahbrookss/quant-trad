@@ -183,3 +183,20 @@ def test_delete_allows_closure_delete_when_dependent_is_in_same_batch() -> None:
         ctx=ctx,
         deleting_ids=["cs-1", "regime-1"],
     )
+
+
+def test_explicit_runtime_version_roundtrips_in_reserved_metadata_without_public_params():
+    from portal.backend.service.indicators.persistence_payload import indicator_payload_version
+    old = merge_indicator_payload({"days_back":180}, [])
+    assert old == {"days_back":180} and indicator_payload_version(old)=="v1"
+    stored = merge_indicator_payload({"days_back":180}, [], version="v2")
+    assert indicator_payload_version(stored)=="v2"
+    assert split_indicator_payload(stored)==({"days_back":180}, [])
+    from portal.backend.service.storage.repos.indicators import _record_to_indicator_payload
+    record=SimpleNamespace(id="profile",name="Profile",type="market_profile",params=stored,color=None,enabled=True,created_at=None,updated_at=None)
+    payload=_record_to_indicator_payload(record)
+    assert payload["version"]=="v2"
+    from portal.backend.service.indicators.indicator_factory import IndicatorFactory
+    meta=IndicatorFactory().build_meta_from_record(payload)
+    assert meta["manifest"]["version"]=="v2"
+    assert "first_value_return" in {o["name"] for o in meta["typed_outputs"]}

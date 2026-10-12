@@ -452,6 +452,10 @@ class CheckRegistry:
             )
         self._definitions[identity] = definition
 
+    def definitions(self) -> tuple[CheckDefinition, ...]:
+        """Return registered immutable definitions in stable identity order."""
+        return tuple(self._definitions[key] for key in sorted(self._definitions))
+
     def resolve_definition(self, definition_id: str, version: str) -> CheckDefinition:
         identity = (str(definition_id), str(version))
         if identity not in self._definitions:

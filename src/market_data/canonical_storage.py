@@ -1,6 +1,7 @@
 """One exact canonical row codec shared by PostgreSQL and cold archives."""
 
 from __future__ import annotations
+from core.execution_control import measured_execution
 
 from collections.abc import Mapping
 import re
@@ -75,6 +76,7 @@ def source_from_storage_row(row: Mapping[str, Any]) -> SourceIdentity:
     return source
 
 
+@measured_execution("decoding")
 def record_from_storage_row(row: Mapping[str, Any]) -> CanonicalFactRecord:
     fact = CanonicalFact(
         fact_type=str(row["fact_type"]),

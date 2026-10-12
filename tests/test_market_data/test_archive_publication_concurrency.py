@@ -79,3 +79,55 @@ def test_threads_use_distinct_staging_files_and_one_immutable_winner(tmp_path, m
         assert "market_archive_object_conflict" in str(failures[0])
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == successes[0].sha256
     assert list(store.root.iterdir()) == [destination]
+
+
+def test_bounded_publication_interrupts_inflight_copy_and_retry_reuses_bytes(tmp_path):
+    store = archive.FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    source = tmp_path / "source"
+    original = b"bounded archive" * (256 * 1024)
+    source.write_bytes(original)
+    expected = hashlib.sha256(original).hexdigest()
+    kwargs = dict(object_key="nested/history.parquet", source_path=source,
+                  expected_sha256=expected)
+    interrupted = []
+
+    def stop_during_copy():
+        partials = list(store.root.rglob("*.partial"))
+        if partials and partials[0].stat().st_size >= 1024 * 1024:
+            interrupted.append(partials[0].stat().st_size)
+            raise RuntimeError("disposable_copy_cancelled")
+
+    with pytest.raises(RuntimeError, match="disposable_copy_cancelled"):
+        store.put_verified(**kwargs, check_budget=stop_during_copy)
+    assert interrupted and interrupted[0] < len(original)
+    assert source.read_bytes() == original
+    assert not store.local_path(kwargs["object_key"]).exists()
+    assert not list(store.root.rglob("*.partial"))
+    first = store.put_verified(**kwargs, check_budget=lambda: None)
+    before = store.local_path(kwargs["object_key"]).stat()
+    retry = store.put_verified(**kwargs, check_budget=lambda: None)
+    assert not first.reused_existing and retry.reused_existing
+    assert store.local_path(kwargs["object_key"]).stat().st_ino == before.st_ino
+    assert source.read_bytes() == store.local_path(kwargs["object_key"]).read_bytes() == original
+
+
+def test_bounded_reuse_checks_budget_while_hashing_existing_bytes(tmp_path):
+    store = archive.FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    source = tmp_path / "source"
+    source.write_bytes(b"x" * (3 * 1024 * 1024))
+    kwargs = dict(object_key="history.parquet", source_path=source,
+                  expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    store.put_verified(**kwargs)
+    checks = []
+
+    def exhausted():
+        checks.append(True)
+        # Initial admission + source hash (four checks), then existing-object
+        # hash must also remain cancellable between chunks.
+        if len(checks) == 7:
+            raise RuntimeError("disposable_hash_budget_exhausted")
+
+    with pytest.raises(RuntimeError, match="disposable_hash_budget_exhausted"):
+        store.put_verified(**kwargs, check_budget=exhausted)
+    assert len(checks) == 7
+    assert store.local_path("history.parquet").read_bytes() == source.read_bytes()

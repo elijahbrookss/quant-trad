@@ -737,7 +737,8 @@ class CollectorOperationsService:
             for item in definitions
             if not self._is_operationally_registered(item, kind)
         ]
-        workers = self.collection_repository.list_worker_states()
+        workers = [row for row in self.collection_repository.list_worker_states()
+                   if row.get("worker_role") != "market_storage_maintenance"]
         worker = self._latest_worker(workers)
         supervisor = self._continuous_snapshot(workers)
 

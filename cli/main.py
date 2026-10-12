@@ -1245,6 +1245,13 @@ def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_derive_candles(args: argparse.Namespace) -> int:
+    payload = {"dataset_id": args.dataset_id, "source_series_id": args.source_series_id,
+               "start": args.start, "end": args.end, "timeframe": args.timeframe}
+    _print_json(_client(args).request_json("POST", "/api/candles/derive", payload=payload))
+    return 0
+
+
 def _cmd_data_acquire_numeric_facts(args: argparse.Namespace) -> int:
     """Explicitly authorize one bounded manifest-driven numeric acquisition."""
 
@@ -1905,6 +1912,18 @@ def _research_item_payload(
     return payload
 
 
+def _cmd_research_question(args: argparse.Namespace) -> int:
+    operations = ResearchOperations(_client(args))
+    if args.question_action == "history":
+        result = operations.publication_history(args.item_id)
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        operation = operations.adopt_question if args.question_action == "adopt" else operations.publish_interpretation
+        result = operation(args.item_id, request)
+    _print_json(result)
+    return 0
+
+
 def _cmd_research_items_create(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("POST", "/api/research/items", payload=_research_item_payload(args)))
     return 0
@@ -2023,6 +2042,16 @@ def _canonical_research_request(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _cmd_research_check_definitions(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).definitions())
+    return 0
+
+
+def _cmd_research_check_definition(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).definition(args.definition_id, args.version))
+    return 0
+
+
 def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
     _print_json(
         ResearchOperations(_client(args)).requirements(
@@ -2056,9 +2085,11 @@ def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
 def _cmd_research_check_run(args: argparse.Namespace) -> int:
     operations = ResearchOperations(_client(args))
     request = _canonical_research_request(args)
+    if args.single_attempt and not args.dispatch:
+        raise ValueError("--single-attempt requires --dispatch")
     if args.dispatch:
         result = operations.dispatch_evidence(
-            request, dataset_id=args.dataset_id
+            request, dataset_id=args.dataset_id, single_attempt=args.single_attempt
         )
         _print_research_job_dispatch(result)
     else:
@@ -2394,6 +2425,9 @@ def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = Tru
     status = str(payload.get("status") or "")
     print(f"Research job: {job_id}", flush=True)
     print(f"Status: {status}", flush=True)
+    if payload.get("cancellation"):
+        stopped = payload["cancellation"].get("execution_stopped") is True
+        print("Cancellation: stopped" if stopped else "Cancellation: requested; stop not yet acknowledged", flush=True)
     print(f"Type: {payload.get('job_type') or ''}", flush=True)
     print(f"Attempts: {payload.get('attempts')}/{payload.get('max_attempts')}", flush=True)
     for label, key in (("Created", "created_at"), ("Started", "started_at"), ("Finished", "finished_at")):
@@ -2425,6 +2459,15 @@ def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = Tru
 
 def _cmd_research_job_status(args: argparse.Namespace) -> int:
     payload = ResearchOperations(_client(args)).job_status(args.job_id)
+    if getattr(args, "json", False):
+        _print_json(payload)
+    else:
+        _print_research_job_status(payload)
+    return 0
+
+
+def _cmd_research_job_cancel(args: argparse.Namespace) -> int:
+    payload = ResearchOperations(_client(args)).cancel_job(args.job_id)
     if getattr(args, "json", False):
         _print_json(payload)
     else:
@@ -3261,6 +3304,41 @@ def _add_global_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-audit-log", action="store_true", help="Disable the per-command CLI audit JSON log.")
 
 
+def _cmd_storage(args: argparse.Namespace) -> int:
+    if args.storage_command == "place-retained-raw":
+        from cli.storage_placement import run_local_placement
+
+        _print_json(run_local_placement(args.request_file, execute=args.execute, cancel=args.cancel))
+        return 0
+    if args.storage_command == "migrate":
+        from scripts.automation.storage_online_operation import run_operation_plan
+
+        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file", "reschedule_forward_file", "recover_repositories_file", "repair_release_file")
+                   if getattr(args, name, None) is not None}
+        if getattr(args, "prepare_forward_only", False):
+            options["prepare_forward_only"] = True
+        _print_json(run_operation_plan(args.operation_file, execute=args.execute, **options))
+        return 0
+    client = _client(args)
+    if args.storage_command == "status":
+        result = client.request_json("GET", "/api/storage")
+    elif args.storage_command == "enroll":
+        result = client.request_json("POST", "/api/storage/targets",
+                                     payload={"target_id": args.target_id})
+    elif args.storage_command == "review":
+        result = client.request_json("POST", "/api/storage/plans", payload={
+            "policy": _read_json_object(args.policy_file),
+            "base_revision": args.base_revision, "request_id": args.request_id,
+        })
+    elif args.storage_command == "plan":
+        result = client.request_json("GET", f"/api/storage/plans/{quote(args.plan_id, safe='')}")
+    else:
+        result = client.request_json("POST", f"/api/storage/plans/{quote(args.plan_id, safe='')}/apply",
+                                     payload={"policy_hash": args.policy_hash})
+    _print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Quant-Trad API-backed research CLI.")
     _add_global_args(parser)
@@ -3750,6 +3828,14 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest.add_argument("--timeframe", required=True)
     data_ingest.add_argument("--source-revision")
     data_ingest.set_defaults(func=_cmd_data_ingest_candles)
+    data_derive = data_sub.add_parser("derive-candles",
+        help="Coarsen exact frozen candles without provider access or gap filling.")
+    data_derive.add_argument("--dataset-id", required=True)
+    data_derive.add_argument("--source-series-id", type=int, required=True)
+    data_derive.add_argument("--start", required=True)
+    data_derive.add_argument("--end", required=True)
+    data_derive.add_argument("--timeframe", required=True)
+    data_derive.set_defaults(func=_cmd_data_derive_candles)
     data_numeric = data_sub.add_parser(
         "acquire-numeric-facts",
         help=(
@@ -4238,6 +4324,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history; distinct from executable StudyDefinition.")
+    research_question_sub = research_question.add_subparsers(dest="question_action", required=True)
+    for action in ("adopt", "publish", "history"):
+        command = research_question_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action != "history":
+            command.add_argument("--request-json", required=True)
+        command.set_defaults(func=_cmd_research_question)
     research_items = research_sub.add_parser("items", help="Research memory item commands.")
     research_items_sub = research_items.add_subparsers(dest="research_items_command", required=True)
     research_items_list = research_items_sub.add_parser("list", help="List research memory items.")
@@ -4322,6 +4416,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_jobs_status.add_argument("job_id")
     research_jobs_status.add_argument("--json", action="store_true", help="Print the machine-readable status payload.")
     research_jobs_status.set_defaults(func=_cmd_research_job_status)
+    research_jobs_cancel = research_jobs_sub.add_parser("cancel", help="Request an individual job stop; running work must acknowledge cancellation.")
+    research_jobs_cancel.add_argument("job_id")
+    research_jobs_cancel.add_argument("--json", action="store_true")
+    research_jobs_cancel.set_defaults(func=_cmd_research_job_cancel)
     research_jobs_result = research_jobs_sub.add_parser("result", help="Print a completed research job result.")
     research_jobs_result.add_argument("job_id")
     research_jobs_result.add_argument("--format", choices=["auto", "json", "table", "summary"], default="auto")
@@ -4358,6 +4456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="Plan, preview, execute, and replay canonical analytical Checks."
     )
     research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_definitions = research_check_sub.add_parser("definitions", help="List registered analytical methods and eligibility.")
+    research_check_definitions.set_defaults(func=_cmd_research_check_definitions)
+    research_check_definition = research_check_sub.add_parser("definition", help="Inspect an exact method version, settings and request example.")
+    research_check_definition.add_argument("definition_id")
+    research_check_definition.add_argument("--version", required=True)
+    research_check_definition.set_defaults(func=_cmd_research_check_definition)
     research_check_requirements = research_check_sub.add_parser(
         "requirements",
         help="Resolve direct and transitive Check requirements without acquisition.",
@@ -4402,6 +4506,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_run.add_argument("--dataset-id")
     research_check_run.add_argument(
         "--dispatch", action="store_true", help="Queue evidence execution and return the research job id."
+    )
+    research_check_run.add_argument(
+        "--single-attempt", action="store_true",
+        help="Require one async claim attempt, with no automatic retry; requires --dispatch."
     )
     research_check_run.set_defaults(func=_cmd_research_check_run)
 
@@ -4840,6 +4948,48 @@ def build_parser() -> argparse.ArgumentParser:
     run_bot.add_argument("--no-golden", action="store_true")
     run_bot.add_argument("--require-golden", action="store_true")
     run_bot.set_defaults(func=_cmd_experiments_run_bot)
+
+    storage = subparsers.add_parser("storage", help="Inspect drives and review server-owned storage policy.")
+    storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    raw_placement = storage_sub.add_parser("place-retained-raw",
+        help="Explicit post-cutover raw placement inside the admitted maintenance container; inspect by default.")
+    raw_placement.add_argument("--request-file", required=True, help="Bounded reviewed JSON file, or '-' for stdin.")
+    raw_action = raw_placement.add_mutually_exclusive_group()
+    raw_action.add_argument("--execute", action="store_true", help="Move the admitted unchanged raw relation; host admission and recovery remain required.")
+    raw_action.add_argument("--cancel", action="store_true", help="Close an unmoved intent after proving rollback; never reverse a completed move.")
+    raw_placement.set_defaults(func=_cmd_storage)
+    migration = storage_sub.add_parser("migrate", help="Inspect or execute a prepared local host migration plan; final release checks remain separate.")
+    migration.add_argument("--operation-file", required=True, help="Private fixed SSD/HDD operation JSON on this Linux host.")
+    migration.add_argument("--execute", action="store_true", help="Perform the admitted preserving migration; default is read-only inspection.")
+    migration.add_argument("--extend-attempt-seconds", type=int, help="Explicit total capture budget amendment, at most 96 hours; requires a retired background worker and fresh capacity evidence.")
+    migration.add_argument("--capacity-file", help="Private measured capacity forecast bound to the original plan and amended absolute horizon.")
+    migration.add_argument("--replacement-package-file", help="Explicit qualified package replacement for a retired worker before its first header page; preserves capture, clocks, source fleet and budgets.")
+    migration.add_argument("--cancel-attempt-file", help="Inspect or execute preserving terminal cancellation with an attested package; retains the original attempt and all copied data, including after expiry.")
+    migration.add_argument("--forward-package-file", help="Inspect or publish a separate forward package after verified cancellation; preserves the original plan and grants no worker start or source stop.")
+    migration.add_argument("--prepare-forward-keys-file", help="Inspect or prepare only the two forward keys using a qualified candidate package; no publication, adoption or source stop.")
+    migration.add_argument("--place-forward-lookups-file", help="Inspect or place the three retained lookup indexes on SSD before successor publication; no adoption or source stop.")
+    migration.add_argument("--reschedule-forward-file", help="Inspect or publish one stopped-worker schedule/package change while preserving current forward proof and its original deadline; no launch or source stop.")
+    migration.add_argument("--recover-repositories-file", help="Inspect or explicitly continue a confirmed committed switch after the known missing recovery-config failure; preserves the failed attempt and never replays the database migration.")
+    migration.add_argument("--repair-release-file", help="Admit an exact software repair after completed cutover and stopped maintenance; preserves storage bindings and incomplete recovery status. Does not deploy or replay migration.")
+    migration.add_argument("--prepare-forward-only", action="store_true", help="With --execute and a published forward plan, complete online preparation and retire the worker before source stop; preserves adoption and its original deadline.")
+    migration.set_defaults(func=_cmd_storage)
+    storage_status = storage_sub.add_parser("status")
+    storage_status.set_defaults(func=_cmd_storage)
+    storage_enroll = storage_sub.add_parser("enroll", help="Enroll a host-prepared target by ID.")
+    storage_enroll.add_argument("target_id")
+    storage_enroll.set_defaults(func=_cmd_storage)
+    storage_review = storage_sub.add_parser("review", help="Create a durable plan without activating it.")
+    storage_review.add_argument("--policy-file", required=True)
+    storage_review.add_argument("--base-revision", required=True, type=int)
+    storage_review.add_argument("--request-id", required=True)
+    storage_review.set_defaults(func=_cmd_storage)
+    storage_plan = storage_sub.add_parser("plan")
+    storage_plan.add_argument("plan_id")
+    storage_plan.set_defaults(func=_cmd_storage)
+    storage_apply = storage_sub.add_parser("apply", help="Apply a reviewed plan when execution is available.")
+    storage_apply.add_argument("plan_id")
+    storage_apply.add_argument("--policy-hash", required=True)
+    storage_apply.set_defaults(func=_cmd_storage)
 
     mcp = subparsers.add_parser("mcp", help="MCP server entrypoint for agent/tool hosts.")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)

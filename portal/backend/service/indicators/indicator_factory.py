@@ -90,8 +90,8 @@ class IndicatorFactory:
         if indicator_type:
             try:
                 definition = get_indicator_definition(indicator_type)
-                manifest = get_indicator_manifest(indicator_type)
-            except Exception:
+                manifest = get_indicator_manifest(indicator_type, meta.get("version"))
+            except KeyError:
                 return meta
             meta["manifest"] = serialize_indicator_manifest(manifest)
             meta["color_mode"] = manifest.color_mode

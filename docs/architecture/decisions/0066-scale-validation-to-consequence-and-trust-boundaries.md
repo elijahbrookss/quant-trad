@@ -111,3 +111,10 @@ decision.
 - [Platform System Contract](../../contracts/platform/00_system_contract.md)
 - [Platform Engineering Contract](../../contracts/platform/03_engineering_contract.md)
 - [Testing Strategy](../../engineering/testing/testing-strategy.md)
+
+
+On a failed disposable Docker run, the runner captures bounded logs and container
+health/exit state from that run's exact database before cleanup. It never inspects
+peer projects or prints resolved environment configuration. This preserves the
+evidence needed to distinguish a database startup prerequisite failure from an
+application test result; the original failure remains the runner's exit status.

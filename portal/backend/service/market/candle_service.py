@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterator, Mapping, Optional
 import pandas as pd
 
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
+from core.execution_control import execution_checkpoint
 from data_providers.utils.ohlcv import compute_tr_atr, interval_to_timedelta
 from indicators.config import DataContext
 from market_data.backtest import normalize_backtest_dataset_binding
@@ -160,6 +161,31 @@ def fetch_ohlcv(
     return fetch_ohlcv_by_instrument(instrument_id, start, end, interval)
 
 
+def iter_ohlcv_by_instrument(
+    instrument_id: str, start: str, end: str, interval: str, *,
+    frozen_alias: str | None = None, batch_bars: int = 2048,
+) -> Iterator[pd.DataFrame]:
+    """Read bounded candle windows; the caller owns one continuous engine.
+
+    Rolling runtime features must be computed by that engine, never independently
+    per page. Sparse intervals stay sparse and page boundaries invent no bars.
+    """
+    if type(batch_bars) is not int or not 1 <= batch_bars <= 4096:
+        raise ValueError("candle_read_batch_invalid: expected 1..4096 bars")
+    lower, upper = pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)
+    if upper <= lower:
+        raise ValueError("candle_read_range_invalid: end must follow start")
+    width = interval_to_timedelta(interval) * batch_bars
+    while lower < upper:
+        execution_checkpoint()
+        stop = min(lower + width, upper)
+        yield fetch_ohlcv_by_instrument(
+            instrument_id, lower.isoformat(), stop.isoformat(), interval,
+            frozen_alias=frozen_alias, include_runtime_features=False,
+        )
+        lower = stop
+
+
 def fetch_ohlcv_by_instrument(
     instrument_id: str,
     start: str,
@@ -167,6 +193,7 @@ def fetch_ohlcv_by_instrument(
     interval: str,
     *,
     frozen_alias: str | None = None,
+    include_runtime_features: bool = True,
 ) -> pd.DataFrame:
     """Read one canonical instrument series without provider/API fallback."""
 
@@ -217,7 +244,7 @@ def fetch_ohlcv_by_instrument(
                 or []
             ),
         )
-    enriched = _with_runtime_candle_features(frame)
+    enriched = _with_runtime_candle_features(frame) if include_runtime_features else frame
     if isinstance(scope, MarketDataReadScope):
         enriched.attrs["market_data_read_scope"] = {
             "schema_version": "market_data_read_scope.v2",
@@ -295,7 +322,9 @@ def preflight_candle_coverage_by_instrument(
         }
 
     try:
-        df = fetch_ohlcv_by_instrument(instrument_id, start, end, interval)
+        df = fetch_ohlcv_by_instrument(
+            instrument_id, start, end, interval, include_runtime_features=False
+        )
     except Exception as exc:  # noqa: BLE001 - preflight reports provider/storage failures as evidence.
         return {
             "schema_version": "candle_coverage_preflight.v1",
@@ -354,7 +383,9 @@ def preflight_candle_coverage_by_instrument(
     coverage_end = last_candle_start + interval_delta
     gap_classification = getattr(df, "attrs", {}).get("gap_classification") if hasattr(df, "attrs") else None
     continuity = summarize_candle_continuity(
-        [{"time": item.isoformat()} for item in times],
+        # Continuity accepts epoch seconds directly. Avoid allocating and then
+        # reparsing a timestamp string/dict for every candle in a long window.
+        (int(item.timestamp()) for item in times),
         expected_interval_seconds_value=expected_interval_seconds(timeframe=interval),
         gap_classification=gap_classification,
     ).to_dict()

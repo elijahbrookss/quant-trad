@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -154,8 +155,10 @@ class _EnrollmentRepository:
         return kwargs
 
 
+@pytest.mark.parametrize("queue_slots", [None, 64])
 def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     monkeypatch: pytest.MonkeyPatch,
+    queue_slots,
 ) -> None:
     products = {
         "b2deb0a0-f292-408a-876d-3dadd8e3819b": "BIP-20DEC30-CDE",
@@ -184,12 +187,17 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     )
     service = MarketStructureService(repository=repository)
 
-    first = service.apply_stream_enrollment_manifest()
-    second = service.apply_stream_enrollment_manifest(
-        manifest=load_stream_enrollment_manifest(
-            "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
-        )
+    manifest = load_stream_enrollment_manifest(
+        "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
     )
+    if queue_slots is not None:
+        manifest = replace(manifest, manifest_hash="", enrollments=tuple(
+            replace(row, max_inflight_segments=queue_slots) for row in manifest.enrollments
+        ))
+    first = service.apply_stream_enrollment_manifest(**(
+        {"manifest": manifest} if queue_slots is not None else {}
+    ))
+    second = service.apply_stream_enrollment_manifest(manifest=manifest)
 
     assert first["manifest_hash"] == second["manifest_hash"]
     assert len(repository.definition_calls) == 6
@@ -207,6 +215,7 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
         }
         assert call["config"]["runtime_policy"]["lease_seconds"] == 90.0
         assert call["config"]["runtime_policy"]["heartbeat_seconds"] == 10.0
+        assert call["config"]["runtime_policy"]["max_inflight_segments"] == (queue_slots or 4)
         assert "collector_runtime" not in call["config"]
     assert {
         key[1]
@@ -214,8 +223,10 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     } >= {"market.trade_flow", "market.trade_flow_feature"}
 
 
+@pytest.mark.parametrize("queue_slots", [None, 64])
 def test_level2_fleet_manifest_registers_continuous_book_and_feature_series(
     monkeypatch: pytest.MonkeyPatch,
+    queue_slots,
 ) -> None:
     products = {
         "b2deb0a0-f292-408a-876d-3dadd8e3819b": "BIP-20DEC30-CDE",
@@ -243,11 +254,17 @@ def test_level2_fleet_manifest_registers_continuous_book_and_feature_series(
         },
     )
 
+    path = "config/market_data/coinbase_perpetual_l2_fleet.v1.json"
+    manifest = load_stream_enrollment_manifest(path)
+    if queue_slots is not None:
+        manifest = replace(manifest, manifest_hash="", enrollments=tuple(
+            replace(row, max_inflight_segments=queue_slots) for row in manifest.enrollments
+        ))
     result = MarketStructureService(
         repository=repository
-    ).apply_stream_enrollment_manifest(
-        manifest_path="config/market_data/coinbase_perpetual_l2_fleet.v1.json"
-    )
+    ).apply_stream_enrollment_manifest(**(
+        {"manifest": manifest} if queue_slots is not None else {"manifest_path": path}
+    ))
 
     assert result["fleet_id"] == "coinbase_perpetual_l2"
     assert len(repository.definition_calls) == 3
@@ -261,6 +278,7 @@ def test_level2_fleet_manifest_registers_continuous_book_and_feature_series(
     )
     assert definition["config"]["safety_policy"]["policy_hash"]
     assert definition["config"]["runtime_policy"]["lease_seconds"] == 90.0
+    assert definition["config"]["runtime_policy"]["max_inflight_segments"] == (queue_slots or 4)
     assert {
         row["fact_type"] for row in definition["config"]["output_series"]
     } == {

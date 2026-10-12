@@ -24,10 +24,13 @@ def split_indicator_payload(
 def merge_indicator_payload(
     params: Mapping[str, Any] | None,
     dependencies: Sequence[Mapping[str, Any]] | None,
+    *, version: str = "v1",
 ) -> Dict[str, Any]:
     stored = dict(params or {})
     normalized_dependencies = [dict(item) for item in (dependencies or []) if isinstance(item, Mapping)]
     meta: Dict[str, Any] = {}
+    if version != "v1":
+        meta["runtime_version"] = version
     if normalized_dependencies:
         meta["dependencies"] = normalized_dependencies
     if meta:
@@ -42,3 +45,11 @@ __all__ = [
     "merge_indicator_payload",
     "split_indicator_payload",
 ]
+
+
+def indicator_payload_version(raw_params: Any) -> str:
+    meta = (raw_params or {}).get(INDICATOR_META_KEY, {})
+    version = meta.get("runtime_version", "v1") if isinstance(meta, Mapping) else "v1"
+    if not isinstance(version, str) or not version:
+        raise ValueError("indicator_version_invalid: persisted runtime version must be a nonempty string")
+    return version

@@ -162,7 +162,7 @@ def _configure_service(monkeypatch) -> None:
         contract_version=_CONTRACT_VERSION,
         dimensions={"quote_currency": "USD"},
     )
-    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type: manifest)
+    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type, version=None: manifest)
     monkeypatch.setattr(
         service,
         "load_numeric_fact_manifest",

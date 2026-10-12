@@ -100,7 +100,7 @@ def plan_runtime_requirements_for_indicators(
             params.update(dict(overrides[indicator_id] or {}))
         params = definition.resolve_config(params, strict_unknown=True)
         meta["params"] = params
-        manifest = get_indicator_manifest(indicator_type)
+        manifest = get_indicator_manifest(indicator_type, meta.get("version"))
         runtime_plan = ctx.factory.build_runtime_input_plan(
             meta,
             strategy_interval=timeframe,

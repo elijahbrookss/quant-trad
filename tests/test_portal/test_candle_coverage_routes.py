@@ -306,3 +306,22 @@ def test_dataset_freeze_route_accepts_exact_typed_series_ids(
             "end": "2026-08-02T18:14:25Z",
         }
     ]
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_candle_derivation_route_uses_explicit_frozen_owner(monkeypatch, rejected):
+    from portal.backend.service.market import candle_derivation_service
+    observed = {}
+    def derive(**kwargs):
+        observed.update(kwargs)
+        if rejected:
+            raise RuntimeError("market_data_source_conflict: fixture")
+        return {"provider_call_performed": False, "series_id": 9}
+    monkeypatch.setattr(candle_derivation_service, "derive_candles", derive)
+    response = TestClient(app).post("/api/candles/derive", json={
+        "dataset_id": "frozen", "source_series_id": 1, "timeframe": "5m",
+        "start": "2022-10-01T00:00:00Z", "end": "2022-10-02T00:00:00Z"})
+    assert response.status_code == (400 if rejected else 200)
+    assert observed["target_seconds"] == 300 and observed["dataset_id"] == "frozen"
+    if rejected:
+        assert "source_conflict" in response.json()["detail"]

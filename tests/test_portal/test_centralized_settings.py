@@ -80,6 +80,34 @@ def test_canonical_retention_environment_bindings(monkeypatch, request):
     assert policy.archive_filesystem_budget_bytes == 654321
 
 
+def test_research_budget_environment_reaches_execution_without_expanding_pinned_limits(monkeypatch, request, tmp_path):
+    from core.execution_control import ExecutionControl, controlled_execution
+    from portal.backend.service.research.execution_limits import research_execution_limits, research_execution_scope
+
+    request.addfinalizer(settings_module.clear_settings_cache)
+    custom = tmp_path / "research.yaml"
+    custom.write_text("async_jobs:\n  research_evidence_bytes: 536870912\n")
+    monkeypatch.setenv("QT_CONFIG_FILE", str(custom))
+    monkeypatch.setenv("QT_RESEARCH_GLOBAL_SERIALIZATION", "false")
+    values = {"EXECUTION_SECONDS": 600, "INPUT_ROWS": 600000, "INPUT_BYTES": 1073741824,
+              "EVIDENCE_BYTES": 1073741824, "RESULT_BYTES": 8388608}
+    for name, value in values.items():
+        monkeypatch.setenv("QT_RESEARCH_" + name, str(value))
+    get_settings(force_reload=True)
+    effective = research_execution_limits()
+    assert effective == dict(seconds=600, input_rows=600000, input_bytes=1073741824,
+        archive_read_bytes=1073741824, archive_cache_write_bytes=1073741824,
+        evidence_bytes=1073741824, result_bytes=8388608)
+
+    pinned = ExecutionControl()
+    pinned.limit(seconds=300, evidence_bytes=268435456, input_rows=5000000)
+    with controlled_execution(pinned), research_execution_scope() as admitted:
+        assert admitted is pinned
+        limits = admitted.snapshot()["limits"]
+        assert limits["evidence_bytes"] == 268435456  # larger deployment cannot loosen this job
+        assert limits["input_rows"] == 600000  # smaller deployment remains effective
+
+
 def test_canonical_executor_environment_bindings(monkeypatch, request):
     request.addfinalizer(settings_module.clear_settings_cache)
     values = {"EXECUTION_ENABLED": True, "MAX_STEPS_PER_RUN": 3, "MAX_RUN_SECONDS": 120,
@@ -148,3 +176,28 @@ def test_yaml_defaults_cover_all_canonical_env_bindings():
     assert settings_module._path_get(defaults, ("profile",), sentinel) == "dev"
     assert settings_module._path_get(merged_prod, ("profile",), sentinel) == "prod"
     assert not missing, missing
+
+
+def test_storage_maintenance_limits_are_optional_and_explicit(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    monkeypatch.delenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", raising=False)
+    assert get_settings(force_reload=True).storage.maintenance_limits_path is None
+    monkeypatch.setenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", "/run/quanttrad/measured-storage-limits.json")
+    assert get_settings(force_reload=True).storage.maintenance_limits_path == "/run/quanttrad/measured-storage-limits.json"
+    monkeypatch.setenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH", "")
+    assert get_settings(force_reload=True).storage.maintenance_limits_path is None
+
+
+def test_history_cache_requires_explicit_headroom_and_global_gate(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    monkeypatch.setenv("QT_HISTORY_READ_CACHE_BYTES", "1048576")
+    settings_module.clear_settings_cache()
+    with pytest.raises(ValueError, match="minimum free bytes"):
+        get_settings()
+    monkeypatch.setenv("QT_HISTORY_READ_CACHE_MIN_FREE_BYTES", "2097152")
+    monkeypatch.setenv("QT_RESEARCH_GLOBAL_SERIALIZATION", "true")
+    settings_module.clear_settings_cache()
+    settings=get_settings()
+    assert settings.storage.history_cache_bytes==1048576
+    assert settings.storage.history_cache_min_free_bytes==2097152
+    assert settings.async_jobs.research_global_serialization is True

@@ -83,7 +83,7 @@ def test_dataset_plan_keeps_numeric_dimensions_in_typed_series_identity(
             ),
         ),
     )
-    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type: manifest)
+    monkeypatch.setattr(service, "get_indicator_manifest", lambda _type, version=None: manifest)
 
     plan = derive_backtest_dataset_plan(
         bot={"id": "bot-1", "run_type": "backtest"},

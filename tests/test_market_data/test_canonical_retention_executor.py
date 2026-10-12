@@ -128,3 +128,96 @@ def test_worker_stop_request_preserves_resume_cursor_and_starts_no_more_work(tmp
     assert result["stop_reason"] == "stop_requested" and result["failure_count"] == 0
     assert result["outcomes"][0]["status"] == "deferred"
     assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
+
+
+def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    instances, calls = [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            instances.append(self)
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            self.check_budget()
+            calls.append(self)
+            return {"status": "book_prefix_verified", "storage_day": day.isoformat()}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2)
+    for _ in range(2):
+        result = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+        assert result["stop_reason"] == "step_budget" and len(result["outcomes"]) == 2
+        assert executor._archive is None
+    assert len(instances) == 2
+    assert calls == [instances[0], instances[0], instances[1], instances[1]]
+
+
+@pytest.mark.parametrize("cause", ["time_budget", "stop_requested"])
+def test_sql_cancellation_at_run_boundary_defers_and_revisits_same_day(
+    tmp_path, monkeypatch, caplog, cause,
+):
+    from sqlalchemy.exc import DBAPIError
+
+    executor, calls = _executor([_plan([_item()])])
+    clock = [0.0]
+    stopped = [False]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    error = RuntimeError("canceling statement due to statement timeout")
+    error.pgcode = "57014"
+
+    def step(**kwargs):
+        if cause == "time_budget":
+            clock[0] = 1.0
+        else:
+            stopped[0] = True
+        raise DBAPIError("SELECT fixture", {}, error)
+
+    monkeypatch.setattr(executor, "_execute_step", step)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_run_seconds=1)
+    with caplog.at_level("INFO"):
+        result = executor.run(policy=policy, storage_root=tmp_path, execute=True,
+                              cancelled=lambda: stopped[0])
+    assert result["stop_reason"] == cause and result["failure_count"] == 0
+    assert result["outcomes"][0]["status"] == "deferred"
+    assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
+    assert "canonical_retention_step_deferred" in caplog.text
+    assert "sqlstate=57014" in caplog.text
+    assert "canonical_retention_step_failed" not in caplog.text
+    assert executor._archive is None
+
+    clock[0] = 2.0
+    stopped[0] = False
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: {"status": "page_acknowledged"})
+    result = executor.run(policy=replace(policy, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True)
+    assert calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
+    assert result["outcomes"][0]["status"] == "page_acknowledged"
+
+
+@pytest.mark.parametrize("sqlstate,expired", [("57014", False), ("XX000", True), (None, True)])
+def test_sql_or_data_failure_is_not_hidden_by_run_budget(tmp_path, monkeypatch, caplog, sqlstate, expired):
+    from sqlalchemy.exc import DBAPIError
+
+    executor, _ = _executor([_plan([_item()])])
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    original = RuntimeError("actual query or data failure")
+    original.pgcode = sqlstate
+    error = DBAPIError("SELECT fixture", {}, original) if sqlstate else original
+
+    def step(**kwargs):
+        clock[0] = 2.0 if expired else 0.5
+        raise error
+
+    monkeypatch.setattr(executor, "_execute_step", step)
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True,
+                          max_run_seconds=1, max_steps_per_run=1), storage_root=tmp_path, execute=True)
+    assert result["status"] == "degraded" and result["failure_count"] == 1
+    assert result["outcomes"][0]["status"] == "failed"
+    assert "actual query or data failure" in result["outcomes"][0]["error"]
+    assert result["next_after_storage_day"] == DAY.isoformat()
+    assert "canonical_retention_step_failed" in caplog.text

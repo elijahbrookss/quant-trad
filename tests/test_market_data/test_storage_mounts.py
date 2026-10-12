@@ -43,6 +43,26 @@ def test_expected_uuid_uses_actual_path_device_and_does_not_write(mounted_archiv
     assert record.read_bytes() == before
 
 
+@pytest.mark.parametrize("properties,expected", [
+    ("E:ID_FS_UUID=observed-device-uuid\n", "observed-device-uuid"),
+    (None, None),
+    ("E:ID_FS_UUID=one-uuid\nE:ID_FS_UUID=two-uuid\n", None),
+    ("E:ID_FS_UUID=malformed uuid\n", None),
+])
+def test_unpinned_observation_reports_only_unambiguous_uuid(mounted_archive, properties, expected):
+    root, udev, record = mounted_archive
+    if properties is None:
+        record.unlink()
+    else:
+        record.write_text(properties)
+    before = record.read_bytes() if record.exists() else None
+    evidence = inspect_filesystem(root, udev_root=udev, require_writable=False)
+    assert evidence.filesystem_uuid == expected
+    assert evidence.available_bytes >= 0
+    assert (record.read_bytes() if record.exists() else None) == before
+    assert list(root.iterdir()) == []
+
+
 @pytest.mark.parametrize("properties", ["E:ID_FS_UUID=nvme-uuid\n", "", "E:ID_FS_UUID=test-archive-uuid\nE:ID_FS_UUID=test-archive-uuid\n"])
 def test_wrong_or_ambiguous_device_identity_fails_closed(mounted_archive, properties):
     root, _, record = mounted_archive
@@ -164,3 +184,93 @@ def test_deployment_probe_reports_actionable_failure_without_creating_path(tmp_p
     assert "storage_mount_unavailable" in result.stderr
     assert str(absent) in result.stderr
     assert not absent.exists()
+
+
+def test_working_root_defaults_preserve_existing_custom_paths(tmp_path, monkeypatch):
+    from core.storage_mounts import configured_working_root, require_configured_working_mount
+    monkeypatch.delenv("MARKET_STRUCTURE_WORKING_ROOT", raising=False)
+    monkeypatch.delenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", raising=False)
+    monkeypatch.delenv("QT_MARKET_DATA_EXPECTED_UUID", raising=False)
+    assert configured_working_root(tmp_path) == tmp_path
+    assert require_configured_working_mount(tmp_path/"spool") is None
+    assert not (tmp_path/"spool").exists()
+
+
+def test_dedicated_working_configuration_requires_both_path_and_identity(mounted_archive, tmp_path, monkeypatch):
+    from core.storage_mounts import require_configured_working_mount
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "test-archive-uuid")
+    monkeypatch.delenv("MARKET_STRUCTURE_WORKING_ROOT", raising=False)
+    with pytest.raises(StorageMountError, match="storage_working_root_required"):
+        require_configured_working_mount()
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(tmp_path/"working"))
+    monkeypatch.delenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", raising=False)
+    with pytest.raises(StorageMountError, match="storage_working_uuid_required"):
+        require_configured_working_mount()
+    assert not (tmp_path/"working").exists()
+
+
+def test_working_identity_missing_mount_and_symlink_escape_fail_before_spool_creation(mounted_archive, tmp_path, monkeypatch):
+    from core.storage_mounts import require_configured_working_mount
+    archive, _, _ = mounted_archive
+    working = tmp_path/"working"
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(working))
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "test-archive-uuid")
+    with pytest.raises(StorageMountError, match="storage_mount_unavailable"):
+        require_configured_working_mount()
+    assert not working.exists()
+    working.mkdir()
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "wrong-uuid")
+    with pytest.raises(StorageMountError, match="identity_mismatch"):
+        DurableRawSpoolSegment(root=working/"spool", definition_id="d", session_id="s", connection_epoch=0)
+    assert not (working/"spool").exists()
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "test-archive-uuid")
+    (working/"spool").symlink_to(archive, target_is_directory=True)
+    with pytest.raises(StorageMountError, match="storage_path_outside_working"):
+        DurableRawSpoolSegment(root=working/"spool", definition_id="d", session_id="s", connection_epoch=0)
+    assert list(archive.iterdir()) == []
+
+
+def test_raw_staging_accepts_only_admitted_working_or_archive_paths(mounted_archive, tmp_path, monkeypatch):
+    from core.storage_mounts import require_configured_staging_mount
+    archive, _, _ = mounted_archive
+    working = archive/"working"
+    working.mkdir()
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(working))
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "test-archive-uuid")
+    assert require_configured_staging_mount(working/"tmp").filesystem_uuid == "test-archive-uuid"
+    assert require_configured_staging_mount(archive/"compaction").filesystem_uuid == "test-archive-uuid"
+    with pytest.raises(StorageMountError, match="storage_path_outside_archive"):
+        require_configured_staging_mount(tmp_path/"unassigned")
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "wrong-uuid")
+    with pytest.raises(StorageMountError, match="identity_mismatch"):
+        require_configured_staging_mount(working/"tmp")
+    assert not (working/"tmp").exists()
+
+
+def test_book_checkpoint_stages_on_working_mount_and_publishes_to_archive(mounted_archive, tmp_path, monkeypatch):
+    from market_data.book_archive import publish_book_checkpoint, encode_book_checkpoint_parquet
+    from market_data.order_book import Level2BookReconstructor
+    from tests.test_market_data.test_order_book_phase2 import _contract, _snapshot
+    archive, _, _ = mounted_archive
+    working = tmp_path / "working"
+    working.mkdir()
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(working))
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "test-archive-uuid")
+    checkpoint = Level2BookReconstructor(series_id=1, contract=_contract()).process(_snapshot()).checkpoints[0]
+    store = FilesystemRawArchiveObjectStore(archive / "objects")
+    encoded, acknowledgement = publish_book_checkpoint(checkpoint, object_store=store,
+        temporary_directory=working / "tmp")
+    assert not encoded.path.exists()
+    published = store.local_path(acknowledgement.object_key)
+    assert published.is_file() and published.is_relative_to(archive)
+    assert hashlib.sha256(published.read_bytes()).hexdigest() == encoded.sha256
+    staged = encode_book_checkpoint_parquet(checkpoint, temporary_directory=archive / "tmp")
+    staged.path.unlink()
+    with pytest.raises(StorageMountError, match="storage_path_outside_archive"):
+        encode_book_checkpoint_parquet(checkpoint, temporary_directory=tmp_path / "unassigned")
+    assert not (tmp_path / "unassigned").exists()
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", "wrong-uuid")
+    with pytest.raises(StorageMountError, match="identity_mismatch"):
+        encode_book_checkpoint_parquet(checkpoint, temporary_directory=working / "refused")
+    assert not (working / "refused").exists()
+    assert hashlib.sha256(published.read_bytes()).hexdigest() == encoded.sha256

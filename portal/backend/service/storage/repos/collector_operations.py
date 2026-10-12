@@ -102,6 +102,44 @@ def _prior_state(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+# Keep one statement snapshot and independent observation/acceptance clocks.
+# Telemetry counts active revisions, including superseded active revisions.
+FACT_SERIES_TELEMETRY_SQL = """
+SELECT wanted.series_id,
+       observation.observation_time AS last_observation_time,
+       acceptance.accepted_at AS last_accepted_at,
+       recent.accepted_last_minute,
+       recent.accepted_last_five_minutes
+FROM unnest(CAST(:series_ids AS bigint[])) AS wanted(series_id)
+LEFT JOIN LATERAL (
+    SELECT observation_time
+    FROM market.fact_versions
+    WHERE series_id = wanted.series_id AND state = 'active'
+    ORDER BY observation_time DESC
+    LIMIT 1
+) observation ON true
+LEFT JOIN LATERAL (
+    SELECT accepted_at
+    FROM market.fact_versions
+    WHERE series_id = wanted.series_id AND state = 'active'
+    ORDER BY accepted_at DESC
+    LIMIT 1
+) acceptance ON true
+CROSS JOIN LATERAL (
+    SELECT count(*) FILTER (
+               WHERE accepted_at >= now() - interval '1 minute'
+           ) AS accepted_last_minute,
+           count(*) AS accepted_last_five_minutes
+    FROM market.fact_versions
+    WHERE series_id = wanted.series_id AND state = 'active'
+      AND accepted_at >= now() - interval '5 minutes'
+) recent
+WHERE EXISTS (
+    SELECT 1 FROM market.fact_versions WHERE series_id = wanted.series_id
+)
+"""
+
+
 class PostgresCollectorOperationsRepository:
     """Own one audited command path for both durable collector families."""
 
@@ -381,26 +419,7 @@ class PostgresCollectorOperationsRepository:
             return {}
         with db.session() as session:
             rows = session.execute(
-                text(
-                    """
-                    SELECT series_id,
-                           max(observation_time) FILTER (WHERE state = 'active')
-                               AS last_observation_time,
-                           max(accepted_at) FILTER (WHERE state = 'active')
-                               AS last_accepted_at,
-                           count(*) FILTER (
-                               WHERE state = 'active'
-                                 AND accepted_at >= now() - interval '1 minute'
-                           ) AS accepted_last_minute,
-                           count(*) FILTER (
-                               WHERE state = 'active'
-                                 AND accepted_at >= now() - interval '5 minutes'
-                           ) AS accepted_last_five_minutes
-                    FROM market.fact_versions
-                    WHERE series_id = ANY(:series_ids)
-                    GROUP BY series_id
-                    """
-                ),
+                text(FACT_SERIES_TELEMETRY_SQL),
                 {"series_ids": normalized_ids},
             ).mappings().all()
         return {int(row["series_id"]): _public_row(row) for row in rows}

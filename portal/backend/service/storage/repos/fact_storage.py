@@ -15,9 +15,10 @@ from typing import Any
 from sqlalchemy import text
 
 from core.storage_mounts import configured_archive_root
+from core.execution_control import execution_checkpoint, consume_execution_json, consume_execution_resource, measured_execution
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
-from market_data.fact_archive import FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
+from market_data.fact_archive import CanonicalArchiveReadPage, FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
 from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION, build_normalized_fact_payload_schema,
     get_fact_payload_schema, register_fact_payload_schema,
@@ -31,16 +32,21 @@ CANONICAL_ENVELOPE_COLUMNS = """
     sources.source_kind, sources.adapter_version AS source_adapter_version,
     series.dimensions AS series_dimensions
 """
-CANONICAL_ENVELOPE_FROM = """
-    FROM market.fact_versions AS versions
+_CANONICAL_ENVELOPE_JOINS = """
     JOIN market.sources AS sources ON sources.id = versions.source_id
     JOIN market.series AS series ON series.id = versions.series_id
 """
+CANONICAL_ENVELOPE_FROM = "\n    FROM market.fact_versions AS versions" + _CANONICAL_ENVELOPE_JOINS
 CANONICAL_ROW_COLUMNS = CANONICAL_ENVELOPE_COLUMNS + ", hot.payload, hot.provenance, hot.quality"
-CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + """
+_CANONICAL_HOT_JOIN = """
     LEFT JOIN market.fact_hot_payloads AS hot
       ON hot.storage_day = versions.storage_day AND hot.id = versions.id
 """
+CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + _CANONICAL_HOT_JOIN
+CANONICAL_RANGE_HEADER_FROM = """
+    FROM market.read_fact_headers_in_range(:series_id, :start, :end) AS versions
+""" + _CANONICAL_ENVELOPE_JOINS
+CANONICAL_RANGE_ROW_FROM = CANONICAL_RANGE_HEADER_FROM + _CANONICAL_HOT_JOIN
 _DOCUMENTS = frozenset(("payload", "provenance", "quality"))
 logger = logging.getLogger(__name__)
 
@@ -131,9 +137,11 @@ class PostgresCanonicalFactStorageRepository:
     def __init__(
         self, *, object_store_factory: Callable[[], RawArchiveObjectStore] = _read_only_store,
         limits: FactArchiveLimits = FactArchiveLimits(),
+        read_cache_factory=None,
     ):
         self.object_store_factory = object_store_factory
         self.limits = limits
+        self.read_cache_factory = read_cache_factory
 
     @contextmanager
     def stream_rows_by_ids(self, session, statement, params=None, *, batch_size=128):
@@ -149,19 +157,23 @@ class PostgresCanonicalFactStorageRepository:
         selected = session.execute(statement, params or {}, execution_options={
             "stream_results": True, "yield_per": batch_size,
         })
+        decoded_page = CanonicalArchiveReadPage()
         def hydrate():
             for batch in selected.scalars().partitions(batch_size):
                 identities = list(batch)
                 if len(identities) != len(set(identities)):
                     raise RuntimeError("canonical_selected_identity_duplicate")
-                rows = self.read_rows_by_ids(session, identities)
+                rows = self.read_rows_by_ids(session, identities, _decoded_page=decoded_page)
                 yield from (rows[identity] for identity in identities)
         rows = hydrate()
         try:
             yield rows
         finally:
-            rows.close()
-            selected.close()
+            try:
+                rows.close()
+            finally:
+                decoded_page.clear()
+                selected.close()
 
     def material_witness_exists(self, session, *, series_ids, material_hash,
                                 evidence_key=None, include_canonical=True):
@@ -272,23 +284,44 @@ class PostgresCanonicalFactStorageRepository:
                     return True
         return False
 
-    def read_rows_by_ids(self, session, fact_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+    def read_rows_by_ids(self, session, fact_ids: Sequence[str], *,
+                         _decoded_page: CanonicalArchiveReadPage | None = None) -> dict[str, dict[str, Any]]:
         """Hydrate an already selected immutable identity set in bounded SQL batches."""
+        if _decoded_page is not None or len(fact_ids) <= 1000:
+            return self._read_rows_by_ids(session, fact_ids, _decoded_page)
+        decoded_page = CanonicalArchiveReadPage()
+        try:
+            return self._read_rows_by_ids(session, fact_ids, decoded_page)
+        finally:
+            decoded_page.clear()
+
+    def _read_rows_by_ids(self, session, fact_ids, decoded_page):
         identities = sorted(set(fact_ids))
         result = {}
         for offset in range(0, len(identities), 1000):
             batch = identities[offset:offset + 1000]
+            locations = session.execute(text(
+                "SELECT id,storage_day FROM market.fact_identities WHERE id = ANY(:fact_ids)"
+            ), {"fact_ids": batch}).mappings().all()
+            if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+                raise RuntimeError("canonical_selected_identity_coverage_invalid")
+            # Resolve dates before issuing the header query. An ARRAY subquery
+            # became an InitPlan on PG15 and did not prune unrelated partitions.
             rows = session.execute(text(f"""
                 SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
                 WHERE versions.id = ANY(:fact_ids)
-            """), {"fact_ids": batch}).mappings().all()
+                  AND versions.storage_day = ANY(:storage_days)
+            """), {"fact_ids": batch,
+                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all()
             found = {row["id"] for row in rows}
             if found != set(batch) or len(rows) != len(found):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
-            result.update((row["id"], row) for row in self.hydrate_rows(session, rows))
+            result.update((row["id"], row) for row in self.hydrate_rows(session, rows, _decoded_page=decoded_page))
         return result
 
-    def hydrate_rows(self, session, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    @measured_execution("hydration")
+    def hydrate_rows(self, session, rows: Sequence[Mapping[str, Any]], *,
+                     _decoded_page: CanonicalArchiveReadPage | None = None) -> list[dict[str, Any]]:
         """Preserve SQL order and validate every cold page before supplying payloads.
 
         Ordinary READ COMMITTED sessions are safe across reclamation because the
@@ -296,6 +329,8 @@ class PostgresCanonicalFactStorageRepository:
         must hold the lifecycle shared fence before establishing their snapshot.
         The caller owns causal filtering; hydration never selects or drops rows.
         """
+        execution_checkpoint()
+        consume_execution_resource("input_rows", len(rows))
         result = [dict(row) for row in rows]
         ensure_payload_contracts(session, [
             (row["payload_schema_id"], row["payload_contract_hash"]) for row in result
@@ -314,6 +349,7 @@ class PostgresCanonicalFactStorageRepository:
                 raise RuntimeError(f"canonical_cold_identity_duplicate: fact_version_id={identity}")
             cold[identity] = row
         if not cold:
+            consume_execution_json("input_bytes", result)
             return result
 
         # Bound the SQL parameter set independently of the overall requested
@@ -334,8 +370,11 @@ class PostgresCanonicalFactStorageRepository:
                  AND (manifests.last_commit_seq, manifests.last_id)
                      >= (requested.market_commit_seq, requested.id)
                 WHERE requested.id = ANY(:fact_ids)
+                  AND requested.storage_day = ANY(:storage_days)
                 ORDER BY requested.id, manifests.page_ordinal
-            """), {"fact_ids": ids[offset:offset + 1000]}).mappings().all()
+            """), {"fact_ids": ids[offset:offset + 1000],
+                   "storage_days": sorted({cold[identity]["storage_day"]
+                                           for identity in ids[offset:offset + 1000]})}).mappings().all()
             for item in matches:
                 identity = str(item["requested_id"])
                 if identity not in cold:
@@ -363,13 +402,20 @@ class PostgresCanonicalFactStorageRepository:
             grouped[manifest.manifest_id].append(row)
 
         store = self.object_store_factory()
+        if self.read_cache_factory is None:
+            from portal.backend.service.storage.history_policy import configured_history_read_cache
+            cache = configured_history_read_cache()
+        else:
+            cache = self.read_cache_factory()
         for manifest_id, wanted in grouped.items():
+            execution_checkpoint()
             manifest = manifests[manifest_id]
             ensure_payload_contracts(session, [
                 contract for bounds in manifest.series for contract in bounds.payload_contracts
             ])
             archive_rows = read_canonical_fact_archive(
-                store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+                store.local_path(manifest.object_key), expected=manifest, limits=self.limits, cache=cache,
+                decoded_page=_decoded_page,
             )
             indexed = {str(row["id"]): row for row in archive_rows}
             for envelope in wanted:
@@ -381,6 +427,7 @@ class PostgresCanonicalFactStorageRepository:
                 # copy, not just ID or row_hash. storage_day is not market truth.
                 verify_archived_envelope(envelope, archived)
                 envelope.update({name: archived[name] for name in _DOCUMENTS})
+        consume_execution_json("input_bytes", result)
         return result
 
 

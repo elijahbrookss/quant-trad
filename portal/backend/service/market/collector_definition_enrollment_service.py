@@ -202,6 +202,7 @@ class CoinbaseFuturesCollectorPack:
             contract_version=template.contract_version,
             max_spool_bytes=template.max_spool_bytes,
             max_segment_bytes=template.max_segment_bytes,
+            max_inflight_segments=template.max_inflight_segments,
             continuous=True,
             product_contract=product_contract,
         )

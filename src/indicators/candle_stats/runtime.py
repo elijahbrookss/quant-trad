@@ -128,6 +128,10 @@ class TypedCandleStatsIndicator(Indicator):
             "atr_expansion_signal_threshold",
             params.get("atr_expansion_signal_threshold"),
         )
+        self._overlay_history_limit_bars = HISTORY_LIMIT
+        self._reset_state(datetime.min)
+
+    def _reset_state(self, bar_time: datetime) -> None:
         self._bars: list[Candle] = []
         self._true_ranges: list[float] = []
         self._atr_short_history: list[float] = []
@@ -140,10 +144,42 @@ class TypedCandleStatsIndicator(Indicator):
         self._atr_short_points: list[dict[str, float | int]] = []
         self._atr_long_points: list[dict[str, float | int]] = []
         self._atr_zscore_points: list[dict[str, float | int]] = []
-        self._overlay_history_limit_bars = HISTORY_LIMIT
-        self._current_bar_time = datetime.min
-        self._output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
-        self._atr_expansion_signal = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
+        self._gap_rewarm_remaining = 0
+        self._current_bar_time = bar_time
+        self._output = RuntimeOutput(bar_time=bar_time, ready=False, value={})
+        self._atr_expansion_signal = RuntimeOutput(bar_time=bar_time, ready=False, value={})
+
+    def handle_gap(
+        self,
+        *,
+        policy: str,
+        gap: Mapping[str, Any],
+        next_bar_time: datetime,
+        rewarm_bars: int,
+    ) -> Mapping[str, Any]:
+        normalized = str(policy or "").strip().lower()
+        if normalized != "reset_rewarm":
+            return super().handle_gap(
+                policy=policy, gap=gap, next_bar_time=next_bar_time,
+                rewarm_bars=rewarm_bars,
+            )
+        if isinstance(rewarm_bars, bool) or not isinstance(rewarm_bars, int) or rewarm_bars < 0:
+            raise RuntimeError(
+                "candle_stats_gap_rewarm_invalid: "
+                f"indicator_id={self.runtime_spec.instance_id} rewarm_bars={rewarm_bars!r}"
+            )
+        # EMA state has no finite exact forgetting horizon. Start a new causal
+        # segment; never carry a previous close or threshold across missing data.
+        self._reset_state(next_bar_time)
+        self._gap_rewarm_remaining = max(rewarm_bars, self._warmup_bars)
+        return {
+            "indicator_id": self.runtime_spec.instance_id,
+            "policy": normalized,
+            "action": "reset_and_rewarm",
+            "gap_classification": str(gap.get("classification") or "unknown"),
+            "rewarm_bars": self._gap_rewarm_remaining,
+            "next_bar_time": next_bar_time.isoformat(),
+        }
 
     def configure_overlay_history(self, *, history_bars: int) -> None:
         self._overlay_history_limit_bars = require_overlay_history_bars(history_bars)
@@ -220,7 +256,10 @@ class TypedCandleStatsIndicator(Indicator):
             self._body_overlap_history.append(overlap)
             _trim(self._body_overlap_history)
 
-        if not self._is_ready():
+        rewarming = self._gap_rewarm_remaining > 0
+        if rewarming:
+            self._gap_rewarm_remaining -= 1
+        if rewarming or not self._is_ready():
             self._output = RuntimeOutput(bar_time=bar.time, ready=False, value={})
             self._atr_expansion_signal = RuntimeOutput(bar_time=bar.time, ready=False, value={})
             return

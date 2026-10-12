@@ -50,6 +50,7 @@ def test_get_indicator_returns_nested_whole_indicator_contract(monkeypatch) -> N
     assert response.status_code == 200
     assert response.json() == {
         "instance": {
+            "version": "v1",
             "id": "indicator-1",
             "type": "market_profile",
             "name": "Profile",
@@ -89,6 +90,7 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
         dependencies=None,
         color=None,
         color_palette=None,
+        version=None,
     ):
         calls.append(
             {
@@ -145,6 +147,7 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
     ]
     assert response.json() == {
         "instance": {
+            "version": "v1",
             "id": "",
             "type": "candle_stats",
             "name": "ATR Check",
@@ -166,3 +169,21 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
             "compute_supported": False,
         },
     }
+
+
+def test_v2_config_validation_selects_complete_manifest_and_rejects_unknown_version():
+    client = _client()
+    response = client.post("/api/indicators/validate-config", json={"type":"market_profile","version":"v2","params":{}})
+    assert response.status_code == 200, response.text
+    assert response.json()["manifest"]["version"] == "v2"
+    assert response.json()["instance"]["version"] == "v2"
+    assert "first_value_return" in {o["name"] for o in response.json()["outputs"]["typed"]}
+    rejected = client.post("/api/indicators/validate-config",json={"type":"market_profile","version":"v999","params":{}})
+    assert rejected.status_code == 400
+
+
+def test_version_cannot_be_changed_in_place(monkeypatch):
+    monkeypatch.setattr(controller,"get_instance_meta",lambda _: {"id":"old","version":"v1"})
+    response = _client().put("/api/indicators/old",json={"type":"market_profile","version":"v2","params":{}})
+    assert response.status_code == 400
+    assert "Cannot change indicator version" in response.json()["detail"]

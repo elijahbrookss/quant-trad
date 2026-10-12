@@ -49,6 +49,11 @@ mutate research or strategies, operate collectors, or write lifecycle state. A
 displayed command remains copy-only unless an independently owned operator
 surface explicitly executes it.
 
+The separately owned V2 Settings > Storage surface may enroll prepared drives
+and review storage policy through the backend storage-management contract.
+Role selection is a request, not evidence of physical placement or completed
+migration. Overview and Operations remain read-only.
+
 Frontend code must render lifecycle, health, readiness, coverage, and diagnostic
 states emitted by their owning backend contracts. It must not infer those states
 from cache presence, enabled flags, recent timestamps, database-shaped payloads,
@@ -72,3 +77,16 @@ locally cached object cannot become product authority merely because it exists.
 
 Artifacts move forward semantically:
 indicator outputs -> strategy decisions -> bot execution -> playback inspection.
+
+
+## Research interpretation publication
+
+Research Memory Studies hold questions and scope; hypotheses hold testable
+claims and Observations hold findings under existing admission rules. A published
+summary is an immutable question-owned interpretation revision with exact
+server-resolved evidence and historical reasoning/relationship context. It is
+not a Campaign, separate research engine or scientific authorization. Generic
+JSON writes cannot claim publication. Corrections append revisions, preserving
+prior citations. Complete references do not certify statistical validity,
+causality, profitability, trading permission or actual replay/recovery.
+See [Research Memory Boundary](../../architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md#question-owned-interpretation-publication).

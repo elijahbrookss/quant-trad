@@ -22,6 +22,9 @@ services:
 
   timescaledb:
     image: timescale/timescaledb:2.14.2-pg15
+    # This stack has no external network. Telemetry jobs can outlive terminated
+    # test sessions and block database cleanup; exercise application jobs only.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
     environment:
       POSTGRES_USER: ${QT_TEST_POSTGRES_USER:?required}
       POSTGRES_PASSWORD: ${QT_TEST_POSTGRES_PASSWORD:?required}
