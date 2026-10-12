@@ -1,12 +1,54 @@
 # Bounded Storage Migrations and Research Compatibility
 
-**Status: deployed; sustained capacity qualification remains open. Updated 2026-10-10.**
+**Status: deployed; sustained capacity qualification remains open. Updated 2026-10-12.**
 Decision: [ADR 0078](../architecture/decisions/0078-evolve-research-within-existing-data-boundaries.md).
 This revision replaces this document's earlier H04-first implementation plan.
 It does not resume a migration, clear an operational hold, deploy a release or
 restart research. Historical approvals and receipts remain evidence.
 
-## Deployed outcome — 2026-10-10
+## Current deployed outcome — 2026-10-12
+
+Release `71946b1a2d59cc0db92653b07232871cfe6b4e56` deployed at 11:46 UTC after
+[all seven exact-source qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38238737081).
+It retains the preceding raw-prefix deduplication, bounded expiration queries,
+controller ownership fixes and research releases. The latest change flushes
+archive catalogue rows in batches of at most 128 within the existing atomic page
+transaction. Three actual PostgreSQL regressions cover slow alias writes,
+cancellation and time-budget rollback, retained archive objects and unchanged
+frozen correction reads. No schema, archive format or verifier changed. The
+database, policy and migration journals were unchanged by this software release;
+all 17 collectors were healthy in the post-deployment observations.
+
+At 12:03 UTC an independently reviewed configuration change raised the existing
+maintenance step cap from 4 to 16. Four quick prefix steps had exhausted the old
+step cap despite remaining time, followed by the normal minute wait. Only the
+maintenance worker was recreated; every other container ID remained unchanged.
+The 60-second canonical run budget, 60-second interval, 5-second SQL limit,
+10,000-row/64 MiB page bounds and final-verification limits are unchanged. The
+saved policy remains 14 days; the raw settings default of 30 days is overridden
+by that saved policy. Permissions and recovery/migration evidence were preserved.
+
+The formerly blocked page now commits. Before the step-cap adjustment, a
+499-second observation recorded 20,000 newly archived rows versus 32,745 new
+identity/hot-table inserts, with no statistics reset. These are about 40 and 66
+rows per second respectively; insert activity is not an exact committed-arrival
+count. This short sample still trails intake. The changed step cap is under
+measurement, not a demonstrated speedup. No additional partition reclamation has
+yet been established; the prior 1,538,539,520-byte reclaim remains the only measured
+reclaim. Successful cycles, prefix progress and page publication alone do not prove
+sustained capacity. Require complete verification/reclamation and improving backlog
+and filesystem headroom under ongoing collection before closing that qualification.
+
+The authorized ATR Check and exact Replay also completed with matching retained
+results. Current and prior research definition versions remain available through
+matching API/CLI catalogue reads. Existing H04/ATR allocations remain completed;
+no new scientific allocation or paused automation was resumed by these releases.
+The current receipts are under
+`artifacts/storage-implementation/history-read-cache/capacity-20261012/release-71946b1a/`,
+including `step-limit16/`. The dated October 10 account below is historical evidence,
+not current pending work or instructions to repeat completed operations.
+
+## Earlier deployed outcome — 2026-10-10
 
 The separately approved schema cutover committed on October 9 at 00:07 UTC.
 Release `89912f167e19f5255fb4ee1ddcf64c92f155d2b2` deployed on October 10 at
@@ -100,7 +142,7 @@ All 17 collectors were healthy at the later observation; the eight stream spools
 held about 1 MB with no partial files. These are bounded observations, not a
 sustained collector-lag or archival-throughput guarantee.
 
-**Pending source candidate, not deployed:** repeated raw-prefix SQL locators are
+**Historical candidate status on October 10; subsequently deployed:** repeated raw-prefix SQL locators are
 now deduplicated while retaining all root witnesses and the original conservative
 work budget. A later deployed-worker failure at 08:15 UTC again contained
 thousands of range entries. The candidate also bounds expiration-witness
@@ -132,7 +174,7 @@ The baseline producer began at 12:38 UTC on October 9; migration, WAL and backup
 growth must be separated from ordinary growth before projecting a capacity horizon.
 No additional historical rewrite or migration-copy deletion is implied. Private
 receipts are retained under `artifacts/storage-implementation/history-read-cache/`:
-`release-89912f16` (current deployment, query correction and initial maintenance/
+`release-89912f16` (October 10 deployment, query correction and initial maintenance/
 collector observations), `release-37177f1c` (actual reclaim/cold-cache proof and
 coverage-query measurements), `release-f19682d1` (2023 research measurements),
 `release-041e3c0a` (earlier query/compaction qualification), `release-dfd717be`
