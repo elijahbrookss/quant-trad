@@ -45,9 +45,21 @@ already-published larger pages during verification, and smaller pages increase t
 final manifest count. The next targeted change belongs in the existing publisher:
 size new pages to their bounded source dependencies while retaining existing read
 and verification ceilings; fail explicitly if even one Fact's closure cannot fit.
-This change is proposed, not implemented or deployed. Preserve correction/known-at
-checks, cursor completeness, cancellation and atomic acknowledgement; qualify mixed
-page sizes and the existing final verification limits before deployment.
+The candidate now implements source-byte admission in the existing publisher:
+a narrowly typed pre-hydration byte refusal halves only the new page's ordered
+root prefix. It retains the complete source closure and existing run/read limits;
+single-root excess and all non-sizing failures still fail explicitly. No new
+schema, service, persisted job state, archive format or verifier version is added.
+The candidate is not deployed. Both native hot/cold regression cases passed, as
+did 47 focused admission tests and the 5,317-test backend suite (7 skipped).
+Complete release CI and production throughput qualification remain pending.
+Qualification covers mixed page sizes, causal correction history, future-known
+exclusion, cancellation, interrupted acknowledgement, restart and frozen reads
+after physical reclamation. Smaller pages may encounter the unchanged final page,
+object, byte or time ceilings. Those limits must be assessed against the actual
+page distribution before claiming capacity improvement; no automatic increase is
+part of this change. Rollback uses the retained compatible runtime and preserves
+all old/new pages and committed cursors.
 
 No additional partition reclamation has yet been established; the prior
 1,538,539,520-byte reclaim remains the only measured reclaim. Successful cycles,

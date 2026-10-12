@@ -599,8 +599,19 @@ ASCII byte by six. The codec still enforces the same 64 MiB default logical-byte
 limit; fuller pages do not enlarge the existing reader's budget or change the
 archive format. Acknowledged pages keep their bytes and cursor boundaries when
 the packing estimate changes, and subsequent publication resumes after them.
-Exact canonical hashes are checked before dependency
-resolution. Object count and cumulative bytes bound raw dependency verification.
+Exact canonical hashes are checked before dependency resolution. The publisher
+also fits the complete causal source set before writing a new page. A typed
+source-byte preflight refusal halves the leading root-record prefix and retries
+under the same deadline and cancellation checks. It never trims a root's source
+revisions or advances past an unacknowledged root. A single root whose complete
+sources exceed the limit fails explicitly. SQL, corruption, scope and other
+admission errors propagate without a sizing retry. This changes only new page
+boundaries: existing objects, row/read ceilings, verification rules and schema
+remain unchanged. At most one prepared page survives between prefix steps.
+Smaller pages can increase catalogue size and final-verification cost; the
+existing page, object and byte ceilings still refuse excessive final work rather
+than increasing automatically. Object count and cumulative bytes bound raw
+dependency verification.
 Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit
 leaves no acknowledged progress; retry reuses identical immutable bytes.

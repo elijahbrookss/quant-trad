@@ -33,6 +33,7 @@ from .fact_storage import (
     CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_ENVELOPE_COLUMNS, CANONICAL_ENVELOPE_FROM,
     _catalog_manifest, ensure_payload_contracts,
 )
+from .fact_dependencies import CanonicalSourceByteBudgetExceeded
 from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_lifecycle_repository
 
 logger = logging.getLogger(__name__)
@@ -439,7 +440,26 @@ class PostgresCanonicalFactArchiveRepository:
                 for row in rows:
                     self._check_budget()
                     record_from_storage_row(row)
-                source_rows = self._source_revisions(session, rows)
+                # The roots can fit while their complete causal sources do not.
+                # Reduce only this new ordered page; never lower read limits or
+                # trim an individual root's correction/provenance closure. The
+                # unchanged run deadline/cancellation guard bounds every retry.
+                while True:
+                    self._check_budget()
+                    try:
+                        source_rows = self._source_revisions(session, rows)
+                        break
+                    except CanonicalSourceByteBudgetExceeded as exc:
+                        if len(rows) == 1:
+                            exc.add_note(f"storage_day={day} fact_version_id={rows[0]['id']}; "
+                                         "one root cannot fit; source cursor unchanged")
+                            raise
+                        next_count = max(1, len(rows) // 2)
+                        logger.warning(
+                            "canonical_archive_page_source_budget_reduced | storage_day=%s page_ordinal=%s "
+                            "rows_before=%s rows_after=%s logical_bytes=%s max_logical_bytes=%s",
+                            day, ordinal, len(rows), next_count, exc.logical_bytes, exc.max_logical_bytes)
+                        rows = rows[:next_count]
                 self._prepared_page = (key, rows, source_rows)
             progress = self._prepare_book_prefix(session, (*rows, *source_rows), day)
             if progress is not None:

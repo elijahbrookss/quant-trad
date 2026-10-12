@@ -170,8 +170,11 @@ def test_source_byte_budget_rejects_before_fetching_payloads():
             if "coalesce(sum" in str(statement):
                 return SimpleNamespace(scalar_one=lambda: 2048)
             return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: []))
-    with pytest.raises(RuntimeError, match="canonical_source_dependency_byte_budget_exceeded"):
+    with pytest.raises(fact_dependencies.CanonicalSourceByteBudgetExceeded,
+                       match="logical_bytes=2048 max_logical_bytes=1024") as caught:
         fact_dependencies.read_canonical_dependency_rows(Session(), ["source"], reader=None, max_logical_bytes=1024)
+    assert caught.value.logical_bytes == 2048
+    assert caught.value.max_logical_bytes == 1024
 
 
 @pytest.mark.parametrize("mode", ["valid", "missing", "hash", "duplicate"])
