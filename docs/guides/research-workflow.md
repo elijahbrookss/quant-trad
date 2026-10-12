@@ -22,6 +22,36 @@ idea
 Skipping a step usually makes the final number easier to produce and harder to
 trust.
 
+## Research Purpose And Stopping Decisions
+
+QT currently develops revisable, inspectable understanding of market behavior.
+Eventual trading usefulness remains downstream; research promises no profitable
+Strategy. A useful result may explain a limitation or close a question without
+advancing toward trading.
+
+Ask a specific question and compare plausible alternatives. Preserve supporting
+and contradicting evidence, the conditions tested, and limitations. Historical
+comparisons do not establish causation. Post-hoc regime splits remain exploratory
+until tested on separate evidence. A negative result applies narrowly to the
+tested formulation, rather than disproving every related idea.
+
+Assess evidence separately from the operational decision: strong evidence may
+still justify deferring work, while weak evidence may justify a bounded next
+comparison. Decide to **close**, **continue**, or **defer**, with reasons and
+conditions for revisiting. A better question must change a research decision;
+it must not justify endless infrastructure or repeated tests without new grounds.
+Reopening requires new evidence or a justified alternative.
+
+At a Study ending, use the existing summaries and linked evidence to explain the
+question, evidence, tested conditions, limitations, decision, and reopening
+criteria. This is reasoning guidance, not a new entity, schema, required metadata,
+or knowledge subsystem. A research-memory Study and the scientific
+`StudyDefinition` composition have distinct existing contracts; this guidance
+does not change either.
+
+Reviewed 2026-10-12: general agent research guidance; no research outcome or
+operational authority is implied.
+
 ## 1. Begin With A Falsifiable Idea
 
 Start with a sentence about observable market behavior, not a Strategy name.
