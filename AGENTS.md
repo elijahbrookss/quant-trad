@@ -67,6 +67,8 @@ documented product contract.
 
 ---
 
+For research work, read the [research purpose and stopping decisions](docs/guides/research-workflow.md#research-purpose-and-stopping-decisions) before choosing the next experiment.
+
 ## Canonical Context (Required Reading)
 
 Agents MUST understand these documents before making architectural or behavioral changes:
