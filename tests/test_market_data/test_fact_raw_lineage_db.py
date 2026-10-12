@@ -19,7 +19,7 @@ from tests.test_market_data.test_market_state_phase3 import _trade
 pytestmark = pytest.mark.db
 
 
-def _raw_trade_fixture(storage, tmp_path, monkeypatch):
+def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-lineage"):
     monkeypatch.setattr(market_structure, "db", storage.database)
     structures = market_structure.market_structure_repository
     day = storage.today - timedelta(days=2)
@@ -29,12 +29,12 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch):
     series_id = storage.repo.register_series(instrument_id="storage-fixture", fact_type="market.trade",
                                            contract_version="market.trade.v1", timeframe_seconds=None)
     structures.upsert_stream_definition(
-        definition_id="exact-lineage", source_id=source_id, series_id=series_id, provider=source.provider,
+        definition_id=definition_id, source_id=source_id, series_id=series_id, provider=source.provider,
         venue=source.venue, provider_product_id="BTC-USD", channels=("market_trades",), auth_mode="public",
         contract_version="market.trade.v1", max_spool_bytes=1024**3, max_segment_bytes=128 * 1024**2,
         config={"fixture": "exact-lineage"},
     )
-    claim = structures.claim_stream(definition_id="exact-lineage", owner_id="exact-lineage-test", lease_seconds=600, bounded=True)
+    claim = structures.claim_stream(definition_id=definition_id, owner_id="exact-lineage-test", lease_seconds=600, bounded=True)
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     raws, manifests = [], []
     for ordinal in (1, 2):
@@ -157,6 +157,26 @@ def test_raw_prefix_lookup_preserves_overlap_scope_and_bound_placements(storage,
                     witness_manifest_ids={**bindings, "repeated-root-0": set()})
         with pytest.raises(RuntimeError, match="prefix_budget_exceeded"):
             resolve(repeated, max_mapping_rows=1199)
+
+        # Independent constant arrays are only coarse pruning. Mixed scopes and
+        # disjoint positions must still use each original paired predicate.
+        other = _raw_trade_fixture(storage, tmp_path, monkeypatch, definition_id="other-lineage")
+        other_last = other.raws[-1]
+        other_prefix = {name: getattr(other_last, name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+            "first_receive_ordinal": 2, "receive_ordinal": 2,
+            "root_fact_version_id": "other-root", "requested_channel": "market_trades",
+        }
+        first_only = {**prefix, "receive_ordinal": 1}
+        assert set(resolve([first_only, other_prefix], max_mapping_rows=2)) == {
+            fixture.manifests[0], other.manifests[1],
+        }
+        assert returned[-1] == 2
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve([first_only, {**prefix, "first_receive_ordinal": 3, "receive_ordinal": 3}])
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve([first_only, {**other_prefix, "session_id": prefix["session_id"]}])
+        with pytest.raises(RuntimeError, match="mapping_missing"):
+            resolve([first_only, {**other_prefix, "connection_epoch": 1}])
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe)
 

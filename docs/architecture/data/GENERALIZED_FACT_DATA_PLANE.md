@@ -880,15 +880,21 @@ session, connection epoch, first ordinal and final ordinal). It still charges
 the original requested-work budget and validates every root's product, channel
 and manifest binding; a conflicting witness cannot disappear through deduplication.
 Overlapping but unequal ranges remain separate. This changes neither proof hashes
-nor persisted certificates or archives. The source candidate includes this
-optimization; deployed `89912f16` still repeats identical locators.
+nor persisted certificates or archives.
 
 Raw-prefix lookup supplies its bounded scope list as typed, bound SQL `VALUES`,
 so PostgreSQL can plan using the requested scope count instead of a generic
 JSON-recordset estimate. The existing `EXISTS` predicate keeps overlapping
-requests from multiplying mapping candidates. Manifest ordinal bounds also
-exclude unrelated objects before visiting their mappings. Exact session/epoch/ordinal
-matching still proves every requested row; overlapping bounds cannot fill a gap.
+requests from multiplying mapping candidates. The prefix query also supplies
+constant definition/session sets and the outer ordinal envelope, as the existing
+exact-position query does. These redundant predicates let PostgreSQL prune
+manifests before visiting their mappings. The independent sets are only coarse
+bounds: the paired definition/session/epoch/ordinal predicate remains authoritative,
+so unrelated combinations and holes cannot satisfy a witness. A bounded
+production `EXPLAIN` comparison selected the existing manifest primary-key index
+instead of a manifest-table scan for 48 endpoint scopes across 24 known manifests.
+That is planner evidence, not a measured execution speedup or sustained archival
+throughput result; the bounds remain a source candidate until separately deployed.
 Placement bounds, expiry exclusion, deterministic ordering, and raw byte
 verification remain unchanged. These query changes add no index or backfill.
 

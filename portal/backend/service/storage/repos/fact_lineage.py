@@ -194,7 +194,20 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             for index in range(len(lookup_prefixes)))
         prefix_params = {f"prefix_{index}_{name}": scope[name]
                          for index, scope in enumerate(lookup_prefixes) for name, _ in fields}
-        queries.append((f"EXISTS (SELECT 1 FROM (VALUES {prefix_values}) "
+        # Constant manifest bounds expose the same pruning opportunity as the
+        # exact-position lookup. Keep EXISTS authoritative for paired scope and
+        # ordinal checks; independent arrays cannot prove a requested position.
+        prefix_params.update(
+            requested_definitions=sorted({item["definition_id"] for item in lookup_prefixes}),
+            requested_sessions=sorted({item["session_id"] for item in lookup_prefixes}),
+            first_requested_ordinal=min(item["first_receive_ordinal"] for item in lookup_prefixes),
+            last_requested_ordinal=max(item["receive_ordinal"] for item in lookup_prefixes),
+        )
+        queries.append(("manifests.definition_id = ANY(:requested_definitions) "
+            "AND manifests.session_id = ANY(:requested_sessions) "
+            "AND manifests.first_receive_ordinal<=:last_requested_ordinal "
+            "AND manifests.last_receive_ordinal>=:first_requested_ordinal "
+            f"AND EXISTS (SELECT 1 FROM (VALUES {prefix_values}) "
             "AS prefixes(definition_id, session_id, connection_epoch, first_receive_ordinal, receive_ordinal) "
             "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
             "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
