@@ -400,27 +400,41 @@ def _verify_published(root, new_path, journal):
 
 
 
-def inspect_published_operation(root, *, request=None, operation_path=None):
+def inspect_published_operation(root, *, request=None, operation_path=None, completed_runtime=False):
     """Admit immutable publication evidence; no launch, SQL or clock renewal.
 
     A completed publication outlives its publication window. Execution must own
     separate original phase receipts and fresh source/runtime/resource admission.
     The canonical worker's mutable lifecycle is deliberately checked by its
-    launcher, against the immutable new binding returned here.
+    launcher, against the immutable new binding returned here. Completed-runtime
+    inspection binds the recipe to the final owner instead of its pre-switch
+    preimage; it grants no launch authority or exemption from live verification.
     """
     from scripts.automation.storage_online_forward_worker import request_binding
 
     root = launch._canonical(root)
+    if type(completed_runtime) is not bool:
+        raise ValueError("storage_forward_completion_mode_invalid")
+    if completed_runtime:
+        from scripts.automation import storage_online_final as final
+        saved = final._load(root/final.STATE)
+        if saved["phase"] != "recovery_runtime_ready":
+            raise RuntimeError("storage_forward_completed_runtime_required")
+        model = host.load_receipt(root/runtime.RUNTIME_RECIPE, max_bytes=524288)
+        if host.digest(model) != saved["runtime"]["admission"]["recipe_sha256"]:
+            raise RuntimeError("storage_forward_completed_runtime_recipe_changed")
     selected_request = request if request is not None else host.load_receipt(root/publication.REQUEST)
     journal = host.load_receipt(root/operation_file(STATE, request=selected_request), max_bytes=_MAX_BYTES)
     from scripts.automation import storage_online_reschedule as reschedule
     if any(os.path.lexists(root/reschedule.state_file(journal["forward"]["operation_sha256"], version=version))
             for version in (1, 2, 3)):
-        return reschedule.inspect_published(root, journal, request=request, operation_path=operation_path)
-    return _inspect_publication(root, journal, request=request, operation_path=operation_path)
+        return reschedule.inspect_published(root, journal, request=request, operation_path=operation_path,
+            check_runtime=not completed_runtime)
+    return _inspect_publication(root, journal, request=request, operation_path=operation_path,
+        check_runtime=not completed_runtime)
 
 
-def _inspect_publication(root, journal, *, request=None, operation_path=None, active=True):
+def _inspect_publication(root, journal, *, request=None, operation_path=None, active=True, check_runtime=True):
     from scripts.automation.storage_online_forward_worker import request_binding
     immutable = {k:v for k,v in journal.items() if k not in {"intent_sha256", "phase"}}
     if journal.get("phase") != "complete" or host.digest(immutable) != journal.get("intent_sha256"):
@@ -479,8 +493,9 @@ def _inspect_publication(root, journal, *, request=None, operation_path=None, ac
         raise RuntimeError("storage_forward_publication_binding_changed")
     checks = [(new_path, (json.dumps(candidate, sort_keys=True)+"\n").encode())]
     if active:
-        checks += [(root/publication.REQUEST, publication.request_bytes(expected)),
-            (root/runtime.RUNTIME_RECIPE, (json.dumps(journal["new_runtime"], sort_keys=True)+"\n").encode())]
+        checks.append((root/publication.REQUEST, publication.request_bytes(expected)))
+        if check_runtime:
+            checks.append((root/runtime.RUNTIME_RECIPE, (json.dumps(journal["new_runtime"], sort_keys=True)+"\n").encode()))
     for path, data in checks:
         host.load_receipt(path, max_bytes=max(65536, len(data)))
         if path.read_bytes() != data:

@@ -314,7 +314,14 @@ The active raw lifecycle has two action types:
 
 - `archive_compact` combines a contiguous, same-session/same-epoch raw manifest
   set into verified Parquet/ZSTD without taking or interrupting the live stream
-  lease. Source bytes remain until their grace period expires.
+  lease. A group becomes eligible after its first-receive UTC hour ends plus
+  `compaction_min_age_minutes`; each source must also satisfy the existing
+  last-received age check. This delays compaction of an accumulating hour instead
+  of repeatedly rewriting its replacements as small segments arrive. Delayed
+  manifest publication can still require a later merge; this is not an
+  exactly-once compaction guarantee. Source bytes remain readable while waiting
+  and until the post-compaction grace period expires. Eligibility changes do not
+  change object formats, lineage, operation IDs, pins, or expiration rules.
 - `archive_expire` rechecks dataset and explicit pins, verifies source and any
   replacement checksums, fsyncs filesystem deletion, then records immutable
   completion evidence. A manifest remains visible as `expired` and replay fails

@@ -17,6 +17,19 @@ SELF_CONTAINED_FACT_TYPES = frozenset({
 })
 
 
+class CanonicalSourceByteBudgetExceeded(RuntimeError):
+    """A source-size preflight refusal, before loading the source documents."""
+
+    def __init__(self, *, logical_bytes: int, max_logical_bytes: int):
+        self.logical_bytes = logical_bytes
+        self.max_logical_bytes = max_logical_bytes
+        super().__init__(
+            "canonical_source_dependency_byte_budget_exceeded: "
+            f"logical_bytes={logical_bytes} max_logical_bytes={max_logical_bytes}; "
+            "reduce archive page size or raise the explicit logical-byte budget"
+        )
+
+
 def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
     """Keep complete bounded canonical windows, including corrections/invalidations.
 
@@ -140,7 +153,8 @@ def read_canonical_dependency_rows(session, identities, *, reader, max_logical_b
                 cold_pages[manifest.manifest_id] = manifest
                 logical_bytes += manifest.logical_byte_count
         if logical_bytes > max_logical_bytes:
-            raise RuntimeError("canonical_source_dependency_byte_budget_exceeded: reduce archive page size or raise the explicit logical-byte budget")
+            raise CanonicalSourceByteBudgetExceeded(
+                logical_bytes=logical_bytes, max_logical_bytes=max_logical_bytes)
     return reader.read_rows_by_ids(session, identities)
 
 

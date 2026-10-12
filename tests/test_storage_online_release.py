@@ -158,6 +158,70 @@ def test_public_operation_requires_fresh_completion_before_staging(monkeypatch,c
     assert source.read_bytes().startswith(b"# retained credentials")
 
 
+@pytest.mark.parametrize("execute", [False, True])
+def test_repair_operation_stages_only_after_stopped_runtime_proof(monkeypatch, completed, execute):
+    root, source, saved, _ = completed
+    request = {"policy":{}, "source_revision":"c"*40, "source_tree_hash":"d"*64}
+    saved["binding"].update(source_revision="original")
+    saved["commit"] = {"source_image":"source-image"}
+    release.host.save_receipt(root/"storage-online-final.json", saved, initial=False)
+    release.host.save_receipt(root/operation.launch._STATE, {"binding":{"image":"candidate"}}, initial=True)
+    release.host.save_receipt(root/"storage-online-request.json", request, initial=True)
+    plan = dict(state_root=str(root), limits=vars(operation.OperationLimits(1,1,1,1,1,1,0,1,0,0)),
+        project="qt-original", source_revision="original", source_image="source-image", image="candidate",
+        request=request, spool_destination=saved["runtime_spool"]["destination"],
+        deployment_environment=str(source), deployment_repository=str(root))
+    repair = repair_request(saved)
+    package = root/"repair.json"
+    release.host.save_receipt(package, repair, initial=True)
+    monkeypatch.setattr(operation, "load_operation_plan", lambda _:copy.deepcopy(plan))
+    monkeypatch.setattr(operation.final, "_load", lambda _:copy.deepcopy(saved))
+    events = []
+    def observe(*args, **kwargs):
+        assert kwargs == {"repair_release":True}
+        events.append("observe")
+        return dict(ready=False, repair_release_admissible=True, complete_backup_confirmed=False)
+    def configure(*args, **kwargs):
+        assert kwargs["repair"] == repair
+        events.append("configure")
+        return {}
+    def publish(*args, **kwargs):
+        assert kwargs["repair"] == repair
+        events.append("publish")
+        return dict(complete_backup_confirmed=False)
+    monkeypatch.setattr(operation.final, "inspect_runtime_completion_locked", observe)
+    monkeypatch.setattr(release, "inspect_deployment_configuration", configure)
+    monkeypatch.setattr(operation.final, "publish_deployment_configuration_locked", publish)
+    result = operation.run_operation_plan(root/"operation.json", repair_release_file=package, execute=execute)
+    assert not result["complete_backup_confirmed"]
+    assert events == (["observe", "configure", "publish"] if execute else ["observe"])
+    assert (root/release.PREPARED_ENVIRONMENT).exists() is execute
+    if execute:
+        assert source.read_bytes() == (root/release.SOURCE_ENVIRONMENT).read_bytes()
+    else:
+        assert source.read_bytes().startswith(b"# retained credentials")
+
+
+@pytest.mark.parametrize("other", ["prepare_forward_only", "extend_attempt_seconds", "capacity_file",
+    "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file",
+    "place_forward_lookups_file", "reschedule_forward_file", "recover_repositories_file"])
+def test_repair_release_refuses_migration_actions_before_reading_inputs(other):
+    with pytest.raises(ValueError, match="repair_release_must_be_separate"):
+        operation.run_operation_plan("/does-not-exist", repair_release_file="/does-not-exist", **{other:True})
+
+
+def test_repair_cli_is_explicit_and_does_not_open_http_or_dispatch_deployment(monkeypatch):
+    from cli import main
+    monkeypatch.setattr(main, "_client", lambda _:pytest.fail("HTTP client opened"))
+    calls = []
+    monkeypatch.setattr(operation, "run_operation_plan", lambda path, **kwargs:calls.append((path,kwargs)) or {})
+    for execute in (False, True):
+        args = main.build_parser().parse_args(["storage", "migrate", "--operation-file", "/operation.json",
+            "--repair-release-file", "/repair.json", *(["--execute"] if execute else [])])
+        assert args.func(args) == 0
+    assert calls == [("/operation.json", dict(execute=value, repair_release_file="/repair.json")) for value in (False, True)]
+
+
 @pytest.mark.parametrize("failure",[None,"mutable","missing","rebuild"])
 def test_storage_application_build_cannot_fetch_or_rebuild_database(tmp_path,failure):
     import os
@@ -217,7 +281,7 @@ def test_proposed_host_bindings_cannot_change_shell_or_dotenv_meaning(value):
 def configuration_pair():
     bindings={"QT_STORAGE_NETWORK":"qt_quanttrad", "QT_MARKET_DATA_WORKING_EXPECTED_UUID":"ssd-uuid",
               "QT_MARKET_DATA_EXPECTED_UUID":"hdd-uuid"}
-    request={"source_revision":"c"*40}
+    request={"source_revision":"c"*40, "source_tree_hash":"e"*64}
     services={}
     for name in ("tsdb", *release.runtime._APPLICATIONS):
         image="sha256:"+("d" if name=="tsdb" else "a")*64
@@ -227,6 +291,8 @@ def configuration_pair():
             networks={"quanttrad":{}},command=["unchanged"],user="70:70" if name=="tsdb" else "1000:1000",
             cap_drop=["ALL"],mem_limit=1024,healthcheck={"test":["CMD","unchanged"]})
     services["backend"]["volumes"].append(dict(type="bind",source="/active.env",target="/app/secrets.env",read_only=True))
+    services["backend"]["environment"].update(SOURCE_REVISION="b"*40,
+        SOURCE_TREE_HASH="f"*64, QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+"b"*40)
     admitted=dict(name="qt",services=services,volumes={"postgres-data":dict(name="pg",external=True),
         "storage-recovery-socket":dict(name="socket",external=True)},networks={"quanttrad":dict(name="qt_quanttrad",external=True)})
     proposed=copy.deepcopy(admitted)
@@ -238,6 +304,8 @@ def configuration_pair():
         if name=="storage-maintenance":service["environment"]["QT_MARKET_DATA_WORKING_EXPECTED_UUID"]="hdd-uuid"
         service["volumes"][0].update(source="/run/udev",target="/run/qt-host-udev")
     proposed["services"]["backend"]["volumes"][1]["source"]="/prepared.env"
+    proposed["services"]["backend"]["environment"].update(SOURCE_REVISION=request["source_revision"],
+        SOURCE_TREE_HASH=request["source_tree_hash"], QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+request["source_revision"])
     images={v["image"]:{"PATH":"/fixture","IMAGE_DEFAULT":"unchanged"} for v in services.values()}
     return proposed,dict(admitted=admitted,bindings=bindings,request=request,
         source_environment=Path("/active.env"),prepared_environment=Path("/prepared.env"),image_environments=images)
@@ -250,6 +318,18 @@ def test_canonical_comparison_accepts_only_explicit_proposal_differences(configu
     assert result==dict(storage_configuration_sha256=release.host.digest(args["admitted"]),
                         canonical_configuration_sha256=release.host.digest(proposed))
     assert (proposed,args)==before
+
+
+@pytest.mark.parametrize("key", ["SOURCE_REVISION", "SOURCE_TREE_HASH", "QT_BOT_RUNTIME_IMAGE"])
+@pytest.mark.parametrize("fault", ["old", "missing", "unqualified"])
+def test_release_identity_requires_exact_candidate_values(configuration_pair, key, fault):
+    proposed, args = configuration_pair
+    backend = proposed["services"]["backend"]["environment"]
+    if fault == "old": backend[key] = args["admitted"]["services"]["backend"]["environment"][key]
+    elif fault == "missing": backend.pop(key)
+    else: backend[key] = "unqualified"
+    with pytest.raises(RuntimeError, match="service_changed: service=backend fields=environment"):
+        release.compare_deployment_configuration(proposed, **args)
 
 
 def test_canonical_comparison_preserves_selected_runtime_controls(configuration_pair):
@@ -302,8 +382,8 @@ def test_canonical_comparison_refuses_drift_without_exposing_private_values(conf
     assert "SECRET-DO-NOT-EXPOSE" not in str(exc.value) and "private-fixture" not in str(exc.value)
 
 
-@pytest.fixture
-def publication(completed):
+@pytest.fixture(params=["legacy-four-fields", "empty-storage-layout"])
+def publication(completed, request):
     root, source, saved, model = completed
     saved["binding"]["source_revision"] = "a"*40
     saved["runtime"]["finished_at"] = 1
@@ -320,7 +400,8 @@ def publication(completed):
     release.host.save_receipt(root/"storage-online-request.json", dict(source_revision="c"*40, source_tree_hash="d"*64), initial=True)
     metadata=root/"release.env"
     metadata.write_text("current_revision="+"a"*40+"\ncurrent_source_tree_hash="+"b"*64+
-        "\nprevious_revision=\ndeployed_at=original\nstorage_layout=\n")
+        "\nprevious_revision=\ndeployed_at=original\n"+
+        ("storage_layout=\n" if request.param == "empty-storage-layout" else ""))
     metadata.chmod(0o600)
     release.prepare_deployment_environment(root, environment_path=source, saved=saved, execute=True)
     configuration=dict(storage_configuration_sha256=release.host.digest(model), canonical_configuration_sha256="e"*64,
@@ -329,14 +410,48 @@ def publication(completed):
     return root, source, saved, configuration
 
 
-def publish(publication):
+def publish(publication, repair=None):
     root, source, saved, configuration = publication
-    return release.publish_configuration(root, repository=root, environment_path=source, saved=saved, configuration=configuration)
+    return release.publish_configuration(root, repository=root, environment_path=source, saved=saved, configuration=configuration, repair=repair)
+
+
+@pytest.mark.parametrize("entry", ["inspect", "publish"])
+@pytest.mark.parametrize("fault", ["extra", "missing", "other-revision", "claimed-layout", "duplicate", "malformed"])
+def test_source_metadata_refuses_before_publication_or_render(publication, monkeypatch, entry, fault):
+    root, source, saved, _ = publication
+    path = root/"release.env"
+    raw = path.read_bytes()
+    if fault == "extra": raw += b"unknown=value\n"
+    elif fault == "missing": raw = raw.replace(b"deployed_at=original\n", b"")
+    elif fault == "other-revision": raw = raw.replace(b"a"*40, b"f"*40)
+    elif fault == "claimed-layout": raw = raw.replace(b"storage_layout=\n", b"")+b"storage_layout=ssd-hdd-v1\n"
+    elif fault == "duplicate": raw += b"current_revision="+b"a"*40+b"\n"
+    elif fault == "malformed": raw += b"not-a-field\n"
+    path.write_bytes(raw)
+    before = {p:p.read_bytes() for p in root.iterdir() if p.is_file()}
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid source metadata must refuse before external inspection")
+    monkeypatch.setattr(release.subprocess, "run", unexpected)
+    monkeypatch.setattr(release.host, "docker", unexpected)
+    with pytest.raises(RuntimeError, match="source_metadata_changed|metadata_invalid"):
+        if entry == "inspect":
+            release.inspect_deployment_configuration(root, repository=root, environment_path=source, saved=saved)
+        else:
+            publish(publication)
+    assert {p:p.read_bytes() for p in root.iterdir() if p.is_file()} == before
+
+
+def repair_request(saved):
+    return dict(schema_version="qt.storage_repair_release.v1", final_sha256=release.host.digest(saved),
+        source_revision="9"*40, source_tree_hash="8"*64)
 
 
 @pytest.mark.parametrize("failure", ["before_environment", "after_environment", "after_release", None])
-def test_terminal_publication_reconciles_only_exact_files_and_preserves_originals(publication, monkeypatch, failure):
-    root, source, _, _ = publication
+@pytest.mark.parametrize("repair", [False, True])
+def test_terminal_publication_reconciles_only_exact_files_and_preserves_originals(publication, monkeypatch, failure, repair):
+    root, source, saved, _ = publication
+    request = repair_request(saved) if repair else None
+    original_request = (root/"storage-online-request.json").read_bytes()
     original=source.read_bytes(); old_release=(root/"release.env").read_bytes()
     writer=release._publish_file
     def interrupted(path, **kw):
@@ -346,14 +461,14 @@ def test_terminal_publication_reconciles_only_exact_files_and_preserves_original
             raise OSError("fixture publication interrupted")
     monkeypatch.setattr(release,"_publish_file",interrupted)
     if failure:
-        with pytest.raises(OSError,match="fixture publication"):publish(publication)
+        with pytest.raises(OSError,match="fixture publication"):publish(publication, request)
         intent=release.host.load_receipt(root/"storage-online-final.json")
         assert intent["release"]["status"]=="publishing"
         assert intent["release"]["published_at"] is None
         assert source.read_bytes()==(original if failure=="before_environment" else (root/release.PREPARED_ENVIRONMENT).read_bytes())
         monkeypatch.setattr(release,"_publish_file",writer)
         result=release.reconcile_configuration_files(root,saved=intent)
-    else:result=publish(publication)
+    else:result=publish(publication, request)
     assert result["phase"]=="deployment_configuration_published"
     assert not result["ordinary_relaunch_authorized"] and not result["migration_replay_authorized"]
     assert (root/release.SOURCE_ENVIRONMENT).read_bytes()==original
@@ -362,8 +477,153 @@ def test_terminal_publication_reconciles_only_exact_files_and_preserves_original
     assert source.stat().st_mode & 0o777==0o600
     values=release._release_values((root/"release.env").read_bytes())
     assert values["current_revision"]==values["previous_revision"]==""
-    assert values["pending_storage_revision"]=="c"*40
-    assert release.host.load_receipt(root/"storage-online-final.json")["release"]["status"]=="published"
+    assert values["pending_storage_revision"] == ("9" if repair else "c")*40
+    after = release.host.load_receipt(root/"storage-online-final.json")
+    assert after["release"]["status"]=="published"
+    assert {k:v for k,v in after.items() if k != "release"} == saved
+    assert (root/"storage-online-request.json").read_bytes() == original_request
+    if repair: assert after["release"]["repair"] == request
+
+
+@pytest.mark.parametrize("fault", ["journal", "phase", "revision", "hash", "schema", "extra", "same-revision"])
+def test_repair_request_cannot_change_original_evidence_or_reuse_broken_revision(publication, fault):
+    root, source, saved, _ = publication
+    request = repair_request(saved)
+    before = {p:p.read_bytes() for p in root.iterdir() if p.is_file()}
+    if fault == "journal": request["final_sha256"] = "0"*64
+    elif fault == "phase": saved["phase"] = "recovery_runtime_starting"
+    elif fault == "revision": request["source_revision"] = "branch-name"
+    elif fault == "hash": request["source_tree_hash"] = None
+    elif fault == "schema": request["schema_version"] = "unknown"
+    elif fault == "extra": request["skip_checks"] = True
+    elif fault == "same-revision": request["source_revision"] = "c"*40
+    with pytest.raises(RuntimeError, match="repair_release_"):
+        publish(publication, request)
+    assert {p:p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("fault", [None, "candidate", "original-request", "original-journal", "repair-request"])
+def test_repair_deployment_uses_new_candidate_without_rewriting_migration_request(publication, monkeypatch, fault):
+    from scripts.automation import storage_online_final as final
+    root, source, saved, _ = publication
+    request = repair_request(saved)
+    publish(publication, request)
+    monkeypatch.setattr(final, "_load", lambda path: release.host.load_receipt(path))
+    revision = request["source_revision"]
+    if fault == "candidate": revision = "c"*40
+    if fault == "original-request":
+        original = release.host.load_receipt(root/"storage-online-request.json")
+        original["source_revision"] = revision
+        release.host.save_receipt(root/"storage-online-request.json", original, initial=False)
+    if fault in ("original-journal", "repair-request"):
+        changed = release.host.load_receipt(root/"storage-online-final.json")
+        if fault == "original-journal": changed["runtime"]["finished_at"] = 2
+        else: changed["release"]["repair"]["source_revision"] = "7"*40
+        release.host.save_receipt(root/"storage-online-final.json", changed, initial=False)
+    def admit():
+        return release.admit_deployment(root, environment_path=source, repository=root, action="deploy", revision=revision)
+    if fault:
+        with pytest.raises(RuntimeError): admit()
+    else:
+        assert admit()["release"]["status"] == "published"
+        (root/"release.env").write_text("current_revision="+revision+"\ncurrent_source_tree_hash="+request["source_tree_hash"]+
+            "\nprevious_revision=\ndeployed_at=now\nstorage_layout=ssd-hdd-v1\n")
+        release.record_deployment(root, environment_path=source, revision=revision, source_hash=request["source_tree_hash"])
+        assert admit()["release"]["status"] == "deployed"
+        assert admit()["release"]["repair"] == request
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_repair_publication_requires_fresh_stopped_runtime_admission(publication, monkeypatch, admitted):
+    from scripts.automation import storage_online_final as final
+    root, source, saved, configuration = publication
+    request = repair_request(saved)
+    monkeypatch.setattr(final, "_load", lambda path: release.host.load_receipt(path))
+    events = []
+    def observe(*args, **kwargs):
+        assert kwargs == {"repair_release":True}
+        events.append("fresh-stopped-runtime")
+        return dict(ready=False, repair_release_admissible=admitted, complete_backup_confirmed=False)
+    def inspect(*args, **kwargs):
+        assert kwargs["repair"] == request
+        events.append("exact-configuration")
+        return configuration
+    monkeypatch.setattr(final, "inspect_runtime_completion_locked", observe)
+    monkeypatch.setattr(release, "inspect_deployment_configuration", inspect)
+    if admitted:
+        result = final.publish_deployment_configuration_locked(root, repository=root, environment_path=source, repair=request)
+        assert result["deployment_revision"] == request["source_revision"]
+        assert events == ["fresh-stopped-runtime", "exact-configuration"]
+    else:
+        with pytest.raises(RuntimeError, match="complete_recovery_required"):
+            final.publish_deployment_configuration_locked(root, repository=root, environment_path=source, repair=request)
+        assert events == ["fresh-stopped-runtime"]
+        assert release.host.load_receipt(root/"storage-online-final.json") == saved
+
+
+@pytest.mark.parametrize("fault", [None, "dirty", "wrong-revision", "wrong-hash", "storage-drift", "metadata-during-render"])
+def test_repair_configuration_binds_clean_new_source_and_original_request(publication, configuration_pair, monkeypatch, fault):
+    import subprocess
+    from scripts.provenance.source_tree_hash import working_tree_hash
+    root, source, saved, _ = publication
+    proposed, args = configuration_pair
+    repository = root/"checkout"
+    repository.mkdir()
+    for name in release._COMPOSE_FILES:
+        path = repository/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# exact fixture configuration\n")
+    (repository/"requirements.txt").write_text("# source material\n")
+    def git(*argv):
+        return subprocess.run(["git", "-C", str(repository), *argv], capture_output=True, text=True, check=True).stdout.strip()
+    git("init", "-q")
+    git("add", ".")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgSign=false",
+        "commit", "-qm", "fixture: source")
+    revision = git("rev-parse", "HEAD")
+    admitted = args["admitted"]
+    admitted["services"]["backend"]["volumes"][1]["source"] = str(source)
+    proposed["services"]["backend"]["volumes"][1]["source"] = str(root/release.PREPARED_ENVIRONMENT)
+    for name in release.runtime._APPLICATIONS:
+        proposed["services"][name]["image"] = "quanttrad-backend:"+revision
+    saved["runtime"]["admission"]["recipe_sha256"] = release.host.digest(admitted)
+    release.host.save_receipt(root/release.runtime.RUNTIME_RECIPE, admitted, initial=False)
+    release.host.save_receipt(root/"storage-online-final.json", saved, initial=False)
+    bindings = args["bindings"]
+    (root/release.PREPARED_ENVIRONMENT).write_bytes(release._environment_bytes(source.read_bytes(), bindings))
+    monkeypatch.setattr(release, "deployment_bindings", lambda *a:bindings)
+    original_request = (root/"storage-online-request.json").read_bytes()
+    repair = repair_request(saved)
+    repair.update(source_revision=revision, source_tree_hash=working_tree_hash(repository))
+    proposed["services"]["backend"]["environment"].update(SOURCE_REVISION=revision,
+        SOURCE_TREE_HASH=repair["source_tree_hash"], QT_BOT_RUNTIME_IMAGE="quanttrad-backend:"+revision)
+    if fault == "dirty": (repository/"requirements.txt").write_text("changed")
+    if fault == "wrong-revision": repair["source_revision"] = "0"*40
+    if fault == "wrong-hash": repair["source_tree_hash"] = "0"*64
+    if fault == "storage-drift": proposed["services"]["backend"]["cap_add"] = ["SYS_ADMIN"]
+    def docker(*argv, **kwargs):
+        if argv[0] == "image":
+            image = argv[-1]
+            return json.dumps(dict(Id=image, Config=dict(Env=[k+"="+v for k,v in args["image_environments"][image].items()])))
+        assert argv[0] == "compose"
+        assert kwargs["env"]["QT_RELEASE_REVISION"] == revision
+        if fault == "metadata-during-render":
+            metadata = root/"release.env"
+            metadata.write_bytes(metadata.read_bytes().replace(b"deployed_at=original", b"deployed_at=changed"))
+        return json.dumps(proposed)
+    monkeypatch.setattr(release.host, "docker", docker)
+    def inspect():
+        return release.inspect_deployment_configuration(root, repository=repository,
+            environment_path=source, saved=saved, repair=repair)
+    if fault:
+        with pytest.raises(RuntimeError, match="exact_clean_checkout_required|source_hash_changed|service_changed|inspection_changed"):
+            inspect()
+    else:
+        result = inspect()
+        assert result["request_sha256"] == release.host.digest(json.loads(original_request))
+        assert result["storage_configuration_sha256"] == release.host.digest(admitted)
+    assert (root/"storage-online-request.json").read_bytes() == original_request
+    assert release.host.load_receipt(root/"storage-online-final.json") == saved
 
 
 @pytest.mark.parametrize("fault",["active_environment","active_release","artifact","journal"])

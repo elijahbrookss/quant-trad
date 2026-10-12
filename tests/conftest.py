@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import inspect
 import os
+import json
 from pathlib import Path
 import warnings
 
@@ -264,3 +265,22 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "db" in item.keywords:
             item.add_marker(skip_db)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if _env_flag("QT_CI_TEST_PHASES"):
+        reporter = item.config.pluginmanager.getplugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line("ci_test_phase " + json.dumps({
+                "nodeid": report.nodeid, "phase": report.when,
+                "duration_seconds": round(report.duration, 6), "outcome": report.outcome,
+            }, sort_keys=True))
+    if report.failed and call.excinfo is not None and _env_flag("QT_CI_IMMEDIATE_FAILURE"):
+        reporter = item.config.pluginmanager.getplugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_sep("!", f"Immediate failure: {report.nodeid} ({report.when})")
+            # Do not print captured stdout/stderr or local/argument inventories.
+            reporter.write_line(str(call.excinfo.getrepr(style="short", showlocals=False, funcargs=False)))

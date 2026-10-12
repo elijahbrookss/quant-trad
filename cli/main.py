@@ -1912,6 +1912,18 @@ def _research_item_payload(
     return payload
 
 
+def _cmd_research_question(args: argparse.Namespace) -> int:
+    operations = ResearchOperations(_client(args))
+    if args.question_action == "history":
+        result = operations.publication_history(args.item_id)
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        operation = operations.adopt_question if args.question_action == "adopt" else operations.publish_interpretation
+        result = operation(args.item_id, request)
+    _print_json(result)
+    return 0
+
+
 def _cmd_research_items_create(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("POST", "/api/research/items", payload=_research_item_payload(args)))
     return 0
@@ -2028,6 +2040,16 @@ def _canonical_research_request(args: argparse.Namespace) -> dict[str, Any]:
     if not payload:
         raise ValueError("--request-json is required")
     return payload
+
+
+def _cmd_research_check_definitions(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).definitions())
+    return 0
+
+
+def _cmd_research_check_definition(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).definition(args.definition_id, args.version))
+    return 0
 
 
 def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
@@ -3291,7 +3313,7 @@ def _cmd_storage(args: argparse.Namespace) -> int:
     if args.storage_command == "migrate":
         from scripts.automation.storage_online_operation import run_operation_plan
 
-        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file", "reschedule_forward_file")
+        options = {name: getattr(args, name) for name in ("extend_attempt_seconds", "capacity_file", "replacement_package_file", "cancel_attempt_file", "forward_package_file", "prepare_forward_keys_file", "place_forward_lookups_file", "reschedule_forward_file", "recover_repositories_file", "repair_release_file")
                    if getattr(args, name, None) is not None}
         if getattr(args, "prepare_forward_only", False):
             options["prepare_forward_only"] = True
@@ -4302,6 +4324,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history; distinct from executable StudyDefinition.")
+    research_question_sub = research_question.add_subparsers(dest="question_action", required=True)
+    for action in ("adopt", "publish", "history"):
+        command = research_question_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action != "history":
+            command.add_argument("--request-json", required=True)
+        command.set_defaults(func=_cmd_research_question)
     research_items = research_sub.add_parser("items", help="Research memory item commands.")
     research_items_sub = research_items.add_subparsers(dest="research_items_command", required=True)
     research_items_list = research_items_sub.add_parser("list", help="List research memory items.")
@@ -4426,6 +4456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="Plan, preview, execute, and replay canonical analytical Checks."
     )
     research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_definitions = research_check_sub.add_parser("definitions", help="List registered analytical methods and eligibility.")
+    research_check_definitions.set_defaults(func=_cmd_research_check_definitions)
+    research_check_definition = research_check_sub.add_parser("definition", help="Inspect an exact method version, settings and request example.")
+    research_check_definition.add_argument("definition_id")
+    research_check_definition.add_argument("--version", required=True)
+    research_check_definition.set_defaults(func=_cmd_research_check_definition)
     research_check_requirements = research_check_sub.add_parser(
         "requirements",
         help="Resolve direct and transitive Check requirements without acquisition.",
@@ -4933,6 +4969,8 @@ def build_parser() -> argparse.ArgumentParser:
     migration.add_argument("--prepare-forward-keys-file", help="Inspect or prepare only the two forward keys using a qualified candidate package; no publication, adoption or source stop.")
     migration.add_argument("--place-forward-lookups-file", help="Inspect or place the three retained lookup indexes on SSD before successor publication; no adoption or source stop.")
     migration.add_argument("--reschedule-forward-file", help="Inspect or publish one stopped-worker schedule/package change while preserving current forward proof and its original deadline; no launch or source stop.")
+    migration.add_argument("--recover-repositories-file", help="Inspect or explicitly continue a confirmed committed switch after the known missing recovery-config failure; preserves the failed attempt and never replays the database migration.")
+    migration.add_argument("--repair-release-file", help="Admit an exact software repair after completed cutover and stopped maintenance; preserves storage bindings and incomplete recovery status. Does not deploy or replay migration.")
     migration.add_argument("--prepare-forward-only", action="store_true", help="With --execute and a published forward plan, complete online preparation and retire the worker before source stop; preserves adoption and its original deadline.")
     migration.set_defaults(func=_cmd_storage)
     storage_status = storage_sub.add_parser("status")

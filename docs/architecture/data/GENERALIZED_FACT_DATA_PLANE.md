@@ -163,6 +163,15 @@ The code and database share an immutable registry. Each row contains at least:
 - typed codec ID;
 - query-field declarations and required index/projection identities.
 
+The immutable in-memory payload schema defensively copies its field sequence to
+an immutable tuple and reuses its computed contract hash. `contract` still
+returns an independent document. This avoids rebuilding the same schema for
+every decoded Fact; it introduces no persisted cache or new registry. Fact
+payload, provenance, quality and row hashes remain freshly evaluated. Existing
+contract bytes, schema IDs, archive formats and frozen evidence are unchanged.
+This optimization is locally implemented; deployment and production performance
+qualification are separate.
+
 Registration fails when the code-owned contract hash differs from PostgreSQL.
 A write fails before persistence for an unknown schema, missing/unknown field,
 wrong JSON kind, invalid decimal/timestamp representation, domain violation,
@@ -300,6 +309,20 @@ Copies are named by immutable object SHA-256. The canonical codec verifies the
 whole chosen copy, schema, contents and requested envelopes exactly as on HDD.
 A corrupt SSD checksum is logged and the original HDD object is read normally;
 corrupt source data still fails. A cache hit does not attest HDD source health.
+
+Within one selected-ID read or identity stream, the existing repository and
+canonical codec retain at most one decoded archive page across SQL batches.
+Reuse requires the same complete manifest and page limits. Every batch still
+checks the current chosen file checksum, current catalog/schema evidence and
+selected envelopes; only repeated Parquet/JSON decoding is avoided. A changed
+page evicts the retained page before decoding its replacement. Defensive copies
+isolate mutable consumer payloads, and completion, early exit and cancellation
+release the retained page. Separate reads do not share this memory. This is one
+bounded page in addition to normal working data, not an RSS ceiling or a new
+persisted cache. Lifecycle and recovery verification do not opt into reuse.
+This change is locally implemented on the request-scoped archive decode branch;
+it is not part of the already-staged `a6586558` release.
+
 The shared filesystem implementation bounds cache bytes (including allocation
 rounding), entries (8,192), fill time (30 seconds) and per-operation fill bytes.
 It prunes inactive copies by last use, with a 14-day inactivity expiry and earlier
@@ -523,6 +546,20 @@ cutoffs, **all** family windows/admission, and writable filesystem/headroom
 checks; a previously returned plan cannot authorize a write. The final physical
 reclaimer independently repeats its exact-relation, pin and current-byte gates.
 
+The staging repository can retain one prepared sealed page while successive
+steps commit book/trade prefix certificates. Its key includes the day and seal,
+expected count, committed page cursor, page limits and verifier version. Each
+call still locks the partition and rechecks policy; publication resolves and
+checks raw/checkpoint dependencies again. A changed cursor or limit, failed
+transaction, cancellation or publication discards the buffer. The scheduled
+executor owns this repository only for its current bounded run, so a restart or
+next run resumes from PostgreSQL and reads the source again. This removes
+repeated hydration without another persisted cache, altered archive format or
+larger step/time budgets. Release qualification must exercise commit failure,
+concurrent publication, changed admission and resource limits in a disposable
+database. Reduced repeated queries alone do not prove sustainable reclamation
+throughput on a deployed host.
+
 The default page bounds are 10,000 rows and 64 MiB logical bytes, with a
 128 MiB encoded-file ceiling. Publication requires reserve for both the encoder
 file and atomic object-store temporary (256 MiB at defaults), in addition to
@@ -559,7 +596,12 @@ can supply `lifecycle-run --canonical-after-storage-day YYYY-MM-DD`; returned
 does not lose storage progress or weaken admission.
 
 Run outcomes distinguish step/time bounds, stop requests, deferred conflicts,
-blocked scans and failures. Genuine step failures log their storage day/action,
+blocked scans and failures. After a step's SQL cancellation (`57014`) rolls back,
+the executor checks the current run deadline and stop request. An elapsed budget
+or requested stop defers that day and retains its resume cursor. A SQL timeout
+with budget remaining still fails; non-cancellation errors remain failures even
+when the deadline has elapsed. This classification does not extend SQL limits or
+acknowledge uncommitted pages. Genuine step failures log their storage day/action,
 return an error outcome and make the lifecycle result degraded; `lifecycle-run`
 prints that result and exits nonzero. Progress remains
 in the existing storage tables; the raw `lifecycle-events` ledger does not claim
@@ -578,11 +620,37 @@ records the source count and physical allocation.
 Each staging call reads the next ordered source page after the last acknowledged
 cursor. Both row count and a conservative SQL-side JSON byte allowance bound
 transfer to Python; a first row outside the byte allowance fails explicitly and
-never advances the cursor. Exact canonical hashes are checked before dependency
-resolution. Object count and cumulative bytes bound raw dependency verification.
+never advances the cursor. The allowance counts PostgreSQL JSON bytes, reserves
+ASCII escape expansion only for non-printable/non-ASCII characters, and allows
+for the five clocks' fixed microsecond rendering. It no longer multiplies every
+ASCII byte by six. The codec still enforces the same 64 MiB default logical-byte
+limit; fuller pages do not enlarge the existing reader's budget or change the
+archive format. Acknowledged pages keep their bytes and cursor boundaries when
+the packing estimate changes, and subsequent publication resumes after them.
+Exact canonical hashes are checked before dependency resolution. The publisher
+also fits the complete causal source set before writing a new page. A typed
+source-byte preflight refusal halves the leading root-record prefix and retries
+under the same deadline and cancellation checks. It never trims a root's source
+revisions or advances past an unacknowledged root. A single root whose complete
+sources exceed the limit fails explicitly. SQL, corruption, scope and other
+admission errors propagate without a sizing retry. This changes only new page
+boundaries: existing objects, row/read ceilings, verification rules and schema
+remain unchanged. At most one prepared page survives between prefix steps.
+Smaller pages can increase catalogue size and final-verification cost; the
+existing page, object and byte ceilings still refuse excessive final work rather
+than increasing automatically. Object count and cumulative bytes bound raw
+dependency verification.
 Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit
 leaves no acknowledged progress; retry reuses identical immutable bytes.
+
+Catalog publication flushes series, alias, raw-dependency and canonical-dependency
+rows in batches of at most 128 inside that same transaction. The existing
+statement deadline applies to each batch, and the run-budget/cancellation check
+runs between batches and after the final flush. A stop or failed batch rolls back
+the manifest and every catalog row together. Archive page size, file format,
+identity and foreign-key checks are unchanged. This bounds SQL work and improves
+cancellation opportunities; sustained HDD throughput still requires measurement.
 
 `fact_archive_material_aliases` indexes legacy typed material hashes retained in
 canonical provenance. Aliases are derived from verified page rows, not invented
@@ -603,6 +671,22 @@ not permission to drop it. This owner does not perform reclamation. A normalized
 page requires the recursive input-window proof below and cannot be admitted with
 an unresolved, empty dependency set. Reviewed activation remains separate.
 
+### Sparse prefix lookup
+
+Raw-prefix lookups first restrict manifests by each complete requested
+`definition_id`/`session_id`/connection-epoch/ordinal-range tuple, then prove the
+exact mapping against that same tuple. Independent scope arrays and the overall
+minimum/maximum ordinal remain coarse filters only: they can include many
+intervening objects when a request contains sparse endpoints. Both filters use
+`EXISTS`, so overlapping witnesses do not multiply placements. Existing frozen
+bindings, missing-position failures, byte verification, expiry checks and mapping
+budgets remain unchanged; this query change creates no index or historical work.
+A bounded production comparison using 14 sparse scopes and 610 current prefix
+bindings timed out at 2 seconds with the prior shape; the paired-manifest shape
+returned 14 mappings in 278 ms. The bindings were reconstructed from current
+prefix metadata because the failure log truncated its list, so this is a
+representative observation, not an exact replay or a throughput guarantee.
+
 ### Exact Raw-Revision Evidence
 
 #### Hot Backlog And Reference Lifetime
@@ -615,8 +699,74 @@ session-scoped backlog protection; exact trade/L2 raw-ID mappings also cover
 generic canonical imports without collector-session metadata. Book/coverage
 scope deliberately protects earlier frames, not only the last source position.
 These checks use the existing JSON-containment GIN indexes and do not decode
-cold files. Planning lists `canonical_hot_backlog`; final expiry repeats the
-check. User-pin release cannot remove either class of canonical protection.
+cold files. Coverage IDs are selected from the immutable target's definition/session
+first; exact raw IDs are selected from its manifest. Materialized candidate sets
+and lateral existence probes keep those small sets outside the hot-payload lookup.
+This avoids a hot-table-first join that can scan every partition when no witness
+exists. All coverage revisions remain eligible witnesses; duplicate interval IDs
+do not alter the boolean hold. No new index, reference authority or historical
+backfill is introduced. Planning lists `canonical_hot_backlog`; final expiry
+repeats the check. User-pin release cannot remove either class of canonical protection.
+
+Expiration planning skips the hot-backlog probe when an exact canonical edge or
+immutable book-session hold has already made the target ineligible. The internal
+candidate uses `canonical_backlog_present=null` to mean not inspected; it does
+not claim that hot references are absent. Such a candidate remains blocked by
+`canonical_archive_dependency`. An uninspected backlog without that hold fails
+planning loudly. Unheld candidates, target-status inspection and final expiration
+still perform the existing bounded witness checks. This avoids a measured
+5-second timeout across hot partitions for an already protected archive without
+changing retention authority, archive formats or historical data.
+
+The indexed query shape is not a hard resource bound. The lifecycle repository
+owns expiration-planning and final-target witness transactions with `SET LOCAL`
+ceilings of 5 seconds per statement and 64 MiB of temporary files. Stricter caller
+settings remain stricter; parallel query workers are disabled for these witnesses
+because PostgreSQL's temporary-file limit applies per process. These are metadata
+query safety ceilings, not a whole-cycle deadline or a throughput promise. Commit
+or rollback removes the local settings before the connection returns to the pool.
+The database role must already be allowed to set `temp_file_limit`; runtime does
+not grant permissions or silently fall back. See PostgreSQL 15's
+[resource limits](https://www.postgresql.org/docs/15/runtime-config-resource.html)
+and [statement timeouts](https://www.postgresql.org/docs/15/runtime-config-client.html).
+
+An identified statement-timeout or temporary-file-limit failure invalidates the
+whole expiration plan. Dry planning fails loudly. An executing cycle records a
+failed `archive_expiration_plan` in additive `planning_failures` and run outcomes,
+preserves its sources, and may continue independent canonical archival after
+releasing the raw lifecycle fence. The cycle remains `degraded`, never successful.
+Manual cancellation, permission errors and unrelated database failures retain
+their original meaning. Retrying requires a fresh witness; a failed plan confers
+no deletion authority. No schema, policy format or recovery-data change is needed.
+
+Expiration candidate discovery uses two additive metadata indexes declared by the
+clean model: `ix_market_raw_archive_expiration_order` on raw manifests
+`(last_received_at, id)`, and `ix_market_dataset_archive_ref_manifest` on Dataset
+archive references `(raw_archive_manifest_id)`. The first supports ordered candidate
+discovery; the second supports reverse pin counts without repeatedly walking the
+Dataset-first primary key. They preserve the existing query, pins, correction
+history, known-at meaning, frozen hashes and archive formats. They add ordinary
+index storage and write cost; they do not convert historical facts.
+
+For an existing deployment, apply
+[`manual_add_archive_expiration_indexes_v1.sql`](../../../scripts/db/manual_add_archive_expiration_indexes_v1.sql)
+using psql with `ON_ERROR_STOP=1`, outside a transaction, after checking ownership,
+collector lag, disk/WAL/temp headroom and the research/deployment reservation.
+The script creates the indexes concurrently and sequentially, with a 1-second lock
+wait, 5-minute statement cap and 64-MiB maintenance-work-memory setting. These caps
+are not admission or a total completion-time promise. It rejects an incompatible
+existing name before either build and verifies both usable definitions afterward.
+Cancellation may leave an invalid index; inspect its state and any active builder
+before separately authorizing its removal/retry. A completed compatible first
+index can remain if the second build fails. Code rollback can retain both indexes.
+
+Clean bootstrap creates them. Ordinary startup on existing tables warns with the
+operator-script path and does not build them. Their absence leaves the readers
+compatible and the existing query limits in force; it does not grant expiration
+or block unrelated research. Neither index makes sparse candidate discovery a
+hard bounded scan. Verify actual planning latency, buffer/temp use and collector
+impact after the operator step; a synthetic plan improvement is not a production
+speedup or proof of sustainable retention.
 
 The final check alone is insufficient. `archive_expiration_lock` holds an
 `UPDATE` row lock on the exact immutable raw/checkpoint manifest through the
@@ -762,6 +912,17 @@ an immutable page. A missing/corrupt selected copy fails without silently
 switching to another copy. Multiple different raw IDs at the same claimed book
 position are ambiguous and rejected.
 
+When every witness in an individual SQL lookup already has pinned raw
+placements, that lookup restricts candidates to their union before applying
+the mapping-row budget. Record IDs, exact book positions, and prefix ranges
+each use their own requested witnesses: unbound trade records on a mixed page
+must not disable known book-placement bounds in the separate position lookup.
+An existing page-wide bound further intersects each union; each witness still
+checks its own binding afterward. Partial bindings within a lookup leave its
+unbound witnesses unrestricted, and an empty eligible set fails closed. This
+avoids considering unrelated placements during trade-prefix endpoint checks without changing raw
+identity, ambiguity checks, byte verification, or archive formats.
+
 Every selected object receives a fresh byte checksum and bounded streaming
 decode. The complete object's row count, order, source session/epoch, and ordinal
 bounds must agree with its manifest. Each requested physical row must match its
@@ -814,6 +975,29 @@ file/logical-byte bounds apply, with cooperative cancellation during hashing.
 The surrounding checksum and file-stability gates still bind those columns to
 the fully decoded object; a fingerprint alone is not raw-frame verification.
 
+Raw-prefix lookup deduplicates identical five-field SQL locators (definition,
+session, connection epoch, first ordinal and final ordinal). It still charges
+the original requested-work budget and validates every root's product, channel
+and manifest binding; a conflicting witness cannot disappear through deduplication.
+Overlapping but unequal ranges remain separate. This changes neither proof hashes
+nor persisted certificates or archives.
+
+Raw-prefix lookup supplies its bounded scope list as typed, bound SQL `VALUES`,
+so PostgreSQL can plan using the requested scope count instead of a generic
+JSON-recordset estimate. The existing `EXISTS` predicate keeps overlapping
+requests from multiplying mapping candidates. The prefix query also supplies
+constant definition/session sets and the outer ordinal envelope, as the existing
+exact-position query does. These redundant predicates let PostgreSQL prune
+manifests before visiting their mappings. The independent sets are only coarse
+bounds: the paired definition/session/epoch/ordinal predicate remains authoritative,
+so unrelated combinations and holes cannot satisfy a witness. A bounded
+production `EXPLAIN` comparison selected the existing manifest primary-key index
+instead of a manifest-table scan for 48 endpoint scopes across 24 known manifests.
+That is planner evidence, not a measured execution speedup or sustained archival
+throughput result; the bounds remain a source candidate until separately deployed.
+Placement bounds, expiry exclusion, deterministic ordering, and raw byte
+verification remain unchanged. These query changes add no index or backfill.
+
 Default per-call bounds are 50,000 mapping candidates, 1,000,000 decoded raw
 records, and 2 GiB logical data. Individual files are limited to 1 GiB and
 declared row groups to 256 MiB; decoding uses 128-row batches, with additional
@@ -832,6 +1016,17 @@ still apply. Shared interval progress removes full-prefix re-decoding on every
 retry, not all size limits. Exact-position SQL also needs representative
 plan/capacity measurements before activation; small disposable fixtures do not
 prove production-scale throughput.
+
+The exact-position lookup supplies constant definition/session sets and the
+requested ordinal envelope to locate candidate manifests before their mappings.
+The full per-position definition, session, epoch and ordinal predicate still
+decides membership; range overlap cannot fill a missing raw row. Bound object
+selection, expiry exclusion and physical verification remain unchanged. This
+uses the existing manifest and mapping indexes without a schema change. An
+October 9 read-only plan probe reproduced a whole-mapping scan for one position;
+the scope prefilter avoided it and returned its one match in 1.49 seconds under
+a two-second limit. That observation does not establish full-page throughput or
+a sustained cold-storage speedup.
 
 RCA: the initial staging implementation reused a latest-by-material-hash lookup.
 Trade material hashes intentionally exclude delivery details. Two immutable
@@ -983,6 +1178,15 @@ reverified under v10 to gain canonical source edges; original page bytes and
 older receipts remain unchanged. This family joins the default-disabled gate;
 Response and normalized-window admission are described below.
 
+Material-source selection omits the hot-provenance and cold-alias candidate
+branches when every request in its bounded batch belongs to a family with no
+legacy material evidence key. Those branches cannot match such facts, and leaving
+a false `CASE` predicate in the join can still produce a full historical-header
+scan. Canonical hash lookup retains its existing index, causal clocks, distinct
+root/source edges, hydration verification and row/byte limits. Batches containing
+legacy keys retain both alias paths; this changes no facts, archive formats,
+provenance meaning or recovery contracts.
+
 Version `market.canonical_archive_verification.v11` strengthens response archive
 publication with canonical source preservation. The declared flow-feature hash
 resolves every causal matching revision and its aggregate/trade closure. The
@@ -1126,7 +1330,17 @@ complete L2/raw/checkpoint closure. Each declared material witness binds **all**
 matching revisions at or before the root's commit and known-at clocks, not the
 latest alias. Requests are batched at 128; total matched edges are bounded by
 the canonical source row budget. Hot lookup uses containment supported by the
-existing provenance GIN index; cold aliases are candidate locators only. Hydrated rows must
+existing provenance GIN index; cold aliases are candidate locators only.
+The batched material resolver also supplies the distinct legacy witnesses as a
+bound constant array prefilter. The exact per-request series, family, hash and
+causal predicates remain authoritative. Each hot match obtains its header through
+an ID/day-parameterized lateral lookup, with an `OFFSET 0` boundary to prevent
+pulling it into a merge against the entire header history. This retains all
+matching revisions and adds no index, stored alias or schema change. The earlier
+October 9 three-root read-only probe returned three
+source revisions in 1.30 seconds under a two-second statement limit. That small
+sample is not an archive-throughput estimate, and normal maintenance budgets
+still apply. Hydrated rows must
 prove their actual material, series, family, observation and causal clocks.
 
 The existing BBO decoder and basis derivation owner validate the declared pair,
@@ -1278,6 +1492,17 @@ File device/inode/mode/size/mtime/ctime are checked around reads and again befor
 admission. These short-handoff checks never replace a fresh checksum on a later
 run. The object-store mount/root guards apply to every path lookup.
 
+Dependency expiration checks use batches of at most 128 exact `(target_kind,
+target_id)` pairs under the existing lifecycle fence, instead of one SQL round
+trip per dependency. Publication uses this same bounded check for its collected
+raw dependencies before their final byte admission. Each page and each final
+verification/reclamation pass checks current expiration events again; there is
+no retained validation cache. The publication change is implemented locally;
+production throughput improvement still requires deployed measurement.
+Cancellation and the run deadline are checked between batches. This changes
+query grouping only: current-byte checks, expiration refusal, receipt format,
+verifier version, resource ceilings, and atomic reclamation remain unchanged.
+
 On success, the partition becomes `verified` with a hash of the ordered page
 proofs. **All hot payloads remain intact.** This state is cold-copy admission,
 not deletion authorization. The separate default-disabled reclamation primitive
@@ -1326,6 +1551,13 @@ It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
 table lock causes a safe retry rather than a queued ingestion stall.
+
+The audit count of overlapping Dataset bindings first uses the already verified
+archive-series bounds to exclude unrelated ranges, then checks exact canonical
+headers and each binding's frozen commit cutoff. Bounds are conservative: gaps
+are not matches, range ends stay exclusive, and placement day is not observation
+time. This reuses the existing catalog after complete evidence checks; it adds
+no authority to delete and does not exempt pinned data from preservation.
 
 The only destructive statement is `DROP TABLE` for that single daily hot-payload
 relation, without `CASCADE`. Table/index/TOAST allocation is reclaimed at commit.

@@ -477,3 +477,39 @@ def test_forward_archive_owner_requires_explicit_database_resolution():
     assert archives._capture().state == archives.STATE
     with pytest.raises(ValueError, match="operation_connection_required"):
         archives._capture("a" * 64)
+
+
+@pytest.mark.parametrize("owned,closed,invalidated", [
+    (False, False, False), (True, True, False), (True, False, True),
+])
+def test_owner_cleanup_never_reconnects_or_unlocks_an_unowned_session(
+        owned, closed, invalidated):
+    from scripts.automation.storage_online_controller import OnlineController
+    events = []
+    def forbidden():
+        pytest.fail("cleanup attempted SQL on an unowned or lost connection")
+    owner = SimpleNamespace(
+        closed=closed, invalidated=invalidated, rollback=forbidden, begin=forbidden,
+        invalidate=lambda: events.append("discard"), close=lambda: events.append("close"))
+    controller = OnlineController.__new__(OnlineController)
+    controller._owner = owner
+    controller._owns_lock = owned
+    controller._release_owner()
+    assert events == ["discard", "close"]
+
+
+def test_owner_cleanup_discards_connection_even_when_unlock_fails():
+    from contextlib import nullcontext
+    from scripts.automation.storage_online_controller import OnlineController
+    events = []
+    owner = SimpleNamespace(
+        closed=False, invalidated=False, rollback=lambda: None,
+        begin=nullcontext, exec_driver_sql=lambda sql: None,
+        scalar=lambda *args: False, invalidate=lambda: events.append("discard"),
+        close=lambda: events.append("close"))
+    controller = OnlineController.__new__(OnlineController)
+    controller._owner = owner
+    controller._owns_lock = True
+    with pytest.raises(RuntimeError, match="unlock_not_owned"):
+        controller._release_owner()
+    assert events == ["discard", "close"]

@@ -213,3 +213,35 @@ def test_hot_flow_holder_cannot_admit_a_nonexistent_coverage_revision(storage, t
     with pytest.raises(RuntimeError, match="canonical_raw_reference_missing"):
         with storage.database.session() as writer:
             lock_canonical_raw_references(writer, [fact], max_mapping_rows=2)
+
+
+def test_hot_flow_backlog_survives_source_reclamation_without_holding_foreign_raw(storage, tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos import fact_archival
+    from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+    from tests.test_market_data.test_fact_derived_retention_db import _archive_day
+    from tests.test_market_data.test_fact_flow_retention_db import _flow_fixture
+
+    flow = _flow_fixture(storage, tmp_path / "flow", monkeypatch)
+    unrelated = _raw_trade_fixture(storage, tmp_path / "unrelated", monkeypatch)
+    monkeypatch.setattr(market_lifecycle, "db", storage.database)
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database, object_store=flow.store,
+        temporary_directory=tmp_path / "staging",
+        limits=fact_archival.FactArchiveLimits(max_rows=10, row_group_size=1),
+    )
+    _archive_day(archive, flow.source_day)
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    assert reclaimer.reclaim_partition(flow.source_day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
+
+    lifecycle = market_lifecycle.market_storage_lifecycle_repository
+    with storage.database.session() as session:
+        # Only derived flows remain hot: their coverage witness, rather than
+        # an original trade's collector/session provenance, must keep raw data.
+        assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE series_id=:id"),
+                              {"id": flow.trade_series}) == 0
+        assert session.scalar(text("SELECT count(*) FROM market.stream_coverage_interval_versions WHERE interval_id=:id"),
+                              {"id": flow.zero.coverage_interval_id}) == 2
+        for manifest_id in flow.manifests:
+            assert lifecycle.canonical_backlog_present(session, target_kind="raw_manifest", target_id=manifest_id)
+        for manifest_id in unrelated.manifests:
+            assert not lifecycle.canonical_backlog_present(session, target_kind="raw_manifest", target_id=manifest_id)

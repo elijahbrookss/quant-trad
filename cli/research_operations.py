@@ -20,6 +20,16 @@ class ResearchOperations:
             raise ValueError("research operation request must be an object")
         return dict(value)
 
+    def definitions(self) -> dict[str, Any]:
+        return self._client.request_json("GET", "/api/research/checks/definitions")
+
+    def definition(self, definition_id: str, version: str) -> dict[str, Any]:
+        from urllib.parse import quote
+
+        return self._client.request_json(
+            "GET", f"/api/research/checks/definitions/{quote(definition_id, safe='')}/{quote(version, safe='')}"
+        )
+
     def requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return self._client.request_json(
             "POST",
@@ -142,6 +152,15 @@ class ResearchOperations:
         return self._client.request_json(
             "GET", f"/api/research/items/{normalized}/trail"
         )
+
+    def adopt_question(self, item_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        return self._client.request_json("POST", f"/api/research/items/{item_id}/question", payload=self._payload(request))
+
+    def publish_interpretation(self, item_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        return self._client.request_json("POST", f"/api/research/items/{item_id}/publications", payload=self._payload(request))
+
+    def publication_history(self, item_id: str) -> dict[str, Any]:
+        return self._client.request_json("GET", f"/api/research/items/{item_id}/publications")
 
 
 __all__ = ["ResearchOperations"]

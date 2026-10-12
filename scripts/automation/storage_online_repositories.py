@@ -22,7 +22,7 @@ RECIPE = "storage-online-repository-preparation.compose.json"
 _ACTIONS = ("logins", "create", "prepare", "settings", "stop", "start", "wal_switch")
 _ARCHIVE_COMMAND = "pgbackrest --config=/run/quanttrad/recovery/pgbackrest.conf --stanza=qt archive-push %p"
 _PREPARE = """
-import json,sys
+import json,os,sys
 from pathlib import Path
 from types import SimpleNamespace
 from time import monotonic
@@ -35,6 +35,13 @@ args=json.loads(sys.argv[1])
 deadline=args["deadline_monotonic"]
 args["timeout_seconds"]=min(args["timeout_seconds"],int(deadline-monotonic()))
 if args["timeout_seconds"] < 1: raise RuntimeError("storage_online_repository_deadline_expired")
+# Reuse the admitted maintenance configuration. The preparation CLI's private
+# input file is temporary; deployment must not provision a duplicate beside keys.
+config=args.pop("incremental_configuration")
+path=Path('/tmp/qt-incremental-config.json')
+with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as output:
+    json.dump(config,output,sort_keys=True)
+args["incremental_config"]=str(path)
 for name in ('inventory','incremental_config','archiver_config','pg_controldata'):
     args[name]=Path(args[name])
 engine=create_engine(get_settings().database.dsn,poolclass=NullPool,hide_parameters=True)
@@ -90,9 +97,30 @@ def _preparer_contract(details, database):
     return host.database_contract(normalized)
 
 
+def incremental_configuration(state_root):
+    """Use the same strict configuration owner as the admitted maintenance service."""
+    from scripts.automation.storage_online_runtime import RUNTIME_RECIPE
+    from portal.backend.service.storage.maintenance_runtime import read_storage_maintenance_limits
+    model = host.load_receipt(Path(state_root)/RUNTIME_RECIPE, max_bytes=524288)
+    mounts = [m for m in model["services"]["storage-maintenance"]["volumes"]
+              if m.get("target") == "/run/quanttrad/storage-maintenance.json"]
+    if len(mounts) != 1 or mounts[0].get("type") != "bind" or mounts[0].get("read_only") is not True:
+        raise RuntimeError("storage_online_repository_maintenance_configuration_required")
+    path = Path(mounts[0]["source"])
+    before = preserving._runtime_configuration_bytes(path)
+    _, _, config = read_storage_maintenance_limits(path)
+    if config is None or preserving._runtime_configuration_bytes(path) != before:
+        raise RuntimeError("storage_online_repository_maintenance_configuration_changed")
+    return {key: str(value) if isinstance(value, Path) else value
+            for key, value in vars(config).items()}
+
+
 def prepare_repositories(state_root, *, saved, worker_process, source_check,
-                         max_bytes, reserve_bytes, recent_free_bytes, max_duration_seconds):
-    if (type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 600
+                         max_bytes, reserve_bytes, recent_free_bytes, max_duration_seconds,
+                         logins_already_open=False):
+    if (type(logins_already_open) is not bool
+            or logins_already_open and (source_check is None or recovery._CONTINUATION.get() is not source_check)
+            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 600
             or any(type(v) is not int or v < 0 for v in (max_bytes,reserve_bytes,recent_free_bytes))
             or max_bytes == 0):
         raise ValueError("storage_online_repository_budget_invalid")
@@ -126,6 +154,9 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
     backup = next(t for t in targets if t["medium"]=="hdd")
     identity = str(saved["login_gate"]["database"]["cluster"])+"/"+str(saved["login_gate"]["database"]["oid"])
     project = saved["binding"]["project"]
+    # Compose selects existing containers by project/service labels, even after
+    # docker rename. Keep the failed preparer intact under its original project.
+    preparer_project = project+("-recovery-continuation" if logins_already_open else "-recovery")
     recipe_path = state_root/RECIPE
     name = project+"-storage-repository-prepare"
     if recipe_path.exists() or recipe_path.is_symlink():
@@ -153,11 +184,11 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
         def gate(opened):
             if json.loads(host.maintenance_query(database_id,_GATE_OBSERVE)) != {**original_gate,"allow_connections":opened}:
                 raise RuntimeError("storage_online_repository_gate_changed")
-        gate(False)
+        gate(logins_already_open)
         if host.docker("ps","-aq","--no-trunc","--filter","name=^/"+name+"$").strip():
             raise RuntimeError("storage_online_repository_unowned_preparer")
         args = dict(deadline_monotonic=deadline,inventory="/run/qt-online/inventory.json",
-            incremental_config="/run/quanttrad/recovery/incremental-config.json",
+            incremental_configuration=incremental_configuration(state_root),
             archiver_config="/run/quanttrad/recovery/pgbackrest.conf",
             recent_target=recent["target_id"],backup_target=backup["target_id"],
             expected_database_identity=identity,pg_controldata="/usr/lib/postgresql/15/bin/pg_controldata",
@@ -213,7 +244,7 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
             return contract
 
         # Private rendered recipe, never printed: it contains the original PG_DSN.
-        recipe=dict(name=project+"-recovery",services=dict(prepare=helper),volumes=model["volumes"])
+        recipe=dict(name=preparer_project,services=dict(prepare=helper),volumes=model["volumes"])
         host.save_receipt(recipe_path,recipe,initial=True)
         saved.update(phase="recovery_repository_preparing",repositories=dict(
             recipe_sha256=host.digest(recipe),helper_id=None,helper_contract=None,
@@ -262,9 +293,10 @@ def prepare_repositories(state_root, *, saved, worker_process, source_check,
         sql_args=["exec","-i",database_id,"sh","-ec",
             'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d postgres '
             '-v ON_ERROR_STOP=1 -v target="$POSTGRES_DB" -qAtf -']
-        dispatch("logins",sql_args,sql="SET statement_timeout='5s';\nSELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
+        if not logins_already_open:
+            dispatch("logins",sql_args,sql="SET statement_timeout='5s';\nSELECT format('ALTER DATABASE %I ALLOW_CONNECTIONS true',datname) FROM pg_database WHERE datname=:'target'\n\\gexec\n")
         gate(True);completed("logins")
-        dispatch("create",["compose","--project-name",project+"-recovery","--file",str(recipe_path),
+        dispatch("create",["compose","--project-name",preparer_project,"--file",str(recipe_path),
                            "create","--no-build","--pull","never","prepare"])
         ids=host.docker("ps","-aq","--no-trunc","--filter","name=^/"+name+"$").split()
         if len(ids)!=1:raise RuntimeError("storage_online_repository_preparer_missing")

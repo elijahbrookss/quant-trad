@@ -231,6 +231,55 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
         )
 
 
+def test_current_commit_seq_preserves_visible_max_and_snapshot(canonical_series, monkeypatch):
+    from sqlalchemy import text
+
+    _ingest(canonical_series, [_fact(0)], source_revision="visible-watermark")
+    # Empty registered series contribute no invented commit. Sequence allocation
+    # and an uncommitted Fact must likewise never become a committed watermark.
+    market_data_repo.register_series(
+        instrument_id=str(canonical_series["instrument_id"]),
+        fact_type=OPEN_INTEREST_FACT_TYPE, timeframe_seconds=None,
+        contract_version=OPEN_INTEREST_FACT_VERSION,
+    )
+    with db.session() as session:
+        before = int(session.execute(text(
+            "SELECT COALESCE(MAX(market_commit_seq),0) FROM market.fact_versions"
+        )).scalar_one())
+        assert market_data_repo._current_commit_seq_with_session(session) == before
+        assert session.execute(text("SELECT nextval('market.fact_commit_seq')")).scalar_one() > before
+    assert market_data_repo.current_commit_seq() == before
+    pending, release = threading.Event(), threading.Event()
+    original = market_data_repo._ingest_canonical_rows_with_session
+    def delayed(session, **kwargs):
+        result = original(session, **kwargs)
+        pending.set()
+        assert release.wait(30), "watermark writer was not released"
+        return result
+    monkeypatch.setattr(market_data_repo, "_ingest_canonical_rows_with_session", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(_ingest, canonical_series, [_fact(1)], source_revision="pending-watermark")
+        try:
+            assert pending.wait(15)
+            with db.session() as session:
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+                assert market_data_repo._current_commit_seq_with_session(session) == before
+                release.set()
+                writer.result(timeout=15)
+                assert market_data_repo.current_commit_seq() > before
+                assert market_data_repo._current_commit_seq_with_session(session) == before
+                assert int(session.execute(text(
+                    "SELECT COALESCE(MAX(market_commit_seq),0) FROM market.fact_versions"
+                )).scalar_one()) == before
+        finally:
+            release.set()
+        writer.result(timeout=15)
+    with db.session() as session:
+        assert market_data_repo._current_commit_seq_with_session(session) == int(session.execute(text(
+            "SELECT COALESCE(MAX(market_commit_seq),0) FROM market.fact_versions"
+        )).scalar_one())
+
+
 @pytest.mark.parametrize("correction", [False, True])
 def test_freeze_excludes_late_cross_series_commit(canonical_series, monkeypatch, correction):
     """A sequence allocated before freeze is not necessarily visible at freeze."""

@@ -2,8 +2,8 @@
 
 This document describes the GitHub Actions topology defined by
 [`.github/workflows/test.yaml`](../../../.github/workflows/test.yaml). The
-workflow runs for pushes to `develop` or `main` and for pull requests targeting
-either branch.
+workflow runs for pushes to `develop`, `main`, `feature/**` and `hotfix/**`, and
+for pull requests targeting `develop` or `main`.
 
 ## Goals
 
@@ -16,7 +16,7 @@ either branch.
 
 ## Current Workflow Topology
 
-The workflow defines exactly five jobs. None declares `needs`, so GitHub may run
+The workflow defines exactly six jobs. None declares `needs`, so GitHub may run
 them concurrently. The numbering below is for documentation only.
 
 | # | Job ID | Primary boundary |
@@ -26,6 +26,17 @@ them concurrently. The numbering below is for documentation only.
 | 3 | `deployment-contract` | Server shell/Compose validation and attested production-image builds |
 | 4 | `clean-database-bootstrap` | Clean-schema bootstrap, private namespace verification, then PostgreSQL-marked contract tests |
 | 5 | `deployment-rehearsal` | Real deployment controller with synthetic Docker services and injected rollout failure |
+| 6 | `committed-recovery` | Native Linux missing-config recovery after a committed switch and expired final window, against current and first-release runtimes |
+
+`committed-recovery` expands into two matrix runs: the current revision and the
+pinned first-release revision `24357ff387776822f676ae2a8b1cce7f209c313e`. Each builds
+its attested test runtime, uses synthetic guarded source peers and independent
+disposable PostgreSQL/archive storage, reproduces the missing repository input,
+and exercises the explicit continuation and completion observation. Neither run
+uses production inputs or proves production throughput. The 25-minute job timeout
+bounds fixture setup and teardown; the operation keeps its own smaller limits.
+This runs on native Linux because Docker Desktop remaps bind paths and cannot
+qualify the exact Linux host identity checks.
 
 ### 1. `pr-suite`
 
@@ -67,7 +78,7 @@ accessibility conformance.
 
 ### 3. `deployment-contract`
 
-Runner: `ubuntu-latest`, with a 45-minute timeout.
+Runner: `ubuntu-latest`, with a 90-minute timeout.
 
 The workflow steps are:
 
@@ -309,3 +320,13 @@ Its internal network, generated credentials, owned resources and cleanup remain
 unchanged. A passed run supports only the exercised disposable layout; actual
 HDD performance, preserving migration duration and server permissions require
 their own evidence.
+
+The committed-recovery matrix also exercises a retained database image missing
+pgBackRest. It reproduces the historical missing-config failure, then completed
+repository setup blocked on WAL archival, and waits for both actual attempt
+expiries. The explicit v2 correction replaces only the database image while
+preserving PGDATA, keys and completed preparation. The same current/frozen reads,
+encrypted pair and read-only completion checks must pass afterward. This test
+uses generated disposable inputs; it does not measure production outage or grant
+production operation authority. Its 25-minute job bound includes image builds
+and deliberate expiry waits, not a production completion estimate.

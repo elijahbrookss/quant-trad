@@ -18,6 +18,44 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 SERVICES = ('tsdb', 'backend', 'initialize', 'market-data-collector', 'docker-stats', 'frontend', 'frontend-v2')
 
+# Synthetic admission evidence only; the rehearsal never calls GitHub.
+GITHUB_API_FIXTURE = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+path = sys.argv[-1]
+identity = Path(__file__).with_suffix('.sha')
+repository = 'elijahbrookss/quant-trad'
+runtimes = ['current', '24357ff387776822f676ae2a8b1cce7f209c313e']
+if 'workflows/' in path:
+    sha = parse_qs(urlsplit(path).query)['head_sha'][0]
+    identity.write_text(sha)
+    response = {'workflow_runs': [dict(id=1, head_sha=sha, event='push', head_branch='develop',
+        path='.github/workflows/test.yaml', repository=dict(full_name=repository),
+        head_repository=dict(full_name=repository), status='completed',
+        conclusion=os.environ.get('QT_FIXTURE_CI', 'success'), run_attempt=1, html_url='fixture://ci')]}
+elif '/attempts/1/jobs?' in path:
+    sha = identity.read_text()
+    names = ['pr-suite', 'frontend', 'deployment-contract', 'clean-database-bootstrap', 'deployment-rehearsal']
+    names += ['committed-recovery (' + runtime + ')' for runtime in runtimes]
+    jobs = [dict(id=index+1, name=name, head_sha=sha, run_id=1, run_attempt=1,
+        status='completed', conclusion='success', started_at='2026-10-10T01:00:00Z',
+        completed_at='2026-10-10T02:00:00Z',
+        steps=[dict(name='Attest and pack disposable qualification evidence', conclusion='success')])
+        for index, name in enumerate(names)]
+    response = dict(total_count=len(jobs), jobs=jobs)
+elif '/runs/1/artifacts?' in path:
+    sha = identity.read_text()
+    artifacts = [dict(id=index+1, name='committed-recovery-' + runtime, expired=False,
+        digest='sha256:' + 'b'*64, created_at='2026-10-10T01:59:00Z',
+        archive_download_url='fixture://artifact/' + runtime,
+        workflow_run=dict(id=1, head_sha=sha)) for index, runtime in enumerate(runtimes)]
+    response = dict(total_count=len(artifacts), artifacts=artifacts)
+else:
+    raise SystemExit('unexpected synthetic GitHub API path: ' + path)
+print(json.dumps(response))
+'''
+
 
 def run(args, *, cwd=None, env=None, ok=True):
     result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=900)
@@ -49,17 +87,7 @@ def main():
             (root / role / 'sentinel').write_text(role + '-retained')
         (root / 'bin').mkdir()
         gh = root / 'bin/gh'
-        gh.write_text(r'''#!/usr/bin/env python3
-import json, os, sys
-from urllib.parse import parse_qs, urlsplit
-path = sys.argv[-1]
-if 'workflows/' in path:
-    sha = parse_qs(urlsplit(path).query)['head_sha'][0]
-    print(json.dumps({'workflow_runs': [dict(id=1, head_sha=sha, event='push', head_branch='develop', status='completed', conclusion=os.environ.get('QT_FIXTURE_CI', 'success'), run_attempt=1, html_url='fixture://ci')]}))
-else:
-    names = ['pr-suite', 'frontend', 'deployment-contract', 'clean-database-bootstrap', 'deployment-rehearsal']
-    print(json.dumps({'total_count': len(names), 'jobs': [dict(name=n, status='completed', conclusion='success') for n in names]}))
-''')
+        gh.write_text(GITHUB_API_FIXTURE)
         gh.chmod(0o755)
         (repo / 'fixture.py').write_text(r'''import os, signal, time
 from pathlib import Path

@@ -15,7 +15,7 @@ from portal.backend.service.storage.repos.market_data import market_data_repo
 pytestmark = pytest.mark.db
 
 
-@pytest.mark.parametrize("forward_risk", [False, True])
+@pytest.mark.parametrize("forward_risk", [False, True, "matched_state", "atr_filtered"])
 def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch, forward_risk):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
@@ -104,6 +104,74 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch, fo
         assert evaluated["sample_count"] > 0
         assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
         assert all(event["fact_references"] == {} for event in evaluated["events"])
+
+    if forward_risk in {"matched_state", "atr_filtered"}:
+        # Reuse the already frozen v9 Dataset: no re-freeze or mutable data substitute.
+        from copy import deepcopy
+        matched_request = deepcopy(prepared["next_request"])
+        matched_request["outcomes"]["forward_risk"].update(
+            schema_version="candle_risk_matched_state.v1",
+            matching_contract="crossing_state_matched_pairs.v1")
+        matched_request.pop("definition_version", None)
+        matched_request.pop("definition_hash", None)
+        original_binding = run["evidence"]["input_binding"]
+        run = service.run_research_check(matched_request)
+        assert run["evidence"]["input_binding"] == original_binding
+        assert run["result"]["evaluator_version"] == "10"
+        if forward_risk == "atr_filtered":
+            original_check = run["check"]["id"]
+            original_hash = run["result"]["result_hash"]
+            original_matching = run["result"]["result"]["crossing_state_comparison"]["matching"]
+            matched_request["outcomes"]["forward_risk"].update(
+                schema_version="candle_risk_matched_state.v2",
+                filter_contract="crossing_state_atr_ratio_filter.v1")
+            run = service.run_research_check(matched_request)
+            assert run["evidence"]["input_binding"] == original_binding
+            assert run["result"]["evaluator_version"] == "11"
+            comparison = run["result"]["result"]["crossing_state_comparison"]
+            assert comparison["matching"] == original_matching
+            assert comparison["atr_ratio_filter"]["original_matched_pairs"] == 0
+            old_replay = service.replay_research_check(original_check)
+            assert old_replay["matches"] is True
+            assert old_replay["original_result_hash"] == original_hash
+
+            # Persistence-only fixture: nonempty calculations are exercised by
+            # the synthetic owner/evaluator tests; the real-engine workflow
+            # above deliberately retains its zero-risk/empty-map case.
+            import numpy as np
+            from market_data.frozen import semantic_hash
+            from tests.test_portal.test_atr_ratio_pair_filter import complete, filtered
+            from tests.test_portal.test_crossing_state_comparison import fixture
+            from portal.backend.service.research import crossing_state_comparison as comparison_owner
+            data = fixture(); original = comparison_owner.prepare_pairs(**data)
+            ratios = np.ones(900); ratios[30] = 2.
+            synthetic = complete(data, filtered(data, original, ratios))
+            definition, request, plan, evidence, result = service._validate_research_check_evidence_payload(run["check"]["payload"])
+            synthetic_result = replace(result, result_hash="", result={**dict(result.result),
+                "crossing_state_comparison": synthetic,
+                "sample_count": synthetic["primary"]["pair_count"],
+                "analysis_status": synthetic["analysis_status"],
+                "hashes": {"crossing_state_comparison_hash": semantic_hash(synthetic)}})
+            saved = service.persist_research_check_evidence(
+                {"title": "Synthetic serialization fixture, not engine replay evidence"},
+                definition=definition, request=request, plan=plan,
+                evidence=evidence.to_dict(), result=synthetic_result.to_dict())
+            retained = service.get_research_item(saved["check"]["id"])
+            retained_result = retained["payload"]["result"]
+            assert retained_result["result_hash"] == synthetic_result.result_hash
+            assert retained_result["result"]["crossing_state_comparison"] == synthetic
+            decisions = retained_result["result"]["crossing_state_comparison"]["atr_ratio_filter"]
+            assert decisions["reason_counts"] == {"above_1_05": 1, "accepted": 2}
+            assert decisions["pairs"][0]["crossing"]["atr_ratio"] == 2.
+            assert len(retained_result["result"]["crossing_state_comparison"]["pairs"]) == 2
+
+        paired = run["result"]["result"]["crossing_state_comparison"]
+        assert paired["analysis_status"] == "unsupported"  # Constant-price synthetic baseline.
+        assert paired["matching"]["eligible_crossings"] == 0
+        assert paired["coverage"]["first_blocking_stage_counts"]["missing_source_candle"] == 1
+        observation = service.create_observation_from_check_evidence(run["check"]["id"], {
+            "title": "Synthetic matched-state frozen evidence", "body": "Qualification only; no market inference."})
+        assert observation is not None
 
     market_data_repo.ingest_candles(
         series_id=series, source_id=source_id,

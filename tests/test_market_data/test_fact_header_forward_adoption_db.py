@@ -32,12 +32,16 @@ OPERATION = "b" * 64
 
 
 @pytest.fixture
-def retained(placed, tmp_path, monkeypatch):
+def retained(placed, tmp_path, monkeypatch, request):
     engine = placed.database._engine
     _raw_trade_fixture(placed, tmp_path, monkeypatch)
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=placed.copy_plan)
         raw.prepare_copy(conn)
+        placed.online_copy_proof = bool(getattr(request, "param", False))
+        if placed.online_copy_proof:
+            from scripts.db import fact_header_v2_online_proof as proof
+            proof.prepare(conn)
     finish_headers(engine)
     finish_raw(engine)
     with engine.begin() as conn:

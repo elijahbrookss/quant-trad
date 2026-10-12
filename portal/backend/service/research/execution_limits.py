@@ -59,13 +59,25 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
     ready, finished = Event(), Event()
     errors = []
     last_observed = [monotonic()]
+    probe_started = [None]
+    completed_probes = [0]
     check_key = object()
 
     def check_observation():
         # Three seconds includes the one-second SQL timeout and normal polling
         # slack, but cannot rely on a stalled connection returning an error.
-        if monotonic() - last_observed[0] > 3:
-            raise ResearchAdmissionError("research_execution_ownership_probe_stale")
+        now = monotonic()
+        observed_age = now - last_observed[0]
+        if observed_age > 3:
+            started = probe_started[0]
+            probe_age = f"{now - started:.6f}" if started is not None else "not_started"
+            in_flight = started is not None and started > last_observed[0]
+            raise ResearchAdmissionError(
+                "research_execution_ownership_probe_stale: "
+                f"observation_age_seconds={observed_age:.6f} "
+                f"probe_age_seconds={probe_age} probe_in_flight={in_flight} "
+                f"completed_probes={completed_probes[0]}"
+            )
 
     def own():
         admitted = False
@@ -79,6 +91,7 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
                 last_observed[0] = monotonic()
                 ready.set()
                 while not finished.wait(0.25):
+                    probe_started[0] = monotonic()
                     if not owner.scalar(text("""
                         WITH key AS (SELECT hashtextextended(:name,0) AS value)
                         SELECT EXISTS(SELECT 1 FROM pg_locks,key WHERE locktype='advisory'
@@ -88,6 +101,7 @@ def _global_admission(control, *, session_factory=None, check_on_exit=True):
                     """), {"name": _GLOBAL_LOCK}):
                         raise ResearchAdmissionError("research_execution_owner_lost")
                     last_observed[0] = monotonic()
+                    completed_probes[0] += 1
         except Exception as error:
             errors.append(error)
             if admitted:

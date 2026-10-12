@@ -99,6 +99,14 @@ _CLEAN_BOOTSTRAP_ONLY_TABLES = frozenset(
         *(("market", name) for name in FACT_STORAGE_TABLES),
     }
 )
+# These additive performance indexes require bounded operator creation on existing
+# deployments; ordinary startup must not launch a blocking historical index build.
+_ARCHIVE_EXPIRATION_OPERATOR_INDEXES = frozenset(
+    {
+        ("market", "ix_market_raw_archive_expiration_order"),
+        ("market", "ix_market_dataset_archive_ref_manifest"),
+    }
+)
 _NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
     {"ix_market_fact_acquisition_coverage_lookup"}
 )
@@ -1601,6 +1609,18 @@ class Database:
             for index in sorted(table.indexes, key=lambda item: str(item.name or "")):
                 index_name = str(index.name or "").strip()
                 if not index_name or index_name in existing:
+                    continue
+                if (
+                    not include_clean_bootstrap
+                    and (schema_name, index_name) in _ARCHIVE_EXPIRATION_OPERATOR_INDEXES
+                ):
+                    logger.warning(
+                        "portal_db_operator_index_missing | schema=%s | table=%s | index=%s | "
+                        "operator_script=scripts/db/manual_add_archive_expiration_indexes_v1.sql",
+                        schema_name,
+                        table.name,
+                        index_name,
+                    )
                     continue
                 conn.execute(CreateIndex(index))
                 logger.info(

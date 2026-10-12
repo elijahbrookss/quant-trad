@@ -25,3 +25,4 @@ ollama
 pyjwt
 cryptography
 coinbase-advanced-py
+ijson==3.4.0

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from core.execution_control import execution_checkpoint
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 from market_data.contracts import (
@@ -36,7 +38,9 @@ from portal.backend.service.indicators.indicator_service import (
 )
 from portal.backend.service.market import instrument_service
 from portal.backend.service.market.frozen_dataset_service import (
+    candle_selection_times,
     matching_source_identity_keys,
+    matching_source_keys,
 )
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
@@ -173,8 +177,12 @@ def _unrecorded_interval_gaps(
     end: datetime,
     timeframe_seconds: int,
     recorded_gaps: Sequence[Mapping[str, Any]],
+    observed_times: Iterable[datetime] | None = None,
 ) -> list[dict[str, Any]]:
-    observed = {_record_time(record) for record in records}
+    observed = (
+        set(observed_times) if observed_times is not None
+        else {_record_time(record) for record in records}
+    )
     step = timedelta(seconds=int(timeframe_seconds))
     # Requirement edges can be off-grid when an outcome tail uses a different
     # timeframe. Anchor to canonical source timestamps, then extrapolate back
@@ -183,6 +191,7 @@ def _unrecorded_interval_gaps(
     cursor = start + ((min(observed) - start) % step) if observed else start
     missing: list[dict[str, Any]] = []
     while cursor < end:
+        execution_checkpoint()
         if cursor not in observed:
             gap_end = min(cursor + step, end)
             recorded = recorded_gaps_cover_interval(
@@ -260,42 +269,41 @@ def _coverage_for_requirement(
             )
             return missing, quality
     records_by_series: dict[int, list[Any]] = {}
+    candle_selections: dict[int, Mapping[str, Any]] = {}
+    inspect_candles = (getattr(store, "inspect_candle_selection", None)
+        if str(requirement["fact_type"]) == CANDLE_FACT_TYPE else None)
     policy_mode = str(source_policy.get("mode") or "current").strip().lower()
     source_resolved_candidates: list[dict[str, Any]] = []
     resolved_source_keys_by_series: dict[int, tuple[str, ...]] = {}
     for candidate in candidates:
         requested_source_keys = _requested_source_keys(source_policy)
-        records = list(
-            store.read_series_records(
-                series_id=int(candidate["series_id"]),
-                start=_utc(requirement["required_start"], field="required_start"),
-                end=_utc(requirement["required_end"], field="required_end"),
-                as_of_commit_seq=as_of_commit_seq,
-                source_identity_keys=requested_source_keys,
-            )
+        selection_args = dict(
+            series_id=int(candidate["series_id"]),
+            start=_utc(requirement["required_start"], field="required_start"),
+            end=_utc(requirement["required_end"], field="required_end"),
+            as_of_commit_seq=as_of_commit_seq, source_identity_keys=requested_source_keys,
         )
+        candle_selection = inspect_candles(**selection_args) if callable(inspect_candles) else None
+        records = [] if candle_selection is not None else list(store.read_series_records(**selection_args))
         if policy_mode == "current":
             selected_source_keys: tuple[str, ...] = ()
         elif policy_mode == "exact" and requested_source_keys:
             selected_source_keys = requested_source_keys
         else:
             selected_source_keys = tuple(
-                matching_source_identity_keys(records, source_policy)
+                matching_source_keys(candle_selection["source_summary"]["sources"], source_policy)
+                if candle_selection is not None else matching_source_identity_keys(records, source_policy)
             )
         if policy_mode == "current" or selected_source_keys:
-            if selected_source_keys:
-                records = list(
-                    store.read_series_records(
-                        series_id=int(candidate["series_id"]),
-                        start=_utc(
-                            requirement["required_start"], field="required_start"
-                        ),
-                        end=_utc(requirement["required_end"], field="required_end"),
-                        as_of_commit_seq=as_of_commit_seq,
-                        source_identity_keys=selected_source_keys,
-                    )
-                )
+            if selected_source_keys and selected_source_keys != requested_source_keys:
+                selection_args["source_identity_keys"] = selected_source_keys
+                if candle_selection is not None:
+                    candle_selection = inspect_candles(**selection_args)
+                else:
+                    records = list(store.read_series_records(**selection_args))
             records_by_series[int(candidate["series_id"])] = records
+            if candle_selection is not None:
+                candle_selections[int(candidate["series_id"])] = candle_selection
             resolved_source_keys_by_series[int(candidate["series_id"])] = (
                 selected_source_keys
             )
@@ -325,6 +333,8 @@ def _coverage_for_requirement(
         return missing, quality
     candidate = source_resolved_candidates[0]
     records = records_by_series[int(candidate["series_id"])]
+    candle_selection = candle_selections.get(int(candidate["series_id"]))
+    record_count = int(candle_selection["row_count"]) if candle_selection is not None else len(records)
     recorded_quality = list(
         store.list_gap_evidence(
             series_id=int(candidate["series_id"]),
@@ -396,7 +406,7 @@ def _coverage_for_requirement(
                 }
                 for row in coverage
             )
-    if not records and not acquisition_coverage_proves_range:
+    if not record_count and not acquisition_coverage_proves_range:
         missing.append(
             {
                 "alias": requirement["alias"],
@@ -404,7 +414,7 @@ def _coverage_for_requirement(
                 "series_id": int(candidate["series_id"]),
             }
         )
-    elif records and (
+    elif record_count and (
         str(requirement.get("alignment") or "") == "exact_interval"
         and requirement.get("timeframe_seconds") is not None
     ):
@@ -414,6 +424,7 @@ def _coverage_for_requirement(
             end=_utc(requirement["required_end"], field="required_end"),
             timeframe_seconds=int(requirement["timeframe_seconds"]),
             recorded_gaps=recorded_quality,
+            observed_times=candle_selection_times(candle_selection) if candle_selection is not None else None,
         ):
             missing.append(
                 {

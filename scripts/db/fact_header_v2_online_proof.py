@@ -197,6 +197,21 @@ def _inspect_triggers(conn, relation, role):
         raise RuntimeError("online_copy_proof_target_guard_changed: " + relation)
 
 
+def _inspect_function(conn, role, body):
+    row = conn.execute(text("""
+        SELECT p.prosrc,p.prosecdef,p.proconfig,p.provolatile,p.proretset,
+               p.pronargs,p.pronargdefaults,p.prorettype='trigger'::regtype,
+               l.lanname,p.proowner=n.nspowner
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        JOIN pg_language l ON l.oid=p.prolang
+        WHERE p.oid=to_regprocedure(:name)
+    """), {"name": SCHEMA + ".online_guard_" + role + "()"}).one_or_none()
+    if (row is None or row[0].strip() != body.strip()
+            or tuple(row[1:]) != (True, ["search_path=pg_catalog"], "v", False,
+                                  0, 0, True, "plpgsql", True)):
+        raise RuntimeError("online_copy_proof_function_changed: " + role)
+
+
 def inspect_protection(conn):
     """Read exact function/trigger/binding identities; never recreate drift."""
     saved = conn.execute(text(f"SELECT id,binding FROM {STATE}")).mappings().one()
@@ -204,18 +219,7 @@ def inspect_protection(conn):
     if saved["id"] != 1 or binding != _binding(conn):
         raise RuntimeError("online_copy_proof_binding_changed")
     for role, body in _bodies(binding).items():
-        row = conn.execute(text("""
-            SELECT p.prosrc,p.prosecdef,p.proconfig,p.provolatile,p.proretset,
-                   p.pronargs,p.pronargdefaults,p.prorettype='trigger'::regtype,
-                   l.lanname,p.proowner=n.nspowner
-            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            JOIN pg_language l ON l.oid=p.prolang
-            WHERE p.oid=to_regprocedure(:name)
-        """), {"name": SCHEMA + ".online_guard_" + role + "()"}).one_or_none()
-        if (row is None or row[0].strip() != body.strip()
-                or tuple(row[1:]) != (True, ["search_path=pg_catalog"], "v", False,
-                                      0, 0, True, "plpgsql", True)):
-            raise RuntimeError("online_copy_proof_function_changed: " + role)
+        _inspect_function(conn, role, body)
     for name, role in ROLES.items():
         _inspect_triggers(conn, SCHEMA + "." + name, role)
     return binding
@@ -314,6 +318,46 @@ def release_for_switch(conn):
         conn.exec_driver_sql(f"DROP FUNCTION {SCHEMA}.online_guard_{role}()")
     conn.exec_driver_sql(f"DROP TABLE {STATE}")
     logger.info("fact_header_online_proof_guards_released | switch_transaction_required=true")
+
+
+def release_forward_targets(conn):
+    """Retire source-bound row guards only on heaps being promoted by forward.
+
+    The forward owner's final transaction already holds the admitted relation
+    locks. Preserve the original proof, functions, truncate guards and every
+    guard on the unpromoted historical copies. A failed switch rolls this back.
+    """
+    from scripts.db import fact_header_forward_adoption as adoption
+    context = conn.info.get("qt.forward_adoption.final_context")
+    if (context is None or context["switched"]
+            or context["transaction"] != conn.scalar(text("SELECT txid_current()"))):
+        raise RuntimeError("online_copy_proof_live_forward_switch_required")
+    names = ["fact_identities"]
+    if not adoption.retains_raw_source(context["state"]):
+        names.append(raw.NAME)
+    if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is None:
+        if conn.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname=:trigger "
+                "AND tgrelid IN (SELECT to_regclass(name) FROM unnest(CAST(:names AS text[])) name))"),
+                {"trigger":ROW_TRIGGER, "names":[SCHEMA+"."+name for name in names]}):
+            raise RuntimeError("online_copy_proof_promoted_guard_without_proof")
+        return
+    saved = conn.execute(text(f"SELECT id,binding FROM {STATE}")).mappings().one()
+    binding = saved["binding"]
+    if saved["id"] != 1 or any(conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+            {"name": name}) != oid for name, oid in binding["source_oids"].items()):
+        raise RuntimeError("online_copy_proof_promoted_binding_changed")
+    bodies = _bodies(binding)
+    _inspect_function(conn, "truncate", bodies["truncate"])
+    for name in names:
+        relation, role = SCHEMA+"."+name, ROLES[name]
+        if conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                {"name":relation}) != binding["targets"][name][0]:
+            raise RuntimeError("online_copy_proof_promoted_binding_changed")
+        _inspect_function(conn, role, bodies[role])
+        _inspect_triggers(conn, relation, role)
+    for name in names:
+        conn.exec_driver_sql(f"DROP TRIGGER {ROW_TRIGGER} ON {SCHEMA}.{name}")
+    logger.info("fact_header_online_proof_forward_guards_released | promoted=%s proof_retained=true", names)
 
 
 def current_lookup_proof(conn):

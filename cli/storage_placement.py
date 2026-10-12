@@ -64,13 +64,21 @@ def _runtime(request):
 
 @contextmanager
 def _cancellation():
+    from psycopg2 import extensions
+    from psycopg2.extras import wait_select
+
     stop = threading.Event()
     previous = {}
+    previous_wait = extensions.get_wait_callback()
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous[sig] = signal.signal(sig, lambda *_: stop.set())
+        # Keep Python signal handlers responsive during native database waits.
+        # This dedicated CLI uses ordinary SQL, never COPY or large-object APIs.
+        extensions.set_wait_callback(wait_select)
         yield stop.is_set
     finally:
+        extensions.set_wait_callback(previous_wait)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 

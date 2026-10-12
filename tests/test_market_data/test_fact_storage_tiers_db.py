@@ -17,15 +17,15 @@ from portal.backend.db.fact_storage_schema import (
 )
 from portal.backend.db.session import Database
 from portal.backend.service.storage.repos import market_data as repository_module
-from tests.test_market_data.migration_test_support import fresh_migration_database
+from tests.test_market_data.migration_test_support import storage_behavior_database
 
 pytestmark = pytest.mark.db
 BASE = datetime(2026, 8, 9, 12, 0, 0, 123456, tzinfo=UTC)
 
 
 @pytest.fixture
-def storage(monkeypatch):
-    with fresh_migration_database("fact_storage") as dsn:
+def storage(monkeypatch, request):
+    with storage_behavior_database(request) as dsn:
         database = Database(dsn)
         try:
             assert database.ensure_schema(), str(database.last_error)

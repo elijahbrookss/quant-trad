@@ -18,12 +18,14 @@ code_paths:
   - src/research_science/check.py
   - src/market_data/frozen.py
   - portal/backend/service/research/registry.py
+  - portal/backend/service/research/catalog.py
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/forward_risk_evaluator.py
+  - portal/backend/service/research/crossing_state_comparison.py
   - portal/backend/service/research/service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
@@ -58,6 +60,29 @@ and the [bounded migration specification](../../engineering/research-data-evolut
 They add no new Check capability or scientific authority. Only actual schema,
 read or resource dependencies should couple research to a storage transition;
 passing storage gates does not resume paused research.
+
+## Discovering implemented methods
+
+The code-owned registry exposes its registered CheckDefinitions through read-only
+`GET /api/research/checks/definitions` and
+`GET /api/research/checks/definitions/{definition_id}/{definition_version}`.
+`qt research check definitions` and `qt research check definition ID --version V`
+use the same ResearchOperations adapter. No latest version is selected implicitly.
+
+Catalogue metadata describes purpose, eligibility, inputs, fixed/configurable
+settings, result shape and binding templates. It is separate from the scientific
+material rules and leaves definition hashes unchanged. Examples are checked by
+the existing request normalizer and requirement declaration; actual input
+resolution and freezing remain in requirements/prepare. Discovery performs no
+acquisition, evidence execution, publication or permission change. Historical
+base version 3 remains visible for replay but has no currently selectable request
+example. Preview-only families remain preview-only.
+
+The generic boundary is CheckDefinition/CheckRequest/ResolvedCheckPlan and
+CheckEvaluator. An evaluator is an ordinary Python implementation, not another
+managed entity. Definition 11/evaluator 10 remains a fixed volatility-specific
+method. Shared functions are appropriate when calculations actually recur;
+discovery adds no DSL, schema, new engine or configurable scientific policy.
 
 ## Purpose
 
@@ -149,6 +174,14 @@ edges outward to whole source candles, records those snapshot bounds, and keeps
 the consumer's exact requirement range. Strict candle duration, known-at,
 continuity and frozen-range checks remain in force. Extra boundary candles do
 not extend the Check's decision window or admit future information.
+
+Candle planning and pre-freeze source resolution use the existing repository's
+[header selection projection](../data/DATA_BOUNDARY.md#candle-selection-for-research-planning).
+They avoid repeated payload hydration for coverage and source discovery. This
+projection retains source/revision and gap selection semantics but does not
+certify payload custody: freeze and frozen binding validation still read and
+validate the full material. Existing Check definitions, result hashes, scientific
+budgets, and the canonical state-engine timeline are unchanged.
 
 Planning never calls a provider. Preparation may call an existing acquisition
 service only when the operator explicitly authorizes network access and
@@ -482,6 +515,12 @@ source candles, a 200-bar finite pre-period initialization and `reset_rewarm`.
 It supports one UTC calendar year or a bounded subwindow for qualification.
 It does not reconstruct an uninterrupted pre-seed EMA history.
 
+Calendar labels use the same UTC pandas formatting in batches of at most 2,048
+timestamps, with execution checkpoints between batches. This limits native
+formatting work that can delay ownership and cancellation helpers; it does not
+change calendar meaning, result hashes, scientific versions, or the materialized
+input contract. It is not a universal stop-latency guarantee.
+
 The collector optionally captures each public output's readiness from the
 canonical engine snapshot. Contiguous identical readiness and gap-segment
 states compress into half-open candle-open intervals. Missing candles are not
@@ -527,3 +566,59 @@ and bounded chronological examples, not a second year-sized observation copy;
 exact frozen inputs, source version and result hashes own replay.
 
 See [ADR 0076](../decisions/0076-declare-candle-risk-observability-and-calendar-boundaries.md).
+
+## Current-state matched candle risk
+
+The opt-in definition 11 / evaluator 10 compares public ATR crossings with
+persistent-high observations using a fixed outcome-blind pair map. The existing
+Candle Stats engine owns both states and the existing Check owns prior/future
+risk. Original immutable Datasets can be reused when the same exact requirements
+fit their binding; a new analytical definition does not authorize range expansion
+or re-freezing. Matching, common-support rejection, whole-pair missingness and
+cross-arm dependence rules are specified in
+[ADR 0076](../decisions/0076-declare-candle-risk-observability-and-calendar-boundaries.md#fixed-crossing-versus-persistent-high-comparison).
+Full pair provenance and diagnostics are canonical Check output, subject to the
+normal evidence/result budgets. Observations and Studies interpret that output;
+they do not recalculate it.
+
+
+### Fixed ATR-ratio pair filter
+
+Definition 12 / evaluator 11 (`event_fact_analysis_result.v11`) is an explicit
+extension of the same comparison owner. Select
+`outcomes.forward_risk.schema_version: candle_risk_matched_state.v2`, retain
+`matching_contract: crossing_state_matched_pairs.v1`, and add
+`filter_contract: crossing_state_atr_ratio_filter.v1`. All other fixed settings
+remain unchanged. Definition 11 and its results/hashes retain their meaning.
+
+The unchanged original matcher freezes its pair map first. Before future
+outcomes, the extension retains whole pairs only when both public ATR ratios
+are finite and positive and their binary64 quotient `max(a,b)/min(a,b) <= 1.05`.
+The boundary is inclusive, without epsilon, rounding, rematching, or a tunable
+threshold. A missing, invalid-type, nonfinite or nonpositive arm excludes the
+whole pair. Those categories, in that precedence order, followed by
+`above_1_05`, give disjoint primary exclusion counts; per-arm flags preserve
+all invalid causes. Overflow of an otherwise positive quotient is above-boundary.
+
+The Check retains the original map digest and matching accounting, filtered
+map digest, both public arm ratios, all original-pair filter decisions, and
+12 monthly retention rows. Excluded-pair filter evidence carries no outcomes.
+The comparison's primary, balance, missingness, day/week deletions and joint
+nonoverlap operate on filtered pairs using the existing outcome rules. Accepted
+pair outcome records also carry both ATR ratios. No tables, persisted entities,
+additional input data or second state-engine path are introduced.
+
+Support has separate denominators: original matching must cover at least 70%
+of original eligible crossings overall and 50% in each month; ATR filtering
+must retain at least 70% of original matched pairs overall and 50% each month.
+At least 95% of filtered pairs must have both outcomes, with at least 200
+complete pairs and 10 in every month. Complete-pair absolute SMD must be at most
+0.10 for current z, log prior RMS and raw ATR ratio. Equal zero-SD means give
+zero; unequal/undefined balance fails. Empty denominators fail. The existing
+nonoverlap sensitivity requires 50 pairs in six months. Failure remains
+`unsupported`; descriptive outputs do not authorize relaxation or promotion.
+
+Existing frozen Datasets, evidence budgets, cancellation, correction isolation,
+Observation admission and provider-free replay own this extension. It requires
+no physical storage cutover. Deployment exposes the method; scientific dispatch
+still requires a prospective protocol and its separately allocated budget.

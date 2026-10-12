@@ -33,12 +33,18 @@ from .fact_storage import (
     CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_ENVELOPE_COLUMNS, CANONICAL_ENVELOPE_FROM,
     _catalog_manifest, ensure_payload_contracts,
 )
+from .fact_dependencies import CanonicalSourceByteBudgetExceeded
 from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_lifecycle_repository
 
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
 FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
+# Keep cold catalog/FK work below the per-statement ceiling without shrinking
+# immutable archive pages or committing partial page metadata.
+_CATALOG_WRITE_BATCH_ROWS = 128
+# Bound expiration-key SQL independently of the number of archive dependencies.
+_EXPIRATION_QUERY_BATCH_ROWS = 128
 
 
 def _series_catalog(manifest):
@@ -87,6 +93,7 @@ class PostgresCanonicalFactArchiveRepository:
         self.statement_timeout_ms = statement_timeout_ms
         self.partition_guard = partition_guard
         self.check_budget = check_budget
+        self._prepared_page = None
 
     def _check_budget(self):
         if self.check_budget is not None:
@@ -237,14 +244,10 @@ class PostgresCanonicalFactArchiveRepository:
         result = []
         if len(references) > self.max_dependency_objects:
             raise RuntimeError("canonical_archive_dependency_object_budget_exceeded: reduce page row limit")
+        self._assert_dependencies_unexpired(session,
+            [{"target_kind": "raw_manifest", "target_id": identity} for identity in sorted(references)],
+            check_budget=self.check_budget)
         for identity, reference in sorted(references.items()):
-            expired = session.execute(text("""
-                SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
-                    WHERE action='archive_expire' AND target_kind='raw_manifest'
-                      AND target_id=:id AND event_type='completed')
-            """), {"id": identity}).scalar_one()
-            if expired:
-                raise RuntimeError(f"canonical_archive_dependency_expired: target_id={identity}")
             # The lifecycle shared fence remains held while bytes are read and
             # permanent hold edges commit. Expiry cannot race this admission.
             objects.verify(reference["object_key"], reference["object_sha256"])
@@ -336,10 +339,36 @@ class PostgresCanonicalFactArchiveRepository:
 
         Missing book/trade prefix evidence advances one committed interval first
         and returns its prefix status; a later call publishes the same hot page.
+        This repository may retain one bounded prepared page between those calls;
+        the scheduled executor confines its lifetime to one bounded run.
         An interrupted publication can leave an unreferenced immutable object.
         Retrying reads the same source cursor and safely reuses identical bytes;
         progress advances only in the catalog transaction.
         """
+        try:
+            return self._stage_next_page(day)
+        except BaseException:
+            # A failed transaction or cancellation cannot retain prepared input.
+            self._prepared_page = None
+            raise
+
+    def _stage_catalog_rows(self, session, record_type, manifest_id, rows):
+        """Bound each write and observe cancellation within the page transaction."""
+        batch = []
+        for values in rows:
+            self._check_budget()
+            batch.append(record_type(manifest_id=manifest_id, **values))
+            if len(batch) == _CATALOG_WRITE_BATCH_ROWS:
+                session.add_all(batch)
+                session.flush()
+                self._check_budget()
+                batch = []
+        if batch:
+            session.add_all(batch)
+            session.flush()
+        self._check_budget()
+
+    def _stage_next_page(self, day: date) -> dict:
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
@@ -350,48 +379,91 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"day": day}).mappings().one_or_none()
             cursor = _catalog_manifest(previous).last_cursor if previous else (0, "")
             ordinal = previous["page_ordinal"] + 1 if previous else 0
-            params = {"day": day, "seq": cursor[0], "id": cursor[1], "limit": self.limits.max_rows,
-                      "max_bytes": self.limits.max_logical_bytes}
-            source = session.execute(text(f"""
-                WITH candidates AS MATERIALIZED (
-                    SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
-                    WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
-                    ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
-                ), budget AS (
-                    SELECT id, sum(6::bigint * octet_length(to_jsonb(candidates)::text))
-                        OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM candidates
-                )
-                SELECT candidates.* FROM candidates JOIN budget USING(id)
-                WHERE budget.cumulative_bytes <= :max_bytes
-                ORDER BY candidates.market_commit_seq,candidates.id
-            """), params).mappings().all()
-            if not source:
-                # PostgreSQL sizes a conservative ASCII-escape allowance before
-                # transferring JSON to Python. Oversized first rows cannot be
-                # mistaken for an exhausted source or skipped behind a cursor.
-                remaining = session.execute(text(
-                    "SELECT EXISTS (SELECT 1 FROM market.fact_versions WHERE storage_day=:day "
-                    "AND (market_commit_seq,id) > (:seq,:id))"
-                ), params).scalar_one()
-                if remaining:
-                    raise RuntimeError(f"canonical_archive_source_row_budget_exceeded: storage_day={day}; raise the explicit logical-byte budget")
-                count = session.execute(text(
-                    "SELECT coalesce(sum(row_count),0) FROM market.fact_archive_manifests WHERE storage_day=:day"
-                ), {"day": day}).scalar_one()
-                if count != partition["expected_rows"]:
-                    raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day}")
-                return {"storage_day": day, "status": "source_exhausted", "archived_rows": count}
-            rows = [{key: value for key, value in row.items() if key != "storage_day"} for row in source]
-            ensure_payload_contracts(session, [(row["payload_schema_id"], row["payload_contract_hash"]) for row in rows])
-            # Validate canonical payload/provenance hashes before following any
-            # claimed source reference or publishing bytes.
-            for row in rows:
-                self._check_budget()
-                record_from_storage_row(row)
-            source_rows = self._source_revisions(session, rows)
+            # Source rows are immutable and the sealed day rejects new inserts.
+            # Every call still locks/rechecks the partition, policy and committed
+            # page cursor. Raw/checkpoint dependencies are resolved afresh below.
+            key = (day, partition["sealed_at"], partition["expected_rows"], cursor,
+                   ordinal, self.limits, self.max_raw_mapping_rows, FACT_ARCHIVE_VERIFIER_VERSION)
+            if self._prepared_page is not None and self._prepared_page[0] == key:
+                _, rows, source_rows = self._prepared_page
+                logger.debug("canonical_archive_prepared_page_reused | storage_day=%s page_ordinal=%s rows=%s",
+                             day, ordinal, len(rows))
+            else:
+                self._prepared_page = None
+                params = {"day": day, "seq": cursor[0], "id": cursor[1], "limit": self.limits.max_rows,
+                          "max_bytes": self.limits.max_logical_bytes}
+                # Bound the ASCII JSON used by the archive codec before hydration.
+                # Printable ASCII already has its JSON escaping in PostgreSQL's
+                # text. Every other character needs at most 12 ASCII bytes (a UTF-16
+                # surrogate pair); reserve 11 beyond its existing UTF-8 bytes.
+                # Five typed timestamps may each gain seven microsecond characters.
+                # The C collation keeps the printable range independent of locale.
+                source = session.execute(text(f"""
+                    WITH candidates AS MATERIALIZED (
+                        SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
+                        WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
+                        ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
+                    ), documents AS MATERIALIZED (
+                        SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
+                        FROM candidates
+                    ), budget AS (
+                        SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
+                            char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
+                            OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
+                    )
+                    SELECT candidates.* FROM candidates JOIN budget USING(id)
+                    WHERE budget.cumulative_bytes <= :max_bytes
+                    ORDER BY candidates.market_commit_seq,candidates.id
+                """), params).mappings().all()
+                if not source:
+                    # PostgreSQL sizes a conservative ASCII-escape allowance before
+                    # transferring JSON to Python. Oversized first rows cannot be
+                    # mistaken for an exhausted source or skipped behind a cursor.
+                    remaining = session.execute(text(
+                        "SELECT EXISTS (SELECT 1 FROM market.fact_versions WHERE storage_day=:day "
+                        "AND (market_commit_seq,id) > (:seq,:id))"
+                    ), params).scalar_one()
+                    if remaining:
+                        raise RuntimeError(f"canonical_archive_source_row_budget_exceeded: storage_day={day}; raise the explicit logical-byte budget")
+                    count = session.execute(text(
+                        "SELECT coalesce(sum(row_count),0) FROM market.fact_archive_manifests WHERE storage_day=:day"
+                    ), {"day": day}).scalar_one()
+                    if count != partition["expected_rows"]:
+                        raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day}")
+                    return {"storage_day": day, "status": "source_exhausted", "archived_rows": count}
+                rows = [{key: value for key, value in row.items() if key != "storage_day"} for row in source]
+                ensure_payload_contracts(session, [(row["payload_schema_id"], row["payload_contract_hash"]) for row in rows])
+                # Validate canonical payload/provenance hashes before following any
+                # claimed source reference or publishing bytes.
+                for row in rows:
+                    self._check_budget()
+                    record_from_storage_row(row)
+                # The roots can fit while their complete causal sources do not.
+                # Reduce only this new ordered page; never lower read limits or
+                # trim an individual root's correction/provenance closure. The
+                # unchanged run deadline/cancellation guard bounds every retry.
+                while True:
+                    self._check_budget()
+                    try:
+                        source_rows = self._source_revisions(session, rows)
+                        break
+                    except CanonicalSourceByteBudgetExceeded as exc:
+                        if len(rows) == 1:
+                            exc.add_note(f"storage_day={day} fact_version_id={rows[0]['id']}; "
+                                         "one root cannot fit; source cursor unchanged")
+                            raise
+                        next_count = max(1, len(rows) // 2)
+                        logger.warning(
+                            "canonical_archive_page_source_budget_reduced | storage_day=%s page_ordinal=%s "
+                            "rows_before=%s rows_after=%s logical_bytes=%s max_logical_bytes=%s",
+                            day, ordinal, len(rows), next_count, exc.logical_bytes, exc.max_logical_bytes)
+                        rows = rows[:next_count]
+                self._prepared_page = (key, rows, source_rows)
             progress = self._prepare_book_prefix(session, (*rows, *source_rows), day)
             if progress is not None:
                 return progress
+            # Publication/verification never retain a second prepared page.
+            self._prepared_page = None
             dependencies, source_rows = self._dependencies(session, rows, source_rows=source_rows)
             manifest = publish_canonical_fact_archive(
                 rows, object_store=self.object_store, temporary_directory=self.temporary_directory, limits=self.limits,
@@ -407,17 +479,17 @@ class PostgresCanonicalFactArchiveRepository:
                 last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1], descriptor=manifest.to_dict(),
             ))
             session.flush()
-            for values in _series_catalog(manifest):
-                session.add(MarketFactArchiveSeriesRecord(manifest_id=manifest.manifest_id, **values))
-            for row in rows:
-                alias = legacy_material_alias(row)
-                if alias is not None:
-                    session.add(MarketFactArchiveMaterialAliasRecord(manifest_id=manifest.manifest_id, **alias))
-            for dependency in dependencies:
-                session.add(MarketFactArchiveDependencyRecord(manifest_id=manifest.manifest_id, **dependency))
-            for source in source_rows:
-                session.add(MarketFactArchiveCanonicalDependencyRecord(manifest_id=manifest.manifest_id,
-                    fact_version_id=source["id"], row_hash=source["row_hash"]))
+            self._stage_catalog_rows(session, MarketFactArchiveSeriesRecord,
+                                     manifest.manifest_id, _series_catalog(manifest))
+            self._stage_catalog_rows(session, MarketFactArchiveMaterialAliasRecord,
+                                     manifest.manifest_id,
+                                     (alias for row in rows if (alias := legacy_material_alias(row)) is not None))
+            self._stage_catalog_rows(session, MarketFactArchiveDependencyRecord,
+                                     manifest.manifest_id, dependencies)
+            self._stage_catalog_rows(session, MarketFactArchiveCanonicalDependencyRecord,
+                                     manifest.manifest_id,
+                                     ({"fact_version_id": row["id"], "row_hash": row["row_hash"]}
+                                      for row in source_rows))
         logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s bytes=%s dependencies=%s",
                     day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies))
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
@@ -569,6 +641,29 @@ class PostgresCanonicalFactArchiveRepository:
         return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
                 "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"]}
 
+    @staticmethod
+    def _assert_dependencies_unexpired(session, dependencies, *, check_budget=None):
+        # The caller holds the lifecycle fence. Each bounded SQL statement checks
+        # exact kind/id pairs; results are never cached across pages or passes.
+        for offset in range(0, len(dependencies), _EXPIRATION_QUERY_BATCH_ROWS):
+            if check_budget is not None:
+                check_budget()
+            batch = dependencies[offset:offset + _EXPIRATION_QUERY_BATCH_ROWS]
+            expired = session.execute(text("""
+                SELECT requested.target_id
+                FROM unnest(CAST(:kinds AS text[]), CAST(:ids AS text[]))
+                    WITH ORDINALITY AS requested(target_kind, target_id, ordinal)
+                WHERE EXISTS (
+                    SELECT 1 FROM market.storage_lifecycle_events AS lifecycle
+                    WHERE lifecycle.action='archive_expire' AND lifecycle.event_type='completed'
+                      AND lifecycle.target_kind=requested.target_kind
+                      AND lifecycle.target_id=requested.target_id)
+                ORDER BY requested.ordinal LIMIT 1
+            """), {"kinds": [row["target_kind"] for row in batch],
+                   "ids": [row["target_id"] for row in batch]}).scalar_one_or_none()
+            if expired is not None:
+                raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
+
     def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
@@ -614,16 +709,11 @@ class PostgresCanonicalFactArchiveRepository:
                     objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
                 source_placements.append(verify_canonical_source_placements(
                     session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget))
+                self._assert_dependencies_unexpired(
+                    session, catalogs["dependencies"], check_budget=check_budget)
                 for dependency in catalogs["dependencies"]:
                     if check_budget is not None:
                         check_budget()
-                    expired = session.execute(text("""
-                        SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
-                            WHERE action='archive_expire' AND event_type='completed'
-                              AND target_kind=:target_kind AND target_id=:target_id)
-                    """), dependency).scalar_one()
-                    if expired:
-                        raise RuntimeError(f"canonical_archive_dependency_expired: target_id={dependency['target_id']}")
                     if objects is not None:
                         objects.verify(dependency["object_key"], dependency["object_sha256"])
                 proofs.append(receipt["verification_hash"])

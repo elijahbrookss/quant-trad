@@ -14,6 +14,7 @@ import os
 import struct
 import tempfile
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -364,9 +365,41 @@ class _MeteredArchiveFile(io.RawIOBase):
     # source/cache context, including the active-reader eviction lock.
 
 
+class CanonicalArchiveReadPage:
+    """Retain one verified decoded page for one caller-owned read operation.
+
+    Every use still hashes the currently selected file. Manifest and limit
+    equality permits reuse of decoding only, never reuse of byte verification.
+    Defensive copies keep caller mutations out of later batches. This state is
+    neither shared between requests nor used by lifecycle/recovery readers.
+    """
+    def __init__(self):
+        self._entry = None
+
+    def clear(self) -> None:
+        self._entry = None
+
+    def _reuse(self, expected, limits):
+        if self._entry is not None:
+            manifest, previous_limits, rows = self._entry
+            if manifest == expected and previous_limits == limits:
+                execution_checkpoint()
+                result = deepcopy(rows)
+                execution_checkpoint()
+                return result
+        self.clear()
+        return None
+
+    def _remember(self, expected, limits, rows) -> None:
+        retained = deepcopy(rows)
+        execution_checkpoint()
+        self._entry = (expected, limits, retained)
+
+
 def read_canonical_fact_archive(
     path: Path, *, expected: FactArchiveManifest,
     limits: FactArchiveLimits = FactArchiveLimits(), cache=None,
+    decoded_page: CanonicalArchiveReadPage | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Verify manifest-bound bytes and contents, optionally from a disposable copy.
 
@@ -381,7 +414,7 @@ def read_canonical_fact_archive(
         with cache.open_copy(path, digest=expected.object_sha256, size=expected.byte_count) as handle:
             if handle is not None:
                 try:
-                    return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="cache")
+                    return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="cache", decoded_page=decoded_page)
                 except ArchiveChecksumMismatch:
                     corrupt = True
         if corrupt:
@@ -389,10 +422,10 @@ def read_canonical_fact_archive(
                 "history_cache_corrupt | object_sha256=%s fallback=authoritative_archive", expected.object_sha256)
             cache.invalidate(expected.object_sha256)
     with Path(path).open("rb") as handle:
-        return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="source")
+        return _read_canonical_fact_archive_handle(handle, expected=expected, limits=limits, tier="source", decoded_page=decoded_page)
 
 
-def _read_canonical_fact_archive_handle(source, *, expected, limits, tier):
+def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decoded_page=None):
     contents = _Contents(limits)
     rows = []
     with _MeteredArchiveFile(source, tier=tier) as handle:
@@ -400,6 +433,10 @@ def _read_canonical_fact_archive_handle(source, *, expected, limits, tier):
             sha256, byte_count = _hash_handle(handle, max_bytes=limits.max_file_bytes)
         if sha256 != expected.object_sha256 or byte_count != expected.byte_count:
             raise ArchiveChecksumMismatch(f"canonical_archive_checksum_mismatch: manifest_id={expected.manifest_id}")
+        if decoded_page is not None:
+            retained = decoded_page._reuse(expected, limits)
+            if retained is not None:
+                return retained
         handle.seek(0)
         parquet = pq.ParquetFile(handle, page_checksum_verification=True,
                                  thrift_string_size_limit=8 * 1024**2, thrift_container_size_limit=100_000)
@@ -431,7 +468,10 @@ def _read_canonical_fact_archive_handle(source, *, expected, limits, tier):
     observed = contents.manifest(sha256=sha256, byte_count=byte_count)
     if observed != expected:
         raise RuntimeError(f"canonical_archive_manifest_mismatch: manifest_id={expected.manifest_id}")
-    return tuple(rows)
+    rows = tuple(rows)
+    if decoded_page is not None:
+        decoded_page._remember(expected, limits, rows)
+    return rows
 
 
 def encode_canonical_fact_archive(

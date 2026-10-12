@@ -108,7 +108,12 @@ def configured_history_read_cache():
             saved.validate_targets(targets)
             by_id = {target.target_id: target for target in targets}
             target = by_id[saved.recent[0]]
-            evidence = target.inspect(require_writable=True)
+            # The backend observes PGDATA through a read-only bind. Capacity and
+            # identity come from that target; writes belong to the working mount.
+            try:
+                evidence = target.inspect(require_writable=False)
+            except StorageMountError as error:
+                raise CacheBypass(str(error)) from error
             working = check_mount(root)
             if (target.medium != "ssd" or evidence.filesystem_uuid != working.filesystem_uuid
                     or evidence.device_id != working.device_id):

@@ -96,6 +96,7 @@ class OnlineController:
         self.state = "new"
         self._stack = None
         self._owner = None
+        self._owns_lock = False
         self.proof = None
         self._capture = None
         self._source = None
@@ -130,6 +131,7 @@ class OnlineController:
                 if not self._owner.scalar(text(
                         "SELECT pg_try_advisory_lock(hashtextextended(:key,0))"), {"key": _LOCK}):
                     raise RuntimeError("storage_online_controller_busy")
+                self._owns_lock = True
                 self._pid = self._owner.scalar(text("SELECT pg_backend_pid()"))
                 with self._operation_step(self._owner, 30) as (saved, owner_deadline):
                     if self.forward_operation_sha256 is None:
@@ -163,9 +165,23 @@ class OnlineController:
     def _release_owner(self):
         if self._owner is not None:
             try:
-                self._owner.invalidate()
+                if self._owns_lock and not self._owner.closed and not self._owner.invalidated:
+                    # Socket close does not acknowledge server-side lock release.
+                    # Finish healthy cleanup before a fresh controller can enter;
+                    # never reconnect a lost session to attempt an unlock.
+                    self._owner.rollback()
+                    with self._owner.begin():
+                        self._owner.exec_driver_sql("SET LOCAL statement_timeout='5s'")
+                        if not self._owner.scalar(text(
+                                "SELECT pg_advisory_unlock(hashtextextended(:key,0))"),
+                                {"key": _LOCK}):
+                            raise RuntimeError("storage_online_controller_unlock_not_owned")
+                        self._owns_lock = False
             finally:
-                self._owner.close()
+                try:
+                    self._owner.invalidate()
+                finally:
+                    self._owner.close()
 
     def _operation_step(self, conn, seconds, *, deadline=None):
         return archives._operation_step(conn, seconds, deadline=deadline,

@@ -408,7 +408,7 @@ def inspect_runtime_configuration(state_root, *, database_model, image_id, reque
             if len(limits)!=1:raise RuntimeError("storage_online_runtime_limits_mount_missing")
             limit_path=Path(literal(limits[0]["source"]))
             limit_raw=preserving._runtime_configuration_bytes(limit_path)
-            preserving._validate_runtime_maintenance(image_id,limit_path,[t["target_id"] for t in targets])
+            preserving._validate_runtime_maintenance(image_id,limit_path,[t["target_id"] for t in targets],True)
             if preserving._runtime_configuration_bytes(limit_path)!=limit_raw:
                 raise RuntimeError("storage_online_runtime_limits_changed")
             files[str(limit_path)]=hashlib.sha256(limit_raw).hexdigest()
@@ -653,15 +653,54 @@ def activate_runtime(state_root, *, saved, worker_process, source_check, max_dur
                     original_ui_admin_restored=True,complete_backup_confirmed=False,ordinary_relaunch_authorized=False)
 
 
-def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
+_REPAIR_POLICY_PROBE = """
+import json, os, sys
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
+from scripts.db.fact_header_v2_handoff import _inspect_initial_policy_records, _policy_plan_id, assert_fact_storage_contract
+from core.storage_targets import StoragePolicy
+from portal.backend.service.storage.recovery_copies import _identity, _snapshot_layout
+from portal.backend.service.storage.maintenance_runtime import _unique_fields
+raw=sys.stdin.buffer.read(65537)
+if len(raw)>65536: raise ValueError('storage_runtime_request_too_large')
+request=json.loads(raw,object_pairs_hook=_unique_fields)
+policy=StoragePolicy.from_dict(request['policy'])
+engine=create_engine(os.environ['PG_DSN'],poolclass=NullPool,hide_parameters=True,
+    connect_args={'connect_timeout':10})
+try:
+    with engine.connect() as conn:
+        conn.exec_driver_sql('SET TRANSACTION READ ONLY')
+        conn.exec_driver_sql("SET LOCAL statement_timeout='10s'")
+        identity,namespace=_identity(conn)
+        if identity!=request['database_identity']: raise RuntimeError('storage_runtime_database_changed')
+        state=conn.execute(text("SELECT state,evidence FROM market.fact_storage_state WHERE layout_version='market.fact_storage_tiers.v2'")).mappings().one_or_none()
+        evidence=state['evidence'] if state is not None else None
+        receipt=evidence.get('handoff') if isinstance(evidence,dict) else None
+        if state is None or state['state']!='ready' or not isinstance(receipt,dict) or _policy_plan_id(receipt)!=request['confirmed_plan_id']:
+            raise RuntimeError('storage_runtime_handoff_certificate_changed')
+        assert_fact_storage_contract(conn)
+        result=_inspect_initial_policy_records(conn,policy=policy,plan_id=request['confirmed_plan_id'])
+        if result.get('policy_current') is not True: raise RuntimeError('storage_runtime_handoff_policy_changed')
+        print(json.dumps(dict(database_identity=identity,plan_id=result['plan_id'],
+            policy_revision=result['policy_revision'],storage_layout=_snapshot_layout(conn))),flush=True)
+finally:
+    engine.dispose()
+"""
+
+
+def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60, repair_release=False):
     """Bounded observation of an already durably ready runtime, even after expiry.
 
     Never dispatch a start, replay an action, renew a migration clock or retire a
     marker. A backup may finish with collection serving after the final window.
     The caller holds the deployment lock and the final owner validates the journal.
+    Explicit repair inspection instead requires stopped maintenance and never
+    certifies runtime/recovery readiness; it checks schema/policy through backend.
     """
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
         raise ValueError("storage_online_completion_timeout_invalid")
+    if type(repair_release) is not bool:
+        raise ValueError("storage_online_repair_release_flag_invalid")
     if saved["phase"] != "recovery_runtime_ready":
         raise RuntimeError("storage_online_completion_runtime_not_confirmed")
     validate_runtime_journal(saved)
@@ -690,8 +729,10 @@ def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
             compose_hashes=journal["compose_hashes"], binding=dict(database_id=database_id),
             receipt=dict(project=saved["binding"]["project"], database_preparation=dict(networks=networks)))
         destination = Path(saved["runtime_spool"]["destination"])
+        maintenance_state = None
 
         def check():
+            nonlocal maintenance_state
             if time.monotonic() >= deadline:
                 raise RuntimeError("storage_online_completion_observation_expired")
             if host.load_receipt(state_root/"storage-online-final.json") != saved:
@@ -726,7 +767,15 @@ def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
                 if name != "tsdb":
                     admit_candidate_privileges(details, model["services"][name])
                 state = json.loads(host.docker("inspect", "--format", "{{json .State}}", identity))
-                if (state["OOMKilled"] or state["Paused"] or state["Restarting"]
+                if repair_release and name == "storage-maintenance":
+                    if (any(state.get(k) is not False for k in ("Running", "Paused", "Restarting", "Dead", "OOMKilled"))
+                            or state.get("Pid") != 0 or state.get("Status") != "exited" or state.get("ExitCode") != 0):
+                        raise RuntimeError("storage_online_repair_maintenance_not_stopped")
+                    current_state = host.digest(state)
+                    if maintenance_state is not None and current_state != maintenance_state:
+                        raise RuntimeError("storage_online_repair_maintenance_changed")
+                    maintenance_state = current_state
+                elif (state["OOMKilled"] or state["Paused"] or state["Restarting"]
                         or (name == "initialize" and (state["Running"] or state["ExitCode"] != 0 or state["Status"] != "exited"))
                         or (name != "initialize" and (not state["Running"] or state.get("Health",{}).get("Status") != "healthy"))):
                     raise RuntimeError("storage_online_completion_unhealthy")
@@ -742,10 +791,26 @@ def inspect_completed_runtime(state_root, *, saved, timeout_seconds=60):
         check()
         raw = preserving._runtime_configuration_bytes(state_root/"storage-online-request.json")
         request = json.loads(raw)
-        identity = saved["binding"]["capture"]["cluster_id"]+"/"+saved["binding"]["capture"]["database_oid"]
-        result = preserving._runtime_observation(journal["candidate_ids"]["storage-maintenance"],
-            dict(policy=request["policy"], database_identity=identity,
-                 inventory_path="/run/quanttrad/storage-inventory.json", confirmed_plan_id=plan_id),
+        # The authenticated request owns identity for both original and forward
+        # captures; forward capture receipts contain proof/clock fields only.
+        identity = request["database_identity"]
+        selected = dict(policy=request["policy"], database_identity=identity,
+            inventory_path="/run/quanttrad/storage-inventory.json", confirmed_plan_id=plan_id)
+        if repair_release:
+            result = json.loads(host.docker("exec", "-i", journal["candidate_ids"]["backend"],
+                "python", "-c", _REPAIR_POLICY_PROBE, input=json.dumps(selected), timeout=45).strip().splitlines()[-1])
+            if (result.get("database_identity") != identity or result.get("plan_id") != plan_id
+                    or type(result.get("policy_revision")) is not int or result["policy_revision"] < 1
+                    or not isinstance(result.get("storage_layout"), dict)
+                    or result["storage_layout"].get("layout_version") != "market.fact_storage_tiers.v2"
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(result["storage_layout"].get("certificate_sha256")))):
+                raise RuntimeError("storage_online_repair_policy_observation_invalid")
+            check()
+            return {**result, "ready":False, "runtime_ready":False,
+                "repair_release_admissible":True, "complete_backup_confirmed":False,
+                "reason":"stopped_maintenance_requires_software_repair",
+                "ordinary_relaunch_authorized":False, "storage_mutations_performed":False}
+        result = preserving._runtime_observation(journal["candidate_ids"]["storage-maintenance"], selected,
             dict(plan_id=plan_id))
         check()
         return {**result, "runtime_ready":True, "complete_backup_confirmed":result["ready"],

@@ -77,3 +77,16 @@ locally cached object cannot become product authority merely because it exists.
 
 Artifacts move forward semantically:
 indicator outputs -> strategy decisions -> bot execution -> playback inspection.
+
+
+## Research interpretation publication
+
+Research Memory Studies hold questions and scope; hypotheses hold testable
+claims and Observations hold findings under existing admission rules. A published
+summary is an immutable question-owned interpretation revision with exact
+server-resolved evidence and historical reasoning/relationship context. It is
+not a Campaign, separate research engine or scientific authorization. Generic
+JSON writes cannot claim publication. Corrections append revisions, preserving
+prior citations. Complete references do not certify statistical validity,
+causality, profitability, trading permission or actual replay/recovery.
+See [Research Memory Boundary](../../architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md#question-owned-interpretation-publication).
