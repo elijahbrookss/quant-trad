@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -119,6 +122,67 @@ def test_payload_schema_is_strict_versioned_and_hash_addressed() -> None:
                 "unit": "fraction",
             }
         )
+
+
+def test_schema_contract_hash_matches_existing_canonical_encoding() -> None:
+    for schema in supported_fact_payload_schemas():
+        expected = hashlib.sha256(json.dumps(
+            schema.contract, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("utf-8")).hexdigest()
+        assert schema.contract_hash == expected
+
+
+def test_schema_contract_hash_reuses_immutable_definition(monkeypatch) -> None:
+    from market_data.fact_registry import FactPayloadSchema
+    schema = replace(get_fact_payload_schema("derivatives.funding_rate.v2"))
+    expected = hashlib.sha256(json.dumps(
+        schema.contract, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+    render_contract = FactPayloadSchema.contract.fget
+    calls = []
+    def observed(instance):
+        calls.append(instance.schema_id)
+        return render_contract(instance)
+    monkeypatch.setattr(FactPayloadSchema, "contract", property(observed))
+    assert [schema.contract_hash for _ in range(40)] == [expected] * 40
+    assert len(calls) == 1
+
+
+def test_schema_defensively_freezes_fields_before_reusing_contract_hash() -> None:
+    original = get_fact_payload_schema("derivatives.funding_rate.v2")
+    supplied_fields = list(original.fields)
+    schema = replace(original, fields=supplied_fields)
+    expected_contract, expected_hash = schema.contract, schema.contract_hash
+    supplied_fields.clear()
+    assert schema.contract == expected_contract
+    assert schema.contract_hash == expected_hash
+    detached_contract = schema.contract
+    detached_contract["fields"].clear()
+    assert schema.contract == expected_contract
+    assert schema.contract_hash == expected_hash
+
+
+def test_replaced_schema_gets_its_own_contract_hash() -> None:
+    from market_data.fact_registry import FactPayloadField
+    schema = replace(get_fact_payload_schema("derivatives.funding_rate.v2"))
+    before = schema.contract_hash
+    changed = replace(schema, fields=(*schema.fields,
+        FactPayloadField("extra", "string", required=False)))
+    assert changed.contract_hash != before
+    assert schema.contract_hash == before
+    assert changed.contract_hash == hashlib.sha256(json.dumps(
+        changed.contract, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+
+
+def test_schema_hash_reuse_does_not_cache_mutable_fact_hashes() -> None:
+    fact = _funding_fact()
+    before = (fact.payload_contract_hash, fact.payload_hash, fact.material_hash, fact.row_hash)
+    fact.payload["rate"] = "0.125"
+    assert fact.payload_contract_hash == before[0]
+    assert fact.payload_hash != before[1]
+    assert fact.material_hash != before[2]
+    assert fact.row_hash != before[3]
 
 
 def test_trade_and_trade_flow_payloads_are_provider_neutral_and_strict() -> None:
