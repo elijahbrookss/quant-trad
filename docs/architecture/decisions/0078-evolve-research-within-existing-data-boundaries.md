@@ -30,8 +30,8 @@ Accepted direction on 2026-10-04 after review narrowed the storage problem and
 separately authorized bounded research streaming and individual job cancellation.
 The coordinated schema cutover committed on October 9. Bounded research,
 compatible historical reads and the disposable SSD cache are deployed. Release
-`71946b1a` on October 12 addresses archive catalogue write timeouts; a subsequent
-maintenance step-cap adjustment uses the existing configuration boundary. Sustained
+`0ca1e345` on October 12 sizes new archive pages to their complete source-byte
+allowance, retaining earlier catalogue batching and bounded maintenance fixes. Sustained
 archival/reclamation capacity remains unproven and is still required for the storage
 goal. The user's October 4 choice of one coordinated release was historical release
 sequencing; storage cutover is not an intrinsic dependency of ordinary research.

@@ -8,73 +8,84 @@ restart research. Historical approvals and receipts remain evidence.
 
 ## Current deployed outcome — 2026-10-12
 
-Release `71946b1a2d59cc0db92653b07232871cfe6b4e56` deployed at 11:46 UTC after
-[all seven exact-source qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38238737081).
-It retains the preceding raw-prefix deduplication, bounded expiration queries,
-controller ownership fixes and research releases. The latest change flushes
-archive catalogue rows in batches of at most 128 within the existing atomic page
-transaction. Three actual PostgreSQL regressions cover slow alias writes,
-cancellation and time-budget rollback, retained archive objects and unchanged
-frozen correction reads. No schema, archive format or verifier changed. The
-database, policy and migration journals were unchanged by this software release;
-all 17 collectors were healthy in the post-deployment observations.
+Release `0ca1e34570e5e43d5e7e98a7c522fccc613a5a6d` deployed at 14:04 UTC after
+[all seven exact-source qualification jobs passed](https://github.com/elijahbrookss/quant-trad/actions/runs/38251006099).
+It retains the earlier raw-prefix, expiration-query, controller-ownership,
+archive-catalogue batching and research fixes. New archive pages now fit their
+complete causal source dependencies within the existing byte allowance. No schema,
+archive format, verifier version or migration changed.
 
-At 12:03 UTC an independently reviewed configuration change raised the existing
-maintenance step cap from 4 to 16. Four quick prefix steps had exhausted the old
-step cap despite remaining time, followed by the normal minute wait. Only the
-maintenance worker was recreated; every other container ID remained unchanged.
-The 60-second canonical run budget, 60-second interval, 5-second SQL limit,
-10,000-row/64 MiB page bounds and final-verification limits are unchanged. The
-saved policy remains 14 days; the raw settings default of 30 days is overridden
-by that saved policy. Permissions and recovery/migration evidence were preserved.
+The independent 14:11 UTC observation verified the exact backend/maintenance images,
+all 17 collectors healthy, no active research jobs, the unchanged environment hash
+and completed migration journal, and the current encrypted recovery pair against
+the database identity/layout and WAL state. Ordinary deployment recreated the
+PostgreSQL container with the same image and persistent storage; its container ID
+changed. Container identity is not database identity. The latest recovery pair
+completed at 00:40 UTC and was not yet due for replacement. The storage-status API
+briefly reported expired maintenance observations while the worker heartbeat was
+live; at 14:14 the worker's latest completed cycle reported no failures, with fresh
+recovery/movement outcomes. Snapshot health does not prove uninterrupted acquisition.
 
-The formerly blocked page now commits. Before the step-cap adjustment, a
-499-second observation recorded 20,000 newly archived rows versus 32,745 new
-identity/hot-table inserts, with no statistics reset. These are about 40 and 66
-rows per second respectively; insert activity is not an exact committed-arrival
-count. This short sample still trails intake. With the 16-step cap, a subsequent
-601-second sample added 30,000 archived rows against 32,106 identity inserts
-(about 50 versus 53 per second). All 17 collectors were healthy at its six snapshots;
-this is not proof of zero intervening stalls. Different pages and cache state prevent
-treating the two windows as a controlled speedup comparison.
+The saved policy remains **14 days** on SSD. At 12:03 UTC the maintenance-only
+step cap changed from 4 to 16: quick prefix steps had exhausted the old cap while
+run time remained. The 60-second canonical run budget, 60-second interval,
+5-second SQL limit, 10,000-row/64 MiB page bounds and final-verification limits
+remain unchanged. The saved policy overrides the raw 30-day setting default.
 
-At 12:12 UTC an August 22 page was refused because its response-source closure
-exceeded the existing 64 MiB logical-byte allowance. Sources remain present. A
-smaller global page limit is not a complete remedy: the same limit also rejects
-already-published larger pages during verification, and smaller pages increase the
-final manifest count. The next targeted change belongs in the existing publisher:
-size new pages to their bounded source dependencies while retaining existing read
-and verification ceilings; fail explicitly if even one Fact's closure cannot fit.
-The candidate now implements source-byte admission in the existing publisher:
-a narrowly typed pre-hydration byte refusal halves only the new page's ordered
-root prefix. It retains the complete source closure and existing run/read limits;
-single-root excess and all non-sizing failures still fail explicitly. No new
-schema, service, persisted job state, archive format or verifier version is added.
-The candidate is not deployed. Both native hot/cold regression cases passed, as
-did 47 focused admission tests and the 5,317-test backend suite (7 skipped).
-Complete release CI and production throughput qualification remain pending.
-Qualification covers mixed page sizes, causal correction history, future-known
-exclusion, cancellation, interrupted acknowledgement, restart and frozen reads
-after physical reclamation. Smaller pages may encounter the unchanged final page,
-object, byte or time ceilings. Those limits must be assessed against the actual
-page distribution before claiming capacity improvement; no automatic increase is
-part of this change. Rollback uses the retained compatible runtime and preserves
-all old/new pages and committed cursors.
+At 12:12 UTC an August 22 page was refused because its complete response-source
+closure exceeded the 64 MiB logical-byte allowance. Lowering the shared page limit
+would also reject already-published larger pages. The deployed publisher instead
+catches only the typed pre-hydration source-byte refusal and halves the new page's
+ordered root prefix. Every retained root keeps its full causal source closure;
+single-root excess and all non-sizing failures still fail explicitly. It adds no
+service or persisted job structure. Rollback uses the retained compatible runtime
+and preserves old/new pages and committed cursors.
+
+Local qualification passed 47 focused tests, 5,317 backend tests (7 skipped), and
+two native PostgreSQL cases with hot/cold sources. Those cases cover real source
+sizing, mixed page sizes, correction/known-at preservation, cancellation/deadline,
+atomic acknowledgement failure, restart/object reuse, final page-cap refusal and
+identical frozen reads after physical reclamation. The initial fixture-only failure
+omitted its required frozen series; its failed receipt and corrected pass are retained.
+Broad database/recovery coverage is supported by the exact-source CI above.
+
+At 14:14 UTC August 22 had 134 pages and 1,128,313 archived rows, **35,000 more
+rows across four pages** than its previously blocked position. This demonstrates
+progress beyond that refusal; it does not establish sustained throughput. Earlier
+601-second and 2,080-second windows averaged approximately 50 and 72 archived rows
+per second, respectively, against approximately 53 and 65 identity inserts per
+second. Insert activity is not an exact committed-arrival count; different pages,
+cache state and intervening deployment prevent treating these as controlled speedups.
+
+A locally qualified follow-up batches final dependency-expiration queries into at
+most 128 exact `(target_kind, target_id)` pairs per statement. The existing archive
+repository owns it. Every page/pass still checks current expiration and bytes under
+the same lifecycle fence; no persistent validation cache or new authority is added.
+Deadline/cancellation checks remain between batches. Three native PostgreSQL cases
+passed, including 129-key query bounds, exact-key/tail detection, cancellation and
+refusal of verification/reclamation after late expiration while preserving hot data.
+The unchanged backend suite passed 5,317 tests (7 skipped), and ten documentation
+tests passed. This follow-up is integrated into the existing component branch;
+**exact integrated-source CI and deployment remain pending**. Its production latency
+benefit is unmeasured. Existing format, verifier and resource limits remain intact.
 
 No additional partition reclamation has yet been established; the prior
-1,538,539,520-byte reclaim remains the only measured reclaim. Successful cycles,
-prefix progress and page publication alone do not prove sustained capacity. Require
-complete verification/reclamation and improving backlog and filesystem headroom
-under ongoing collection before closing that qualification.
+1,538,539,520-byte reclaim remains the only measured reclaim. Smaller new pages can
+increase final manifest/object work. Assess the actual distribution against the
+unchanged final page/object/byte/time ceilings; do not raise them automatically.
+Require complete verification/reclamation and improving backlog and filesystem
+headroom under ongoing collection before closing capacity qualification.
 
-The authorized ATR Check and exact Replay also completed with matching retained
-results. Current and prior research definition versions remain available through
-matching API/CLI catalogue reads. Existing H04/ATR allocations remain completed;
-no new scientific allocation or paused automation was resumed by these releases.
-The current receipts are under
-`artifacts/storage-implementation/history-read-cache/capacity-20261012/release-71946b1a/`,
-including `step-limit16/`. The dated October 10 account below is historical evidence,
-not current pending work or instructions to repeat completed operations.
+The authorized ATR Check and exact Replay completed with matching retained results.
+Current and prior research definitions remain available through matching API/CLI
+catalogue reads. H04/ATR allocations remain completed; these releases do not admit
+new scientific work or restart paused automations.
+
+Receipts are under
+`artifacts/storage-implementation/history-read-cache/capacity-20261012/`:
+`release-71946b1a/step-limit16/`, `source-page-sizing/`, `release-0ca1e345/` and
+`verification-query-batching/`. The dated October 10 account below is historical
+evidence, not instructions to repeat completed operations.
 
 ## Earlier deployed outcome — 2026-10-10
 
