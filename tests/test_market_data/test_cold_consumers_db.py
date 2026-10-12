@@ -242,12 +242,23 @@ def test_normalization_source_noop_and_causal_guards_survive_cooling(storage, tm
     check_guards()
     # A server-side ID cursor must permit nested hydration queries on this
     # same connection and preserve its selected order over multiple batches.
-    with storage.database.session() as session:
-        expected = session.execute(text("SELECT id FROM market.fact_versions ORDER BY market_commit_seq DESC")).scalars().all()
-        with market_data.canonical_fact_storage_repository.stream_rows_by_ids(
-            session, text("SELECT id FROM market.fact_versions ORDER BY market_commit_seq DESC"), batch_size=1,
-        ) as rows:
-            assert [row["id"] for row in rows] == expected
+    from market_data import fact_archive
+    original = fact_archive.pq.ParquetFile
+    decodes = []
+    def decode(*args, **kwargs):
+        decodes.append(True)
+        return original(*args, **kwargs)
+    with monkeypatch.context() as proof:
+        proof.setattr(fact_archive.pq, "ParquetFile", decode)
+        for request in range(2):
+            with storage.database.session() as session:
+                expected = session.execute(text("SELECT id FROM market.fact_versions ORDER BY market_commit_seq DESC")).scalars().all()
+                assert len(expected) > 1
+                with market_data.canonical_fact_storage_repository.stream_rows_by_ids(
+                    session, text("SELECT id FROM market.fact_versions ORDER BY market_commit_seq DESC"), batch_size=1,
+                ) as rows:
+                    assert [row["id"] for row in rows] == expected
+            assert len(decodes) == request + 1
     archive_path.write_bytes(b"corrupt test archive")
     with pytest.raises(RuntimeError, match="checksum_mismatch"):
         repo.ingest([fact])

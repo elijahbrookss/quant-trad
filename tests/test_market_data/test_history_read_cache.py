@@ -209,13 +209,16 @@ def test_expired_inactive_copy_is_reclaimed_on_fill(cache,tmp_path):
     assert not (cache.root/(a[1]+".parquet")).exists()
 
 
-def test_cache_full_codec_equivalence_and_corrupt_copy_fallback(cache,tmp_path):
+@pytest.mark.parametrize("decoded_reuse", [False, True])
+def test_cache_full_codec_equivalence_and_corrupt_copy_fallback(cache,tmp_path,decoded_reuse):
+    from market_data.fact_archive import CanonicalArchiveReadPage
+    page = CanonicalArchiveReadPage() if decoded_reuse else None
     rows=[_row(1),_row(2)]
     encoded=encode_canonical_fact_archive(rows,temporary_directory=tmp_path/"encoding")
     control=ExecutionControl()
     with controlled_execution(control):
-        first=read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache)
-        second=read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache)
+        first=read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache,decoded_page=page)
+        second=read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache,decoded_page=page)
     assert first==second==tuple(rows)
     stats=control.snapshot()["consumed"]
     assert stats["archive_source_bytes"]==encoded.manifest.byte_count
@@ -223,7 +226,7 @@ def test_cache_full_codec_equivalence_and_corrupt_copy_fallback(cache,tmp_path):
     cached=cache.root/(encoded.manifest.object_sha256+".parquet")
     content=cached.read_bytes()
     cached.write_bytes(b"x"+content[1:])
-    assert read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache)==tuple(rows)
+    assert read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache,decoded_page=page)==tuple(rows)
     assert not cached.exists()
     assert encoded.path.read_bytes()==content
 
@@ -236,14 +239,17 @@ def test_corrupt_authoritative_source_is_not_hidden_by_fill(cache,tmp_path):
     assert not list(cache.root.iterdir())
 
 
-def test_archive_io_budget_applies_on_source_and_cached_reads(cache,tmp_path):
+@pytest.mark.parametrize("decoded_reuse", [False, True])
+def test_archive_io_budget_applies_on_source_and_cached_reads(cache,tmp_path,decoded_reuse):
+    from market_data.fact_archive import CanonicalArchiveReadPage
+    page = CanonicalArchiveReadPage() if decoded_reuse else None
     encoded=encode_canonical_fact_archive([_row()],temporary_directory=tmp_path/"encoding")
-    read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache)
+    read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=cache,decoded_page=page)
     for selected_cache in (None,cache):
         control=ExecutionControl()
         control.limit(seconds=10,archive_read_bytes=10)
         with pytest.raises(ExecutionBudgetExceededError,match="archive_read_bytes"), controlled_execution(control):
-            read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=selected_cache)
+            read_canonical_fact_archive(encoded.path,expected=encoded.manifest,cache=selected_cache,decoded_page=page)
 
 
 def test_repository_cache_does_not_select_or_modify_frozen_envelopes(cache,tmp_path):

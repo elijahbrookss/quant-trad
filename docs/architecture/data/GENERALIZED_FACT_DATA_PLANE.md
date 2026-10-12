@@ -309,6 +309,20 @@ Copies are named by immutable object SHA-256. The canonical codec verifies the
 whole chosen copy, schema, contents and requested envelopes exactly as on HDD.
 A corrupt SSD checksum is logged and the original HDD object is read normally;
 corrupt source data still fails. A cache hit does not attest HDD source health.
+
+Within one selected-ID read or identity stream, the existing repository and
+canonical codec retain at most one decoded archive page across SQL batches.
+Reuse requires the same complete manifest and page limits. Every batch still
+checks the current chosen file checksum, current catalog/schema evidence and
+selected envelopes; only repeated Parquet/JSON decoding is avoided. A changed
+page evicts the retained page before decoding its replacement. Defensive copies
+isolate mutable consumer payloads, and completion, early exit and cancellation
+release the retained page. Separate reads do not share this memory. This is one
+bounded page in addition to normal working data, not an RSS ceiling or a new
+persisted cache. Lifecycle and recovery verification do not opt into reuse.
+This change is locally implemented on the request-scoped archive decode branch;
+it is not part of the already-staged `a6586558` release.
+
 The shared filesystem implementation bounds cache bytes (including allocation
 rounding), entries (8,192), fill time (30 seconds) and per-operation fill bytes.
 It prunes inactive copies by last use, with a 14-day inactivity expiry and earlier

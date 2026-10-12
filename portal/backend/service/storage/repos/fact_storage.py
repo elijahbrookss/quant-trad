@@ -18,7 +18,7 @@ from core.storage_mounts import configured_archive_root
 from core.execution_control import execution_checkpoint, consume_execution_json, consume_execution_resource, measured_execution
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
-from market_data.fact_archive import FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
+from market_data.fact_archive import CanonicalArchiveReadPage, FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
 from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION, build_normalized_fact_payload_schema,
     get_fact_payload_schema, register_fact_payload_schema,
@@ -157,19 +157,23 @@ class PostgresCanonicalFactStorageRepository:
         selected = session.execute(statement, params or {}, execution_options={
             "stream_results": True, "yield_per": batch_size,
         })
+        decoded_page = CanonicalArchiveReadPage()
         def hydrate():
             for batch in selected.scalars().partitions(batch_size):
                 identities = list(batch)
                 if len(identities) != len(set(identities)):
                     raise RuntimeError("canonical_selected_identity_duplicate")
-                rows = self.read_rows_by_ids(session, identities)
+                rows = self.read_rows_by_ids(session, identities, _decoded_page=decoded_page)
                 yield from (rows[identity] for identity in identities)
         rows = hydrate()
         try:
             yield rows
         finally:
-            rows.close()
-            selected.close()
+            try:
+                rows.close()
+            finally:
+                decoded_page.clear()
+                selected.close()
 
     def material_witness_exists(self, session, *, series_ids, material_hash,
                                 evidence_key=None, include_canonical=True):
@@ -280,8 +284,18 @@ class PostgresCanonicalFactStorageRepository:
                     return True
         return False
 
-    def read_rows_by_ids(self, session, fact_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+    def read_rows_by_ids(self, session, fact_ids: Sequence[str], *,
+                         _decoded_page: CanonicalArchiveReadPage | None = None) -> dict[str, dict[str, Any]]:
         """Hydrate an already selected immutable identity set in bounded SQL batches."""
+        if _decoded_page is not None or len(fact_ids) <= 1000:
+            return self._read_rows_by_ids(session, fact_ids, _decoded_page)
+        decoded_page = CanonicalArchiveReadPage()
+        try:
+            return self._read_rows_by_ids(session, fact_ids, decoded_page)
+        finally:
+            decoded_page.clear()
+
+    def _read_rows_by_ids(self, session, fact_ids, decoded_page):
         identities = sorted(set(fact_ids))
         result = {}
         for offset in range(0, len(identities), 1000):
@@ -302,11 +316,12 @@ class PostgresCanonicalFactStorageRepository:
             found = {row["id"] for row in rows}
             if found != set(batch) or len(rows) != len(found):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
-            result.update((row["id"], row) for row in self.hydrate_rows(session, rows))
+            result.update((row["id"], row) for row in self.hydrate_rows(session, rows, _decoded_page=decoded_page))
         return result
 
     @measured_execution("hydration")
-    def hydrate_rows(self, session, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def hydrate_rows(self, session, rows: Sequence[Mapping[str, Any]], *,
+                     _decoded_page: CanonicalArchiveReadPage | None = None) -> list[dict[str, Any]]:
         """Preserve SQL order and validate every cold page before supplying payloads.
 
         Ordinary READ COMMITTED sessions are safe across reclamation because the
@@ -400,6 +415,7 @@ class PostgresCanonicalFactStorageRepository:
             ])
             archive_rows = read_canonical_fact_archive(
                 store.local_path(manifest.object_key), expected=manifest, limits=self.limits, cache=cache,
+                decoded_page=_decoded_page,
             )
             indexed = {str(row["id"]): row for row in archive_rows}
             for envelope in wanted:
