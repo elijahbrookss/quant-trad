@@ -56,7 +56,7 @@ speedup without a representative measurement.
 
 Research compatibility during storage migration is scoped in
 [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
-and the [bounded migration specification](../../engineering/research-data-evolution-spec.md).
+and [Storage Management](../persistence/STORAGE_MANAGEMENT.md#storage-capacity-and-workload-admission).
 They add no new Check capability or scientific authority. Only actual schema,
 read or resource dependencies should couple research to a storage transition;
 passing storage gates does not resume paused research.

@@ -253,8 +253,10 @@ A database-sample-age panel makes stale SQL telemetry explicit; the largest
 relations table includes TOAST alongside table/index bytes. These additions
 reuse existing sources and change no telemetry schema or cadence. The actual
 native LogQL expressions are exercised by the existing disposable storage-alert
-proof. See the [capacity plan](../../engineering/research-data-evolution-spec.md#storage-growth-plan-and-release-acceptance)
-for the physical byte ledger, preservation rules and release decision.
+proof. See [storage capacity and workload admission](../persistence/STORAGE_MANAGEMENT.md#storage-capacity-and-workload-admission)
+for physical capacity accounting and preservation rules, and
+[ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+for the migration-scope decision.
 
 ## Grafana Dashboard Lifecycle
 

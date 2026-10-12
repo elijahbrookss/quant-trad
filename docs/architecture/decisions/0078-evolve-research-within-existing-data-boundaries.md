@@ -26,18 +26,13 @@ code_paths:
 
 ## Status
 
-Accepted direction on 2026-10-04 after review narrowed the storage problem and
+Accepted on 2026-10-04 after review narrowed the storage problem and
 separately authorized bounded research streaming and individual job cancellation.
-The coordinated schema cutover committed on October 9. Bounded research,
-compatible historical reads and the disposable SSD cache are deployed. Release
-`0ca1e345` on October 12 sizes new archive pages to their complete source-byte
-allowance, retaining earlier catalogue batching and bounded maintenance fixes. Sustained
-archival/reclamation capacity remains unproven and is still required for the storage
-goal. The user's October 4 choice of one coordinated release was historical release
-sequencing; storage cutover is not an intrinsic dependency of ordinary research.
-The [implementation specification](../../engineering/research-data-evolution-spec.md)
-owns the concrete route, slices and acceptance evidence. Neither document
-authorizes migration, deployment, cleanup or restarting paused work.
+This ADR records that decision. Current behavior and operational procedures live
+in [Storage Management](../persistence/STORAGE_MANAGEMENT.md), the
+[data boundary](../data/GENERALIZED_FACT_DATA_PLANE.md), and the
+[Check evidence boundary](../research-orchestration/CHECK_EVIDENCE_BOUNDARY.md).
+It does not authorize migration, deployment, cleanup or restarting paused work.
 
 ## Context
 
@@ -63,6 +58,10 @@ Keep the existing research architecture. Require each storage change to justify
 the historical data it must copy, transform or validate and the phases that block
 writers or readers. Prefer compatible reads and changes to new writes where they
 meet the actual goal. Convert only the necessary historical scope explicitly.
+The owning storage or runbook document must distinguish new writes, selected historical ranges, and
+all-history work, and justify required copies, index builds, validation scans,
+and writer or reader fences. Use existing owner documentation rather than a new
+universal migration manifest or registry.
 
 For this migration, qualify retaining existing headers before requiring a
 full-history daily rebuild. Keep global uniqueness and reference enforcement.
@@ -135,11 +134,11 @@ a safe rollback plan for a system accepting new writes.
 
 ## Enforcement and references
 
-The specification requires scope/capacity justification, concurrent preparation,
+This decision requires scope/capacity justification, concurrent preparation,
 logical read equivalence, bounded pause/resource evidence, crash reconciliation
 and applicable recovery/release qualification for the selected route. Historical
-candidate tests support only their recorded source and scenario; no completed
-production transition is asserted here.
+candidate tests support only their recorded source and scenario; operational
+admission requires evidence for the selected source and affected workload.
 
 - [Engineering contract](../../contracts/platform/03_engineering_contract.md) and
   [core promises](../../core-promises.md).

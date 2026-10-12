@@ -83,11 +83,11 @@ validation still fails if their actual rows disagree. A new freeze is required
 for stronger selection guarantees. Disposable barrier tests exercise a delayed
 insert and correction while another series commits a larger sequence.
 
-Proposed storage evolution is tracked in [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
-and the [bounded migration specification](../../engineering/research-data-evolution-spec.md).
+Storage evolution follows [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+and [Storage Management](../persistence/STORAGE_MANAGEMENT.md#storage-capacity-and-workload-admission).
 They require justified historical scope, compatible reads and bounded migration
-interruptions. They preserve the current research architecture and do not describe
-a completed storage cutover.
+interruptions while preserving the current research architecture. Operational
+admission remains separate from this design guidance.
 
 ## Status
 

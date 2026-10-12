@@ -156,16 +156,34 @@ The existing storage lifecycle supervisor performs history movement and local re
 copies under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
 
-## Current deployment and historical qualification
+## Storage capacity and workload admission
 
-The approved retained-header cutover is complete. The
-[deployed outcome in the implementation specification](../../engineering/research-data-evolution-spec.md#deployed-outcome--2026-10-09)
-records the serving release, 14-day policy, cache and matching recovery evidence.
-Sustained archival throughput and growth-horizon qualification remain open.
-The migration sections below preserve earlier design and qualification states;
-their historical release-status statements do not supersede that deployed
-outcome or authorize replay. Alternative operators still need their own
-applicable qualification.
+[ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
+records the migration-scope decision. Current procedures and limits belong to
+the storage and release boundaries; dated qualification records are evidence
+for their recorded source and workload, not instructions to replay operations.
+Migration design and qualification sections below retain historical context;
+their older status statements do not establish the current deployment state.
+
+Before admitting affected storage work, account for each physical disk's current
+occupancy once and the additional allocations that coexist: source/target and
+rollback copies, indexes, identity/catalog growth, spool, WAL, temporary files,
+archives, recovery chains and replacement overlap. Overlapping policy reserves
+and operation floors are not additive: use the larger applicable requirement
+after accounting for demands and competing claims. Do not credit predicted
+reclamation before verified publication and physical observation.
+
+Capacity claims require a measured growth horizon and sustained verification and
+reclamation under continuing intake. Copy counts, healthy-service snapshots and
+small correctness fixtures do not establish sustainable capacity or a speedup.
+Do not remove indexes or retained recovery/source material based on size alone.
+
+The selected 14-day recent-data placement policy is not a research lookback or
+data-expiration limit. Affected workflows must qualify uncached historical reads,
+including initialization, restart, gap catch-up and warmup beyond that window,
+against their existing latency/resource limits and competing collection I/O.
+Observe-only paper support does not establish live readiness. Passing storage
+checks does not start research or clear an operational hold.
 
 ## Proposed forward-only transition
 
