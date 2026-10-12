@@ -32,12 +32,28 @@ The formerly blocked page now commits. Before the step-cap adjustment, a
 499-second observation recorded 20,000 newly archived rows versus 32,745 new
 identity/hot-table inserts, with no statistics reset. These are about 40 and 66
 rows per second respectively; insert activity is not an exact committed-arrival
-count. This short sample still trails intake. The changed step cap is under
-measurement, not a demonstrated speedup. No additional partition reclamation has
-yet been established; the prior 1,538,539,520-byte reclaim remains the only measured
-reclaim. Successful cycles, prefix progress and page publication alone do not prove
-sustained capacity. Require complete verification/reclamation and improving backlog
-and filesystem headroom under ongoing collection before closing that qualification.
+count. This short sample still trails intake. With the 16-step cap, a subsequent
+601-second sample added 30,000 archived rows against 32,106 identity inserts
+(about 50 versus 53 per second). All 17 collectors were healthy at its six snapshots;
+this is not proof of zero intervening stalls. Different pages and cache state prevent
+treating the two windows as a controlled speedup comparison.
+
+At 12:12 UTC an August 22 page was refused because its response-source closure
+exceeded the existing 64 MiB logical-byte allowance. Sources remain present. A
+smaller global page limit is not a complete remedy: the same limit also rejects
+already-published larger pages during verification, and smaller pages increase the
+final manifest count. The next targeted change belongs in the existing publisher:
+size new pages to their bounded source dependencies while retaining existing read
+and verification ceilings; fail explicitly if even one Fact's closure cannot fit.
+This change is proposed, not implemented or deployed. Preserve correction/known-at
+checks, cursor completeness, cancellation and atomic acknowledgement; qualify mixed
+page sizes and the existing final verification limits before deployment.
+
+No additional partition reclamation has yet been established; the prior
+1,538,539,520-byte reclaim remains the only measured reclaim. Successful cycles,
+prefix progress and page publication alone do not prove sustained capacity. Require
+complete verification/reclamation and improving backlog and filesystem headroom
+under ongoing collection before closing that qualification.
 
 The authorized ATR Check and exact Replay also completed with matching retained
 results. Current and prior research definition versions remain available through
