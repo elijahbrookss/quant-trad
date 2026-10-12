@@ -43,6 +43,8 @@ FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
 # Keep cold catalog/FK work below the per-statement ceiling without shrinking
 # immutable archive pages or committing partial page metadata.
 _CATALOG_WRITE_BATCH_ROWS = 128
+# Bound expiration-key SQL independently of the number of archive dependencies.
+_EXPIRATION_QUERY_BATCH_ROWS = 128
 
 
 def _series_catalog(manifest):
@@ -643,6 +645,29 @@ class PostgresCanonicalFactArchiveRepository:
         return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
                 "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"]}
 
+    @staticmethod
+    def _assert_dependencies_unexpired(session, dependencies, *, check_budget=None):
+        # The caller holds the lifecycle fence. Each bounded SQL statement checks
+        # exact kind/id pairs; results are never cached across pages or passes.
+        for offset in range(0, len(dependencies), _EXPIRATION_QUERY_BATCH_ROWS):
+            if check_budget is not None:
+                check_budget()
+            batch = dependencies[offset:offset + _EXPIRATION_QUERY_BATCH_ROWS]
+            expired = session.execute(text("""
+                SELECT requested.target_id
+                FROM unnest(CAST(:kinds AS text[]), CAST(:ids AS text[]))
+                    WITH ORDINALITY AS requested(target_kind, target_id, ordinal)
+                WHERE EXISTS (
+                    SELECT 1 FROM market.storage_lifecycle_events AS lifecycle
+                    WHERE lifecycle.action='archive_expire' AND lifecycle.event_type='completed'
+                      AND lifecycle.target_kind=requested.target_kind
+                      AND lifecycle.target_id=requested.target_id)
+                ORDER BY requested.ordinal LIMIT 1
+            """), {"kinds": [row["target_kind"] for row in batch],
+                   "ids": [row["target_id"] for row in batch]}).scalar_one_or_none()
+            if expired is not None:
+                raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
+
     def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
@@ -688,16 +713,11 @@ class PostgresCanonicalFactArchiveRepository:
                     objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
                 source_placements.append(verify_canonical_source_placements(
                     session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget))
+                self._assert_dependencies_unexpired(
+                    session, catalogs["dependencies"], check_budget=check_budget)
                 for dependency in catalogs["dependencies"]:
                     if check_budget is not None:
                         check_budget()
-                    expired = session.execute(text("""
-                        SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
-                            WHERE action='archive_expire' AND event_type='completed'
-                              AND target_kind=:target_kind AND target_id=:target_id)
-                    """), dependency).scalar_one()
-                    if expired:
-                        raise RuntimeError(f"canonical_archive_dependency_expired: target_id={dependency['target_id']}")
                     if objects is not None:
                         objects.verify(dependency["object_key"], dependency["object_sha256"])
                 proofs.append(receipt["verification_hash"])

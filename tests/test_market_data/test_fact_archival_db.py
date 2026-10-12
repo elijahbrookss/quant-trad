@@ -249,6 +249,20 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
     assert archive.inspect_partition(day)["state"] == "sealed"
     path.write_bytes(original)
     assert archive.verify_partition(day)["verified_objects"] == 4
+    # Final verification and reclamation must both recheck expiration even
+    # after a successful page/partition receipt, without touching hot data.
+    lifecycle.append_event(operation_id="late-expiration", action="archive_expire",
+        event_type="completed", target_kind="raw_manifest", target_id=raw_ids[-1], evidence={})
+    with pytest.raises(RuntimeError, match=f"canonical_archive_dependency_expired: target_id={raw_ids[-1]}"):
+        archive.verify_partition(day)
+    from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    with pytest.raises(RuntimeError, match="canonical_archive_dependency_expired"):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                               {"day": day}).scalar_one() == 4
+    assert path.read_bytes() == original
 
 
 def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, tmp_path, monkeypatch):
@@ -562,3 +576,56 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
     assert set(fixture.store.root.rglob("*.parquet")) == objects
     assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
     assert fixture.read() == fixture.before
+
+
+def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(storage, monkeypatch):
+    from portal.backend.service.storage.repos import market_lifecycle
+    from portal.backend.service.market.canonical_retention import (
+        CanonicalRetentionBudgetExceeded, CanonicalRetentionStopRequested,
+    )
+    monkeypatch.setattr(market_lifecycle, "db", storage.database)
+    lifecycle = market_lifecycle.market_storage_lifecycle_repository
+    dependencies = [{"target_kind": "raw_manifest", "target_id": f"expiration-{index:03d}"}
+                    for index in range(129)]
+    # Same ID in another target kind, a different action, a failed operation,
+    # and an unrelated ID must not count as completed expiry for these inputs.
+    for operation, kind, identity, action, state in (
+        ("other-kind", "book_checkpoint", "expiration-000", "archive_expire", "completed"),
+        ("other-action", "raw_manifest", "expiration-001", "archive_compact", "completed"),
+        ("failed-expiry", "raw_manifest", "expiration-002", "archive_expire", "failed"),
+        ("other-id", "raw_manifest", "not-in-request", "archive_expire", "completed"),
+    ):
+        lifecycle.append_event(operation_id=operation, action=action, event_type=state,
+                               target_kind=kind, target_id=identity, evidence={})
+    batches = []
+    def observe(_conn, _cursor, statement, parameters, *_):
+        if "WITH ORDINALITY AS requested" in statement:
+            batches.append(len(parameters["ids"]))
+    event.listen(storage.database._engine, "after_cursor_execute", observe)
+    try:
+        with storage.database.session() as session:
+            lifecycle.acquire_dataset_pin_lock(session)
+            fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
+                session, dependencies)
+        # Fixed workload: at most two SQL round trips for 129 exact key pairs.
+        assert len(batches) <= 2 and sum(batches) == len(dependencies)
+        for error in (CanonicalRetentionBudgetExceeded, CanonicalRetentionStopRequested):
+            batches.clear()
+            def cancelled():
+                if batches:
+                    raise error("stop between expiration batches")
+            with pytest.raises(error, match="stop between expiration batches"):
+                with storage.database.session() as session:
+                    lifecycle.acquire_dataset_pin_lock(session)
+                    fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
+                        session, dependencies, check_budget=cancelled)
+            assert len(batches) == 1 and sum(batches) < len(dependencies)
+        lifecycle.append_event(operation_id="tail-expiry", action="archive_expire", event_type="completed",
+            target_kind="raw_manifest", target_id=dependencies[-1]["target_id"], evidence={})
+        with pytest.raises(RuntimeError, match="canonical_archive_dependency_expired: target_id=expiration-128"):
+            with storage.database.session() as session:
+                lifecycle.acquire_dataset_pin_lock(session)
+                fact_archival.PostgresCanonicalFactArchiveRepository._assert_dependencies_unexpired(
+                    session, dependencies)
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", observe)
