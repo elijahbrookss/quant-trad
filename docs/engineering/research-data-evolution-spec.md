@@ -57,6 +57,18 @@ per second, respectively, against approximately 53 and 65 identity inserts per
 second. Insert activity is not an exact committed-arrival count; different pages,
 cache state and intervening deployment prevent treating these as controlled speedups.
 
+A supported configuration experiment temporarily raised the run allowance from
+60 to 90 seconds at 14:34 UTC, retaining the 60-second idle interval and all other
+limits. Six observations over 602 seconds recorded 50,000 archived rows versus
+47,954 identity inserts (about 83 versus 80 per second), with all 17 collectors
+healthy at each snapshot. Three snapshots included a failed cycle due to source
+selection or raw-mapping SQL timeouts, and additional reclaimed bytes remained
+zero. This small, variable margin does not establish sustainable capacity or a
+controlled speedup. The original 60-second setting and exact environment hash
+were restored at 14:49 UTC; only maintenance was recreated. An earlier 30-second
+idle candidate was rejected before activation by the existing minimum-60 policy.
+Trial and rollback receipts remain under `release-0ca1e345/run-budget-90/`.
+
 A locally qualified follow-up batches final dependency-expiration queries into at
 most 128 exact `(target_kind, target_id)` pairs per statement. The existing archive
 repository owns it. Every page/pass still checks current expiration and bytes under
@@ -66,7 +78,14 @@ passed, including 129-key query bounds, exact-key/tail detection, cancellation a
 refusal of verification/reclamation after late expiration while preserving hot data.
 The unchanged backend suite passed 5,317 tests (7 skipped), and ten documentation
 tests passed. This follow-up is integrated into the existing component branch;
-**exact integrated-source CI and deployment remain pending**. Its production latency
+**exact integrated-source CI and deployment remain pending**. CI on `012d7b2b`
+failed an existing slow-write regression because its artificial two-second timeout
+fired during input selection, before the intended alias INSERT. The fixture now
+applies that timeout only to alias writes and restores the prior transaction
+setting. A native rerun passed the unchanged coarse-batch failure, bounded-write
+success, rollback and frozen-read assertions. The first local correction incorrectly
+restored an unset timeout as `None`; that failure and the corrected pass are retained.
+Runtime limits are unchanged by this test correction. Its production latency
 benefit is unmeasured. Existing format, verifier and resource limits remain intact.
 
 No additional partition reclamation has yet been established; the prior
