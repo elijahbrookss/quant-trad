@@ -665,8 +665,35 @@ releasing the raw lifecycle fence. The cycle remains `degraded`, never successfu
 Manual cancellation, permission errors and unrelated database failures retain
 their original meaning. Retrying requires a fresh witness; a failed plan confers
 no deletion authority. No schema, policy format or recovery-data change is needed.
-These guards are implemented in the source candidate; deployed `89912f16` does
-not contain them yet.
+
+Expiration candidate discovery uses two additive metadata indexes declared by the
+clean model: `ix_market_raw_archive_expiration_order` on raw manifests
+`(last_received_at, id)`, and `ix_market_dataset_archive_ref_manifest` on Dataset
+archive references `(raw_archive_manifest_id)`. The first supports ordered candidate
+discovery; the second supports reverse pin counts without repeatedly walking the
+Dataset-first primary key. They preserve the existing query, pins, correction
+history, known-at meaning, frozen hashes and archive formats. They add ordinary
+index storage and write cost; they do not convert historical facts.
+
+For an existing deployment, apply
+[`manual_add_archive_expiration_indexes_v1.sql`](../../../scripts/db/manual_add_archive_expiration_indexes_v1.sql)
+using psql with `ON_ERROR_STOP=1`, outside a transaction, after checking ownership,
+collector lag, disk/WAL/temp headroom and the research/deployment reservation.
+The script creates the indexes concurrently and sequentially, with a 1-second lock
+wait, 5-minute statement cap and 64-MiB maintenance-work-memory setting. These caps
+are not admission or a total completion-time promise. It rejects an incompatible
+existing name before either build and verifies both usable definitions afterward.
+Cancellation may leave an invalid index; inspect its state and any active builder
+before separately authorizing its removal/retry. A completed compatible first
+index can remain if the second build fails. Code rollback can retain both indexes.
+
+Clean bootstrap creates them. Ordinary startup on existing tables warns with the
+operator-script path and does not build them. Their absence leaves the readers
+compatible and the existing query limits in force; it does not grant expiration
+or block unrelated research. Neither index makes sparse candidate discovery a
+hard bounded scan. Verify actual planning latency, buffer/temp use and collector
+impact after the operator step; a synthetic plan improvement is not a production
+speedup or proof of sustainable retention.
 
 The final check alone is insufficient. `archive_expiration_lock` holds an
 `UPDATE` row lock on the exact immutable raw/checkpoint manifest through the

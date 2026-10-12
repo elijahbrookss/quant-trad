@@ -1154,6 +1154,7 @@ class MarketRawArchiveManifestRecord(Base):
         CheckConstraint("record_count > 0", name="ck_market_raw_archive_records"),
         CheckConstraint("last_receive_ordinal >= first_receive_ordinal", name="ck_market_raw_archive_ordinals"),
         Index("ix_market_raw_archive_definition_time", "definition_id", "first_received_at"),
+        Index("ix_market_raw_archive_expiration_order", "last_received_at", "id"),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -1835,6 +1836,7 @@ class MarketDatasetArchiveRefRecord(Base):
     __tablename__ = "dataset_archive_refs"
     __table_args__ = (
         PrimaryKeyConstraint("dataset_id", "raw_archive_manifest_id", name="pk_market_dataset_archive_ref"),
+        Index("ix_market_dataset_archive_ref_manifest", "raw_archive_manifest_id"),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
