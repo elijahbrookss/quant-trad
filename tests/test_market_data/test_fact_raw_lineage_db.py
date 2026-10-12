@@ -24,7 +24,8 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-l
     structures = market_structure.market_structure_repository
     day = storage.today - timedelta(days=2)
     _placement(monkeypatch, day)
-    source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream", adapter_version="exact-lineage.fixture.v1")
+    source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream",
+                            adapter_version=f"{definition_id}.fixture.v1")
     source_id = storage.repo.register_source(source, lineage={"fixture": "exact-lineage"})
     series_id = storage.repo.register_series(instrument_id="storage-fixture", fact_type="market.trade",
                                            contract_version="market.trade.v1", timeframe_seconds=None)
