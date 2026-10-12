@@ -286,3 +286,105 @@ def finish_pairs(*, prepared, times, known, metric, atr_ratio, baseline, sample_
             "calendar_contribution": contribution},
         "joint_nonoverlap": sensitivity, **deletions, "pairs": records,
         "interpretation": "Retrospective matched development association, not causal, independent, significant, live-available, profitable or promotion evidence. Matching precedes future outcomes; missingness never rematches. Reserved years are excluded."}
+
+
+ATR_FILTER_CONTRACT = "crossing_state_atr_ratio_filter.v1"
+FILTERED_CONTRACT = "crossing_state_matched_pairs.v2"
+
+
+def filter_pairs_by_atr_ratio(*, prepared, atr_ratio, times, known, months):
+    """Filter the unchanged feature map before future outcomes; never rematch."""
+    from numbers import Real
+
+    normalized = np.full(len(atr_ratio), np.nan)
+    records = []
+    keep = []
+    counts = Counter()
+    for ordinal, (i, j) in enumerate(prepared["pairs"]):
+        execution_checkpoint()
+        arms = []
+        for index in (i, j):
+            raw = atr_ratio[index]
+            reason = ("missing" if raw is None else
+                      "invalid_type" if isinstance(raw, (bool, np.bool_)) or not isinstance(raw, Real) else
+                      "nonfinite" if not np.isfinite(raw) else
+                      "nonpositive" if raw <= 0 else None)
+            value = float(raw) if reason in (None, "nonpositive") else None
+            if reason is None:
+                normalized[index] = value
+            arms.append({"source_open_epoch": int(times[index]),
+                "decision_known_at_epoch": int(known[index]),
+                "atr_ratio": value, "atr_ratio_exclusion": reason})
+        invalid = {arm["atr_ratio_exclusion"] for arm in arms}
+        # Fixed precedence makes primary reason counts disjoint; arm flags retain
+        # all causes, including different invalid states within the same pair.
+        reason = next((x for x in ("missing", "invalid_type", "nonfinite", "nonpositive") if x in invalid), None)
+        ratio = None
+        if reason is None:
+            a, b = (arm["atr_ratio"] for arm in arms)
+            quotient = max(a, b) / min(a, b)
+            ratio = quotient if np.isfinite(quotient) else None
+            if quotient > 1.05:
+                reason = "above_1_05"
+        accepted = reason is None
+        keep.append(accepted)
+        counts["accepted" if accepted else reason] += 1
+        records.append({"original_pair_ordinal": ordinal, "crossing": arms[0],
+            "persistent_high": arms[1], "max_min_ratio": ratio,
+            "max_min_ratio_overflow": reason == "above_1_05" and ratio is None,
+            "accepted": accepted, "reason": "accepted" if accepted else reason})
+    kept = prepared["pairs"][np.asarray(keep, dtype=bool)]
+    original_count = len(prepared["pairs"])
+    eligible = prepared["accounting"]["eligible_crossings"]
+    monthly = []
+    for original in prepared["accounting"]["monthly"]:
+        accepted = int(np.sum(months[kept[:, 0]] == original["month"]))
+        original_pairs = original["matched_pairs"]
+        monthly.append({"month": original["month"],
+            "original_matched_pairs": original_pairs, "accepted_pairs": accepted,
+            "excluded_pairs": original_pairs-accepted,
+            "retention_fraction": accepted/original_pairs if original_pairs else None,
+            "accepted_eligible_fraction": accepted/original["eligible_crossings"] if original["eligible_crossings"] else None})
+    digest = hashlib.sha256()
+    for i, j in kept:
+        execution_checkpoint()
+        digest.update((json.dumps([int(times[i]), int(times[j]), int(known[i]), int(known[j])], separators=(",", ":"))+"\n").encode())
+    evidence = {"schema_version": ATR_FILTER_CONTRACT,
+        "numeric_rule": "public_binary64_max_min_quotient_lte_1.05_no_epsilon_or_rounding",
+        "original_pair_map_sha256_json_lines": prepared["accounting"]["feature_pair_map_sha256_json_lines"],
+        "accepted_pair_map_sha256_json_lines": digest.hexdigest(),
+        "original_matched_pairs": original_count, "accepted_pairs": len(kept),
+        "excluded_pairs": original_count-len(kept), "reason_counts": dict(counts),
+        "retention_fraction": len(kept)/original_count if original_count else None,
+        "accepted_eligible_fraction": len(kept)/eligible if eligible else None,
+        "monthly": monthly, "pairs": records,
+        "filter_uses_future_outcomes": False, "rematched": False}
+    return {**prepared, "pairs": kept, "atr_ratio_filter": evidence,
+            "filtered_atr_ratio_values": normalized}
+
+
+def finish_atr_ratio_pairs(**kwargs):
+    """Apply existing outcome/dependence rules to only the frozen filtered pairs."""
+    prepared = kwargs["prepared"]
+    result = finish_pairs(**{**kwargs, "atr_ratio": prepared["filtered_atr_ratio_values"]})
+    filtering = prepared["atr_ratio_filter"]
+    result["schema_version"] = FILTERED_CONTRACT
+    result["atr_ratio_filter"] = filtering
+    balance = result["balance"]
+    balance["atr_ratio"] = balance.pop("atr_ratio_unmatched_diagnostic")
+    gates = result["support_gates"]
+    gates.update(overall_atr_filter_retention=(filtering["retention_fraction"] or 0) >= .70,
+        every_month_atr_filter_retention=all((row["retention_fraction"] or 0) >= .50 for row in filtering["monthly"]),
+        atr_ratio_balance=balance["atr_ratio"]["absolute_smd"] is not None and balance["atr_ratio"]["absolute_smd"] <= .10)
+    for row, filtered in zip(result["monthly"], filtering["monthly"], strict=True):
+        row.update(atr_accepted_pairs=filtered["accepted_pairs"],
+            atr_excluded_pairs=filtered["excluded_pairs"],
+            atr_retention_fraction=filtered["retention_fraction"],
+            atr_accepted_eligible_fraction=filtered["accepted_eligible_fraction"])
+    for record, (i, j) in zip(result["pairs"], prepared["pairs"], strict=True):
+        for arm, index in (("crossing", i), ("persistent_high", j)):
+            record[arm]["atr_ratio"] = float(prepared["filtered_atr_ratio_values"][index])
+    result["analysis_status"] = "descriptive_only" if all(gates.values()) else "unsupported"
+    result["per_asset_investment_criteria_met"] = all(gates.values()) and all(result["descriptive_investment_gates"].values())
+    result["interpretation"] += " Fixed ATR-ratio filtering narrows the original matched population before outcomes. Matching coverage, filter retention and outcome completeness use separate denominators. Support failure never relaxes the filter."
+    return result

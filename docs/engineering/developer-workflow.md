@@ -395,3 +395,11 @@ needed merely to change the analytical question. Qualification must prove
 original-Dataset reuse, public-state eligibility, outcome-blind matching,
 whole-pair missingness/deletions, cross-arm nonoverlap, bounded cancellation,
 Observation admission and provider-free replay before empirical admission.
+
+
+Definition 12 / evaluator 11 adds the fixed ATR-ratio filter using
+`candle_risk_matched_state.v2` and `filter_contract: crossing_state_atr_ratio_filter.v1`,
+while retaining the original v1 matching contract. Use the catalog's exact
+request template. The [Check evidence boundary](../architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md#fixed-atr-ratio-pair-filter)
+owns the fixed rule, separate support denominators and compatibility behavior.
+This analytical extension requires no schema migration or new Dataset.

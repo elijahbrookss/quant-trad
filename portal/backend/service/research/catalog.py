@@ -254,6 +254,10 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                      'outcomes': {'forward_bars': [1, 3]},
                                      'gap_policy': 'reject'}}
 
+_EXAMPLES["event_fact_analysis@12"] = deepcopy(_EXAMPLES["event_fact_analysis@11"])
+_EXAMPLES["event_fact_analysis@12"]["outcomes"]["forward_risk"].update(
+    schema_version="candle_risk_matched_state.v2", filter_contract="crossing_state_atr_ratio_filter.v1")
+
 _PURPOSES = {
     "raw_forward_outcome@2": "Preview raw candle conditions and subsequent outcomes.",
     "indicator_forward_outcome@2": "Preview indicator output conditions and subsequent outcomes.",
@@ -270,6 +274,7 @@ _PURPOSES = {
     "event_fact_analysis@9": "Compare first return to the original market-profile range.",
     "event_fact_analysis@10": "Describe fixed Candle Stats ATR-expansion future risk cohorts.",
     "event_fact_analysis@11": "Compare fixed ATR crossings with matched persistent-high states.",
+    "event_fact_analysis@12": "Filter the original crossing-state pairs by a fixed 5% public ATR-ratio rule before outcomes.",
 }
 
 
@@ -317,7 +322,7 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
                 "constraints": "Nonnegative integer thresholds, default 0; eligibility is analytical completeness, not trading authority."},
             "statistics.purge_bars/embargo_bars": {"type": "integer", "minimum": 0, "default": 0},
         })
-        if version in {"6", "7", "8", "9", "10", "11"}:
+        if version in {"6", "7", "8", "9", "10", "11", "12"}:
             fields["inputs[]"] = {"fixed": [], "meaning": "Candle-only public Indicator snapshots; no additional Fact aliases."}
         if version in {"7", "8", "9"}:
             for key in list(fields):
@@ -335,7 +340,7 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
                 "readiness_contract": "market_profile.value_location.v1" if version == "8" else "market_profile.first_return_state.v2"}
             if version == "9":
                 fields["detector"]["constraints"] = "balance_breakout output; event key balance_breakout_<long|short>; no matched_origin or invalidation."
-        if version in {"10", "11"}:
+        if version in {"10", "11", "12"}:
             fields = {key: value for key, value in fields.items() if key in {"scope", "assertions[]", "gap_rewarm_bars"}}
             fields["scope"]["constraints"] = "Instrument and Candle Stats IDs are bindable; parameters remain pinned. Fixed 1m, 200-bar initialization, whole-minute UTC boundaries, single calendar year, <=370 days including seed, no outcome tail."
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
@@ -388,7 +393,7 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         "sample_count": {"type": "integer", "unit": "method-specific observations", "meaning": "Inspect method population and exclusions; not effective independent sample size."},
         "data_quality": {"type": "object", "meaning": "Resolved input/gap evidence, not a result certification."},
     }
-    if family == "event_fact_analysis" and version == "11":
+    if family == "event_fact_analysis" and version in {"11", "12"}:
         summary = {
             "pair_count": {"type": "integer", "unit": "complete pairs"},
             "raw_risk_contrast": {"type": "number or null", "unit": "mean squared one-minute log return", "meaning": "Mean within-pair crossing minus persistent-high future 120-minute risk; not price return."},
@@ -414,6 +419,30 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
                 "per_asset_investment_criteria_met": {"type": "boolean", "meaning": "All support and descriptive gates; requires both prespecified assets; never promotion/execution authority."},
             },
         }
+        if version == "12":
+            comparison = fields["crossing_state_comparison"]
+            comparison["schema_version"] = "crossing_state_matched_pairs.v2"
+            detail = comparison["fields"]
+            detail["support_gates"]["thresholds"].update({
+                "overall_atr_filter_retention": {"minimum": .70, "unit": "fraction", "population": "accepted ATR pairs / original matched pairs; zero denominator fails"},
+                "every_month_atr_filter_retention": {"minimum": .50, "unit": "fraction", "population": "each of all 12 UTC months; accepted / original matched; zero denominator fails"},
+                "atr_ratio_balance": {"maximum": .10, "unit": "absolute standardized mean difference", "population": "complete filtered pairs; raw public ATR ratio", "undefined_fails": True},
+            })
+            detail["support_gates"]["thresholds"]["outcome_completeness"]["population"] = "both outcomes complete / ATR-accepted pairs"
+            detail["balance"]["fields"] = {"current_atr_zscore/log_prior_rms/atr_ratio": "{pair_count,absolute_smd,crossing_mean,control_mean,pooled_population_sd?,undefined_zero_sd?}; complete filtered pairs; equal zero-SD means give zero, unequal fail"}
+            detail["atr_ratio_filter"] = {"type": "object", "schema_version": "crossing_state_atr_ratio_filter.v1",
+                "fields": {"original_matched_pairs/accepted_pairs/excluded_pairs": "integer counts before outcomes",
+                    "retention_fraction": "accepted / original matched; null if empty",
+                    "accepted_eligible_fraction": "accepted / original eligible crossings; separate from original matching coverage",
+                    "original_pair_map_sha256_json_lines/accepted_pair_map_sha256_json_lines": "original and filtered outcome-blind pair identity digests",
+                    "reason_counts": "disjoint accepted/missing/invalid_type/nonfinite/nonpositive/above_1_05 counts; same fixed exclusion precedence",
+                    "monthly[]": "all 12 months with original matched, accepted, excluded, retention and accepted/eligible coverage",
+                    "pairs[]": "every original pair in order with original ordinal, both source/decision epochs, per-arm ATR ratio or null, per-arm exclusion flags, symmetric quotient or null on overflow, accepted and primary reason; no outcomes",
+                    "filter_uses_future_outcomes/rematched": "false"}}
+            detail["monthly[]"]["fields"].update({"atr_accepted_pairs/atr_excluded_pairs": "integer counts before outcomes",
+                "atr_retention_fraction": "accepted / original matched", "atr_accepted_eligible_fraction": "accepted / original eligible"})
+            detail["pairs[]"]["meaning"] += " Only ATR-accepted pairs; both arms include their positive public atr_ratio."
+            detail["outcome_missingness"]["fields"]["complete_fraction"] = "complete / ATR-accepted or null"
         return fields
     if family == "event_fact_analysis" and version == "10":
         fields["forward_risk_comparison"] = {"type": "object", "fields": {"coverage": "expected/observed/observable minute counts; undetectable intervals and exclusions, unknown event count remains null", "horizons": "seconds -> cohorts ordinary/shock_crossing/persistent_high: counts, raw_risk distributions (mean squared log return), future_prior_risk_ratio (dimensionless), path-range distributions and unresolved reasons", "months": "UTC monthly versions of cohort comparisons", "observation_ledger": "ordered identity digest and bounded examples, not full row persistence", "interpretation": "descriptive association; overlapping outcomes are not independent"}}
@@ -459,7 +488,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                 or configured.definition_version.split("+", 1)[0] != definition.definition_version):
             raise ValueError(f"check_catalog_example_version_mismatch: {key}")
         declarations = dict(evaluator.declare_requirements(definition=configured, request=request))
-    fixed_risk = definition.definition_id == "event_fact_analysis" and version in {"10", "11"}
+    fixed_risk = definition.definition_id == "event_fact_analysis" and version in {"10", "11", "12"}
     settings = {
         "fixed": deepcopy(dict(definition.material_rules)),
         "configurable": {
@@ -485,12 +514,23 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                                      "scope.start/end": "Aligned UTC range within one calendar year; no outcome tail."}
         settings["constraints"] += ["No configurable inference, matching thresholds or alternate indicators.",
                                      "Descriptive association only; not causality, profitability or promotion."]
-        if version == "11":
+        if version in {"11", "12"}:
             settings["fixed"]["matching"] = {"z_caliper": 0.25, "max_prior_rms_ratio": 1.25,
                 "calendar_window_days": 7, "primary_horizon_seconds": 7200,
                 "control_reuse": False, "same_episode": False,
                 "strata": "UTC month x six-hour block x prior RMS bin"}
             settings["constraints"].append("At most 20,000,000 candidate comparisons; result-size and execution budgets still apply.")
+    if fixed_risk and version == "12":
+        settings["fixed"]["atr_ratio_filter"] = {
+            "contract": "crossing_state_atr_ratio_filter.v1", "max_min_ratio_max": 1.05,
+            "numeric_semantics": "public binary64 quotient <= 1.05 inclusive; no epsilon or rounding",
+            "positive_finite_arms_required": True, "rematch": False,
+            "sequence": "original feature map -> whole-pair ATR filter -> future outcomes",
+            "support": {"original_matching": "70% overall / 50% each month of eligible crossings",
+                "filter_retention": "70% overall / 50% each month of original matched pairs",
+                "complete_pairs": "95% of filtered pairs; >=200 total and >=10 each month",
+                "balance": "absolute SMD <=0.10 for current z, log prior RMS and raw ATR ratio in complete filtered pairs"},
+        }
     settings["configurable"] = _settings_fields(definition.definition_id, version)
     durable = definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
     return {
@@ -513,7 +553,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "crossing_state_comparison" if fixed_risk and version == "11" else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),

@@ -580,3 +580,45 @@ cross-arm dependence rules are specified in
 Full pair provenance and diagnostics are canonical Check output, subject to the
 normal evidence/result budgets. Observations and Studies interpret that output;
 they do not recalculate it.
+
+
+### Fixed ATR-ratio pair filter
+
+Definition 12 / evaluator 11 (`event_fact_analysis_result.v11`) is an explicit
+extension of the same comparison owner. Select
+`outcomes.forward_risk.schema_version: candle_risk_matched_state.v2`, retain
+`matching_contract: crossing_state_matched_pairs.v1`, and add
+`filter_contract: crossing_state_atr_ratio_filter.v1`. All other fixed settings
+remain unchanged. Definition 11 and its results/hashes retain their meaning.
+
+The unchanged original matcher freezes its pair map first. Before future
+outcomes, the extension retains whole pairs only when both public ATR ratios
+are finite and positive and their binary64 quotient `max(a,b)/min(a,b) <= 1.05`.
+The boundary is inclusive, without epsilon, rounding, rematching, or a tunable
+threshold. A missing, invalid-type, nonfinite or nonpositive arm excludes the
+whole pair. Those categories, in that precedence order, followed by
+`above_1_05`, give disjoint primary exclusion counts; per-arm flags preserve
+all invalid causes. Overflow of an otherwise positive quotient is above-boundary.
+
+The Check retains the original map digest and matching accounting, filtered
+map digest, both public arm ratios, all original-pair filter decisions, and
+12 monthly retention rows. Excluded-pair filter evidence carries no outcomes.
+The comparison's primary, balance, missingness, day/week deletions and joint
+nonoverlap operate on filtered pairs using the existing outcome rules. Accepted
+pair outcome records also carry both ATR ratios. No tables, persisted entities,
+additional input data or second state-engine path are introduced.
+
+Support has separate denominators: original matching must cover at least 70%
+of original eligible crossings overall and 50% in each month; ATR filtering
+must retain at least 70% of original matched pairs overall and 50% each month.
+At least 95% of filtered pairs must have both outcomes, with at least 200
+complete pairs and 10 in every month. Complete-pair absolute SMD must be at most
+0.10 for current z, log prior RMS and raw ATR ratio. Equal zero-SD means give
+zero; unequal/undefined balance fails. Empty denominators fail. The existing
+nonoverlap sensitivity requires 50 pairs in six months. Failure remains
+`unsupported`; descriptive outputs do not authorize relaxation or promotion.
+
+Existing frozen Datasets, evidence budgets, cancellation, correction isolation,
+Observation admission and provider-free replay own this extension. It requires
+no physical storage cutover. Deployment exposes the method; scientific dispatch
+still requires a prospective protocol and its separately allocated budget.
