@@ -1464,6 +1464,14 @@ File device/inode/mode/size/mtime/ctime are checked around reads and again befor
 admission. These short-handoff checks never replace a fresh checksum on a later
 run. The object-store mount/root guards apply to every path lookup.
 
+Dependency expiration checks use batches of at most 128 exact `(target_kind,
+target_id)` pairs under the existing lifecycle fence, instead of one SQL round
+trip per dependency. Each page and each final verification/reclamation pass
+checks current expiration events again; there is no retained validation cache.
+Cancellation and the run deadline are checked between batches. This changes
+query grouping only: current-byte checks, expiration refusal, receipt format,
+verifier version, resource ceilings, and atomic reclamation remain unchanged.
+
 On success, the partition becomes `verified` with a hash of the ordered page
 proofs. **All hot payloads remain intact.** This state is cold-copy admission,
 not deletion authorization. The separate default-disabled reclamation primitive
