@@ -1376,3 +1376,47 @@ def test_operation_catches_late_baseline_queue_before_identity_fence(storage, tm
             assert not conn.scalar(text('SELECT EXISTS((SELECT '+columns+' FROM '+headers.SOURCE+
                 ' EXCEPT SELECT '+columns+' FROM '+headers.SCHEMA+'.fact_versions) UNION ALL (SELECT '+
                 columns+' FROM '+headers.SCHEMA+'.fact_versions EXCEPT SELECT '+columns+' FROM '+headers.SOURCE+'))'))
+
+
+@pytest.mark.parametrize("pending_transaction", [False, True])
+def test_controller_releases_lock_before_connection_disposal(
+        storage, monkeypatch, pending_transaction):
+    """Delayed server-side disconnect cannot keep a healthy owner busy."""
+    from scripts.automation.storage_online_controller import _LOCK
+
+    engine = storage.database._engine
+    controller = OnlineController.__new__(OnlineController)
+    controller._owner = engine.connect()
+    controller._owns_lock = True
+    owner = controller._owner
+    with owner.begin():
+        assert owner.scalar(text(
+            "SELECT pg_try_advisory_lock(hashtextextended(:key,0))"), {"key": _LOCK})
+    if pending_transaction:
+        owner.exec_driver_sql("CREATE TABLE controller_cleanup_uncommitted (id integer)")
+    observed = []
+    invalidate = Connection.invalidate
+
+    def before_disconnect(connection, *args, **kwargs):
+        try:
+            if connection is owner:
+                # Keep the old connection alive until the next session has
+                # checked the lock. No sleeps or scheduler-dependent race.
+                with engine.begin() as challenger:
+                    acquired = challenger.scalar(text(
+                        "SELECT pg_try_advisory_lock(hashtextextended(:key,0))"),
+                        {"key": _LOCK})
+                    observed.append(acquired)
+                    if acquired:
+                        assert challenger.scalar(text(
+                            "SELECT pg_advisory_unlock(hashtextextended(:key,0))"),
+                            {"key": _LOCK})
+        finally:
+            invalidate(connection, *args, **kwargs)
+
+    monkeypatch.setattr(Connection, "invalidate", before_disconnect)
+    controller._release_owner()
+    assert owner.closed
+    assert observed == [True]
+    with engine.begin() as conn:
+        assert conn.scalar(text("SELECT to_regclass('controller_cleanup_uncommitted')")) is None

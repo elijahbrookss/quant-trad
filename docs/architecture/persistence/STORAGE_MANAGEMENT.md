@@ -1657,8 +1657,12 @@ archive roots. Loss of the owning connection never transparently reconnects.
 Existing page transactions retain their own migration/resource locks; an
 in-flight bounded page may commit before ownership loss is observed, and its
 durable progress is re-admitted on restart. Closing the context closes every
-proof descriptor and invalidates the dedicated session rather than returning a
-session-level lock to a pool.
+proof descriptor. Healthy owner cleanup rolls back any unfinished transaction
+and explicitly acknowledges release of its controller lock before invalidating
+the dedicated session. The unlock has a five-second statement ceiling; failure
+still discards the connection and is surfaced. A lost or invalidated session
+never reconnects for cleanup. No session-level lock returns to a pool, and a
+fresh controller does not depend on asynchronous disconnect processing.
 
 The fixed pipe protocol permits status, bounded SQL copy, one rotating archive
 page, one rotating background file-reproof page, fixed preparation steps, spool
