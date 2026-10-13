@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/raw_candle_evaluator.py
+  - portal/backend/service/research/controlled_reversal_evaluator.py
   - portal/backend/service/research/event_fact_evaluator.py
   - portal/backend/service/research/event_features.py
   - portal/backend/service/research/event_configuration.py
@@ -706,3 +707,61 @@ Existing frozen Datasets, evidence budgets, cancellation, correction isolation,
 Observation admission and provider-free replay own this extension. It requires
 no physical storage cutover. Deployment exposes the method; scientific dispatch
 still requires a prospective protocol and its separately allocated budget.
+
+
+## Comparing engulfing with comparable bullish reversals
+
+`raw_forward_outcome` version 4 selects the explicit
+`controlled_reversal_comparison.v1` outcome schema and
+`controlled_bullish_reversal` detector. It owns one joint comparison; running
+separate treatment and control Checks cannot substitute for its common-support
+matching. Versions 2 and 3 retain their prior behavior and identities.
+
+The method uses one-minute canonical candles and declares 21 prior candles,
+without an Indicator, extra Fact aliases or volume. A candidate has a bullish
+current candle, bearish immediately preceding candle, and negative close return
+from t-6 to t-1. The treatment inclusively contains the previous candle's body;
+controls are the complementary candidates. Features are log of positive current
+log-body size, log of RMS of the 20 simple returns ending at t-1, and the prior
+five-interval decline divided by sqrt(5) times that RMS. Missing history and
+features known after nominal entry close are explicit exclusions.
+
+The Check matches within the UTC date and hour of current candle close. Treated
+candidates are processed chronologically. Controls are never reused. Absolute
+feature differences must be at most log(1.25), log(1.25), and 0.5 respectively;
+the minimum sum of squared caliper-normalized differences wins. Ties prefer the
+smaller absolute event-time distance, then the earlier control. Comparisons use
+binary64 inclusive boundaries without epsilon or rounding. Entry is the next
+candle close and the endpoint is five further bars later, strictly before the
+evaluation end. Closed entry-to-target intervals within each pair must be
+strictly disjoint, so touching endpoints count as overlap.
+
+Features, matched identities and the joint nonoverlap subset are frozen before
+entry availability or future paths are resolved. The subset processes pairs in
+treated chronological order and retains a pair only when neither interval
+intersects an already retained interval. Missing either outcome removes the
+whole pair, with both reasons retained and no replacement or rematching. The
+existing canonical candle validator and forward-outcome resolver own input and
+path semantics; the existing population-SMD helper owns balance arithmetic.
+
+The primary statistic is mean paired return difference, engulfing minus control,
+with both arm means, medians and positive fractions. Support requires 100
+complete pairs on 10 UTC days, 50% of eligible treated candidates matched, 95%
+complete matched pairs, and absolute population SMD at most 0.10 for every
+feature. Undefined SMD fails support; equal constant arms have SMD zero.
+Leave-one-UTC-day-out comparisons never rematch. The fixed nonoverlap subset
+requires 30 complete pairs on six days. A positive descriptive lead requires all
+primary support gates, positive primary contrast, every defined day-deletion
+contrast positive, and a supported positive nonoverlap contrast. Other outcomes
+are `unsupported`, `nonpositive`, or `mixed`; none establishes significance,
+causality, live fill quality or profitability.
+
+Requests cannot tune this procedure. The range must have whole-minute boundaries
+and span at most 32 days, with exactly 21 warmup bars when supplied and no tail.
+The existing 100,000-candle, execution, cancellation, evidence and result budgets
+remain enforced, plus a three-million candidate-comparison guard. Results retain
+the feature-map hash, every matched pair and unmatched treated identity, clocks,
+subset membership, outcome missingness, balance and dependence outputs. An
+unsupported result is still a completed Check, not permission to search new
+thresholds or dates. Inferred interval-close labels remain explicit and do not
+certify measured publication latency.
