@@ -146,6 +146,8 @@ def _prepare(candles: pd.DataFrame, *, step: timedelta, volume_required: bool):
         known = _clock(row["known_at"], "known_at")
         if previous is not None and opened <= previous:
             raise ValueError("raw_candle_input_invalid: duplicate or unordered canonical candle identity")
+        if previous is not None and (opened-previous) % pd.Timedelta(step) != pd.Timedelta(0):
+            raise ValueError("raw_candle_input_invalid: inconsistent canonical candle cadence")
         if closed != opened + step or known < closed:
             raise ValueError("raw_candle_input_invalid: invalid candle duration or availability clock")
         method = row["known_at_method"]

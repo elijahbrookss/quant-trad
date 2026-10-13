@@ -255,7 +255,8 @@ uses volume. Immediately previous fields require the actual prior interval, not
 the previous retained row. Missing, nonfinite or negative predicate volume is an
 explicit candidate exclusion; a real source-established zero remains zero.
 Canonical source/clock fields must exist, identities must be ordered and unique,
-and malformed/nonpositive OHLC, ambiguous sources or clocks fail the input
+and malformed/nonpositive OHLC, inconsistent observed cadence, ambiguous sources
+or clocks fail the input
 contract rather than being repaired or dropped. Source admission still owns
 whether retained volume and availability provenance suit a scientific question.
 

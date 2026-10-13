@@ -269,3 +269,22 @@ def test_bounded_predicate_rejects_before_recursive_legacy_validation():
     p["detector"]=node
     with pytest.raises(ValueError,match="bounded mapping tree"):
         normalize_check_request(p)
+
+
+
+def test_interleaved_off_grid_row_cannot_replace_actual_previous_interval():
+    frame=candles();extra=frame.iloc[0].copy()
+    extra["timestamp"]=(START+timedelta(seconds=30)).isoformat()
+    extra["close_time"]=extra["known_at"]=(START+timedelta(seconds=90)).isoformat()
+    frame=pd.concat([frame.iloc[:1],pd.DataFrame([extra]),frame.iloc[1:]],ignore_index=True)
+    with pytest.raises(ValueError,match="inconsistent canonical candle cadence"):
+        run(frame)
+
+
+def test_consistent_observed_source_offset_is_preserved_without_utc_anchor():
+    frame=candles()
+    for field in ("timestamp","close_time","known_at"):
+        frame[field]=[(pd.Timestamp(v)+timedelta(seconds=30)).isoformat() for v in frame[field]]
+    result=run(frame)
+    assert result["complete_sample_count"]==1
+    assert result["events"][0]["entry_time"]==(START+timedelta(minutes=3,seconds=30)).isoformat().replace("+00:00","Z")
