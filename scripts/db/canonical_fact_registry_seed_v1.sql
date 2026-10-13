@@ -52,6 +52,17 @@ VALUES
     true
 ),
 (
+    'derivatives.liquidation_volume.v1',
+    'derivatives.liquidation_volume',
+    'a6f20680997ae56c2a91f5175b3b71eefeb83c963127a093016b79c26a2db72c',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"derivatives.liquidation_volume","fields":[{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"raw_value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"numeric_fact_material_hash.v1","observation_time_field":"effective_at","query_fields":["value"],"row_hash_version":"derivatives.liquidation_volume.v1","schema_id":"derivatives.liquidation_volume.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'effective_at',
+    'numeric_fact_material_hash.v1',
+    'derivatives.liquidation_volume.v1',
+    '["value"]'::jsonb,
+    true
+),
+(
     'derivatives.open_interest.v1',
     'derivatives.open_interest',
     '64acfaca327e97b75dec0fdb963ded17c141093784dd179577cb619f73cf3396',
