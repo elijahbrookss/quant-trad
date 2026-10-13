@@ -27,6 +27,7 @@ from research_science.check import (
 )
 
 from . import checks
+from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
 from .matched_origin_evaluator import MatchedOriginEvaluator, normalize_matched_origin
 from .shared_landmark_evaluator import SharedLandmarkEvaluator, normalize_shared_landmark
 from .first_return_evaluator import FirstReturnEvaluator, normalize_first_return
@@ -51,6 +52,7 @@ LEGACY_CHECK_FAMILIES = (
     checks.RUN_DECISION_TRADE_COMPARISON,
 )
 REGISTERED_CHECK_FAMILIES = frozenset({*LEGACY_CHECK_FAMILIES, EVENT_FACT_ANALYSIS})
+# Legacy family-level defaults; all operational admission uses definition_allows_evidence.
 DURABLE_EVIDENCE_CHECK_FAMILIES = frozenset(
     {
         EVENT_FACT_ANALYSIS,
@@ -259,6 +261,29 @@ def _register_legacy_families() -> None:
 
 
 _register_legacy_families()
+
+_raw_candle_evaluator = RawCandleEvaluator()
+CHECK_REGISTRY.register_evaluator(_raw_candle_evaluator)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="3", evaluator_id=_raw_candle_evaluator.evaluator_id,
+    evaluator_version=_raw_candle_evaluator.version, request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_boundary": "evaluation_end_exclusive",
+        "outcome_schema": OUTCOME_SCHEMA, "inference": "descriptive_only", "return_unit": "fraction",
+        "limits": {"candles": 100000, "horizons": 20, "lag_plus_horizon_bars": 10000,
+            "examples": 1000, "predicate_depth": 32, "predicate_nodes": 500}},
+))
+
+
+def definition_allows_evidence(definition: CheckDefinition) -> bool:
+    """Keep historical raw v2 unqualified; admit only the registered raw v3 pair."""
+    if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
+        return (definition.definition_version.split("+", 1)[0] == "3"
+                and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
+                and definition.evaluator_version == "3")
+    return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
 
 
 def _register_event_fact_family() -> None:
@@ -805,7 +830,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
+        base_version or ("3" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == OUTCOME_SCHEMA
+            else default_version if family == EVENT_FACT_ANALYSIS else "2")
     )
     if availability_trigger and resolved_base_version != "5":
         raise ValueError(
@@ -844,7 +871,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    else:
+    elif not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3"):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -894,6 +921,9 @@ def materialize_check_definition(
         raise ValueError(
             "event_fact_check_invalid: fact_snapshot does not support reset_rewarm"
         )
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3":
+        outcomes = normalize_raw_candle_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
     material_rules = {
         **dict(base.material_rules),
         "registered_definition": {
@@ -938,7 +968,7 @@ def normalize_check_request(
     definition = materialize_check_definition(payload, mode=normalized_mode)
     if (
         normalized_mode == CHECK_MODE_EVIDENCE
-        and definition.definition_id not in DURABLE_EVIDENCE_CHECK_FAMILIES
+        and not definition_allows_evidence(definition)
     ):
         raise ValueError(
             "check_evidence_family_preview_only: legacy evaluator cannot create new "
@@ -1095,7 +1125,7 @@ def normalize_check_preparation_request(
     """
 
     definition = materialize_check_definition(payload, mode=CHECK_MODE_EVIDENCE)
-    if definition.definition_id not in DURABLE_EVIDENCE_CHECK_FAMILIES:
+    if not definition_allows_evidence(definition):
         raise ValueError(
             "check_evidence_family_preview_only: legacy evaluator cannot create new "
             f"durable evidence family={definition.definition_id}; use "
@@ -1124,6 +1154,7 @@ def normalize_check_preparation_request(
 __all__ = [
     "CHECK_REGISTRY",
     "DURABLE_EVIDENCE_CHECK_FAMILIES",
+    "definition_allows_evidence",
     "EVENT_FACT_ANALYSIS",
     "LEGACY_CHECK_FAMILIES",
     "REGISTERED_CHECK_FAMILIES",

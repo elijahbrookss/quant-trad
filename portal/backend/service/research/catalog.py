@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 from .forward_risk_evaluator import PINNED_PARAMS
-from .registry import CHECK_REGISTRY, DURABLE_EVIDENCE_CHECK_FAMILIES, normalize_check_request
+from .registry import CHECK_REGISTRY, definition_allows_evidence, normalize_check_request
 
 SCHEMA = "research_check_catalog.v1"
 
@@ -181,6 +181,12 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                                           'outcome_boundary': 'evaluation_end_exclusive',
                                                           'matching_contract': 'crossing_state_matched_pairs.v1'}},
                             'statistics': {}},
+ 'raw_forward_outcome@3': {'check_family': 'raw_forward_outcome', 'mode': 'preview',
+     'scope': {'instrument_id': 'instrument-id', 'timeframe': '1m',
+               'start': '2022-01-01T00:00:00Z', 'end': '2022-01-02T00:00:00Z'},
+     'detector': {'type': 'raw_condition', 'field': 'close', 'operator': 'gt', 'value_field': 'previous_close'},
+     'outcomes': {'schema_version': 'raw_candle_forward_outcome.v1', 'forward_bars': [5], 'entry_lag_bars': 1},
+     'gap_policy': 'continue_degraded'},
  'raw_forward_outcome@2': {'check_family': 'raw_forward_outcome',
                            'mode': 'preview',
                            'scope': {'instrument_id': 'instrument-id',
@@ -259,6 +265,7 @@ _EXAMPLES["event_fact_analysis@12"]["outcomes"]["forward_risk"].update(
     schema_version="candle_risk_matched_state.v2", filter_contract="crossing_state_atr_ratio_filter.v1")
 
 _PURPOSES = {
+    "raw_forward_outcome@3": "Evaluate canonical raw candle predicates with causal close entry and contiguous bounded outcomes.",
     "raw_forward_outcome@2": "Preview raw candle conditions and subsequent outcomes.",
     "indicator_forward_outcome@2": "Preview indicator output conditions and subsequent outcomes.",
     "signal_audit@2": "Audit emitted signals against declared public output expectations.",
@@ -373,6 +380,10 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
     else:
         fields["outcomes"] = {"fields": ["min_sample_count", "max_examples"] + (["bucket_by", "buckets"] if family == "run_signal_summary" else []),
             "defaults": {"min_sample_count": 5, "max_examples": 100}, "constraints": "Sample threshold is descriptive; example cap bounds reporting. Signal-summary bucket_by (buckets alias) lists recorded fields, default symbol/output_name/event_key."}
+    if family == "raw_forward_outcome" and version == "3":
+        fields["outcomes"] = {"fields": ["schema_version", "forward_bars", "entry_lag_bars", "direction",
+            "min_sample_count", "min_edge_pct", "max_examples", "outcome_boundary"],
+            "constraints": "Explicit raw_candle_forward_outcome.v1; 1..20 positive integer horizons, total lag+horizon<=10000 bars; canonical close entry and target close strictly before evaluation end; continue_degraded with local exclusions. Returns are fractions despite _pct names."}
     return fields
 
 
@@ -532,7 +543,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                 "balance": "absolute SMD <=0.10 for current z, log prior RMS and raw ATR ratio in complete filtered pairs"},
         }
     settings["configurable"] = _settings_fields(definition.definition_id, version)
-    durable = definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
+    durable = definition_allows_evidence(definition)
     return {
         "schema_version": SCHEMA,
         "definition": definition.to_dict(),
