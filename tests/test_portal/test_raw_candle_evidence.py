@@ -41,7 +41,7 @@ def candles():
     return pd.DataFrame([{ "timestamp": time(i), "close_time": time(i+1), "known_at": time(i+1),
         "known_at_method": "interval_close_inferred", "source_identity_key": "source-1",
         "open": o, "high": max(o,c)+1, "low": min(o,c)-1, "close": c,
-        "volume": 20 if i==1 else 10} for i,(o,c) in enumerate(zip(opens,closes))])
+        "volume": 20 if i==1 else 10} for i,(o,c) in enumerate(zip(opens,closes))]).astype({key:"float64" for key in ("open","high","low","close","volume")})
 
 
 def contract(p=None):
