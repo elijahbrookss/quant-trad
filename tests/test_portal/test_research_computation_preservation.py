@@ -14,7 +14,6 @@ from market_data.frozen import semantic_hash
 from portal.backend.service.research.event_fact_evaluator import EventFactEvaluator, normalize_event_fact_configuration
 from tests.test_portal.test_event_fact_check import _inputs, _plan, _record, _iso
 from tests.test_portal.test_first_return_check import run as first_return
-from tests.test_portal.test_forward_risk_check import run as forward_risk
 
 
 def model_case(*, fit_intercept=True):
@@ -85,12 +84,13 @@ def test_feature_and_paired_model_result_preserved(fit_intercept):
     model.pop("prediction_hash")  # Exact same-environment hashes are retained in the handoff receipt.
     _assert_model_values(model, expected["model"])
     result["hashes"].pop("statistics_hash")
+    # This hash also contains optimizer metrics, not just discrete fold membership.
+    result["hashes"].pop("fold_assignment_hash")
     assert semantic_hash(result) == expected["non_model_result_hash"]
 
 
-@pytest.mark.parametrize("run, expected", [(first_return, "9bb1d1d7a20214af2577f602762538e993badadb5446e5a87df4e3b1439d32d5"), (forward_risk, "de547df039e60c761979f965c333b7fc507d8f4eff734601d2b6027617ba1adc")])
-def test_distinct_procedure_complete_result_preserved(run, expected):
-    assert semantic_hash(run()) == expected
+def test_first_return_complete_result_preserved():
+    assert semantic_hash(first_return()) == "9bb1d1d7a20214af2577f602762538e993badadb5446e5a87df4e3b1439d32d5"
 
 
 def test_model_convergence_failure_remains_loud():

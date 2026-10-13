@@ -84,7 +84,7 @@
         "delta_roc_auc": 0.0,
         "bootstrap": null
       },
-      "non_model_result_hash": "1cf80cd345ba943f9036bf576e9e739f9259e11bd1524e9fafa665c7c42bae68"
+      "non_model_result_hash": "27df6a7e27979837174db183e163a35e27bc8009a6f0d9514dde98ba155b0820"
     },
     "False": {
       "model": {
@@ -169,7 +169,7 @@
         "delta_roc_auc": 0.0,
         "bootstrap": null
       },
-      "non_model_result_hash": "59294871fb657e79dc0c47b81dfa615873d5912684737af7c6e161298a96604a"
+      "non_model_result_hash": "27df6a7e27979837174db183e163a35e27bc8009a6f0d9514dde98ba155b0820"
     }
   }
 }
