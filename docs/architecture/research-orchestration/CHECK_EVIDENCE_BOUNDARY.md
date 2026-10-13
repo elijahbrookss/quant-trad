@@ -23,9 +23,17 @@ code_paths:
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
   - portal/backend/service/research/event_features.py
+  - portal/backend/service/research/event_configuration.py
+  - portal/backend/service/research/event_time.py
+  - portal/backend/service/research/event_facts.py
+  - portal/backend/service/research/event_preparation.py
+  - portal/backend/service/research/event_observations.py
+  - portal/backend/service/research/event_outcomes.py
+  - portal/backend/service/research/event_statistics.py
   - portal/backend/service/research/directional_model.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
+  - portal/backend/service/research/first_return_evaluator.py
   - portal/backend/service/research/forward_risk_evaluator.py
   - portal/backend/service/research/crossing_state_comparison.py
   - portal/backend/service/research/service.py
@@ -88,16 +96,26 @@ discovery adds no DSL, schema, new engine or configurable scientific policy.
 
 ## Shared calculations and procedure ownership
 
-`event_features.py` owns the existing baseline feature preparation and values.
-`directional_model.py` fits and scores the baseline/enriched models on the same
-caller-admitted fold rows. Neither helper selects events, determines causal
-availability, resolves outcomes or changes registered scientific choices.
-The event-and-fact evaluator retains those decisions and fold eligibility.
-Distinct first-return and forward-risk procedures remain explicit. This is a
-computation-only extraction: settings, definitions, result schemas and evaluator
-versions retain their existing material meaning. Producing source identity still
-changes with code; old source-bound evidence remains replayable through its
-existing exact-source custody, rather than being relabeled as new-source evidence.
+The event-and-fact evaluator orchestrates named preparation, causal Fact,
+observation/entry, outcome and statistical functions. Settings normalization lives
+in `event_configuration.py`; the registry keeps literal historical version
+precedence in `_resolve_definition_version`. Feature calculation and paired model
+fitting/scoring use `event_features.py` and `directional_model.py`.
+
+Matched-origin, shared-landmark and first-return keep their distinct orchestration.
+A call-scoped `EventCandlePreparation` shares candle conversion/indexes and ATR on
+the same unchanged input object. Readonly row/index views prevent consumer writes;
+they are shallow, and the owned frozen inputs must remain unchanged during the
+call. Causal Fact/event selection and outcomes are recalculated for each detector
+or shifted endpoint. No preparation survives a public evaluation or is shared
+with another job. Forward-risk retains its separate calculation.
+
+This extraction changes no accepted settings, scientific choices, definition IDs,
+result schemas or evaluator versions. Producing source identity changes with code;
+old source-bound evidence retains its exact-source custody rather than being
+relabeled. Verification compares scientific material on identical input fixtures;
+wall-clock performance metadata and producing-source identity are separate from
+that comparison. Synthetic coverage does not establish saved real-Check parity.
 
 ## Purpose
 

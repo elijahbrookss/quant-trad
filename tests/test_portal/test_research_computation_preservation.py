@@ -98,3 +98,41 @@ def test_model_convergence_failure_remains_loud():
     inputs["statistics"]["model"]["max_iterations"] = 1
     with pytest.raises(RuntimeError, match="event_fact_logistic_failed"):
         EventFactEvaluator().evaluate(inputs=inputs, plan=plan)
+
+
+@pytest.mark.parametrize("procedure", ["matched", "landmark", "first_return"])
+def test_owned_procedure_prepares_candles_once_without_mutating_inputs(monkeypatch, procedure):
+    from portal.backend.service.research import event_preparation
+    from tests.test_portal import test_matched_origin_check as matched
+    from tests.test_portal import test_shared_landmark_check as landmark
+    from tests.test_portal import test_first_return_check as first
+    cases = {"matched": (matched._inputs, matched._plan, matched.MatchedOriginEvaluator),
+             "landmark": (landmark._case, None, landmark.SharedLandmarkEvaluator),
+             "first_return": (first.case, None, first.FirstReturnEvaluator)}
+    builder, plan_builder, evaluator = cases[procedure]
+    if plan_builder:
+        inputs, plan = builder(), plan_builder()
+    else:
+        inputs, plan = builder()
+    original = deepcopy(inputs)
+    convert = event_preparation._candle_rows
+    calls = []
+    def count_conversion(value, *, field):
+        calls.append(field)
+        return convert(value, field=field)
+    monkeypatch.setattr(event_preparation, "_candle_rows", count_conversion)
+    evaluator().evaluate(inputs=inputs, plan=plan)
+    assert calls == ["indicator_evidence.candles"]
+    assert inputs == original
+
+
+def test_preparation_is_fresh_for_each_public_evaluation():
+    from tests.test_portal import test_first_return_check as first
+    inputs, plan = first.case()
+    evaluator = first.FirstReturnEvaluator()
+    before = evaluator.evaluate(inputs=inputs, plan=plan)
+    candle = inputs["indicator_evidence"]["candles"][1]
+    for field in ["open", "high", "low", "close"]:
+        candle[field] += 1
+    after = evaluator.evaluate(inputs=inputs, plan=plan)
+    assert after["events"][0]["entry_price"] == before["events"][0]["entry_price"] + 1

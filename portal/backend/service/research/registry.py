@@ -766,13 +766,8 @@ def _validate_event_fact_bindings(
     return normalized_detector, normalized_statistics, inputs
 
 
-def materialize_check_definition(
-    payload: Mapping[str, Any],
-    *,
-    mode: str,
-    base_version: str | None = None,
-) -> CheckDefinition:
-    family = str(payload.get("check_family") or checks.SUPPORTED_CHECK_FAMILY).strip()
+def _resolve_definition_version(payload, *, family, base_version):
+    """Select existing historical procedures; no taxonomy for future methods."""
     availability_trigger = (
         _mapping(payload.get("detector"), field="detector").get("evaluation_trigger")
         == "required_facts_available"
@@ -789,8 +784,26 @@ def materialize_check_definition(
     forward_risk = _mapping(payload.get("outcomes"), field="outcomes").get("forward_risk")
     paired_state = isinstance(forward_risk, Mapping) and forward_risk.get("schema_version") == "candle_risk_matched_state.v1"
     atr_filter = isinstance(forward_risk, Mapping) and forward_risk.get("schema_version") == "candle_risk_matched_state.v2"
-    risk_version = "12" if atr_filter else "11" if paired_state else "10"
-    default_version = risk_version if forward_risk is not None else "9" if first_return is not None else "8" if shared_landmark is not None else "7" if matched_origin is not None else "5" if availability_trigger else "6" if candle_only else "4"
+    if atr_filter:
+        risk_version = "12"
+    elif paired_state:
+        risk_version = "11"
+    else:
+        risk_version = "10"
+    if forward_risk is not None:
+        default_version = risk_version
+    elif first_return is not None:
+        default_version = "9"
+    elif shared_landmark is not None:
+        default_version = "8"
+    elif matched_origin is not None:
+        default_version = "7"
+    elif availability_trigger:
+        default_version = "5"
+    elif candle_only:
+        default_version = "6"
+    else:
+        default_version = "4"
     resolved_base_version = str(
         base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
     )
@@ -807,6 +820,20 @@ def materialize_check_definition(
     if forward_risk is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != risk_version
             or any(v is not None for v in (matched_origin, shared_landmark, first_return))):
         raise ValueError(f"forward_risk_invalid: requires standalone definition version {risk_version}")
+    return resolved_base_version, matched_origin, shared_landmark, first_return, forward_risk
+
+
+def materialize_check_definition(
+    payload: Mapping[str, Any],
+    *,
+    mode: str,
+    base_version: str | None = None,
+) -> CheckDefinition:
+    family = str(payload.get("check_family") or checks.SUPPORTED_CHECK_FAMILY).strip()
+    (resolved_base_version, matched_origin, shared_landmark,
+     first_return, forward_risk) = _resolve_definition_version(
+        payload, family=family, base_version=base_version,
+    )
     base = CHECK_REGISTRY.resolve_definition(family, resolved_base_version)
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")

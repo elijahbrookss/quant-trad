@@ -516,13 +516,20 @@ realized-risk analysis have distinct procedures. Volatility as a directional
 predictor is a different question from measuring future volatility. Existing ATR
 baseline support does not admit ATR as an enriched feature.
 
-The event-and-fact evaluator uses `event_features.py` for existing baseline feature
-preparation/calculation and `directional_model.py` for paired fold fitting/scoring.
-The caller still owns causal admission, complete-case selection, fold boundaries,
-labels and eligibility. Reuse these functions only when their existing semantics
-fit; do not force a new procedure through unrelated flags. Fixed protocol choices
-remain fixed. Keep architectural cohesion an agent and reviewer responsibility,
-without adding a scanning or enforcement system.
+The event-and-fact code keeps accepted settings in `event_configuration.py` and
+historical procedure selection in the registry's `_resolve_definition_version`.
+`event_preparation.py` selects public events; `event_facts.py` owns causal Fact
+selection/features. `event_observations.py` admits observations and entry clocks,
+`event_outcomes.py` resolves horizons/invalidation, and `event_statistics.py`
+orchestrates distributions, folds, bins and direct tests. Existing baseline
+features and paired fitting/scoring remain in `event_features.py` and
+`directional_model.py`.
+
+Distinct procedures retain their own attribution/classification orchestration.
+They share readonly candle/index/ATR preparation only within one owned call on
+unchanged inputs; causal selections and shifted outcomes still execute for each
+pass. Public evaluations start fresh. Fixed protocol choices remain fixed, and
+cohesion remains an agent/reviewer responsibility without a scanning system.
 
 For a new method, implement the existing `CheckEvaluator` interface in
 `src/research_science/check.py`: `declare_requirements(definition, request)`
