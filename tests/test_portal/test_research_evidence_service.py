@@ -398,12 +398,7 @@ def test_eligible_check_requires_explicit_observation_admission_and_support_link
 
     # Exercise the admission operation with an otherwise valid frozen contract
     # designated eligible for this focused service-boundary test.
-    monkeypatch.setattr(
-        service,
-        "DURABLE_EVIDENCE_CHECK_FAMILIES",
-        frozenset({definition.definition_id}),
-    )
-    monkeypatch.setattr(service, "PREVIEW_ONLY_CHECK_FAMILIES", frozenset())
+    monkeypatch.setattr(service, "definition_allows_evidence", lambda _definition: True)
     monkeypatch.setattr(service.repository, "get_item", lambda *_args, **_kwargs: check)
 
     def create_item(**kwargs):

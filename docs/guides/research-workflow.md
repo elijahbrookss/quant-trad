@@ -555,3 +555,20 @@ stated version through the real normalizer and reach the existing prepare
 contract, with API/CLI parity. Frozen data, scientific admission and accounting
 remain with their existing owners. There is no plugin installer, expression
 language, saved configuration resource or independent evaluator lifecycle.
+
+### Raw candle predicates with durable evidence
+
+Discover `raw_forward_outcome` version 3 through `qt research check definition
+raw_forward_outcome --version 3`. Select it explicitly with
+`outcomes.schema_version: raw_candle_forward_outcome.v1` and use the existing
+requirements, prepare, frozen evidence and replay workflow. Version 2 remains
+preview-only. V3 requires canonical clocks and source identity, real contiguous
+entry/outcome paths, and genuine volume where used. Its entry is a causal candle
+close; targets end strictly before the declared evaluation boundary. Use
+`continue_degraded` and inspect local exclusions and complete support counts.
+
+The canonical `mean_forward_return_pct` and related `_pct` fields are fractions;
+percentage display multiplies by 100. Compare requested cohort summaries as
+emitted; the all-bar baseline edge is a different comparison. Method availability
+and successful deployment do not allocate a scientific experiment or permit
+tuning, more dates, extra Checks, or external order submission.

@@ -21,6 +21,7 @@ code_paths:
   - portal/backend/service/research/catalog.py
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
+  - portal/backend/service/research/raw_candle_evaluator.py
   - portal/backend/service/research/event_fact_evaluator.py
   - portal/backend/service/research/event_features.py
   - portal/backend/service/research/event_configuration.py
@@ -236,6 +237,55 @@ alias, fact type/version, subject, alignment, staleness, and source policy.
 deterministically. Unconstrained provider selection is rejected for evidence.
 The same semantic fact may be bound under multiple aliases to compare exact
 sources without identity collision.
+
+## Canonical raw-candle evidence
+
+`raw_forward_outcome` definition/evaluator v3 is explicitly selected by
+`outcomes.schema_version: raw_candle_forward_outcome.v1`. Without that selector,
+v2 remains the default preview method. Its definition, arithmetic and historical
+reconstruction are unchanged. Eligibility is definition/evaluator-version aware
+in normalization, preparation, persistence, saved-evidence projection and method
+discovery; enabling a whole legacy family cannot qualify v2.
+
+V3 uses the existing canonical candle reader, frozen binding, source ownership,
+generic raw `all`/`any`/`not` predicates, shared outcome calculation, summaries and
+Check persistence/replay. It adds no Indicator, provider adapter, strategy,
+statistical procedure or table. Required volume is declared only when a predicate
+uses volume. Immediately previous fields require the actual prior interval, not
+the previous retained row. Missing, nonfinite or negative predicate volume is an
+explicit candidate exclusion; a real source-established zero remains zero.
+Canonical source/clock fields must exist, identities must be ordered and unique,
+and malformed/nonpositive OHLC, ambiguous sources or clocks fail the input
+contract rather than being repaired or dropped. Source admission still owns
+whether retained volume and availability provenance suit a scientific question.
+
+The analytical price proxy is the configured exact contiguous entry candle's
+**close**. Every required predicate candle must be known by that close, and the
+entry price must itself be available by its close. Lag paths cannot bridge gaps.
+Forward outcomes use exact contiguous subsequent candles. Entry and target close
+must be strictly before the evaluation end; planning adds no future tail. Missing
+paths, late entry inputs and boundary censoring retain separate reason counts.
+Retrospective outcome known-at is the maximum entry/path availability, distinct
+from decision information. Known-at method labels are retained: inferred interval
+close is not measured provider publication latency.
+
+The result reports matched, complete, predicate-eligible and excluded populations,
+per-horizon resolution, bounded examples and descriptive summaries. Retained
+`*_pct` summary names contain **fractions**, as existing raw summaries do; multiply
+by 100 only for percentage display. An all-bar baseline edge is not an opposing
+cohort contrast. Overlap, descriptive support thresholds and a screening
+recommendation confer no independence, significance, causality, profitability,
+scientific allocation or trading authority.
+
+The evaluator accepts at most 100,000 candles, 20 declared horizons, a total
+lag+horizon of 10,000 bars and 1,000 examples, within the existing execution byte,
+ownership and cancellation limits. Requirement declaration rejects oversized
+nominal materialization ranges before source inspection or hydration; existing
+read-byte/row limits still bound actual canonical reads. The initial policy is explicit
+`continue_degraded` with local complete-path exclusions. Existing history cache,
+source-binding, frozen Dataset and exact producing-source replay guards remain
+unchanged. Deployment exposes this capability; scientific dispatch requires its
+own admitted fixed protocol, source and budget.
 
 ## Generic Event-And-Fact Checks
 

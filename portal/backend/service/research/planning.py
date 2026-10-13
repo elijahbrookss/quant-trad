@@ -564,7 +564,8 @@ def plan_research_check(
             "alignment": "exact_interval",
             "max_staleness_seconds": None,
             "known_at_required": True,
-            "required_fields": ["open", "high", "low", "close", "known_at"],
+            "required_fields": list(declaration.get("primary_candle_required_fields") or
+                ["open", "high", "low", "close", "known_at"]),
             "series_required": True,
             "frame_missing_policy": "indicator_owned",
             "source_policy": {
