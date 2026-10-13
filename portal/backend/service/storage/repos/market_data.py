@@ -64,6 +64,7 @@ from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION,
     get_fact_contract,
     get_fact_payload_schema,
+    supported_fact_contracts,
 )
 from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
@@ -463,6 +464,7 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
         "derivatives.funding_rate.v1",
         "market.reference_price.v1",
         "market.reserve_balance.v1",
+        "derivatives.liquidation_volume.v1",
         "market.trade.v1",
         "market.trade_flow.v1",
         "market.trade_flow_feature.v1",
@@ -1429,10 +1431,7 @@ class PostgresMarketDataRepository:
                            CASE WHEN series.fact_type = 'derivatives.funding_rate'
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS funding_rate_count,
-                           CASE WHEN series.fact_type IN (
-                                      'market.reference_price',
-                                      'market.reserve_balance'
-                                  )
+                           CASE WHEN series.fact_type = ANY(:numeric_types)
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS numeric_fact_count,
                            CASE WHEN series.fact_type = 'market.trade'
@@ -1495,7 +1494,9 @@ class PostgresMarketDataRepository:
                              series.timeframe_seconds NULLS FIRST, series.id
                     """
                 ),
-                {**params, "feature_types": list(feature_types)},
+                {**params, "feature_types": list(feature_types),
+                 "numeric_types": [contract.fact_type for contract in supported_fact_contracts()
+                                   if contract.uses_exact_numeric_storage]},
             ).mappings().all()
         return [dict(row) for row in rows]
 

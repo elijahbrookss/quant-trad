@@ -19,11 +19,14 @@ tags:
   - explicit-migration
 code_paths:
   - src/market_data/contracts.py
+  - src/market_data/canonical.py
   - src/market_data/fact_registry.py
   - src/market_data/requirements.py
   - src/market_data/store.py
   - src/data_providers/numeric_facts.py
   - src/data_providers/providers/chainlink.py
+  - src/data_providers/providers/coinalyze.py
+  - src/data_providers/registry.py
   - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
   - portal/backend/service/market/numeric_fact_acquisition.py
@@ -38,6 +41,7 @@ code_paths:
   - tests/test_market_data/test_numeric_fact_acquisition.py
   - tests/test_data_providers/test_chainlink_manifest.py
   - tests/test_data_providers/test_chainlink_provider.py
+  - tests/test_data_providers/test_coinalyze_provider.py
 ---
 # Numeric Facts And On-Demand Acquisition
 
@@ -48,15 +52,16 @@ units, dimensions, event identity, and causal provenance must remain exact. It
 adds a provider-neutral storage and dataset path without making providers part
 of consumer reads or creating a table per upstream feed.
 
-The first admitted facts and source adapter are:
+The registered numeric contracts and adapters include:
 
 | Fact contract | Subject | Required dimension | Unit rule | Value domain |
 | --- | --- | --- | --- | --- |
 | `market.reference_price.v1` | canonical instrument | `quote_currency` | equals `quote_currency` | greater than zero |
 | `market.reserve_balance.v1` | canonical instrument | `reserve_unit` | equals `reserve_unit` | greater than or equal to zero |
+| `derivatives.liquidation_volume.v1` | canonical instrument | liquidated side, bucket seconds, volume unit, exchange, product | exact catalogue denomination | nonnegative; missing is not zero |
 | `chainlink_aggregator_v3.v1` | acquisition adapter | manifest-bound | provider value scaled by verified decimals | read-only public EVM evidence |
 
-This component does not implement multi-variable response feeds, sequencer
+This component does not implement arbitrary multi-variable response feeds, sequencer
 uptime, continuous collection, websocket subscriptions, wallet/signer flows, or
 transactions.
 
@@ -100,8 +105,10 @@ as unbounded `numeric`, not `double precision`, and retains the raw source text
 independently.
 
 Series identity is canonical instrument, fact type, contract version, optional
-timeframe, and normalized contract dimensions. The two v1 numeric contracts
-forbid a timeframe. Currency/unit dimensions are uppercased. A dimension that
+timeframe, and normalized contract dimensions. These numeric contracts
+forbid a candle timeframe. A liquidation observation carries its distinct bucket
+duration as a contract dimension; it is never implicitly resampled or carried
+forward as a candle. Currency/unit dimensions are uppercased. A dimension that
 changes fact meaning therefore produces a different series ID.
 
 ## Event Identity, Revisions, And Reorgs
@@ -153,7 +160,8 @@ declares exactly:
 - ID and explicit enabled state;
 - adapter ID, canonical instrument, and declared instrument role;
 - fact type, contract version, unit, and dimensions;
-- an environment-variable name in `endpoint_ref`, never the endpoint value;
+- an endpoint reference: Chainlink uses an environment-variable name; registered
+  fixed-endpoint adapters use their declared opaque ID, never a secret URL;
 - provider/venue/source-kind/adapter-version identity;
 - expected update/deviation schedule metadata;
 - maximum-staleness policy whose only v1 behavior is an explicit gap;
@@ -169,6 +177,95 @@ data rather than Python conditionals.
 Both the manifest and selected binding must be enabled. Checked-in ETH/USD and
 TUSD-reserves reference manifests are disabled at both levels. They document
 verified bindings but do not authorize acquisition.
+
+## Coinalyze liquidation history (candidate implementation)
+
+`coinalyze_liquidation_history.v1` uses the existing provider registry/factory,
+encrypted credential schema and `NumericFactAcquisitionService`. It is an
+additive adapter and payload registration; there is no new table, collector,
+Check evaluator or migration. This section describes the branch implementation,
+not evidence of deployment or authenticated source qualification.
+
+Each reviewed binding admits one BTC product and one liquidated side (`long`
+or `short`). Series identity includes the source exchange code, native product,
+bucket duration and volume unit as well as the canonical instrument. Longs and
+shorts share a source event group but have separate component keys. Two bindings
+therefore require two bounded acquisitions; this deliberately reuses scalar
+Facts rather than introducing a new paired storage path. Existing event-fact
+Checks already support numeric inputs, causal selection and gap exclusions.
+
+The adapter verifies the pinned product against `/future-markets` before reading
+`/liquidation-history`. Config contains exactly `product`, `interval`, opaque
+`credential_ref` and `confirmations: 0` (the existing coverage field; REST has no
+block finality). Product pins `symbol`, `exchange`, `symbol_on_exchange`,
+`base_asset`, `quote_asset`, `is_perpetual`, `expire_at` and
+`oi_lq_vol_denominated_in`. Perpetual absent/zero expiry normalizes to null; a
+dated contract requires its millisecond expiry. Unit is the catalogue's base
+asset, quote asset or `CONTRACTS`, never an assumed USD conversion. Metadata
+changes require a reviewed binding; changed product/unit/duration creates a
+separate series. No live product or instrument mapping is checked in as verified.
+
+`endpoint_ref` is the registered fixed ID `coinalyze.v1`; source identity is
+`COINALYZE / COINALYZE_AGGREGATE / rest_history / coinalyze_liquidation_history.v1`.
+The aggregate venue names the API source namespace, not the execution venue.
+The exchange and native product remain explicit dimensions and provenance.
+The credential schema field `COINALYZE_API_KEY` is an encrypted-store field,
+not a supported environment-variable fallback. Construction and binding
+validation do not read credentials or use the network. Only explicitly authorized
+acquisition loads the referenced credential and sends it in the `api_key` header.
+
+A call requests at most 1,500 closed, aligned buckets for one symbol and charges
+two requests (catalogue plus history). The caller's `max_logs` bounds returned
+bucket count; `max_blocks` is unused and reports zero. The existing required
+positive block budget may be one. Ranges remain half-open in QT; the provider's
+inclusive `to` is `end - 1 second`. There is no pagination or automatic retry.
+HTTP timeouts, elapsed body-read limits, 16 MiB catalogue and 1 MiB history caps
+bound work. Calls in one process are paced at least 1.6 seconds apart; other
+processes must still use the coordinated acquisition window. HTTP 429 exposes
+sanitized `Retry-After` seconds for an explicit later retry. Errors never retain
+headers, keys or upstream error bodies; redirects are rejected.
+
+The provider's `t` is bucket start. Bucket end remains provenance, while the
+exact JSON numeric token is retained beside the Decimal value. Source publication
+time is unavailable. `received_at` records response receipt and canonical
+`known_at` is at least acceptance time (`platform_receipt`), never bucket start
+or close. Re-observation of unchanged material is a no-op; changed totals append
+a correction with reconciliation time. The prior Fact and frozen commit scope
+remain available. Changing response-wide hashes alone does not revise a Fact.
+
+Missing buckets produce coalesced gaps, including an entirely empty response;
+returned zero totals remain real observations. Even a full set of returned
+buckets currently carries `provider_completeness_unverified` and `partial`
+coverage. Bucket presence cannot certify exchange/provider capture completeness.
+Partial responses never invalidate older observations and never become durable
+complete-range cache hits. This conservative candidate is not yet an admitted
+historical causal research input. Do not remove its gaps or backdate known-at to
+make a Check run. Old intraday history may already be unavailable; daily data
+cannot substitute for intraday liquidation bursts.
+
+Before real acquisition, qualify one exact product/instrument mapping, requested
+range and actual candle overlap, retention/use rights and a bounded request/row
+budget. These are acquisition/science decisions, not extra implementation
+frameworks. No key was inspected and no authenticated request was made for the
+candidate qualification. Once the registered integration is deployed, the human
+can use the existing hidden prompt:
+
+```sh
+qt providers credentials add --provider COINALYZE --venue COINALYZE_AGGREGATE --ref coinalyze-research
+```
+
+Do not put the key in chat, command arguments, manifests or logs. This handoff
+requires the existing encrypted store to be configured; it does not rotate or
+replace its master key. Registration readiness does not authorize credential
+entry, acquisition or deployment. Rollback disables acquisition/new reads of this
+payload on the older release while preserving all retained facts; old releases
+do not know the newly registered payload schema. No cleanup is required.
+
+Primary source semantics: [official API documentation](https://api.coinalyze.net/v1/doc/)
+and [OpenAPI specification](https://api.coinalyze.net/v1/doc/api-spec.json), reviewed
+2026-10-13. The rolling intraday retention and rate limit are documented provider
+behavior; receipt-time availability and unverified completeness are QT's explicit
+conservative interpretation where the provider makes no historical guarantee.
 
 ## Chainlink Historical Acquisition
 
