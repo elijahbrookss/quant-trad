@@ -27,6 +27,7 @@ code_paths:
   - portal/backend/service/research/event_features.py
   - portal/backend/service/research/event_configuration.py
   - portal/backend/service/research/event_time.py
+  - portal/backend/service/research/retrospective_numeric.py
   - portal/backend/service/research/event_facts.py
   - portal/backend/service/research/event_preparation.py
   - portal/backend/service/research/event_observations.py
@@ -765,3 +766,72 @@ subset membership, outcome missingness, balance and dependence outputs. An
 unsupported result is still a completed Check, not permission to search new
 thresholds or dates. Inferred interval-close labels remain explicit and do not
 certify measured publication latency.
+
+
+## Configurable controlled reversal and retrospective numeric comparison
+
+`raw_forward_outcome@5` extends the existing controlled-reversal procedure with
+explicit `controlled_reversal_comparison.v2` choices. V4 retains its immutable
+1m/21-prior/5-return/5-outcome/date-hour rules and result hashes. V5 accepts
+1m, 15m, 30m or 1h sampling without another evaluator per interval. The scope
+timeframe must equal `interval`; UTC boundaries align to that interval and the
+evaluation lasts at most 32 days. Trend and volatility lookbacks, entry lag and
+outcome horizon are integer interval counts. Decline must fit the prior RMS
+window; warmup equals volatility returns plus one prior candle. Every expected
+timestamp must exist: gaps never compress physical time.
+
+The January 2022 prospective example is 15m, 12 prior decline returns, 96 prior
+RMS returns, next-candle-close entry and 12 forward intervals. That means a
+three-hour prior decline, a 24-hour prior RMS window excluding the pattern,
+entry 15 minutes after pattern close, and three hours from entry to target.
+RMS is a fractional-return summary, not annualized volatility. Features must be
+known by entry close; missing entry/outcome paths remove a whole frozen pair
+without replacement. Exact-source coarsening remains an explicit preparation
+operation outside the evaluator.
+
+Matching keeps existing calipers, ranking, no control reuse and closed-interval
+overlap rules. `same_utc_close_slot` admits dates within an explicit 1..31-day
+radius; the example fixes seven days. Controls may be later observations, so
+this is a retrospective matched association. `same_date_hour` needs radius zero
+and enough within-hour separation for two disjoint closed outcome paths. Support gates retain treated-close day
+counts; both-arm coverage is separately reported. Day deletion omits a whole
+pair when either arm's candle-close date is omitted, over the union of dates,
+without rematching. The feature-frozen joint nonoverlap subset remains shared.
+Neither diagnostic establishes independence, significance or causality.
+
+`event_fact_analysis@13` requires an explicit
+`outcomes.retrospective.schema_version: retrospective_numeric_comparison.v1`,
+real `analysis_as_of`, and `bucket_time_interpretation: bucket_start_unverified`.
+It compares one next-hour raw-return-direction outcome in an aligned hourly
+sample of at most 60 days. The fixed baseline is one-bar lagged return and
+ATR fraction period 14; one or two exact numeric `latest_value` features use
+exact completed-hour alignment (`dimensions.bucket_seconds=3600`) and explicit
+3600-second staleness. Exactly one chronological train/validation logistic
+comparison reuses existing training-only standardization, L2 fitting, paired
+complete-case scoring with a one-bar purge and zero embargo. No additional bins/tests/bootstrap
+are admitted. Those chronological windows are analytical partitions, not a
+point-in-time forecast or a fresh holdout claim.
+
+The existing source-constrained frozen-history reader runs at the declared
+analysis cutoff for this version only. Latest active revisions are selected
+per observation at that real cutoff, then matched to the exact completed
+bucket; at most 10,000 frozen revisions per alias are admitted. Missing observations never become zero. Real `known_at`, publication,
+receipt, acceptance, revision, source identity and provider provenance remain
+in output references. Coinalyze's current adapter interprets provider `t` as
+bucket start; this remains explicitly unverified. Its long and short BTC
+volumes are separate exact numeric series for Binance BTCUSDT_PERP.A; Coinbase
+BTC-USD price outcomes are a different venue and spot product.
+
+V13 results identify `retrospective_conditional_association`, replace historical
+decision labels with sample time, and explicitly set point-in-time predictive,
+backtest-certified and scientific-certification eligibility to false. Durable
+frozen/replayable evidence means repeatable arithmetic under those assumptions,
+not certification. V3/V4/V5 causal Fact selection is unchanged. Existing exact-bucket gap semantics
+remain: missing buckets exclude samples (with gap/missing reasons), while real
+present observations may be used under `continue_degraded` with recorded gaps
+and completeness uncertainty retained; `reject` blocks recorded gaps. No zero
+is invented and no provider-completeness claim follows; no timestamp
+is backdated. Existing Fact payload registry, providers, collection, persistence,
+scientific budgets and concurrency are unchanged by these method extensions.
+Catalogue examples are templates; prepare/freeze and scientific dispatch remain
+separate authorized operations.

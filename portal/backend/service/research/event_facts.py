@@ -341,6 +341,7 @@ def _fact_features_for_event(
     sample_time: datetime,
     venue_close: float,
     direction: float,
+    retrospective: bool = False,
 ) -> tuple[
     dict[str, float | None],
     dict[str, list[dict[str, Any]]],
@@ -362,10 +363,10 @@ def _fact_features_for_event(
         where = dict(spec.get("where") or {})
         operator = str(spec["operator"])
         exact_alignment = (
-            operator in _STRUCTURED_FACT_OPERATORS
+            (operator in _STRUCTURED_FACT_OPERATORS or retrospective)
             and str(requirement.get("alignment") or "") == "exact_interval"
         )
-        if operator in _STRUCTURED_FACT_OPERATORS:
+        if operator in _STRUCTURED_FACT_OPERATORS or retrospective:
             latest = structured_snapshots.get(
                 _structured_snapshot_key(alias, where), {}
             ).get(
@@ -389,7 +390,7 @@ def _fact_features_for_event(
             latest = visible[-1] if visible else None
         max_staleness = int(requirement.get("max_staleness_seconds") or 0)
         source_step = timedelta(
-            seconds=int(requirement.get("timeframe_seconds") or 0)
+            seconds=3600 if retrospective else int(requirement.get("timeframe_seconds") or 0)
         )
         exact_gap = exact_alignment and _fact_gap_intersects(
             gap_evidence,
@@ -405,7 +406,8 @@ def _fact_features_for_event(
         elif max_staleness and (
             decision_time
             - (
-                _record_freshness_time(latest)
+                (_record_effective_at(latest) + timedelta(hours=1))
+                if retrospective else _record_freshness_time(latest)
                 if operator in _STRUCTURED_FACT_OPERATORS
                 else _record_known_at(latest)
             )
@@ -433,6 +435,15 @@ def _fact_features_for_event(
 
         def retain(record: Any, *, role: str) -> None:
             material = {"alias": alias, "role": role, **_fact_material(record)}
+            if retrospective:
+                fact = record.fact
+                material["source_provenance"] = dict(record.provenance)
+                material["source_published_at"] = _iso(fact.source_published_at) if fact.source_published_at else None
+                material["received_at"] = _iso(fact.received_at) if fact.received_at else None
+                material["accepted_at"] = _iso(fact.accepted_at)
+                material["known_at_method"] = fact.known_at_method
+                material["effective_at_method"] = fact.effective_at_method
+                material["historical_availability_admitted"] = False
             selected[_selected_record_key(alias, record)] = material
             if material not in references[alias]:
                 references[alias].append(material)

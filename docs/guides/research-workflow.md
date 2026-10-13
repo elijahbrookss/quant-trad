@@ -572,3 +572,20 @@ percentage display multiplies by 100. Compare requested cohort summaries as
 emitted; the all-bar baseline edge is a different comparison. Method availability
 and successful deployment do not allocate a scientific experiment or permit
 tuning, more dates, extra Checks, or external order submission.
+
+
+Use `qt research check definition raw_forward_outcome --version 5` for the
+configurable controlled-reversal template. Keep physical windows fixed when
+changing interval: the three-hour decline/outcome and 24-hour RMS choice uses
+12/96/12 bars at 15m, 6/48/6 at 30m and 3/24/3 at 1h, with warmup 97/49/25.
+That expresses supported variations without implementing another method. It
+does not authorize new studies or choose a timeframe from favorable results.
+
+Use `qt research check definition event_fact_analysis --version 13` for explicit
+retrospective numeric association. Declare the real analysis cutoff; preserve
+late receipts. The July 25–September 23 exclusive hourly example has 1,440
+nominal buckets, separate long/short liquidation inputs and one fixed paired
+logistic comparison beyond recent return and ATR. Its dates and train/validation
+split are a template to fix before dispatch, not an allocation or measured
+coverage claim. Results are conditional on unverified bucket-start meaning and
+cannot supply point-in-time predictive, backtest or certification evidence.
