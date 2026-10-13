@@ -72,11 +72,14 @@ def test_raw_candle_freeze_persistence_replay_and_real_gap_exclusion(monkeypatch
     result=high["result"]["result"]
     assert result["complete_sample_count"]==1
     assert result["outcomes"]["summary"]["5"]["mean_forward_return_pct"]==pytest.approx(107/102-1)
-    requirement=high["plan"]["market_data_requirements"][0]
+    plan=high["check"]["payload"]["plan"]
+    requirement=plan["market_data_requirements"][0]
     assert "volume" in requirement["required_fields"]
-    assert high["plan"]["outcome_tail"]["seconds"]==0
+    assert plan["outcome_tail"]["seconds"]==0
     low_request=deepcopy(prepared["next_request"])
     low_request["detector"]["all"][-1]["operator"]="lte"
+    low_request.pop("definition_version",None)
+    low_request.pop("definition_hash",None)
     low=service.run_research_check(low_request)
     assert low["evidence"]["input_binding"]==high["evidence"]["input_binding"]
     low_result=low["result"]["result"]
