@@ -5,7 +5,7 @@ from core.execution_control import execution_checkpoint
 from .event_time import _utc, _iso
 from market_data.frozen import semantic_hash
 from market_data.fact_registry import get_fact_contract
-from .event_facts import (_record_known_at, _record_effective_at, 
+from .event_facts import (_record_known_at, _record_effective_at,
     _record_event_key, _record_revision_key, _record_is_active, _record_matches_where)
 
 SCHEMA = "retrospective_numeric_comparison.v1"
