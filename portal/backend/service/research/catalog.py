@@ -181,6 +181,12 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                                           'outcome_boundary': 'evaluation_end_exclusive',
                                                           'matching_contract': 'crossing_state_matched_pairs.v1'}},
                             'statistics': {}},
+ 'raw_forward_outcome@4': {'check_family': 'raw_forward_outcome', 'mode': 'preview',
+     'scope': {'instrument_id': 'instrument-id', 'timeframe': '1m',
+               'start': '2022-01-01T00:00:00Z', 'end': '2022-02-01T00:00:00Z'},
+     'detector': {'type': 'controlled_bullish_reversal'},
+     'outcomes': {'schema_version': 'controlled_reversal_comparison.v1'},
+     'gap_policy': 'continue_degraded'},
  'raw_forward_outcome@3': {'check_family': 'raw_forward_outcome', 'mode': 'preview',
      'scope': {'instrument_id': 'instrument-id', 'timeframe': '1m',
                'start': '2022-01-01T00:00:00Z', 'end': '2022-01-02T00:00:00Z'},
@@ -265,6 +271,7 @@ _EXAMPLES["event_fact_analysis@12"]["outcomes"]["forward_risk"].update(
     schema_version="candle_risk_matched_state.v2", filter_contract="crossing_state_atr_ratio_filter.v1")
 
 _PURPOSES = {
+    "raw_forward_outcome@4": "Compare bullish engulfing against matched non-engulfing candles after a fixed prior decline, with outcome-blind pairs and dependence checks.",
     "raw_forward_outcome@3": "Evaluate canonical raw candle predicates with causal close entry and contiguous bounded outcomes.",
     "raw_forward_outcome@2": "Preview raw candle conditions and subsequent outcomes.",
     "indicator_forward_outcome@2": "Preview indicator output conditions and subsequent outcomes.",
@@ -352,6 +359,11 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             fields["scope"]["constraints"] = "Instrument and Candle Stats IDs are bindable; parameters remain pinned. Fixed 1m, 200-bar initialization, whole-minute UTC boundaries, single calendar year, <=370 days including seed, no outcome tail."
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
         return fields
+    if family == "raw_forward_outcome" and version == "4":
+        return {"scope": {"fields": ["instrument_id", "symbol", "timeframe", "start", "end", "warmup_bars", "datasource", "exchange"],
+            "constraints": "Fixed 1m, aligned UTC minute boundaries, nonempty range <=32 days; 21 warmup candles when specified. No Indicator or additional Fact inputs."},
+            "method_configuration": {"fixed": "Explicit controlled_reversal_comparison.v1 and controlled_bullish_reversal detector. See settings.fixed for all matching/support rules. No configurable thresholds, horizons, statistics or rewarm."},
+            "gap_policy": {"fixed": "continue_degraded"}, "assertions[]": fields["assertions[]"]}
     operators = sorted(checks._DETECTOR_OPERATORS)
     if family == "raw_forward_outcome":
         fields["detector"] = {"fields": ["type", "field", "operator", "value", "value_field", "all", "any", "not"], "field_choices": sorted(checks._RAW_DETECTOR_FIELDS), "operators": operators,
@@ -473,6 +485,11 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["outcomes"] = {"type": "object", "unit": "candidate/event counts", "meaning": "Funnel, stage/status/terminal/reason counts and lifecycle-contract issues; not predictive outcomes."}
     elif family == "run_signal_summary":
         fields["outcomes"] = {"type": "object", "unit": "record counts", "meaning": "Declared buckets, decision states and linked trade counts from existing run evidence."}
+    elif family == "raw_forward_outcome" and version == "4":
+        fields["controlled_reversal_comparison"] = {"type": "object", "unit": "fractional returns, pairs and UTC days",
+            "meaning": "Paired mean contrast, arm distributions, population-SMD balance, support gates, day deletion and feature-frozen joint nonoverlap. Unsupported/mixed/nonpositive/positive_descriptive_lead; no causal or inference claim."}
+        fields["pairs"] = {"type": "array", "meaning": "Complete frozen identities/features/clocks, fixed subset membership and both outcome resolutions; whole-pair missingness never rematches."}
+        fields["feature_frozen_hash"] = {"type": "string", "meaning": "Hash of all feature candidates, matches and unmatched identities before forward resolution."}
     elif family == "run_decision_trade_comparison":
         fields["outcomes.by_decision_state"] = {"type": "object", "unit": "counts and run-reported PnL currency", "meaning": "Trade count/net PnL/average per trade grouped by decision state; descriptive run summary."}
     else:
@@ -564,7 +581,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version == "4" else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),

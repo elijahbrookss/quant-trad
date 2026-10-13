@@ -28,6 +28,8 @@ from research_science.check import (
 
 from . import checks
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
+from .controlled_reversal_evaluator import (ControlledReversalEvaluator, FIXED_RULES,
+    OUTCOME_SCHEMA as REVERSAL_SCHEMA, normalize_configuration as normalize_reversal_configuration)
 from .matched_origin_evaluator import MatchedOriginEvaluator, normalize_matched_origin
 from .shared_landmark_evaluator import SharedLandmarkEvaluator, normalize_shared_landmark
 from .first_return_evaluator import FirstReturnEvaluator, normalize_first_return
@@ -277,12 +279,25 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_reversal_evaluator = ControlledReversalEvaluator()
+CHECK_REGISTRY.register_evaluator(_reversal_evaluator)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="4", evaluator_id=_reversal_evaluator.evaluator_id,
+    evaluator_version=_reversal_evaluator.version, request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": REVERSAL_SCHEMA,
+        **FIXED_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit only the registered raw v3 pair."""
+    """Keep historical raw v2 unqualified; admit only exact registered raw v3/v4 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] == "3"
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
-                and definition.evaluator_version == "3")
+                and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
 
 
@@ -830,7 +845,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("3" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("4" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == REVERSAL_SCHEMA
+            else "3" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == OUTCOME_SCHEMA
             else default_version if family == EVENT_FACT_ANALYSIS else "2")
     )
@@ -871,7 +888,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3"):
+    elif not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -924,6 +941,11 @@ def materialize_check_definition(
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3":
         outcomes = normalize_raw_candle_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "4":
+        outcomes = normalize_reversal_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars:
+            raise ValueError("controlled_reversal_invalid: no configurable gap rewarm")
     material_rules = {
         **dict(base.material_rules),
         "registered_definition": {
