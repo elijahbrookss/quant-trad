@@ -69,8 +69,13 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
     return {"schema_version": OUTCOME_SCHEMA}
 
 
-def prepare_candidates(rows, *, start, end):
+def prepare_candidates(rows, *, start, end, choices=None):
     """Inspect only current/prior features; entry and forward availability are not selection inputs."""
+    step = timedelta(seconds=INTERVALS[choices["interval"]]) if choices else STEP
+    lookback = choices["volatility_lookback_bars"] + 1 if choices else LOOKBACK
+    trend = choices["trend_lookback_bars"] if choices else 5
+    horizon = choices["outcome_horizon_bars"] if choices else HORIZON
+    lag = choices["entry_lag_bars"] if choices else 1
     by_open = {r["open_time"]: r for r in rows}
     candidates, exclusions = [], Counter()
     evaluated = 0
@@ -80,19 +85,19 @@ def prepare_candidates(rows, *, start, end):
         if not start <= opened < end:
             continue
         evaluated += 1
-        history = [by_open.get(opened-STEP*i) for i in range(LOOKBACK, 0, -1)]
+        history = [by_open.get(opened-step*i) for i in range(lookback, 0, -1)]
         if any(r is None for r in history):
-            exclusions["prior_21_candle_path_missing"] += 1
+            exclusions[f"prior_{lookback}_candle_path_missing"] += 1
             continue
         previous = history[-1]
         if not current["close"] > current["open"] or not previous["close"] < previous["open"]:
             exclusions["not_bullish_after_bearish"] += 1
             continue
-        decline = previous["close"]/history[-6]["close"]-1.
+        decline = previous["close"]/history[-(trend+1)]["close"]-1.
         if not decline < 0:
-            exclusions["prior_five_interval_move_not_down"] += 1
+            exclusions["prior_five_interval_move_not_down" if not choices else "prior_decline_not_down"] += 1
             continue
-        entry_close, target_close = opened+2*STEP, opened+7*STEP
+        entry_close, target_close = opened+(lag+1)*step, opened+(lag+1+horizon)*step
         if target_close >= end:
             exclusions["nominal_target_outside_evaluation"] += 1
             continue
@@ -102,16 +107,18 @@ def prepare_candidates(rows, *, start, end):
             continue
         returns = [b["close"]/a["close"]-1. for a,b in zip(history, history[1:])]
         # hypot avoids overflowing the sum of squared returns for valid positive prices.
-        rms = math.hypot(*returns)/math.sqrt(20)
+        rms = math.hypot(*returns)/math.sqrt(lookback-1)
         body = math.log(current["close"]/current["open"])
-        intensity = -decline/(math.sqrt(5)*rms) if rms > 0 else math.nan
+        intensity = -decline/(math.sqrt(trend)*rms) if rms > 0 else math.nan
         if not all(math.isfinite(v) and v > 0 for v in (rms, body, intensity)):
             exclusions["matching_feature_numeric_unavailable"] += 1
             continue
         candidates.append({"event_time": _iso(opened), "event_close_time": _iso(current["close_time"]),
             "decision_known_at": _iso(known), "entry_time": _iso(entry_close), "target_time": _iso(target_close),
             "day": current["close_time"].date().isoformat(),
-            "stratum": _iso(current["close_time"].floor("h")),
+            "stratum": (current["close_time"].strftime("%H:%M:%S")
+                if choices and choices["matching_policy"] == "same_utc_close_slot"
+                else _iso(current["close_time"].floor("h"))),
             "treated": current["open"] <= previous["close"] and current["close"] >= previous["open"],
             "features": dict(zip(FEATURES, (math.log(body), math.log(rms), intensity)))})
     return candidates, dict(exclusions), evaluated
@@ -121,7 +128,7 @@ def _disjoint(a, b):
     return a["target_time"] < b["entry_time"] or b["target_time"] < a["entry_time"]
 
 
-def prepare_pairs(candidates):
+def prepare_pairs(candidates, *, choices=None):
     """Freeze identities using features only. A failed future outcome never supplies another control."""
     pools = defaultdict(list)
     for c in candidates:
@@ -138,6 +145,9 @@ def prepare_pairs(candidates):
                 execution_checkpoint()
             if comparisons > MAX_COMPARISONS:
                 raise ValueError("controlled_reversal_resource_limit: candidate comparisons exceeded")
+            if choices and choices["matching_policy"] == "same_utc_close_slot" and abs((_clock(a["event_close_time"], "close") -
+                    _clock(b["event_close_time"], "close")).total_seconds()) > choices["comparison_window_days"] * 86400:
+                continue
             if b["event_time"] in used or not _disjoint(a,b):
                 continue
             distances = [abs(a["features"][f]-b["features"][f]) for f in FEATURES]
@@ -171,25 +181,31 @@ def prepare_pairs(candidates):
     return pairs, unmatched, comparisons
 
 
-def resolve_candidate(candidate, *, rows, by_open, end):
-    entry_open = _clock(candidate["event_time"],"event")+STEP
+def resolve_candidate(candidate, *, rows, by_open, end, choices=None):
+    step = timedelta(seconds=INTERVALS[choices["interval"]]) if choices else STEP
+    horizon = choices["outcome_horizon_bars"] if choices else HORIZON
+    lag = choices["entry_lag_bars"] if choices else 1
+    event_open = _clock(candidate["event_time"],"event")
+    entry_open = event_open+lag*step
+    if choices and any(event_open+step*i not in by_open for i in range(lag+1)):
+        return {"status": "unresolved", "reason": "gap_in_entry_path"}
     entry = by_open.get(entry_open)
     if entry is None:
         return {"status": "unresolved", "reason": "gap_in_entry_path"}
     if entry["known_at"] > entry["close_time"]:
         return {"status": "unresolved", "reason": "entry_price_known_after_close"}
     row = {"outcomes": {}}
-    resolve_event_outcomes(row=row, outcomes={"horizons": [HORIZON], "horizon_kind": "bars"},
+    resolve_event_outcomes(row=row, outcomes={"horizons": [horizon], "horizon_kind": "bars"},
         detector_type=checks.RAW_FORWARD_OUTCOME, entry_time=entry_open,
         entry_close_time=entry["close_time"], entry_close=entry["close"], direction=1.,
-        step=STEP, evaluation_end=end, candles=rows, candle_by_open=by_open,
-        event_payload={}, horizon_resolution={HORIZON: Counter()}, invalidation_resolution=Counter())
-    result = row["outcomes"][str(HORIZON)]
+        step=step, evaluation_end=end, candles=rows, candle_by_open=by_open,
+        event_payload={}, horizon_resolution={horizon: Counter()}, invalidation_resolution=Counter())
+    result = row["outcomes"][str(horizon)]
     if result["status"] != "resolved":
         return {"status": "unresolved", "reason": result["reason"]}
     if not math.isfinite(result["forward_return"]):
         return {"status": "unresolved", "reason": "outcome_numeric_unavailable"}
-    path = [by_open[entry_open+STEP*i] for i in range(HORIZON+1)]
+    path = [by_open[entry_open+step*i] for i in range(horizon+1)]
     return {"status": "resolved", "forward_return": result["forward_return"],
             "entry_known_at": _iso(entry["known_at"]),
             "outcome_known_at": _iso(max(r["known_at"] for r in path))}
@@ -210,7 +226,7 @@ def _summary(pairs):
         "engulfing": _distribution(a), "control": _distribution(b)}
 
 
-def summarize_pairs(pairs, *, eligible_treated):
+def summarize_pairs(pairs, *, eligible_treated, both_arm_days=False):
     complete = [p for p in pairs if all(v["status"] == "resolved" for v in p["outcomes"].values())]
     primary = _summary(complete)
     balance = {}
@@ -225,11 +241,14 @@ def summarize_pairs(pairs, *, eligible_treated):
         "treated_matching": matching is not None and matching >= .5,
         "outcome_completeness": completeness is not None and completeness >= .95,
         "balance": all(v["absolute_smd"] is not None and v["absolute_smd"] <= .1 for v in balance.values())}
-    days = sorted({p["treated"]["day"] for p in complete})
+    days = sorted({p[arm]["day"] for p in complete
+                   for arm in (("treated", "control") if both_arm_days else ("treated",))})
+    if both_arm_days:
+        primary["both_arm_utc_days"] = len(days)
     deletion = []
     for day in days:
         execution_checkpoint()
-        deletion.append({"omitted_utc_day": day, **_summary([p for p in complete if p["treated"]["day"] != day])})
+        deletion.append({"omitted_utc_day": day, **_summary([p for p in complete if p["treated"]["day"] != day and (not both_arm_days or p["control"]["day"] != day)])})
     subset = _summary([p for p in complete if p["joint_nonoverlap_selected"]])
     subset["supported"] = subset["complete_pairs"] >= 30 and subset["utc_days"] >= 6
     delta = primary["mean_paired_return_difference"]
@@ -299,3 +318,121 @@ class ControlledReversalEvaluator:
                 "Day deletion and nonoverlap do not guarantee independence or remove unmeasured confounding.",
                 "Inferred interval-close availability is not measured publication latency.",
                 "Current-body, prior-risk and decline calipers are fixed; no outcome-driven rematching."]}
+
+
+# V4 keeps its constants, material rules and entry point. V5 pins choices in the
+# configured definition; bar counts mean exact elapsed intervals, never row offsets.
+CONFIGURABLE_SCHEMA = "controlled_reversal_comparison.v2"
+INTERVALS = {"1m": 60, "15m": 900, "30m": 1800, "1h": 3600}
+CONFIGURABLE_RULES = {
+    k: v for k, v in FIXED_RULES.items()
+    if k not in {"candidate", "prior_rms_returns", "feature_lookback_bars", "stratum",
+                 "entry_lag_bars", "forward_bars", "timeframe", "dependence"}
+}
+CONFIGURABLE_RULES.update({
+    "choices_contract": CONFIGURABLE_SCHEMA,
+    "candidate": "bullish after bearish with configured prior close decline",
+    "dependence": "delete whole pair on either arm close date; frozen joint nonoverlap; no rematching",
+    "support_day_count": "treated candle-close dates; both-arm coverage reported separately",
+    "time_windows": "exact contiguous interval paths; no gap compression",
+})
+
+
+def validate_choices(outcomes, scope):
+    keys = {"schema_version", "interval", "trend_lookback_bars", "volatility_lookback_bars",
+            "entry_lag_bars", "outcome_horizon_bars", "matching_policy", "comparison_window_days"}
+    if set(outcomes) != keys or outcomes.get("schema_version") != CONFIGURABLE_SCHEMA:
+        raise ValueError("controlled_reversal_invalid: explicit v2 research choices required")
+    c = dict(outcomes)
+    interval = c["interval"]
+    if interval not in INTERVALS or scope.get("timeframe", scope.get("interval")) != interval:
+        raise ValueError("controlled_reversal_invalid: supported interval must equal scope timeframe")
+    for key in ("trend_lookback_bars", "volatility_lookback_bars", "entry_lag_bars", "outcome_horizon_bars"):
+        if isinstance(c[key], bool) or not isinstance(c[key], int) or not 1 <= c[key] <= 10000:
+            raise ValueError(f"controlled_reversal_invalid: {key} must be an integer 1..10000")
+    if c["trend_lookback_bars"] > c["volatility_lookback_bars"] or c["entry_lag_bars"] + c["outcome_horizon_bars"] > 10000:
+        raise ValueError("controlled_reversal_invalid: decline must fit prior RMS window and lag+horizon <=10000")
+    days = c["comparison_window_days"]
+    if isinstance(days, bool) or not isinstance(days, int):
+        raise ValueError("controlled_reversal_invalid: comparison_window_days must be an integer")
+    if c["matching_policy"] == "same_utc_close_slot":
+        if not 1 <= days <= 31:
+            raise ValueError("controlled_reversal_invalid: cross-date window must be 1..31 days")
+    elif c["matching_policy"] == "same_date_hour":
+        if days != 0 or c["outcome_horizon_bars"] * INTERVALS[interval] >= 3600 - INTERVALS[interval]:
+            raise ValueError("controlled_reversal_invalid: same-hour matching needs zero day radius and room for two disjoint closed paths")
+    else:
+        raise ValueError("controlled_reversal_invalid: unsupported matching policy")
+    warmup = scope.get("warmup_bars", c["volatility_lookback_bars"] + 1)
+    if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup != c["volatility_lookback_bars"] + 1:
+        raise ValueError("controlled_reversal_invalid: warmup must equal volatility lookback +1")
+    start, end = (_clock(scope.get(k), "scope."+k) for k in ("start", "end"))
+    seconds = INTERVALS[interval]
+    if any(t.timestamp() % seconds for t in (start, end)) or not timedelta(0) < end-start <= timedelta(days=32):
+        raise ValueError("controlled_reversal_invalid: UTC aligned range of at most 32 days required")
+    if (c["entry_lag_bars"] + 1 + c["outcome_horizon_bars"]) * seconds >= (end-start).total_seconds():
+        raise ValueError("controlled_reversal_invalid: entry and outcome cannot fit evaluation range")
+    return c, start, end
+
+
+def normalize_configurable_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy):
+    if detector != DETECTOR or inputs or statistics or scope.get("indicator_id") or scope.get("indicator_param_overrides"):
+        raise ValueError("controlled_reversal_invalid: fixed detector and no Indicator, inputs or statistics required")
+    if gap_policy != "continue_degraded":
+        raise ValueError("controlled_reversal_invalid: continue_degraded required")
+    return validate_choices(outcomes, scope)[0]
+
+
+@dataclass(frozen=True)
+class ConfigurableControlledReversalEvaluator:
+    evaluator_id: str = checks.RAW_FORWARD_OUTCOME
+    version: str = "5"
+    result_schema_version: str = "controlled_reversal_comparison_result.v2"
+
+    def declare_requirements(self, *, definition, request):
+        del definition
+        c, _, _ = validate_choices(request.parameters["outcomes"], request.scope)
+        return {"input_kind": "market_data", "indicator_ids": [], "warmup_floor_bars": 0,
+            "feature_lookback_bars": c["volatility_lookback_bars"]+1, "feature_windows_seconds_by_alias": {},
+            "outcome_horizons": [c["outcome_horizon_bars"]], "required_outcome_horizons": [c["outcome_horizon_bars"]],
+            "horizon_kind": "bars", "entry_lag_bars": c["entry_lag_bars"], "invalidation_max_bars": 0,
+            "outcome_boundary": "evaluation_end_exclusive",
+            "primary_candle_required_fields": ["open", "high", "low", "close", "known_at"]}
+
+    def evaluate(self, *, plan, inputs: Mapping):
+        primary = next(r for r in plan.market_data_requirements if r["alias"] == "primary_bars")
+        raw = inputs["outcomes"]
+        c, start, end = validate_choices(raw, {"timeframe": raw["interval"],
+            "start": plan.evaluation_range["start"], "end": plan.evaluation_range["end_exclusive"]})
+        seconds = INTERVALS[c["interval"]]
+        if primary["timeframe_seconds"] != seconds:
+            raise ValueError("controlled_reversal_invalid: canonical requirement interval differs from pinned choices")
+        _, rows = _prepare(inputs["candles"], step=timedelta(seconds=seconds), volume_required=False)
+        candidates, exclusions, evaluated = prepare_candidates(rows, start=start, end=end, choices=c)
+        pairs, unmatched, comparisons = prepare_pairs(candidates, choices=c)
+        feature_hash = semantic_hash({"candidates": candidates, "pairs": pairs, "unmatched": unmatched})
+        by_open = {r["open_time"]: r for r in rows}
+        for pair in pairs:
+            execution_checkpoint()
+            pair["outcomes"] = {arm: resolve_candidate(pair[arm], rows=rows, by_open=by_open, end=end, choices=c)
+                                for arm in ("treated", "control")}
+        treated = sum(c["treated"] for c in candidates)
+        analysis = summarize_pairs(pairs, eligible_treated=treated, both_arm_days=True)
+        return {"schema_version": self.result_schema_version, "check_family": checks.RAW_FORWARD_OUTCOME,
+            "status": "completed", "event_ownership": "check", "return_unit": "fraction", "research_choices": c,
+            "elapsed_seconds": {"decline": c["trend_lookback_bars"]*seconds,
+                "prior_rms": c["volatility_lookback_bars"]*seconds,
+                "pattern_close_to_entry": c["entry_lag_bars"]*seconds,
+                "entry_to_target": c["outcome_horizon_bars"]*seconds},
+            "sample_count": len(pairs), "complete_sample_count": analysis["primary"]["complete_pairs"],
+            "eligible_bars": evaluated, "candidate_exclusions": exclusions,
+            "eligible_treated": treated, "eligible_controls": len(candidates)-treated,
+            "candidate_comparisons": comparisons, "feature_frozen_hash": feature_hash,
+            "controlled_reversal_comparison": analysis, "pairs": pairs, "unmatched": unmatched,
+            "known_at_methods": dict(Counter(r["known_at_method"] for r in rows)),
+            "data_quality": dict(inputs.get("data_quality") or {}),
+            "caveats": ["Descriptive matched association; no causality, significance, profitability or execution claim.",
+                "Exact elapsed-time paths exclude gaps; availability must permit the declared entry close.",
+                "Cross-date controls may be later; pairing is retrospective and either-arm day deletion does not establish independence.",
+                "Decline and RMS are interval-specific summaries, not a broad regime or annualized volatility.",
+                "Inferred interval-close availability is not measured publication latency."]}

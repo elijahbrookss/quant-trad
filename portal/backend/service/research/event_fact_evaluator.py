@@ -79,6 +79,7 @@ class EventFactEvaluator:
     fact_snapshot_enabled: bool = True
     availability_trigger_enabled: bool = False
     descriptive_outcomes_enabled: bool = False
+    retrospective_enabled: bool = False
 
     def _validate_trigger(self, detector: Mapping[str, Any]) -> None:
         if (
@@ -96,6 +97,12 @@ class EventFactEvaluator:
         request: CheckRequest,
     ) -> Mapping[str, Any]:
         del definition
+        if self.retrospective_enabled:
+            from .retrospective_numeric import normalize_retrospective
+            normalize_retrospective(request.parameters.get("outcomes", {}).get("retrospective"),
+                detector=request.parameters.get("detector", {}), outcomes=request.parameters.get("outcomes", {}),
+                statistics=request.parameters.get("statistics", {}), scope=request.scope,
+                inputs=request.parameters.get("inputs", []))
         statistics = dict(request.parameters.get("statistics") or {})
         detector = dict(request.parameters.get("detector") or {})
         self._validate_trigger(detector)
@@ -170,7 +177,11 @@ class EventFactEvaluator:
     def evaluate(
         self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        return self._evaluate(plan=plan, inputs=inputs, preparation=EventCandlePreparation())
+        result = self._evaluate(plan=plan, inputs=inputs, preparation=EventCandlePreparation())
+        if self.retrospective_enabled:
+            from .retrospective_numeric import qualify_result
+            return qualify_result(dict(result), inputs["outcomes"]["retrospective"])
+        return result
 
     def _evaluate(
         self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any],
@@ -184,6 +195,9 @@ class EventFactEvaluator:
                 "event_fact_check_invalid: fact_snapshot requires evaluator version 3"
             )
         outcomes = dict(inputs.get("outcomes") or {})
+        retrospective = outcomes.get("retrospective")
+        if bool(retrospective) != self.retrospective_enabled:
+            raise ValueError("retrospective_invalid: explicit contract requires evaluator version 13")
         statistics = dict(inputs.get("statistics") or {})
         indicator_evidence = dict(inputs.get("indicator_evidence") or {})
         fact_records = {
@@ -287,15 +301,21 @@ class EventFactEvaluator:
         enriched_specs = list(
             (statistics.get("features") or {}).get("enriched") or []
         )
-        (ordered_revisions_by_alias, direction_by_key, output_name,
-         event_rows, detector_snapshots, trigger_readiness) = select_public_events(
-            detector=detector, detector_type=detector_type,
-            indicator_evidence=indicator_evidence, candles=candles,
-            baseline_specs=baseline_specs, enriched_specs=enriched_specs,
-            fact_records=fact_records, fact_requirements=fact_requirements,
-            fact_gap_evidence=fact_gap_evidence,
-            evaluation_start=evaluation_start, evaluation_end=evaluation_end,
-        )
+        if self.retrospective_enabled:
+            from .retrospective_numeric import retrospective_events
+            ordered_revisions_by_alias, direction_by_key, output_name = {}, {}, "fact_snapshot"
+            event_rows = retrospective_events(candles, start=evaluation_start, end=evaluation_end)
+            detector_snapshots, trigger_readiness = {}, {}
+        else:
+            (ordered_revisions_by_alias, direction_by_key, output_name,
+             event_rows, detector_snapshots, trigger_readiness) = select_public_events(
+                detector=detector, detector_type=detector_type,
+                indicator_evidence=indicator_evidence, candles=candles,
+                baseline_specs=baseline_specs, enriched_specs=enriched_specs,
+                fact_records=fact_records, fact_requirements=fact_requirements,
+                fact_gap_evidence=fact_gap_evidence,
+                evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+            )
 
         atr_by_period = preparation.atr(candles, baseline_specs)
 
@@ -385,11 +405,11 @@ class EventFactEvaluator:
                     dict(detector.get("where") or {}),
                 ): detector_snapshots
             }
-            if detector_type == _FACT_SNAPSHOT_DETECTOR
+            if detector_type == _FACT_SNAPSHOT_DETECTOR and not self.retrospective_enabled
             else {}
         )
         for spec in enriched_specs:
-            if str(spec.get("operator") or "") not in _STRUCTURED_FACT_OPERATORS:
+            if str(spec.get("operator") or "") not in _STRUCTURED_FACT_OPERATORS and not self.retrospective_enabled:
                 continue
             alias = str(spec["input_alias"])
             where = dict(spec.get("where") or {})
@@ -399,7 +419,13 @@ class EventFactEvaluator:
                 exact_alignment = (
                     str(requirement.get("alignment") or "") == "exact_interval"
                 )
-                structured_snapshots[key] = _causal_snapshot_series(
+                selector = _causal_snapshot_series
+                selector_options = {"ordered_revisions": ordered_revisions_by_alias.get(alias)}
+                if self.retrospective_enabled:
+                    from .retrospective_numeric import retrospective_snapshots
+                    selector = retrospective_snapshots
+                    selector_options = {"analysis_as_of": _utc(retrospective["analysis_as_of"], field="analysis_as_of")}
+                structured_snapshots[key] = selector(
                     tuple(fact_records.get(alias) or ()),
                     snapshot_requests=[
                         (
@@ -415,7 +441,7 @@ class EventFactEvaluator:
                     ],
                     where=where,
                     alias=alias,
-                    ordered_revisions=ordered_revisions_by_alias.get(alias),
+                    **selector_options,
                 )
 
         if not eligibility_reasons:
@@ -434,6 +460,7 @@ class EventFactEvaluator:
                     ),
                     venue_close=float(row["event_price"]),
                     direction=1.0 if row["direction"] == "long" else -1.0,
+                    retrospective=self.retrospective_enabled,
                 )
                 row["features"].update(features)
                 row["fact_references"] = references

@@ -30,6 +30,14 @@ A missing input is unresolved evidence, not an invented timestamp or value.
 Outcome price observations must be at or after the decision; they cannot imply
 an earlier execution. Historical definition versions retain their pinned rules.
 
+Explicit retrospective Checks may compare completed historical observations using
+later-received frozen revisions at a declared analysis cutoff. Such a method
+must preserve actual publication, receipt and known-at provenance, label sample
+time independently of historical decision time, and prohibit point-in-time
+predictive, backtest-certified or scientific-certification claims. This is
+descriptive conditional association only; causal consumer selectors and trading
+timelines retain the known-at invariant above. Historical versions remain fixed.
+
 ## Layer Ownership
 
 - QuantLab: research and indicator exploration.

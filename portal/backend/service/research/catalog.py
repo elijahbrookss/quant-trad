@@ -270,7 +270,40 @@ _EXAMPLES["event_fact_analysis@12"] = deepcopy(_EXAMPLES["event_fact_analysis@11
 _EXAMPLES["event_fact_analysis@12"]["outcomes"]["forward_risk"].update(
     schema_version="candle_risk_matched_state.v2", filter_contract="crossing_state_atr_ratio_filter.v1")
 
+_EXAMPLES["raw_forward_outcome@5"] = deepcopy(_EXAMPLES["raw_forward_outcome@4"])
+_EXAMPLES["raw_forward_outcome@5"]["scope"].update(timeframe="15m", warmup_bars=97)
+_EXAMPLES["raw_forward_outcome@5"]["outcomes"] = {
+    "schema_version": "controlled_reversal_comparison.v2", "interval": "15m",
+    "trend_lookback_bars": 12, "volatility_lookback_bars": 96, "entry_lag_bars": 1,
+    "outcome_horizon_bars": 12, "matching_policy": "same_utc_close_slot", "comparison_window_days": 7}
+_EXAMPLES["event_fact_analysis@13"] = {
+    "check_family": "event_fact_analysis", "mode": "preview", "gap_policy": "continue_degraded",
+    "scope": {"instrument_id": "coinbase-btc-usd", "timeframe": "1h", "warmup_bars": 15,
+        "start": "2026-07-25T00:00:00Z", "end": "2026-09-23T00:00:00Z"},
+    "detector": {"type": "fact_snapshot", "input_alias": "long_liquidations"},
+    "outcomes": {"horizons": [1], "entry_lag_bars": 0, "retrospective": {
+        "schema_version": "retrospective_numeric_comparison.v1",
+        "analysis_as_of": "2026-10-13T23:00:00Z", "bucket_time_interpretation": "bucket_start_unverified"}},
+    "inputs": [{"alias": side+"_liquidations", "instrument_id": "binance-btc-usdt-perp",
+        "fact_type": "derivatives.liquidation_volume", "contract_version": "derivatives.liquidation_volume.v1",
+        "max_staleness_seconds": 3600, "alignment": "exact_interval",
+        "dimensions": {"liquidated_side": side, "bucket_seconds": 3600, "volume_unit": "BTC",
+            "exchange": "Binance", "product": "BTCUSDT_PERP.A"},
+        "source_policy": {"mode": "exact", "source_identity_key": "authorized-source"}} for side in ("long", "short")],
+    "statistics": {"features": {"baseline": [
+        {"name": "recent_return", "operator": "lagged_return", "lookback_bars": 1},
+        {"name": "recent_volatility", "operator": "atr_fraction", "period": 14}],
+        "enriched": [{"name": "long_liquidations", "operator": "latest_value",
+            "input_alias": "long_liquidations"},
+            {"name": "short_liquidations", "operator": "latest_value",
+            "input_alias": "short_liquidations"}]},
+        "model": {"type": "standardized_l2_logistic", "c": 1.0}, "purge_bars": 1,
+        "folds": [{"id": "fixed-comparison", "train": {"start": "2026-07-25T00:00:00Z", "end": "2026-09-03T00:00:00Z"},
+            "validation": {"start": "2026-09-03T00:00:00Z", "end": "2026-09-23T00:00:00Z"}}]}}
+
 _PURPOSES = {
+    "raw_forward_outcome@5": "Compare controlled reversal cohorts with explicit interval, prior windows, entry/outcome horizon and matching-time choices.",
+    "event_fact_analysis@13": "Compare next-hour direction association beyond return/ATR using late-received exact-bucket numeric features; retrospective only.",
     "raw_forward_outcome@4": "Compare bullish engulfing against matched non-engulfing candles after a fixed prior decline, with outcome-blind pairs and dependence checks.",
     "raw_forward_outcome@3": "Evaluate canonical raw candle predicates with causal close entry and contiguous bounded outcomes.",
     "raw_forward_outcome@2": "Preview raw candle conditions and subsequent outcomes.",
@@ -359,6 +392,26 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             fields["scope"]["constraints"] = "Instrument and Candle Stats IDs are bindable; parameters remain pinned. Fixed 1m, 200-bar initialization, whole-minute UTC boundaries, single calendar year, <=370 days including seed, no outcome tail."
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
         return fields
+    if family == "raw_forward_outcome" and version == "5":
+        fields["detector"] = {"fixed":{"type":"controlled_bullish_reversal"}}
+        fields["inputs[]"] = {"fixed":[]}
+        fields["statistics"] = {"fixed":{}}
+        fields["gap_policy"] = {"fixed":"continue_degraded"}
+        fields["gap_rewarm_bars"] = {"fixed":0}
+        fields["outcomes"] = {"fields": list(_EXAMPLES["raw_forward_outcome@5"]["outcomes"]),
+            "constraints": "All choices explicit. Interval 1m/15m/30m/1h equals scope; trend <= volatility; integers 1..10000; lag+horizon <=10000. Same UTC close slot radius 1..31 days or same date/hour radius 0 with room for two disjoint closed paths. UTC aligned evaluation <=32 days; warmup exactly volatility+1."}
+    if family == "event_fact_analysis" and version == "13":
+        fields["scope"]["constraints"] = "Hourly UTC sample <=60 days; no Indicator. Price outcomes use the next close, including the declared one-hour preparation tail."
+        fields["statistics.features"] = {"baseline_operators":["lagged_return","atr_fraction"],
+            "enriched_operators":["latest_value"], "constraints":"Exactly one-bar recent return and ATR14 baseline; one or two untransformed exact numeric features. Inputs use exact_interval and dimensions.bucket_seconds=3600; real source clocks remain required."}
+        fields["statistics.folds"]["constraints"] = "Exactly one chronological train/validation partition within the sample. Retrospective analytical comparison; no historical availability or fresh-holdout claim."
+        fields["statistics.purge_bars/embargo_bars"] = {"fixed":{"purge_bars":1,"embargo_bars":0}}
+        for name in ("bootstrap","direct_tests","feature_bins"):
+            fields["statistics."+name] = {"fixed":{}, "meaning":"No additional inference or comparisons in this bounded contract."}
+        fields["gap_rewarm_bars"] = {"fixed":0}
+        fields["detector"] = {"fixed": {"type":"fact_snapshot","sampling":"primary_bar_close"}, "constraints":"Unconditional primary-close samples; detector alias names one numeric input, not causal Fact-driven event emission."}
+        fields["outcomes.retrospective"] = {"fields": ["schema_version", "analysis_as_of", "bucket_time_interpretation"],
+            "constraints": "Explicit retrospective_numeric_comparison.v1; real cutoff >= sample end; bucket_start_unverified. Hourly sample <=60 days, next-hour only, exact bucket inputs, recent return/ATR14 baseline, 1..2 numeric features, one fixed logistic fold."}
     if family == "raw_forward_outcome" and version == "4":
         return {"scope": {"fields": ["instrument_id", "symbol", "timeframe", "start", "end", "warmup_bars", "datasource", "exchange"],
             "constraints": "Fixed 1m, aligned UTC minute boundaries, nonempty range <=32 days; 21 warmup candles when specified. No Indicator or additional Fact inputs."},
@@ -485,7 +538,7 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["outcomes"] = {"type": "object", "unit": "candidate/event counts", "meaning": "Funnel, stage/status/terminal/reason counts and lifecycle-contract issues; not predictive outcomes."}
     elif family == "run_signal_summary":
         fields["outcomes"] = {"type": "object", "unit": "record counts", "meaning": "Declared buckets, decision states and linked trade counts from existing run evidence."}
-    elif family == "raw_forward_outcome" and version == "4":
+    elif family == "raw_forward_outcome" and version in {"4", "5"}:
         fields["controlled_reversal_comparison"] = {"type": "object", "unit": "fractional returns, pairs and UTC days",
             "meaning": "Paired mean contrast, arm distributions, population-SMD balance, support gates, day deletion and feature-frozen joint nonoverlap. Unsupported/mixed/nonpositive/positive_descriptive_lead; no causal or inference claim."}
         fields["pairs"] = {"type": "array", "meaning": "Complete frozen identities/features/clocks, fixed subset membership and both outcome resolutions; whole-pair missingness never rematches."}
@@ -494,6 +547,9 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["outcomes.by_decision_state"] = {"type": "object", "unit": "counts and run-reported PnL currency", "meaning": "Trade count/net PnL/average per trade grouped by decision state; descriptive run summary."}
     else:
         fields["outcomes.summary"] = {"type": "object", "unit": "fractional price returns and counts", "meaning": "Per-forward-bar event versus baseline distributions; events are bounded examples; recommendation is descriptive screening."}
+    if family == "event_fact_analysis" and version == "13":
+        fields["events[]"]["meaning"] = "Historical primary-close sample identities; actual late Fact references, outcomes, features and exclusions. No historical decisions."
+        fields["evidence_class"] = {"fixed":"retrospective_conditional_association", "meaning":"No PIT predictive, backtest-certified or scientific-certification claims."}
     return fields
 
 
@@ -568,7 +624,9 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         "eligibility": {"request_selectable": example is not None,
                         "modes": ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
-                        "execution_authority": False, "promotion_authority": False},
+                        "execution_authority": False, "promotion_authority": False,
+                        **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
+                           if definition.definition_id == "event_fact_analysis" and version == "13" else {})},
         "required_inputs": {"declaration": declarations,
                             "evidence_binding": "Exactly one frozen Dataset or supported immutable run evidence; use existing requirements/prepare.",
                             "resource_bindings": {"scope.instrument_id": "Authorized server instrument ID.",
@@ -581,7 +639,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version == "4" else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),
