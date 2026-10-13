@@ -22,6 +22,8 @@ code_paths:
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
+  - portal/backend/service/research/event_features.py
+  - portal/backend/service/research/directional_model.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/forward_risk_evaluator.py
@@ -83,6 +85,19 @@ CheckEvaluator. An evaluator is an ordinary Python implementation, not another
 managed entity. Definition 11/evaluator 10 remains a fixed volatility-specific
 method. Shared functions are appropriate when calculations actually recur;
 discovery adds no DSL, schema, new engine or configurable scientific policy.
+
+## Shared calculations and procedure ownership
+
+`event_features.py` owns the existing baseline feature preparation and values.
+`directional_model.py` fits and scores the baseline/enriched models on the same
+caller-admitted fold rows. Neither helper selects events, determines causal
+availability, resolves outcomes or changes registered scientific choices.
+The event-and-fact evaluator retains those decisions and fold eligibility.
+Distinct first-return and forward-risk procedures remain explicit. This is a
+computation-only extraction: settings, definitions, result schemas and evaluator
+versions retain their existing material meaning. Producing source identity still
+changes with code; old source-bound evidence remains replayable through its
+existing exact-source custody, rather than being relabeled as new-source evidence.
 
 ## Purpose
 

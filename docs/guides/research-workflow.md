@@ -502,6 +502,28 @@ new database entity. Reuse an existing method when its declared inputs and
 settings express the question. Changing a symbol or supported sample does not
 require another implementation.
 
+Before adding code, distinguish four ordinary choices:
+
+- Configure an existing method when its admitted settings express the question.
+- Reuse an existing calculation when the same operation occurs in another procedure.
+- Extend a method through a reviewed version when its scientific meaning changes.
+- Implement a distinct procedure when selection, outcomes or inference actually differ.
+
+These are review decisions, not a fixed taxonomy of future research. A new question
+alone does not require another evaluator. Spread and book-imbalance directional
+comparisons already share fitting/scoring; first-return classification and future
+realized-risk analysis have distinct procedures. Volatility as a directional
+predictor is a different question from measuring future volatility. Existing ATR
+baseline support does not admit ATR as an enriched feature.
+
+The event-and-fact evaluator uses `event_features.py` for existing baseline feature
+preparation/calculation and `directional_model.py` for paired fold fitting/scoring.
+The caller still owns causal admission, complete-case selection, fold boundaries,
+labels and eligibility. Reuse these functions only when their existing semantics
+fit; do not force a new procedure through unrelated flags. Fixed protocol choices
+remain fixed. Keep architectural cohesion an agent and reviewer responsibility,
+without adding a scanning or enforcement system.
+
 For a new method, implement the existing `CheckEvaluator` interface in
 `src/research_science/check.py`: `declare_requirements(definition, request)`
 describes needed evidence and `evaluate(plan, inputs)` computes the result from

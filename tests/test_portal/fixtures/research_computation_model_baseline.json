@@ -1,0 +1,175 @@
+{
+  "source": "dfdb6a92ff0e51026e0366f5aca28a1dbfc22fda",
+  "expected": {
+    "True": {
+      "model": {
+        "implementation": {
+          "type": "standardized_l2_logistic",
+          "implementation": "qt_scipy_lbfgsb.v1",
+          "c": 1.0,
+          "fit_intercept": true,
+          "tolerance": 1e-09,
+          "max_iterations": 1000,
+          "seed": 0,
+          "standardization": "train_fold_mean_population_std.v1"
+        },
+        "baseline_features": [
+          "direction",
+          "metadata",
+          "signed",
+          "lagged",
+          "atr",
+          "volume"
+        ],
+        "enriched_features": [
+          "direction",
+          "metadata",
+          "signed",
+          "lagged",
+          "atr",
+          "volume",
+          "reference"
+        ],
+        "folds": [
+          {
+            "id": "chronological",
+            "train_count": 27,
+            "validation_count": 28,
+            "status": "valid",
+            "reason": null,
+            "purge_bars": 0,
+            "embargo_bars": 0,
+            "effective_train_end": "2026-01-02T06:00:00.000000Z",
+            "effective_validation_start": "2026-01-02T08:00:00.000000Z",
+            "baseline": {
+              "log_loss": 0.36666946592844324,
+              "brier": 0.11608760846541048,
+              "roc_auc": 0.9387755102040817,
+              "fit": {
+                "iterations": 9,
+                "objective": 11.28076868201365,
+                "converged": true
+              }
+            },
+            "enriched": {
+              "log_loss": 0.4543888990736083,
+              "brier": 0.14738206455621014,
+              "roc_auc": 0.9387755102040817,
+              "fit": {
+                "iterations": 11,
+                "objective": 11.185755866419116,
+                "converged": true
+              }
+            },
+            "delta_log_loss": -0.08771943314516506,
+            "delta_brier": -0.03129445609079966,
+            "delta_roc_auc": 0.0
+          }
+        ],
+        "valid_fold_count": 1,
+        "positive_delta_fold_count": 0,
+        "oos_count": 28,
+        "baseline": {
+          "log_loss": 0.36666946592844324,
+          "brier": 0.11608760846541048,
+          "roc_auc": 0.9387755102040817
+        },
+        "enriched": {
+          "log_loss": 0.4543888990736083,
+          "brier": 0.14738206455621014,
+          "roc_auc": 0.9387755102040817
+        },
+        "delta_log_loss": -0.08771943314516499,
+        "delta_brier": -0.03129445609079966,
+        "delta_roc_auc": 0.0,
+        "bootstrap": null
+      },
+      "non_model_result_hash": "1cf80cd345ba943f9036bf576e9e739f9259e11bd1524e9fafa665c7c42bae68"
+    },
+    "False": {
+      "model": {
+        "implementation": {
+          "type": "standardized_l2_logistic",
+          "implementation": "qt_scipy_lbfgsb.v1",
+          "c": 1.0,
+          "fit_intercept": false,
+          "tolerance": 1e-09,
+          "max_iterations": 1000,
+          "seed": 0,
+          "standardization": "train_fold_mean_population_std.v1"
+        },
+        "baseline_features": [
+          "direction",
+          "metadata",
+          "signed",
+          "lagged",
+          "atr",
+          "volume"
+        ],
+        "enriched_features": [
+          "direction",
+          "metadata",
+          "signed",
+          "lagged",
+          "atr",
+          "volume",
+          "reference"
+        ],
+        "folds": [
+          {
+            "id": "chronological",
+            "train_count": 27,
+            "validation_count": 28,
+            "status": "valid",
+            "reason": null,
+            "purge_bars": 0,
+            "embargo_bars": 0,
+            "effective_train_end": "2026-01-02T06:00:00.000000Z",
+            "effective_validation_start": "2026-01-02T08:00:00.000000Z",
+            "baseline": {
+              "log_loss": 0.3590092827765375,
+              "brier": 0.11295188549522923,
+              "roc_auc": 0.9387755102040817,
+              "fit": {
+                "iterations": 8,
+                "objective": 11.331356582110141,
+                "converged": true
+              }
+            },
+            "enriched": {
+              "log_loss": 0.4289600354732427,
+              "brier": 0.1377086911945408,
+              "roc_auc": 0.9387755102040817,
+              "fit": {
+                "iterations": 11,
+                "objective": 11.234564342597272,
+                "converged": true
+              }
+            },
+            "delta_log_loss": -0.0699507526967052,
+            "delta_brier": -0.02475680569931156,
+            "delta_roc_auc": 0.0
+          }
+        ],
+        "valid_fold_count": 1,
+        "positive_delta_fold_count": 0,
+        "oos_count": 28,
+        "baseline": {
+          "log_loss": 0.3590092827765375,
+          "brier": 0.11295188549522923,
+          "roc_auc": 0.9387755102040817
+        },
+        "enriched": {
+          "log_loss": 0.4289600354732427,
+          "brier": 0.1377086911945408,
+          "roc_auc": 0.9387755102040817
+        },
+        "delta_log_loss": -0.06995075269670527,
+        "delta_brier": -0.02475680569931156,
+        "delta_roc_auc": 0.0,
+        "bootstrap": null
+      },
+      "non_model_result_hash": "59294871fb657e79dc0c47b81dfa615873d5912684737af7c6e161298a96604a"
+    }
+  }
+}

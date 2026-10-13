@@ -16,10 +16,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 from scipy.stats import pearsonr, pointbiserialr
 
-from data_providers.utils.ohlcv import compute_tr_atr
 from market_data.frozen import semantic_hash
 from market_data.requirements import causal_numeric_fact_records
 from research_science import adjusted_p_values
@@ -30,6 +28,10 @@ from research_science.check import (
     CheckRequest,
     ResolvedCheckPlan,
 )
+
+
+from .event_features import baseline_features, prepare_atr, _path
+from .directional_model import fit_paired_fold, _auc, _fit_logistic, _log_loss
 
 
 EVENT_FACT_ANALYSIS = "event_fact_analysis"
@@ -683,15 +685,6 @@ def normalize_event_fact_configuration(
     )
 
 
-def _path(payload: Mapping[str, Any], path: str) -> Any:
-    current: Any = payload
-    for part in str(path).split("."):
-        if not isinstance(current, Mapping) or part not in current:
-            return None
-        current = current[part]
-    return current
-
-
 def _record_known_at(record: Any) -> datetime:
     return _utc(getattr(record.fact, "known_at", None), field="fact.known_at")
 
@@ -1002,98 +995,6 @@ def _distribution(values: Sequence[float]) -> dict[str, Any]:
         "min": min(finite),
         "max": max(finite),
     }
-
-
-def _auc(y: np.ndarray, probability: np.ndarray) -> float | None:
-    positives = int(np.sum(y == 1.0))
-    negatives = int(np.sum(y == 0.0))
-    if not positives or not negatives:
-        return None
-    order = np.argsort(probability, kind="mergesort")
-    ranks = np.empty(len(probability), dtype=float)
-    cursor = 0
-    while cursor < len(order):
-        end = cursor + 1
-        while end < len(order) and probability[order[end]] == probability[order[cursor]]:
-            end += 1
-        rank = (cursor + 1 + end) / 2.0
-        ranks[order[cursor:end]] = rank
-        cursor = end
-    rank_sum = float(np.sum(ranks[y == 1.0]))
-    return (rank_sum - positives * (positives + 1) / 2.0) / (
-        positives * negatives
-    )
-
-
-def _fit_logistic(
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_validation: np.ndarray,
-    model: Mapping[str, Any],
-) -> tuple[np.ndarray, dict[str, Any]]:
-    means = np.mean(x_train, axis=0)
-    scales = np.std(x_train, axis=0, ddof=0)
-    scales = np.where(scales == 0.0, 1.0, scales)
-    train = (x_train - means) / scales
-    validation = (x_validation - means) / scales
-    fit_intercept = bool(model["fit_intercept"])
-    design = (
-        np.column_stack([np.ones(len(train)), train])
-        if fit_intercept
-        else train
-    )
-    validation_design = (
-        np.column_stack([np.ones(len(validation)), validation])
-        if fit_intercept
-        else validation
-    )
-    c_value = float(model["c"])
-
-    def objective(beta: np.ndarray) -> tuple[float, np.ndarray]:
-        logits = np.clip(design @ beta, -40.0, 40.0)
-        probabilities = 1.0 / (1.0 + np.exp(-logits))
-        epsilon = 1e-15
-        loss = -float(
-            np.sum(
-                y_train * np.log(np.clip(probabilities, epsilon, 1.0))
-                + (1.0 - y_train)
-                * np.log(np.clip(1.0 - probabilities, epsilon, 1.0))
-            )
-        )
-        penalty_start = 1 if fit_intercept else 0
-        penalty = beta.copy()
-        penalty[:penalty_start] = 0.0
-        loss += 0.5 * float(np.dot(penalty, penalty)) / c_value
-        gradient = design.T @ (probabilities - y_train) + penalty / c_value
-        return loss, gradient
-
-    optimized = minimize(
-        objective,
-        np.zeros(design.shape[1], dtype=float),
-        method="L-BFGS-B",
-        jac=True,
-        options={
-            "ftol": float(model["tolerance"]),
-            "gtol": float(model["tolerance"]),
-            "maxiter": int(model["max_iterations"]),
-        },
-    )
-    if not optimized.success:
-        raise RuntimeError(
-            f"event_fact_logistic_failed: {optimized.message}"
-        )
-    logits = np.clip(validation_design @ optimized.x, -40.0, 40.0)
-    probabilities = 1.0 / (1.0 + np.exp(-logits))
-    return probabilities, {
-        "iterations": int(optimized.nit),
-        "objective": float(optimized.fun),
-        "converged": True,
-    }
-
-
-def _log_loss(y: np.ndarray, probability: np.ndarray) -> float:
-    p = np.clip(probability, 1e-15, 1.0 - 1e-15)
-    return -float(np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p)))
 
 
 def _utc_day_cluster_ci(
@@ -1988,21 +1889,7 @@ class EventFactEvaluator:
                 f"event_fact_check_invalid: unsupported detector type {detector_type or '<empty>'}"
             )
 
-        atr_by_period: dict[int, dict[datetime, float]] = {}
-        if any(str(row.get("operator")) == "atr_fraction" for row in baseline_specs):
-            frame = pd.DataFrame(candles)
-            frame.index = pd.to_datetime(
-                [row.get("open_time") or row.get("time") for row in candles], utc=True
-            )
-            for period in sorted(
-                {int(row["period"]) for row in baseline_specs if row["operator"] == "atr_fraction"}
-            ):
-                enriched_frame = compute_tr_atr(frame.copy(), period=period)
-                atr_by_period[period] = {
-                    timestamp.to_pydatetime(): float(value)
-                    for timestamp, value in enriched_frame["atr_wilder"].items()
-                    if pd.notna(value)
-                }
+        atr_by_period = prepare_atr(candles, baseline_specs)
 
         selected_fact_material: dict[tuple[Any, ...], dict[str, Any]] = {}
         exclusion_counts: Counter[str] = Counter()
@@ -2343,62 +2230,12 @@ class EventFactEvaluator:
                             "resolved:invalidated" if first is not None else "resolved:not_invalidated"
                         ] += 1
 
-            for spec in baseline_specs:
-                name = str(spec["name"])
-                operator = str(spec["operator"])
-                value: float | None
-                if operator == "event_direction":
-                    value = direction
-                elif operator == "event_metadata_number":
-                    raw_value = _path(dict(output.get("event") or {}), str(spec["path"]))
-                    value = (
-                        float(raw_value) * float(spec.get("scale", 1.0))
-                        if raw_value is not None
-                        else None
-                    )
-                elif operator in {"direction_signed_return", "lagged_return"}:
-                    lookback = int(spec["lookback_bars"])
-                    previous_time = event_time - step * lookback
-                    previous = candle_by_open.get(previous_time)
-                    local_times = [
-                        event_time - step * offset
-                        for offset in range(1, lookback + 1)
-                    ]
-                    raw_return = (
-                        (event_close / float(previous["close"])) - 1.0
-                        if previous is not None
-                        and all(item in candle_by_open for item in local_times)
-                        else None
-                    )
-                    value = (
-                        raw_return * direction
-                        if raw_return is not None
-                        and operator == "direction_signed_return"
-                        else raw_return
-                    )
-                elif operator == "atr_fraction":
-                    atr = atr_by_period[int(spec["period"])].get(event_time)
-                    value = atr / event_close if atr is not None and event_close else None
-                elif operator == "volume_ratio":
-                    lookback = int(spec["lookback_bars"])
-                    history = [
-                        candle_by_open.get(event_time - step * offset)
-                        for offset in range(1, lookback + 1)
-                    ]
-                    volumes = [
-                        float(item.get("volume") or 0.0)
-                        for item in history
-                        if item is not None
-                    ]
-                    denominator = fmean(volumes) if len(volumes) == lookback else 0.0
-                    value = (
-                        float(event_candle.get("volume") or 0.0) / denominator
-                        if denominator > 0.0
-                        else None
-                    )
-                else:  # pragma: no cover - normalization makes this unreachable.
-                    raise AssertionError(operator)
-                row["features"][name] = value
+            row["features"].update(baseline_features(
+                baseline_specs=baseline_specs, output=output, direction=direction,
+                event_time=event_time, step=step, event_close=event_close,
+                event_candle=event_candle, candle_by_open=candle_by_open,
+                atr_by_period=atr_by_period,
+            ))
 
             unresolved_required = [
                 int(horizon)
@@ -2692,98 +2529,13 @@ class EventFactEvaluator:
                 elif not baseline_names or not enriched_names:
                     fold_result["reason"] = "feature_set_empty"
                 else:
-                    y_train = np.asarray(
-                        [
-                            1.0 if row["outcomes"][primary_key]["positive"] else 0.0
-                            for row in train_rows
-                        ],
-                        dtype=float,
+                    metrics, fold_pairs = fit_paired_fold(
+                        train_rows=train_rows, validation_rows=validation_rows,
+                        baseline_names=baseline_names, enriched_names=enriched_names,
+                        primary_key=primary_key, model=model,
                     )
-                    y_validation = np.asarray(
-                        [
-                            1.0 if row["outcomes"][primary_key]["positive"] else 0.0
-                            for row in validation_rows
-                        ],
-                        dtype=float,
-                    )
-                    baseline_train = np.asarray(
-                        [[row["features"][name] for name in baseline_names] for row in train_rows],
-                        dtype=float,
-                    )
-                    baseline_validation = np.asarray(
-                        [[row["features"][name] for name in baseline_names] for row in validation_rows],
-                        dtype=float,
-                    )
-                    enriched_train = np.asarray(
-                        [[row["features"][name] for name in enriched_names] for row in train_rows],
-                        dtype=float,
-                    )
-                    enriched_validation = np.asarray(
-                        [[row["features"][name] for name in enriched_names] for row in validation_rows],
-                        dtype=float,
-                    )
-                    baseline_probability, baseline_fit = _fit_logistic(
-                        baseline_train, y_train, baseline_validation, model
-                    )
-                    enriched_probability, enriched_fit = _fit_logistic(
-                        enriched_train, y_train, enriched_validation, model
-                    )
-                    baseline_loss = _log_loss(y_validation, baseline_probability)
-                    enriched_loss = _log_loss(y_validation, enriched_probability)
-                    baseline_brier = float(
-                        np.mean((baseline_probability - y_validation) ** 2)
-                    )
-                    enriched_brier = float(
-                        np.mean((enriched_probability - y_validation) ** 2)
-                    )
-                    baseline_auc = _auc(y_validation, baseline_probability)
-                    enriched_auc = _auc(y_validation, enriched_probability)
-                    fold_result.update(
-                        {
-                            "status": "valid",
-                            "baseline": {
-                                "log_loss": baseline_loss,
-                                "brier": baseline_brier,
-                                "roc_auc": baseline_auc,
-                                "fit": baseline_fit,
-                            },
-                            "enriched": {
-                                "log_loss": enriched_loss,
-                                "brier": enriched_brier,
-                                "roc_auc": enriched_auc,
-                                "fit": enriched_fit,
-                            },
-                            "delta_log_loss": baseline_loss - enriched_loss,
-                            "delta_brier": baseline_brier - enriched_brier,
-                            "delta_roc_auc": (
-                                enriched_auc - baseline_auc
-                                if baseline_auc is not None
-                                and enriched_auc is not None
-                                else None
-                            ),
-                        }
-                    )
-                    for index, source_row in enumerate(validation_rows):
-                        actual = float(y_validation[index])
-                        baseline_p = float(baseline_probability[index])
-                        enriched_p = float(enriched_probability[index])
-                        paired_rows.append(
-                            {
-                                "event_time": source_row["event_time"],
-                                "decision_time": source_row["decision_time"],
-                                "actual": actual,
-                                "baseline_probability": baseline_p,
-                                "enriched_probability": enriched_p,
-                                "paired_log_loss_delta": (
-                                    -actual * math.log(max(baseline_p, 1e-15))
-                                    - (1.0 - actual)
-                                    * math.log(max(1.0 - baseline_p, 1e-15))
-                                    + actual * math.log(max(enriched_p, 1e-15))
-                                    + (1.0 - actual)
-                                    * math.log(max(1.0 - enriched_p, 1e-15))
-                                ),
-                            }
-                        )
+                    fold_result.update(metrics)
+                    paired_rows.extend(fold_pairs)
                 fold_results.append(fold_result)
             valid_folds = [row for row in fold_results if row["status"] == "valid"]
             if len(valid_folds) < int(eligibility.get("min_valid_folds") or 0):

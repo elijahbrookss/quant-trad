@@ -213,6 +213,12 @@ Refactor with logs, tests, or concrete pressure.
 
 ---
 
+For analytical Checks, inspect existing preparation and calculations before adding
+an evaluator. Configure or reuse where semantics already fit; keep genuinely new
+procedures explicit. Review cohesion and duplication as agent responsibilities,
+not through a new architecture scanner. Preserve fixed scientific choices,
+versioned behavior and historical replay during computation-only refactors.
+
 ## Non-Negotiable Rule
 
 > If you must choose between convenience and correctness, choose correctness.
