@@ -143,10 +143,12 @@ def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archi
     prefixes += [{**scope, "root_fact_version_id": f"overlap-{index}"}
                  for index, scope in enumerate(prefixes[:6])]
     bound = {identity for fixture in fixtures for identity in fixture.manifests}
-    returned = []
+    returned, queries = [], []
     def observe(conn, cursor, statement, parameters, context, executemany):
-        if "raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement:
+        if ("raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement
+                and not statement.startswith("EXPLAIN")):
             returned.append(cursor.rowcount)
+            queries.append((statement, parameters))
     event.listen(storage.database._engine, "after_cursor_execute", observe)
     try:
         with storage.database.session() as session:
@@ -156,6 +158,22 @@ def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archi
                 book_prefix_ranges=prefixes, max_mapping_rows=len(prefixes), bound_manifest_ids=bound)
         assert set(references) == expected
         assert returned == [len(expected)], "overlapping sparse witnesses must not duplicate placements"
+        # Check actual PostgreSQL execution, not just the returned references:
+        # intervening manifests must be removed before mapping expansion. A
+        # flattened semijoin can return the same references after wasted reads.
+        statement, parameters = queries[0]
+        with storage.database.session() as session:
+            plan = session.connection().exec_driver_sql(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters).scalar_one()[0]["Plan"]
+        pending, manifest_plans = [plan], []
+        while pending:
+            node = pending.pop()
+            if node.get("Subplan Name") == "CTE candidate_manifests":
+                manifest_plans.append(node)
+            pending.extend(node.get("Plans", []))
+        assert len(manifest_plans) == 1
+        assert manifest_plans[0]["Actual Rows"] == len(expected)
+        assert manifest_plans[0]["Actual Loops"] == 1
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe)
 

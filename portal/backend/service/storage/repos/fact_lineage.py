@@ -154,6 +154,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     matches = []
     # Both predicates address the exact record mapping, never a manifest's
     # min/max ordinal range (which can contain holes or another reconnect).
+    prefix_manifest_predicate = None
     queries = [
         ("mappings.raw_record_id = ANY(:ids)", {"ids": record_ids}),
         # Constant scope/range bounds let PostgreSQL find candidate manifests
@@ -214,11 +215,12 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         # each paired manifest scope before touching its mappings, independently
         # of the mapping-correlated proof. Both EXISTS clauses preserve one row
         # per placement when requested scopes overlap.
-        queries.append(("manifests.definition_id = ANY(:requested_definitions) "
+        prefix_manifest_predicate = ("manifests.definition_id = ANY(:requested_definitions) "
             "AND manifests.session_id = ANY(:requested_sessions) "
             "AND manifests.first_receive_ordinal<=:last_requested_ordinal "
             "AND manifests.last_receive_ordinal>=:first_requested_ordinal "
-            f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope}) "
+            f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope})")
+        queries.append((prefix_manifest_predicate + " " +
             f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope} "
             "AND prefixes.session_id=mappings.session_id "
             "AND prefixes.connection_epoch=mappings.connection_epoch "
@@ -249,13 +251,24 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             query_bound_ids = eligible if page_bound_ids is None else eligible.intersection(page_bound_ids)
         bound_predicate = "" if query_bound_ids is None else "AND manifests.id = ANY(:bound_ids)"
         bound_params = {} if query_bound_ids is None else {"bound_ids": sorted(query_bound_ids)}
-        found = session.execute(text(f"""
+        manifest_table = "market.raw_archive_manifests"
+        manifest_cte = ""
+        if "requested_definitions" in params:
+            # Fence sparse manifest pruning before mappings are visited. Without
+            # materialization PostgreSQL can apply the paired-scope predicate
+            # after reading every mapping inside the much wider ordinal envelope.
+            manifest_cte = f"""WITH candidate_manifests AS MATERIALIZED (
+                SELECT manifests.* FROM market.raw_archive_manifests AS manifests
+                WHERE {prefix_manifest_predicate} {bound_predicate}
+            )"""
+            manifest_table = "candidate_manifests"
+        found = session.execute(text(f"""{manifest_cte}
             SELECT manifests.*, mappings.raw_record_id, mappings.object_row_index, mappings.object_row_group,
                    mappings.spool_segment_id AS mapped_segment_id, mappings.session_id AS mapped_session_id,
                    mappings.connection_epoch AS mapped_epoch, mappings.receive_ordinal AS mapped_ordinal,
                    mappings.raw_frame_sha256 AS mapped_frame_sha256
             FROM market.raw_archive_record_mappings AS mappings
-            JOIN market.raw_archive_manifests AS manifests ON manifests.id=mappings.manifest_id
+            JOIN {manifest_table} AS manifests ON manifests.id=mappings.manifest_id
             WHERE {predicate} {bound_predicate} AND NOT EXISTS (
                 SELECT 1 FROM market.storage_lifecycle_events AS expired
                 WHERE expired.action='archive_expire' AND expired.event_type='completed'
