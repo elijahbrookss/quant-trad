@@ -11,6 +11,7 @@ import uuid
 
 from PIL import Image
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from portal.backend.db.models import ResearchImageRecord, ResearchItemRecord
 from portal.backend.db.session import db
@@ -51,10 +52,18 @@ def test_image_custody_retry_fresh_process_and_unchanged_publication(tmp_path):
     )
     root = Path(__file__).resolve().parents[2]
     environment = {**os.environ, "PYTHONPATH": f"{root}:{root / 'src'}"}
-    fresh = subprocess.run([sys.executable, "-c", code], cwd=root, env=environment, capture_output=True, text=True, check=True)
+    fresh = subprocess.run([sys.executable, "-c", code], cwd=root, env=environment,
+                           capture_output=True, text=True, check=True, timeout=60)
     restored = json.loads(fresh.stdout.strip().splitlines()[-1])
     assert restored["sha256"] == image["sha256"]
     assert restored["binding"] == image["binding"]
+    # A real SQL constraint failure rolls back without damaging retained bytes.
+    with pytest.raises(IntegrityError):
+        with db.session() as session:
+            saved = session.get(ResearchImageRecord, image["image_id"])
+            saved.content = b""
+            session.flush()
+    assert images.get_content(study["id"], image["image_id"])[1] == image
     with db.session() as session:
         saved = session.get(ResearchImageRecord, image["image_id"])
         saved.content = b"corrupt"
