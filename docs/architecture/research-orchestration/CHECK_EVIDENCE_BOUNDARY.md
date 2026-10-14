@@ -835,3 +835,29 @@ is backdated. Existing Fact payload registry, providers, collection, persistence
 scientific budgets and concurrency are unchanged by these method extensions.
 Catalogue examples are templates; prepare/freeze and scientific dispatch remain
 separate authorized operations.
+
+
+## Retrospective complete paired inputs
+
+The hourly v13 numeric comparison optionally declares
+`outcomes.retrospective.input_coverage_policy: complete_paired_rows`. This is an
+explicit input-admission branch, pinned in the request, configured definition,
+plan and frozen binding. Omitting it preserves the historical planning rules.
+It changes no feature, sample-selection calculation, logistic fit, chronological
+fold, purge or score rule.
+
+This branch requires only completed numeric buckets inside the evaluation
+range, retaining the existing price lookback. The primary materialization ends
+at the fixed exclusive boundary rather than acquiring an outcome tail. The
+existing evaluator counts missing numeric values and unavailable final outcomes
+as exclusions and fits baseline/enriched models on identical complete rows.
+
+The planner and frozen binding accept source-bound immutable `partial` range
+custody in addition to `complete` custody only under this explicit policy.
+`failed`, unknown and unacquired intervals still fail admission. Partial does
+not become complete: coverage status, gaps, source identity, revision clocks and
+provider-completeness uncertainty remain pinned. Acquisition caches and ordinary
+causal consumers still require complete coverage. Check execution remains
+provider-free. The real analysis cutoff and `bucket_start_unverified` limitation
+remain mandatory; this is conditional retrospective association, with no
+historical-availability, predictive, causal or certification claim.

@@ -91,7 +91,20 @@ def missing_complete_coverage(
     source_identity_keys: Sequence[str],
     coverage: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str]]:
-    """Return every unproven provider subrange, independently per source."""
+    """Return every unproven complete provider subrange, independently per source."""
+    return missing_recorded_coverage(start=start, end=end,
+        source_identity_keys=source_identity_keys, coverage=coverage)
+
+
+def missing_recorded_coverage(
+    *, start: Any, end: Any, source_identity_keys: Sequence[str],
+    coverage: Sequence[Mapping[str, Any]], allow_partial: bool = False,
+) -> list[dict[str, str]]:
+    """Verify acquired range custody; partial admission never certifies completeness.
+
+    Only an explicit consumer policy may admit recorded partial intervals. Failed
+    or unacquired ranges remain missing. Acquisition caches use the strict wrapper.
+    """
 
     lower = _utc(start)
     upper = _utc(end)
@@ -109,7 +122,7 @@ def missing_complete_coverage(
             )
             for row in normalized
             if row["source_identity_key"] == source_key
-            and row["status"] == "complete"
+            and row["status"] in ({"complete", "partial"} if allow_partial else {"complete"})
             and _utc(row["range_end"]) > lower
             and _utc(row["range_start"]) < upper
         )
@@ -143,4 +156,4 @@ def missing_complete_coverage(
     return missing
 
 
-__all__ = ["missing_complete_coverage", "normalize_acquisition_coverage"]
+__all__ = ["missing_complete_coverage", "missing_recorded_coverage", "normalize_acquisition_coverage"]

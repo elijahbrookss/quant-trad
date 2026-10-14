@@ -589,3 +589,15 @@ logistic comparison beyond recent return and ATR. Its dates and train/validation
 split are a template to fix before dispatch, not an allocation or measured
 coverage claim. Results are conditional on unverified bucket-start meaning and
 cannot supply point-in-time predictive, backtest or certification evidence.
+
+
+For an explicitly bounded complete-case comparison, add
+`outcomes.retrospective.input_coverage_policy: complete_paired_rows` to v13.
+It admits acquired partial source ranges without relabeling them as complete,
+requires liquidation buckets only within the fixed dates, and does not acquire
+prices beyond the exclusive end. Missing values on either side and unavailable
+boundary outcomes are excluded and counted; returned zeros remain values.
+Inspect both fold counts and the retained source-quality evidence. Omitting the
+option preserves the historical strict input plan. Preparation and execution
+still use the existing freeze/run operations; do not backdate receipts or repair
+missing buckets with invented zero values.

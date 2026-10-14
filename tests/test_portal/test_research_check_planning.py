@@ -529,3 +529,32 @@ def test_candle_header_projection_failure_never_falls_back_to_payloads():
             "required_start": datetime(2026, 1, 1, tzinfo=UTC),
             "required_end": datetime(2026, 1, 2, tzinfo=UTC), "source_policy": {"mode": "current"},
         }, store=BrokenStore(), as_of_commit_seq=77)
+
+
+@pytest.mark.parametrize("status,policy,missing", [
+    ("partial", None, True), ("partial", "recorded_partial", False),
+    ("failed", "recorded_partial", True),
+])
+def test_planning_partial_custody_policy_retains_source_uncertainty(status, policy, missing):
+    store = _Store()
+    original = store.list_source_acquisition_coverage
+    def coverage(**kwargs):
+        rows = original(**kwargs)
+        for row in rows:
+            row["status"] = status
+            material = {k: row[k] for k in ("schema_version", "series_id", "source_id",
+                "binding_id", "manifest_hash", "interface_version", "confirmation_depth",
+                "range_start", "range_end", "source_positions", "status", "evidence")}
+            row["identity_key"] = semantic_hash(material)
+        return rows
+    store.list_source_acquisition_coverage = coverage
+    req = {"alias": "reference", "instrument_id": "instrument-1",
+        "fact_type": "market.reference_price", "contract_version": "market.reference_price.v1",
+        "timeframe_seconds": None, "dimensions": {"quote_currency": "USD"},
+        "alignment": "latest_known", "source_policy": {"mode": "exact", "source_identity_key": "source-a"},
+        "required_start": "2026-01-01T00:00:00Z", "required_end": "2026-02-01T00:00:00Z"}
+    if policy:
+        req["coverage_policy"] = policy
+    gaps, quality = _coverage_for_requirement(req, store=store, as_of_commit_seq=77)
+    assert any(row["reason"] == "source_acquisition_coverage_missing" for row in gaps) is missing
+    assert quality[0]["coverage"]["status"] == status

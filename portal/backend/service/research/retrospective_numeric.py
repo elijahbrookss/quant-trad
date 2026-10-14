@@ -12,10 +12,13 @@ SCHEMA = "retrospective_numeric_comparison.v1"
 
 
 def normalize_retrospective(raw, *, detector, outcomes, statistics, scope, inputs):
-    if not isinstance(raw, Mapping) or set(raw) != {"schema_version", "analysis_as_of", "bucket_time_interpretation"}:
+    required = {"schema_version", "analysis_as_of", "bucket_time_interpretation"}
+    if not isinstance(raw, Mapping) or not required <= set(raw) or set(raw) - required - {"input_coverage_policy"}:
         raise ValueError("retrospective_invalid: explicit schema, analysis_as_of and bucket interpretation required")
     if raw["schema_version"] != SCHEMA or raw["bucket_time_interpretation"] != "bucket_start_unverified":
         raise ValueError("retrospective_invalid: unsupported contract or bucket interpretation")
+    if "input_coverage_policy" in raw and raw["input_coverage_policy"] != "complete_paired_rows":
+        raise ValueError("retrospective_invalid: unsupported input coverage policy")
     cutoff = _utc(raw["analysis_as_of"], field="retrospective.analysis_as_of")
     start, end = (_utc(scope.get(k), field="scope."+k) for k in ("start", "end"))
     if scope.get("timeframe") != "1h" or not timedelta(0) < end-start <= timedelta(days=60) or cutoff < end:
@@ -52,7 +55,9 @@ def normalize_retrospective(raw, *, detector, outcomes, statistics, scope, input
     if _utc(fold["train"]["start"], field="train.start") < start or _utc(fold["validation"]["end"], field="validation.end") > end:
         raise ValueError("retrospective_invalid: comparison windows must fit declared sample")
     return {"schema_version": SCHEMA, "analysis_as_of": _iso(cutoff),
-            "bucket_time_interpretation": "bucket_start_unverified"}
+            "bucket_time_interpretation": "bucket_start_unverified",
+            **({"input_coverage_policy": raw["input_coverage_policy"]}
+               if "input_coverage_policy" in raw else {})}
 
 
 def retrospective_snapshots(records, *, snapshot_requests, where, alias, analysis_as_of):

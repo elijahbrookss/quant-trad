@@ -238,8 +238,10 @@ returned zero totals remain real observations. Even a full set of returned
 buckets currently carries `provider_completeness_unverified` and `partial`
 coverage. Bucket presence cannot certify exchange/provider capture completeness.
 Partial responses never invalidate older observations and never become durable
-complete-range cache hits. This conservative candidate is not yet an admitted
-historical causal research input. Do not remove its gaps or backdate known-at to
+complete-range cache hits. This conservative candidate is not an admitted
+historical causal research input. The explicit v13 `complete_paired_rows`
+retrospective consumer may admit its recorded partial range custody while
+retaining every gap and completeness warning; that does not certify coverage. Do not remove its gaps or backdate known-at to
 make a Check run. Old intraday history may already be unavailable; daily data
 cannot substitute for intraday liquidation bursts.
 
@@ -417,7 +419,10 @@ change and consumer proof, not an in-place reinterpretation.
   includes binding/source context and fails or records a typed gap.
 - Provider failures record failed coverage and gap evidence, log an error, and
   propagate.
-- Partial acquisition never satisfies required dataset coverage.
+- Partial acquisition never proves complete coverage or becomes a cache hit.
+  The explicit retrospective complete-paired Check policy may freeze and consume
+  recorded partial custody with gaps and uncertainty preserved; ordinary causal
+  consumers remain strict.
 - A read miss remains a read miss; it never authorizes network access.
 
 ## Related Docs

@@ -15,7 +15,7 @@ from market_data.contracts import (
     MarketDataRequirement,
 )
 from market_data.acquisition_coverage import (
-    missing_complete_coverage,
+    missing_recorded_coverage,
     normalize_acquisition_coverage,
 )
 from market_data.fact_registry import get_fact_contract
@@ -377,11 +377,12 @@ def _coverage_for_requirement(
                     end=_utc(requirement["required_end"], field="required_end"),
                 )
             )
-            uncovered_ranges = missing_complete_coverage(
+            uncovered_ranges = missing_recorded_coverage(
                 start=requirement["required_start"],
                 end=requirement["required_end"],
                 source_identity_keys=tuple(sorted(resolved_source_keys)),
                 coverage=coverage,
+                allow_partial=requirement.get("coverage_policy") == "recorded_partial",
             )
             acquisition_coverage_proves_range = bool(resolved_source_keys) and not (
                 uncovered_ranges
@@ -642,10 +643,16 @@ def plan_research_check(
         )
         if requirement.key in feature_predecessor_aliases:
             lookback_seconds += max(lookback_seconds, timeframe_seconds)
+        complete_paired = declaration.get("input_coverage_policy") == "complete_paired_rows"
+        if complete_paired:
+            # Completed-bucket snapshots at each primary close need the matching
+            # evaluation bucket, never a staleness-based predecessor interval.
+            lookback_seconds = 0
         requirements.append(
             {
                 **resolved_series.to_dict(),
                 "alias": requirement.key,
+                **({"coverage_policy": "recorded_partial"} if complete_paired else {}),
                 "consumer_id": "check",
                 "instrument_id": resolved_series.instrument_id,
                 "series_required": bool(raw.get("series_required", True)),
