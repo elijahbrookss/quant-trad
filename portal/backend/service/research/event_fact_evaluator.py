@@ -152,6 +152,13 @@ class EventFactEvaluator:
                 if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE
                 else {}
             ),
+            **(
+                {"outcome_boundary": "evaluation_end_exclusive",
+                 "input_coverage_policy": "complete_paired_rows"}
+                if self.retrospective_enabled and outcomes.get("retrospective", {}).get(
+                    "input_coverage_policy") == "complete_paired_rows"
+                else {}
+            ),
             "input_kind": "market_data",
             "indicator_ids": indicator_ids,
             "warmup_floor_bars": 0,

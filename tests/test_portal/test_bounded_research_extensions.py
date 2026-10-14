@@ -289,3 +289,64 @@ def test_v5_legacy_profile_reuses_identical_feature_frozen_pair_map():
     historical=run()
     assert result["feature_frozen_hash"]==historical["feature_frozen_hash"]
     assert result["pairs"]==historical["pairs"]
+
+
+def test_complete_paired_policy_plans_only_evaluation_buckets_and_preserves_legacy():
+    from portal.backend.service.research.planning import plan_research_check
+    p = deepcopy(catalog._EXAMPLES["event_fact_analysis@13"])
+    def planned(payload):
+        d, q = normalize_check_request(payload)
+        plan = plan_research_check(d, q, inspect_coverage=False,
+            instrument_loader=lambda key: {"id": key, "symbol": "SYNTHETIC"},
+            indicator_planner=lambda ids, **kw: {"indicators": [], "requirements": [], "warmup_bars": 0})
+        d, q, plan = pin_check_definition_to_plan(d, q, plan)
+        assert reconstruct_pinned_check_definition(q, plan).to_dict() == d.to_dict()
+        return d, q, plan
+    old_d, old_q, old_plan = planned(p)
+    assert old_plan.outcome_tail["seconds"] == 3600
+    assert old_plan.market_data_requirements[1]["required_start"].startswith("2026-07-24T23:")
+    p["outcomes"]["retrospective"]["input_coverage_policy"] = "complete_paired_rows"
+    d, q, plan = planned(p)
+    assert d.evaluator_version == "13"
+    assert d.definition_hash != old_d.definition_hash
+    assert plan.outcome_tail["seconds"] == 0
+    assert plan.materialization_range["end_exclusive"].startswith("2026-09-23T00:")
+    assert plan.market_data_requirements[0]["required_start"].startswith("2026-07-24T09:")
+    for req in plan.market_data_requirements[1:]:
+        assert req["required_start"].startswith("2026-07-25T00:")
+        assert req["required_end"].startswith("2026-09-23T00:")
+        assert req["coverage_policy"] == "recorded_partial"
+    assert "input_coverage_policy" not in old_q.parameters["outcomes"]["retrospective"]
+    p["outcomes"]["retrospective"]["input_coverage_policy"] = "fill_missing_zero"
+    with pytest.raises(ValueError, match="unsupported input coverage policy"):
+        planned(p)
+
+
+def test_complete_paired_two_sides_excludes_missing_retains_zeros_and_fixed_boundary():
+    d, q, plan, inputs = retrospective_inputs()
+    long = inputs["fact_records_by_alias"]["long_liquidations"]
+    short = [replace(rec, series_id=12, fact=replace(rec.fact,
+        dimensions={**rec.fact.dimensions, "liquidated_side": "short"})) for rec in long]
+    inputs["fact_records_by_alias"]["short_liquidations"] = short
+    inputs["inputs"].append({**inputs["inputs"][0], "alias": "short_liquidations",
+        "dimensions": {**inputs["inputs"][0]["dimensions"], "liquidated_side": "short"}})
+    inputs["statistics"]["features"]["enriched"].append(
+        {"name": "short_liquidations", "operator": "latest_value", "input_alias": "short_liquidations"})
+    inputs["fact_requirements_by_alias"]["short_liquidations"] = inputs["inputs"][-1]
+    inputs["outcomes"]["retrospective"]["input_coverage_policy"] = "complete_paired_rows"
+    end = datetime(2026, 9, 23, tzinfo=UTC)
+    inputs["candles"] = [row for row in inputs["candles"] if pd.Timestamp(row["open_time"]) < end]
+    ev = CHECK_REGISTRY.resolve_evaluator(d)
+    baseline = ev.evaluate(plan=plan, inputs=inputs)
+    inputs["fact_records_by_alias"]["long_liquidations"] = long[:100] + long[101:]
+    inputs["fact_records_by_alias"]["short_liquidations"] = short[:1100] + short[1101:]
+    result = ev.evaluate(plan=plan, inputs=inputs)
+    assert result["analysis_sample_count"] == baseline["analysis_sample_count"] - 2
+    admitted = [row for row in result["events"] if row["analysis_eligible"]]
+    assert any(row["features"]["long_liquidations"] == 0 for row in admitted)
+    assert all(row["features"]["long_liquidations"] is not None and
+               row["features"]["short_liquidations"] is not None for row in admitted)
+    assert all(pd.Timestamp(row["outcomes"]["1"]["target_time"]) < end for row in admitted)
+    assert not result["events"][-1]["analysis_eligible"]
+    assert result["analysis_contract"]["input_coverage_policy"] == "complete_paired_rows"
+    assert not result["point_in_time_predictive"]

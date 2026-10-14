@@ -303,7 +303,7 @@ _EXAMPLES["event_fact_analysis@13"] = {
 
 _PURPOSES = {
     "raw_forward_outcome@5": "Compare controlled reversal cohorts with explicit interval, prior windows, entry/outcome horizon and matching-time choices.",
-    "event_fact_analysis@13": "Compare next-hour direction association beyond return/ATR using late-received exact-bucket numeric features; retrospective only.",
+    "event_fact_analysis@13": "Compare next-hour direction association beyond return/ATR using late-received exact-bucket numeric features; retrospective only. Optional outcomes.retrospective.input_coverage_policy=complete_paired_rows admits recorded partial custody with missing-row exclusions and fixed boundaries.",
     "raw_forward_outcome@4": "Compare bullish engulfing against matched non-engulfing candles after a fixed prior decline, with outcome-blind pairs and dependence checks.",
     "raw_forward_outcome@3": "Evaluate canonical raw candle predicates with causal close entry and contiguous bounded outcomes.",
     "raw_forward_outcome@2": "Preview raw candle conditions and subsequent outcomes.",

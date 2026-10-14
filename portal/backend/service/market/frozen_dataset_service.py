@@ -17,7 +17,7 @@ from market_data.contracts import (
     dataset_series_identity_payload,
 )
 from market_data.acquisition_coverage import (
-    missing_complete_coverage,
+    missing_recorded_coverage,
     normalize_acquisition_coverage,
 )
 from market_data.fact_registry import get_fact_contract
@@ -587,11 +587,12 @@ def resolve_frozen_dataset_read_binding(
                     created_at_lte=getattr(dataset, "created_at", None),
                 )
             )
-            uncovered = missing_complete_coverage(
+            uncovered = missing_recorded_coverage(
                 start=required_start,
                 end=required_end,
                 source_identity_keys=tuple(sorted(allowed_gap_sources)),
                 coverage=acquisition_coverage,
+                allow_partial=requirement.get("coverage_policy") == "recorded_partial",
             )
             if uncovered:
                 raise ValueError(
