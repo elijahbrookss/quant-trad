@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { RefreshCcw, X } from 'lucide-react'
-import { fetchResearchItem, fetchResearchTrail } from '../../adapters/research.adapter.js'
+import { fetchResearchItem, fetchResearchTrail, fetchResearchImages, researchImageContentUrl } from '../../adapters/research.adapter.js'
 
 function safeOrigin(value) {
   if (value === '/overview') return value
@@ -23,12 +23,33 @@ function ItemLink({ item }) {
   )
 }
 
+function EvidenceImage({ itemId, image }) {
+  const [failed, setFailed] = useState(false)
+  const url = researchImageContentUrl(itemId, image.image_id)
+  return <figure className="qt2-evidence-image">
+    <div>
+      {failed ? <p className="qt2-error">Image unavailable. Refresh to retry.</p>
+        : <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={image.alt_text}
+          loading="lazy" onError={() => setFailed(true)} /></a>}
+    </div>
+    <figcaption>
+      <h3>{image.title}</h3>
+      <p className="qt2-evidence-body">{image.explanation}</p>
+      <p>{image.binding.kind === 'study' ? `Study interpretation ${image.binding.revision}` : 'Exact Check evidence'} ┬╖ Presentation only</p>
+      <details><summary>Source binding and image identity</summary><pre>{JSON.stringify({
+        image_id: image.image_id, sha256: image.sha256, binding: image.binding,
+      }, null, 2)}</pre></details>
+    </figcaption>
+  </figure>
+}
+
 export function ResearchEvidenceRoom() {
   const { itemId } = useParams()
   const location = useLocation()
   const navigate = useNavigate()
   const [item, setItem] = useState(() => location.state?.item?.id === itemId ? location.state.item : null)
   const [trail, setTrail] = useState(null)
+  const [images, setImages] = useState([])
   const [loading, setLoading] = useState(true)
   const [errors, setErrors] = useState([])
   const [revision, setRevision] = useState(0)
@@ -36,14 +57,17 @@ export function ResearchEvidenceRoom() {
   useEffect(() => {
     let mounted = true
     setLoading(true)
-    Promise.allSettled([fetchResearchItem(itemId), fetchResearchTrail(itemId)])
-      .then(([itemResult, trailResult]) => {
+    setImages([])
+    Promise.allSettled([fetchResearchItem(itemId), fetchResearchTrail(itemId), fetchResearchImages(itemId)])
+      .then(([itemResult, trailResult, imageResult]) => {
         if (!mounted) return
         const nextErrors = []
         if (itemResult.status === 'fulfilled') setItem(itemResult.value)
         else nextErrors.push(itemResult.reason?.message || 'Research item unavailable')
         if (trailResult.status === 'fulfilled') setTrail(trailResult.value)
         else nextErrors.push(trailResult.reason?.message || 'Research trail unavailable')
+        if (imageResult.status === 'fulfilled') setImages(imageResult.value.items || [])
+        else nextErrors.push(imageResult.reason?.message || 'Research images unavailable')
         setErrors(nextErrors)
       })
       .finally(() => {
@@ -126,6 +150,11 @@ export function ResearchEvidenceRoom() {
             <pre>{JSON.stringify(publication.references, null, 2)}</pre>
             <small className="qt-mono">{publication.publication_hash}</small>
           </article>)}
+        </section> : null}
+
+        {images.length > 0 ? <section className="qt2-stat-card qt2-raw-evidence">
+          <span className="qt2-kicker">Attached research images</span>
+          {images.map((image) => <EvidenceImage key={image.image_id + ':' + revision} itemId={item.id} image={image} />)}
         </section> : null}
 
         <section className="qt2-stat-card qt2-raw-evidence">

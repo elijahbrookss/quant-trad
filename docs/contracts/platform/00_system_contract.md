@@ -98,3 +98,10 @@ JSON writes cannot claim publication. Corrections append revisions, preserving
 prior citations. Complete references do not certify statistical validity,
 causality, profitability, trading permission or actual replay/recovery.
 See [Research Memory Boundary](../../architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md#question-owned-interpretation-publication).
+
+Bounded static images may be attached to exact durable Check evidence or a
+published Study interpretation. QT retains image bytes and source identities on
+its database boundary, separately from scientific payloads and immutable
+publication history. Images are presentation evidence; attachment does not
+execute research, revise results or establish scientific certification. V2
+displays them through read-only contracts.

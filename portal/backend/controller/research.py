@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -17,8 +17,48 @@ from ..service.research import pass_gates as research_pass_gates
 
 from ..service.research import catalog as research_catalog
 from ..service.research import publication as research_publication
+from ..service.research import images as research_images
 
 router = APIRouter()
+
+
+class ResearchImageRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    title: str = Field(min_length=1, max_length=255)
+    explanation: str = Field(min_length=1, max_length=8192)
+    alt_text: str = Field(min_length=1, max_length=2048)
+    binding: Dict[str, str]
+    content_base64: str = Field(min_length=1, max_length=research_images.MAX_ENCODED_BYTES)
+
+
+def _image_call(handler, *args):
+    try:
+        return handler(*args)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(403 if "inaccessible" in str(exc) else 409, str(exc)) from exc
+
+
+@router.post("/items/{item_id}/images", status_code=201)
+def attach_research_image(item_id: str, body: ResearchImageRequest) -> Dict[str, Any]:
+    return _image_call(research_images.attach, item_id, body.model_dump())
+
+
+@router.get("/items/{item_id}/images")
+def list_research_images(item_id: str) -> Dict[str, Any]:
+    return _image_call(research_images.list_images, item_id)
+
+
+@router.get("/items/{item_id}/images/{image_id}/content")
+def get_research_image_content(item_id: str, image_id: str) -> Response:
+    content, manifest = _image_call(research_images.get_content, item_id, image_id)
+    return Response(content, media_type=manifest["media_type"], headers={
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "no-store",
+        "Content-Disposition": "inline",
+    })
 
 
 class ResearchItemRequest(BaseModel):

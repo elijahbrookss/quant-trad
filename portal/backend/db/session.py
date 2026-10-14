@@ -1968,6 +1968,7 @@ class Database:
         assert_required_indexes("portal_bot_run_leases", REQUIRED_BOT_RUN_LEASE_INDEXES)
         assert_required_indexes("portal_research_items", REQUIRED_RESEARCH_ITEM_INDEXES)
         assert_required_indexes("portal_research_links", REQUIRED_RESEARCH_LINK_INDEXES)
+        assert_required_indexes("portal_research_images", {"ix_portal_research_images_item_created"})
         for table_name, required_indexes in sorted(
             REQUIRED_RESEARCH_AUTHORITY_INDEXES.items()
         ):

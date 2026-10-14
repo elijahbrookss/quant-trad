@@ -49,6 +49,16 @@ export async function fetchResearchTrail(itemId) {
   return request(`/api/research/items/${encodeURIComponent(itemId)}/trail`)
 }
 
+export async function fetchResearchImages(itemId) {
+  const payload = await request(`/api/research/items/${encodeURIComponent(itemId)}/images`)
+  if (!Array.isArray(payload?.items)) throw new Error('Research image response invalid')
+  return payload
+}
+
+export function researchImageContentUrl(itemId, imageId) {
+  return `${BASE}/api/research/items/${encodeURIComponent(itemId)}/images/${encodeURIComponent(imageId)}/content`
+}
+
 export async function fetchRunResearchEvidence(runId, options = {}) {
   return request(`/api/research/runs/${encodeURIComponent(runId)}/evidence`, options)
 }

@@ -1912,6 +1912,33 @@ def _research_item_payload(
     return payload
 
 
+def _cmd_research_images(args: argparse.Namespace) -> int:
+    from base64 import b64encode
+    from urllib.parse import quote
+
+    path = f"/api/research/items/{quote(args.item_id, safe='')}/images"
+    client = _client(args)
+    if args.image_action == "list":
+        result = client.request_json("GET", path)
+    elif args.image_action == "download":
+        response = client.request_bytes("GET", path + f"/{quote(args.image_id, safe='')}/content")
+        # Exclusive creation prevents accidental replacement of local evidence.
+        with Path(args.output).open("xb") as output:
+            output.write(response.body)
+        result = {"image_id": args.image_id, "output": args.output, "byte_count": len(response.body)}
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        if "content_base64" in request:
+            raise ValueError("--request-json contains metadata only; image bytes come from --file")
+        with Path(args.file).open("rb") as image:
+            content = image.read(4 * 1024 * 1024 + 1)
+        if not 0 < len(content) <= 4 * 1024 * 1024:
+            raise ValueError("image file must contain 1..4194304 bytes")
+        result = client.request_json("POST", path, payload={**request, "content_base64": b64encode(content).decode("ascii")})
+    _print_json(result)
+    return 0
+
+
 def _cmd_research_question(args: argparse.Namespace) -> int:
     operations = ResearchOperations(_client(args))
     if args.question_action == "history":
@@ -4324,6 +4351,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_images = research_sub.add_parser("images", help="Attach and inspect static Check/Study presentation images on QT.")
+    image_sub = research_images.add_subparsers(dest="image_action", required=True)
+    for action in ("attach", "list", "download"):
+        command = image_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action == "attach":
+            command.add_argument("--file", required=True, help="Local PNG/JPEG to upload to QT.")
+            command.add_argument("--request-json", required=True, help="Title, explanation, alt_text and exact evidence binding.")
+        elif action == "download":
+            command.add_argument("image_id")
+            command.add_argument("--output", required=True, help="New destination file; existing files are preserved.")
+        command.set_defaults(func=_cmd_research_images)
     research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history; distinct from executable StudyDefinition.")
     research_question_sub = research_question.add_subparsers(dest="question_action", required=True)
     for action in ("adopt", "publish", "history"):
