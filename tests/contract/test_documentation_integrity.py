@@ -104,7 +104,11 @@ def test_ci_topology_matches_workflow_jobs() -> None:
         "deployment-rehearsal",
         "committed-recovery",
     )
-    assert set(jobs) == set(expected_jobs)
+    assert set(jobs) == set(expected_jobs) | {"changes", "docs", "ci-required"}
+    assert jobs["ci-required"]["if"] == "${{ always() }}"
+    assert set(jobs["ci-required"]["needs"]) == set(expected_jobs) | {"changes", "docs"}
+    for job in expected_jobs:
+        assert jobs[job]["needs"] == "changes"
 
     bootstrap_steps = tuple(
         step["name"] for step in jobs["clean-database-bootstrap"]["steps"]
@@ -141,7 +145,7 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     )
     assert documented_jobs == expected_jobs
     normalized = _squash(topology)
-    assert "the workflow defines exactly six jobs" in normalized
+    assert "the workflow defines nine jobs" in normalized
     assert "three sequential steps in this fourth job" in normalized
     assert "they are not separate workflow jobs" in normalized
 

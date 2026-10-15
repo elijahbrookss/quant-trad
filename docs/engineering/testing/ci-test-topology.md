@@ -16,8 +16,10 @@ for pull requests targeting `develop` or `main`.
 
 ## Current Workflow Topology
 
-The workflow defines exactly six jobs. None declares `needs`, so GitHub may run
-them concurrently. The numbering below is for documentation only.
+The workflow defines nine jobs. `changes` computes requirements before the six
+existing qualification jobs and the new `docs` check. Those checks can run
+concurrently; `ci-required` always runs after their results. The numbering below
+identifies the six existing qualification jobs for reproduction.
 
 | # | Job ID | Primary boundary |
 | ---: | --- | --- |
@@ -45,7 +47,7 @@ Runner: `ubuntu-latest` with Python 3.12 and pip caching keyed by
 
 The workflow steps are:
 
-1. `Checkout repository` with full Git history;
+1. `Checkout repository`;
 2. `Set up Python`;
 3. `Install dependencies` with `pip install --no-deps -r requirements.lock`
    followed by `python -m pip check`; and
@@ -143,7 +145,7 @@ does not claim per-test database isolation for the rest of the DB corpus.
 
 ## What The Workflow Protects
 
-The four-job workflow catches:
+The workflow catches:
 
 - non-database backend import, logic, provider-wiring, runtime, accounting,
   reporting, BotLens, CLI, MCP, and service-contract regressions;
@@ -330,3 +332,44 @@ encrypted pair and read-only completion checks must pass afterward. This test
 uses generated disposable inputs; it does not measure production outage or grant
 production operation authority. Its 25-minute job bound includes image builds
 and deliberate expiry waits, not a production completion estimate.
+
+
+## Conservative work-branch selection
+
+`scripts/ci/ci_impact.py` owns the small allowlist. Feature/hotfix pushes compare
+all changed paths to the push's previous commit; a deleted path and its renamed
+replacement both participate. PRs into release branches, develop/main pushes,
+and manual workflow dispatch retain complete qualification. Use Actions **Run
+workflow** with **force_full** to request complete checks on a work branch.
+Missing/zero bases, missing history, invalid comparisons, unknown paths and empty
+diffs select all checks. Mixed changes take the union, and any high-risk path
+selects the complete workflow. The plan records base/head, paths and requirements
+in the selection log; it never treats unavailable coverage as a passing test.
+
+| Scope | Work-branch requirement |
+| --- | --- |
+| Markdown and static documentation assets | `docs` |
+| Frontend JSX/TSX/styles/static assets outside API/adapters/services | `docs`, `frontend` |
+| Reviewed event_statistics, directional_model, metrics modules and test_event_fact_check | `docs`, complete ordinary `pr-suite` |
+| Evaluators, registry/catalog, request/result serialization, frozen bindings, repositories, dependencies, configuration, storage, migrations, shared infrastructure or any unlisted path | Complete workflow |
+
+The calculation allowlist is a test-environment boundary, not permission to
+change historical scientific meanings or eligibility for automatic deployment.
+Do not add evaluator globs. New eligible files require review of imports,
+durable contract ownership and regression scope. Changes to the selector itself
+receive full qualification.
+
+`ci-required` checks every computed required job for success. Failure,
+cancellation, a missing result or an unexpected skip fails the gate; an explicitly
+unrequired skip remains a skip. The existing release receipt still requires all
+seven expanded original jobs and both recovery bundles. A selected iteration run
+cannot satisfy it. GitHub must require the stable `ci-required` check when this
+policy is activated; changing repository rules needs separate approval. This
+component does not change GitHub rules or any production trigger.
+
+The deployment-contract job captures image IDs before runtime proofs, verifies
+they are unchanged afterward, and exports backend/frontend/frontend-v2 in the
+`routine-release-package` artifact with source SHA/hash, run/attempt, image IDs
+and archive checksum. It adds artifact export time and storage proportional to
+the images; seven-day retention matches recovery evidence. Infrastructure images
+are not exported or upgraded by routine promotion.

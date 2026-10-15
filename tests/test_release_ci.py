@@ -21,6 +21,7 @@ def response():
     for name, job in workflow["jobs"].items():
         matrix = job.get("strategy", {}).get("matrix", {}).get("runtime")
         labels.extend(f"{name} ({runtime})" for runtime in matrix) if matrix else labels.append(name)
+    labels.sort(key=lambda name: name not in ci.REQUIRED_JOBS)
     run = dict(id=10, head_sha=SHA, event="push", head_branch="develop", path=".github/workflows/test.yaml",
                status="completed", conclusion="success", run_attempt=2,
                repository=dict(full_name=ci.REPOSITORY), head_repository=dict(full_name=ci.REPOSITORY),
@@ -56,7 +57,7 @@ def test_requires_exact_latest_push_run_and_complete_attempt(monkeypatch):
     assert receipt["attempt"] == 2
     assert receipt["event"] == "release_ci_qualified"
     assert len(receipt["jobs"]) == 7
-    assert {job["name"] for job in jobs["jobs"]} == ci.REQUIRED_JOBS
+    assert ci.REQUIRED_JOBS <= {job["name"] for job in jobs["jobs"]}
     assert len(receipt["artifacts"]) == 2
     assert "head_sha=" + SHA in calls[0]
     assert "attempts/2/jobs" in calls[1]

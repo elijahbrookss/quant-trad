@@ -357,3 +357,76 @@ python3() { printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         assert result.returncode!=0 and 'source-only storage fence' in result.stderr
         assert 'COMPOSE_REACHED' not in result.stdout
     assert private.exists()
+
+
+@pytest.mark.parametrize("hold", ["valid", "corrupt", "symlink"])
+def test_routine_entry_refuses_storage_hold_before_package_or_runtime(tmp_path, hold):
+    state=tmp_path/"state"
+    state.mkdir()
+    marker=state/"storage-handoff.json"
+    if hold=="symlink": marker.symlink_to(state/"missing")
+    else: marker.write_text("{}" if hold=="valid" else "broken")
+    result=shell(tmp_path, "promote_routine " + "a"*40 + " --package /nonexistent.zip")
+    assert result.returncode != 0
+    assert "storage handoff hold" in result.stderr
+
+
+def test_routine_image_reuse_still_marks_activation_before_up(tmp_path):
+    state=tmp_path/"state"
+    state.mkdir()
+    (state/"promotion.env").write_text("activation_started=false\n")
+    result=shell(tmp_path, r'''
+routine_active=true
+promotion_in_progress=true
+reuse_release_images=true
+require_runtime() { :; }
+require_no_storage_handoff() { :; }
+require_no_alert_preview() { :; }
+select_release() { QT_RELEASE_REVISION=fixture; QT_SOURCE_TREE_HASH=fixture; }
+validate_storage_root() { :; }
+promotion_value() { printf previous; }
+python3() { :; }
+compose() {
+  if test "$1" = config && test "${2:-}" = --format; then echo '{}'; fi
+  if test "$1" = up; then
+    grep -q 'activation_started=true' "$state_root/promotion.env" || exit 90
+    echo ACTIVATION_RECORDED
+    return 19
+  fi
+}
+(deploy_release fixture) &
+child=$!
+if wait "$child"; then exit 91; fi
+''')
+    assert result.returncode == 0, result.stderr
+    assert "ACTIVATION_RECORDED" in result.stdout
+
+
+def test_routine_recovery_uses_frozen_old_images_without_routine_preflight(tmp_path):
+    state=tmp_path/"state"
+    state.mkdir()
+    (state/"promotion.env").write_text(f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\n")
+    (state/"recovery.compose.json").write_text('{}')
+    result=shell(tmp_path, r'''
+routine_active=true
+select_release() { :; }
+deploy_release() {
+  test "$routine_active" = false || exit 90
+  test "$reuse_release_images" = true || exit 91
+  echo FROZEN_RECOVERY
+}
+recover_promotion
+''')
+    assert result.returncode==0, result.stderr
+    assert "FROZEN_RECOVERY" in result.stdout
+
+
+
+def test_unknown_post_rollout_compatibility_blocks_automatic_old_image_recovery(tmp_path):
+    state=tmp_path/"state";state.mkdir()
+    (state/"promotion.env").write_text("compatibility_lost=true\n")
+    result=shell(tmp_path, "select_release() { echo INCORRECT_CHECKOUT; }; recover_promotion")
+    assert result.returncode != 0
+    assert "compatibility is unknown" in result.stderr
+    assert "INCORRECT_CHECKOUT" not in result.stdout
+    assert (state/"promotion.env").exists()

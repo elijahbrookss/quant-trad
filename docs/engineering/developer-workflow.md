@@ -403,3 +403,22 @@ while retaining the original v1 matching contract. Use the catalog's exact
 request template. The [Check evidence boundary](../architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md#fixed-atr-ratio-pair-filter)
 owns the fixed rule, separate support denominators and compatibility behavior.
 This analytical extension requires no schema migration or new Dataset.
+
+
+## Change-impact iteration and routine promotion
+
+Work-branch CI now computes required checks from the conservative matrix in
+[CI test topology](testing/ci-test-topology.md#conservative-work-branch-selection).
+Docs, frontend presentation and a few reviewed research calculation modules can
+avoid unrelated database/storage rehearsals. Unlisted or mixed high-risk changes
+run everything. A manual force-full run remains available. Keep focused local
+feedback and the normal validation matrix; a short CI run is not the full
+exact-source handoff receipt described above. Develop/main release qualification
+and its seven original expanded jobs/recovery artifacts remain mandatory.
+
+Routine deployment eligibility is narrower than test selection. The first path
+allows documentation and frontend presentation only, with unchanged backend,
+schema, registry, serialization, dependencies, configuration and storage. Check
+calculation updates still require reviewed manual compatibility promotion.
+See [server deployment](server-deployment.md#qualified-routine-promotion) for the
+artifact, read-only preflight, recovery evidence and activation boundary.
