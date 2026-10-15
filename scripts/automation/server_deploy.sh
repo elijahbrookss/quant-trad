@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Internal recovery mode is never selected by an inherited environment value.
 recovery_config_frozen=false
+routine_active=false
+routine_package=""
+compose_probe_timeout=false
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 repo_root="$(cd "$script_dir/../.." >/dev/null 2>&1 && pwd)"
@@ -65,6 +68,7 @@ Usage:
   scripts/automation/server_deploy.sh preview-alerts
   scripts/automation/server_deploy.sh restore-alerts
   scripts/automation/server_deploy.sh promote <full-commit> --compatible-with <current-full-commit>
+  scripts/automation/server_deploy.sh promote-routine <full-commit> --package <Actions-artifact.zip>
   scripts/automation/server_deploy.sh recover
   scripts/automation/server_deploy.sh deploy [git-ref]
   scripts/automation/server_deploy.sh rollback [git-ref]
@@ -400,6 +404,11 @@ storage_overlay_for() {
 }
 
 compose() {
+  local compose_exec=(docker compose)
+  if test "${compose_probe_timeout:-false}" = true; then
+    require_command timeout
+    compose_exec=(timeout --kill-after=5s 30s docker compose)
+  fi
   local profile_args=()
   local compose_file_args=(--file "$compose_file")
   local storage_overlay
@@ -419,7 +428,7 @@ compose() {
     compose_file_args+=(--file "$alerting_compose_file")
   fi
 
-  docker compose \
+  "${compose_exec[@]}" \
     --env-file "$env_file" \
     "${compose_file_args[@]}" \
     "${profile_args[@]}" \
@@ -554,6 +563,15 @@ state_value() {
   printf '%s' "${line#*=}"
 }
 
+routine_configuration() {
+  local action="$1" previous="${2:-}" mode="${3:-}"
+  local -a options=()
+  if test "$mode" = without-running; then options+=(--without-running); fi
+  compose config --format json | python3 "$repo_root/scripts/automation/routine_configuration.py" "$action" \
+    --state "$state_root" --env-file "$env_file" --revision "$QT_RELEASE_REVISION" \
+    --source-hash "$QT_SOURCE_TREE_HASH" --previous "$previous" "${options[@]}"
+}
+
 record_release() {
   local prior_current prior_previous next_previous deployed_at temporary layout
   layout="$(recorded_storage_layout)" || return
@@ -564,6 +582,15 @@ record_release() {
     next_previous="$prior_current"
   else
     next_previous="$prior_previous"
+  fi
+  if test -f "$repo_root/scripts/automation/routine_configuration.py"; then
+    if ! routine_configuration capture; then
+      rm -f -- "$state_root/routine-configuration.json"
+      if test "$routine_active" = true || test "$(promotion_value routine_promotion)" = true; then
+        die "routine configuration baseline unavailable; preserve state"
+      fi
+      echo "routine configuration baseline unavailable; future routine promotion is disabled" >&2
+    fi
   fi
   deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   temporary="$(mktemp "$state_root/release.XXXXXX")"
@@ -862,6 +889,19 @@ deploy_release() {
   echo "Deploying Quant-Trad revision $QT_RELEASE_REVISION"
   echo "Source tree hash $QT_SOURCE_TREE_HASH"
   compose config --quiet
+  if test "$routine_active" = true; then
+    local candidate_config
+    candidate_config="$(mktemp "$state_root/routine-candidate.XXXXXX")"
+    chmod 0600 "$candidate_config"
+    compose config --format json >"$candidate_config"
+    python3 "$repo_root/scripts/automation/routine_promotion.py" pin \
+      --candidate "$QT_RELEASE_REVISION" --previous "$(promotion_value previous_revision)" \
+      --package "$routine_package" --state "$state_root" --config "$candidate_config"
+    compose_file="$candidate_config"
+    recovery_config_frozen=true
+    alerts_enabled=false
+    reuse_release_images=true
+  fi
   if test "${reuse_release_images:-false}" != "true"; then
     build_release_images
   fi
@@ -878,7 +918,12 @@ check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sy
     revision=sys.argv[4], source_hash=sys.argv[5], model=json.loads(raw))
 ' "$state_root" "$env_file" "$repo_root" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH"
   fi
-  if test "${promotion_in_progress:-false}" = "true" && test "${reuse_release_images:-false}" != "true"; then
+  if test "$routine_active" = true; then
+    # Recheck resolved settings, private file/bind bytes and the current runtime
+    # immediately before the first replacement; never fold edits into recovery.
+    routine_configuration admit "$(promotion_value previous_revision)"
+  fi
+  if test "${promotion_in_progress:-false}" = "true" && { test "${reuse_release_images:-false}" != "true" || test "$routine_active" = true; }; then
     printf 'activation_started=true\n' >>"$state_root/promotion.env"
   fi
   compose up --detach --remove-orphans --wait --no-build --pull never \
@@ -893,6 +938,19 @@ check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sy
   verify_release_image frontend
   verify_release_image frontend-v2
   compose exec -T backend /app/scripts/qt data collectors fleet >/dev/null
+  if test "$routine_active" = true; then
+    local post_schema
+    post_schema="$(mktemp "$state_root/routine-schema-after.XXXXXX")"
+    chmod 0600 "$post_schema"
+    if ! capture_routine_schema "$post_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine schema probe unavailable; preserve state and verify compatibility before recovery"
+    fi
+    if ! cmp --silent "$schema_probe" "$post_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine post-deploy schema/cluster changed; preserve state and reconcile compatibility before recovery"
+    fi
+  fi
   compose ps
   record_release
   if storage_online_pending; then
@@ -959,6 +1017,14 @@ prepare_recovery() {
   mv "$temporary" "$state_root/recovery.compose.json"
 }
 
+capture_routine_schema() {
+  # Probe the existing DB directly so recovery does not depend on a healthy
+  # candidate application. Use its existing local identity; copy no credentials.
+  python3 "$repo_root/scripts/automation/routine_schema_probe.py" --sql \
+    | compose_probe_timeout=true compose exec -T tsdb sh -eu -c 'export PGCONNECT_TIMEOUT=10; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    | python3 "$repo_root/scripts/automation/routine_schema_probe.py" --fingerprint >"$1"
+}
+
 recover_promotion() {
   require_no_storage_handoff
   test -f "$state_root/promotion.env" || die "no unfinished promotion is recorded"
@@ -969,6 +1035,31 @@ recover_promotion() {
   [[ "$activation" = true || "$activation" = false ]] || die "invalid promotion activation state"
   [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
     || die "invalid promotion recovery state"
+  local routine baseline baseline_hash recovery_schema
+  routine="$(promotion_value routine_promotion)"
+  [[ -z "$routine" || "$routine" = true ]] || die "invalid routine recovery identity"
+  if test "$routine" = true && test "$activation" = true; then
+    baseline="$(promotion_value routine_schema_path)"
+    baseline_hash="$(promotion_value routine_schema_sha256)"
+    [[ "$baseline" = "$state_root"/routine-schema.* && "$baseline_hash" =~ ^[a-f0-9]{64}$ ]] \
+      && test -f "$baseline" && test ! -L "$baseline" \
+      || die "routine recovery schema baseline is missing or invalid"
+    actual_hash="$(sha256sum "$baseline")"
+    test "${actual_hash%% *}" = "$baseline_hash" \
+      || die "routine recovery baseline changed; evidence retained"
+    recovery_schema="$(mktemp "$state_root/routine-recovery-schema.XXXXXX")"
+    chmod 0600 "$recovery_schema"
+    if ! capture_routine_schema "$recovery_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine recovery compatibility is unknown; probe failed; preserve state"
+    fi
+    if ! cmp --silent "$baseline" "$recovery_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine recovery compatibility is unknown after schema drift; preserve state"
+    fi
+  elif test "$(promotion_value compatibility_lost)" = true; then
+    die "routine compatibility is unknown after schema drift; preserve state and reconcile before recovery"
+  fi
   test -f "$state_root/recovery.compose.json" || die "recovery Compose snapshot is missing"
   layout="$(recorded_storage_layout)" || return
   test "$(promotion_value storage_layout)" = "$layout" \
@@ -983,12 +1074,19 @@ recover_promotion() {
     test "${actual_hash%% *}" = "$snapshot_hash" \
       || die "recovery Compose snapshot changed; evidence retained"
   fi
+  if test "$routine" = true && test "$activation" = true; then
+    # A partly replaced candidate cannot match the old container inventory, but
+    # settings and mounted configuration must still match its approved baseline.
+    compute_release_material
+    routine_configuration admit "$previous" without-running
+  fi
   echo "event=promotion_recovery_started candidate=$candidate previous=$previous" >&2
   # Run outside a shell conditional: Bash otherwise disables errexit inside
   # called functions and can record a failed deployment as successful.
   (
     set -e
     promotion_in_progress=true
+    routine_active=false
     reuse_release_images=true
     compose_file="$state_root/recovery.compose.json"
     alerts_enabled=false
@@ -1035,6 +1133,17 @@ promote_release() {
   for service in backend market-data-collector docker-stats frontend frontend-v2; do
     verify_release_image "$service"
   done
+  if test "$routine_active" = true; then
+    test -z "$single_node_profiles" || die "routine promotion excludes optional profiles"
+    routine_configuration admit "$previous"
+    local schema_probe
+    schema_probe="$(mktemp "$state_root/routine-schema.XXXXXX")"
+    chmod 0600 "$schema_probe"
+    capture_routine_schema "$schema_probe"
+    python3 "$repo_root/scripts/automation/routine_promotion.py" admit \
+      --candidate "$candidate" --previous "$previous" --package "$routine_package" --state "$state_root" --schema "$schema_probe"
+  fi
+  if test "$routine_active" = true; then routine_configuration admit "$previous"; fi
   prepare_recovery
   local temporary layout snapshot_hash
   layout="$(recorded_storage_layout)" || return
@@ -1044,6 +1153,12 @@ promote_release() {
   chmod 0600 "$temporary"
   printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\nstorage_layout=%s\nrecovery_compose_sha256=%s\n' \
     "$previous" "$candidate" "$layout" "$snapshot_hash" >"$temporary"
+  if test "$routine_active" = true; then
+    local schema_file_hash
+    schema_file_hash="$(sha256sum "$schema_probe")"
+    printf 'routine_promotion=true\nroutine_schema_path=%s\nroutine_schema_sha256=%s\n' \
+      "$schema_probe" "${schema_file_hash%% *}" >>"$temporary"
+  fi
   mv "$temporary" "$state_root/promotion.env"
   echo "event=promotion_started candidate=$candidate previous=$previous"
   (
@@ -1062,17 +1177,30 @@ promote_release() {
   fi
 }
 
+promote_routine() {
+  test "$#" = 3 && test "$2" = --package \
+    || die "promote-routine requires <full-commit> --package <Actions-artifact.zip>"
+  require_no_storage_handoff
+  routine_package="$(realpath -- "$3")"
+  test -f "$routine_package" || die "routine image package is unavailable"
+  routine_active=true
+  promote_release "$1" --compatible-with "$(state_value current_revision)"
+}
+
 action="${1:-}"
 shift || true
 
 case "$action" in
-  init-env|deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
+  init-env|deploy|rollback|promote|promote-routine|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
     acquire_deployment_lock
     require_no_storage_handoff "${1:-}"
     ;;
 esac
 
 case "$action" in
+  promote-routine)
+    promote_routine "$@"
+    ;;
   promote)
     promote_release "$@"
     ;;

@@ -1,6 +1,15 @@
 name: Tests with Coverage
 
+permissions:
+  contents: read
+
 on:
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: 'Run complete qualification (work branches included)'
+        type: boolean
+        default: true
   push:
     branches: [develop, main, 'feature/**', 'hotfix/**']
   pull_request:
@@ -12,7 +21,60 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/') }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      plan: ${{ steps.select.outputs.plan }}
+      docs: ${{ steps.select.outputs.docs }}
+      pr-suite: ${{ steps.select.outputs.pr-suite }}
+      frontend: ${{ steps.select.outputs.frontend }}
+      deployment-contract: ${{ steps.select.outputs.deployment-contract }}
+      deployment-rehearsal: ${{ steps.select.outputs.deployment-rehearsal }}
+      clean-database-bootstrap: ${{ steps.select.outputs.clean-database-bootstrap }}
+      committed-recovery: ${{ steps.select.outputs.committed-recovery }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: select
+        env:
+          QT_CI_INTEGRATION_REF: origin/develop
+        run: python3 scripts/ci/ci_impact.py
+
+  docs:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --no-deps -r requirements.lock
+      - run: |
+          python scripts/docs/build_architecture_index.py --check
+          QT_OMIT_DB_TESTS=1 python -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_documentation_integrity.py tests/contract/test_platform_glossary.py
+
+  ci-required:
+    if: ${{ always() }}
+    needs: [changes, docs, pr-suite, frontend, deployment-contract, deployment-rehearsal, clean-database-bootstrap, committed-recovery]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Enforce computed required checks
+        env:
+          QT_CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/ci_impact.py --gate
+
   committed-recovery:
+    needs: changes
+    if: ${{ needs.changes.outputs['committed-recovery'] == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -24,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -131,11 +194,15 @@ jobs:
           retention-days: 7
 
   pr-suite:
+    needs: changes
+    if: ${{ needs.changes.outputs['pr-suite'] == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -154,11 +221,15 @@ jobs:
         run: ./scripts/ci/run_test_suite.sh pr
 
   frontend:
+    needs: changes
+    if: ${{ needs.changes.outputs['frontend'] == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -174,6 +245,8 @@ jobs:
         run: make frontend-check
 
   deployment-contract:
+    needs: changes
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
     runs-on: ubuntu-latest
     # Online proofs take ~33 minutes; retain room for the separately bounded
     # 40-minute operator rehearsal, image builds and runtime checks.
@@ -182,11 +255,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Generate disposable operator environment
         env:
-          QT_SINGLE_NODE_ENV_FILE: ${{ github.workspace }}/secrets.env
-        run: bash scripts/automation/server_deploy.sh init-env
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
 
       - name: Validate shell and Compose contracts
         run: |
@@ -201,7 +282,7 @@ jobs:
           export QT_RELEASE_REVISION="$revision"
           export QT_SOURCE_TREE_HASH="$tree_hash"
           docker compose \
-            --env-file secrets.env \
+            --env-file "$QT_SINGLE_NODE_ENV_FILE" \
             --file docker/docker-compose.server.yml \
             config --quiet
 
@@ -222,9 +303,12 @@ jobs:
           export QT_RELEASE_REVISION="$revision"
           export QT_SOURCE_TREE_HASH="$tree_hash"
           docker compose \
-            --env-file secrets.env \
+            --env-file "$QT_SINGLE_NODE_ENV_FILE" \
             --file docker/docker-compose.server.yml \
             build tsdb backend frontend frontend-v2
+
+      - name: Capture candidate image identities before proofs
+        run: python3 scripts/automation/release_package.py capture --root "$RUNNER_TEMP/qt-release-package"
 
       - name: Prove production worker encrypted pairing and dependency retirement
         run: |
@@ -308,16 +392,44 @@ jobs:
             --runtime-images qt-incremental-runtime-proof \
             "quanttrad-frontend:$revision" "quanttrad-frontend-v2:$revision"
 
+      - name: Export qualified routine images
+        run: python3 scripts/automation/release_package.py export --root "$RUNNER_TEMP/qt-release-package"
+      - name: Preserve qualified routine images
+        uses: actions/upload-artifact@v4
+        with:
+          name: routine-release-package
+          path: ${{ runner.temp }}/qt-release-package/*
+          retention-days: 7
+          compression-level: 0
+
   deployment-rehearsal:
+    needs: changes
+    if: ${{ needs.changes.outputs['deployment-rehearsal'] == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Set private disposable temporary root
+        run: printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Rehearse promotion and failed rollout recovery
         run: python3 scripts/ci/test_server_promotion.py
+      - name: Rehearse actual routine package promotion and recovery
+        run: python3 scripts/ci/test_server_promotion.py --routine --evidence-root "$RUNNER_TEMP/qt-routine-evidence"
+      - name: Preserve disposable routine qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: routine-controller-rehearsal
+          path: ${{ runner.temp }}/qt-routine-evidence/qualification.json
+          retention-days: 7
+
 
   clean-database-bootstrap:
+    needs: changes
+    if: ${{ needs.changes.outputs['clean-database-bootstrap'] == 'true' }}
     runs-on: ubuntu-latest
 
     services:
@@ -338,6 +450,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5

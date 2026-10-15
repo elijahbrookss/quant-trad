@@ -10,6 +10,10 @@ tags:
   - recovery
 code_paths:
   - scripts/automation/server_deploy.sh
+  - scripts/automation/release_package.py
+  - scripts/automation/routine_promotion.py
+  - scripts/automation/routine_schema_probe.py
+  - scripts/automation/routine_configuration.py
   - scripts/automation/check_release_ci.py
   - scripts/automation/pin_deploy_recovery.py
   - scripts/automation/storage_handoff_pause.py
@@ -350,3 +354,65 @@ a replacement database. Its Compose overlay removes the inherited database build
 `QT_REBUILD_DATABASE_IMAGE=1` is refused in this layout. Maintenance uses the same
 locally built backend image, so its image is not fetched as an unrelated service.
 The source-layout database build behavior remains unchanged.
+
+
+## Qualified routine capability, trigger activation deferred
+
+The existing controller may mechanically admit only documentation/exact reviewed frontend
+presentation changes while all backend write/read, schema, registry, serialized
+result, dependency, configuration and storage source remains unchanged. This
+narrow path uses the exact application image IDs exported after successful
+runtime proofs in the exact develop-push attempt. The package manifest and
+GitHub artifact bytes bind source, run/attempt and image identities; candidate
+activation pins infrastructure to current running IDs and never rebuilds/pulls.
+
+Admission also consumes a private operator-qualified backup/restore record,
+checks its source/expiry and evidence fingerprints, and verifies the actual
+read-only schema/cluster fingerprint before and after promotion. The routine identity and hashed baseline are persisted before activation;
+activated recovery must independently re-probe current schema even after probe
+failure or controller interruption, without requiring a healthy candidate app.
+Existing host locks, persistent holds, health gates, retained recovery snapshots, failed-operation
+semantics and interruption markers remain authoritative. Unknown compatibility,
+backend changes, migrations, storage cutovers and credentials/security changes
+remain explicitly reviewed procedures. CI iteration eligibility is broader than
+routine deployment eligibility and cannot confer promotion authority.
+
+This component adds the capability, not an unattended production trigger. The
+operator still initiates it; activation of a future trigger and GitHub required
+checks requires an exact separate approval after real disposable qualification
+and the existing release installation. No new credential or deployment platform
+is introduced. The recovery record references actual approved backup/restore
+evidence; a checksum alone never certifies a restore.
+
+
+The existing disposable rehearsal also owns a hosted-only routine mode. It invokes
+the real routine controller and package/schema/recovery boundaries against tiny
+synthetic apps and real isolated PostgreSQL, with local synthetic CI metadata.
+It qualifies controller behavior, not production schema, provider availability,
+actual backup custody or a release. Its tiny actual restore precedes the fixture
+recovery record; private environment and snapshots never enter its uploaded
+receipt. Source-bound hosted execution and separate real artifact verification
+remain required before activation.
+
+## Routine configuration admission
+
+Source-only eligibility cannot authorize live configuration edits. Successful
+new-controller deployments record private fingerprints of the effective Compose
+model, operator environment, mounted configuration and actual runtime inventory.
+Routine admission requires that baseline, checks it before recovery capture and
+immediately before activation, and permits only derived qualified-source/image
+identity changes. Recovery retains the settings guard even when candidate
+containers are partly replaced. Missing legacy baselines and private-file,
+caller-setting, mounted-file permission/ownership or runtime drift refuse before
+replacement; reviewed manual reconciliation remains required. Fingerprints never
+publish resolved credentials or Docker configuration. This extends the existing
+locked controller and does not enable a production trigger.
+
+
+Routine configuration admission refuses nonempty Compose `configs` or `secrets`
+at either model or service level, including custom `QT_SINGLE_NODE_COMPOSE_FILE`
+models. Referenced payloads are not covered by the existing bind-file fingerprint;
+rendered declarations alone cannot establish their identity. Refusal precedes
+private binding reads and Docker observations, including interrupted recovery's
+configuration-only check. Supporting these mechanisms needs explicit review and
+payload identity evidence; the default production model does not use them.
