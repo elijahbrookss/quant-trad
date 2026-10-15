@@ -28,7 +28,9 @@ from research_science.check import (
 
 from . import checks
 from .liquidity_episode_evaluator import (LiquidityEpisodeEvaluator, SCHEMA as EPISODE_SCHEMA, RULES as EPISODE_RULES, normalize_configuration as normalize_episode_configuration)
-from .volume_cohort_evaluator import (VolumeCohortEvaluator, OUTCOME_SCHEMA as VOLUME_COHORT_SCHEMA,
+from .volume_cohort_evaluator import (NearbyDateVolumeCohortEvaluator,
+    NEARBY_SCHEMA as NEARBY_VOLUME_SCHEMA, NEARBY_RULES as NEARBY_VOLUME_RULES,
+    normalize_nearby_configuration, VolumeCohortEvaluator, OUTCOME_SCHEMA as VOLUME_COHORT_SCHEMA,
     RULES as VOLUME_COHORT_RULES, normalize_configuration as normalize_volume_cohort_configuration)
 from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME_SCHEMA as DISTRIBUTION_SCHEMA, RULES as DISTRIBUTION_RULES, normalize_configuration as normalize_distribution_configuration)
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
@@ -338,10 +340,23 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_nearby_volume_evaluator = NearbyDateVolumeCohortEvaluator()
+CHECK_REGISTRY.register_evaluator(_nearby_volume_evaluator)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="8", evaluator_id=_nearby_volume_evaluator.evaluator_id,
+    evaluator_version="8", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family":checks.RAW_FORWARD_OUTCOME, "event_ownership":"check",
+        "input_policy":"canonical_candle_clock_path.v1", "outcome_schema":NEARBY_VOLUME_SCHEMA,
+        "outcome_boundary":"evaluation_end_exclusive", "volume_cohort_rules":NEARBY_VOLUME_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit only exact registered raw v3/v4/v5/v6/v7 pairs."""
+    """Keep historical raw v2 unqualified; admit only exact registered raw v3/v4/v5/v6/v7/v8 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -924,7 +939,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("7" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("8" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == NEARBY_VOLUME_SCHEMA
+            else "7" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == VOLUME_COHORT_SCHEMA
             else "6" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == DISTRIBUTION_SCHEMA
@@ -978,7 +995,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1036,6 +1053,11 @@ def materialize_check_definition(
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3":
         outcomes = normalize_raw_candle_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "8":
+        outcomes = normalize_nearby_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars:
+            raise ValueError("volume_cohort_nearby_invalid: no configurable gap rewarm")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "7":
         outcomes = normalize_volume_cohort_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)

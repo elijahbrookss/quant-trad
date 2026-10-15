@@ -319,6 +319,11 @@ _EXAMPLES["raw_forward_outcome@7"]["outcomes"].update(
         "matching_policy":"same_date_hour", "caliper_ratios":{
             "formation_body_fraction":1.25, "formation_range_fraction":1.25, "prior_rms_return":1.25}})
 
+_EXAMPLES["raw_forward_outcome@8"] = deepcopy(_EXAMPLES["raw_forward_outcome@7"])
+_EXAMPLES["raw_forward_outcome@8"]["outcomes"]["schema_version"] = "volume_cohort_matched.v2"
+_EXAMPLES["raw_forward_outcome@8"]["outcomes"]["comparison"].update(
+    matching_policy="same_utc_close_slot", comparison_window_days=3, matching_slot_seconds=3600)
+
 _EXAMPLES["event_fact_analysis@14"] = {
     "check_family":"event_fact_analysis", "mode":"preview", "gap_policy":"continue_degraded",
     "scope":{"instrument_id":"instrument-id","timeframe":"1m","start":"2026-09-22T00:00:00Z","end":"2026-09-22T00:30:00Z"},
@@ -336,6 +341,7 @@ _EXAMPLES["event_fact_analysis@14"] = {
 
 _PURPOSES = {
     "event_fact_analysis@14": "Describe fixed sharp-move and thinning episodes, outcome-blind precontext controls, trade sequences, and actual availability clocks on bounded exposed inputs.",
+    "raw_forward_outcome@8": "Compare raw-event volume cohorts using an explicit nearby-date radius and UTC time slot with unchanged feature calipers, support and both-arm date dependence diagnostics.",
     "raw_forward_outcome@7": "Compare configured raw-event volume cohorts with outcome-blind body/range/prior-volatility matching, retaining the full original universe and missingness.",
     "raw_forward_outcome@6": "Retain every raw-candle event and compare volume cohorts with fixed quantiles, tails, day and overlap diagnostics; preserve valid extremes.",
     "raw_forward_outcome@5": "Compare controlled reversal cohorts with explicit interval, prior windows, entry/outcome horizon and matching-time choices.",
@@ -488,6 +494,9 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
     else:
         fields["outcomes"] = {"fields": ["min_sample_count", "max_examples"] + (["bucket_by", "buckets"] if family == "run_signal_summary" else []),
             "defaults": {"min_sample_count": 5, "max_examples": 100}, "constraints": "Sample threshold is descriptive; example cap bounds reporting. Signal-summary bucket_by (buckets alias) lists recorded fields, default symbol/output_name/event_key."}
+    if family == "raw_forward_outcome" and version == "8":
+        fields["outcomes"] = {"fields":list(_EXAMPLES["raw_forward_outcome@8"]["outcomes"]),
+            "constraints":"Explicit volume_cohort_matched.v2; v7 raw/cohort/outcome constraints; comparison adds required day radius 1..31 and UTC close slot 60 or 3600 seconds. Same-slot controls within inclusive elapsed radius and requested input only. Prospective choices, no tuning or inferred acquisition."}
     if family == "raw_forward_outcome" and version == "7":
         fields["outcomes"] = {"fields":list(_EXAMPLES["raw_forward_outcome@7"]["outcomes"]),
             "constraints":"Explicit volume_cohort_matched.v1; single horizon; raw detector, interval, direction and lag supplied by request. comparison explicitly chooses supported volume cohort, prior candle count, per-feature ratio calipers and matching policy. One-bar binding; unavailable prior context retained. No outcome-driven tuning or replay."}
@@ -523,7 +532,7 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["support"] = {"type":"object","meaning":"Joined seconds, path/quality exclusions, pre-context-selected matches and separate control support states; no minimum significance or power claim."}
         fields["dependence"] = {"type":"object","meaning":"Unique/shared event anchors, cross-origin reused controls and coalesced inclusive-window overlaps/components; not independent trial counts."}
         return fields
-    if family == "raw_forward_outcome" and version == "7":
+    if family == "raw_forward_outcome" and version in {"7", "8"}:
         fields["events[]"] = {"type":"array", "meaning":"All original detector events, outcomes and matching context/missingness, including unmatched cases."}
         fields["volume_cohort_comparison"] = {"type":"object", "unit":"fractional returns", "meaning":"Frozen pair contrast, selected/complete balance, support gates, complete-pair tails, day deletions and joint nonoverlap sensitivity; descriptive only."}
         fields["dependence"] = {"type":"object", "meaning":"Closed outcome and full-feature overlap components across original events and both selected roles; not independent N."}
@@ -702,7 +711,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version == "7" else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),

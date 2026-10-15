@@ -937,3 +937,26 @@ cover the complete five-alias path with disposable canonical records; the native
 PostgreSQL fixture additionally checks real source selection, explicit sparse
 coverage, preparation resolution and cutoff/watermark-bound causal history.
 These tests do not execute a scientific Check or authorize acquisition/freezing.
+
+
+### Nearby-date volume comparison
+
+`raw_forward_outcome` v8 selects `volume_cohort_matched.v2`. It reuses v7 raw
+selection, preparation, feature calculation, outcome resolution, balance,
+support and dependence calculations. The caller explicitly supplies
+`comparison_window_days` (integer 1..31) and `matching_slot_seconds` (60 or 3600)
+with `matching_policy=same_utc_close_slot`. The existing controlled-reversal
+`prepare_pairs` performs the inclusive elapsed-radius test unchanged. V5's
+minute slot and v7's same-date/hour semantics are unchanged.
+
+A 3600-second slot preserves UTC close hour while allowing nearby dates; a
+60-second slot preserves the exact UTC close minute. Neither implies permission
+to search these settings. Candidate records must still come from the declared
+evaluation range; a wider match radius never expands Dataset reads. Pair
+identities are frozen before outcomes. Both arm dates and signed control-time
+distances are retained, with whole-pair deletion on either arm date. These are
+influence/dependence diagnostics, not independent-day or causal assurance.
+
+V8 has its own immutable registration, rules and result schema; v7 remains
+replayable with unchanged default output and hashes. No new persistence,
+framework, provider or deployment capability is introduced.
