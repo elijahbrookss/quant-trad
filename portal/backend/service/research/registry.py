@@ -27,6 +27,8 @@ from research_science.check import (
 )
 
 from . import checks
+from .liquidity_episode_evaluator import (LiquidityEpisodeEvaluator, SCHEMA as EPISODE_SCHEMA, RULES as EPISODE_RULES, normalize_configuration as normalize_episode_configuration)
+from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME_SCHEMA as DISTRIBUTION_SCHEMA, RULES as DISTRIBUTION_RULES, normalize_configuration as normalize_distribution_configuration)
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
 from .controlled_reversal_evaluator import (ControlledReversalEvaluator, FIXED_RULES,
     OUTCOME_SCHEMA as REVERSAL_SCHEMA, normalize_configuration as normalize_reversal_configuration,
@@ -308,10 +310,23 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_distribution_evaluator = CandleDistributionEvaluator()
+CHECK_REGISTRY.register_evaluator(_distribution_evaluator)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="6", evaluator_id=_distribution_evaluator.evaluator_id,
+    evaluator_version="6", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": DISTRIBUTION_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive", "distribution_rules": DISTRIBUTION_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit only exact registered raw v3/v4/v5 pairs."""
+    """Keep historical raw v2 unqualified; admit only exact registered raw v3/v4/v5/v6 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -503,6 +518,19 @@ def _register_event_fact_family() -> None:
             },
         )
     )
+
+
+_episode_evaluator = LiquidityEpisodeEvaluator()
+CHECK_REGISTRY.register_evaluator(_episode_evaluator)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=EVENT_FACT_ANALYSIS,
+    definition_version="14", evaluator_id=_episode_evaluator.evaluator_id,
+    evaluator_version="14", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": EVENT_FACT_ANALYSIS, "event_ownership": "check",
+        "input_policy": EPISODE_SCHEMA, "episode_rules": EPISODE_RULES,
+        "inference": "retrospective_descriptive_only"},
+))
 
 
 _register_event_fact_family()
@@ -862,7 +890,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         risk_version = "10"
     retrospective = _mapping(payload.get("outcomes"), field="outcomes").get("retrospective")
-    if retrospective is not None:
+    if family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == EPISODE_SCHEMA:
+        default_version = "14"
+    elif retrospective is not None:
         default_version = "13"
     elif forward_risk is not None:
         default_version = risk_version
@@ -879,7 +909,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("5" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("6" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == DISTRIBUTION_SCHEMA
+            else "5" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == CONFIGURABLE_SCHEMA
             else "4" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == REVERSAL_SCHEMA
@@ -923,13 +955,13 @@ def materialize_check_definition(
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")
     statistics = _mapping(payload.get("statistics"), field="statistics")
-    if family == EVENT_FACT_ANALYSIS:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version != "14":
         detector, outcomes, statistics = normalize_event_fact_configuration(
             detector=detector,
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -956,7 +988,7 @@ def materialize_check_definition(
             detector=detector, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
     if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11", "12"}:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
-    if family == EVENT_FACT_ANALYSIS:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version != "14":
         detector, statistics, inputs = _validate_event_fact_bindings(
             detector=detector,
             statistics=statistics,
@@ -987,6 +1019,11 @@ def materialize_check_definition(
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3":
         outcomes = normalize_raw_candle_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "6":
+        outcomes = normalize_distribution_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars:
+            raise ValueError("candle_distribution_invalid: no configurable gap rewarm")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "4":
         outcomes = normalize_reversal_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
@@ -999,6 +1036,11 @@ def materialize_check_definition(
             raise ValueError("controlled_reversal_invalid: no configurable gap rewarm")
     if family == EVENT_FACT_ANALYSIS and resolved_base_version == "13" and (gap_rewarm_bars or gap_policy not in {"reject", "continue_degraded"}):
         raise ValueError("retrospective_invalid: explicit local exclusions or gap rejection; no rewarm")
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "14":
+        detector, outcomes, statistics = normalize_episode_configuration(detector=detector,
+            outcomes=outcomes, statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars:
+            raise ValueError("liquidity_episode_invalid: no configurable rewarm")
     material_rules = {
         **dict(base.material_rules),
         "registered_definition": {
