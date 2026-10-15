@@ -254,3 +254,9 @@ def test_episode_rejects_explicit_external_lookback_instead_of_clamping(native_a
     response = f.api.post('/api/research/checks/requirements', json=f.payload)
     assert response.status_code==400
     assert 'cannot request external lookback' in response.json()['detail']
+
+
+def test_missing_effective_time_never_uses_known_at_as_event_time():
+    record = SimpleNamespace(fact=SimpleNamespace(known_at=at(600)))
+    with pytest.raises(ValueError, match='record.time is required'):
+        planning._record_time(record)

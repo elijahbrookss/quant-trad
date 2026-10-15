@@ -170,7 +170,10 @@ def _record_time(record: Any) -> datetime:
         or getattr(fact, "effective_at", None)
     )
     if value is None:
-        value = canonical_record_effective_time(record)
+        try:
+            value = canonical_record_effective_time(record)
+        except TypeError as exc:
+            raise ValueError("check_requirement_plan_invalid: record.time is required") from exc
     return _utc(value, field="record.time")
 
 
