@@ -1,5 +1,6 @@
 """Outcome-blind volume-cohort matching over configured raw candle events."""
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import timedelta
 import math
@@ -90,7 +91,9 @@ def prepare_volume_candidates(frame, rows, *, detector, start, end, step, choice
             missing.append("formation_known_after_close")
         candidate = {"event_time":_iso(opened), "event_close_time":_iso(current["close_time"]),
             "decision_known_at":_iso(decision), "day":current["close_time"].date().isoformat(),
-            "stratum":_iso(current["close_time"].floor("h")),
+            "stratum":(current["close_time"].floor(f"{choices['matching_slot_seconds']}s").strftime("%H:%M:%S")
+                if choices["matching_policy"] == "same_utc_close_slot"
+                else _iso(current["close_time"].floor("h"))),
             "entry_time":_iso(opened+(lag+1)*step), "target_time":_iso(opened+(lag+1+horizon)*step),
             "feature_start":_iso(opened-choices["prior_volatility_bars"]*step),
             "treated":current["volume"] > prior["volume"],
@@ -151,6 +154,7 @@ class VolumeCohortEvaluator:
     evaluator_id: str = "raw_forward_outcome"
     version: str = "7"
     result_schema_version: str = RESULT_SCHEMA
+    rules = RULES
 
     def declare_requirements(self, *, definition, request):
         return CandleDistributionEvaluator().declare_requirements(definition=definition, request=request)
@@ -167,6 +171,7 @@ class VolumeCohortEvaluator:
             end=_clock(plan.evaluation_range["end_exclusive"],"end"), step=step,
             choices=choices, lag=outcomes["entry_lag_bars"], horizon=horizon)
         pairs, unmatched, comparisons = prepare_pairs(candidates, features=FEATURES,
+            choices=choices if choices["matching_policy"] == "same_utc_close_slot" else None,
             calipers=tuple(math.log(choices["caliper_ratios"][f]) for f in FEATURES),
             support_start="feature_start")
         feature_hash = semantic_hash({"choices":choices, "ledger":ledger, "pairs":pairs, "unmatched":unmatched})
@@ -219,9 +224,9 @@ class VolumeCohortEvaluator:
             for cohort in ("increasing_volume", "non_increasing_volume"):
                 for state in ("original", "feature_missing", "feature_eligible", "selected", "complete_pair"):
                     coverage[day].setdefault(cohort+":"+state,0)
-        return {**baseline, "schema_version":RESULT_SCHEMA,
+        return {**baseline, "schema_version":self.result_schema_version,
             "recommendation":"inspect_matched_volume_association_only",
-            "comparison_rules":RULES, "comparison_choices":choices,
+            "comparison_rules":self.rules, "comparison_choices":choices,
             "feature_frozen_hash":feature_hash, "feature_freeze_stage":"before_any_outcome_resolution",
             "matching_universe_count":len(ledger), "matching_feature_eligible_count":len(candidates),
             "matching_candidate_exclusions":exclusions, "matching_evaluated_bars":evaluated,
@@ -245,3 +250,68 @@ class VolumeCohortEvaluator:
                 "Contemporaneous volume/body conditioning is not causal adjustment or a profitability test.",
                 "Missing/zero matching features remain in the original ledger; no imputation, trimming or outcome-driven rematching.",
                 "Support gates are inherited diagnostics, not a power calculation; unsupported closes without changing choices."]}
+
+
+# Historical v7 retains its normalizer, material rules, schema and default output.
+NEARBY_SCHEMA = "volume_cohort_matched.v2"
+NEARBY_RESULT_SCHEMA = "volume_cohort_matched_result.v2"
+NEARBY_RULES = deepcopy(RULES)
+NEARBY_RULES.update({
+    "matching_policy_choices":["same_utc_close_slot"],
+    "matching_slot_seconds_choices":[60,3600],
+    "comparison_window_days_bounds":[1,31],
+    "matching_window":"inclusive absolute elapsed day radius, UTC close slot; no observations outside request",
+    "dependence":"delete whole pair on either arm date; report relative control dates; no rematching",
+    "comparability":"cross-date descriptive association; time slot does not control regime or common shocks",
+})
+
+
+def normalize_nearby_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy):
+    c = outcomes.get("comparison")
+    base_keys = {"cohort", "prior_volatility_bars", "caliper_ratios", "matching_policy"}
+    if outcomes.get("schema_version") != NEARBY_SCHEMA or not isinstance(c,dict) or set(c) != base_keys | {
+            "comparison_window_days", "matching_slot_seconds"}:
+        raise ValueError("volume_cohort_nearby_invalid: explicit v2 choices required")
+    if c["matching_policy"] != "same_utc_close_slot":
+        raise ValueError("volume_cohort_nearby_invalid: same_utc_close_slot required")
+    _integer(c["comparison_window_days"],field="comparison_window_days",minimum=1,maximum=31)
+    if isinstance(c["matching_slot_seconds"],bool) or type(c["matching_slot_seconds"]) is not int or c["matching_slot_seconds"] not in (60,3600):
+        raise ValueError("volume_cohort_nearby_invalid: UTC slot must be 60 or 3600 seconds")
+    # Reuse all v7 raw/cohort/feature validation without mutating its schema/rules.
+    normalized = normalize_configuration(detector=detector, outcomes={**outcomes,
+        "schema_version":OUTCOME_SCHEMA, "comparison":{
+            **{k:v for k,v in c.items() if k in base_keys}, "matching_policy":"same_date_hour"}},
+        statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+    return {**normalized, "schema_version":NEARBY_SCHEMA, "comparison":{
+        **normalized["comparison"], "matching_policy":c["matching_policy"],
+        "comparison_window_days":c["comparison_window_days"], "matching_slot_seconds":c["matching_slot_seconds"]}}
+
+
+@dataclass(frozen=True)
+class NearbyDateVolumeCohortEvaluator(VolumeCohortEvaluator):
+    version: str = "8"
+    result_schema_version: str = NEARBY_RESULT_SCHEMA
+    rules = NEARBY_RULES
+
+    def evaluate(self, *, plan, inputs):
+        result = super().evaluate(plan=plan,inputs=inputs)
+        directions = Counter()
+        for pair in result["pairs"]:
+            treated,control = pair["treated"],pair["control"]
+            delta = (_clock(control["event_close_time"],"control close")-
+                     _clock(treated["event_close_time"],"treated close")).total_seconds()
+            pair["control_minus_treated_seconds"] = delta
+            direction = "same_utc_date" if control["day"] == treated["day"] else (
+                "earlier_utc_date" if delta < 0 else "later_utc_date")
+            directions[direction] += 1
+        result["matching_time_geometry"] = {
+            "pair_counts_by_control_date":dict(directions),
+            "slot_seconds":inputs["outcomes"]["comparison"]["matching_slot_seconds"],
+            "maximum_elapsed_distance_seconds":inputs["outcomes"]["comparison"]["comparison_window_days"]*86400,
+            "outside_request_controls":False,
+            "date_deletion":"whole pair removed if either arm belongs to omitted UTC date"}
+        result["caveats"] += [
+            "Cross-date controls may precede or follow treatment; this is retrospective matching, not live predictive availability.",
+            "Same UTC slot preserves time of day, not market regime or independent day shocks. Both-arm day deletion is influence analysis only.",
+            "Wider candidate pools do not guarantee higher greedy matching coverage; no radius or caliper tuning follows failure."]
+        return result
