@@ -87,7 +87,8 @@ The workflow steps are:
 1. `Checkout repository`;
 2. `Generate disposable operator environment` by running
    `bash scripts/automation/server_deploy.sh init-env` with
-   `QT_SINGLE_NODE_ENV_FILE` bound to the checkout's `secrets.env`;
+   `QT_SINGLE_NODE_ENV_FILE` bound to `qt-disposable.env` inside an explicitly
+   private runner-temp operator directory;
 3. `Validate shell and Compose contracts` by syntax-checking both server
    scripts, computing the Git revision and source-tree hash, and running
    `docker compose ... config --quiet`; and
@@ -205,7 +206,10 @@ Run this only in a disposable checkout because `init-env` writes the named
 operator-environment file.
 
 ```bash
-export QT_SINGLE_NODE_ENV_FILE="$PWD/secrets.env"
+qt_ci_private="$(mktemp -d "${TMPDIR:-/tmp}/qt-disposable-operator.XXXXXX")"
+chmod 0700 "$qt_ci_private"
+export QT_SINGLE_NODE_ENV_FILE="$qt_ci_private/qt-disposable.env"
+export QT_SERVER_ENV_FILE="$QT_SINGLE_NODE_ENV_FILE"
 bash scripts/automation/server_deploy.sh init-env
 bash -n scripts/automation/server_deploy.sh
 bash -n scripts/automation/server_host_bootstrap.sh
@@ -220,11 +224,11 @@ export QT_RELEASE_REVISION="$qt_ci_revision"
 export QT_SOURCE_TREE_HASH="$qt_ci_tree_hash"
 
 docker compose \
-  --env-file secrets.env \
+  --env-file "$QT_SINGLE_NODE_ENV_FILE" \
   --file docker/docker-compose.server.yml \
   config --quiet
 docker compose \
-  --env-file secrets.env \
+  --env-file "$QT_SINGLE_NODE_ENV_FILE" \
   --file docker/docker-compose.server.yml \
   build tsdb backend frontend frontend-v2
 ```
@@ -385,3 +389,41 @@ are not exported or upgraded by routine promotion.
 The workflow gives its GitHub token read-only repository contents access and
 disables checkout credential persistence. PR source still runs on disposable
 runners without production secrets; PR evidence never qualifies a deployment.
+
+
+### Actual routine-path disposable rehearsal
+
+The existing `deployment-rehearsal` job now runs its original compatible operator
+rehearsal and `test_server_promotion.py --routine`. The latter is admitted only
+on a GitHub-hosted runner using its default local Docker socket; remote contexts
+and local/production execution refuse before creating resources. It uses a unique
+Compose project, private runner-temp fixture Git repo/environment, internal
+networks, no host ports and owned volumes. Runtime applications are tiny synthetic
+processes, not QT/provider clients; every enrollment flag is disabled. The actual
+PostgreSQL container and psql/schema probe are real.
+
+The routine mode invokes the actual `promote-routine` controller, package
+capture/export/ZIP/load and immutable-ID pinning. It removes candidate image tags
+before admission so a cached build cannot substitute for loading the package.
+Local fake GitHub responses model a completed exact develop attempt and artifact
+digest; they are explicitly synthetic admission metadata, not GitHub release
+qualification. An actual tiny dump is restored on an independent owned PostgreSQL
+volume before generating fixture-only recovery admission. The rehearsal checks
+retained rows/schema/cluster, compatible success, active-hold/credential-scope/
+changed-artifact/stale-restore refusal, unhealthy rollout recovery, interrupted
+schema-drift hold and explicit reconciliation followed by offline recovery.
+Docker-call traces reject build/pull during routine activation and recovery.
+
+A ten-minute operation deadline, existing fifteen-minute job limit and bounded
+owned cleanup constrain this test. Failure preserves a small `qualification.json`
+with source, phases, outcome and cleanup errors. The `routine-controller-rehearsal`
+artifact contains that receipt only; no environment, resolved recovery snapshot,
+backup payload or credential is uploaded. Cleanup targets only the recorded
+unique fixture resources, never a daemon-wide prune.
+
+A passing non-Docker unit suite does not certify this path. The hosted run must
+actually finish this routine step and its existing companions successfully.
+After the source run completes, independently validate its real exported
+`routine-release-package` download/digest/job/attempt binding. A work-branch
+receipt remains handoff evidence only; production admission still requires an
+exact develop push and the separately authorized installation/activation.

@@ -895,5 +895,8 @@ or changed compatibility retains the marker. Once actual state is reconciled to
 the qualified baseline, a successful matching probe can admit explicit recovery. Failed/interrupted recovery retains its marker and blocks
 new updates. This path does not claim provider acquisition progress or scientific
 Check interpretation; retain the release owner's bounded acquisition checks and
-scientific owner's serial checks where applicable. Heavy Docker qualification of
-this new path is required before activation; unit tests are insufficient.
+scientific owner's serial checks where applicable. The hosted `test_server_promotion.py --routine` step now exercises actual
+routine success/refusal/recovery with tiny images and real disposable PostgreSQL,
+including a genuine tiny restore before fixture admission. GitHub CI metadata
+there is synthetic and cannot admit production. This new step and real artifact
+provenance must pass before activation; unit tests are insufficient.

@@ -382,3 +382,13 @@ checks requires an exact separate approval after real disposable qualification
 and the existing release installation. No new credential or deployment platform
 is introduced. The recovery record references actual approved backup/restore
 evidence; a checksum alone never certifies a restore.
+
+
+The existing disposable rehearsal also owns a hosted-only routine mode. It invokes
+the real routine controller and package/schema/recovery boundaries against tiny
+synthetic apps and real isolated PostgreSQL, with local synthetic CI metadata.
+It qualifies controller behavior, not production schema, provider availability,
+actual backup custody or a release. Its tiny actual restore precedes the fixture
+recovery record; private environment and snapshots never enter its uploaded
+receipt. Source-bound hosted execution and separate real artifact verification
+remain required before activation.
