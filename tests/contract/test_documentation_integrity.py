@@ -104,6 +104,11 @@ def test_ci_topology_matches_workflow_jobs() -> None:
         "deployment-rehearsal",
         "committed-recovery",
     )
+    assert workflow["permissions"] == {"contents":"read"}
+    for job in jobs.values():
+        for step in job.get("steps",[]):
+            if step.get("uses")=="actions/checkout@v4":
+                assert step["with"]["persist-credentials"] is False
     assert set(jobs) == set(expected_jobs) | {"changes", "docs", "ci-required"}
     assert jobs["ci-required"]["if"] == "${{ always() }}"
     assert set(jobs["ci-required"]["needs"]) == set(expected_jobs) | {"changes", "docs"}

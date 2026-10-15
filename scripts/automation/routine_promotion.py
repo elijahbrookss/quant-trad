@@ -6,6 +6,7 @@ Never loads a database, runs a migration, starts services, or creates credential
 from __future__ import annotations
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -15,6 +16,13 @@ import zipfile
 from datetime import datetime, timezone
 
 from check_release_ci import qualify, api
+
+# One reviewed presentation inventory shared with iteration CI. Load by exact
+# source path so this standalone host helper does not depend on PYTHONPATH.
+_scope_spec = importlib.util.spec_from_file_location('qt_ci_impact_scope', Path(__file__).resolve().parents[1]/'ci/ci_impact.py')
+_scope = importlib.util.module_from_spec(_scope_spec)
+_scope_spec.loader.exec_module(_scope)
+PRESENTATION = _scope.PRESENTATION
 
 def recovery_admission(state, previous, schema=None):
     """Validate the operator's private, source-bound restore qualification.
@@ -62,7 +70,7 @@ def eligible(paths):
         raise ValueError('routine promotion has no reviewed changes')
     for path in paths:
         docs=path.startswith('docs/') and path.endswith(('.md','.png','.jpg','.svg','.mmd'))
-        ui=path.startswith(('portal/frontend/src/','portal/frontend-v2/src/')) and path.endswith(('.jsx','.tsx','.css','.scss','.png','.jpg','.svg'))
+        ui=path in PRESENTATION
         if (not (docs or ui) or '..' in path.split('/') or
             any(p in path.split('/') for p in ('api','adapters','services','auth','security'))):
             raise ValueError(f'routine compatibility unknown for {path}; use reviewed manual promotion')

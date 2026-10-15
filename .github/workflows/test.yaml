@@ -1,5 +1,8 @@
 name: Tests with Coverage
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -32,8 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - id: select
+        env:
+          QT_CI_INTEGRATION_REF: origin/develop
         run: python3 scripts/ci/ci_impact.py
 
   docs:
@@ -41,6 +47,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -57,6 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Enforce computed required checks
         env:
           QT_CI_NEEDS: ${{ toJSON(needs) }}
@@ -76,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -190,6 +201,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -215,6 +228,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -240,6 +255,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Generate disposable operator environment
         env:
@@ -387,6 +404,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Rehearse promotion and failed rollout recovery
         run: python3 scripts/ci/test_server_promotion.py
 
@@ -413,6 +432,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5

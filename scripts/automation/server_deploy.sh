@@ -5,6 +5,7 @@ set -euo pipefail
 recovery_config_frozen=false
 routine_active=false
 routine_package=""
+compose_probe_timeout=false
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 repo_root="$(cd "$script_dir/../.." >/dev/null 2>&1 && pwd)"
@@ -403,6 +404,11 @@ storage_overlay_for() {
 }
 
 compose() {
+  local compose_exec=(docker compose)
+  if test "${compose_probe_timeout:-false}" = true; then
+    require_command timeout
+    compose_exec=(timeout --kill-after=5s 30s docker compose)
+  fi
   local profile_args=()
   local compose_file_args=(--file "$compose_file")
   local storage_overlay
@@ -422,7 +428,7 @@ compose() {
     compose_file_args+=(--file "$alerting_compose_file")
   fi
 
-  docker compose \
+  "${compose_exec[@]}" \
     --env-file "$env_file" \
     "${compose_file_args[@]}" \
     "${profile_args[@]}" \
@@ -913,7 +919,10 @@ check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sy
     local post_schema
     post_schema="$(mktemp "$state_root/routine-schema-after.XXXXXX")"
     chmod 0600 "$post_schema"
-    compose exec -T backend python - <"$repo_root/scripts/automation/routine_schema_probe.py" >"$post_schema"
+    if ! capture_routine_schema "$post_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine schema probe unavailable; preserve state and verify compatibility before recovery"
+    fi
     if ! cmp --silent "$schema_probe" "$post_schema"; then
       printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
       die "routine post-deploy schema/cluster changed; preserve state and reconcile compatibility before recovery"
@@ -985,11 +994,17 @@ prepare_recovery() {
   mv "$temporary" "$state_root/recovery.compose.json"
 }
 
+capture_routine_schema() {
+  # Probe the existing DB directly so recovery does not depend on a healthy
+  # candidate application. Use its existing local identity; copy no credentials.
+  python3 "$repo_root/scripts/automation/routine_schema_probe.py" --sql \
+    | compose_probe_timeout=true compose exec -T tsdb sh -eu -c 'export PGCONNECT_TIMEOUT=10; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    | python3 "$repo_root/scripts/automation/routine_schema_probe.py" --fingerprint >"$1"
+}
+
 recover_promotion() {
   require_no_storage_handoff
   test -f "$state_root/promotion.env" || die "no unfinished promotion is recorded"
-  test "$(promotion_value compatibility_lost)" != true \
-    || die "routine compatibility is unknown after schema drift; preserve state and reconcile before recovery"
   local previous candidate activation layout snapshot_hash actual_hash
   previous="$(promotion_value previous_revision)"
   candidate="$(promotion_value candidate_revision)"
@@ -997,6 +1012,31 @@ recover_promotion() {
   [[ "$activation" = true || "$activation" = false ]] || die "invalid promotion activation state"
   [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
     || die "invalid promotion recovery state"
+  local routine baseline baseline_hash recovery_schema
+  routine="$(promotion_value routine_promotion)"
+  [[ -z "$routine" || "$routine" = true ]] || die "invalid routine recovery identity"
+  if test "$routine" = true && test "$activation" = true; then
+    baseline="$(promotion_value routine_schema_path)"
+    baseline_hash="$(promotion_value routine_schema_sha256)"
+    [[ "$baseline" = "$state_root"/routine-schema.* && "$baseline_hash" =~ ^[a-f0-9]{64}$ ]] \
+      && test -f "$baseline" && test ! -L "$baseline" \
+      || die "routine recovery schema baseline is missing or invalid"
+    actual_hash="$(sha256sum "$baseline")"
+    test "${actual_hash%% *}" = "$baseline_hash" \
+      || die "routine recovery baseline changed; evidence retained"
+    recovery_schema="$(mktemp "$state_root/routine-recovery-schema.XXXXXX")"
+    chmod 0600 "$recovery_schema"
+    if ! capture_routine_schema "$recovery_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine recovery compatibility is unknown; probe failed; preserve state"
+    fi
+    if ! cmp --silent "$baseline" "$recovery_schema"; then
+      printf 'compatibility_lost=true\n' >>"$state_root/promotion.env"
+      die "routine recovery compatibility is unknown after schema drift; preserve state"
+    fi
+  elif test "$(promotion_value compatibility_lost)" = true; then
+    die "routine compatibility is unknown after schema drift; preserve state and reconcile before recovery"
+  fi
   test -f "$state_root/recovery.compose.json" || die "recovery Compose snapshot is missing"
   layout="$(recorded_storage_layout)" || return
   test "$(promotion_value storage_layout)" = "$layout" \
@@ -1069,7 +1109,7 @@ promote_release() {
     local schema_probe
     schema_probe="$(mktemp "$state_root/routine-schema.XXXXXX")"
     chmod 0600 "$schema_probe"
-    compose exec -T backend python - <"$repo_root/scripts/automation/routine_schema_probe.py" >"$schema_probe"
+    capture_routine_schema "$schema_probe"
     python3 "$repo_root/scripts/automation/routine_promotion.py" admit \
       --candidate "$candidate" --previous "$previous" --package "$routine_package" --state "$state_root" --schema "$schema_probe"
   fi
@@ -1082,6 +1122,12 @@ promote_release() {
   chmod 0600 "$temporary"
   printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\nstorage_layout=%s\nrecovery_compose_sha256=%s\n' \
     "$previous" "$candidate" "$layout" "$snapshot_hash" >"$temporary"
+  if test "$routine_active" = true; then
+    local schema_file_hash
+    schema_file_hash="$(sha256sum "$schema_probe")"
+    printf 'routine_promotion=true\nroutine_schema_path=%s\nroutine_schema_sha256=%s\n' \
+      "$schema_probe" "${schema_file_hash%% *}" >>"$temporary"
+  fi
   mv "$temporary" "$state_root/promotion.env"
   echo "event=promotion_started candidate=$candidate previous=$previous"
   (

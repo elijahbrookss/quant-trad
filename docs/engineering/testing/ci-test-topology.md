@@ -337,8 +337,12 @@ and deliberate expiry waits, not a production completion estimate.
 ## Conservative work-branch selection
 
 `scripts/ci/ci_impact.py` owns the small allowlist. Feature/hotfix pushes compare
-all changed paths to the push's previous commit; a deleted path and its renamed
-replacement both participate. PRs into release branches, develop/main pushes,
+all branch contributions to the merge base with the workflow's explicit
+`QT_CI_INTEGRATION_REF` (default `origin/develop`). Earlier changes remain in
+scope even if a predecessor push run was cancelled. A deleted path and its
+renamed replacement both participate. For a separately coordinated feature
+integration, review and set that baseline explicitly; do not infer it from the
+last push or an unqualified predecessor. PRs into release branches, develop/main pushes,
 and manual workflow dispatch retain complete qualification. Use Actions **Run
 workflow** with **force_full** to request complete checks on a work branch.
 Missing/zero bases, missing history, invalid comparisons, unknown paths and empty
@@ -349,13 +353,17 @@ in the selection log; it never treats unavailable coverage as a passing test.
 | Scope | Work-branch requirement |
 | --- | --- |
 | Markdown and static documentation assets | `docs` |
-| Frontend JSX/TSX/styles/static assets outside API/adapters/services | `docs`, `frontend` |
+| Exact reviewed presentation files in `ci_impact.PRESENTATION` | `docs`, `frontend` |
 | Reviewed event_statistics, directional_model, metrics modules and test_event_fact_check | `docs`, complete ordinary `pr-suite` |
 | Evaluators, registry/catalog, request/result serialization, frozen bindings, repositories, dependencies, configuration, storage, migrations, shared infrastructure or any unlisted path | Complete workflow |
 
 The calculation allowlist is a test-environment boundary, not permission to
 change historical scientific meanings or eligibility for automatic deployment.
-Do not add evaluator globs. New eligible files require review of imports,
+The presentation inventory currently contains index.css, v2.css,
+v2-operator.css, ActivityHeatmap.jsx, WarningPanel.jsx and BotLensHeader.jsx at
+the exact paths in the selector. Credential dialogs, mixed chart containers,
+application roots and new/unlisted frontend files select the full workflow.
+Do not add evaluator or frontend globs. New eligible files require review of imports,
 durable contract ownership and regression scope. Changes to the selector itself
 receive full qualification.
 
@@ -373,3 +381,7 @@ they are unchanged afterward, and exports backend/frontend/frontend-v2 in the
 and archive checksum. It adds artifact export time and storage proportional to
 the images; seven-day retention matches recovery evidence. Infrastructure images
 are not exported or upgraded by routine promotion.
+
+The workflow gives its GitHub token read-only repository contents access and
+disables checkout credential persistence. PR source still runs on disposable
+runners without production secrets; PR evidence never qualifies a deployment.

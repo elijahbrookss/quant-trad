@@ -10,6 +10,15 @@ import subprocess
 
 JOBS = ('docs', 'pr-suite', 'frontend', 'deployment-contract',
         'deployment-rehearsal', 'clean-database-bootstrap', 'committed-recovery')
+# Reviewed presentation-only files. New/mixed/credential components fail closed.
+PRESENTATION = frozenset({
+    'portal/frontend/src/index.css',
+    'portal/frontend/src/v2/v2.css',
+    'portal/frontend/src/v2/v2-operator.css',
+    'portal/frontend/src/features/overview/components/ActivityHeatmap.jsx',
+    'portal/frontend/src/features/bots/botlens/components/WarningPanel.jsx',
+    'portal/frontend/src/features/bots/botlens/components/BotLensHeader.jsx',
+})
 PURE = frozenset({
     'portal/backend/service/research/event_statistics.py',
     'portal/backend/service/research/directional_model.py',
@@ -25,14 +34,8 @@ def plan(paths, *, full=False, reason='changes'):
             full = True
         elif (path.startswith('docs/') and path.endswith(('.md', '.png', '.jpg', '.svg', '.mmd'))) or path in {'README.md', 'CHANGELOG.md'}:
             pass
-        elif path.startswith(('portal/frontend/', 'portal/frontend-v2/')):
-            # Lockfiles, build configuration and adapters are not presentation-only.
-            if not path.endswith(('.jsx', '.tsx', '.css', '.scss', '.png', '.jpg', '.svg')):
-                full = True
-            elif any(word in path.split('/') for word in ('api', 'adapters', 'services')):
-                full = True
-            else:
-                required.add('frontend')
+        elif path in PRESENTATION:
+            required.add('frontend')
         elif path in PURE:
             required.add('pr-suite')
         else:
@@ -67,8 +70,16 @@ def event_plan(event, name, ref, head, force=False):
             head = pr_head
             full = True  # PR-to-release qualification remains complete.
         elif name == 'push':
-            base = event['before']
-            if not ref.startswith(('refs/heads/feature/', 'refs/heads/hotfix/')):
+            if ref.startswith(('refs/heads/feature/', 'refs/heads/hotfix/')):
+                # Include all branch contributions, even when an earlier push's
+                # full run was cancelled. The baseline is explicit, never inferred
+                # from the last pushed commit or an unqualified predecessor.
+                baseline = os.environ.get('QT_CI_INTEGRATION_REF', 'origin/develop')
+                if not re.fullmatch(r'origin/(?:develop|main|feature/[a-zA-Z0-9._/-]+)', baseline):
+                    raise ValueError('invalid_integration_baseline')
+                base = git('merge-base', baseline, head).decode().strip()
+            else:
+                base = event['before']
                 full = True
         elif name == 'workflow_dispatch':
             full = True

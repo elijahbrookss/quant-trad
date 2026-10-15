@@ -424,9 +424,85 @@ recover_promotion
 
 def test_unknown_post_rollout_compatibility_blocks_automatic_old_image_recovery(tmp_path):
     state=tmp_path/"state";state.mkdir()
-    (state/"promotion.env").write_text("compatibility_lost=true\n")
+    (state/"promotion.env").write_text(f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\ncompatibility_lost=true\n")
     result=shell(tmp_path, "select_release() { echo INCORRECT_CHECKOUT; }; recover_promotion")
     assert result.returncode != 0
     assert "compatibility is unknown" in result.stderr
     assert "INCORRECT_CHECKOUT" not in result.stdout
     assert (state/"promotion.env").exists()
+
+
+
+@pytest.mark.parametrize("fault", ["probe_failed", "probe_timed_out", "drift", "baseline_changed", None])
+def test_interrupted_routine_recovery_requires_current_compatible_schema(tmp_path,fault):
+    state=tmp_path/"state";state.mkdir()
+    baseline=state/"routine-schema.fixture";baseline.write_text('qualified schema\n')
+    baseline_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
+    (state/"promotion.env").write_text(
+        f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\n"
+        f"routine_promotion=true\nroutine_schema_path={baseline}\nroutine_schema_sha256={baseline_hash}\n")
+    (state/"recovery.compose.json").write_text('{}')
+    if fault=="baseline_changed":baseline.write_text('tampered')
+    result=shell(tmp_path,r'''
+capture_routine_schema() {
+  echo PROBED
+  if test "$FAULT" = probe_failed; then return 19; fi
+  if test "$FAULT" = probe_timed_out; then return 124; fi
+  if test "$FAULT" = drift; then printf 'different schema\n' >"$1"; else printf 'qualified schema\n' >"$1"; fi
+}
+select_release() { echo CHECKOUT_RESTORED; }
+deploy_release() { echo FROZEN_RECOVERY; }
+recover_promotion
+''',env={"FAULT":fault or "none"})
+    if fault:
+        assert result.returncode != 0
+        assert "FROZEN_RECOVERY" not in result.stdout and "CHECKOUT_RESTORED" not in result.stdout
+        assert (state/"promotion.env").exists()
+        if fault != "baseline_changed":assert "compatibility_lost=true" in (state/"promotion.env").read_text()
+    else:
+        assert result.returncode==0,result.stderr
+        assert "PROBED" in result.stdout and "FROZEN_RECOVERY" in result.stdout
+        assert not (state/"promotion.env").exists()
+
+
+def test_routine_post_probe_failure_durably_marks_unknown_compatibility(tmp_path):
+    state=tmp_path/"state";state.mkdir()
+    (state/"promotion.env").write_text('activation_started=false\n')
+    result=shell(tmp_path,r'''
+routine_active=true
+promotion_in_progress=true
+require_runtime() { :; }
+require_no_storage_handoff() { :; }
+require_no_alert_preview() { :; }
+select_release() { QT_RELEASE_REVISION=fixture; QT_SOURCE_TREE_HASH=fixture; }
+validate_storage_root() { :; }
+promotion_value() { printf previous; }
+python3() { :; }
+compose() { if test "$1" = config && test "${2:-}" = --format; then echo '{}'; fi; }
+verify_initializer() { :; }
+verify_release_image() { :; }
+recorded_storage_layout() { :; }
+capture_routine_schema() { return 19; }
+record_release() { echo INCORRECT_SUCCESS; }
+(deploy_release fixture) &
+child=$!
+if wait "$child"; then exit 91; fi
+''')
+    assert result.returncode==0,result.stderr
+    assert "INCORRECT_SUCCESS" not in result.stdout
+    assert 'compatibility_lost=true' in (state/"promotion.env").read_text()
+
+
+
+def test_schema_capture_bounds_docker_exec_without_calling_unbounded_docker(tmp_path):
+    result=shell(tmp_path,r'''
+repo_root="$PROBE_ROOT"
+mkdir -p "$state_root"
+storage_overlay_for() { :; }
+timeout() { printf 'TIMEOUT:%s\n' "$@" >&2; return 124; }
+docker() { echo INCORRECT_UNBOUNDED_DOCKER; return 91; }
+if capture_routine_schema "$state_root/probe.json"; then exit 92; fi
+''',env={"PROBE_ROOT":str(ROOT)})
+    assert result.returncode==0,result.stderr
+    assert 'TIMEOUT:--kill-after=5s' in result.stderr and 'TIMEOUT:30s' in result.stderr
+    assert 'INCORRECT_UNBOUNDED_DOCKER' not in result.stdout

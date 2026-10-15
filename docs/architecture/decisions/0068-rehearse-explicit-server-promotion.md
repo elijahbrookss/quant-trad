@@ -357,7 +357,7 @@ The source-layout database build behavior remains unchanged.
 
 ## Qualified routine capability, trigger activation deferred
 
-The existing controller may mechanically admit only documentation/frontend
+The existing controller may mechanically admit only documentation/exact reviewed frontend
 presentation changes while all backend write/read, schema, registry, serialized
 result, dependency, configuration and storage source remains unchanged. This
 narrow path uses the exact application image IDs exported after successful
@@ -367,8 +367,10 @@ activation pins infrastructure to current running IDs and never rebuilds/pulls.
 
 Admission also consumes a private operator-qualified backup/restore record,
 checks its source/expiry and evidence fingerprints, and verifies the actual
-read-only schema/cluster fingerprint before and after promotion. Existing host
-locks, persistent holds, health gates, retained recovery snapshots, failed-operation
+read-only schema/cluster fingerprint before and after promotion. The routine identity and hashed baseline are persisted before activation;
+activated recovery must independently re-probe current schema even after probe
+failure or controller interruption, without requiring a healthy candidate app.
+Existing host locks, persistent holds, health gates, retained recovery snapshots, failed-operation
 semantics and interruption markers remain authoritative. Unknown compatibility,
 backend changes, migrations, storage cutovers and credentials/security changes
 remain explicitly reviewed procedures. CI iteration eligibility is broader than

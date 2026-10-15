@@ -822,8 +822,9 @@ base after the active release. Do not insert this component into a source alread
 being qualified.
 
 Routine eligibility is deliberately narrower than CI selection: only documented
-static assets and frontend source presentation changes, excluding API/adapters/
-services/auth/security. Backend, registry/catalog, durable request/results,
+static assets and the exact six reviewed presentation files in
+`ci_impact.PRESENTATION`. Credential dialogs, mixed chart containers, application
+roots, new frontend files and API/adapters/services/auth/security paths are excluded. Backend, registry/catalog, durable request/results,
 serialization, dependencies, configuration, deployment/security scripts, storage
 and migrations must be byte-identical to the current release. Renames include
 both paths. Unknown changes refuse routine promotion and need manually reviewed
@@ -867,24 +868,31 @@ protect evidence identity; they do not independently prove its scientific or
 restore claims. A missing record blocks the operation. No credentials or resolved
 Compose secrets belong in the record or CI artifacts.
 
-`routine_schema_probe.py` is sent via stdin to the existing backend. It uses
-only PG_DSN and a read-only repeatable-read transaction, with connection and SQL
-timeouts; it never imports the runtime Database/bootstrap boundary. The fingerprint
-covers public application parent-table columns, defaults, constraints and indexes;
-it excludes physical partitions and TimescaleDB internal schemas. Registry,
-serialization and archive compatibility additionally rely on unchanged source;
-this does not generalize to backend or migration changes. A changed application
-schema invalidates the fingerprint; requalify recovery rather than weaken the
-comparison by hand. Physical storage compatibility remains protected by unchanged
-source/configuration and the existing storage hold, not this logical-schema probe.
+`capture_routine_schema` sends a fixed read-only SQL script to PostgreSQL's
+existing local psql identity inside tsdb, then fingerprints the bounded JSON on
+the host with stdlib Python. It does not copy credentials, add a DSN, import the
+runtime Database/bootstrap boundary or depend on candidate application health.
+The transaction is read-only repeatable-read, with connection and SQL timeouts.
+Docker exec additionally has a 30-second host timeout and five-second kill grace;
+timeout is unknown compatibility and preserves the activated recovery marker.
+The fingerprint covers public application parent-table columns, defaults,
+constraints and indexes; physical partitions and TimescaleDB internal schemas
+are excluded. Registry, serialization and archive compatibility additionally
+rely on unchanged source; this does not generalize to backend or migration
+changes. Changed logical schema invalidates admission. Physical storage remains
+protected by unchanged source/configuration and existing storage holds.
 
 The controller retains current images/configuration before replacing services,
+persists the routine identity and hashed preflight baseline before activation,
 marks activation before `compose up`, runs existing health/initializer/source/fleet
 checks and confirms the schema/cluster fingerprint is unchanged before recording
 success. Ordinary rollout failure invokes the existing compatible pinned-image recovery;
-it never rewrites the database. Detected schema/cluster drift records
-`compatibility_lost=true` and blocks automatic old-image recovery: preserve the
-marker and reconcile actual compatibility explicitly before any recovery. Failed/interrupted recovery retains its marker and blocks
+it never rewrites the database. A failed post-activation probe or schema/cluster drift records
+`compatibility_lost=true`. Activated routine recovery always re-probes the DB
+and compares the persisted, integrity-checked baseline before changing the
+checkout or restarting old images, including recovery after interruption. Unknown
+or changed compatibility retains the marker. Once actual state is reconciled to
+the qualified baseline, a successful matching probe can admit explicit recovery. Failed/interrupted recovery retains its marker and blocks
 new updates. This path does not claim provider acquisition progress or scientific
 Check interpretation; retain the release owner's bounded acquisition checks and
 scientific owner's serial checks where applicable. Heavy Docker qualification of

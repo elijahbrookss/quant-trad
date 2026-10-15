@@ -13,10 +13,13 @@ sys.path.insert(0,str(ROOT/'scripts/automation'))
 import routine_promotion as routine
 
 def test_routine_scope_is_smaller_than_ci_selection():
-    routine.eligible(['docs/index.md','portal/frontend/src/views/View.jsx'])
+    routine.eligible(['docs/index.md',next(iter(routine.PRESENTATION))])
     for path in ['portal/backend/service/research/metrics.py','src/research_science/check.py',
                  'portal/frontend/package-lock.json','portal/frontend/src/api/Client.jsx',
-                 'portal/frontend/src/auth/Login.jsx','scripts/db/change.sql','docker/compose.yml']:
+                 'portal/frontend/src/auth/Login.jsx',
+                 'portal/frontend/src/components/ChartComponent/CredentialsModal.jsx',
+                 'portal/frontend/src/components/ChartComponent/ChartComponent.jsx',
+                 'portal/frontend/src/App.jsx','scripts/db/change.sql','docker/compose.yml']:
         with pytest.raises(ValueError):
             routine.eligible(['docs/index.md',path])
 
@@ -95,3 +98,16 @@ def test_export_refuses_image_replacement_during_runtime_proofs(tmp_path,monkeyp
     monkeypatch.setattr(sys,"argv",["release_package","export","--root",str(tmp_path)])
     with pytest.raises(ValueError,match="changed during proofs"):release_package.main()
     assert not (tmp_path/"images.tar").exists()
+
+
+
+def test_schema_probe_host_modes_require_no_application_or_database_imports(monkeypatch,capsys):
+    import routine_schema_probe as probe
+    monkeypatch.setitem(sys.modules,'sqlalchemy',None)
+    monkeypatch.setattr(sys,'argv',['probe','--sql'])
+    probe.main()
+    sql=capsys.readouterr().out
+    assert 'REPEATABLE READ READ ONLY' in sql and 'statement_timeout=10000' in sql
+    assert 'pg_control_system' in sql
+    assert probe.fingerprint([['column','public','table','field','text','false','']],123)['cluster_identifier']=='123'
+    with pytest.raises(ValueError):probe.fingerprint([],123)

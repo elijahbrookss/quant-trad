@@ -409,9 +409,10 @@ This analytical extension requires no schema migration or new Dataset.
 
 Work-branch CI now computes required checks from the conservative matrix in
 [CI test topology](testing/ci-test-topology.md#conservative-work-branch-selection).
-Docs, frontend presentation and a few reviewed research calculation modules can
+Docs, exact reviewed frontend presentation files and a few reviewed research calculation modules can
 avoid unrelated database/storage rehearsals. Unlisted or mixed high-risk changes
-run everything. A manual force-full run remains available. Keep focused local
+run everything. Selection includes the branch contribution since its explicitly
+configured integration merge base, even when earlier push runs were cancelled. A manual force-full run remains available. Keep focused local
 feedback and the normal validation matrix; a short CI run is not the full
 exact-source handoff receipt described above. Develop/main release qualification
 and its seven original expanded jobs/recovery artifacts remain mandatory.
