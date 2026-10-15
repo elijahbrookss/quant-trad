@@ -509,7 +509,8 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
     }
     if family == "event_fact_analysis" and version == "14":
         fields["episodes[]"] = {"type":"array","meaning":"Complete second sequences, raw trade traces and immutable known-at references; precontext controls; thinning forward move and no-move outcomes."}
-        fields["support"] = {"type":"object","meaning":"Joined seconds, path/quality exclusions and matched counts; no minimum significance or power claim."}
+        fields["support"] = {"type":"object","meaning":"Joined seconds, path/quality exclusions, pre-context-selected matches and separate control support states; no minimum significance or power claim."}
+        fields["dependence"] = {"type":"object","meaning":"Unique/shared event anchors, cross-origin reused controls and coalesced inclusive-window overlaps/components; not independent trial counts."}
         return fields
     if family == "raw_forward_outcome" and version == "6":
         fields["events[]"] = {"type":"array","meaning":"Every event with volume cohort, context and overlap IDs; no truncation."}

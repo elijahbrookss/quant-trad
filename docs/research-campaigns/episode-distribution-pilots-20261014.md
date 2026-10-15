@@ -117,10 +117,20 @@ All context and trajectory inputs stay inside the declared half-hour; no hidden
 warmup or outcome tail is requested. The inclusive 241-second path permits
 anchors only from 00:02:00 through 00:27:59 UTC. Matching context is the inclusive
 61 observations from anchor-120 through anchor-60 (60 one-second returns), so it
-ends before the sharp detector's anchor-60 through anchor move interval. Controls
-need their own complete 241-second path. The earliest possible matched event
+ends before the sharp detector's anchor-60 through anchor move interval. Control
+anchors use that same declared structural grid, but selection requires only the
+61 pre-context observations; it never inspects their anchor or future path. The
+earliest possible matched event
 anchor is 00:07:00, with a control at 00:02:00; actual gaps can narrow this support
 further. Unmatched early events remain explicit rather than extending inputs.
+Once the best pre-context control is selected, retain its identity even if its
+anchor, subsequent flow or displayed-book path is missing or crosses validity
+intervals. Emit partial second rows, missing offsets and path-support reasons;
+do not search for a future-valid replacement. The next-60-second label is null
+when its own 0..60-second path is unavailable or invalid. Missing later seconds
+outside that horizon can leave the forward label resolved while the full
+trajectory remains incomplete. Selection and observed outcome support are
+separate counts.
 
 Match one earlier same-UTC-hour control at least 300 seconds away, separately
 within each origin and without control reuse within that origin. Matching uses
@@ -139,6 +149,17 @@ or choosing a tight empirical optimum. Minimize the sum of absolute log ratios,
 then choose the earliest timestamp on ties. Report unmatched anchors. Controls
 may exhibit later moves: their outcomes cannot determine matching. The two
 origins may reuse a control identity and are not independent studies.
+
+Report unique event anchors, event anchors shared across origins, unique control
+anchors, controls reused across origins and additional control occurrences.
+Coalesce an anchor used in multiple roles/origins into one planned inclusive
+[anchor-120, anchor+120] window. Count intersecting unique-window pairs, including
+windows touching at an endpoint, and transitive overlap components. Retain window
+roles and case IDs; missing support does not erase its planned window or its
+shared identity. Episode rows, selected matches, unique windows and overlap
+components are descriptive accounting, not independent trials or an effective
+sample size. Common shocks and longer serial dependence remain outside these
+short-window overlap counts.
 
 Retain second sequences, raw executed-trade traces and actual availability
 references. Separately label whether each thinning episode reaches a 10bps

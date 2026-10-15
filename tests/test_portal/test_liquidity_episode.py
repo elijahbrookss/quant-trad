@@ -153,3 +153,53 @@ def test_declared_scope_keeps_pre_post_and_matching_context_inside():
             assert episode['seconds'][-1]['offset_seconds']==120
         if e['control'] is not None:
             assert datetime.fromisoformat(e['event']['anchor'].replace('Z','+00:00'))>=t(420)
+
+
+@pytest.mark.parametrize('missing_second',[150,240])
+def test_identical_precontext_keeps_selected_control_when_future_coverage_changes(missing_second):
+    _,request,plan,records=fixture()
+    evaluator=LiquidityEpisodeEvaluator()
+    baseline=evaluator.evaluate(plan=plan,inputs={**request.parameters,'fact_records_by_alias':records})
+    changed=deepcopy(records)
+    changed['flow']=[r for r in changed['flow'] if r.fact.observation_time!=t(missing_second)]
+    partial=evaluator.evaluate(plan=plan,inputs={**request.parameters,'fact_records_by_alias':changed})
+    assert len(baseline['episodes'])==len(partial['episodes'])==2
+    for before,after in zip(baseline['episodes'],partial['episodes']):
+        assert before['event_id']==after['event_id']
+        assert before['control']['anchor']==after['control']['anchor']==t(120).isoformat(timespec='microseconds').replace('+00:00','Z')
+        assert before['control']['context']==after['control']['context']
+        assert after['match_status']=='matched'
+        assert after['control']['path_support_status']=='unresolved'
+        assert missing_second-120 in after['control']['missing_offsets_seconds']
+        if missing_second==150:
+            assert after['control']['forward_60s_status']=='unresolved'
+            assert after['control']['sharp_move_in_next_60s'] is None
+        else:
+            assert after['control']['forward_60s_status']=='resolved'
+    assert baseline['dependence']==partial['dependence']
+
+
+def test_shared_control_and_overlapping_event_windows_are_not_independent_counts():
+    _,request,plan,records=fixture()
+    result=LiquidityEpisodeEvaluator().evaluate(plan=plan,inputs={**request.parameters,'fact_records_by_alias':records})
+    d=result['dependence']
+    assert d['episode_rows']==d['unique_event_anchors']==2
+    assert d['event_anchors_shared_across_origins']==0
+    assert d['selected_control_occurrences']==2 and d['unique_control_anchors']==1
+    assert d['control_anchors_reused_across_origins']==d['additional_control_occurrences']==1
+    assert d['unique_planned_windows']==3 and d['overlap_pair_count']==1
+    assert d['overlap_component_count']==2
+
+
+def test_shared_origin_anchor_roles_and_inclusive_endpoint_overlap():
+    from portal.backend.service.research.liquidity_episode_evaluator import episode_dependence
+    def ep(i):return {'anchor':t(i).isoformat()}
+    cases=[{'event_id':'a','origin':'sharp_move','event':ep(600),'control':ep(120)},
+           {'event_id':'b','origin':'depth_thinning','event':ep(600),'control':ep(120)},
+           {'event_id':'c','origin':'sharp_move','event':ep(840),'control':ep(600)}]
+    d=episode_dependence(cases)
+    assert d['unique_event_anchors']==2 and d['event_anchors_shared_across_origins']==1
+    assert d['unique_control_anchors']==2 and d['control_anchors_reused_across_origins']==1
+    assert d['anchors_used_as_event_and_control']==[t(600).isoformat()]
+    assert d['unique_planned_windows']==3 and d['overlap_pair_count']==1
+    assert d['overlap_component_count']==2

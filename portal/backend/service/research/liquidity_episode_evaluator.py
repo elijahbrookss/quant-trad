@@ -21,6 +21,8 @@ RULES = {"move_horizon_seconds": 60, "sharp_log_return_bps": 10.,
     "max_records_per_alias": 50000, "matching": "earlier_same_hour_no_replacement.v1",
     "match_calipers": {"spread_ratio": 2., "depth_ratio": 2., "volatility_ratio": 2.},
     "resolution_seconds": 1, "revision_selection": "latest_at_declared_analysis_cutoff.v1",
+    "control_admission": "precontext_only_before_future_support.v1",
+    "dependence": "unique_anchor_closed_window_components.v1",
     "missing_second_policy": "exclude_without_fill", "inference": "retrospective_descriptive_only"}
 EXPECTED = {"bbo": ("market.bbo", "market.bbo.v1", 1),
     "depth": ("market.depth_observation", "market.depth_band.v1", 1),
@@ -119,9 +121,9 @@ def build_rows(inputs,cutoff):
     return joined,sorted(trades,key=lambda r:(r['time'],r['event_key'])),reasons
 
 
-def supported(joined,t):
+def supported(joined,t,lower=-120,upper=120):
     # Exact materialized seconds only. Producer quiet proof never manufactures rows.
-    window=[joined.get(t+timedelta(seconds=i)) for i in range(-120,121)]
+    window=[joined.get(t+timedelta(seconds=i)) for i in range(lower,upper+1)]
     return (window if all(r is not None for r in window) and
         len({r['validity_interval_id'] for r in window})==1 else None)
 
@@ -150,9 +152,51 @@ def match_distance(a,b):
     return math.fsum(distances)
 
 
-def analyze(joined,trades):
+def episode_dependence(episodes):
+    """Count shared identities and inclusive planned-window overlap, not trials."""
+    events=defaultdict(list);controls=defaultdict(list);windows={}
+    for case in episodes:
+        for role,members in (('event',events),('control',controls)):
+            episode=case.get(role)
+            if episode is None:continue
+            anchor=episode['anchor'];members[anchor].append(case['origin'])
+            window=windows.setdefault(anchor,{'anchor':anchor,'roles':set(),'case_ids':set()})
+            window['roles'].add(role);window['case_ids'].add(case['event_id'])
+    ordered=sorted(windows)
+    components=[];pairs=[];right=None
+    for anchor in ordered:
+        execution_checkpoint()
+        instant=_utc(anchor,field='anchor');left=instant-timedelta(seconds=120)
+        end=instant+timedelta(seconds=120)
+        if right is None or left>right:components.append([])
+        right=max(right or end,end)
+        row=windows[anchor];row['roles']=sorted(row['roles']);row['case_ids']=sorted(row['case_ids'])
+        row['component_id']=len(components);components[-1].append(anchor)
+    for i,a in enumerate(ordered):
+        for b in ordered[i+1:]:
+            if (_utc(b,field='anchor')-_utc(a,field='anchor')).total_seconds()<=240:
+                pairs.append({'left_anchor':a,'right_anchor':b})
+    shared_events=[a for a,v in sorted(events.items()) if len(set(v))>1]
+    shared_controls=[a for a,v in sorted(controls.items()) if len(set(v))>1]
+    return {'episode_rows':len(episodes),'unique_event_anchors':len(events),
+        'event_anchors_shared_across_origins':len(shared_events),'shared_event_anchors':shared_events,
+        'selected_control_occurrences':sum(len(v) for v in controls.values()),
+        'unique_control_anchors':len(controls),
+        'control_anchors_reused_across_origins':len(shared_controls),'reused_control_anchors':shared_controls,
+        'additional_control_occurrences':sum(len(v)-1 for v in controls.values()),
+        'anchors_used_as_event_and_control':sorted(set(events)&set(controls)),
+        'unique_planned_windows':len(windows),'overlap_pair_count':len(pairs),'overlap_pairs':pairs,
+        'overlap_component_count':len(components),'overlap_components':components,
+        'windows':[windows[a] for a in ordered],
+        'interpretation':'Unique inclusive +/-120s planned windows, coalesced across roles/origins even when support is missing. These counts are not independent observations or an effective sample size.'}
+
+
+def analyze(joined,trades,*,start,end):
     reasons=Counter();eligible=[];origin={'sharp_move':[],'depth_thinning':[]};last={}
-    for t in sorted(joined):
+    # The structural grid is fixed by declared inputs, not available future rows.
+    grid=[start+timedelta(seconds=i) for i in range(120,int((end-start).total_seconds())-120)]
+    precontexts={t:context(joined,t) for t in grid if supported(joined,t,-120,-60) is not None}
+    for t in grid:
         execution_checkpoint()
         w=supported(joined,t)
         if w is None:reasons['episode_path_unavailable']+=1;continue
@@ -167,9 +211,12 @@ def analyze(joined,trades):
             if not hit or len(origin[name])>=10 or (name in last and (t-last[name]).total_seconds()<300):continue
             origin[name].append({'time':t,'move_bps':move,'thinning_sides':thin});last[name]=t
     trade_times=[r['time'] for r in trades]
-    contexts={t:context(joined,t) for t in eligible}
     def episode(t):
-        w=supported(joined,t)
+        path=[joined.get(t+timedelta(seconds=i)) for i in range(-120,121)]
+        missing=[i-120 for i,r in enumerate(path) if r is None]
+        intervals={r['validity_interval_id'] for r in path if r is not None}
+        support_reasons=(['materialized_seconds_missing'] if missing else [])+(['book_validity_interval_changed'] if len(intervals)>1 else [])
+        w=[r for r in path if r is not None]
         sample=[{'offset_seconds':int((r['time']-t).total_seconds()),
             **{k:v for k,v in r.items() if k not in ('time','validity_interval_id')},
             'bucket_start':_iso(r['time'])} for r in w]
@@ -184,17 +231,21 @@ def analyze(joined,trades):
                 'record_id':r['record_id'],'event_key':r['event_key'],
                 'aggressor_side':p['aggressor_side'],'maker_side':p['maker_side'],
                 'price':number(p,'price',True),'base_quantity':number(p,'base_quantity')})
-        return {'anchor':_iso(t),'context':contexts[t],'seconds':sample,'trades':trace,
-            'sharp_move_in_next_60s':any(abs(math.log(joined[t+timedelta(seconds=i)]['mid']/joined[t]['mid']))*10000>=10 for i in range(1,61))}
+        future=supported(joined,t,0,60)
+        return {'anchor':_iso(t),'context':precontexts[t],'seconds':sample,'trades':trace,
+            'path_support_status':'unresolved' if support_reasons else 'complete',
+            'path_support_reasons':support_reasons,'missing_offsets_seconds':missing,
+            'forward_60s_status':'resolved' if future is not None else 'unresolved',
+            'sharp_move_in_next_60s':any(abs(math.log(r['mid']/future[0]['mid']))*10000>=10 for r in future[1:]) if future is not None else None}
     episodes=[]
     for name,anchors in origin.items():
         used=set()
         for anchor in anchors:
-            t=anchor['time'];ctx=contexts[t];candidates=[]
-            for c in eligible:
+            t=anchor['time'];ctx=precontexts[t];candidates=[]
+            for c in precontexts:
                 if c in used or c.hour!=t.hour or c.date()!=t.date() or c>t-timedelta(seconds=300):continue
                 # Earlier anchor need not have a quiet future; matching is outcome-blind.
-                score=match_distance(ctx,contexts[c])
+                score=match_distance(ctx,precontexts[c])
                 if score is not None:candidates.append((score,c))
             control=min(candidates)[1] if candidates else None
             if control is not None:used.add(control)
@@ -202,7 +253,7 @@ def analyze(joined,trades):
                 'move_bps':anchor['move_bps'],'thinning_sides':anchor['thinning_sides'],
                 'event':episode(t),'control':episode(control) if control is not None else None,
                 'match_status':'matched' if control is not None else 'no_precontext_match'})
-    return episodes,reasons,len(eligible)
+    return episodes,reasons,len(eligible),len(precontexts)
 
 
 @dataclass(frozen=True)
@@ -224,16 +275,20 @@ class LiquidityEpisodeEvaluator:
         # Restrict analysis to exact declared scope, even if an adapter supplies a suffix.
         start,end=(_utc(plan.evaluation_range[k],field=k) for k in ('start','end_exclusive'))
         joined={t:r for t,r in joined.items() if start<=t<end}
-        episodes,reasons,eligible=analyze(joined,trades)
+        episodes,reasons,eligible,control_candidates=analyze(joined,trades,start=start,end=end)
         return {'schema_version':RESULT_SCHEMA,'check_family':self.evaluator_id,'status':'completed',
             'sample_count':len(episodes),'rules':RULES,'analysis_as_of':_iso(cutoff),
             'evidence_class':'retrospective_event_sequences','historical_decision':False,
             'support':{'joined_seconds':len(joined),'eligible_anchors':eligible,
                 'join_exclusions':dict(join_reasons),'episode_exclusions':dict(reasons),
                 'by_origin':dict(Counter(e['origin'] for e in episodes)),
-                'matched':sum(e['control'] is not None for e in episodes)},
+                'precontext_control_candidates':control_candidates,
+                'matched':sum(e['control'] is not None for e in episodes),
+                'selected_control_path_status':dict(Counter(e['control']['path_support_status'] for e in episodes if e['control'] is not None)),
+                'selected_control_forward_status':dict(Counter(e['control']['forward_60s_status'] for e in episodes if e['control'] is not None))},
+            'dependence':episode_dependence(episodes),
             'episodes':episodes,'data_quality':inputs.get('data_quality',{}),
-            'caveats':['Only complete materialized second paths; quiet proof does not create observations.',
+            'caveats':['Event anchors require complete paths. Controls are selected from pre-context only; missing later support/outcomes remain explicit without replacement. Quiet proof does not create observations.',
                 'Depth bands follow the current midpoint. Thinning is not cancellation attribution.',
                 'Feed clocks may disagree; sequence numbers across feeds do not establish order. Within-second ordering remains unresolved.',
                 'Each reference retains actual known_at. Event-time sequences are not historical decisions or tradable fills.',
