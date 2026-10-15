@@ -971,6 +971,11 @@ def _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_s
     assert response.status_code == 200, response.text
     result = response.json()
     assert result['provider_call_performed'] is False and result['preparation_authorized'] is False
+    assert len(result['plan']['market_data_requirements'])==5
+    assert result['plan']['warmup']['bars']==0 and result['plan']['outcome_tail']['seconds']==0
+    assert all(datetime.fromisoformat(r['required_start'].replace('Z','+00:00'))==start
+               and datetime.fromisoformat(r['required_end'].replace('Z','+00:00'))==end
+               for r in result['plan']['market_data_requirements'])
     # Sparse/absent inputs remain acquisition requirements, not false readiness.
     assert result['plan']['missing_coverage']
     assert any(r['alias']=='flow' and r['reason']=='source_bound_interval_unrecorded'
