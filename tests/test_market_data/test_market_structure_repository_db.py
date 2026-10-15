@@ -916,7 +916,10 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
             **bounds, source_identity_keys=(source_key,))
         market_data_repo.ingest_facts(
             series_id=series, source_id=alternate_id,
-            facts=[canonicalize(native_fact, source=alternate_source)],
+            facts=[canonicalize(
+                replace(native_fact, known_at=native_fact.known_at + timedelta(microseconds=1)),
+                source=alternate_source,
+            )],
             request={"fixture": "native-source-before-latest"},
         )
         latest = market_data_repo.read_series_records(**bounds)
