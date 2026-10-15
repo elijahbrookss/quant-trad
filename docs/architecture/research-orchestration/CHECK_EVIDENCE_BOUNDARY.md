@@ -21,6 +21,8 @@ code_paths:
   - portal/backend/service/research/catalog.py
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
+  - portal/backend/service/research/candle_distribution_evaluator.py
+  - portal/backend/service/research/liquidity_episode_evaluator.py
   - portal/backend/service/research/raw_candle_evaluator.py
   - portal/backend/service/research/controlled_reversal_evaluator.py
   - portal/backend/service/research/event_fact_evaluator.py
@@ -861,3 +863,26 @@ causal consumers still require complete coverage. Check execution remains
 provider-free. The real analysis cutoff and `bucket_start_unverified` limitation
 remain mandatory; this is conditional retrospective association, with no
 historical-availability, predictive, causal or certification claim.
+
+
+## Complete distributions and bounded liquidity episodes
+
+`raw_forward_outcome` v6 explicitly selects `raw_candle_distribution.v1`.
+It reuses v3 preparation/predicate/close-outcome arithmetic through an internal
+complete-event collector; historical v3 output and registrations are unchanged.
+Complete volume-cohort events, fixed tail/quantile/day diagnostics and overlap
+identities belong to the Check, not shell/report calculations. A complete-table
+resource limit fails rather than truncating scientific support.
+
+`event_fact_analysis` v14 explicitly selects `liquidity_episode.v1` with a real
+analysis cutoff. It uses canonical typed frozen Fact histories and the existing
+revision selector at that cutoff, then admits complete short book/flow/trade
+paths. It retains actual information clocks and prohibits retrospective sequence
+inspection from claiming historical decisions. It is a distinct descriptive
+procedure, not a reinterpretation of causal v5 or hourly retrospective v13.
+
+The fixed exposed-data pilot rules, threshold rationale, missingness, reuse,
+allocation and stopping decisions are recorded in
+[the bounded C/A protocol](../../research-campaigns/episode-distribution-pilots-20261014.md).
+Method registration does not authorize deployment, acquisition, extra attempts,
+sealed-data access or trading. Historical definitions/results remain replayable.

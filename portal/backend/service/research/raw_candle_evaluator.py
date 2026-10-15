@@ -200,7 +200,7 @@ class RawCandleEvaluator:
                 "entry_lag_bars": outcomes["entry_lag_bars"], "invalidation_max_bars": 0,
                 "outcome_boundary": "evaluation_end_exclusive", "primary_candle_required_fields": required}
 
-    def evaluate(self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any]):
+    def evaluate(self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any], _event_collector=None):
         detector = inputs["detector"]
         outcomes = inputs["outcomes"]
         fields = detector_fields(detector)
@@ -299,12 +299,16 @@ class RawCandleEvaluator:
                 complete += 1
             for h in horizons:
                 horizon_resolution[h]["resolved" if h in resolved else "unresolved:"+unresolved[h]] += 1
-            if len(examples) < outcomes["max_examples"]:
-                examples.append({"event_time": _iso(opened), "event_close_time": _iso(current["close_time"]),
+            if len(examples) < outcomes["max_examples"] or _event_collector is not None:
+                example = {"event_time": _iso(opened), "event_close_time": _iso(current["close_time"]),
                     "decision_known_at": _iso(decision), "entry_time": event.entry_time or None,
                     "entry_price_rule": "canonical_candle_close", "entry_reason": entry_reason,
                     "outcomes": {str(h): {"status": "resolved", **resolved[h]} if h in resolved
-                        else {"status": "unresolved", "reason": unresolved[h]} for h in horizons}})
+                        else {"status": "unresolved", "reason": unresolved[h]} for h in horizons}}
+                if len(examples) < outcomes["max_examples"]:
+                    examples.append(example)
+                if _event_collector is not None:
+                    _event_collector(example, current, prior, by_open)
         summary = checks._summarize_outcomes(events, baseline, forward_bars=horizons,
             min_sample_count=outcomes["min_sample_count"], min_edge_pct=outcomes["min_edge_pct"])
         return {"schema_version": RESULT_SCHEMA, "check_family": checks.RAW_FORWARD_OUTCOME,

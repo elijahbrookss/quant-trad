@@ -301,7 +301,35 @@ _EXAMPLES["event_fact_analysis@13"] = {
         "folds": [{"id": "fixed-comparison", "train": {"start": "2026-07-25T00:00:00Z", "end": "2026-09-03T00:00:00Z"},
             "validation": {"start": "2026-09-03T00:00:00Z", "end": "2026-09-23T00:00:00Z"}}]}}
 
+_EXAMPLES["raw_forward_outcome@6"] = deepcopy(_EXAMPLES["raw_forward_outcome@3"])
+_EXAMPLES["raw_forward_outcome@6"]["scope"]["warmup_bars"] = 1
+_EXAMPLES["raw_forward_outcome@6"]["detector"] = {"all": [
+    {"field": "previous_close", "operator": "lt", "value_field": "previous_open"},
+    {"field": "close", "operator": "gt", "value_field": "open"},
+    {"field": "open", "operator": "lte", "value_field": "previous_close"},
+    {"field": "close", "operator": "gte", "value_field": "previous_open"},
+    {"any": [{"field": "volume", "operator": "gt", "value_field": "previous_volume"},
+             {"field": "volume", "operator": "lte", "value_field": "previous_volume"}]}]}
+_EXAMPLES["raw_forward_outcome@6"]["outcomes"]["schema_version"] = "raw_candle_distribution.v1"
+
+_EXAMPLES["event_fact_analysis@14"] = {
+    "check_family":"event_fact_analysis", "mode":"preview", "gap_policy":"continue_degraded",
+    "scope":{"instrument_id":"instrument-id","timeframe":"1m","start":"2026-09-22T00:00:00Z","end":"2026-09-22T00:30:00Z"},
+    "detector":{"type":"liquidity_episode"},
+    "outcomes":{"schema_version":"liquidity_episode.v1","analysis_as_of":"2026-10-14T00:00:00Z"},
+    "inputs":[{"alias":alias,"fact_type":fact,"contract_version":contract,
+        **({"timeframe_seconds":seconds} if seconds else {}),
+        "alignment":"exact_interval" if seconds else "latest_known","max_staleness_seconds":1,"allow_gaps":True,
+        "source_policy":{"mode":"exact","source_identity_key":"source-identity-id"}}
+        for alias,fact,contract,seconds in [
+            ("bbo","market.bbo","market.bbo.v1",1),
+            ("depth","market.depth_observation","market.depth_band.v1",1),
+            ("flow","market.trade_flow","market.trade_flow.v1",1),
+            ("trades","market.trade","market.trade.v1",None)]]}
+
 _PURPOSES = {
+    "event_fact_analysis@14": "Describe fixed sharp-move and thinning episodes, outcome-blind precontext controls, trade sequences, and actual availability clocks on bounded exposed inputs.",
+    "raw_forward_outcome@6": "Retain every raw-candle event and compare volume cohorts with fixed quantiles, tails, day and overlap diagnostics; preserve valid extremes.",
     "raw_forward_outcome@5": "Compare controlled reversal cohorts with explicit interval, prior windows, entry/outcome horizon and matching-time choices.",
     "event_fact_analysis@13": "Compare next-hour direction association beyond return/ATR using late-received exact-bucket numeric features; retrospective only. Optional outcomes.retrospective.input_coverage_policy=complete_paired_rows admits recorded partial custody with missing-row exclusions and fixed boundaries.",
     "raw_forward_outcome@4": "Compare bullish engulfing against matched non-engulfing candles after a fixed prior decline, with outcome-blind pairs and dependence checks.",
@@ -412,6 +440,13 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
         fields["detector"] = {"fixed": {"type":"fact_snapshot","sampling":"primary_bar_close"}, "constraints":"Unconditional primary-close samples; detector alias names one numeric input, not causal Fact-driven event emission."}
         fields["outcomes.retrospective"] = {"fields": ["schema_version", "analysis_as_of", "bucket_time_interpretation"],
             "constraints": "Explicit retrospective_numeric_comparison.v1; real cutoff >= sample end; bucket_start_unverified. Hourly sample <=60 days, next-hour only, exact bucket inputs, recent return/ATR14 baseline, 1..2 numeric features, one fixed logistic fold."}
+    if family == "event_fact_analysis" and version == "14":
+        return {"scope":{"fields":["instrument_id","timeframe","start","end"],
+            "constraints":"Aligned 1m source; 5..30 minute range. No warmup, Indicator or model."},
+            "detector":{"fixed":{"type":"liquidity_episode"}},
+            "outcomes":{"fields":["schema_version","analysis_as_of"],"constraints":"Explicit liquidity_episode.v1 and real analysis cutoff >=end; fixed sharp10bps/60s and 50% thinning, 5bps depth, +/-120s paths, 300s refractory, first10 per origin."},
+            "inputs[]":{"fields":["alias","fact_type","contract_version","timeframe_seconds","source_policy","alignment","max_staleness_seconds","allow_gaps"],"constraints":"Exact bbo/depth/flow/trades aliases and canonical contracts; complete second paths; no gap fill."},
+            "gap_policy":{"fixed":"continue_degraded"}}
     if family == "raw_forward_outcome" and version == "4":
         return {"scope": {"fields": ["instrument_id", "symbol", "timeframe", "start", "end", "warmup_bars", "datasource", "exchange"],
             "constraints": "Fixed 1m, aligned UTC minute boundaries, nonempty range <=32 days; 21 warmup candles when specified. No Indicator or additional Fact inputs."},
@@ -445,6 +480,9 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
     else:
         fields["outcomes"] = {"fields": ["min_sample_count", "max_examples"] + (["bucket_by", "buckets"] if family == "run_signal_summary" else []),
             "defaults": {"min_sample_count": 5, "max_examples": 100}, "constraints": "Sample threshold is descriptive; example cap bounds reporting. Signal-summary bucket_by (buckets alias) lists recorded fields, default symbol/output_name/event_key."}
+    if family == "raw_forward_outcome" and version == "6":
+        fields["outcomes"] = {"fields": list(_EXAMPLES["raw_forward_outcome@6"]["outcomes"]),
+            "constraints": "Explicit raw_candle_distribution.v1; raw v3 close/outcome rules; both volume fields required; one warmup bar; complete table <=10000 events; fixed diagnostic rules, no tail removal."}
     if family == "raw_forward_outcome" and version == "3":
         fields["outcomes"] = {"fields": ["schema_version", "forward_bars", "entry_lag_bars", "direction",
             "min_sample_count", "min_edge_pct", "max_examples", "outcome_boundary"],
@@ -469,6 +507,15 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         "sample_count": {"type": "integer", "unit": "method-specific observations", "meaning": "Inspect method population and exclusions; not effective independent sample size."},
         "data_quality": {"type": "object", "meaning": "Resolved input/gap evidence, not a result certification."},
     }
+    if family == "event_fact_analysis" and version == "14":
+        fields["episodes[]"] = {"type":"array","meaning":"Complete second sequences, raw trade traces and immutable known-at references; precontext controls; thinning forward move and no-move outcomes."}
+        fields["support"] = {"type":"object","meaning":"Joined seconds, path/quality exclusions, pre-context-selected matches and separate control support states; no minimum significance or power claim."}
+        fields["dependence"] = {"type":"object","meaning":"Unique/shared event anchors, cross-origin reused controls and coalesced inclusive-window overlaps/components; not independent trial counts."}
+        return fields
+    if family == "raw_forward_outcome" and version == "6":
+        fields["events[]"] = {"type":"array","meaning":"Every event with volume cohort, context and overlap IDs; no truncation."}
+        fields["distribution"] = {"type":"object","meaning":"Fixed quantiles, full-denominator tail contributions, daily sums and influence diagnostics. Returns are fractions."}
+        return fields
     if family == "event_fact_analysis" and version in {"11", "12"}:
         summary = {
             "pair_count": {"type": "integer", "unit": "complete pairs"},
@@ -626,7 +673,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
                         "execution_authority": False, "promotion_authority": False,
                         **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
-                           if definition.definition_id == "event_fact_analysis" and version == "13" else {})},
+                           if definition.definition_id == "event_fact_analysis" and version in {"13", "14"} else {})},
         "required_inputs": {"declaration": declarations,
                             "evidence_binding": "Exactly one frozen Dataset or supported immutable run evidence; use existing requirements/prepare.",
                             "resource_bindings": {"scope.instrument_id": "Authorized server instrument ID.",
