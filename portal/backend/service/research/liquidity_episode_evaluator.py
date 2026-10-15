@@ -267,7 +267,7 @@ class LiquidityEpisodeEvaluator:
             'feature_lookback_bars':0,'feature_windows_seconds_by_alias':{},
             'outcome_horizons':[],'required_outcome_horizons':[],'horizon_kind':'elapsed_time',
             'entry_lag_bars':0,'invalidation_max_bars':0,'outcome_boundary':'evaluation_end_exclusive',
-            'fact_history_required':True,'primary_candle_required_fields':['close','known_at']}
+            'fact_history_required':True,'fact_history_boundary':'evaluation_range','primary_candle_required_fields':['close','known_at']}
 
     def evaluate(self,*,plan,inputs):
         cutoff=_utc(inputs['outcomes']['analysis_as_of'],field='analysis_as_of')

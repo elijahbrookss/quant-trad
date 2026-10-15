@@ -917,3 +917,22 @@ No imputation, trimming, control reuse, future-valid replacement or automatic
 rematching is provided. The support gates are descriptive requirements, not a
 power calculation. Exact source qualification and separate attempt allocation
 remain prerequisites for scientific execution.
+
+
+### Native episode admission
+
+Requirement planning and frozen-input preparation retain the canonical Fact
+view for native trades and trade-flow buckets. The legacy typed read API is
+unchanged; its projection is not used to reconstruct source identities during
+admission. Canonical source, revision, watermark and known-at predicates remain
+owned by the existing repository. Native effective timestamps use the shared
+canonical record accessor when no legacy common clock is present.
+
+Liquidity episode v14 declares its Fact histories bounded by the evaluation
+range. Generic staleness settings do not create a predecessor outside its fixed
+window; all pre/post support remains inside that window. Other procedures retain
+their existing lookback policy. HTTP requirements and preparation dry-run tests
+cover the complete five-alias path with disposable canonical records; the native
+PostgreSQL fixture additionally checks real source selection, explicit sparse
+coverage, preparation resolution and cutoff/watermark-bound causal history.
+These tests do not execute a scientific Check or authorize acquisition/freezing.

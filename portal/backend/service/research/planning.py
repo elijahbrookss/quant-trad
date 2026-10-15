@@ -13,6 +13,7 @@ from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
     MarketDataRequirement,
+    record_effective_time as canonical_record_effective_time,
 )
 from market_data.acquisition_coverage import (
     missing_recorded_coverage,
@@ -41,6 +42,7 @@ from portal.backend.service.market.frozen_dataset_service import (
     candle_selection_times,
     matching_source_identity_keys,
     matching_source_keys,
+    read_requirement_records,
 )
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
@@ -167,6 +169,8 @@ def _record_time(record: Any) -> datetime:
         or getattr(fact, "observation_time", None)
         or getattr(fact, "effective_at", None)
     )
+    if value is None:
+        value = canonical_record_effective_time(record)
     return _utc(value, field="record.time")
 
 
@@ -284,7 +288,7 @@ def _coverage_for_requirement(
             as_of_commit_seq=as_of_commit_seq, source_identity_keys=requested_source_keys,
         )
         candle_selection = inspect_candles(**selection_args) if callable(inspect_candles) else None
-        records = [] if candle_selection is not None else list(store.read_series_records(**selection_args))
+        records = [] if candle_selection is not None else read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
         if policy_mode == "current":
             selected_source_keys: tuple[str, ...] = ()
         elif policy_mode == "exact" and requested_source_keys:
@@ -300,7 +304,7 @@ def _coverage_for_requirement(
                 if candle_selection is not None:
                     candle_selection = inspect_candles(**selection_args)
                 else:
-                    records = list(store.read_series_records(**selection_args))
+                    records = read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
             records_by_series[int(candidate["series_id"])] = records
             if candle_selection is not None:
                 candle_selections[int(candidate["series_id"])] = candle_selection
@@ -644,7 +648,8 @@ def plan_research_check(
         if requirement.key in feature_predecessor_aliases:
             lookback_seconds += max(lookback_seconds, timeframe_seconds)
         complete_paired = declaration.get("input_coverage_policy") == "complete_paired_rows"
-        if complete_paired:
+        if complete_paired or declaration.get("fact_history_boundary") == "evaluation_range":
+            # Owned in-scope histories do not sample a predecessor outside the window.
             # Completed-bucket snapshots at each primary close need the matching
             # evaluation bucket, never a staleness-based predecessor interval.
             lookback_seconds = 0
