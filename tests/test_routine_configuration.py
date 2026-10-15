@@ -81,3 +81,17 @@ def test_child_configuration_permissions_are_bound(deployment,tmp_path):
     key.chmod(0o644)
     with pytest.raises(ValueError,match='configuration drift'):
         config.admit(baseline,config.configuration_identity(model,previous,tree,env),previous)
+
+
+@pytest.mark.parametrize('mechanism',['configs','secrets'])
+@pytest.mark.parametrize('location',['model','service'])
+@pytest.mark.parametrize('running',[False,True])
+def test_compose_configs_and_secrets_refuse_before_file_or_runtime_observation(deployment,monkeypatch,mechanism,location,running):
+    model,env,previous,tree,runtime,baseline=deployment
+    if location=='model':model[mechanism]={'private':{'file':'/must-not-be-read'}}
+    else:model['services']['backend'][mechanism]=[{'source':'private','target':'/run/private'}]
+    def unexpected(*args,**kwargs):raise AssertionError('unsupported model must refuse before private or Docker observations')
+    monkeypatch.setattr(config,'binding_identity',unexpected)
+    monkeypatch.setattr(config,'running_identity',unexpected)
+    with pytest.raises(ValueError,match='unsupported Compose configs/secrets'):
+        config.configuration_identity(model,previous,tree,env,running=running)

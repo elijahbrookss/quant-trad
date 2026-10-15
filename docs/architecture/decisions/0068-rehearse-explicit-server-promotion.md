@@ -407,3 +407,12 @@ caller-setting, mounted-file permission/ownership or runtime drift refuse before
 replacement; reviewed manual reconciliation remains required. Fingerprints never
 publish resolved credentials or Docker configuration. This extends the existing
 locked controller and does not enable a production trigger.
+
+
+Routine configuration admission refuses nonempty Compose `configs` or `secrets`
+at either model or service level, including custom `QT_SINGLE_NODE_COMPOSE_FILE`
+models. Referenced payloads are not covered by the existing bind-file fingerprint;
+rendered declarations alone cannot establish their identity. Refusal precedes
+private binding reads and Docker observations, including interrupted recovery's
+configuration-only check. Supporting these mechanisms needs explicit review and
+payload identity evidence; the default production model does not use them.

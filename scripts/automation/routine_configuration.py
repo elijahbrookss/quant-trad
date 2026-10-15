@@ -78,6 +78,9 @@ def running_identity(model):
 
 def configuration_identity(model,revision,source_hash,env_file,*,running=True):
     if not 1<=len(model.get('services',{}))<=64:raise ValueError('configuration service inventory exceeds bound')
+    for key in ('configs','secrets'):
+        if model.get(key) or any(service.get(key) for service in model['services'].values()):
+            raise ValueError('routine configuration uses unsupported Compose configs/secrets')
     result={'configuration_sha256':digest(normalized(model,revision,source_hash)),
             'bindings_sha256':binding_identity(model,env_file)}
     if running:result['running_sha256']=running_identity(model)
