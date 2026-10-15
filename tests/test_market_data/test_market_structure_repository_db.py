@@ -939,10 +939,10 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
     market_structure_repository.release(claim)
     with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
         market_structure_repository.heartbeat(claim, lease_seconds=120)
-    _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_series_id, source_key, bucket)
+    _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_series_id, source_key, bucket, frozen)
 
 
-def _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_series_id, source_key, bucket):
+def _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_series_id, source_key, bucket, frozen):
     """Real PG native selection/preparation plus the public requirements route.
 
     The archived fixture is sparse: API gaps remain explicit, never filled.
@@ -957,6 +957,7 @@ def _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_s
     from portal.backend.service.market.frozen_dataset_service import prepare_frozen_dataset_from_requirements
     from portal.backend.service.market.runtime_market_data import RuntimeMarketDataResolver
     from market_data.canonical import CanonicalFactRecord
+    from portal.backend.service.market.frozen_dataset_service import resolve_frozen_dataset_read_binding
 
     start = bucket.replace(second=0, microsecond=0)
     end = start + timedelta(minutes=5)
@@ -1001,6 +1002,18 @@ def _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_s
         assert resolver.causal_history(**{**arguments,'evaluation_time':cutoff-timedelta(microseconds=1)})==()
         older = RuntimeMarketDataResolver(store=market_data_repo, as_of_commit_seq=original[0].market_commit_seq-1)
         assert older.causal_history(**arguments)==()
+        entry = next(row for row in frozen.series if int(row['series_id'])==sid)
+        frozen_requirement = {**requirement, 'required_start':entry['range_start'], 'required_end':entry['range_end']}
+        binding = resolve_frozen_dataset_read_binding(dataset_id=frozen.dataset_id, requirements=[frozen_requirement])
+        frozen_resolver = RuntimeMarketDataResolver(store=market_data_repo, dataset_binding=binding)
+        frozen_arguments = {**arguments, 'requirement':frozen_requirement,
+            'start':datetime.fromisoformat(str(entry['range_start']).replace('Z','+00:00')),
+            'end':datetime.fromisoformat(str(entry['range_end']).replace('Z','+00:00'))}
+        frozen_records = frozen_resolver.causal_history(**frozen_arguments)
+        assert len(frozen_records)==1 and isinstance(frozen_records[0], CanonicalFactRecord)
+        assert frozen_records[0].fact_version_id==original[0].fact_version_id
+        assert frozen_records[0].source_identity_key==source_key
+        assert frozen_resolver.causal_history(**{**frozen_arguments,'evaluation_time':cutoff-timedelta(microseconds=1)})==()
 
 
 def test_book_archive_validity_checkpoint_and_replay_are_atomic(

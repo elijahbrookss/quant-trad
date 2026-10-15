@@ -136,7 +136,7 @@ def native_admission(monkeypatch):
         value['source_policy'] = {'mode':'exact', 'source_identity_key':source.identity_key}
     app = FastAPI(); app.include_router(router, prefix='/api/research')
     return SimpleNamespace(api=TestClient(app), payload=payload, records=canonical, calls=calls,
-                           source=source, repo=repo)
+                           source=source, repo=repo, candles=candles)
 
 
 def test_full_episode_http_requirements_admits_native_flow_and_trade_records(native_admission):
@@ -213,3 +213,31 @@ def test_legacy_native_effective_times_still_use_authoritative_clocks(native_adm
             as_of_commit_seq=10000, source_identity_keys=(f.source.identity_key,))
         assert records and planning._record_time(records[0]) == expected
         assert records[0].fact.known_at >= expected
+
+
+def test_admitted_native_inputs_load_into_episode_method_without_dispatch(native_admission, monkeypatch):
+    import pandas as pd
+    from research_science.check import CheckDefinition, CheckRequest, ResolvedCheckPlan
+    from portal.backend.service.research import execution
+    from portal.backend.service.research.liquidity_episode_evaluator import LiquidityEpisodeEvaluator
+    f = native_admission
+    response = f.api.post('/api/research/checks/requirements', json=f.payload)
+    assert response.status_code == 200, response.text
+    value = response.json()
+    definition = CheckDefinition.from_dict(value['definition'])
+    request = CheckRequest.from_dict(value['request'])
+    plan = ResolvedCheckPlan.from_dict(value['plan'])
+    frame = pd.DataFrame([dict(timestamp=r.fact.open_time, close_time=r.fact.close_time,
+        known_at=r.fact.known_at, open=r.fact.open, high=r.fact.high, low=r.fact.low,
+        close=r.fact.close, volume=r.fact.volume) for r in f.candles])
+    monkeypatch.setattr(execution.candle_service, 'fetch_ohlcv_by_instrument', lambda *a,**k:frame)
+    resolver = RuntimeMarketDataResolver(store=f.repo, as_of_commit_seq=10000)
+    inputs = execution._load_market_inputs(definition, request, plan, resolver=resolver)
+    assert set(inputs['fact_records_by_alias']) == {'bbo','depth','flow','trades'}
+    assert all(r.source_identity_key==f.source.identity_key
+               for records in inputs['fact_records_by_alias'].values() for r in records)
+    assert all(c['known_at_lte']==at(900) and c['as_of_commit_seq']==10000
+               for c in f.calls[-4:])
+    result = LiquidityEpisodeEvaluator().evaluate(plan=plan, inputs=inputs)
+    assert result['support']['joined_seconds']==300
+    assert result['sample_count']==0  # Explicitly quiet synthetic fixture, not a scientific null.
