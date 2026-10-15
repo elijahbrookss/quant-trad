@@ -58,8 +58,11 @@ def test_synthetic_package_api_matches_actual_package_verifier(tmp_path,monkeypa
 def test_workflow_keeps_generated_environment_private_and_runs_routine_path():
     workflow=yaml.safe_load((ROOT/'.github/workflows/test.yaml').read_text())
     job=workflow['jobs']['deployment-contract']
-    path=job['env']['QT_SINGLE_NODE_ENV_FILE']
-    assert job['env']['QT_SERVER_ENV_FILE']==path
+    setup=next(s for s in job['steps'] if s.get('name')=='Generate disposable operator environment')
+    path=setup['env']['QT_SINGLE_NODE_ENV_FILE']
+    assert setup['env']['QT_SERVER_ENV_FILE']==path
+    assert 'GITHUB_ENV' in setup['run']
+    assert all('runner.' not in str(j.get('env',{})) for j in workflow['jobs'].values())
     assert path.startswith('${{ runner.temp }}/') and 'secrets.env' not in path
     commands='\n'.join(s.get('run','') for s in job['steps'])
     assert 'install -d -m 0700' in commands
