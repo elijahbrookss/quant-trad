@@ -3821,11 +3821,6 @@ class PostgresMarketDataRepository:
                     source_identity_keys=source_identity_keys,
                 )
             )
-        if source_identity_keys:
-            raise ValueError(
-                "market_data_source_binding_unsupported: exact source filtering "
-                f"is not implemented for fact_type={fact_type}"
-            )
         if fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE}:
             from .market_structure import market_structure_repository
 
@@ -3837,6 +3832,7 @@ class PostgresMarketDataRepository:
                         end=end,
                         as_of_commit_seq=as_of_commit_seq,
                         known_at_lte=known_at_lte,
+                        source_identity_keys=source_identity_keys,
                     )
                 )
             timeframe = identity.get("timeframe_seconds")
@@ -3852,7 +3848,13 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
+            )
+        if source_identity_keys:
+            raise ValueError(
+                "market_data_source_binding_unsupported: exact source filtering "
+                f"is not implemented for fact_type={fact_type}"
             )
         if fact_type in {
             "market.bbo",

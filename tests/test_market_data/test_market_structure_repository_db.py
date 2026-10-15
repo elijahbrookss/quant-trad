@@ -22,7 +22,9 @@ from market_data.archive import (
     publish_spool_archive,
 )
 from market_data.book_archive import publish_book_checkpoint
-from market_data.canonical_adapters import canonicalize_l2_snapshot
+from market_data.canonical_adapters import (
+    canonicalize_l2_snapshot, canonicalize_market_trade, canonicalize_trade_flow,
+)
 from market_data.contracts import DatasetSeriesRequest, SourceIdentity
 from market_data.market_state import (
     BBO_FACT_TYPE,
@@ -621,6 +623,25 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
         end=bucket + timedelta(seconds=1),
     )
     assert stored_aggregate[0].fact.material_hash == aggregate.material_hash
+    # Native dispatch must retain exact source scope and both visibility clocks.
+    source_key = market_data_repo.get_source_identity(source_id).identity_key
+    for series in (trade_series_id, aggregate_series_id):
+        unfiltered = market_data_repo.read_series_records(
+            series_id=series, start=bucket, end=bucket + timedelta(seconds=1),
+        )
+        assert len(unfiltered) == 1
+        retained = unfiltered[0]
+        arguments = dict(series_id=series, start=bucket,
+            end=bucket + timedelta(seconds=1), source_identity_keys=(source_key,),
+            as_of_commit_seq=retained.market_commit_seq,
+            known_at_lte=retained.fact.known_at)
+        assert market_data_repo.read_series_records(**arguments) == unfiltered
+        assert market_data_repo.read_series_records(
+            **{**arguments, 'source_identity_keys': ('f' * 64,)}) == []
+        assert market_data_repo.read_series_records(
+            **{**arguments, 'as_of_commit_seq': retained.market_commit_seq - 1}) == []
+        assert market_data_repo.read_series_records(
+            **{**arguments, 'known_at_lte': retained.fact.known_at - timedelta(microseconds=1)}) == []
     with db.session() as session:
         canonical_counts = dict(
             session.execute(
@@ -879,6 +900,38 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
     assert retention["dataset_pin_count"] == 1
     assert retention["pinned"] is True
     assert retention["ordinary_retention_eligible"] is False
+
+    # A later revision from another source must not hide the requested source.
+    alternate_source = SourceIdentity(
+        provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream",
+        adapter_version=f"native-source-selection-alternate.{token}",
+    )
+    alternate_id = market_data_repo.register_source(alternate_source)
+    for series, native_fact, canonicalize in (
+        (trade_series_id, fact, canonicalize_market_trade),
+        (aggregate_series_id, aggregate, canonicalize_trade_flow),
+    ):
+        bounds = dict(series_id=series, start=bucket, end=bucket + timedelta(seconds=1))
+        original = market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(source_key,))
+        market_data_repo.ingest_facts(
+            series_id=series, source_id=alternate_id,
+            facts=[canonicalize(native_fact, source=alternate_source)],
+            request={"fixture": "native-source-before-latest"},
+        )
+        latest = market_data_repo.read_series_records(**bounds)
+        assert len(latest) == 1 and latest[0].revision > original[0].revision
+        assert market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(source_key,)) == original
+        assert market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(alternate_source.identity_key,)) == latest
+        assert market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(source_key,),
+            as_of_commit_seq=original[0].market_commit_seq,
+            known_at_lte=original[0].fact.known_at) == original
+        # Existing frozen history remains pinned despite the later source revision.
+        assert market_data_repo.read_dataset_series(
+            dataset_id=frozen.dataset_id, series_id=series)[0].revision == original[0].revision
 
     market_structure_repository.release(claim)
     with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
