@@ -648,7 +648,11 @@ def plan_research_check(
         if requirement.key in feature_predecessor_aliases:
             lookback_seconds += max(lookback_seconds, timeframe_seconds)
         complete_paired = declaration.get("input_coverage_policy") == "complete_paired_rows"
-        if complete_paired or declaration.get("fact_history_boundary") == "evaluation_range":
+        bounded_history = declaration.get("fact_history_boundary") == "evaluation_range"
+        if bounded_history and (requirement.lookback_seconds or requirement.lookback_bars
+                or feature_window_seconds or requirement.key in feature_predecessor_aliases):
+            raise ValueError("check_requirement_plan_invalid: evaluation-bounded Fact history cannot request external lookback")
+        if complete_paired or bounded_history:
             # Owned in-scope histories do not sample a predecessor outside the window.
             # Completed-bucket snapshots at each primary close need the matching
             # evaluation bucket, never a staleness-based predecessor interval.

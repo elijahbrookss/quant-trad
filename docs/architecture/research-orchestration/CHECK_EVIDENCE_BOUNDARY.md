@@ -929,7 +929,8 @@ owned by the existing repository. Native effective timestamps use the shared
 canonical record accessor when no legacy common clock is present.
 
 Liquidity episode v14 declares its Fact histories bounded by the evaluation
-range. Generic staleness settings do not create a predecessor outside its fixed
+range. Explicit external lookback requests fail rather than being clamped.
+Generic staleness settings do not create a predecessor outside its fixed
 window; all pre/post support remains inside that window. Other procedures retain
 their existing lookback policy. HTTP requirements and preparation dry-run tests
 cover the complete five-alias path with disposable canonical records; the native

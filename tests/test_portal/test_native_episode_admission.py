@@ -240,4 +240,17 @@ def test_admitted_native_inputs_load_into_episode_method_without_dispatch(native
                for c in f.calls[-4:])
     result = LiquidityEpisodeEvaluator().evaluate(plan=plan, inputs=inputs)
     assert result['support']['joined_seconds']==300
+    assert result['support']['eligible_anchors']==60  # 120 leading +120 trailing support seconds excluded.
+    for alias in ('bbo','depth','flow'):
+        history = inputs['fact_records_by_alias'][alias]
+        assert len(history)==300 and min(r.fact.observation_time for r in history)==at(0)
+        assert max(r.fact.observation_time for r in history)==at(299)
     assert result['sample_count']==0  # Explicitly quiet synthetic fixture, not a scientific null.
+
+
+def test_episode_rejects_explicit_external_lookback_instead_of_clamping(native_admission):
+    f = native_admission
+    next(r for r in f.payload['inputs'] if r['alias']=='flow')['lookback_seconds']=2
+    response = f.api.post('/api/research/checks/requirements', json=f.payload)
+    assert response.status_code==400
+    assert 'cannot request external lookback' in response.json()['detail']
