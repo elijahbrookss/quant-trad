@@ -201,3 +201,102 @@ supported day remains a narrow description; do not extend the sample to obtain
 a favorable or apparently powered result. D (depth incremental to spread) still
 awaits identical joint cases/clocks/folds and is outside this change. The existing
 60 Study records are not 60 independent experiments.
+
+
+## C2: volume after body/range/prior-volatility comparison
+
+Status: authorized implementation and one separately allocated Check attempt,
+zero automatic replay. This text specifies a prospective procedure, not a result.
+Both A attempts retain their allocation. Reconcile the current ledger before
+dispatch, serialize with engineering, and use the established release owner.
+Do not cancel a running source qualification to add this implementation.
+
+### Configuration versus code
+
+`raw_forward_outcome@7` is selected by `volume_cohort_matched.v1`. The existing
+study request supplies the frozen Dataset, source/instrument, dates, timeframe,
+raw candle detector, direction, entry lag and single primary horizon. A different
+supported sample does not require a code change. The comparison exposes:
+
+```json
+{"cohort":"volume_gt_previous_vs_lte", "prior_volatility_bars":20,
+ "matching_policy":"same_date_hour", "caliper_ratios":{
+   "formation_body_fraction":1.25,
+   "formation_range_fraction":1.25,
+   "prior_rms_return":1.25}}
+```
+
+The cohort and matching-policy fields name the currently supported algorithms;
+they are not a universal expression framework. Supported raw predicates determine
+the event universe from the input, including explicit current/previous-volume
+predicates. No Python constant contains this study's candle IDs, calendar dates,
+asset, venue, expected cohort counts or outcomes. Preserve the original C request
+choices for C2, not a hardcoded list of candles. Matched counts are allowed to
+differ; every missing-feature and unmatched original event remains visible.
+
+For this C2 configuration retain the original frozen January 2022 Coinbase
+BTC-USD one-minute input, inclusive body-engulfing predicate, current volume
+greater than previous versus less than or equal, long next-close entry with lag
+one, and five-bar target strictly before evaluation end. No new warmup, provider,
+date expansion or holdout is requested. Historical inferred close availability
+is not a measured live receipt/publication clock.
+
+### Prospective selection and support
+
+Use logs of positive absolute body fraction, high-low range fraction (both divided
+by current open), and prior RMS. Twenty prior completed candles yield nineteen
+close returns, exactly the C diagnostic definition. Zero/missing RMS or zero body
+is feature-ineligible without epsilon or imputation; retain the original row and
+its reason. Features must be known by formation close. Genuine zero volume is
+valid cohort data, not a missing value. V6's baseline 20-candle context and the
+configured matching context are labeled separately if their windows differ.
+
+Pair increasing-volume events chronologically to unused non-increasing controls
+within the same UTC formation-close date/hour. For each log feature enforce the
+configured ratio caliper. Minimize summed squared normalized distances; break
+ties by absolute event-time distance, then earlier control. Within-pair closed
+nominal entry-to-target intervals must be disjoint; shared endpoints overlap.
+Select solely from pre-outcome features and nominal times, including nominal
+targets with unavailable futures. Freeze identities/hash before any outcome
+resolution. Incomplete selected pairs stay incomplete, without replacement.
+
+Report selected-pair and complete-pair balance separately. Inherit support gates:
+100 complete pairs, 10 treated UTC days, matching fraction >=0.5 of feature-eligible
+increasing-volume events, pair outcome completeness >=0.95, and all absolute SMDs
+<=0.1 for both selected and complete pairs. Also emit matching fraction against
+the original increasing-volume denominator, every calendar day's original,
+eligible, missing, selected and complete counts for both cohorts, missing reasons,
+and all unmatched treatments/unselected controls. The gates are not power claims.
+
+Primary outcome is mean paired five-bar return difference. Emit median paired
+difference and complete-pair arm distributions/tails alongside the full original
+distribution. Retain extremes; no trimming, winsorization or outcome-based split.
+Delete whole pairs for either arm's UTC day. Report closed outcome-support and
+full prior-feature-through-target overlap components across both roles, for the
+original and selected populations. Freeze a joint nonoverlap subset on full
+feature support before outcomes; require 30 complete pairs over 6 days for that
+sensitivity. Do not rematch. Components do not measure effective independent N.
+
+If timing integrity, support or balance fails, close this formulation as
+unsupported. Do not tighten/relax calipers, change feature windows, drop extremes,
+expand dates or retry to rescue a claim. Any supported contrast concerns a
+common-support subset, distinct from the original mean gap. Same-formation
+volume/body conditioning does not establish causation or profitability.
+
+
+### Interpretation and question separation
+
+C remains closed with its original evidence; C2 is a separate question and must
+have separate evidence and interpretation. The original detector has no prior
+downtrend filter and is not the completed, visually validated reversal formation
+question B. Higher total candle volume is not signed buying pressure.
+
+The result includes original, feature-eligible, selected and complete-pair context
+counts/means/medians for both cohorts, so the population change can be inspected.
+A sparse matched subset must not be offered as an explanation of the entire
+original gap. Day deletion and nonoverlap support influence/dependence diagnostics;
+this bounded procedure supplies no dependence-adjusted confidence interval,
+significance result or effective-independent-N estimate. Limit inference explicitly
+rather than adding an uncertainty framework. A shrinking difference does not
+prove that volume never matters; a persistent descriptive difference does not
+establish causality or profitability. No automatic new-period execution follows.
