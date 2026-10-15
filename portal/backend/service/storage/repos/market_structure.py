@@ -2381,6 +2381,7 @@ class PostgresMarketStructureRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[MarketTradeRecord]:
         records = [
             decode_market_trade_record(record)
@@ -2390,6 +2391,7 @@ class PostgresMarketStructureRepository:
                 end=_utc(end),
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
         ]
         return sorted(
@@ -2516,6 +2518,7 @@ class PostgresMarketStructureRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[TradeFlowAggregateRecord]:
         records = [
             decode_trade_flow_record(record)
@@ -2525,6 +2528,7 @@ class PostgresMarketStructureRepository:
                 end=_utc(end),
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
         ]
         invalid = [
