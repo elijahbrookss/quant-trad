@@ -13,6 +13,7 @@ code_paths:
   - scripts/automation/release_package.py
   - scripts/automation/routine_promotion.py
   - scripts/automation/routine_schema_probe.py
+  - scripts/automation/routine_configuration.py
   - scripts/automation/check_release_ci.py
   - scripts/automation/pin_deploy_recovery.py
   - scripts/automation/storage_handoff_pause.py
@@ -392,3 +393,17 @@ actual backup custody or a release. Its tiny actual restore precedes the fixture
 recovery record; private environment and snapshots never enter its uploaded
 receipt. Source-bound hosted execution and separate real artifact verification
 remain required before activation.
+
+## Routine configuration admission
+
+Source-only eligibility cannot authorize live configuration edits. Successful
+new-controller deployments record private fingerprints of the effective Compose
+model, operator environment, mounted configuration and actual runtime inventory.
+Routine admission requires that baseline, checks it before recovery capture and
+immediately before activation, and permits only derived qualified-source/image
+identity changes. Recovery retains the settings guard even when candidate
+containers are partly replaced. Missing legacy baselines and private-file,
+caller-setting, mounted-file permission/ownership or runtime drift refuse before
+replacement; reviewed manual reconciliation remains required. Fingerprints never
+publish resolved credentials or Docker configuration. This extends the existing
+locked controller and does not enable a production trigger.

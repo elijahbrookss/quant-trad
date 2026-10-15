@@ -841,6 +841,27 @@ pins application images by immutable local ID. Infrastructure remains pinned to
 running image IDs. No build or pull occurs during routine activation. Rebuilding
 from the same source is insufficient for this path.
 
+A successful deployment using the new controller records a private
+`routine-configuration.json` baseline. Legacy releases without that baseline
+refuse routine admission; do not manufacture one from an edited environment.
+Install the controller through reviewed manual promotion first. The baseline
+contains hashes, not resolved secret values: effective Compose settings, private
+environment bytes, mounted configuration bytes and permissions/ownership, and
+actual container identities/configuration. Only the expected source revision,
+source hash, application image references and build metadata may differ.
+Configuration-directory traversal is bounded; data/system mount contents are
+excluded while their paths and root permissions remain bound. Unknown or
+unavailable configuration disables routine admission.
+
+Admission checks this baseline before package loading, again before creating the
+recovery snapshot, and immediately before replacement. Private-file edits,
+caller overrides, changed bind configuration or unexpected runtime replacement
+require reviewed manual reconciliation. Activated recovery checks settings and
+bindings again; it permits partially replaced container identities but refuses
+configuration drift and preserves the marker. No resolved environment or Docker
+inspection is printed or uploaded. These checks do not authorize privileged
+out-of-band host changes during deployment; use the existing environment lock.
+
 Before promotion, the approved backup/restore procedure must produce a private
 (mode 0600, regular file) `routine-recovery.json` in the existing state directory:
 

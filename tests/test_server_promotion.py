@@ -450,6 +450,13 @@ capture_routine_schema() {
   if test "$FAULT" = probe_timed_out; then return 124; fi
   if test "$FAULT" = drift; then printf 'different schema\n' >"$1"; else printf 'qualified schema\n' >"$1"; fi
 }
+unset QT_RELEASE_REVISION QT_SOURCE_TREE_HASH
+compute_release_material() { QT_RELEASE_REVISION=current; QT_SOURCE_TREE_HASH=current_hash; echo SOURCE_READ; }
+routine_configuration() {
+  test "$QT_RELEASE_REVISION" = current && test "$QT_SOURCE_TREE_HASH" = current_hash
+  test "$1" = admit && test "$3" = without-running
+  echo CONFIGURATION_CHECKED
+}
 select_release() { echo CHECKOUT_RESTORED; }
 deploy_release() { echo FROZEN_RECOVERY; }
 recover_promotion
@@ -462,6 +469,7 @@ recover_promotion
     else:
         assert result.returncode==0,result.stderr
         assert "PROBED" in result.stdout and "FROZEN_RECOVERY" in result.stdout
+        assert result.stdout.index("SOURCE_READ") < result.stdout.index("CONFIGURATION_CHECKED") < result.stdout.index("CHECKOUT_RESTORED")
         assert not (state/"promotion.env").exists()
 
 
@@ -506,3 +514,32 @@ if capture_routine_schema "$state_root/probe.json"; then exit 92; fi
     assert result.returncode==0,result.stderr
     assert 'TIMEOUT:--kill-after=5s' in result.stderr and 'TIMEOUT:30s' in result.stderr
     assert 'INCORRECT_UNBOUNDED_DOCKER' not in result.stdout
+
+
+def test_late_routine_configuration_drift_refuses_before_activation(tmp_path):
+    state=tmp_path/'state';state.mkdir()
+    marker=state/'promotion.env';marker.write_text('activation_started=false\n')
+    result=shell(tmp_path,r'''
+routine_active=true
+promotion_in_progress=true
+require_runtime() { :; }
+require_no_storage_handoff() { :; }
+require_no_alert_preview() { :; }
+select_release() { QT_RELEASE_REVISION=fixture; QT_SOURCE_TREE_HASH=fixture; }
+validate_storage_root() { :; }
+promotion_value() { printf previous; }
+python3() { :; }
+compose() {
+  if test "$1" = up; then echo INCORRECT_REPLACEMENT; fi
+  if test "$1" = config && test "${2:-}" = --format; then echo '{}'; fi
+}
+routine_configuration() { echo CONFIGURATION_REFUSED; return 19; }
+record_release() { echo INCORRECT_SUCCESS; }
+(deploy_release fixture) &
+child=$!
+if wait "$child"; then exit 91; fi
+''')
+    assert result.returncode==0,result.stderr
+    assert 'CONFIGURATION_REFUSED' in result.stdout
+    assert 'INCORRECT_REPLACEMENT' not in result.stdout and 'INCORRECT_SUCCESS' not in result.stdout
+    assert marker.read_text()=='activation_started=false\n'

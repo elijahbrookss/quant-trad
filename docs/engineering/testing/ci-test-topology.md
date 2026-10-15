@@ -427,3 +427,8 @@ After the source run completes, independently validate its real exported
 `routine-release-package` download/digest/job/attempt binding. A work-branch
 receipt remains handoff evidence only; production admission still requires an
 exact develop push and the separately authorized installation/activation.
+
+The routine fixture also proves that edits to its private operator file and
+caller configuration overrides refuse before recovery-snapshot creation or
+container replacement. Configuration fingerprints remain private to the fixture;
+the uploaded receipt contains phase results only.

@@ -96,7 +96,7 @@ def main():
         root = Path(directory)
         repo = root / 'app'
         repo.mkdir()
-        for name in ('scripts/automation/server_deploy.sh', 'scripts/automation/check_release_ci.py', 'scripts/automation/pin_deploy_recovery.py', 'scripts/provenance/source_tree_hash.py', 'src/core/storage_mounts.py'):
+        for name in ('scripts/automation/server_deploy.sh', 'scripts/automation/check_release_ci.py', 'scripts/automation/pin_deploy_recovery.py', 'scripts/automation/routine_configuration.py', 'scripts/provenance/source_tree_hash.py', 'src/core/storage_mounts.py'):
             target = repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
@@ -452,7 +452,7 @@ def routine_main(evidence_root=None):
             call(['docker','rm','--force',restore_name]);call(['docker','volume','rm',restore_volume])
             return baseline
         try:
-            for name in ('server_deploy.sh','check_release_ci.py','pin_deploy_recovery.py','routine_promotion.py','routine_schema_probe.py','release_package.py'):
+            for name in ('server_deploy.sh','check_release_ci.py','pin_deploy_recovery.py','routine_promotion.py','routine_schema_probe.py','routine_configuration.py','release_package.py'):
                 target=repo/'scripts/automation'/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/'scripts/automation'/name,target)
             for name in ('scripts/ci/ci_impact.py','scripts/provenance/source_tree_hash.py','src/core/storage_mounts.py'):
                 target=repo/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/name,target)
@@ -489,7 +489,7 @@ CMD ["python","/app/fixture.py"]
                 role=service if service in ('frontend','frontend-v2') else 'backend'
                 services[service]={'image':f'quanttrad-{role}:${{QT_RELEASE_REVISION}}',
                     'build':{'context':'..','args':{'QT_SOURCE_REVISION':'${QT_RELEASE_REVISION}','QT_SOURCE_TREE_HASH':'${QT_SOURCE_TREE_HASH}'}},
-                    'environment':{'FIXTURE_SERVICE':service},'volumes':['proof:/proof'],'stop_grace_period':'5s','init':True}
+                    'environment':{'FIXTURE_SERVICE':service,'FIXTURE_OPERATOR_SETTING':'${QT_FIXTURE_OPERATOR_SETTING:-baseline}'},'volumes':['proof:/proof'],'stop_grace_period':'5s','init':True}
                 if service!='initialize':services[service]['healthcheck']={'test':['CMD','test','-f','/tmp/ready'],'interval':'1s','timeout':'2s','retries':3}
             services['tsdb']={'image':f'{project}-database:${{QT_RELEASE_REVISION}}',
                 'build':{'context':'..','dockerfile':'docker/Dockerfile.database'},
@@ -549,7 +549,20 @@ CMD ["python","/app/fixture.py"]
                 return destination
             second_package=package(second)
             package_env={**env,'QT_FIXTURE_PACKAGE':str(second_package)}
-            before=containers();hold=state_root/'storage-handoff.json';hold.write_text('{}')
+            before=containers()
+            approved_environment=private_env.read_text()
+            recovery_before=(state_root/'recovery.compose.json').read_bytes() if (state_root/'recovery.compose.json').exists() else None
+            private_env.write_text(approved_environment+'QT_FIXTURE_OPERATOR_SETTING=unreviewed\n')
+            refused=call(deploy+['promote-routine',second,'--package',str(second_package)],cwd=repo,env=package_env,ok=False)
+            assert refused.returncode and 'routine configuration admission failed' in refused.stderr and containers()==before
+            assert ((state_root/'recovery.compose.json').read_bytes() if (state_root/'recovery.compose.json').exists() else None)==recovery_before
+            private_env.write_text(approved_environment)
+            refused=call(deploy+['promote-routine',second,'--package',str(second_package)],cwd=repo,
+                         env={**package_env,'QT_FIXTURE_OPERATOR_SETTING':'unreviewed-caller'},ok=False)
+            assert refused.returncode and 'routine configuration admission failed' in refused.stderr and containers()==before
+            assert ((state_root/'recovery.compose.json').read_bytes() if (state_root/'recovery.compose.json').exists() else None)==recovery_before
+            phases.append('private environment and caller configuration drift refused before snapshot or replacement')
+            hold=state_root/'storage-handoff.json';hold.write_text('{}')
             refused=call(deploy+['promote-routine',second,'--package',str(second_package)],cwd=repo,env=package_env,ok=False)
             assert refused.returncode and 'storage handoff hold' in refused.stderr and containers()==before;hold.unlink()
             refused=call(deploy+['promote-routine',ineligible,'--package',str(second_package)],cwd=repo,env=package_env,ok=False)
@@ -589,6 +602,14 @@ CMD ["python","/app/fixture.py"]
                 f'recovery_compose_sha256={hashlib.sha256(snapshot.read_bytes()).hexdigest()}\nroutine_promotion=true\n'
                 f'routine_schema_path={schema}\nroutine_schema_sha256={hashlib.sha256(schema.read_bytes()).hexdigest()}\n')
             marker.chmod(0o600)
+            before=containers();checkpoint=len(trace());unchanged_checkout=call(['git','rev-parse','HEAD'],cwd=repo).stdout
+            private_env.write_text(approved_environment+'QT_FIXTURE_OPERATOR_SETTING=unreviewed-recovery\n')
+            refused=call(deploy+['recover'],cwd=repo,env=bad_env,ok=False)
+            no_build_or_pull(checkpoint)
+            assert refused.returncode and 'routine configuration admission failed' in refused.stderr and marker.exists() and containers()==before
+            assert call(['git','rev-parse','HEAD'],cwd=repo).stdout==unchanged_checkout
+            private_env.write_text(approved_environment)
+            phases.append('interrupted routine recovery refuses edited private configuration before checkout or replacement')
             sql('ALTER TABLE qt_routine_evidence ADD COLUMN unexpected integer;')
             before=containers();checkpoint=len(trace())
             refused=call(deploy+['recover'],cwd=repo,env=bad_env,ok=False)

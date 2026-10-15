@@ -563,6 +563,15 @@ state_value() {
   printf '%s' "${line#*=}"
 }
 
+routine_configuration() {
+  local action="$1" previous="${2:-}" mode="${3:-}"
+  local -a options=()
+  if test "$mode" = without-running; then options+=(--without-running); fi
+  compose config --format json | python3 "$repo_root/scripts/automation/routine_configuration.py" "$action" \
+    --state "$state_root" --env-file "$env_file" --revision "$QT_RELEASE_REVISION" \
+    --source-hash "$QT_SOURCE_TREE_HASH" --previous "$previous" "${options[@]}"
+}
+
 record_release() {
   local prior_current prior_previous next_previous deployed_at temporary layout
   layout="$(recorded_storage_layout)" || return
@@ -573,6 +582,15 @@ record_release() {
     next_previous="$prior_current"
   else
     next_previous="$prior_previous"
+  fi
+  if test -f "$repo_root/scripts/automation/routine_configuration.py"; then
+    if ! routine_configuration capture; then
+      rm -f -- "$state_root/routine-configuration.json"
+      if test "$routine_active" = true || test "$(promotion_value routine_promotion)" = true; then
+        die "routine configuration baseline unavailable; preserve state"
+      fi
+      echo "routine configuration baseline unavailable; future routine promotion is disabled" >&2
+    fi
   fi
   deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   temporary="$(mktemp "$state_root/release.XXXXXX")"
@@ -900,6 +918,11 @@ check_deployment_render(sys.argv[1], environment_path=sys.argv[2], repository=sy
     revision=sys.argv[4], source_hash=sys.argv[5], model=json.loads(raw))
 ' "$state_root" "$env_file" "$repo_root" "$QT_RELEASE_REVISION" "$QT_SOURCE_TREE_HASH"
   fi
+  if test "$routine_active" = true; then
+    # Recheck resolved settings, private file/bind bytes and the current runtime
+    # immediately before the first replacement; never fold edits into recovery.
+    routine_configuration admit "$(promotion_value previous_revision)"
+  fi
   if test "${promotion_in_progress:-false}" = "true" && { test "${reuse_release_images:-false}" != "true" || test "$routine_active" = true; }; then
     printf 'activation_started=true\n' >>"$state_root/promotion.env"
   fi
@@ -1051,6 +1074,12 @@ recover_promotion() {
     test "${actual_hash%% *}" = "$snapshot_hash" \
       || die "recovery Compose snapshot changed; evidence retained"
   fi
+  if test "$routine" = true && test "$activation" = true; then
+    # A partly replaced candidate cannot match the old container inventory, but
+    # settings and mounted configuration must still match its approved baseline.
+    compute_release_material
+    routine_configuration admit "$previous" without-running
+  fi
   echo "event=promotion_recovery_started candidate=$candidate previous=$previous" >&2
   # Run outside a shell conditional: Bash otherwise disables errexit inside
   # called functions and can record a failed deployment as successful.
@@ -1106,6 +1135,7 @@ promote_release() {
   done
   if test "$routine_active" = true; then
     test -z "$single_node_profiles" || die "routine promotion excludes optional profiles"
+    routine_configuration admit "$previous"
     local schema_probe
     schema_probe="$(mktemp "$state_root/routine-schema.XXXXXX")"
     chmod 0600 "$schema_probe"
@@ -1113,6 +1143,7 @@ promote_release() {
     python3 "$repo_root/scripts/automation/routine_promotion.py" admit \
       --candidate "$candidate" --previous "$previous" --package "$routine_package" --state "$state_root" --schema "$schema_probe"
   fi
+  if test "$routine_active" = true; then routine_configuration admit "$previous"; fi
   prepare_recovery
   local temporary layout snapshot_hash
   layout="$(recorded_storage_layout)" || return
