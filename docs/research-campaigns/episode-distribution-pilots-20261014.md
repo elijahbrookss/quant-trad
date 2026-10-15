@@ -64,7 +64,27 @@ Use `event_fact_analysis` base version 14, selected by
 `analysis_as_of` cutoff. Begin with exactly 00:00-00:30 UTC on September 22 and 23,
 2026, native BIP instrument `b2deb0a0-f292-408a-876d-3dadd8e3819b`. These first
 half-hours are predetermined subsets of the exposed fixed six-hour windows.
-No replacement window is selected after seeing sparse support or outcomes.
+These two half-hours are **feasibility runs with bounded descriptive examples**.
+They test joint support, clock interpretation, trade reconciliation and whether
+usable events/controls can be formed. They do not answer the original six-hour
+question, estimate a full-window event rate or establish repeatability across
+days. Two dates with sparse matched episodes do not become adequate repetition
+merely because their signs agree. No replacement window is selected after seeing
+sparse support or outcomes.
+
+The narrowing is a prospective resource/support step, not an outcome selection.
+The new pilot deliberately caps each alias at 50,000 frozen revisions and each
+scope at 30 minutes while the joint raw-trade/flow/book path is unproven. At one
+row per second, the three retained depth bands (5/10/25bps) would nominally yield
+64,800 rows in six hours before revisions and before the evaluator filters 5bps,
+exceeding that guard. A half-hour nominally has 5,400 such rows, plus 1,800 BBO and
+1,800 flow rows; raw trade counts and revisions remain unknown until admission.
+These are grid arithmetic, not measured coverage or a guarantee that preparation
+fits runtime/memory limits. A cap failure stops; it does not trigger a shorter
+outcome-selected interval. Extending to the original six-hour question needs a
+separately fixed bounded-input/support plan, with the original rules preserved
+unless a distinct question is declared. Feasibility outcomes must not tune that
+plan's thresholds or select favorable periods.
 
 Bind exact canonical BBO (series 20), 5bps depth (21), one-second trade flow (2)
 and trades (1). The planner continues to bind the existing 1m primary candle
@@ -77,7 +97,7 @@ The sharp-move label is an absolute 60-second midpoint log displacement reaching
 is a round, interpretable 0.1% scale chosen before new episode outcomes; it is not
 an empirically established universal definition of sharpness or an optimized
 predictor. The distinct reverse question begins at the first bid or ask depth
-crossing below 50% of its preceding 60-second median. Half-depth is a similarly
+crossing to at or below 50% of its preceding 60-second median. Half-depth is a similarly
 interpretable relative contraction, not an optimized boundary. Neither threshold
 can be tuned using this pilot's outcomes. Depth bands follow the changing midpoint,
 so changes may include price-band membership changes.
@@ -93,11 +113,27 @@ days. An unsupported initial crossing must not become a later ongoing-threshold
 event when coverage resumes. Retain exclusion counts without claiming the
 unobserved number of true market events.
 
+All context and trajectory inputs stay inside the declared half-hour; no hidden
+warmup or outcome tail is requested. The inclusive 241-second path permits
+anchors only from 00:02:00 through 00:27:59 UTC. Matching context is the inclusive
+61 observations from anchor-120 through anchor-60 (60 one-second returns), so it
+ends before the sharp detector's anchor-60 through anchor move interval. Controls
+need their own complete 241-second path. The earliest possible matched event
+anchor is 00:07:00, with a control at 00:02:00; actual gaps can narrow this support
+further. Unmatched early events remain explicit rather than extending inputs.
+
 Match one earlier same-UTC-hour control at least 300 seconds away, separately
 within each origin and without control reuse within that origin. Matching uses
-only the -120 to -60-second context: sign of prior return, median spread, median
-total side depth and RMS one-second midpoint returns. Spread/depth/volatility
-ratios must be <=2 (both zero is permitted for volatility). The factor-of-two
+only the -120 to -60-second context: positive versus nonpositive prior return
+(zero belongs to nonpositive), median spread, median total side depth and RMS
+one-second midpoint returns. For each nonnegative spread/depth/volatility value
+pair `(x,y)`, use the symmetric absolute-scale ratio `max(x/y,y/x)<=2`, not a
+signed ratio or fitted standardized distance. Equality at two passes. When both
+values are zero they match with zero log-distance; when exactly one is zero they
+do not match. Canonical admission requires positive spread and positive total
+depth at every joined second, so zero medians for those two features cannot enter
+this pilot; volatility may genuinely be zero. No epsilon, pseudocount or silent
+replacement handles zero. The factor-of-two
 caliper prevents order-of-magnitude context mismatches without fitting a model
 or choosing a tight empirical optimum. Minimize the sum of absolute log ratios,
 then choose the earliest timestamp on ties. Report unmatched anchors. Controls

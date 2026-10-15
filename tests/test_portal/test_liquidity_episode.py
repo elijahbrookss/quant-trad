@@ -127,3 +127,29 @@ def test_cancellation_checkpoint_is_not_swallowed(monkeypatch):
     def checkpoint():raise Cancelled()
     monkeypatch.setattr(method,'execution_checkpoint',checkpoint)
     with pytest.raises(Cancelled):build_rows({'fact_records_by_alias':records},t(2000))
+
+
+@pytest.mark.parametrize("feature",["spread","depth","volatility"])
+def test_symmetric_factor_two_boundary_and_zero_behavior(feature):
+    a={"prior_return":0.,"spread":1.,"depth":10.,"volatility":.001}
+    assert match_distance(a,{**a,feature:a[feature]*2}) is not None
+    assert match_distance({**a,feature:a[feature]*2},a) is not None
+    assert match_distance(a,{**a,feature:a[feature]*2.0001}) is None
+    assert match_distance({**a,feature:0.},{**a,feature:0.})==0.
+    assert match_distance(a,{**a,feature:0.}) is None
+    assert match_distance({**a,feature:0.},a) is None
+
+
+def test_declared_scope_keeps_pre_post_and_matching_context_inside():
+    _,r,plan,records=fixture()
+    out=LiquidityEpisodeEvaluator().evaluate(plan=plan,inputs={**r.parameters,'fact_records_by_alias':records})
+    assert out['support']['eligible_anchors']==1200-240
+    for e in out['episodes']:
+        for episode in [e['event'],e['control']]:
+            if episode is None:continue
+            anchor=datetime.fromisoformat(episode['anchor'].replace('Z','+00:00'))
+            assert t(120)<=anchor<=t(1079)
+            assert episode['seconds'][0]['offset_seconds']==-120
+            assert episode['seconds'][-1]['offset_seconds']==120
+        if e['control'] is not None:
+            assert datetime.fromisoformat(e['event']['anchor'].replace('Z','+00:00'))>=t(420)
