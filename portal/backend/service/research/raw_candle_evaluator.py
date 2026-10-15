@@ -172,6 +172,33 @@ def _iso(value):
     return value.isoformat().replace("+00:00", "Z")
 
 
+def prepare_predicate_candidates(frame, rows, *, detector, start, end, step):
+    """Outcome-free raw selection, shared by raw reporting and matched procedures."""
+    fields = detector_fields(detector)
+    previous_required = any(field.startswith("previous_") for field in fields)
+    by_open = {r["open_time"]: r for r in rows}
+    candidates, exclusions = [], Counter()
+    evaluated = 0
+    for index, current in enumerate(rows):
+        if index % 128 == 0:
+            execution_checkpoint()
+        opened = current["open_time"]
+        if not start <= opened < end:
+            continue
+        evaluated += 1
+        prior = by_open.get(opened-step) if previous_required else None
+        if previous_required and prior is None:
+            exclusions["previous_bar_missing"] += 1
+            continue
+        volume_rows = ([current] if "volume" in fields else []) + ([prior] if "previous_volume" in fields else [])
+        if any(_finite(r.get("volume")) is None or _finite(r.get("volume")) < 0 for r in volume_rows):
+            exclusions["predicate_volume_unavailable"] += 1
+            continue
+        decision = max(r["known_at"] for r in [current] + ([prior] if prior is not None else []))
+        candidates.append((index, current, prior, checks._evaluate_detector(detector, frame, index), decision))
+    return candidates, exclusions, evaluated
+
+
 @dataclass(frozen=True)
 class RawCandleEvaluator:
     evaluator_id: str = checks.RAW_FORWARD_OUTCOME
@@ -204,7 +231,6 @@ class RawCandleEvaluator:
         detector = inputs["detector"]
         outcomes = inputs["outcomes"]
         fields = detector_fields(detector)
-        previous_required = any(field.startswith("previous_") for field in fields)
         volume_required = any(field.removeprefix("previous_") == "volume" for field in fields)
         primary = next(r for r in plan.market_data_requirements if r["alias"] == "primary_bars")
         seconds = int(primary["timeframe_seconds"])
@@ -223,26 +249,12 @@ class RawCandleEvaluator:
         baseline, events, examples = [], [], []
         eligible = predicate_eligible = complete = 0
         direction = -1.0 if outcomes["direction"] == "short" else 1.0
-        for index, current in enumerate(rows):
-            if index % 128 == 0:
-                execution_checkpoint()
+        candidates, candidate_exclusions, eligible = prepare_predicate_candidates(
+            frame, rows, detector=detector, start=start, end=end, step=step)
+        predicate_eligible = len(candidates)
+        for index, current, prior, matched, decision in candidates:
+            execution_checkpoint()
             opened = current["open_time"]
-            if not start <= opened < end:
-                continue
-            eligible += 1
-            prior = by_open.get(opened-step) if previous_required else None
-            if previous_required and prior is None:
-                candidate_exclusions["previous_bar_missing"] += 1
-                continue
-            condition_rows = [current] + ([prior] if prior is not None else [])
-            volume_rows = ([current] if "volume" in fields else []) + ([prior] if "previous_volume" in fields else [])
-            if any(_finite(r.get("volume")) is None or _finite(r.get("volume")) < 0
-                   for r in volume_rows):
-                candidate_exclusions["predicate_volume_unavailable"] += 1
-                continue
-            predicate_eligible += 1
-            matched = checks._evaluate_detector(detector, frame, index)
-            decision = max(r["known_at"] for r in condition_rows)
             entry_open = opened + step*outcomes["entry_lag_bars"]
             entry = by_open.get(entry_open)
             entry_reason = None
