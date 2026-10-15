@@ -35,6 +35,18 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
     return {**raw, "schema_version": OUTCOME_SCHEMA}
 
 
+def formation_context(current, by_open, *, step, decision, prior_bars=20):
+    """Completed prior candles only; no extra source rows or missing-value imputation."""
+    opened = current["open_time"]
+    history = [by_open.get(opened-step*i) for i in range(prior_bars, 0, -1)]
+    available = all(r is not None and r["known_at"] <= decision for r in history)
+    returns = [b["close"]/a["close"]-1 for a,b in zip(history, history[1:])] if available else []
+    return {"formation_body_fraction": (current["close"]-current["open"])/current["open"],
+        "formation_range_fraction": (current["high"]-current["low"])/current["open"],
+        "prior_rms_return": math.hypot(*returns)/math.sqrt(len(returns)) if returns else None,
+        "prior_context_status": "available" if available else f"prior_{prior_bars}_bar_context_unavailable"}
+
+
 def describe(rows, horizon, calendar_days=()):
     resolved = [r for r in rows if r["outcomes"][str(horizon)]["status"] == "resolved"]
     ordered = sorted(resolved, key=lambda r: (r["outcomes"][str(horizon)]["forward_return_pct"], r["event_id"]))
@@ -117,19 +129,14 @@ class CandleDistributionEvaluator:
                 if v is None or not math.isfinite(float(v)) or float(v) < 0:
                     raise ValueError("candle_distribution_invalid: unavailable volume cannot form a cohort")
             opened = current["open_time"]
-            history = [by_open.get(opened-step*i) for i in range(20, 0, -1)]
-            available = all(r is not None and r["known_at"] <= _clock(example["decision_known_at"], "decision") for r in history)
-            returns = [b["close"]/a["close"]-1 for a,b in zip(history, history[1:])] if available else []
             events.append({**example, "event_id": semantic_hash({"event_time": example["event_time"],
                 "source": current["source_identity_key"], "instrument_id": primary.get("instrument_id"),
                 "timeframe_seconds": seconds}), "utc_day": current["close_time"].date().isoformat(),
                 "cohort": "increasing_volume" if current["volume"] > prior["volume"] else "non_increasing_volume",
                 "volume": current["volume"], "previous_volume": prior["volume"],
                 "volume_ratio": current["volume"]/prior["volume"] if prior["volume"] else None,
-                "formation_body_fraction": (current["close"]-current["open"])/current["open"],
-                "formation_range_fraction": (current["high"]-current["low"])/current["open"],
-                "prior_rms_return": math.hypot(*returns)/math.sqrt(len(returns)) if returns else None,
-                "prior_context_status": "available" if available else "prior_20_bar_context_unavailable",
+                **formation_context(current, by_open, step=step,
+                    decision=_clock(example["decision_known_at"], "decision")),
                 "formation_start": _iso(prior["open_time"]),
                 "_opened": opened, "_lag": inputs["outcomes"]["entry_lag_bars"]})
         # The collector is private method composition, never an alternate input adapter.

@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/candle_distribution_evaluator.py
+  - portal/backend/service/research/volume_cohort_evaluator.py
   - portal/backend/service/research/liquidity_episode_evaluator.py
   - portal/backend/service/research/raw_candle_evaluator.py
   - portal/backend/service/research/controlled_reversal_evaluator.py
@@ -886,3 +887,33 @@ allocation and stopping decisions are recorded in
 [the bounded C/A protocol](../../research-campaigns/episode-distribution-pilots-20261014.md).
 Method registration does not authorize deployment, acquisition, extra attempts,
 sealed-data access or trading. Historical definitions/results remain replayable.
+
+
+### Configured volume-cohort matching
+
+`raw_forward_outcome` v7 explicitly selects `volume_cohort_matched.v1`.
+The request supplies the raw event predicate, source/Dataset, instrument, range,
+timeframe, direction, entry lag and one outcome horizon. Its `comparison` selects
+the supported volume cohort split and matching policy, prior volatility candle
+count and each feature ratio caliper. There are no study-specific candle IDs,
+dates, venues, assets, outcome values or expected membership counts in the method.
+
+Raw predicate preparation is shared with v3/v6; prior context is shared with v6.
+The procedure freezes its outcome-free candidate ledger, pairs and feature hash
+before calling the existing distribution/outcome evaluator. Missing context and
+unmatched cases stay in the original event ledger. One-bar source binding is
+retained; requesting a longer prior feature window does not acquire extra data.
+The full-population v6 context remains explicitly a 20-prior-candle diagnostic;
+`events[].matching_context` uses the configured window for the v7 comparison.
+
+V7 configures the existing chronological nearest-caliper matching and paired
+support/deletion calculations with explicit feature names and arm labels. V4/v5
+callers retain their old defaults. Full feature-through-target support is an
+explicit new caller choice for the joint nonoverlap sensitivity; within-pair
+matching still checks nominal outcome intervals only. Selected and complete pair
+balance, original/eligible matching denominators, calendar-day missingness, both
+arm overlap components, and all original and complete-pair tails are emitted.
+No imputation, trimming, control reuse, future-valid replacement or automatic
+rematching is provided. The support gates are descriptive requirements, not a
+power calculation. Exact source qualification and separate attempt allocation
+remain prerequisites for scientific execution.

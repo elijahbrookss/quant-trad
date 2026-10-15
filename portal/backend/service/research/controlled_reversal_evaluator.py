@@ -128,7 +128,7 @@ def _disjoint(a, b):
     return a["target_time"] < b["entry_time"] or b["target_time"] < a["entry_time"]
 
 
-def prepare_pairs(candidates, *, choices=None):
+def prepare_pairs(candidates, *, choices=None, features=FEATURES, calipers=CALIPERS, support_start="entry_time"):
     """Freeze identities using features only. A failed future outcome never supplies another control."""
     pools = defaultdict(list)
     for c in candidates:
@@ -150,10 +150,10 @@ def prepare_pairs(candidates, *, choices=None):
                 continue
             if b["event_time"] in used or not _disjoint(a,b):
                 continue
-            distances = [abs(a["features"][f]-b["features"][f]) for f in FEATURES]
-            if any(d > limit for d,limit in zip(distances,CALIPERS)):
+            distances = [abs(a["features"][f]-b["features"][f]) for f in features]
+            if any(d > limit for d,limit in zip(distances,calipers)):
                 continue
-            score = sum((d/limit)**2 for d,limit in zip(distances,CALIPERS))
+            score = sum((d/limit)**2 for d,limit in zip(distances,calipers))
             rank = (score, abs((_clock(a["event_time"],"event")-_clock(b["event_time"],"event")).total_seconds()), b["event_time"])
             if best is None or rank < best[0]:
                 best = (rank,b)
@@ -168,8 +168,8 @@ def prepare_pairs(candidates, *, choices=None):
     intervals = []
     for pair in pairs:
         execution_checkpoint()
-        proposed = [(pair[arm]["entry_time"],pair[arm]["target_time"]) for arm in ("treated","control")]
-        retain = True
+        proposed = [(pair[arm][support_start],pair[arm]["target_time"]) for arm in ("treated","control")]
+        retain = proposed[0][1] < proposed[1][0] or proposed[1][1] < proposed[0][0]
         for lo,hi in proposed:
             at = bisect_left(intervals,(lo,))
             if (at and intervals[at-1][1] >= lo) or (at < len(intervals) and intervals[at][0] <= hi):
@@ -218,22 +218,22 @@ def _distribution(values):
         "positive_fraction": float(np.mean(values > 0)) if len(values) else None}
 
 
-def _summary(pairs):
+def _summary(pairs, *, treated_label="engulfing"):
     a = np.asarray([p["outcomes"]["treated"]["forward_return"] for p in pairs],dtype=float)
     b = np.asarray([p["outcomes"]["control"]["forward_return"] for p in pairs],dtype=float)
     return {"complete_pairs": len(pairs), "utc_days": len({p["treated"]["day"] for p in pairs}),
         "mean_paired_return_difference": float(np.mean(a-b)) if len(pairs) else None,
-        "engulfing": _distribution(a), "control": _distribution(b)}
+        treated_label: _distribution(a), "control": _distribution(b)}
 
 
-def summarize_pairs(pairs, *, eligible_treated, both_arm_days=False):
+def summarize_pairs(pairs, *, eligible_treated, both_arm_days=False, features=FEATURES, treated_label="engulfing"):
     complete = [p for p in pairs if all(v["status"] == "resolved" for v in p["outcomes"].values())]
-    primary = _summary(complete)
+    primary = _summary(complete, treated_label=treated_label)
     balance = {}
-    for feature in FEATURES:
+    for feature in features:
         a,b = (np.asarray([p[arm]["features"][feature] for p in complete],dtype=float) for arm in ("treated","control"))
         value = _balance(a,b)
-        value["engulfing_mean"] = value.pop("crossing_mean")
+        value[treated_label+"_mean"] = value.pop("crossing_mean")
         balance[feature] = value
     matching = len(pairs)/eligible_treated if eligible_treated else None
     completeness = len(complete)/len(pairs) if pairs else None
@@ -248,8 +248,8 @@ def summarize_pairs(pairs, *, eligible_treated, both_arm_days=False):
     deletion = []
     for day in days:
         execution_checkpoint()
-        deletion.append({"omitted_utc_day": day, **_summary([p for p in complete if p["treated"]["day"] != day and (not both_arm_days or p["control"]["day"] != day)])})
-    subset = _summary([p for p in complete if p["joint_nonoverlap_selected"]])
+        deletion.append({"omitted_utc_day": day, **_summary([p for p in complete if p["treated"]["day"] != day and (not both_arm_days or p["control"]["day"] != day)], treated_label=treated_label)})
+    subset = _summary([p for p in complete if p["joint_nonoverlap_selected"]], treated_label=treated_label)
     subset["supported"] = subset["complete_pairs"] >= 30 and subset["utc_days"] >= 6
     delta = primary["mean_paired_return_difference"]
     if not all(gates.values()):
