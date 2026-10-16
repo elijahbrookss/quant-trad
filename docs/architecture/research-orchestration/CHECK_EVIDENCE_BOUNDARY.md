@@ -16,6 +16,10 @@ tags:
   - mcp
 code_paths:
   - src/research_science/check.py
+  - src/research_science/recognition.py
+  - src/research_science/reversal_recognition.py
+  - portal/backend/service/research/reversal_recognition_evaluator.py
+  - scripts/reporting/reversal_recognition_preview.py
   - src/market_data/frozen.py
   - portal/backend/service/research/registry.py
   - portal/backend/service/research/catalog.py
@@ -960,3 +964,32 @@ influence/dependence diagnostics, not independent-day or causal assurance.
 V8 has its own immutable registration, rules and result schema; v7 remains
 replayable with unchanged default output and hashes. No new persistence,
 framework, provider or deployment capability is introduced.
+
+
+## Composable recognition candidates before outcome science
+
+`raw_forward_outcome@9` explicitly selects `reversal_recognition.v1`. It calls
+the domain `ReversalRecognizer` through typed candle/context/event contracts;
+the offline preview calls the same `initialize -> apply_bar -> snapshot` state.
+Origin and validated settings enter material identity. The adapter uses the
+existing canonical candle preparation and pinned Check evidence without a new
+registry, persistence model or workflow language. Historical methods keep their
+versions and semantics.
+
+The first consumer records provisional decline/rebound/lower-low/recovery/reclaim
+chains. Numeric reference availability and reference-role availability are
+separate clocks. Source-event links preserve the exact confirmed reference,
+definition version and consumption clock. Competing chains remain visible;
+neither implicit deduplication nor a minimum-size filter settles Study ownership.
+Candidate counts are not an independent event population: sample count and
+admitted Study events are zero, and no outcomes or statistics are calculated.
+
+The method requires fixed-origin contiguous close-available candles, rejects gaps
+and delayed-close reinterpretation, and fails explicit resource bounds rather
+than returning a partial population. It has no outcome tail. Candidate completion
+membership is `[evaluation_start,evaluation_end)`; contextual references and
+pending chains are labeled with the full input snapshot clock at evaluation end.
+The [definition guide](../../guides/research-recognition-definitions.md) describes
+settings, ordinary-function composition, immutable outputs, shared visual use
+and the reviewed separation from Indicator signals and execution consumers.
+Registration and synthetic qualification do not authorize a real-data dispatch.
