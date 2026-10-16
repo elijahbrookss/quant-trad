@@ -34,6 +34,12 @@ from .volume_cohort_evaluator import (NearbyDateVolumeCohortEvaluator,
     RULES as VOLUME_COHORT_RULES, normalize_configuration as normalize_volume_cohort_configuration)
 from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME_SCHEMA as DISTRIBUTION_SCHEMA, RULES as DISTRIBUTION_RULES, normalize_configuration as normalize_distribution_configuration)
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
+from .reversal_first_passage_evaluator import (ReversalFirstPassageEvaluator,
+    SCHEMA as FIRST_PASSAGE_SCHEMA, RULES as FIRST_PASSAGE_RULES,
+    normalize_configuration as normalize_first_passage_configuration)
+from .reversal_recognition_evaluator import (ReversalRecognitionEvaluator,
+    SCHEMA as RECOGNITION_SCHEMA, RULES as RECOGNITION_RULES,
+    normalize_configuration as normalize_recognition_configuration)
 from .controlled_reversal_evaluator import (ControlledReversalEvaluator, FIXED_RULES,
     OUTCOME_SCHEMA as REVERSAL_SCHEMA, normalize_configuration as normalize_reversal_configuration,
     ConfigurableControlledReversalEvaluator, CONFIGURABLE_RULES, CONFIGURABLE_SCHEMA,
@@ -353,10 +359,36 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_reversal_recognition = ReversalRecognitionEvaluator()
+CHECK_REGISTRY.register_evaluator(_reversal_recognition)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="9", evaluator_id=_reversal_recognition.evaluator_id,
+    evaluator_version="9", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": RECOGNITION_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive", "recognition_rules": RECOGNITION_RULES},
+))
+
+
+_reversal_first_passage = ReversalFirstPassageEvaluator()
+CHECK_REGISTRY.register_evaluator(_reversal_first_passage)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="10", evaluator_id=_reversal_first_passage.evaluator_id,
+    evaluator_version="10", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": FIRST_PASSAGE_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive", "first_passage_rules": FIRST_PASSAGE_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit only exact registered raw v3/v4/v5/v6/v7/v8 pairs."""
+    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v10 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -939,7 +971,11 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("8" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("10" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == FIRST_PASSAGE_SCHEMA
+            else "9" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == RECOGNITION_SCHEMA
+            else "8" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == NEARBY_VOLUME_SCHEMA
             else "7" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == VOLUME_COHORT_SCHEMA
@@ -995,7 +1031,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1050,6 +1086,16 @@ def materialize_check_definition(
         raise ValueError(
             "event_fact_check_invalid: fact_snapshot does not support reset_rewarm"
         )
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "10":
+        outcomes = normalize_first_passage_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("reversal_first_passage_invalid: no rewarm or scientific assertions")
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "9":
+        outcomes = normalize_recognition_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("reversal_recognition_invalid: no rewarm or scientific assertions")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "3":
         outcomes = normalize_raw_candle_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
