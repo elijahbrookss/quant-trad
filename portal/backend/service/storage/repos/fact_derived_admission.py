@@ -55,6 +55,22 @@ _LEGACY_MATERIAL_CANDIDATES = """
                     WHERE hot.storage_day=source.storage_day AND hot.id=source.id)
 """
 
+def _material_source_batches(requests):
+    # A large ANY-of-JSON-witnesses probe across every hot partition inflated
+    # cardinality enough to enable hundreds of optimized JIT functions before
+    # returning a source. Keep one distinct legacy GIN witness per statement;
+    # repeated roots/roles still share a probe, with their own causal clocks.
+    # Canonical-only families retain the existing 128-request batches.
+    groups = defaultdict(list)
+    for request in requests:
+        key = legacy_material_evidence_key(request["fact_type"])
+        witness = (key, request["material_hash"]) if key is not None else None
+        groups[witness].append(request)
+    for group in groups.values():
+        for offset in range(0, len(group), 128):
+            yield group[offset:offset + 128]
+
+
 def resolve_material_source_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
     """Resolve bounded (root, role) witnesses without selecting latest aliases.
 
@@ -75,12 +91,12 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         indexed[identity] = request
     selections = defaultdict(list)
     count = 0
-    for offset in range(0, len(requests), 128):
+    for request_batch in _material_source_batches(requests):
         if check_budget is not None:
             check_budget()
         batch = [{**request, "known_at": request["known_at"].isoformat(),
                   "evidence_key": legacy_material_evidence_key(request["fact_type"])}
-                 for request in requests[offset:offset + 128]]
+                 for request in request_batch]
         # Families without a legacy material hash cannot match either alias
         # branch. Omit those joins before planning; a CASE filter can otherwise
         # cause a full historical header scan even when every key is null.

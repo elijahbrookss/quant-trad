@@ -1354,6 +1354,16 @@ sample is not an archive-throughput estimate, and normal maintenance budgets
 still apply. Hydrated rows must
 prove their actual material, series, family, observation and causal clocks.
 
+Legacy material-source selection groups at most 128 requests sharing one exact
+legacy provenance witness per SQL statement. Canonical-only requests retain
+128-request batches. This avoids a measured many-witness plan enabling hundreds
+of optimized JIT functions across hot payload partitions, without changing the
+SQL predicates, causal clocks, complete revision set, hydration checks, edge
+budget, verifier version or retention policy. A statement retains every root and
+role separately; grouping never selects the latest revision. Planner estimates
+are diagnostic evidence, not a wall-clock performance guarantee.
+
+
 The existing BBO decoder and basis derivation owner validate the declared pair,
 mids, staleness, input fingerprint and retained typed material hash. Immutable
 role-mapping metadata must exist with matching instruments, `spot_reference`

@@ -76,6 +76,48 @@ def test_material_sources_revalidate_every_candidate_and_causal_clock(monkeypatc
             admission.resolve_material_source_revisions(SimpleNamespace(execute=execute), **kwargs)
 
 
+def test_material_witness_groups_preserve_edges_clocks_and_budget(monkeypatch):
+    requests, rows = [], {}
+    for index in range(300):
+        legacy = index % 4 != 0
+        material = f"{index % 7:064x}"
+        family = "market.bbo" if legacy else "market.trade"
+        source_id = f"{family}-{material}"
+        rows[source_id] = dict(id=source_id, series_id=20, fact_type=family,
+            material_hash=material, provenance={}, known_at=BASE, market_commit_seq=1,
+            observation_key=source_id)
+        requests.append(dict(root_id=str(index), role="input", series_id=20,
+            fact_type=family, material_hash=material, known_at=BASE, commit_seq=2))
+    batches = []
+    def execute(statement, params):
+        batch = json.loads(params["requests"])
+        batches.append(batch)
+        return SimpleNamespace(all=lambda: [(r["root_id"], r["role"],
+            f"{r['fact_type']}-{r['material_hash']}") for r in batch])
+    monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda session, ids, **kw:
+                        {identity: rows[identity] for identity in ids})
+    monkeypatch.setattr(admission, "record_from_storage_row", lambda row: None)
+    kwargs = dict(requests=requests, reader=None, max_rows=300, max_logical_bytes=1024)
+    actual = admission.resolve_material_source_revisions(SimpleNamespace(execute=execute), **kwargs)
+    assert sum(map(len, batches)) == len(requests)
+    assert all(len(batch) <= 128 for batch in batches)
+    assert all(len({(r["evidence_key"], r["material_hash"]) for r in batch
+                    if r["evidence_key"] is not None}) <= 1 for batch in batches)
+    assert len(actual[1]) == 300  # Repeated edges are not collapsed to unique documents.
+    with monkeypatch.context() as previous:
+        previous.setattr(admission, "_material_source_batches",
+            lambda rs: (rs[offset:offset + 128] for offset in range(0, len(rs), 128)))
+        assert admission.resolve_material_source_revisions(SimpleNamespace(execute=execute), **kwargs) == actual
+    def overflowing_execute(statement, params):
+        result = execute(statement, params).all()
+        # A second distinct candidate per request crosses the edge ceiling even
+        # though the number of requests itself is admitted.
+        return SimpleNamespace(all=lambda: result + [(root, role, source_id + "-revision")
+                                                     for root, role, source_id in result])
+    with pytest.raises(RuntimeError, match="canonical_material_source_budget_exceeded"):
+        admission.resolve_material_source_revisions(SimpleNamespace(execute=overflowing_execute), **kwargs)
+
+
 @pytest.mark.parametrize("field,value", [("series_id", True), ("series_id", None), ("commit_seq", 0),
                                        ("material_hash", None), ("material_hash", "bad")])
 def test_invalid_source_identity_never_reaches_sql(field, value):
@@ -113,20 +155,24 @@ def test_material_selection_omits_only_impossible_legacy_joins(monkeypatch, fami
     requests = [dict(root_id=name, role="input", series_id=selected[name]["series_id"],
         fact_type=selected[name]["fact_type"], material_hash=selected[name]["material_hash"],
         known_at=selected[name]["known_at"], commit_seq=selected[name]["market_commit_seq"]) for name in families]
+    matched = 0
     def execute(statement, params):
+        nonlocal matched
         sql = str(statement)
         # The non-applicable branches caused a measured production plan to scan
         # the historical header table before its false legacy-key filter.
-        assert ("fact_hot_payloads" in sql) is ("legacy" in families)
-        assert ("fact_archive_material_aliases" in sql) is ("legacy" in families)
+        names = [item["root_id"] for item in json.loads(params["requests"])]
+        assert ("fact_hot_payloads" in sql) is ("legacy" in names)
+        assert ("fact_archive_material_aliases" in sql) is ("legacy" in names)
         assert "source.material_hash=requested.material_hash" in sql
         assert "SELECT DISTINCT root_id,role,id" in sql
-        assert params["limit"] == 11
+        assert params["limit"] == 11 - matched
+        matched += len(names)
         assert [json.loads(value) for value in params["legacy_witnesses"]] == (
             [{"_qt_bbo_evidence": {"legacy_material_hash": legacy["material_hash"]}}]
-            if "legacy" in families else [])
-        assert ("hot.provenance @> ANY" in sql) is ("legacy" in families)
-        return SimpleNamespace(all=lambda:[(name, "input", selected[name]["id"]) for name in families])
+            if "legacy" in names else [])
+        assert ("hot.provenance @> ANY" in sql) is ("legacy" in names)
+        return SimpleNamespace(all=lambda:[(name, "input", selected[name]["id"]) for name in names])
     monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda *a, **kw:rows)
     monkeypatch.setattr(admission, "record_from_storage_row", lambda row:None)
     sources, edges = admission.resolve_material_source_revisions(SimpleNamespace(execute=execute),

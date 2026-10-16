@@ -109,14 +109,27 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
             "fact_type": "market.bbo", "material_hash": features[0][0].material_hash,
             "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
         }]
-        mixed_sources, mixed_edges = resolve_material_source_revisions(session,
-            requests=[{**request, "root_id": f"mixed-{index}"}
-                      for index in range(70) for request in mixed_requests],
-            reader=tiered, max_rows=210, max_logical_bytes=64 * 1024**2)
-        assert len(mixed_sources) == 3
-        assert len(mixed_edges) == 140
+        mixed_requests.append({
+            "root_id": "mixed", "role": "spot-bbo", "series_id": features[1][0].series_id,
+            "fact_type": "market.bbo", "material_hash": features[1][0].material_hash,
+            "commit_seq": basis_outcome.max_commit_seq, "known_at": BASE + timedelta(minutes=1),
+        })
+        requests = [{**request, "root_id": f"mixed-{index}"}
+                    for index in range(70) for request in mixed_requests]
+        kwargs = dict(requests=requests, reader=tiered, max_rows=350, max_logical_bytes=64 * 1024**2)
+        mixed_sources, mixed_edges = resolve_material_source_revisions(session, **kwargs)
+        # Compare the same unchanged SQL and hydration against the previous
+        # contiguous 128-request batching on real hot/cold fixture revisions.
+        from portal.backend.service.storage.repos import fact_derived_admission as admission
+        with monkeypatch.context() as previous:
+            previous.setattr(admission, "_material_source_batches",
+                lambda rs: (rs[offset:offset + 128] for offset in range(0, len(rs), 128)))
+            assert resolve_material_source_revisions(session, **kwargs) == (mixed_sources, mixed_edges)
+        assert len(mixed_sources) == 4
+        assert len(mixed_edges) == 210
         assert all(len(mixed_edges[(f"mixed-{index}", "book")]) == 1
-                   and len(mixed_edges[(f"mixed-{index}", "bbo")]) == 2 for index in range(70))
+                   and len(mixed_edges[(f"mixed-{index}", "bbo")]) == 2
+                   and len(mixed_edges[(f"mixed-{index}", "spot-bbo")]) == 1 for index in range(70))
         assert all(row["market_commit_seq"] not in {
             future_known_outcome.max_commit_seq, late_outcome.max_commit_seq,
         } for row in mixed_sources.values())
