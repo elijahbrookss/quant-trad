@@ -54,6 +54,7 @@ state_file="$state_root/release.env"
 history_file="$state_root/release-history.ndjson"
 alert_preview_state_file="$state_root/alert-preview.env"
 alerts_enabled="$(first_value "$(env_value QT_ALERTS_ENABLED)" "false")"
+clock_health_enabled="$(first_value "$(env_value QT_CLOCK_HEALTH_ENABLED)" "false")"
 export QT_MARKET_DATA_ROOT="$data_root"
 export QT_MARKET_DATA_EXPECTED_UUID="$archive_uuid"
 
@@ -403,6 +404,16 @@ storage_overlay_for() {
   fi
 }
 
+clock_health_overlay_for() {
+  local source_root="$1"
+  validate_boolean_value QT_CLOCK_HEALTH_ENABLED "$clock_health_enabled"
+  if test "$clock_health_enabled" = true; then
+    test -f "$source_root/docker/docker-compose.clock-health.yml" \
+      || die "clock-health overlay is not supported by this checkout"
+    printf '%s' "$source_root/docker/docker-compose.clock-health.yml"
+  fi
+}
+
 compose() {
   local compose_exec=(docker compose)
   if test "${compose_probe_timeout:-false}" = true; then
@@ -411,8 +422,12 @@ compose() {
   fi
   local profile_args=()
   local compose_file_args=(--file "$compose_file")
-  local storage_overlay
+  local storage_overlay clock_overlay
   if test "${recovery_config_frozen:-false}" != true; then
+    clock_overlay="$(clock_health_overlay_for "$repo_root")" || return
+    if test -n "$clock_overlay"; then
+      compose_file_args+=(--file "$clock_overlay")
+    fi
     storage_overlay="$(storage_overlay_for "$repo_root")" || return
     if test -n "$storage_overlay"; then
       compose_file_args+=(--file "$storage_overlay")
@@ -442,7 +457,7 @@ compose_from_repo_root() {
   local source_compose_file="$source_root/docker/docker-compose.server.yml"
   local source_alerting_file="$source_root/docker/docker-compose.alert-email.yml"
   local cleanup_provisioning_root="$repo_root/docker/grafana/server-alerting/cleanup-provisioning"
-  local source_revision source_tree_hash storage_overlay
+  local source_revision source_tree_hash storage_overlay clock_overlay
   local compose_file_args=(--file "$source_compose_file")
   local profile_args=()
   local profile
@@ -461,6 +476,10 @@ compose_from_repo_root() {
   done
   if test "$alerts_enabled" = "true" && test -f "$source_alerting_file"; then
     compose_file_args+=(--file "$source_alerting_file")
+  fi
+  clock_overlay="$(clock_health_overlay_for "$source_root")" || return
+  if test -n "$clock_overlay"; then
+    compose_file_args+=(--file "$clock_overlay")
   fi
   storage_overlay="$(storage_overlay_for "$source_root")" || return
   if test -n "$storage_overlay"; then

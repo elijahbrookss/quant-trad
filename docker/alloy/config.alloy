@@ -67,3 +67,27 @@ loki.write "local" {
     url = "http://loki:3100/loki/api/v1/push"
   }
 }
+
+// Optional clock-health overlay exposes only the non-secret JSONL export.
+local.file_match "clock_health" {
+  path_targets = [{"__path__" = "/run/qt-clock-health/clock-health.jsonl", "job" = "quanttrad", "service" = "clock-health"}]
+  sync_period = "15s"
+}
+
+loki.source.file "clock_health" {
+  targets    = local.file_match.clock_health.targets
+  forward_to = [loki.process.clock_health.receiver]
+}
+
+loki.process "clock_health" {
+  stage.json {
+    expressions = {observed_at = "observed_at"}
+  }
+  // File replay must retain sample time rather than look like fresh health.
+  stage.timestamp {
+    source = "observed_at"
+    format = "RFC3339Nano"
+    action_on_failure = "skip"
+  }
+  forward_to = [loki.write.local.receiver]
+}

@@ -381,3 +381,87 @@ evaluate in Grafana, but this installation has no external email route.
 
 A code rollback uses the normal deployment rollback command. Do not delete the
 Grafana volume or broad-restart the stack to change alerting.
+
+## Optional native-host clock-health alert
+
+`qt-host-clock-unhealthy` uses the existing Alloy -> Loki -> Grafana route and
+existing operator-email contact point. It does not add recipients, credentials,
+a telemetry database, a research procedure, or an admission gate. Historical
+research results, evidence and timestamps remain unchanged.
+
+The host-native `scripts/reporting/server_clock_health.py` performs only
+`/usr/bin/chronyc tracking`, `activity`, and `-n sources`, with a three-second
+limit each. The installed timer samples every 30 seconds. A selected reachable
+remote source and at least one online source are required. Invalid/missing
+status, unsynchronised leap status, a reference more than 1 second in the
+future or older than 1,800 seconds, or uncertainty above 0.100 seconds emits
+`healthy=0` with bounded reason codes. The conditional uncertainty estimate is
+`abs(system time offset) + root delay / 2 + root dispersion`; it assumes the
+upstream clock is correct. These are operational warning thresholds, not a
+scientific timing tolerance or proof of historical clock accuracy.
+
+The probe exports no source addresses or raw command output. It appends to
+`clock-health.jsonl`, rotating at 1 MiB to one retained `.1` file, in a directory
+owned by the sampling user and not writable by others. Symlink/non-regular or
+multiply linked output files are refused. Alloy reads only that inert directory
+through a read-only bind; it has no chrony control socket or private log mount.
+Alloy retains the sample's UTC timestamp so replayed files do not appear fresh.
+
+The rule uses the worst health sample in a two-minute window and a two-minute
+hold. Recovery requires the bad samples to leave that window. Stopped sampling
+becomes no data after the window expires; missing or malformed evidence and
+query errors alert, rather than imply health. Detection therefore normally takes
+roughly two to five minutes including the one-minute evaluation cadence. Existing
+notification grouping and delivery add their own delay. The same-host monitor
+cannot independently diagnose its own host/network outage or a clock sufficiently
+wrong to disrupt Loki ingestion; missing-data alerting provides bounded coverage
+while Grafana remains operational.
+
+### Activation requirements (not executed by implementation)
+
+Activation is a separately coordinated monitoring change after review and
+qualification of the exact source, including the disposable Alloy configuration
+and Loki/Grafana rule proof in `scripts/ci/test_storage_alerts.py`. The deployed
+`7a34ead6` release does not contain this capability. Do not copy these files into
+that release or restart application/collector services to activate it.
+
+A host owner must approve/install the two supplied systemd units and prepare
+only the new non-secret export directory. With the reviewed source at
+`/srv/quanttrad/app`, the installation commands are:
+
+```sh
+sudo install -d -o qtadmin -g qtadmin -m 0755 /srv/quanttrad/deploy-state/clock-health
+sudo install -o root -g root -m 0644 scripts/reporting/qt-clock-health.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 scripts/reporting/qt-clock-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now qt-clock-health.timer
+```
+
+These commands require host-owner installation permission; ordinary read-only
+chronyc status already works as `qtadmin`. No access to `/var/log/chrony`, group
+membership changes, clock correction, source/network configuration, or changes
+to chrony itself are required. The unit's Python/script paths and existing
+`qtadmin` identity must be verified for the installation. An unhealthy probe
+exits 1 after exporting its record; the timer continues sampling, and systemd
+also makes this failure visible.
+
+The installation owner then adds `QT_CLOCK_HEALTH_ENABLED=true` to the existing
+private deployment environment. The reviewed server runner selects the fixed
+`docker/docker-compose.clock-health.yml` overlay for normal and candidate
+composition; disabled/absent is the default. The directory bind never creates
+missing host paths. Frozen recovery uses its pinned rendered configuration
+without appending this overlay. An older source that cannot support an enabled
+overlay fails closed; disabling the optional flag is an explicit operator action,
+not an automatic rollback guess.
+
+Activate through the established reviewed release procedure, coordinated with
+research ownership and its execution slot. This change requires Alloy/Grafana
+recreation to load the bind/rule, but does not inherently require restarting
+application services or collectors. The full-release runner may restart those
+services; schedule any such operation explicitly. Do not introduce a separate
+manual Compose execution route. Before declaring active, verify timer cadence,
+fresh JSONL timestamps, Alloy ingestion, the provisioned rule's healthy state,
+and notification routing. The disposable proof sends no real email; it does not
+certify production delivery. To stop sampling, a host owner can disable the timer;
+keep the alert enabled until the resulting missing evidence is acknowledged or
+explicitly disable the optional overlay in a reviewed monitoring change.

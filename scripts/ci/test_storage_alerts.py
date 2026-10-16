@@ -1,4 +1,4 @@
-"""Prove the production storage rules against disposable local Loki/Grafana.
+"""Prove storage and clock rules against disposable local Loki/Grafana.
 
 No SMTP, host mounts, production credentials, or external endpoints. The unique
 Compose project and its data volumes are removed even if the proof fails.
@@ -105,7 +105,7 @@ def evaluate(grafana: str, rule: dict, timestamp: float, *, expression: bool = T
 def prove(grafana: str, loki: str) -> None:
     loaded = request(grafana + "/api/v1/provisioning/alert-rules", auth=True)
     rules = {rule["uid"]: rule for rule in loaded}
-    assert set(rules) == set(RULES), rules.keys()
+    assert set(rules) == set(RULES) | {"qt-host-clock-unhealthy"}, rules.keys()
     for uid in RULES[3:]:
         assert rules[uid]["noDataState"] == "Alerting"
         assert rules[uid]["execErrState"] == "Alerting"
@@ -149,6 +149,28 @@ def prove(grafana: str, loki: str) -> None:
     guest = evaluate(grafana, rules[RULES[4]], guest_time + 1, expression=False)
     assert values(guest, "A") == {}, guest
     print("storage_alert_health_proved failure=per-disk missing=Alerting guest=not-physical", flush=True)
+
+
+def prove_clock(grafana: str, loki: str) -> None:
+    rule = next(item for item in request(grafana + "/api/v1/provisioning/alert-rules", auth=True)
+                if item["uid"] == "qt-host-clock-unhealthy")
+    assert rule["noDataState"] == rule["execErrState"] == "Alerting"
+    base = int(time.time()) - 4000
+    entries = []
+    for offset, healthy in ((0, 1), (180, 0), (240, 1), (360, 1), (540, "malformed")):
+        payload = {"sample_kind": "clock_health", "resource_id": "host-clock", "healthy": healthy}
+        entries.append([str((base + offset) * 1_000_000_000), json.dumps(payload)])
+    request(loki + "/loki/api/v1/push", {"streams": [{"stream": {"service": "clock-health"}, "values": entries}]})
+    for offset, expected in ((1, 0), (181, 1), (361, 0)):
+        result = evaluate(grafana, rule, base + offset)
+        assert values(result, "C") == {"host-clock": float(expected)}, result
+    for offset in (541, 721):
+        result = evaluate(grafana, rule, base + offset, expression=False)
+        assert values(result, "A") == {}, result
+    # One bad sample must remain unhealthy until it leaves the two-minute window.
+    mixed = evaluate(grafana, rule, base + 241)
+    assert values(mixed, "C") == {"host-clock": 1.0}, mixed
+    print("clock_alert_proved healthy unhealthy recovery malformed missing=Alerting", flush=True)
 
 
 def prove_capacity_dashboard(grafana: str, loki: str) -> None:
@@ -238,7 +260,12 @@ def main() -> int:
         loki = endpoint_for("loki", 3100)
         wait_ready(grafana + "/api/health")
         wait_ready(loki + "/ready")
+        checked = subprocess.check_output([*compose, "ps", "--all", "--quiet", "alloy-config-check"], text=True).strip()
+        assert checked, "alloy configuration validator was not created"
+        state = json.loads(subprocess.check_output(["docker", "inspect", checked], text=True))[0]["State"]
+        assert state["Status"] == "exited" and state["ExitCode"] == 0, state
         prove(grafana, loki)
+        prove_clock(grafana, loki)
         prove_capacity_dashboard(grafana, loki)
     except BaseException:
         subprocess.run([*compose, "logs", "--tail", "80"], check=False, timeout=30)

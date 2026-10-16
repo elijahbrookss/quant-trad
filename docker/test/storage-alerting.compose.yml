@@ -1,4 +1,11 @@
 services:
+  alloy-config-check:
+    image: grafana/alloy:v1.18.1
+    command: [validate, /etc/alloy/config.alloy]
+    network_mode: none
+    volumes:
+      - ../alloy/config.alloy:/etc/alloy/config.alloy:ro
+
   loki:
     image: grafana/loki:3.7.6
     # Synthetic 24h-old samples have just arrived and are still in the ingester.
@@ -33,6 +40,7 @@ services:
     volumes:
       - ../grafana/provisioning/datasources/loki.yml:/etc/grafana/provisioning/datasources/loki.yml:ro
       - ../grafana/provisioning/alerting/storage-safety.yml:/etc/grafana/provisioning/alerting/storage-safety.yml:ro
+      - ../grafana/provisioning/alerting/clock-safety.yml:/etc/grafana/provisioning/alerting/clock-safety.yml:ro
 
 volumes:
   loki-data:
