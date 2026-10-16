@@ -57,3 +57,34 @@ def test_read_deadline_is_separate_from_scientific_job_cancellation(monkeypatch)
     with pytest.raises(HTTPException) as raised:
         research._read_call(lambda: sleep(0.03))
     assert raised.value.status_code == 503
+
+
+def test_reused_image_gets_have_deadline_and_activity_keeps_validation_status(monkeypatch):
+    real = research.ExecutionControl
+    class ShortRead(real):
+        def limit(self, **kwargs):
+            super().limit(seconds=0.01)
+    monkeypatch.setattr(research, "ExecutionControl", ShortRead)
+    monkeypatch.setattr(research.research_images, "list_images", lambda *args: sleep(0.02))
+    with pytest.raises(HTTPException) as raised:
+        research.list_research_images("synthetic-item")
+    assert raised.value.status_code == 503
+    def invalid(**kwargs):
+        raise ValueError("unsupported research activity type")
+    monkeypatch.setattr(research.research_service, "get_research_activity", invalid)
+    with pytest.raises(HTTPException) as raised:
+        research.get_research_activity(type="unsupported", days=1)
+    assert raised.value.status_code == 400
+
+
+def test_actual_activity_route_wires_existing_service_and_zero_fills(monkeypatch):
+    from fastapi.testclient import TestClient
+    from portal.backend.service.research import service
+    monkeypatch.setattr(service.repository, "count_items_by_day", lambda **kwargs: [])
+    app = FastAPI()
+    app.include_router(research.router, prefix="/api/research")
+    response = TestClient(app).get("/api/research/activity?type=checks_completed&days=1")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["activity_type"] == "checks_completed"
+    assert len(body["days"]) == 1 and body["days"][0]["total"] == 0

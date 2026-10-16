@@ -29,7 +29,7 @@ from ..service.research import browse as research_browse
 from ..service.research import evidence_export as research_export
 
 
-def _read_call(handler, *args, **kwargs):
+def _read_call(handler, *args, _value_error_status=409, **kwargs):
     control = ExecutionControl()
     control.limit(seconds=20)
     try:
@@ -39,7 +39,7 @@ def _read_call(handler, *args, **kwargs):
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         message = str(exc)
-        status = 403 if "inaccessible" in message else 429 if "export_busy" in message else 409
+        status = 403 if "inaccessible" in message else 429 if "export_busy" in message else _value_error_status
         raise HTTPException(status, message) from exc
     except (DBAPIError, ExecutionBudgetExceededError) as exc:
         logger.warning("research_read_unavailable | operation=%s phase=read error_type=%s", handler.__name__, type(exc).__name__)
@@ -125,12 +125,12 @@ def attach_research_image(item_id: str, body: ResearchImageRequest) -> Dict[str,
 
 @router.get("/items/{item_id}/images")
 def list_research_images(item_id: str) -> Dict[str, Any]:
-    return _image_call(research_images.list_images, item_id)
+    return _read_call(research_images.list_images, item_id)
 
 
 @router.get("/items/{item_id}/images/{image_id}/content")
 def get_research_image_content(item_id: str, image_id: str) -> Response:
-    content, manifest = _image_call(research_images.get_content, item_id, image_id)
+    content, manifest = _read_call(research_images.get_content, item_id, image_id)
     return Response(content, media_type=manifest["media_type"], headers={
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -447,10 +447,8 @@ def get_research_activity(
     """Return a complete zero-filled UTC activity projection."""
 
     try:
-        return research_service.get_research_activity(
-            activity_type=type,
-            days=days,
-        )
+        return _read_call(research_service.get_research_activity,
+            activity_type=type, days=days, _value_error_status=400)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

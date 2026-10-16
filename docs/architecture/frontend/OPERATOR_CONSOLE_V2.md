@@ -137,7 +137,12 @@ entries at most 256 KiB). Raw records, export preflights and ZIP bytes are not
 cached. No private evidence is persisted in localStorage.
 
 Read handlers are synchronous threadpool work with the existing ExecutionControl
-20-second total deadline and 5-second per-statement PostgreSQL timeout. New
+20-second total deadline for new reads and reused research activity/image GETs.
+New compact sessions also use a 5-second per-statement PostgreSQL timeout;
+other SQL inside the controlled scope uses the existing remaining-deadline hook.
+The reused backtest activity endpoint belongs to reporting and is unchanged; its
+latency/SQL-release behavior needs separate qualification, not an assumed new
+research timeout. New
 compact sessions use repeatable-read/read-only connection options before their
 first statement. Summary and relationship release project nested dependency
 IDs and apply existing protocol custody checks without transferring full
