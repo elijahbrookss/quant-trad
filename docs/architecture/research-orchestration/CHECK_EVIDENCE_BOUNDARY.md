@@ -18,6 +18,8 @@ code_paths:
   - src/research_science/check.py
   - src/research_science/recognition.py
   - src/research_science/reversal_recognition.py
+  - src/research_science/reversal_outcomes.py
+  - portal/backend/service/research/reversal_first_passage_evaluator.py
   - portal/backend/service/research/reversal_recognition_evaluator.py
   - scripts/reporting/reversal_recognition_preview.py
   - src/market_data/frozen.py
@@ -993,3 +995,25 @@ The [definition guide](../../guides/research-recognition-definitions.md) describ
 settings, ordinary-function composition, immutable outputs, shared visual use
 and the reviewed separation from Indicator signals and execution consumers.
 Registration and synthetic qualification do not authorize a real-data dispatch.
+
+
+## Completed-formation first-passage description
+
+`raw_forward_outcome@10` explicitly selects `reversal_first_passage.v1`. It pins
+the user's retreat-inclusive reference choice and reuses v9's canonical input
+preparation and sequential recognizer without changing historical v9 outputs.
+The domain outcome procedure anchors at the observational completion close E,
+locks the entire formation low L, verifies E>L, and tracks inclusive first touches
+of L or E+(E-L) over the next twelve15m candles. Ambiguous same-bar order,
+invalid risk and unavailable horizons remain explicit unresolved cases; a full
+untouched horizon is neither. The evaluation boundary prevents a future tail.
+
+Before reading outcomes, closed formation-start through nominal-horizon
+intervals form transitive overlap components. Every chain is retained. Outputs
+show all four classes, raw chain shares, equal-component within-component class
+shares, component sizes, UTC-day counts and descriptive concentration. Neither
+component counts nor inverse HHI claim independent observations. Existing
+Check/version/input binding, job admission, evidence and Research Memory paths
+own persistence and execution; there is no new scientific runtime or matching
+campaign. See the [fixed January protocol](../../research-campaigns/reversal-first-passage-20261016.md)
+for exposure, availability, censoring, resource and single-attempt stopping rules.

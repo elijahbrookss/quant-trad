@@ -134,3 +134,13 @@ timeline, publication contract and execution separation. This pilot adds no
 signal, Strategy, Bot or backtest integration. First-passage continuation,
 failure and unresolved outcomes also await a visually accepted formation and
 explicit ownership/support protocol; old body-only engulfing is no substitute.
+
+The subsequent user decision selects `rising_leg_plus_retreat` for the new
+`raw_forward_outcome@10` first-passage study. V9 and earlier previews retain their
+original provisional meaning. V10 reuses the same recognizer and canonical
+preparation, adds the explicit fixed twelve-bar first-passage procedure, and
+retains all chains in outcome-blind overlap components. Its completion-close
+anchor is an observational price; no execution signal or fill is created. See
+the [fixed development protocol](../research-campaigns/reversal-first-passage-20261016.md)
+for thresholds, censoring, dependence and stopping decisions. Registration still
+does not authorize execution before qualified deployment and QT admission.

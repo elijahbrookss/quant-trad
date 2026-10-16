@@ -139,3 +139,30 @@ def test_material_candle_conversion_normalizes_clocks_and_rejects_source_conflic
 
 def plain_clock(value):
     return value.isoformat().replace('+00:00','Z')
+
+
+def test_january27_retreat_high_is_locked_at_retreat_close_without_rewriting_old_choice():
+    # Exact four-bar excerpt from already-retained January27 Coinbase15m facts.
+    # This local reference-rule regression is not a fixed-origin population replay.
+    from research_science.recognition import utc
+    origin=utc('2022-01-27T01:30:00Z')
+    context=replace(CONTEXT,computation_origin=origin)
+    prices=((36692.71,36698.76,36162.81,36279.82),
+            (36274.92,36318.26,35844.,35897.08),
+            (35895.28,35948.70,35778.15,35898.17),
+            (35900.12,35996.37,35734.07,35883.26))
+    bars=tuple(RecognitionCandle(str(i),'source',origin+timedelta(minutes=15*i),
+        origin+timedelta(minutes=15*(i+1)),origin+timedelta(minutes=15*(i+1)),*p) for i,p in enumerate(prices))
+    state=ReversalRecognizer(context,settings('rising_leg_plus_retreat'))
+    for b in bars[:3]:state.apply_bar(b)
+    assert state.snapshot().references==()
+    state.apply_bar(bars[3]);ref=state.snapshot().references[0]
+    assert ref.levels[0].price==35996.37 and ref.levels[0].candle_id==bars[3].candle_id
+    assert ref.levels[0].price_known_at==ref.levels[0].role_known_at==ref.known_at==utc('2022-01-27T02:30:00Z')
+    old=recognize_reversals(bars,context=context,settings=settings('rising_leg_only')).references[0]
+    assert old.levels[0].price==35948.70 and old.event_id!=ref.event_id
+    assert old.configuration_hash!=ref.configuration_hash
+    later=RecognitionCandle('later','source',bars[-1].close_time,bars[-1].close_time+timedelta(minutes=15),
+        bars[-1].close_time+timedelta(minutes=15),35883.26,37000.,35800.,36000.)
+    state.apply_bar(later)
+    assert state.snapshot().references[0]==ref

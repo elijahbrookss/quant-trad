@@ -59,6 +59,26 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
     return {"schema_version": SCHEMA}
 
 
+def prepare_recognition(*, plan, inputs, schema=SCHEMA):
+    """Shared canonical preparation and one sequential recognizer for both Checks."""
+    settings = choices(inputs["detector"])
+    if inputs["outcomes"] != {"schema_version": schema} or plan.gap_policy != "reject":
+        raise ValueError("reversal_recognition_invalid: pinned inputs required")
+    primary = next(x for x in plan.market_data_requirements if x["alias"] == "primary_bars")
+    seconds = int(primary["timeframe_seconds"])
+    origin = utc(inputs["detector"]["computation_origin"])
+    start, end = utc(plan.evaluation_range["start"]), utc(plan.evaluation_range["end_exclusive"])
+    if utc(plan.materialization_range["start"]) != origin:
+        raise ValueError("reversal_recognition_invalid: planned origin differs from pinned detector")
+    _, rows = _prepare(inputs["candles"], step=timedelta(seconds=seconds), volume_required=False)
+    if not rows or utc(rows[0]["open_time"]) != origin or utc(rows[-1]["close_time"]) != end:
+        raise ValueError("reversal_recognition_invalid: incomplete origin-to-end candle path")
+    candles = tuple(RecognitionCandle.from_mapping(r) for r in rows)
+    context = RecognitionContext(str(primary["instrument_id"]), seconds, origin, candles[0].source_identity_key)
+    snapshot = recognize_reversals(candles, context=context, settings=settings, checkpoint=execution_checkpoint)
+    return settings, snapshot, rows, start, end, candles
+
+
 @dataclass(frozen=True)
 class ReversalRecognitionEvaluator:
     evaluator_id: str = "raw_forward_outcome"
@@ -80,21 +100,8 @@ class ReversalRecognitionEvaluator:
             "primary_candle_required_fields": ["open", "high", "low", "close", "known_at"]}
 
     def evaluate(self, *, plan, inputs):
-        settings = choices(inputs["detector"])
-        if inputs["outcomes"] != {"schema_version": SCHEMA} or plan.gap_policy != "reject":
-            raise ValueError("reversal_recognition_invalid: pinned recognition-only inputs required")
-        primary = next(x for x in plan.market_data_requirements if x["alias"] == "primary_bars")
-        seconds = int(primary["timeframe_seconds"])
+        settings, snapshot, rows, start, end, _ = prepare_recognition(plan=plan, inputs=inputs)
         origin = utc(inputs["detector"]["computation_origin"])
-        start, end = utc(plan.evaluation_range["start"]), utc(plan.evaluation_range["end_exclusive"])
-        if utc(plan.materialization_range["start"]) != origin:
-            raise ValueError("reversal_recognition_invalid: planned origin differs from pinned detector")
-        _, rows = _prepare(inputs["candles"], step=timedelta(seconds=seconds), volume_required=False)
-        if not rows or utc(rows[0]["open_time"]) != origin or utc(rows[-1]["close_time"]) != end:
-            raise ValueError("reversal_recognition_invalid: incomplete origin-to-end candle path")
-        candles = tuple(RecognitionCandle.from_mapping(r) for r in rows)
-        context = RecognitionContext(str(primary["instrument_id"]), seconds, origin, candles[0].source_identity_key)
-        snapshot = recognize_reversals(candles, context=context, settings=settings, checkpoint=execution_checkpoint)
         events = [x.to_dict() for x in snapshot.candidates if start <= x.occurred_at < end]
         groups = {}
         for event in events:
