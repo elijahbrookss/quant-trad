@@ -116,3 +116,26 @@ def test_visual_consumer_uses_identical_event_identity_and_masks_after_completio
     pending=prepare_preview(data,[pending_case],settings=ReversalSettings('rising_leg_only','retain_all_provisional',100,100))['examples'][0]
     assert pending['candidate'] is None and utc(pending['as_of'])==t(5)
     assert all(utc(s['known_at'])<=t(5) for s in pending['stages'])
+
+
+def test_preview_chart_labels_validated_instrument_without_assuming_btc(monkeypatch,tmp_path):
+    from scripts.reporting.reversal_recognition_preview import prepare_preview,render_preview
+    from research_science.reversal_recognition import ReversalSettings
+    from matplotlib.figure import Figure
+    data={'start_inclusive':plain(t(0)),
+          'series_manifest':{'instrument_id':'ETH-USDT','timeframe_seconds':900},
+          'records':[{'source_identity_key':'source','fact':vars(b)} for b in candles()]}
+    cases=[{'label':'synthetic','start':plain(t(0)),'end':plain(t(7)),
+            'reference_known_at':plain(t(4))}]
+    preview=prepare_preview(data,cases,settings=ReversalSettings('rising_leg_only','retain_all_provisional',100,100))
+    captured={}
+    def save(figure,*args,**kwargs):
+        captured['title']=figure._suptitle.get_text()
+        captured['ylabels']=[axis.get_ylabel() for axis in figure.axes]
+    monkeypatch.setattr(Figure,'savefig',save)
+    render_preview(preview,tmp_path/'preview.png')
+    assert 'instrument ETH-USDT' in captured['title']
+    assert 'BTC' not in captured['title'] and captured['ylabels']==['Price']
+    invalid={**preview,'context':{**preview['context'],'instrument_id':''}}
+    with pytest.raises(ValueError,match='nonempty identity'):
+        render_preview(invalid,tmp_path/'invalid.png')

@@ -78,6 +78,7 @@ def prepare_preview(payload, cases, *, settings):
 
 
 def render_preview(preview, destination):
+    context = RecognitionContext(**preview["context"])
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -120,9 +121,9 @@ def render_preview(preview, destination):
         ax.xaxis.set_major_formatter(DateFormatter("%H:%M"))
         ax.set_xlim(date2num(utc(bars[0]["close_time"]))-width,
                     date2num(utc(case["as_of"]))+width)
-        ax.set_ylabel("BTC/USD"); ax.set_xlabel("Candle close, UTC"); ax.grid(alpha=.15)
+        ax.set_ylabel("Price"); ax.set_xlabel("Candle close, UTC"); ax.grid(alpha=.15)
         ax.legend(loc="lower left", fontsize=8)
-    fig.suptitle("Provisional reversal recognition — same domain state as the Check method\nFixed origin; retained overlapping chains; no Study population or forward outcomes", fontsize=14)
+    fig.suptitle(f"Provisional reversal recognition — instrument {context.instrument_id}\nFixed origin; retained overlapping chains; no Study population or forward outcomes", fontsize=14)
     fig.tight_layout(pad=2, h_pad=3, rect=(0, 0, 1, .96))
     fig.savefig(destination, dpi=150)
     plt.close(fig)
