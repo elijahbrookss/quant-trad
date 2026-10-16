@@ -54,6 +54,7 @@ state_file="$state_root/release.env"
 history_file="$state_root/release-history.ndjson"
 alert_preview_state_file="$state_root/alert-preview.env"
 alerts_enabled="$(first_value "$(env_value QT_ALERTS_ENABLED)" "false")"
+clock_health_enabled="$(first_value "$(env_value QT_CLOCK_HEALTH_ENABLED)" "false")"
 export QT_MARKET_DATA_ROOT="$data_root"
 export QT_MARKET_DATA_EXPECTED_UUID="$archive_uuid"
 
@@ -403,6 +404,21 @@ storage_overlay_for() {
   fi
 }
 
+clock_health_overlay_for() {
+  local source_root="$1"
+  validate_boolean_value QT_CLOCK_HEALTH_ENABLED "$clock_health_enabled"
+  if test "$clock_health_enabled" = true; then
+    test -f "$source_root/docker/docker-compose.clock-health.yml" \
+      || die "clock-health overlay is not supported by this checkout"
+    local deployed_revision
+    deployed_revision="$(state_value current_revision)"
+    test -n "$deployed_revision" && git -C "$repo_root" cat-file -e \
+      "$deployed_revision:docker/grafana/server-alerting/clock-disabled.yml" 2>/dev/null \
+      || die "install the qualified clock-disabled baseline before enabling clock health"
+    printf '%s' "$source_root/docker/docker-compose.clock-health.yml"
+  fi
+}
+
 compose() {
   local compose_exec=(docker compose)
   if test "${compose_probe_timeout:-false}" = true; then
@@ -411,8 +427,12 @@ compose() {
   fi
   local profile_args=()
   local compose_file_args=(--file "$compose_file")
-  local storage_overlay
+  local storage_overlay clock_overlay
   if test "${recovery_config_frozen:-false}" != true; then
+    clock_overlay="$(clock_health_overlay_for "$repo_root")" || return
+    if test -n "$clock_overlay"; then
+      compose_file_args+=(--file "$clock_overlay")
+    fi
     storage_overlay="$(storage_overlay_for "$repo_root")" || return
     if test -n "$storage_overlay"; then
       compose_file_args+=(--file "$storage_overlay")
@@ -442,7 +462,7 @@ compose_from_repo_root() {
   local source_compose_file="$source_root/docker/docker-compose.server.yml"
   local source_alerting_file="$source_root/docker/docker-compose.alert-email.yml"
   local cleanup_provisioning_root="$repo_root/docker/grafana/server-alerting/cleanup-provisioning"
-  local source_revision source_tree_hash storage_overlay
+  local source_revision source_tree_hash storage_overlay clock_overlay
   local compose_file_args=(--file "$source_compose_file")
   local profile_args=()
   local profile
@@ -461,6 +481,10 @@ compose_from_repo_root() {
   done
   if test "$alerts_enabled" = "true" && test -f "$source_alerting_file"; then
     compose_file_args+=(--file "$source_alerting_file")
+  fi
+  clock_overlay="$(clock_health_overlay_for "$source_root")" || return
+  if test -n "$clock_overlay"; then
+    compose_file_args+=(--file "$clock_overlay")
   fi
   storage_overlay="$(storage_overlay_for "$source_root")" || return
   if test -n "$storage_overlay"; then
@@ -719,12 +743,12 @@ apply_alerting_configuration() {
 
   compose config --quiet
   compose up --detach --no-deps --force-recreate --wait \
-    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" grafana
-  compose ps grafana
+    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" alloy grafana
+  compose ps alloy grafana
   if test "$alerts_enabled" = "true"; then
-    echo "Operator email alerting applied to Grafana (enabled)."
+    echo "Monitoring alert configuration applied to Alloy/Grafana (email enabled)."
   else
-    echo "Operator email alerting removed from Grafana (disabled)."
+    echo "Monitoring alert configuration applied to Alloy/Grafana (email disabled)."
   fi
 }
 
@@ -1223,6 +1247,7 @@ case "$action" in
     test -f "$env_file" || die "operator environment file not found: $env_file"
     validate_private_env_file
     validate_alerting_environment
+    clock_health_overlay_for "$repo_root" >/dev/null
     echo "Operator alert configuration is valid (enabled=$alerts_enabled)."
     ;;
   apply-alerts)

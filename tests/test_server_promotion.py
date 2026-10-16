@@ -543,3 +543,76 @@ if wait "$child"; then exit 91; fi
     assert 'CONFIGURATION_REFUSED' in result.stdout
     assert 'INCORRECT_REPLACEMENT' not in result.stdout and 'INCORRECT_SUCCESS' not in result.stdout
     assert marker.read_text()=='activation_started=false\n'
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+@pytest.mark.parametrize("enabled,frozen,expected", [("false", False, False), ("true", False, True), ("true", True, False)])
+def test_clock_overlay_is_explicit_and_never_appended_to_frozen_recovery(tmp_path, enabled, frozen, expected, candidate):
+    private = tmp_path / "private.env"
+    private.write_text(f"QT_CLOCK_HEALTH_ENABLED={enabled}\n")
+    overlay = tmp_path / "docker/docker-compose.clock-health.yml"
+    overlay.parent.mkdir()
+    overlay.write_text("services: {}\n")
+    (overlay.parent / "docker-compose.server.yml").write_text("services: {}\n")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    docker = binary / "docker"
+    docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    docker.chmod(0o700)
+    invocation = 'compose_from_repo_root "$repo_root" "" config' if candidate else "compose config"
+    result = shell(tmp_path, f"""
+repo_root="$FIXTURE_ROOT"
+recovery_config_frozen={str(frozen).lower()}
+recorded_storage_layout() {{ printf 'directory'; }}
+docker() {{ printf '%s\\n' "$@"; }}
+state_value() {{ printf '%040d' 0; }}
+git() {{ if test \"$3\" = cat-file; then return 0; fi; printf '%040d' 0; }}
+python3() {{ printf '%064d' 0; }}
+{invocation}
+""", env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private), "PATH": str(binary) + os.pathsep + os.environ["PATH"]})
+    assert result.returncode == 0, result.stderr
+    assert (str(overlay) in result.stdout.splitlines()) == (expected or (candidate and enabled == "true"))
+
+
+@pytest.mark.parametrize("enabled,reason", [("true", "not supported by this checkout"), ("maybe", "must be true or false")])
+def test_clock_overlay_refuses_unknown_flag_or_missing_candidate_support(tmp_path, enabled, reason):
+    private = tmp_path / "private.env"
+    private.write_text(f"QT_CLOCK_HEALTH_ENABLED={enabled}\n")
+    result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; docker() { echo INCORRECT_DOCKER; }; compose config',
+                   env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private)})
+    assert result.returncode != 0
+    assert reason in result.stderr
+    assert "INCORRECT_DOCKER" not in result.stdout
+
+
+def test_clock_enable_refuses_baseline_without_persistent_rule_cleanup(tmp_path):
+    private = tmp_path / "private.env"
+    private.write_text("QT_CLOCK_HEALTH_ENABLED=true\n")
+    overlay = tmp_path / "docker/docker-compose.clock-health.yml"
+    overlay.parent.mkdir()
+    overlay.write_text("services: {}\n")
+    result = shell(tmp_path, '''
+repo_root="$FIXTURE_ROOT"
+state_value() { printf '%040d' 0; }
+git() { return 1; }
+docker() { echo INCORRECT_DOCKER; }
+compose config
+''', env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private)})
+    assert result.returncode != 0
+    assert "clock-disabled baseline" in result.stderr
+    assert "INCORRECT_DOCKER" not in result.stdout
+
+
+def test_apply_alerts_recreates_only_existing_monitoring_services(tmp_path):
+    result = shell(tmp_path, '''
+require_no_alert_preview() { :; }
+require_runtime() { :; }
+compute_release_material() { QT_RELEASE_REVISION=fixture; }
+state_value() { printf fixture; }
+compose() { printf '%s\\n' "$@"; }
+apply_alerting_configuration
+''')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines().count("alloy") == 2
+    assert result.stdout.splitlines().count("grafana") == 2
+    assert "backend" not in result.stdout and "market-data-collector" not in result.stdout
