@@ -558,3 +558,22 @@ interpretation. Published references retain the Check owner's assurance
 classification. Small reasoning snapshots explicitly remain
 `reasoning_snapshot_not_calculated_evidence`, including manual/legacy findings;
 a copied result inside a note does not acquire canonical calculated authority.
+
+
+## Compact inspection and saved-record bundles
+
+The v2 browser uses bounded SQL metadata projections for Study inventory and
+aggregate coverage; it does not calculate scientific outcomes or infer
+independent evidence from record counts. Exact interpretations retain their
+existing immutable revision/hash and reference snapshots. Compact dependency
+checks defer sealed access decisions to current protocol custody.
+
+Read-only export pins the selected publication and reference identities,
+includes exact Check payloads and historical reasoning snapshots, and reuses
+native image custody. SHA-256 manifests support saved-record verification only.
+No separate raw-source or OHLCV files are acquired or included; exact saved
+record payloads remain preserved and their source completeness is not certified; raw-input recomputation and actual
+replay are not claimed. Existing encoded reports remain original JSON payload
+content until an explicit typed extraction mapping is reviewed. No schema,
+admission rule, historical definition/result, publication history or image
+identity is changed. See [Frontend V2](../frontend/OPERATOR_CONSOLE_V2.md).
