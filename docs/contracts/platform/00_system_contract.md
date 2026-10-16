@@ -51,7 +51,9 @@ research, report, strategy, and execution truth. Operator and browser surfaces
 own presentation, browser-local interaction state, and composition of typed read
 models only.
 
-The Frontend V2 primary rooms, Overview and Operations, are read-only. Their
+The Frontend V2 primary rooms, Overview and Studies, are read-only.
+Bot runs and Collectors are directly named secondary read views; existing
+Operations deep links remain compatibility routes. Their
 adapters use GET, SSE, or equivalent read contracts and must not start runs,
 mutate research or strategies, operate collectors, or write lifecycle state. A
 displayed command remains copy-only unless an independently owned operator
@@ -60,7 +62,11 @@ surface explicitly executes it.
 The separately owned V2 Settings > Storage surface may enroll prepared drives
 and review storage policy through the backend storage-management contract.
 Role selection is a request, not evidence of physical placement or completed
-migration. Overview and Operations remain read-only.
+migration. Overview, Studies and secondary inventories remain read-only.
+Storage and Appearance are reached through the bottom Settings area on desktop
+and narrow screens. Navigating away or cancelling a page read never cancels a
+scientific job. Read-only saved-record exports disclose excluded raw inputs and
+do not acquire source data, replay research or grant redistribution rights.
 
 Frontend code must render lifecycle, health, readiness, coverage, and diagnostic
 states emitted by their owning backend contracts. It must not infer those states

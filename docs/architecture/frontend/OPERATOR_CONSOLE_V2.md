@@ -41,189 +41,149 @@ code_paths:
 
 ## Purpose
 
-Operator Console v2 is Quant Trad's bounded human inspection surface. It is a
-dashboard and evidence browser, not an alternate workflow engine.
+Frontend V2 is the bounded human research browser. The agent remains the primary
+work interface. Browser state never owns research, runtime, collector or
+scientific history.
 
-The information architecture has two primary rooms:
+## Navigation and presentation
 
-- **Overview** answers whether anything needs the operator now.
-- **Operations** locates run, market, and research evidence.
+Primary destinations are **Overview** and **Studies**. **Bot runs** and
+**Collectors** are named secondary links, not nested under an Operations room.
+The bottom **Settings** menu contains Storage and Appearance on desktop and
+phone. Existing appearance, density and motion preferences remain owned by
+PortalSettingsContext; the charcoal surfaces use existing v2 semantic tokens
+and a sage default accent. Previously saved accent choices remain respected.
 
-BotLens, Market Lens, and research trails are contextual lenses opened
-from those rooms. The primary rooms stay sparse; technical identity, attempts,
-timestamps, diagnostics, and raw payloads belong in lenses or context menus.
+Routes are `/overview`, `/studies`, `/studies/:itemId`, `/bot-runs` and
+`/collectors`. The exact `/operations/runs/:runId`,
+`/operations/market/:collectorKind/:collectorId` and
+`/operations/research/:itemId` routes remain inspectable. Legacy Operations tab
+links redirect deliberately to their named destination; research and memory
+aliases reach Studies. No historical evidence identities are rewritten.
 
-## Boundary Contract
+Matte charcoal work panels, restrained navigation glass, readable focus rings
+and the existing responsive shell carry the approved palette. Scientific
+conclusions and limitations are separate from record lifecycle status.
 
-The console owns:
+## Read boundaries and Overview
 
-- browser-local filters, sort order, cursor-window state, tabs, and safe navigation;
-- view models over typed backend read contracts;
-- explicit loading, partial, unavailable, stale, invalid, and empty states;
-- bounded snapshots, cursors, and change-only streams over read-only projections;
-- run-scoped navigation to persisted supporting evidence;
-- readable operator summaries with copyable technical error details.
+`GET /api/research/overview` aggregates saved Study counts in PostgreSQL. It does
+not fetch all Study payloads or relationship trails into Python or the browser.
+Symbol, timeframe and exact stored-window distributions count Study IDs;
+windows are not continuous source-data coverage. Linked Check definition
+groups count each Study once per actual linked definition, may overlap, and
+retain unclassified Studies. Only the largest 12 groups are returned, with
+explicit remainder counts. No count implies independent scientific evidence.
 
-The console does not own:
+Overview has three inventory rollups, one compact bot/collector attention area,
+one existing ActivityHeatmap and recent compact Study rows. Activity explicitly
+selects completed Checks, completed backtests, created hypotheses or recorded
+Observations. Backtests retain ended_at UTC semantics; research activity retains
+the producing contract's created_at semantics. Activity is not market time.
+Operational details stay in Bot runs and Collectors. Missing/partial evidence
+never becomes zero or an all-clear. No full research inventory is loaded for
+attention or activity.
 
-- runtime, container, collector, or stream lifecycle;
-- scheduling, retries, leases, fencing, or process liveness;
-- report generation, research mutation, or strategy authoring;
-- market-data reconstruction, admission, normalization, or quality truth;
-- alternate run identity or report semantics.
+Bot runs reuses the existing active-run projection, stream-first behavior,
+Current/History separation, stable historical cursor, BotLens, replay and run
+report access. Live/paper/backtest executions remain distinct from research
+Checks. Collectors reuses the provider/collector inventory, material-change
+stream, health/freshness/ingestion evidence and separately owned audited
+lifecycle operations. Collector detail retains Runtime, Activity, Facts, Data
+quality, Diagnostics and Configuration. Recent Facts are not a historical
+market browser or proof that a Study's source inputs remain available.
 
-The v2 adapters used by the primary rooms issue GET requests only. A rerun
-option copies the canonical `qt bots start ... --dataset-id ...` command; it
-does not start a run from the browser.
+## Study browsing and inspection
 
-## Supported Source And Validation Topology
+`GET /api/research/browse` returns scalar metadata plus publication descriptors,
+not bodies, full payloads or base64 files. Search is title/symbol/ID, with exact
+kind, state, symbol, timeframe and publication filters. Pages contain 1..100
+rows (UI 25); continuation is stable `(created_at,id)` descending and scoped to
+the exact filters. Total means all matching saved records, not the loaded page.
+URL filters and browser back/forward retain navigation state. A direct cursor
+link can return to First page without assuming a local cursor history.
 
-The V2 read-only-surface scan covers the exact routed source roots:
+Studies defaults to Study records. **All research records** retains standalone
+Checks, Observations and hypotheses; unrelated records are not forced into a
+new Study entity. `summary` reads compact scalar fields, body and verified
+question/publication history. Selecting a revision pins its hash and reference
+identities. A generic interpretation uses emitted conclusion/scope/limitations;
+heterogeneous records without interpretation remain inspectable. No universal
+scientific chart renderer or hardcoded result template is introduced.
 
-- `portal/frontend/src/v2`;
-- `portal/frontend/src/features/overview`;
-- `portal/frontend/src/features/operations`;
-- `portal/frontend/src/features/collectors`;
-- `portal/frontend/src/features/bots/botlens`.
+Interpretation, Evidence, Files and History are separate views. Evidence loads
+a bounded 50-link one-hop compact `relationships` projection only on intent;
+it labels truncation and separates current links from frozen publication
+references. Related bot runs retain exact BotLens links and origin-aware return.
+Two linked Checks can use the existing comparison contract on explicit intent,
+with bounded/access-checked records and a 256 KiB response cap. Scope, Dataset
+and population remain inspectable; numeric deltas do not establish independent
+evidence. Full raw payload is an explicit bounded load. Files loads existing
+native image metadata and lazy original image bytes, filtering Study images by
+the selected publication hash. Existing image custody revalidates bindings,
+checksums and access. Legacy encoded reports are preserved in downloadable
+original record JSON; extracted report-file retrieval needs an explicitly
+reviewed typed field/MIME/checksum mapping, not heuristic payload traversal.
 
-A declared root that does not exist is a contract failure, not an empty surface.
-The primary Overview and Operations rooms remain GET/read-only. A routed
-collector lens requests lifecycle actions only through the canonical backend
-collector-operation endpoint owned by `CollectorOperationsService`; the
-frontend does not acquire lifecycle authority by presenting that action.
+## Request lifecycle and limits
 
-Frontend validation keeps two explicit test families. `npm run test:node` runs
-the Node-native model, adapter, and source-contract suites. `npm run test:jsx`
-runs the two tracked React component suites through the pinned Vitest/jsdom
-profile. `npm test` runs both families, and `make frontend-check` adds the Vite
-production build. These checks cover source contracts, tracked components, and compilation. They
-do not exercise a real backend, browser/E2E behavior, deployment, or a live
-system.
+Research reads coalesce identical in-flight requests. Each consumer owns its
+AbortSignal; only the last consumer's departure aborts the physical fetch.
+Navigation invalidates rendering ownership immediately, and obsolete success
+or error cannot overwrite another record. Abort is a cancelled section state,
+with an explicit reload action; it is not a technical failure. A bounded
+15-second, 20-entry/2 MiB memory cache holds compact metadata only (individual
+entries at most 256 KiB). Raw records, export preflights and ZIP bytes are not
+cached. No private evidence is persisted in localStorage.
 
-## Navigation And Visual Language
+Read handlers are synchronous threadpool work with the existing ExecutionControl
+20-second total deadline and 5-second per-statement PostgreSQL timeout. New
+compact sessions use repeatable-read/read-only connection options before their
+first statement. Summary and relationship release project nested dependency
+IDs and apply existing protocol custody checks without transferring full
+payloads; access verification fails closed above its 512-identity bound.
 
-The shell uses a persistent left rail with only **Overview** and **Operations**.
-The rail is keyboard-operable, collapsible, and remembers the browser-local
-preference. Collapsing navigation changes presentation only; it never changes
-route or evidence state. On narrow screens it becomes an icon rail instead of
-covering the workspace.
+The real local HTTP fixture test proves that closing a client socket does not
+stop the synchronous read worker. Browser AbortController is not a claim of
+server cancellation. Deadlines independently bound remaining work; actual
+PostgreSQL disconnect-to-release timing is not measured here. No navigation,
+page cancellation, cache eviction or export cancellation calls the scientific
+job cancel route. Research jobs retain their own admission/lifecycle authority.
 
-The visual hierarchy is intentionally restrained: matte work surfaces carry
-tables and charts; glass and backdrop blur are reserved for the navigation
-shell, routed lenses, menus, and modal overlays. Warm ivory and brass establish
-the luxury tone, while cyan is reserved for live evidence. Motion is short,
-functional, and disabled by the existing reduced-motion preference. Loading
-uses component-shaped skeletons so stale values are not painted as current.
+## Saved-record evidence export
 
-## Evidence Flow
+Export review is explicit. Preflight and content use a selected revision/hash,
+recheck access and referenced identities, preserve historical reasoning
+snapshots, and reuse immutable Check definitions/requests/plans/bindings/results.
+Original root-current JSON is labeled separately from the exact selected
+historical publication. Native image bytes come only from custody, filtered to
+included interpretation hashes or exact Check evidence. Later interpretation
+images cannot enter a historical snapshot bundle.
 
-```text
-durable runtime / market / research truth
-  -> typed backend read projections
-  -> GET-only frontend adapters
-  -> source-specific hooks with explicit partial failure
-  -> pure evidence view models
-  -> Overview / Operations
-  -> exact run, collector, or research lens
-```
+The ZIP contains records, selected publication, native visuals and manifests,
+README reproduction limits, and SHA-256 checksums. It is always labeled
+`saved_record_verification_only`; no separate raw-source files are included.
+Exact record payloads are preserved, including embedded content whose source
+completeness and redistribution rights are not established by export. Record checksums do not establish detector recomputation, statistical
+validity, causality or profitability. Embedded reports remain unmodified inside
+their record JSON. Export never acquires, replays, executes attachments or
+grants source redistribution rights.
 
-Frontend state may improve first paint, but it is never authoritative. Exact
-run routes refresh the navigation hint from `run_id` and reject mismatched
-scope.
+Bounds: 8 MiB per record, 32 MiB complete uncompressed bundle, 160 files including
+metadata, at most 100 pinned references and one concurrent export preparation
+per process. Oversize, inaccessible, invalid or changed evidence fails explicitly;
+no partial archive silently passes. The existing database model and image
+durability are unchanged; there is no new persistence layer or migration.
 
-## Overview Contract
+## Validation scope
 
-Overview is intentionally dashboard-shaped:
-
-- four rollups: attention, active runs, collector delivery, and market pairs;
-- at most three current attention items;
-- at most four active evidence rows;
-- one bounded activity heatmap;
-- one top completed result.
-
-There are no numbered report sections and no complete operational tables on
-Overview.
-
-Attention uses a fixed 72-hour lookback, deduplicates by canonical evidence
-identity, and sorts by severity followed by recency. Active work contains real
-run instances, in-flight attempts, and leased stream sessions. Enabled
-definitions are never counted as running.
-
-Collector rollups are healthy only when the durable worker heartbeat is current, an active attempt is not stalled, the schedule is current, and recent successful delivery evidence is fresh. Liveness, schedule, and delivery remain separately inspectable. Market posture keeps collection, coverage, book
-validity, archive, normalization, admission, and quality evidence independent.
-
-## Operations Contract
-
-Operations has three task domains rather than exposing backend subsystem names:
-
-| Domain | Primary row grain | Deep detail |
-| --- | --- | --- |
-| Runs / Current | one fresh leased run instance from the active-run stream | BotLens modal and exact-run actions |
-| Runs / History | persisted terminal or prior run instance | replay, report/research evidence, copy-only rerun command |
-| Market | grouped scheduled facts and configured structure pairs | Market Lens facts, attempts, latency, and quality |
-| Research | persisted research item | relationship trail and raw provider-free evidence |
-
-The Market domain keeps two explicit sections. **Scheduled facts** groups facts
-such as `derivatives.open_interest` and `derivatives.funding_rate` by provider
-and provider product/instrument. **Structure streams** preserves independent
-coverage, book-validity, archive, normalization, admission, and quality states
-for configured futures/spot relationships. The grouping reduces scan cost but
-does not merge their typed backend contracts.
-
-Runs opens on **Current**. Current run cards consume `active_run_list.v1` from
-`GET /api/bots/runs/active` and its `GET /api/bots/runs/stream` SSE companion.
-The stream's initial snapshot is primary; the browser performs one bounded HTTP
-fallback only when the first stream snapshot does not arrive. Runtime deltas
-update an exact `run_id` locally, while membership changes trigger one bounded
-resynchronization read. There is no interval polling.
-
-The active projection begins with fresh run leases, joins run/lifecycle truth in
-batches, and includes only evidenced starting, running, paused, or degraded run
-instances. Two active runs of one bot definition remain two cards because
-definition identity and run identity are not interchangeable. Overview uses the
-same active-run projection and never opens the global historical inventory
-endpoint. A configured or terminal bot definition is not an active run.
-
-**History** is an explicit secondary view. Only after the operator selects it
-does the console read `bot_run_inventory.v1`: one 20-run
-reverse-chronological server window with a stable
-`(before_sort_at, before_run_id)` continuation cursor. **Load older runs**
-appends and deduplicates the next bounded window; numbered pages are not the
-historical retrieval contract, and the console never attempts to preload every
-completed run or replay. Market inventory uses
-`market_structure_operator_snapshot.v1` plus a change-only SSE stream, while
-the scheduled-fact projection has its own durable snapshot and stream. Research
-remains bounded to 200 records. Only the selected task domain performs its
-secondary inventory reads.
-
-The history repository selects only list-card scalar fields, summary, hashes,
-execution semantics, and compact dataset identity. It does not read or return a
-run's full `config_snapshot`; opening the exact run is the boundary that may
-load that configuration. This keeps thousands of historical runs cheap to scan
-without weakening exact-run provenance.
-
-Scheduled-fact and market-structure hooks are also stream-first. When an SSE
-surface exists they wait up to four seconds for its initial snapshot before one
-HTTP fallback. Manual refresh remains an explicit resynchronization action;
-mounting a page does not launch an HTTP snapshot and SSE snapshot in parallel.
-
-The market snapshot is a partial-success contract. `component_errors` is keyed
-by `definitions`, `sessions`, `normalization_specs`, or `status_by_definition`;
-each value contains a stable code, readable message, and exact technical detail.
-A failed component returns its typed empty fallback while healthy components
-remain visible. The backend emits one warning per distinct component failure
-and one recovery event rather than logging every five-second stream poll. The
-frontend marks normalization unavailable when its component read failed and
-renders each error inside Structure Streams; it never reinterprets a failed read
-as evidence that no specifications exist.
-
-Market Lens is a routed, blurred modal over Operations. It exposes four
-component-owned views: Status, Facts, Attempts, and Quality. Facts are read from
-a bounded canonical typed-fact window (maximum seven days and 1,000 samples);
-the lens never calls the provider or reconstructs missing history. Attempt bars
-show wall time and provider request time independently when provider timing
-evidence is present. Missing provider timing is labeled unavailable rather than
-interpreted as zero.
+`make frontend-check` runs Node model/adapter/source tests, React/jsdom component
+tests and a Vite build. Focused backend tests exercise compact projections,
+cursor scoping, sealed dependencies, frozen reference export, bounds/checksums
+and a real local HTTP disconnect with synthetic work. Disposable DB tests cover
+large paginated inventories/aggregates when the isolated Docker prerequisite is
+available. Browser QA uses installed Edge, isolated profile and synthetic API
+fixtures; it must not be described as a production performance measurement.
 
 ## BotLens Modal And Replay
 
