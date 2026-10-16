@@ -405,7 +405,9 @@ The probe exports no source addresses or raw command output. It appends to
 owned by the sampling user and not writable by others. Symlink/non-regular or
 multiply linked output files are refused. Alloy reads only that inert directory
 through a read-only bind; it has no chrony control socket or private log mount.
-Alloy retains the sample's UTC timestamp so replayed files do not appear fresh.
+Alloy validates and retains the sample's UTC timestamp. Missing, malformed,
+non-string or unparseable timestamps are discarded before timestamp assignment;
+replayed valid files retain their original age and cannot appear fresh.
 
 The rule uses the worst health sample in a two-minute window and a two-minute
 hold. Recovery requires the bad samples to leave that window. Stopped sampling
@@ -445,23 +447,68 @@ to chrony itself are required. The unit's Python/script paths and existing
 exits 1 after exporting its record; the timer continues sampling, and systemd
 also makes this failure visible.
 
-The installation owner then adds `QT_CLOCK_HEALTH_ENABLED=true` to the existing
-private deployment environment. The reviewed server runner selects the fixed
-`docker/docker-compose.clock-health.yml` overlay for normal and candidate
-composition; disabled/absent is the default. The directory bind never creates
-missing host paths. Frozen recovery uses its pinned rendered configuration
-without appending this overlay. An older source that cannot support an enabled
-overlay fails closed; disabling the optional flag is an explicit operator action,
-not an automatic rollback guess.
+The narrowest supported activation uses the existing `apply-alerts` operation,
+which now recreates only Alloy and Grafana. It does not restart the backend,
+collectors, initialize job, database or frontends. No new execution command or
+notification route is introduced. Keep all existing private credentials,
+recipients, SMTP/TLS settings and source/network/chrony settings unchanged.
 
-Activate through the established reviewed release procedure, coordinated with
-research ownership and its execution slot. This change requires Alloy/Grafana
-recreation to load the bind/rule, but does not inherently require restarting
-application services or collectors. The full-release runner may restart those
-services; schedule any such operation explicitly. Do not introduce a separate
-manual Compose execution route. Before declaring active, verify timer cadence,
-fresh JSONL timestamps, Alloy ingestion, the provisioned rule's healthy state,
-and notification routing. The disposable proof sends no real email; it does not
-certify production delivery. To stop sampling, a host owner can disable the timer;
-keep the alert enabled until the resulting missing evidence is acknowledged or
-explicitly disable the optional overlay in a reviewed monitoring change.
+There are two phases, and neither was executed by this implementation:
+
+1. Install the exact qualified combined release with `QT_CLOCK_HEALTH_ENABLED`
+   absent or `false`, using the already established reviewed full-release runner.
+   This is the normal release cutover and may restart application/collector
+   services, so coordinate it separately with research ownership. The default
+   Grafana mount explicitly deletes only `qt-host-clock-unhealthy`, installing
+   a rollback baseline that can remove a previously persisted clock rule.
+2. After the release is recorded, the installation owner prepares the export
+   directory/timer as above and adds `QT_CLOCK_HEALTH_ENABLED=true` to the existing
+   private deployment environment. This is a non-secret opt-in, not a credential
+   rotation. From that same clean, recorded source, run the existing commands:
+
+```sh
+# PHASE 1: through the existing approved full-release runner and its recorded
+# mount/UID/group/environment profile, with the clock flag disabled:
+bash /srv/quanttrad/app/scripts/automation/server_deploy.sh deploy <QUALIFIED_FULL_COMBINED_COMMIT>
+
+# PHASE 2: same established operator execution environment, after timer setup
+# and explicit QT_CLOCK_HEALTH_ENABLED=true in the existing private env file:
+bash /srv/quanttrad/app/scripts/automation/server_deploy.sh validate-alerts
+bash /srv/quanttrad/app/scripts/automation/server_deploy.sh apply-alerts
+bash /srv/quanttrad/app/scripts/automation/server_deploy.sh status
+```
+
+`<QUALIFIED_FULL_COMBINED_COMMIT>` must be replaced by the final integrated,
+qualified revision; a work-branch handoff receipt is not develop deployment
+admission. These are the existing runner's inner commands, not an instruction
+to bypass its verified operator container/profile. Preparing or starting that
+operator remains a separately authorized activation step. Do not run an ad-hoc
+Compose command or copy candidate files into deployed `7a34ead6`.
+
+Enablement refuses an absent baseline or a recorded baseline that lacks the
+clock-rule cleanup file. This makes pinned rollback to a clock-disabled baseline
+safe: Grafana persists rule definitions in its database, so merely removing a
+rule mount would leave an unwanted missing-data alert. Default/disabled source
+provisions an exact `deleteRules` entry; the enabled overlay replaces that same
+mount target with the live rule. Existing contact points, policies and unrelated
+rules are untouched. Frozen recovery uses its pinned rendered configuration
+without appending an overlay. An enabled candidate missing overlay support
+fails closed; disabling the flag is an explicit operator decision.
+
+The directory bind never creates missing host paths. `apply-alerts` requires
+the clean source to match the recorded deployed revision. Before declaring the
+alert active, verify timer cadence, fresh JSONL timestamps, Alloy ingestion, the
+provisioned rule's healthy state, and existing notification routing. The
+extended disposable proof exercises actual file -> Alloy -> Loki ingestion,
+malformed/old timestamps, file rotation, and enable/disable/re-enable against
+retained Grafana SQLite. It sends no real email and does not certify production
+delivery. The existing disposable email proof separately exercises native
+notification routing with synthetic recipients; production recipients do not
+change.
+
+For a planned disable, explicitly set the flag to `false` and run the same
+`validate-alerts` and `apply-alerts` commands from the recorded release. This
+removes the persisted clock rule and the Alloy directory mount while preserving
+all other rules/routing. A host owner may then run
+`sudo systemctl disable --now qt-clock-health.timer`. Stopping the timer alone
+while the alert remains enabled deliberately becomes missing evidence.

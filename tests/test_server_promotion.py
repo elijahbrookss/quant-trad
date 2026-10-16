@@ -565,7 +565,8 @@ repo_root="$FIXTURE_ROOT"
 recovery_config_frozen={str(frozen).lower()}
 recorded_storage_layout() {{ printf 'directory'; }}
 docker() {{ printf '%s\\n' "$@"; }}
-git() {{ printf '%040d' 0; }}
+state_value() {{ printf '%040d' 0; }}
+git() {{ if test \"$3\" = cat-file; then return 0; fi; printf '%040d' 0; }}
 python3() {{ printf '%064d' 0; }}
 {invocation}
 """, env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private), "PATH": str(binary) + os.pathsep + os.environ["PATH"]})
@@ -582,3 +583,36 @@ def test_clock_overlay_refuses_unknown_flag_or_missing_candidate_support(tmp_pat
     assert result.returncode != 0
     assert reason in result.stderr
     assert "INCORRECT_DOCKER" not in result.stdout
+
+
+def test_clock_enable_refuses_baseline_without_persistent_rule_cleanup(tmp_path):
+    private = tmp_path / "private.env"
+    private.write_text("QT_CLOCK_HEALTH_ENABLED=true\n")
+    overlay = tmp_path / "docker/docker-compose.clock-health.yml"
+    overlay.parent.mkdir()
+    overlay.write_text("services: {}\n")
+    result = shell(tmp_path, '''
+repo_root="$FIXTURE_ROOT"
+state_value() { printf '%040d' 0; }
+git() { return 1; }
+docker() { echo INCORRECT_DOCKER; }
+compose config
+''', env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private)})
+    assert result.returncode != 0
+    assert "clock-disabled baseline" in result.stderr
+    assert "INCORRECT_DOCKER" not in result.stdout
+
+
+def test_apply_alerts_recreates_only_existing_monitoring_services(tmp_path):
+    result = shell(tmp_path, '''
+require_no_alert_preview() { :; }
+require_runtime() { :; }
+compute_release_material() { QT_RELEASE_REVISION=fixture; }
+state_value() { printf fixture; }
+compose() { printf '%s\\n' "$@"; }
+apply_alerting_configuration
+''')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines().count("alloy") == 2
+    assert result.stdout.splitlines().count("grafana") == 2
+    assert "backend" not in result.stdout and "market-data-collector" not in result.stdout

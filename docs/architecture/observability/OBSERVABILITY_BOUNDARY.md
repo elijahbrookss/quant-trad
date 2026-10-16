@@ -270,7 +270,12 @@ reads that owned export directory via a read-only bind, retaining sample UTC tim
 no clock control socket, host journal or private chrony logs are exposed. The
 optional server overlay provisions one critical Grafana rule, with unhealthy,
 missing-data and query-error states routed through existing operator alerting.
-Default deployment composition remains unchanged until explicitly enabled.
+Default deployment mounts an exact deletion entry for the optional persisted
+clock rule. Enablement replaces that same target with the live rule and requires
+a recorded clock-disabled cleanup baseline so pinned recovery can remove it.
+The existing `apply-alerts` operation recreates only Alloy/Grafana for reviewed
+monitoring activation after that baseline release is installed; application and
+collector services remain untouched by this operation.
 
 Source availability, reference age and conditional chrony uncertainty are
 operational diagnostics. They do not calibrate historical time, rewrite accepted

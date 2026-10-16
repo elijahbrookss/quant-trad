@@ -285,6 +285,11 @@ jobs:
             --env-file "$QT_SINGLE_NODE_ENV_FILE" \
             --file docker/docker-compose.server.yml \
             config --quiet
+          docker compose \
+            --env-file "$QT_SINGLE_NODE_ENV_FILE" \
+            --file docker/docker-compose.server.yml \
+            --file docker/docker-compose.clock-health.yml \
+            config --quiet
 
       - name: Prove Grafana email notification path
         run: bash scripts/ci/test_grafana_email_alerting.sh

@@ -410,6 +410,11 @@ clock_health_overlay_for() {
   if test "$clock_health_enabled" = true; then
     test -f "$source_root/docker/docker-compose.clock-health.yml" \
       || die "clock-health overlay is not supported by this checkout"
+    local deployed_revision
+    deployed_revision="$(state_value current_revision)"
+    test -n "$deployed_revision" && git -C "$repo_root" cat-file -e \
+      "$deployed_revision:docker/grafana/server-alerting/clock-disabled.yml" 2>/dev/null \
+      || die "install the qualified clock-disabled baseline before enabling clock health"
     printf '%s' "$source_root/docker/docker-compose.clock-health.yml"
   fi
 }
@@ -738,12 +743,12 @@ apply_alerting_configuration() {
 
   compose config --quiet
   compose up --detach --no-deps --force-recreate --wait \
-    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" grafana
-  compose ps grafana
+    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" alloy grafana
+  compose ps alloy grafana
   if test "$alerts_enabled" = "true"; then
-    echo "Operator email alerting applied to Grafana (enabled)."
+    echo "Monitoring alert configuration applied to Alloy/Grafana (email enabled)."
   else
-    echo "Operator email alerting removed from Grafana (disabled)."
+    echo "Monitoring alert configuration applied to Alloy/Grafana (email disabled)."
   fi
 }
 
@@ -1242,6 +1247,7 @@ case "$action" in
     test -f "$env_file" || die "operator environment file not found: $env_file"
     validate_private_env_file
     validate_alerting_environment
+    clock_health_overlay_for "$repo_root" >/dev/null
     echo "Operator alert configuration is valid (enabled=$alerts_enabled)."
     ;;
   apply-alerts)

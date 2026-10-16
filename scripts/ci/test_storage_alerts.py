@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import base64
 import copy
+from datetime import datetime, timezone
 import json
 import math
 import os
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -173,6 +176,81 @@ def prove_clock(grafana: str, loki: str) -> None:
     print("clock_alert_proved healthy unhealthy recovery malformed missing=Alerting", flush=True)
 
 
+def prove_clock_ingress(grafana: str, loki: str, export_root: Path) -> None:
+    """Actual checked-in clock stages, synthetic files; never query host chrony."""
+    now = int(time.time())
+    observed_at = datetime.fromtimestamp(now - 3600, timezone.utc).isoformat()
+    common = {"sample_kind": "clock_health", "resource_id": "host-clock", "healthy": 1,
+              "fixture": "clock-file-ingress"}
+    rows = [
+        {**common, "entry_id": "old", "observed_at": observed_at},
+        {**common, "entry_id": "missing"},
+        {**common, "entry_id": "malformed", "observed_at": "bad"},
+        {**common, "entry_id": "calendar-invalid", "observed_at": "2026-99-99T00:00:00Z"},
+        {**common, "entry_id": "numeric", "observed_at": now},
+    ]
+    path = export_root / "clock-health.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    rule = next(item for item in request(grafana + "/api/v1/provisioning/alert-rules", auth=True)
+                if item["uid"] == "qt-host-clock-unhealthy")
+
+    def entries() -> list:
+        query = urllib.parse.urlencode({"query": '{service="clock-health"} | json | fixture="clock-file-ingress"',
+                                       "start": (now - 7200) * 1_000_000_000,
+                                       "end": int(time.time() + 10) * 1_000_000_000, "limit": 100})
+        response = request(loki + "/loki/api/v1/query_range?" + query)
+        return [item for stream in response["data"]["result"] for item in stream["values"]]
+
+    def wait_entry(entry_id: str) -> list:
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            found = entries()
+            if any(json.loads(line)["entry_id"] == entry_id for _, line in found):
+                return found
+            time.sleep(1)
+        raise AssertionError(f"clock_ingress_entry_missing: {entry_id}")
+
+    found = wait_entry("old")
+    # Also wait through at least one file discovery/flush cycle before checking
+    # absence, so invalid rows after the first valid row cannot race the query.
+    time.sleep(5)
+    found = entries()
+    assert {json.loads(line)["entry_id"] for _, line in found} == {"old"}, found
+    assert all(int(timestamp) == (now - 3600) * 1_000_000_000 for timestamp, _ in found), found
+    assert values(evaluate(grafana, rule, time.time(), expression=False), "A") == {}
+
+    with path.open("a") as output:
+        output.write(json.dumps({**common, "entry_id": "fresh", "observed_at": datetime.now(timezone.utc).isoformat()}) + "\n")
+    wait_entry("fresh")
+    assert values(evaluate(grafana, rule, time.time()), "C") == {"host-clock": 0.0}
+    # Same rotation shape as the bounded host writer: rename current, create new.
+    path.replace(export_root / "clock-health.jsonl.1")
+    path.write_text(json.dumps({**common, "entry_id": "rotated", "healthy": 0,
+                               "observed_at": datetime.now(timezone.utc).isoformat()}) + "\n")
+    wait_entry("rotated")
+    assert values(evaluate(grafana, rule, time.time()), "C") == {"host-clock": 1.0}
+    print("clock_file_ingress_proved old=not-fresh malformed-missing-numeric=discarded rotation=read", flush=True)
+
+
+def prove_clock_lifecycle(compose: list[str], endpoint_for) -> None:
+    """Rule removal/recreation must work against retained Grafana SQLite."""
+    grafana = endpoint_for("grafana", 3000)
+    policies = request(grafana + "/api/v1/provisioning/policies", auth=True)
+    contacts = request(grafana + "/api/v1/provisioning/contact-points", auth=True)
+    for enabled in (False, True):
+        os.environ["QT_CLOCK_ALERT_TEST_RULE_FILE"] = str(ROOT / (
+            "docker/grafana/provisioning/alerting/clock-safety.yml" if enabled else
+            "docker/grafana/server-alerting/clock-disabled.yml"))
+        subprocess.run([*compose, "up", "--detach", "--no-deps", "--force-recreate", "grafana"], check=True, timeout=120)
+        grafana = endpoint_for("grafana", 3000)
+        wait_ready(grafana + "/api/health")
+        rules = {rule["uid"] for rule in request(grafana + "/api/v1/provisioning/alert-rules", auth=True)}
+        assert rules == set(RULES) | ({"qt-host-clock-unhealthy"} if enabled else set()), rules
+        assert request(grafana + "/api/v1/provisioning/policies", auth=True) == policies
+        assert request(grafana + "/api/v1/provisioning/contact-points", auth=True) == contacts
+    print("clock_rule_lifecycle_proved enabled-disabled-enabled persistent-db routing=unchanged", flush=True)
+
+
 def prove_capacity_dashboard(grafana: str, loki: str) -> None:
     """Exercise the shipped native runway queries with physical and missing evidence."""
     dashboard = json.loads(
@@ -248,6 +326,19 @@ def main() -> int:
         raise RuntimeError(f"storage_alert_test_requires_local_docker: endpoint={endpoint}")
     project = "qt-storage-alert-test-" + uuid.uuid4().hex[:12]
     compose = ["docker", "compose", "--project-name", project, "--file", str(ROOT / "docker/test/storage-alerting.compose.yml")]
+    fixture = tempfile.TemporaryDirectory(prefix="qt-clock-alert-test-")
+    fixture_root = Path(fixture.name)
+    export_root = fixture_root / "export"
+    export_root.mkdir(mode=0o755)
+    source = (ROOT / "docker/alloy/config.alloy").read_text()
+    head, marker, pipeline = source.partition("// Optional clock-health overlay")
+    assert marker and pipeline, "production clock pipeline boundary missing"
+    write_start = head.index('loki.write "local"')
+    config = fixture_root / "clock-config.alloy"
+    config.write_text(head[write_start:] + "\n// Optional clock-health overlay" + pipeline)
+    os.environ["QT_CLOCK_ALERT_TEST_CONFIG"] = str(config)
+    os.environ["QT_CLOCK_ALERT_TEST_EXPORT_ROOT"] = str(export_root)
+    os.environ["QT_CLOCK_ALERT_TEST_RULE_FILE"] = str(ROOT / "docker/grafana/provisioning/alerting/clock-safety.yml")
     print(f"storage_alert_test_start project={project}", flush=True)
     try:
         subprocess.run([*compose, "up", "--detach", "--quiet-pull"], check=True, timeout=600)
@@ -267,11 +358,14 @@ def main() -> int:
         prove(grafana, loki)
         prove_clock(grafana, loki)
         prove_capacity_dashboard(grafana, loki)
+        prove_clock_ingress(grafana, loki, export_root)
+        prove_clock_lifecycle(compose, endpoint_for)
     except BaseException:
         subprocess.run([*compose, "logs", "--tail", "80"], check=False, timeout=30)
         raise
     finally:
         subprocess.run([*compose, "down", "--volumes", "--remove-orphans"], check=True, timeout=90)
+        fixture.cleanup()
     print("storage_alert_test_passed", flush=True)
     return 0
 

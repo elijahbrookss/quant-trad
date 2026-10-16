@@ -156,3 +156,17 @@ def test_export_rejects_shared_writable_output(tmp_path):
     with pytest.raises(ValueError, match="regular_files"):
         clock.append_sample(tmp_path, assess())
     assert output.read_text() == "unchanged"
+
+
+def test_disabled_clock_rule_cleanup_is_exact_and_reuses_same_mount_target():
+    cleanup = yaml.safe_load((ROOT / "docker/grafana/server-alerting/clock-disabled.yml").read_text())
+    assert cleanup == {"apiVersion": 1, "deleteRules": [{"orgId": 1, "uid": "qt-host-clock-unhealthy"}]}
+    base = yaml.safe_load((ROOT / "docker/docker-compose.server.yml").read_text())
+    enabled = yaml.safe_load((ROOT / "docker/docker-compose.clock-health.yml").read_text())
+    target = "/etc/grafana/provisioning/alerting/clock-safety.yml"
+    def mount(config):
+        return next(item for item in config["services"]["grafana"]["volumes"]
+                    if isinstance(item, dict) and item["target"] == target)
+    assert mount(base)["source"].endswith("clock-disabled.yml")
+    assert mount(enabled)["source"].endswith("clock-safety.yml")
+    assert mount(base)["read_only"] is True and mount(enabled)["read_only"] is True

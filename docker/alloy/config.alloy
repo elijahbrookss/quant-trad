@@ -82,6 +82,17 @@ loki.source.file "clock_health" {
 loki.process "clock_health" {
   stage.json {
     expressions = {observed_at = "observed_at"}
+    drop_malformed = true
+  }
+  // Timestamp parsing failure otherwise retains scrape time. Drop invalid
+  // evidence first so a malformed/replayed healthy record cannot look fresh.
+  stage.template {
+    source = "clock_timestamp_valid"
+    template = `{{ if kindIs "string" .observed_at }}{{ $parsed := toDate "2006-01-02T15:04:05.999999999Z07:00" .observed_at }}{{ if gt $parsed.Unix 0 }}true{{ else }}false{{ end }}{{ else }}false{{ end }}`
+  }
+  stage.drop {
+    source = "clock_timestamp_valid"
+    value = "false"
   }
   // File replay must retain sample time rather than look like fresh health.
   stage.timestamp {
