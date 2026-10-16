@@ -1896,3 +1896,25 @@ bytes, fills/hits/bypasses/evictions and `archive_cache_fill`, `archive_verify`,
 control. These stages are nested: do not sum them as independent wall time.
 Application read bytes are not physical disk I/O; OS cache and device counters
 must be measured separately. Cache-hit reads still verify content and semantics.
+
+### Bounded checkpoint-source hydration
+
+Checkpoint admission retains its complete committed checkpoint set and exact
+causal source identities. Source placement metadata groups additional identities
+by their existing cold page. Each group admits the retained selected-row charge
+plus one full-page decode against the unchanged page logical-byte limit; full
+unselected page contents are released by the common reader before the next group.
+The selected rows use the existing conservative sixfold document-size allowance.
+This is a serialized working-set admission bound, not a measured RSS guarantee.
+
+Cold source objects also join the same cumulative verification object/count/byte
+budget as raw and checkpoint objects. Every group rechecks placement and runs the
+existing hash, manifest, envelope and canonical-record validation. Missing or
+ambiguous coverage, oversized individual pages, retained-row overflow, changed
+bytes, cancellation and cumulative object-budget exhaustion still refuse
+admission. The checkpoint scope/state and source revision/known-at checks are
+unchanged. Other source-closure callers retain their aggregate preflight.
+
+This permits a checkpoint closure spanning several individually admissible cold
+pages without raising global limits, splitting historical pages, replacing old
+receipts, dropping dependencies or changing retention/scientific behavior.

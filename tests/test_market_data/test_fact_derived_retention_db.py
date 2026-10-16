@@ -238,3 +238,60 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
         for identity in fixture.manifests:
             status = fixture.structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
             assert status["canonical_dependency_count"] > 0 and status["pinned"] is True
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_checkpoint_source_groups_decode_real_cold_pages_with_unchanged_working_limit(storage, tmp_path, monkeypatch, corrupt):
+    import json
+    from market_data.fact_archive import FactArchiveLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_dependencies
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    # One small selected row and unrelated large retained evidence per page.
+    # Their source identities are inputs to hydration, never reselected here.
+    for index in range(3):
+        for kind in ("selected", "ballast"):
+            storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
+                facts=[replace(storage.fact, observation_key=f"checkpoint-{index}-{kind}",
+                    provenance={**storage.fact.provenance,
+                        "fixture_padding": "x" * 40_000 if kind == "ballast" else ""})])
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database,
+        object_store=store, temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=2, row_group_size=2))
+    _archive_day(archive, day)
+    reclaimer = fact_reclamation.PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
+    _placement(monkeypatch, storage.today)
+    storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
+        facts=[replace(storage.fact, observation_key="checkpoint-hot")])
+    tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: store)
+    with storage.database.session() as session:
+        ids = session.execute(text("SELECT id FROM market.fact_versions WHERE observation_key LIKE 'checkpoint-%-selected' "
+                                   "OR observation_key='checkpoint-hot' ORDER BY id")).scalars().all()
+        assert len(ids) == 4
+        previous = fact_dependencies.read_canonical_dependency_rows(session, ids, reader=tiered,
+            max_logical_bytes=64 * 1024**2)
+        manifests = session.execute(text("SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day "
+                                          "ORDER BY page_ordinal"), {"day": day}).mappings().all()
+        assert len(manifests) == 3
+        logical = [int(row["descriptor"]["logical_byte_count"]) for row in manifests]
+        retained = 6 * sum(len(json.dumps(row, default=str).encode("utf-8")) for row in previous.values())
+        limit = max(logical) + retained
+        assert max(logical) < limit < sum(logical)
+        with pytest.raises(fact_dependencies.CanonicalSourceByteBudgetExceeded):
+            fact_dependencies.read_canonical_dependency_rows(session, ids, reader=tiered, max_logical_bytes=limit)
+        objects = ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits())
+        tiered.limits = replace(tiered.limits, max_logical_bytes=limit)
+        if corrupt:
+            path = store.local_path(manifests[0]["object_key"])
+            path.write_bytes(path.read_bytes()[:-1] + b"!")
+            with pytest.raises(RuntimeError, match="checksum_mismatch"):
+                fact_dependencies.read_checkpoint_dependency_rows(session, ids, reader=tiered,
+                    byte_verifier=objects, max_logical_bytes=limit, max_objects=objects.limits.max_objects)
+        else:
+            assert fact_dependencies.read_checkpoint_dependency_rows(session, ids, reader=tiered,
+                byte_verifier=objects, max_logical_bytes=limit, max_objects=objects.limits.max_objects) == previous
+            assert objects.byte_count == sum(row["byte_count"] for row in manifests)
+            assert len(objects.objects) == 3
