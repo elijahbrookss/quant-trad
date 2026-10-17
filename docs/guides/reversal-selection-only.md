@@ -59,13 +59,17 @@ For describing the matched population, each retained completion clock receives
 equal weight, split across its matched chains. Keep unmatched chains visible;
 this matched distribution is not the entire formation population. Report raw
 chain counts, moment counts, date/block/duration coverage and full versus
-matched context distributions with observed-weight denominators. Weighted
+feature-eligible and matched context distributions with observed/missing-weight
+denominators. Each eligible-population clock has equal weight, split over its
+eligible chains. Duration remains observed for invalid-feature chains. Weighted
 quantiles use first CDF crossing, without interpolation.
 
 Direct-support components include interval intersections and matched-pair
 links. Recognition ancestry is separately conservative: when complete state
 ancestry is not represented, all records sharing the computation origin form
-one ancestry-aware component. Report that limitation. No component count,
+one ancestry-aware component. Report its case/control sizes, completion-moment
+count and span from recognition origin, alongside its direct-component links.
+Report that limitation. No component count,
 moment count or inverse concentration measure is independent sample size.
 
 There are no 200-pair, 90-percent, 80-percent-stratum, 20-day or SMD0.10

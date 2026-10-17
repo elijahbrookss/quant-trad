@@ -141,3 +141,35 @@ def test_real_shared_recognizer_events_retain_identity_in_selection_records():
     assert {r['event_id'] for r in result['cases']}==expected
     assert not result['outcomes_calculated']
     assert all(r['timing']['schema_version']=='reversal_stage_availability.v2' for r in result['cases'])
+
+
+def test_full_eligible_and_matched_populations_keep_observed_duration_and_missing_mass():
+    bars,event=fixture()
+    bars=tuple(replace(b,open=100.,high=101.,low=99.,close=100.) if 403<=i<500 else b
+        for i,b in enumerate(bars))
+    result=run(bars,[event(i=500,key='zero_sigma'),event(i=700,key='valid')])
+    assert result['selection_summary']['all']['chains']==2
+    assert result['selection_summary']['feature_eligible']['chains']==1
+    contexts=result['selection_summary']['context_distributions']
+    assert contexts['sigma']['all_moments']['observed_weight']==.5
+    assert contexts['sigma']['all_moments']['missing_weight']==.5
+    assert contexts['sigma']['feature_eligible_moments']['observed_weight']==1.
+    assert contexts['duration_hours']['all_moments']['observed_weight']==1.
+    assert contexts['duration_hours']['all_moments']['mean']==1.5
+    assert not result['outcomes_calculated']
+
+
+def test_ancestry_component_reports_its_full_population_and_actual_origin_span():
+    bars,event=fixture()
+    result=run(bars,[event(key='a'),event(key='b')])
+    graph=result['dependence']['all_cases_and_selected_controls']
+    assert graph['ancestry_aware_component_count']==1
+    component,=graph['ancestry_aware_components']
+    assert component['case_count']==2
+    assert component['control_count']==len(result['pairs'])
+    assert component['case_completion_moment_count']==1
+    from research_science.recognition import plain
+    assert component['earliest_support']==plain(bars[0].open_time)
+    assert component['latest_support']==max(g['latest_support'] for g in graph['direct_support_and_pair_components'])
+    assert set(component['direct_component_ids'])=={g['component_id'] for g in graph['direct_support_and_pair_components']}
+    assert graph['independent_sample_size'] is None

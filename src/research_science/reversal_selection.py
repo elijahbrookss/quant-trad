@@ -68,11 +68,18 @@ def moment_weights(records):
 
 
 def _distribution(records, weights, field):
-    pairs = [(r["features"][field], weights[r["event_id"]]) for r in records
-             if r.get("features") and math.isfinite(r["features"][field])]
+    pairs = []
+    for record in records:
+        value = (record.get("features") or {}).get(field)
+        # Duration is observed even when volatility/risk cannot enter matching.
+        if field == "duration_hours" and "formation_candles" in record:
+            value = record["formation_candles"]/4
+        if value is not None and math.isfinite(value):
+            pairs.append((value, weights[record["event_id"]]))
     mass = math.fsum(w for _, w in pairs)
+    missing = max(0., math.fsum(weights.values())-mass)
     if not mass:
-        return {"observed_weight": 0., "mean": None, "quantiles": {}}
+        return {"observed_weight": 0., "missing_weight": missing, "mean": None, "quantiles": {}}
     pairs.sort()
     quantiles = {}
     for q in (0., .25, .5, .75, .9, .95, 1.):
@@ -84,11 +91,11 @@ def _distribution(records, weights, field):
                 value = x
                 break
         quantiles[str(q)] = value
-    return {"observed_weight": mass, "mean": math.fsum(x*w for x, w in pairs)/mass,
+    return {"observed_weight": mass, "missing_weight": missing, "mean": math.fsum(x*w for x, w in pairs)/mass,
             "quantiles": quantiles, "quantile_rule": "first weighted CDF crossing;no interpolation"}
 
 
-def _components(cases, pairs):
+def _components(cases, pairs, *, recognition_origin):
     nodes = [(r["event_id"], r["support_start"], r["support_end"], "case", r["decision_at"]) for r in cases]
     nodes += [(p["control"]["control_id"], p["control"]["support_start"], p["control"]["support_end"], "control", p["control"]["decision_at"]) for p in pairs]
     parent = {n[0]: n[0] for n in nodes}
@@ -122,8 +129,15 @@ def _components(cases, pairs):
             "case_completion_moment_count": len({n[4] for n in members if n[3] == "case"}),
             "case_completion_clocks": sorted({n[4] for n in members if n[3] == "case"}),
             "earliest_support": min(n[1] for n in members), "latest_support": max(n[2] for n in members)})
+    ancestry = [] if not nodes else [{
+        "component_id": stable_hash({"origin": recognition_origin, "members": sorted(parent)}),
+        "direct_component_ids": sorted(g["component_id"] for g in direct),
+        "case_count": len(cases), "control_count": len(pairs),
+        "case_completion_moment_count": len({r["decision_at"] for r in cases}),
+        "earliest_support": recognition_origin, "latest_support": max(n[2] for n in nodes)}]
     return {"direct_support_and_pair_components": sorted(direct, key=lambda g: g["earliest_support"]),
-        "ancestry_aware_component_count": int(bool(nodes)),
+        "ancestry_aware_components": ancestry,
+        "ancestry_aware_component_count": len(ancestry),
         "ancestry_method": "conservative shared computation-origin ancestry;not an independence proof",
         "independent_sample_size": None}
 
@@ -257,7 +271,8 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
             "support_start": plain(support_start), "support_end": plain(support_end), "features": g}
         pairs.append({"event_id": event.event_id, "decision_at": record["decision_at"], "distance_squared": key[0], "control": control})
     matched = [r for r in cases if r["match_status"] == "matched"]
-    all_weights, matched_weights = moment_weights(cases), moment_weights(matched)
+    eligible = [r for r in cases if r["features"]]
+    all_weights, eligible_weights, matched_weights = moment_weights(cases), moment_weights(eligible), moment_weights(matched)
     groups, matched_groups = Counter(r["decision_at"] for r in cases), Counter(r["decision_at"] for r in matched)
     for record in cases:
         record["full_population_moment_weight"] = all_weights[record["event_id"]]
@@ -288,7 +303,7 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
     features = ("sigma", "r", "z_pre12", "q", "z_pre96", "body", "range", "duration_hours")
     controls = [{"event_id": p["event_id"], "features": p["control"]["features"]} for p in pairs]
     result = {"rules": RULES, "outcomes_calculated": False, "cases": cases, "pairs": pairs,
-        "selection_summary": {"all": counts(cases), "feature_eligible": counts([r for r in cases if r["features"]]),
+        "selection_summary": {"all": counts(cases), "feature_eligible": counts(eligible),
             "matched": counts(matched), "fully_matched_completion_clocks": sum(matched_groups[t] == k for t, k in groups.items()),
             "partially_matched_completion_clocks": sum(0 < matched_groups[t] < k for t, k in groups.items()),
             "unmatched_completion_clocks": sum(not matched_groups[t] for t in groups),
@@ -302,10 +317,11 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
                 "ordinary_clocks_with_valid_prior_features": sum(len(group) for group in eligible_controls.values()),
                 "per_case_n_risk_and_support": "Eligibility/rejections recorded separately per case;control r depends on case n"},
             "context_distributions": {name: {"all_moments": _distribution(cases, all_weights, name),
+                "feature_eligible_moments": _distribution(eligible, eligible_weights, name),
                 "matched_moments": _distribution(matched, matched_weights, name),
                 "matched_controls": _distribution(controls, matched_weights, name)} for name in features},
             "coverage_pass_gate": None, "power_claim": False, "independence_claim": False},
-        "dependence": {"all_cases_and_selected_controls": _components(cases, pairs),
-                       "matched_cases_and_controls": _components(matched, pairs)}}
+        "dependence": {"all_cases_and_selected_controls": _components(cases, pairs, recognition_origin=plain(candles[0].open_time)),
+                       "matched_cases_and_controls": _components(matched, pairs, recognition_origin=plain(candles[0].open_time))}}
     result["selection_manifest_hash"] = stable_hash({"rules": RULES, "cases": cases, "pairs": pairs, "dependence": result["dependence"]})
     return result
