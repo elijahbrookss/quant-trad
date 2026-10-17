@@ -296,3 +296,33 @@ def test_reclamation_handoff_fences_readers_and_never_waits_for_parent_read_lock
         finally:
             release.set()
         assert future.result(timeout=30)["status"] == "partition_reclaimed"
+
+
+@pytest.mark.parametrize("action", ["verify", "reclaim"])
+def test_distinct_proof_exit_fence_refuses_changed_bytes_before_admission(storage, tmp_path, monkeypatch, action):
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    initial = archive.inspect_partition(day)
+    with storage.database.session() as session:
+        key = session.execute(text("SELECT object_key FROM market.fact_archive_manifests WHERE storage_day=:day"),
+                              {"day": day}).scalar_one()
+    path = archive.object_store.local_path(key)
+    original = path.read_bytes()
+    original_evidence = archive._partition_evidence
+
+    def changed_after_evidence(*args, **kwargs):
+        evidence = original_evidence(*args, **kwargs)
+        if kwargs.get("objects") is not None:
+            path.write_bytes(b"x" * len(original))
+        return evidence
+
+    monkeypatch.setattr(archive, "_partition_evidence", changed_after_evidence)
+    try:
+        with pytest.raises(RuntimeError, match="object_changed"):
+            if action == "verify":
+                archive.verify_partition(day)
+            else:
+                reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    finally:
+        path.write_bytes(original)
+    assert archive.inspect_partition(day) == initial
+    assert _physical(storage, day)["hot_rows"] == 3

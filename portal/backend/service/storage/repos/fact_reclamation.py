@@ -164,7 +164,8 @@ class PostgresCanonicalFactReclamationRepository:
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
             objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,
                                                check_budget=self.archive.check_budget)
-            evidence = self.archive._partition_evidence(session, partition, limits=verification_limits, objects=objects)
+            with objects.distinct_references():
+                evidence = self.archive._partition_evidence(session, partition, limits=verification_limits, objects=objects)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             self._assert_archive_admission(objects)

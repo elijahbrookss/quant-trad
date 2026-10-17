@@ -1513,6 +1513,17 @@ File device/inode/mode/size/mtime/ctime are checked around reads and again befor
 admission. These short-handoff checks never replace a fresh checksum on a later
 run. The object-store mount/root guards apply to every path lookup.
 
+Whole-partition verification and the reclaimer's initial current-byte proof use
+an explicit `ArchiveVerificationBatch.distinct_references()` scope under their
+existing lifecycle fence. Every reference still checks its hash/size claim and
+cooperative budget; each distinct file receives a fresh checksum. Repeated
+references defer only redundant path/mount/stamp checks to the scope's mandatory
+successful-exit fence over every verified object. Other callers retain immediate
+repeat checks. Reclamation also retains its existing mount/path/stamp checks
+around the exclusive handoff and transactional drop. Exceptions or cancellation
+cannot complete the scope or admit evidence. No cross-run cache, receipt/schema
+change or resource-limit increase is involved.
+
 Dependency expiration checks use batches of at most 128 exact `(target_kind,
 target_id)` pairs under the existing lifecycle fence, instead of one SQL round
 trip per dependency. Publication uses this same bounded check for its collected

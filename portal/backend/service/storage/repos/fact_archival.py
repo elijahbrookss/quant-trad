@@ -746,8 +746,8 @@ class PostgresCanonicalFactArchiveRepository:
             if partition["state"] not in {"sealed", "verified"}:
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
             objects = ArchiveVerificationBatch(self.object_store, limits=limits, check_budget=self.check_budget)
-            evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
-            objects.assert_unchanged()
+            with objects.distinct_references():
+                evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
             if partition["state"] == "verified":
                 if partition["manifest_set_hash"] != evidence["manifest_set_hash"]:
                     raise RuntimeError(f"canonical_archive_partition_verification_changed: storage_day={day}")
