@@ -11,4 +11,3 @@ revision="$(git rev-parse HEAD)"
 python3 scripts/ci/test_storage_database_preparation.py \
   --runtime-images qt-incremental-runtime-proof \
   "quanttrad-frontend:$revision" "quanttrad-frontend-v2:$revision"
-
