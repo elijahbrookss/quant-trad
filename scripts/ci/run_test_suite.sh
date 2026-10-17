@@ -48,6 +48,8 @@ run_pytest_docker() (
   local cleanup_status
   local original_status
   local -a compose
+  local -a cleanup_images=(--rmi local)
+  local -a run_options=()
   if ! command -v docker >/dev/null 2>&1; then
     echo "ci_runner_prereq_missing: docker CLI is required when CI_USE_DOCKER=1" >&2
     exit 127
@@ -70,6 +72,13 @@ run_pytest_docker() (
     compose+=(-f docker/test/incremental-application.compose.yml)
   fi
 
+  if [[ -n "${QT_CI_PROOF_ROOT:-}" ]]; then
+    python scripts/ci/deployment_proofs.py prebuilt --root "$QT_CI_PROOF_ROOT" --suite "$SUITE"
+    compose+=(-f "$QT_CI_PROOF_ROOT/compose-$SUITE.json")
+    cleanup_images=()
+    run_options=(--no-build --pull never)
+  fi
+
   cleanup_test_stack() {
     original_status=$?
     trap - EXIT
@@ -90,7 +99,7 @@ run_pytest_docker() (
         fi
       fi
     fi
-    "${compose[@]}" down --volumes --remove-orphans --rmi local || cleanup_status=$?
+    "${compose[@]}" down --volumes --remove-orphans "${cleanup_images[@]}" || cleanup_status=$?
     phase_end "$cleanup_status"
     if [[ "$original_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
       original_status=$cleanup_status
@@ -100,14 +109,16 @@ run_pytest_docker() (
   trap cleanup_test_stack EXIT
 
   phase_start build
-  if [[ "$SUITE" == "incremental-recovery" ]]; then
+  if [[ -n "${QT_CI_PROOF_ROOT:-}" ]]; then
+    : # Exact loaded image IDs were verified above; never rebuild or pull.
+  elif [[ "$SUITE" == "incremental-recovery" ]]; then
     "${compose[@]}" build timescaledb test
   else
     "${compose[@]}" build test
   fi
   phase_end 0
   phase_start execution
-  "${compose[@]}" run --rm \
+  "${compose[@]}" run --rm "${run_options[@]}" \
     -e QT_CI_IMMEDIATE_FAILURE=1 -e QT_CI_TEST_PHASES="$QT_CI_TEST_PHASES" \
     -e QT_SCHEMA_TEMPLATE_PILOT="${QT_SCHEMA_TEMPLATE_PILOT:-0}" \
     -e SOURCE_REVISION="$source_revision" \

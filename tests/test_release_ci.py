@@ -19,7 +19,7 @@ def response():
     workflow = yaml.safe_load((ROOT / ".github/workflows/test.yaml").read_text())
     labels = []
     for name, job in workflow["jobs"].items():
-        matrix = job.get("strategy", {}).get("matrix", {}).get("runtime")
+        matrix = job.get("strategy", {}).get("matrix", {}).get("runtime", job.get("strategy", {}).get("matrix", {}).get("shard"))
         labels.extend(f"{name} ({runtime})" for runtime in matrix) if matrix else labels.append(name)
     labels.sort(key=lambda name: name not in ci.REQUIRED_JOBS)
     run = dict(id=10, head_sha=SHA, event="push", head_branch="develop", path=".github/workflows/test.yaml",
@@ -29,7 +29,8 @@ def response():
     jobs = [dict(id=index+1, name=name, head_sha=SHA, run_id=10, run_attempt=2,
                  status="completed", conclusion="success", started_at="2026-10-10T01:00:00Z",
                  completed_at="2026-10-10T02:00:00Z",
-                 steps=[dict(name="Attest and pack disposable qualification evidence", conclusion="success")])
+                 steps=[dict(name="Attest and pack disposable qualification evidence", conclusion="success"),
+                        dict(name="Attest complete deployment proof coverage", conclusion="success")])
             for index, name in enumerate(labels)]
     artifacts = [dict(id=index+1, name="committed-recovery-"+runtime, expired=False,
                       digest="sha256:"+"b"*64, created_at="2026-10-10T01:59:00Z",
@@ -56,7 +57,7 @@ def test_requires_exact_latest_push_run_and_complete_attempt(monkeypatch):
     receipt = ci.qualify(SHA)
     assert receipt["attempt"] == 2
     assert receipt["event"] == "release_ci_qualified"
-    assert len(receipt["jobs"]) == 7
+    assert len(receipt["jobs"]) == len(ci.REQUIRED_JOBS)
     assert ci.REQUIRED_JOBS <= {job["name"] for job in jobs["jobs"]}
     assert len(receipt["artifacts"]) == 2
     assert "head_sha=" + SHA in calls[0]
@@ -185,3 +186,19 @@ def test_promotion_rehearsal_fixture_matches_strict_admission(tmp_path, monkeypa
         assert {job["name"] for job in receipt["jobs"]} == ci.REQUIRED_JOBS
         assert len(receipt["artifacts"]) == 2
         assert any("attempts/1/jobs" in path for path in calls)
+
+
+@pytest.mark.parametrize('child', sorted(ci.PROOF_JOBS))
+@pytest.mark.parametrize('failure', ['missing', 'skipped', 'cancelled', 'failure', 'wrong-attempt'])
+def test_green_aggregate_cannot_hide_missing_or_failed_child(monkeypatch, child, failure):
+    run, jobs, artifacts = response()
+    if failure == 'missing':
+        jobs['jobs'] = [j for j in jobs['jobs'] if j['name'] != child]
+        jobs['total_count'] = len(jobs['jobs'])
+    else:
+        job = next(j for j in jobs['jobs'] if j['name'] == child)
+        if failure == 'wrong-attempt': job['run_attempt'] = 1
+        else: job['conclusion'] = failure
+    mock_api(monkeypatch, run, jobs, artifacts)
+    with pytest.raises(ValueError, match='required CI job'):
+        ci.qualify(SHA)

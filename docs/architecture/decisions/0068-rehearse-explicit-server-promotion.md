@@ -24,6 +24,15 @@ code_paths:
   - scripts/ci/test_server_core_recreation.py
   - docker/docker-compose.storage-server.yml
   - tests/test_server_storage_config.py
+  - scripts/ci/deployment_proofs.py
+  - scripts/ci/proof_pytest.py
+  - scripts/ci/online_proof_selection.json
+  - scripts/ci/online_proof_allocation.json
+  - scripts/ci/proof_alerts.sh
+  - scripts/ci/proof_lifecycle.sh
+  - scripts/ci/proof_restore.sh
+  - scripts/ci/proof_core.sh
+  - tests/test_deployment_proofs.py
   - .github/workflows/test.yaml
   - tests/test_release_ci.py
   - tests/test_server_promotion.py
@@ -416,3 +425,16 @@ rendered declarations alone cannot establish their identity. Refusal precedes
 private binding reads and Docker observations, including interrupted recovery's
 configuration-only check. Supporting these mechanisms needs explicit review and
 payload identity evidence; the default production model does not use them.
+
+## Isolated proof scheduling
+
+The full deployment proof is an aggregate of source/run/attempt-bound independent
+runner groups and six node-level online shards, with at most four online shards
+active together. Image transport is provisional until every mandatory group and
+collected case is verified; qualified-package export follows aggregation. The
+exact-source admission helper requires each expanded child job, both existing
+recovery variants and the aggregate attestation. No real recovery wait, database
+isolation, source-image binding or refusal guard is removed. See the
+[CI topology](../../engineering/testing/ci-test-topology.md) for coverage, retained
+diagnostics and the limits of timing projections. This changes scheduling only,
+not deployment eligibility or production concurrency.

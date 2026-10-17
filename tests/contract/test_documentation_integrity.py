@@ -109,11 +109,13 @@ def test_ci_topology_matches_workflow_jobs() -> None:
         for step in job.get("steps",[]):
             if step.get("uses")=="actions/checkout@v4":
                 assert step["with"]["persist-credentials"] is False
-    assert set(jobs) == set(expected_jobs) | {"changes", "docs", "ci-required"}
+    proof_jobs = {"deployment-proof-" + name for name in ("build", "alerts", "lifecycle", "restore", "core", "online")}
+    assert set(jobs) == set(expected_jobs) | {"changes", "docs", "ci-required"} | proof_jobs
     assert jobs["ci-required"]["if"] == "${{ always() }}"
     assert set(jobs["ci-required"]["needs"]) == set(expected_jobs) | {"changes", "docs"}
-    for job in expected_jobs:
+    for job in set(expected_jobs) - {"deployment-contract"}:
         assert jobs[job]["needs"] == "changes"
+    assert set(jobs["deployment-contract"]["needs"]) == proof_jobs | {"changes"}
 
     bootstrap_steps = tuple(
         step["name"] for step in jobs["clean-database-bootstrap"]["steps"]
@@ -139,10 +141,13 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     attestation = recovery_steps["Attest and pack disposable qualification evidence"]["run"]
     assert "GITHUB_SHA" in attestation and "GITHUB_RUN_ATTEMPT" in attestation
     assert "qualification-source.json" in attestation and ".qt-source-attestation.json" in attestation
-    deployment_commands = [step.get("run", "") for step in jobs["deployment-contract"]["steps"]]
-    storage_commands = [command for command in deployment_commands if "run_test_suite.sh storage-demo " in command]
-    assert len(storage_commands) == 1
-    assert "tests/test_market_data/test_storage_end_to_end_db.py" in storage_commands[0]
+    import json
+    selections = json.loads(_read('scripts/ci/online_proof_selection.json'))
+    assert "tests/test_market_data/test_storage_end_to_end_db.py" in selections
+    assert jobs['deployment-proof-online']['strategy']['matrix']['shard'] == list(range(6))
+    assert jobs['deployment-proof-online']['strategy']['max-parallel'] == 4
+    assert any(step.get('name') == 'Attest complete deployment proof coverage'
+               for step in jobs['deployment-contract']['steps'])
 
     topology = _read("docs/engineering/testing/ci-test-topology.md")
     documented_jobs = tuple(
@@ -150,7 +155,7 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     )
     assert documented_jobs == expected_jobs
     normalized = _squash(topology)
-    assert "the workflow defines nine jobs" in normalized
+    assert "the workflow defines fifteen jobs" in normalized
     assert "three sequential steps in this fourth job" in normalized
     assert "they are not separate workflow jobs" in normalized
 
