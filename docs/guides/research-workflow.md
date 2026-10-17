@@ -106,6 +106,14 @@ qt data freeze-dataset --help
 qt data dataset <dataset_id>
 ```
 
+For new candle inputs, acquire provider-native candles at the requested
+timeframe and freeze them directly. Do not coarsen, split, upsample or synthesize
+candles from other timeframes, even when the arithmetic appears equivalent.
+Provider pagination may divide requests in time while preserving the native
+timeframe. Missing native coverage stays missing; it is not filled from another
+interval. Preserve earlier derived inputs/results with their original lineage
+for historical custody/replay; do not rewrite or relabel them as provider-native.
+
 Acquisition is a separate, explicit operation. A backtest or evidence replay
 must not fill a missing range by contacting a provider behind your back.
 

@@ -99,3 +99,20 @@ through April26 exclusive, with candidate frozen source through April26 03:00
 UTC. Before dispatch verify exposure records, exact frozen/source/normalization
 identities, qualified producing source, heavy-slot ownership, duplicate and
 attempt admission. A successful selection report authorizes no outcome run.
+
+
+## Provider native source amendment before B2 selection
+
+The user selected provider-supplied candles at the requested timeframe on
+2026-10-17. B2 now uses native Coinbase15m spot candles, canonicalized and frozen
+directly over the unchanged declared window. The planned1m-to15m preparation
+route and capacity-extension proposal are cancelled. Retain the previously
+frozen1m input and failed derivation refusal as preparation history; do not use
+them to synthesize this new B2 input or rewrite B1.
+
+The original selected protocol v1 JSON remains retained. The provenance-only
+amendment is `reversal-selection-only-v2.json`; case/control rules, matching
+tolerances, finite origin, windows, weighting and no-outcome scope are unchanged.
+Native candles have historical close-inferred availability, not measured live
+publication latency. The new input must have its own frozen manifest/source
+identity; do not claim byte equivalence with historical derived candles.

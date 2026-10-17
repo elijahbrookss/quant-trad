@@ -1041,3 +1041,14 @@ See [the fixed procedure](../../guides/reversal-selection-only.md) and its
 retained selected protocol JSON. A qualified method, frozen data and normal
 admission remain prerequisites. Method availability and a selection report do
 not authorize an outcome run or a capacity-limit bypass in data preparation.
+
+
+## Provider native candle source policy
+
+New candle evidence uses the provider's requested timeframe and is frozen
+directly. Internal coarsening, higher-bar splitting/upsampling and synthetic gap
+fills are not new research preparation routes. Transport pagination does not
+change the candle timeframe. Historical derived evidence and replay definitions
+remain immutable and accurately labeled; this policy adds no subsystem or
+automatic source substitution. Record any source-policy amendment before
+selection, without changing a historical result.
