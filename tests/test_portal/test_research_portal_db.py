@@ -170,7 +170,7 @@ def test_disposable_nested_custody_dependency_cap_and_oversize_refuse():
     sealed = repository.create_item(kind="observation", title="sealed fixture", payload={"nested": {"dataset_id": token}})
     excessive = repository.create_item(kind="study", title="dependency cap fixture", payload={"nested": [{"dataset_id": token + str(i)} for i in range(513)]})
     oversized = repository.create_item(kind="study", title="oversize fixture", payload={"encoded_report": "x" * (9 * 1024 * 1024)})
-    large_body = repository.create_item(kind="study", title="legacy body fixture", body="x" * (9 * 1024 * 1024), payload={})
+    large_body = repository.create_item(kind="study", title="combined row size fixture", body="x" * 8192, payload={"content": "x" * (evidence_export.MAX_RECORD_BYTES - 4096)})
     large_tags = repository.create_item(kind="study", title="legacy tags fixture", tags=["x" * (9 * 1024 * 1024)], payload={})
     ids = [sealed["id"], excessive["id"], oversized["id"], large_body["id"], large_tags["id"]]
     try:

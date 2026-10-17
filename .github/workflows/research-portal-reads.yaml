@@ -1,0 +1,54 @@
+name: Focused Research Portal Reads
+
+# Focused feedback only. Existing required CI and release admission stay unchanged.
+on:
+  push:
+    branches: ['feature/**', 'hotfix/**']
+    paths:
+      - '.github/workflows/research-portal-reads.yaml'
+      - 'portal/backend/controller/research.py'
+      - 'portal/backend/service/research/browse.py'
+      - 'portal/backend/service/research/evidence_export.py'
+      - 'tests/test_portal/test_research_browse.py'
+      - 'tests/test_portal/test_research_portal_db.py'
+      - 'tests/test_portal/test_research_publication_db.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qualify exact source with disposable PostgreSQL
+        env:
+          QT_DISABLE_DOTENV: '1'
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/portal-read-qualification
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          source = {"revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                    "run_id": int(os.environ["GITHUB_RUN_ID"]), "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                    "scope": "focused_research_portal_postgresql_not_full_release_admission"}
+          pathlib.Path("artifacts/portal-read-qualification/source.json").write_text(json.dumps(source, indent=2) + "\n")
+          PY
+          ./scripts/ci/run_test_suite.sh db -s tests/test_portal/test_research_browse.py tests/test_portal/test_research_portal_db.py tests/test_portal/test_research_publication_db.py 2>&1 | tee artifacts/portal-read-qualification/db.log
+      - name: Preserve focused qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-portal-read-qualification
+          path: |
+            artifacts/portal-read-qualification/source.json
+            artifacts/portal-read-qualification/db.log
+          retention-days: 7
+          if-no-files-found: error
