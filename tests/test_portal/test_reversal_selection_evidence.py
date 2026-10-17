@@ -85,3 +85,45 @@ def test_admitted_adapter_consumes_only_its_synthetic_prefix_and_no_future_tail(
     late=frame.copy();late.loc[100,'known_at']=late.loc[100,'close_time']+timedelta(seconds=1)
     with pytest.raises(ValueError,match='close-available'):
         ReversalSelectionEvaluator().evaluate(plan=plan,inputs={**request.parameters,'candles':late})
+
+
+def test_standard_loader_to_registered_evaluator_accepts_its_real_input_contract(monkeypatch):
+    from datetime import timedelta
+    from types import SimpleNamespace
+    import pandas as pd
+    from portal.backend.service.research import execution
+    from tests.test_research_science.test_recognition import candles as formation_candles
+    definition,request=normalize_check_request(payload())
+    plan=plan_research_check(definition,request,inspect_coverage=False,
+        instrument_loader=lambda key:{'id':key,'symbol':'synthetic'},
+        indicator_planner=lambda *a,**k:{'indicators':[],'requirements':[],'warmup_bars':0})
+    opened=pd.date_range('2025-01-01',periods=11040,freq='15min',tz='UTC')
+    prices=[100+i*.001 for i in range(len(opened))]
+    frame=pd.DataFrame({'timestamp':opened,'close_time':opened+timedelta(minutes=15),
+        'known_at':opened+timedelta(minutes=15),'source_identity_key':'synthetic',
+        'known_at_method':'interval_close_inferred','open':prices,'high':[p+.01 for p in prices],
+        'low':[p-.01 for p in prices],'close':prices})
+    for offset,bar in enumerate(formation_candles()):
+        for field in ('open','high','low','close'):
+            frame.loc[4000+offset,field]=getattr(bar,field)
+    before=frame.copy(deep=True)
+    calls=[]
+    def fetch(instrument_id,start,end,timeframe,*,frozen_alias):
+        calls.append((instrument_id,start,end,timeframe,frozen_alias))
+        return frame
+    monkeypatch.setattr(execution.candle_service,'fetch_ohlcv_by_instrument',fetch)
+    loaded=execution._load_market_inputs(definition,request,plan,
+        resolver=SimpleNamespace(dataset_binding={'recorded_gaps':[]}))
+    assert 'inputs' not in loaded  # Runtime payload is not request.parameters.
+    assert calls==[('instrument',plan.materialization_range['start'],
+        plan.materialization_range['end_exclusive'],'15m','primary_bars')]
+    result=execution._evaluate(definition,request,plan,loaded)
+    pd.testing.assert_frame_equal(frame,before)
+    assert result['processed_bars']==11040 and result['candidate_count']>=1
+    assert result['candidate_count']==len(result['cases'])
+    assert result['analysis_status']=='selection_feasibility_only'
+    assert not result['outcomes_calculated']
+    assert result['promotion_authority'] is result['execution_authority'] is False
+    assert plan.outcome_tail['bars']==plan.outcome_tail['seconds']==0
+    with pytest.raises(ValueError,match='fixed smaller-design'):
+        execution._evaluate(definition,request,plan,{**loaded,'inputs':[{'alias':'unexpected'}]})

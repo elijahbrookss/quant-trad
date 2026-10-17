@@ -56,8 +56,9 @@ class ReversalSelectionEvaluator:
         frame = inputs["candles"]
         if int(frame.memory_usage(index=True, deep=True).sum()) > RULES["limits"]["input_bytes"]:
             raise ValueError("reversal_selection_limit: input exceeds256MiB")
+        # Extra Fact declarations are request metadata, absent from the candle loader.
         normalize_configuration(detector=inputs["detector"], outcomes=inputs["outcomes"],
-            statistics=inputs["statistics"], inputs=inputs["inputs"], gap_policy=plan.gap_policy,
+            statistics=inputs["statistics"], inputs=inputs.get("inputs", []), gap_policy=plan.gap_policy,
             scope={"start": plan.evaluation_range["start"], "end": plan.evaluation_range["end_exclusive"], "timeframe": "15m"})
         settings, snapshot, rows, start, end, candles = prepare_recognition(plan=plan, inputs=inputs, schema=SCHEMA, checkpoint=checkpoint)
         checkpoint()
