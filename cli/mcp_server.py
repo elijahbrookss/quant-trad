@@ -9,7 +9,7 @@ import sys
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
-from cli.api import ApiClient
+from cli.api import ApiClient, ApiError
 from cli.audit import date_partition, safe_path_part, timestamp_slug
 from cli.experiments.contracts import normalize_plan
 from cli.experiments.event_log import read_events
@@ -530,10 +530,24 @@ class QuantTradMcpServer:
             arguments,
             "dispatching an evidence Check may persist canonical evidence",
         )
-        return self._research_operations().dispatch_evidence(
-            self._research_request(arguments),
-            dataset_id=_optional_str(arguments, "dataset_id"),
-        )
+        single_attempt = arguments.get("single_attempt", False)
+        if not isinstance(single_attempt, bool):
+            raise McpError("single_attempt must be a boolean", code=-32602)
+        try:
+            return self._research_operations().dispatch_evidence(
+                self._research_request(arguments),
+                dataset_id=_optional_str(arguments, "dataset_id"),
+                single_attempt=single_attempt,
+            )
+        except ApiError as exc:
+            # Dispatch may have enqueued/reused a job before receipt readback
+            # failed. Keep its backend job ID and reconciliation instructions.
+            data: dict[str, Any] = {}
+            if exc.status is not None:
+                data["status"] = exc.status
+            if exc.body:
+                data["body"] = exc.body
+            raise McpError(str(exc), data=data or None) from exc
 
     def _tool_get_research_job_status(
         self, arguments: dict[str, Any]
@@ -1283,11 +1297,12 @@ class QuantTradMcpServer:
                 "handler": self._tool_run_research_check_evidence,
             },
             "dispatch_research_check_evidence": {
-                "description": "Queue provider-free Check evidence execution. Requires confirm=true.",
+                "description": "Queue provider-free Check evidence execution. Requires confirm=true. single_attempt=true uses the fail-closed run-once route.",
                 "inputSchema": _object_schema(
                     {
                         "request": _free_object_schema(),
                         "dataset_id": _string_schema(),
+                        "single_attempt": _boolean_schema(default=False),
                         "confirm": _boolean_schema(default=False),
                     },
                     required=["request"],

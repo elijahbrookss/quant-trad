@@ -301,6 +301,42 @@ If the Check does not support the idea, keep that result. A clear rejection is
 valuable research evidence and protects the next experiment from repeating the
 same hidden choice.
 
+### Dispatch And Keep The Receipt
+
+For an approved asynchronous evidence run, retain the complete machine-readable
+receipt:
+
+```bash
+qt research check run \
+  --request-json <request.json> \
+  --dataset-id <dataset_id> \
+  --dispatch --single-attempt --format json
+```
+
+`--single-attempt` requires `--dispatch` and selects the distinct run-once API;
+an older server must reject that route rather than silently use another policy.
+Omitting the flag preserves normal dispatch. The matching MCP tool is
+`dispatch_research_check_evidence` with `request`, optional `dataset_id`,
+`single_attempt: true`, and `confirm: true`; its omitted/default
+`single_attempt` is false. Both adapters use the existing
+`ResearchOperations.dispatch_evidence` method.
+
+The `research_job_dispatch.v1` receipt includes the job ID/type, actual status,
+`reused`, `attempts`, persisted `max_attempts`, `request_fingerprint`, and status
+and result URLs. Keep those fields, including when QT reuses an in-flight job.
+`--format auto` (the default) preserves the existing text dispatch receipt;
+`--format text` is explicit text output and requires `--dispatch`.
+Synchronous execution remains JSON and accepts `--format json`.
+
+A dispatch error may arrive after a job was enqueued or reused. Preserve its
+HTTP status/body, job ID and reconciliation instructions. MCP dispatch errors
+retain that status/body in JSON-RPC error data. Inspect the existing job before
+retrying; do not switch policies or redispatch automatically after a receipt
+failure, policy mismatch or timeout. If the response supplied no job ID, the
+outcome may remain unknown. A client timeout does not acknowledge that server
+work stopped. Use the existing job status/result and explicit cancellation
+contracts; requesting cancellation is not acknowledgement of stopped work.
+
 ### When A Check Becomes A Research Observation
 
 A Check and a **Research Observation** are deliberately separate. A preview is
