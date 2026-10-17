@@ -121,3 +121,21 @@ def test_comparison_math_and_context_use_same_admitted_snapshots_without_rereads
     assert result["deltas"]["sample_count"]["delta"] == 2
     assert result["record_context"]["left"]["result_hash"] == "a-hash"
     assert result["record_context"]["right"]["result_hash"] == "b-hash"
+
+
+def test_complete_saved_row_is_admitted_before_materialization(monkeypatch):
+    from contextlib import contextmanager
+    from sqlalchemy.dialects import postgresql
+    seen = []
+    class Session:
+        def scalar(self, statement):
+            seen.append(str(statement.compile(dialect=postgresql.dialect())))
+            return export.MAX_RECORD_BYTES + 1
+    @contextmanager
+    def read():
+        yield Session()
+    monkeypatch.setattr(export.browse, "read_session", read)
+    monkeypatch.setattr(export.repository, "get_item", lambda *args, **kwargs: pytest.fail("Oversized complete row must not be fetched"))
+    with pytest.raises(ValueError, match="8 MiB"):
+        export.record_snapshot("legacy-large-body")
+    assert "row_to_json(portal_research_items)" in seen[0]

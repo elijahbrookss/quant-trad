@@ -36,7 +36,11 @@ def json_bytes(value):
 
 def record_snapshot(item_id: str):
     with browse.read_session() as session:
-        size = session.scalar(select(func.octet_length(cast(ResearchItemRecord.payload, String))).where(ResearchItemRecord.id == item_id))
+        # Measure the complete logical row on PostgreSQL before fetching it:
+        # legacy body/tags can be large even when payload alone is small.
+        size = session.scalar(select(func.octet_length(cast(
+            func.row_to_json(ResearchItemRecord.__table__.table_valued()), String
+        ))).where(ResearchItemRecord.id == item_id))
         if size is None:
             raise KeyError("Research item not found")
         if size > MAX_RECORD_BYTES:

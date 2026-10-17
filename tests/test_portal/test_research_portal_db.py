@@ -170,7 +170,9 @@ def test_disposable_nested_custody_dependency_cap_and_oversize_refuse():
     sealed = repository.create_item(kind="observation", title="sealed fixture", payload={"nested": {"dataset_id": token}})
     excessive = repository.create_item(kind="study", title="dependency cap fixture", payload={"nested": [{"dataset_id": token + str(i)} for i in range(513)]})
     oversized = repository.create_item(kind="study", title="oversize fixture", payload={"encoded_report": "x" * (9 * 1024 * 1024)})
-    ids = [sealed["id"], excessive["id"], oversized["id"]]
+    large_body = repository.create_item(kind="study", title="legacy body fixture", body="x" * (9 * 1024 * 1024), payload={})
+    large_tags = repository.create_item(kind="study", title="legacy tags fixture", tags=["x" * (9 * 1024 * 1024)], payload={})
+    ids = [sealed["id"], excessive["id"], oversized["id"], large_body["id"], large_tags["id"]]
     try:
         with db.session() as session:
             session.add(ResearchProtocolRecord(id=token, schema_version="synthetic", protocol_hash=token,
@@ -183,8 +185,9 @@ def test_disposable_nested_custody_dependency_cap_and_oversize_refuse():
                 _idle_pool()
             response = client.get(f"/api/research/items/{excessive['id']}/summary")
             assert response.status_code == 409 and "too many dependency" in response.json()["detail"]
-            response = client.get(f"/api/research/items/{oversized['id']}/record")
-            assert response.status_code == 409 and "8 MiB" in response.json()["detail"]
+            for item in (oversized, large_body, large_tags):
+                response = client.get(f"/api/research/items/{item['id']}/record")
+                assert response.status_code == 409 and "8 MiB" in response.json()["detail"]
             _idle_pool()
     finally:
         with db.session() as session:
