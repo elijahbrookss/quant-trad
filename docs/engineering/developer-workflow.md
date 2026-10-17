@@ -44,7 +44,7 @@ Common agent/tool workflow commands:
 - `qt indicators types`
 - `qt indicators validate-config --type <type> --params-json '<json>'`
 - `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
-- `qt data derive-candles --dataset-id <frozen_id> --source-series-id <id> --start <iso> --end <iso> --timeframe <coarser_interval>`
+- `qt data ingest-candles --instrument-id <id> --start <iso> --end <iso> --timeframe <provider-native-interval>`
 - `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
 - `qt research check requirements --request-json <request.json>`
 - `qt research check preview --request-json <request.json>`
@@ -65,6 +65,13 @@ Common agent/tool workflow commands:
 - `qt experiments resume <experiment_id>`
 - `qt experiments status <experiment_id>`
 - `qt experiments collect <experiment_id> --wait --export`
+
+New candle inputs must be provider-native at the requested timeframe and
+frozen directly. Do not aggregate, split/upsample or synthesize candles from
+other intervals. Native request pagination is transport, not candle conversion.
+The existing `qt data derive-candles` implementation is retained historical
+compatibility for already-derived evidence, not a new-research preparation step.
+Preserve its historical inputs, lineage, behavior and results without relabeling.
 
 For research calculations, use the sequence above. Preview is ephemeral and
 cannot support an evidence-bearing Observation. Preparation may acquire only

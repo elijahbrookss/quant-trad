@@ -59,7 +59,7 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
     return {"schema_version": SCHEMA}
 
 
-def prepare_recognition(*, plan, inputs, schema=SCHEMA):
+def prepare_recognition(*, plan, inputs, schema=SCHEMA, checkpoint=None):
     """Shared canonical preparation and one sequential recognizer for both Checks."""
     settings = choices(inputs["detector"])
     if inputs["outcomes"] != {"schema_version": schema} or plan.gap_policy != "reject":
@@ -75,7 +75,7 @@ def prepare_recognition(*, plan, inputs, schema=SCHEMA):
         raise ValueError("reversal_recognition_invalid: incomplete origin-to-end candle path")
     candles = tuple(RecognitionCandle.from_mapping(r) for r in rows)
     context = RecognitionContext(str(primary["instrument_id"]), seconds, origin, candles[0].source_identity_key)
-    snapshot = recognize_reversals(candles, context=context, settings=settings, checkpoint=execution_checkpoint)
+    snapshot = recognize_reversals(candles, context=context, settings=settings, checkpoint=checkpoint or execution_checkpoint)
     return settings, snapshot, rows, start, end, candles
 
 
