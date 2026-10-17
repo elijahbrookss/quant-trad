@@ -2114,11 +2114,17 @@ def _cmd_research_check_run(args: argparse.Namespace) -> int:
     request = _canonical_research_request(args)
     if args.single_attempt and not args.dispatch:
         raise ValueError("--single-attempt requires --dispatch")
+    output_format = getattr(args, "format", "auto")
+    if output_format == "text" and not args.dispatch:
+        raise ValueError("--format text requires --dispatch")
     if args.dispatch:
         result = operations.dispatch_evidence(
             request, dataset_id=args.dataset_id, single_attempt=args.single_attempt
         )
-        _print_research_job_dispatch(result)
+        if output_format == "json":
+            _print_json(result)
+        else:
+            _print_research_job_dispatch(result)
     else:
         _print_json(
             operations.run_evidence(request, dataset_id=args.dataset_id)
@@ -4549,6 +4555,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_run.add_argument(
         "--single-attempt", action="store_true",
         help="Require one async claim attempt, with no automatic retry; requires --dispatch."
+    )
+    research_check_run.add_argument(
+        "--format", choices=["auto", "json", "text"], default="auto",
+        help="Output format: auto preserves text dispatch receipts and JSON synchronous results; json retains the complete receipt. text requires --dispatch."
     )
     research_check_run.set_defaults(func=_cmd_research_check_run)
 

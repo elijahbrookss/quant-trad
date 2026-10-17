@@ -775,3 +775,37 @@ def test_research_check_catalog_uses_shared_get_contract(monkeypatch, capsys, ar
     assert main(["--no-audit-log", "research", "check", *args]) == 0
     assert observed == {"method": "GET", "path": path, "body": None}
     assert json.loads(capsys.readouterr().out) == expected
+
+
+@pytest.mark.parametrize("output_format", [None, "auto", "json"])
+def test_check_run_synchronous_output_and_route_remain_json(monkeypatch, capsys, output_format):
+    result = {"schema_version": "research_check_fixture.v1", "check_id": "check-1"}
+    observed = _capture_request(monkeypatch, json.dumps(result).encode())
+    request = {"scope": {}, "detector": {}, "dataset_id": "mds-1"}
+    argv = ["--no-audit-log", "research", "check", "run", "--request-json", json.dumps(request)]
+    if output_format:
+        argv.extend(["--format", output_format])
+    assert main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == result
+    assert observed == {"method": "POST", "path": "/api/research/checks/run", "body": {**request, "mode": "evidence"}}
+
+
+@pytest.mark.parametrize("output_format", [None, "auto", "text"])
+def test_check_dispatch_retains_existing_text_default(monkeypatch, capsys, output_format):
+    observed = _capture_request(monkeypatch, b'{"job_id":"job-1","status":"queued","job_type":"research_check_run"}')
+    argv = ["--no-audit-log", "research", "check", "run", "--request-json",
+            '{"scope":{},"detector":{}}', "--dispatch"]
+    if output_format:
+        argv.extend(["--format", output_format])
+    assert main(argv) == 0
+    output = capsys.readouterr().out
+    assert output.startswith("Research job queued.\nJob id: job-1\n")
+    assert "research jobs status job-1" in output
+    assert observed["path"] == "/api/research/jobs/checks/run"
+
+
+def test_check_run_text_without_dispatch_fails_before_network(monkeypatch, capsys):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("network must not be called")))
+    assert main(["--no-audit-log", "research", "check", "run", "--request-json",
+                 '{"scope":{},"detector":{}}', "--format", "text"]) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "--format text requires --dispatch"}

@@ -193,6 +193,32 @@ MCP does not normalize a second request language, calculate features or hashes,
 or interpret a verdict. Dataset freeze, durable Check execution, and Observation
 creation require confirmation. Preview and requirements remain read-only.
 
+### Evidence Dispatch Parity
+
+`dispatch_research_check_evidence` accepts `request`, optional `dataset_id`,
+`single_attempt` (a boolean, default false), and `confirm` (required true to
+execute). It calls the existing `ResearchOperations.dispatch_evidence` method,
+as does `qt research check run --dispatch`. With `single_attempt=true`, both
+use `/api/research/jobs/checks/run-once`; otherwise they use
+`/api/research/jobs/checks/run`. There is no fallback from the run-once route
+and no automatic resubmission. The policy is not added to the scientific
+request fingerprint.
+
+The tool returns the unchanged `research_job_dispatch.v1` receipt: job ID/type,
+actual status, `reused`, `attempts`, persisted `max_attempts`,
+`request_fingerprint`, `status_url`, and `result_url`. CLI callers can retain the
+same complete object with `qt research check run --dispatch --format json`.
+CLI default dispatch output remains text; synchronous execution remains JSON.
+
+For this dispatch tool, an upstream `ApiError` keeps its available HTTP `status`
+and raw response `body` in JSON-RPC error `data`, with the original error
+message. The body may contain a reconciliation job ID even when receipt
+readback failed after enqueue/reuse. A policy mismatch or uncertain receipt is
+not permission to redispatch or change policy. Timeout does not prove server
+cancellation; status/result and explicit cancellation retain their existing
+contracts. This adapter change adds no admission, budget, retry or cancellation
+semantics and does not change other tools' error handling.
+
 For wider scout-window planning, `qt instruments coverage-matrix` calls the
 backend instrument coverage matrix and combines instrument readiness with candle
 coverage for a filtered instrument set.
