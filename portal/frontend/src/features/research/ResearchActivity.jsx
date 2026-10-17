@@ -15,7 +15,7 @@ export function ResearchActivity() {
   const [initial] = useState(() => activityWindow('24h'))
   const from = params.get('from') || initial.from, to = params.get('to') || initial.to
   const requestedPreset = params.get('range') || '24h'
-  const activePreset = PRESETS[requestedPreset] || requestedPreset === 'custom' ? requestedPreset : 'custom'
+  const activePreset = PRESETS[requestedPreset] && Date.parse(to) - Date.parse(from) === PRESETS[requestedPreset][1] ? requestedPreset : 'custom'
   useEffect(() => {
     if (!params.has('from') || !params.has('to')) {
       const next = new URLSearchParams(params); next.set('from', from); next.set('to', to); next.set('range', activePreset); setParams(next, { replace: true })

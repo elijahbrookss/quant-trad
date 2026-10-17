@@ -95,4 +95,45 @@ describe('Generic Study inspection', () => {
     expect(screen.getByRole('button', { name: 'Load again' })).toBeVisible()
   })
 
+  it.each([true, false])('clears comparisons when refresh settles to changed publication=%s', async published => {
+    const data = summary()
+    data.publication.references = [{ item_id: 'check-a', kind: 'research_check' }, { item_id: 'check-b', kind: 'research_check' }]
+    let settleRefresh
+    api.fetchResearchSummary.mockResolvedValueOnce(data).mockImplementation(() => new Promise(resolve => { settleRefresh = resolve }))
+    api.fetchResearchComparison.mockResolvedValue({ left: { id: 'check-a' }, right: { id: 'check-b' } })
+    mount('/studies/question?tab=evidence')
+    await screen.findByText('Compare related Checks')
+    fireEvent.change(screen.getByLabelText('Left Check'), { target: { value: 'check-a' } })
+    fireEvent.change(screen.getByLabelText('Right Check'), { target: { value: 'check-b' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Compare', exact: true }))
+    await screen.findByText(/Inspect each scope/)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh summary' }))
+    await waitFor(() => expect(settleRefresh).toBeDefined())
+    const next = structuredClone(data); next.publication = published ? { ...next.publication, publication_hash: 'new-hash' } : null
+    await act(async () => settleRefresh(next))
+    if (published) {
+      expect(await screen.findByText('Compare related Checks')).toBeVisible()
+      expect(screen.getByLabelText('Left Check').value).toBe('')
+      expect(screen.getByRole('button', { name: 'Compare', exact: true })).toBeDisabled()
+    } else expect(screen.queryByText('Compare related Checks')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Inspect each scope/)).not.toBeInTheDocument()
+  })
+
+  it('aborts an unpublished record raw read when its summary is refreshed', async () => {
+    let settleRefresh, rawSignal
+    api.fetchResearchSummary.mockResolvedValueOnce(summary('question', false)).mockImplementation(() => new Promise(resolve => { settleRefresh = resolve }))
+    api.fetchResearchRecord.mockImplementation((id, options) => new Promise((resolve, reject) => {
+      rawSignal = options.signal
+      options.signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')))
+    }))
+    mount('/studies/question?tab=evidence')
+    fireEvent.click(await screen.findByRole('button', { name: 'Load exact retained payload' }))
+    await waitFor(() => expect(rawSignal).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh summary' }))
+    await waitFor(() => expect(rawSignal.aborted).toBe(true))
+    await act(async () => settleRefresh(summary('question', false)))
+    expect(await screen.findByRole('button', { name: 'Load exact retained payload' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Hide exact payload' })).not.toBeInTheDocument()
+  })
+
 })

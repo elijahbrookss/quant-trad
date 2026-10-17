@@ -3,7 +3,7 @@ import { Link, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { fetchResearchSummary, fetchResearchRelationships, fetchResearchImages, fetchResearchRecord, fetchResearchComparison,
   fetchResearchExportPreflight, researchImageContentUrl, researchRecordUrl, downloadResearchExport } from '../../adapters/research.adapter.js'
 import { useResearchRead } from '../../features/research/useResearchRead.js'
-import { ResearchText, ResearchScope, instrumentName } from '../../features/research/ResearchText.jsx'
+import { ResearchText, ResearchScope, instrumentEntries } from '../../features/research/ResearchText.jsx'
 import { ReadState } from '../../features/research/ResearchViews.jsx'
 
 function origin(value) {
@@ -40,15 +40,23 @@ export function ResearchEvidenceRoom() {
   const downloadRef = useRef(null)
   const [download, setDownload] = useState({ busy: false, error: null, cancelled: false })
   const publicationHash = publication?.publication_hash
+  const previousView = useRef({ itemId, selectedRevision, publicationHash, tab, settled: false })
   useEffect(() => {
+    const previous = previousView.current
+    const sameView = previous.itemId === itemId && previous.selectedRevision === selectedRevision && previous.tab === tab
+    const refreshStarted = sameView && previous.settled && summary.loading
+    const changed = !sameView || refreshStarted || (previous.publicationHash && !summary.loading && previous.publicationHash !== publicationHash)
+    previousView.current = { itemId, selectedRevision, tab, settled: (sameView && previous.settled) || Boolean(summary.data), publicationHash: sameView && summary.loading ? previous.publicationHash : publicationHash }
     downloadRef.current?.abort()
     downloadRef.current = null
-    setCompareIds([])
-    setCompareSelection(['', ''])
-    setRawOpen(false)
+    if (changed) {
+      setCompareIds([])
+      setCompareSelection(['', ''])
+      setRawOpen(false)
+    }
     setDownload({ busy: false, error: null, cancelled: false })
     return () => { downloadRef.current?.abort(); downloadRef.current = null }
-  }, [itemId, selectedRevision, publicationHash, tab])
+  }, [itemId, selectedRevision, publicationHash, tab, summary.loading])
   function selectTab(next) { const query = new URLSearchParams(params); query.set('tab', next === 'interpretation' ? 'summary' : next); setParams(query) }
   function selectRevision(value) { const query = new URLSearchParams(params); if (value) query.set('revision', value); else query.delete('revision'); setParams(query) }
   async function downloadBundle() {
@@ -70,10 +78,13 @@ export function ResearchEvidenceRoom() {
   const from = origin(location.state?.from)
   const self = location.pathname + location.search
   if (!item) return <div className="qt2-room qt2-research-room"><Link to={from}>Back to research</Link><ReadState read={summary} label="Loading Study summary" /></div>
+  const scopeRows = summary.data.scope ? summary.data.scope.items || [] : [item]
+  const scopeNames = instrumentEntries(scopeRows).map(row => row.label)
+  const scopeFrames = [...new Set(scopeRows.map(row => row.timeframe).filter(Boolean))]
   const displayedImages = (images.data?.items || []).filter(image => image.binding?.kind !== 'study' || image.binding.publication_hash === publication?.publication_hash)
   return <div className="qt2-room qt2-research-room">
     <Link className="qt2-research-back" to={from}>← {from === '/overview' ? 'Overview' : 'Studies / records'}</Link>
-    <header className="qt2-room-head"><div><span className="qt2-kicker">{item.kind === 'study' ? 'Study' : item.kind} · read only</span><h1 className="qt2-title">{item.title}</h1><p className="qt2-sub">{[instrumentName(item), item.timeframe].filter(Boolean).join(' · ') || 'Scope from summary and evidence'}</p></div><div className="qt2-head-actions"><button className="qt2-button" onClick={summary.refresh}>Refresh summary</button><button className="qt2-button" onClick={() => selectTab('export')}>Export</button></div></header>
+    <header className="qt2-room-head"><div><span className="qt2-kicker">{item.kind === 'study' ? 'Study' : item.kind} · read only</span><h1 className="qt2-title">{item.title}</h1><p className="qt2-sub">{[scopeNames.join(' · '), scopeFrames.join(' · ')].filter(Boolean).join(' · ') || 'Instrument not declared at this level'}</p></div><div className="qt2-head-actions"><button className="qt2-button" onClick={summary.refresh}>Refresh summary</button><button className="qt2-button" onClick={() => selectTab('export')}>Export</button></div></header>
     <nav className="qt2-research-tabs" aria-label="Research record sections">{['interpretation', 'evidence', 'files', 'history'].map(value => <button className={tab === value ? 'is-active' : ''} key={value} onClick={() => selectTab(value)}>{value === 'interpretation' ? 'Summary' : value[0].toUpperCase() + value.slice(1)}</button>)}</nav>
     {summary.data.history.length ? <label className="qt2-revision-picker">Summary version <select aria-label="Summary revision" value={publication?.revision || ''} onChange={event => selectRevision(event.target.value)}>{summary.data.history.map(version => <option key={version.revision} value={version.revision}>Version {version.revision}</option>)}</select></label> : null}
     {tab === 'interpretation' ? <div className="qt2-study-layout"><section className="qt2-research-panel qt2-interpretation">
