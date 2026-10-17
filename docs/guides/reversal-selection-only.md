@@ -120,3 +120,11 @@ tolerances, finite origin, windows, weighting and no-outcome scope are unchanged
 Native candles have historical close-inferred availability, not measured live
 publication latency. The new input must have its own frozen manifest/source
 identity; do not claim byte equivalence with historical derived candles.
+
+
+## Fixed six-block extension
+
+The separate [six-block selection procedure](reversal-six-block-selection.md)
+uses version12. Version11 and its historical results remain unchanged. Extending
+the reporting period does not create old-block controls, independent episodes
+or permission to inspect future outcomes.

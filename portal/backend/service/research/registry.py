@@ -35,6 +35,7 @@ from .volume_cohort_evaluator import (NearbyDateVolumeCohortEvaluator,
 from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME_SCHEMA as DISTRIBUTION_SCHEMA, RULES as DISTRIBUTION_RULES, normalize_configuration as normalize_distribution_configuration)
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
 from .reversal_selection_evaluator import (ReversalSelectionEvaluator, SCHEMA as SELECTION_SCHEMA, RULES as SELECTION_RULES, normalize_configuration as normalize_selection_configuration)
+from .reversal_six_block_selection_evaluator import (ReversalSixBlockSelectionEvaluator, SCHEMA as SIX_BLOCK_SCHEMA, RULES as SIX_BLOCK_RULES, normalize_configuration as normalize_six_block_configuration)
 from .reversal_first_passage_evaluator import (ReversalFirstPassageEvaluator,
     SCHEMA as FIRST_PASSAGE_SCHEMA, RULES as FIRST_PASSAGE_RULES,
     normalize_configuration as normalize_first_passage_configuration)
@@ -399,10 +400,23 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_six_block_selection = ReversalSixBlockSelectionEvaluator()
+CHECK_REGISTRY.register_evaluator(_six_block_selection)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="12", evaluator_id=_six_block_selection.evaluator_id,
+    evaluator_version="12", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": SIX_BLOCK_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive", "selection_rules": SIX_BLOCK_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v11 pairs."""
+    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v12 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -985,7 +999,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("11" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("12" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == SIX_BLOCK_SCHEMA
+            else "11" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == SELECTION_SCHEMA
             else "10" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == FIRST_PASSAGE_SCHEMA
@@ -1047,7 +1063,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1102,6 +1118,11 @@ def materialize_check_definition(
         raise ValueError(
             "event_fact_check_invalid: fact_snapshot does not support reset_rewarm"
         )
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "12":
+        outcomes = normalize_six_block_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("reversal_selection_invalid: no rewarm,assertions or outcomes")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "11":
         outcomes = normalize_selection_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
