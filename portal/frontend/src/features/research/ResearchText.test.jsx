@@ -27,3 +27,11 @@ it('keeps distinct instrument IDs when catalog symbols collide',()=>{
  expect(entries).toHaveLength(2);expect(entries[0].label).not.toBe(entries[1].label)
 })
 
+
+it('disambiguates equal symbol, type and venue with source and exact ID when needed', () => {
+ const row = { symbol: 'BTC-USD', instrument_type: 'SPOT', exchange: 'Coinbase', datasource: 'native' }
+ const entries = instrumentEntries([{instrument_id:'first',instrument:row},{instrument_id:'second',instrument:row},{instrument_id:'third',instrument:{...row,datasource:'other'}}])
+ expect(new Set(entries.map(entry => entry.label)).size).toBe(3)
+ expect(entries.find(entry => entry.key === 'first').label).toContain('[first]')
+ expect(entries.find(entry => entry.key === 'third').label).toContain('other')
+})

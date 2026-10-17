@@ -436,6 +436,11 @@ and 64 distinct Checks per page; overflow is explicit. Each Study keeps its own
 reference identity/partial-state checks. Missing scope is not inferred from titles,
 multiple IDs are not collapsed just because symbols match, and catalog names do
 not replace frozen evidence identities. No metadata backfill is implicit.
+Colliding names add market/source details; exact IDs appear only if those labels
+still collide. Focused disposable PostgreSQL qualification logs synthetic interval
+and bounded JSONPath timings, the existing SQL-timeout response, and connection
+return after a real loopback HTTP disconnect. These are qualification baselines,
+not production latency guarantees or a claim that disconnect cancels SQL.
 
 `GET /api/research/activity/range` accepts explicit timezone-bearing `from`/`to`
 and type, validates a positive range no longer than 366 days and applies `[from,to)`

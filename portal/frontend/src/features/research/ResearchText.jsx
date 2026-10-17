@@ -26,9 +26,10 @@ export function instrumentName(item) {
 }
 export function instrumentEntries(rows) {
   const found = new Map()
-  rows.forEach(row => { const label = instrumentName(row); if (label) found.set(row.instrument_id || 'symbol:' + label, { key: row.instrument_id || label, label, detail: [row.instrument?.instrument_type, row.instrument?.exchange].filter(Boolean).join(' · ') }) })
+  rows.forEach(row => { const label = instrumentName(row); if (label) found.set(row.instrument_id || 'symbol:' + label, { key: row.instrument_id || label, label, detail: [row.instrument?.instrument_type, row.instrument?.exchange, row.instrument?.datasource].filter(Boolean).join(' · ') }) })
   const values = [...found.values()]
-  return values.map(value => ({ ...value, label: values.filter(other => other.label === value.label).length > 1 ? value.label + ' (' + (value.detail || 'distinct instrument ID') + ')' : value.label })).sort((a,b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key))
+  const labelled = values.map(value => ({ ...value, label: values.filter(other => other.label === value.label).length > 1 ? value.label + ' (' + (value.detail || 'distinct instrument ID') + ')' : value.label }))
+  return labelled.map(value => ({ ...value, label: labelled.filter(other => other.label === value.label).length > 1 ? value.label + ' [' + value.key + ']' : value.label })).sort((a,b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key))
 }
 export function ResearchScope({ item, scope }) {
   const rows = scope ? scope.items || [] : [item]

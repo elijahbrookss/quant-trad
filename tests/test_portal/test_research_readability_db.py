@@ -10,12 +10,14 @@ def test_disposable_activity_half_open_range_counts_all_matching_records():
     from portal.backend.db.models import ResearchItemRecord as Item
     token=uuid.uuid4().hex
     ids=[token+str(i) for i in range(3)]
+    before=activity_range.activity("hypotheses_created","1999-01-01T00:00Z","1999-01-01T00:02Z")
     try:
         with db.session() as s:
             for id,minute in zip(ids,[0,1,2]):
                 s.add(Item(id=id,kind="hypothesis",status="draft",title="range fixture",payload={},tags=[],created_at=datetime(1999,1,1,0,minute)))
         result=activity_range.activity("hypotheses_created","1999-01-01T00:00Z","1999-01-01T00:02Z")
-        assert result["total"]==2 and [x["total"] for x in result["buckets"]]==[1,1]
+        assert result["total"]==before["total"]+2
+        assert [new["total"]-old["total"] for new,old in zip(result["buckets"],before["buckets"])]==[1,1]
     finally:
         with db.session() as s:s.execute(delete(Item).where(Item.id.in_(ids)))
 
