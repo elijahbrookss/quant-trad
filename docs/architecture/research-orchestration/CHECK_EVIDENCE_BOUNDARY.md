@@ -19,6 +19,8 @@ code_paths:
   - src/research_science/recognition.py
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
+  - src/research_science/reversal_selection.py
+  - portal/backend/service/research/reversal_selection_evaluator.py
   - portal/backend/service/research/reversal_first_passage_evaluator.py
   - portal/backend/service/research/reversal_recognition_evaluator.py
   - scripts/reporting/reversal_recognition_preview.py
@@ -1017,3 +1019,25 @@ Check/version/input binding, job admission, evidence and Research Memory paths
 own persistence and execution; there is no new scientific runtime or matching
 campaign. See the [fixed January protocol](../../research-campaigns/reversal-first-passage-20261016.md)
 for exposure, availability, censoring, resource and single-attempt stopping rules.
+
+
+## Completed reversal selection without outcomes
+
+`raw_forward_outcome@11` is the fixed smaller-design selection-only method.
+It consumes the same canonical sequential recognizer as v9/v10; historical
+definitions and evidence remain unchanged. It declares no outcome horizons or
+tail reads and imports no first-passage procedure. New stage-availability views
+distinguish candle clocks from role/parent recognition without rewriting v1.
+
+Selection matches only prior volatility, fractional boundary distance and
+strictly pre-decision movement. Body/range and derived normalized distance are
+diagnostics. Every chain remains explicit, while reporting gives completion
+moments equal weight and exposes partially matched moments. Within-pair direct
+histories must be disjoint; cross-pair and shared recognition ancestry remain
+reported dependence, not independent observations. There are no numeric
+coverage or power pass gates and no rescue tuning.
+
+See [the fixed procedure](../../guides/reversal-selection-only.md) and its
+retained selected protocol JSON. A qualified method, frozen data and normal
+admission remain prerequisites. Method availability and a selection report do
+not authorize an outcome run or a capacity-limit bypass in data preparation.

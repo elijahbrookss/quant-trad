@@ -601,3 +601,11 @@ Inspect both fold counts and the retained source-quality evidence. Omitting the
 option preserves the historical strict input plan. Preparation and execution
 still use the existing freeze/run operations; do not backdate receipts or repair
 missing buckets with invented zero values.
+
+
+For the user-selected completed-reversal comparison feasibility question,
+discover `raw_forward_outcome` version11 and read
+[selection only](reversal-selection-only.md). This fixed84-day method reports
+matched/excluded populations, completion-moment weights and dependence without
+forward outcomes, arbitrary coverage gates or repeated matching adjustments.
+It does not acquire data or relax canonical derivation resource limits.
