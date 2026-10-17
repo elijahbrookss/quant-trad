@@ -133,6 +133,7 @@ def test_disposable_http_disconnect_releases_connection_after_sql_timeout(monkey
             "type": "hypotheses_created", "from": "2001-01-01T00:00Z", "to": "2001-01-01T01:00Z"})
         table = engine.dialect.identifier_preparer.format_table(Item.__table__)
         with engine.connect() as locker, engine.connect().execution_options(isolation_level="AUTOCOMMIT") as monitor:
+            locker.execute(text("SET LOCAL lock_timeout = '2000ms'"))
             locker.execute(text(f"LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"))
             try:
                 connected = http.client.HTTPConnection("127.0.0.1", port, timeout=12)

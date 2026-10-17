@@ -461,3 +461,9 @@ bounds in URL/cache identity; refresh moves the anchor. Changing activity type
 keeps the same bounds. Minute-level activity is never inferred from daily totals
 or the current inventory page. Empty, unavailable and cancelled reads remain
 distinct. No new research execution, acquisition, persistence or framework occurs.
+
+Record status is the ResearchItem memory-record lifecycle, not an execution or
+scientific-disposition field. Inventory labels it explicitly and shows the latest
+summary version separately. Intentionally selected historical summaries stay
+selected, identify the latest revision, and offer View latest. No closure/defer
+badge is inferred from prose and no extra job polling is added for these labels.

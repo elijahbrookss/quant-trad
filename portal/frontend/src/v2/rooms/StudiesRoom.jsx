@@ -37,6 +37,7 @@ export function StudiesRoom() {
       {read.data.items.length ? <StudyTable items={read.data.items} from={location.pathname + location.search} /> : <p className="qt2-empty">No records match these filters.</p>}
       <div className="qt2-pagination"><span>{read.data.items.length} shown · {read.data.total} matching records</span><div>{params.has('cursor') ? <button className="qt2-button" onClick={() => update('cursor', '')}>First page</button> : null}<button className="qt2-button" disabled={!read.data.next_cursor} onClick={nextPage}>Next page</button></div></div>
     </section> : null}
+    <p className="qt2-research-caption">Record status describes the saved record. Research decisions are in published summaries; running work is shown separately.</p>
     <p className="qt2-research-caption">Saved records are not independent scientific replications. Scope shown here is recorded metadata; linked evidence may contain additional scope.</p>
   </div>
 }

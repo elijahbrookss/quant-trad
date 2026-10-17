@@ -137,3 +137,20 @@ describe('Generic Study inspection', () => {
   })
 
 })
+
+it('keeps an intentional historical summary until View latest is selected', async () => {
+ const old = summary('historical-selection'); old.publication.conclusion = 'Original bounded finding'
+ old.history = [{revision:1,publication_hash:'old-hash'},{revision:2,publication_hash:'middle-hash'},{revision:3,publication_hash:'latest-hash'}]
+ const latest = {...old, publication:{...old.publication,revision:3,publication_hash:'latest-hash',conclusion:'This bounded comparison is closed; no new experiment is authorized.'}}
+ api.fetchResearchSummary.mockImplementation((id, params) => Promise.resolve(params.revision === 1 ? old : latest))
+ mount('/studies/historical-selection?revision=1&tab=summary')
+ expect(await screen.findByText('Original bounded finding')).toBeVisible()
+ expect(screen.getByText('Historical summary · v1 · latest is v3')).toBeVisible()
+ expect(screen.getByRole('heading',{name:'Historical summary'})).toBeVisible()
+ expect(screen.queryByText(latest.publication.conclusion)).toBeNull()
+ fireEvent.click(screen.getByRole('button',{name:'View latest'}))
+ expect(await screen.findByText(latest.publication.conclusion)).toBeVisible()
+ expect(screen.getByRole('heading',{name:'Latest published summary'})).toBeVisible()
+ expect(screen.queryByRole('button',{name:'View latest'})).toBeNull()
+ expect(api.fetchResearchSummary.mock.calls.at(-1)[1].revision).toBeUndefined()
+})

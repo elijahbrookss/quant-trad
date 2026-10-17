@@ -8,8 +8,12 @@ on:
       - '.github/workflows/research-portal-reads.yaml'
       - 'portal/backend/controller/research.py'
       - 'portal/backend/service/research/browse.py'
+      - 'portal/backend/service/research/activity_range.py'
+      - 'portal/backend/service/research/scope.py'
       - 'portal/backend/service/research/evidence_export.py'
       - 'tests/test_portal/test_research_browse.py'
+      - 'tests/test_portal/test_research_readability_db.py'
+      - 'tests/test_portal/test_research_readability_measurements_db.py'
       - 'tests/test_portal/test_research_portal_db.py'
       - 'tests/test_portal/test_research_publication_db.py'
   workflow_dispatch:
@@ -41,7 +45,7 @@ jobs:
                     "scope": "focused_research_portal_postgresql_not_full_release_admission"}
           pathlib.Path("artifacts/portal-read-qualification/source.json").write_text(json.dumps(source, indent=2) + "\n")
           PY
-          ./scripts/ci/run_test_suite.sh db -s tests/test_portal/test_research_browse.py tests/test_portal/test_research_portal_db.py tests/test_portal/test_research_publication_db.py 2>&1 | tee artifacts/portal-read-qualification/db.log
+          ./scripts/ci/run_test_suite.sh db -s tests/test_portal/test_research_browse.py tests/test_portal/test_research_portal_db.py tests/test_portal/test_research_publication_db.py tests/test_portal/test_research_readability_db.py tests/test_portal/test_research_readability_measurements_db.py 2>&1 | tee artifacts/portal-read-qualification/db.log
       - name: Preserve focused qualification evidence
         if: always()
         uses: actions/upload-artifact@v4

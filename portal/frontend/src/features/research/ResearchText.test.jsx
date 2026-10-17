@@ -1,6 +1,8 @@
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import { ResearchText, ResearchScope, instrumentEntries } from './ResearchText.jsx'
+import { StudyTable } from './ResearchViews.jsx'
+import { MemoryRouter } from 'react-router-dom'
 describe('readable research text', () => {
  it('renders safe semantic paragraphs, headings, bullets and emphasis without executing HTML', () => {
   const { container } = render(<ResearchText text={'Meaning first.\n\n## Support\n- **441 pairs** retained\n- Limited coverage\n\n<script>alert(1)</script> [not a link](javascript:alert(1))'} />)
@@ -34,4 +36,13 @@ it('disambiguates equal symbol, type and venue with source and exact ID when nee
  expect(new Set(entries.map(entry => entry.label)).size).toBe(3)
  expect(entries.find(entry => entry.key === 'first').label).toContain('[first]')
  expect(entries.find(entry => entry.key === 'third').label).toContain('other')
+})
+
+it('labels record lifecycle independently from the latest summary', () => {
+ render(<MemoryRouter><StudyTable items={[{id:'active-record',kind:'study',title:'Closed comparison',status:'active',publication_count:3,latest_revision:3},{id:'blocked-record',kind:'study',title:'Unpublished question',status:'blocked',publication_count:0}]} /></MemoryRouter>)
+ expect(screen.getByText('Record status: active')).toBeVisible()
+ expect(screen.getByText('Record status: blocked')).toBeVisible()
+ expect(screen.getByText('Latest summary · v3')).toBeVisible()
+ expect(screen.getByText('No published summary')).toBeVisible()
+ expect(screen.queryByText(/running experiment/i)).toBeNull()
 })
