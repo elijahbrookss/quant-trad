@@ -1568,6 +1568,11 @@ current placement; each cold source page is freshly hashed too. A separate
 ephemeral placement hash detects a hot-to-cold move between the two phases and
 requires a retry. Placement is deliberately excluded from immutable receipt
 hashes so a legitimate move cannot invalidate a dependent forever.
+Source-placement lookups first use the permanent identity directory to restrict
+partitioned header and hot-payload queries to the referenced storage days. Each
+returned header must still match its individual directory day and expected hash;
+cold-page coverage and current object bytes remain independently verified. This
+routing adds no persistent verification cache, receipt change, or relaxed budget.
 It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting

@@ -262,15 +262,29 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
         if check_budget is not None:
             check_budget()
         batch = identities[offset:offset + 1000]
+        # Permanent identities route the lookup; actual headers, hashes and
+        # current hot/cold placement remain independently checked below.
+        locations = session.execute(text(
+            "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
+        ), {"ids": batch}).mappings().all()
+        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+            raise RuntimeError("canonical_source_dependency_missing")
+        location_days = {row["id"]: row["storage_day"] for row in locations}
+        days = sorted(set(location_days.values()))
+        if check_budget is not None:
+            check_budget()
         headers = session.execute(text("""
             SELECT versions.id, versions.row_hash, versions.storage_day,
                    hot.id IS NOT NULL AS hot_present
             FROM market.fact_versions AS versions
             LEFT JOIN market.fact_hot_payloads AS hot
               ON hot.storage_day=versions.storage_day AND hot.id=versions.id
-            WHERE versions.id=ANY(:ids) ORDER BY versions.id
-        """), {"ids": batch}).mappings().all()
-        if {item["id"] for item in headers} != set(batch):
+             AND hot.storage_day=ANY(:days)
+            WHERE versions.id=ANY(:ids) AND versions.storage_day=ANY(:days)
+            ORDER BY versions.id
+        """), {"ids": batch, "days": days}).mappings().all()
+        if ({item["id"] for item in headers} != set(batch)
+                or any(item["storage_day"] != location_days[item["id"]] for item in headers)):
             raise RuntimeError("canonical_source_dependency_missing")
         cold = [item["id"] for item in headers if not item["hot_present"]]
         pages = defaultdict(list)
@@ -283,8 +297,10 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
                 JOIN market.fact_archive_manifests AS manifests ON manifests.storage_day=source.storage_day
                   AND (manifests.first_commit_seq,manifests.first_id)<=(source.market_commit_seq,source.id)
                   AND (manifests.last_commit_seq,manifests.last_id)>=(source.market_commit_seq,source.id)
-                WHERE source.id=ANY(:ids) ORDER BY source.id,manifests.page_ordinal LIMIT :limit
-            """), {"ids": cold, "limit": len(cold) + 1}).mappings().all()
+                WHERE source.id=ANY(:ids) AND source.storage_day=ANY(:days)
+                ORDER BY source.id,manifests.page_ordinal LIMIT :limit
+            """), {"ids": cold, "days": sorted({row["storage_day"] for row in headers if not row["hot_present"]}),
+                    "limit": len(cold) + 1}).mappings().all()
             if len(matches) != len(cold):
                 raise RuntimeError("canonical_source_dependency_archive_coverage_invalid")
             for item in matches:
