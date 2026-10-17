@@ -74,9 +74,11 @@ run_pytest_docker() (
 
   if [[ -n "${QT_CI_PROOF_ROOT:-}" ]]; then
     python scripts/ci/deployment_proofs.py prebuilt --root "$QT_CI_PROOF_ROOT" --suite "$SUITE"
-    compose+=(-f "$QT_CI_PROOF_ROOT/compose-$SUITE.json")
+    compose+=(-f "$QT_CI_PROOF_ROOT/compose-$SUITE.yml")
+    "${compose[@]}" config --format json | python scripts/ci/deployment_proofs.py compose-model \
+      --root "$QT_CI_PROOF_ROOT" --suite "$SUITE"
     cleanup_images=()
-    run_options=(--no-build --pull never)
+    run_options=(--pull never)
   fi
 
   cleanup_test_stack() {

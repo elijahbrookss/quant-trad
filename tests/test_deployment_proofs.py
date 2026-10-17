@@ -136,12 +136,12 @@ def test_prebuilt_only_allows_exact_owned_storage_overrides(monkeypatch, tmp_pat
     manifest, _ = packet(monkeypatch)
     proof.write(tmp_path / 'proof-manifest.json', manifest)
     monkeypatch.setattr(proof, 'image_snapshot', lambda m: None)
-    expected = {'services': {'test': {'image': manifest['images']['storage-test']['id']},
-                            'timescaledb': {'image': manifest['images']['storage-database']['id']}}}
-    proof.write(tmp_path / 'compose-storage-demo.json', expected)
+    expected = proof.compose_override(manifest, 'storage-demo')
+    assert expected.count('build: !reset null') == 2
+    assert expected.count('pull_policy: never') == 2
+    (tmp_path / 'compose-storage-demo.yml').write_text(expected)
     proof.prebuilt(tmp_path, 'storage-demo')
-    expected['services']['test']['volumes'] = ['/host:/host']
-    proof.write(tmp_path / 'compose-storage-demo.json', expected)
+    (tmp_path / 'compose-storage-demo.yml').write_text(expected + '    volumes: ["/host:/host"]\n')
     with pytest.raises(ValueError, match='unexpected prebuilt'): proof.prebuilt(tmp_path, 'storage-demo')
     with pytest.raises(ValueError, match='bounded'): proof.prebuilt(tmp_path, 'db')
 
@@ -168,3 +168,21 @@ def test_wrong_transport_checksum_is_rejected_before_docker_load(monkeypatch, tm
     (tmp_path / 'images.tar').write_bytes(b'wrong archive')
     monkeypatch.setattr(proof.subprocess, 'run', lambda *a, **k: pytest.fail('must not load mismatched bytes'))
     with pytest.raises(ValueError, match='checksum mismatch'): proof.load(tmp_path)
+
+
+@pytest.mark.parametrize('fault', ['', 'build', 'pull', 'image', 'port', 'network'])
+def test_effective_compose_model_must_have_only_loaded_images_no_build_or_egress(monkeypatch, fault):
+    manifest, _ = packet(monkeypatch)
+    model = {'services': {name: {'image': manifest['images'][key]['id'], 'pull_policy': 'never'}
+                          for name, key in [('test', 'storage-test'), ('timescaledb', 'storage-database')]},
+             'networks': {'default': {'internal': True}}}
+    service = model['services']['test']
+    if fault == 'build': service['build'] = {'context': '/unexpected'}
+    elif fault == 'pull': service['pull_policy'] = 'always'
+    elif fault == 'image': service['image'] = 'unqualified:latest'
+    elif fault == 'port': service['ports'] = [{'published': 5432}]
+    elif fault == 'network': model['networks']['default']['internal'] = False
+    if fault:
+        with pytest.raises(ValueError): proof.validate_compose_model(manifest, 'storage-demo', model)
+    else:
+        proof.validate_compose_model(manifest, 'storage-demo', model)

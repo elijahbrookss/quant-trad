@@ -163,27 +163,48 @@ def load(root):
     subprocess.run(['docker', 'load', '--input', str(root / 'images.tar')], check=True, timeout=600)
     image_snapshot(manifest)
     for suite in ('storage-demo', 'incremental-recovery'):
-        services = {'test': {'image': manifest['images']['storage-test']['id']}}
-        db = 'database' if suite == 'incremental-recovery' else 'storage-database'
-        services['timescaledb'] = {'image': manifest['images'][db]['id']}
-        if suite == 'incremental-recovery':
-            services['restored'] = {'image': manifest['images'][db]['id']}
-        write(root / ('compose-' + suite + '.json'), {'services': services})
+        (root / ('compose-' + suite + '.yml')).write_text(compose_override(manifest, suite))
     return manifest
 
-def prebuilt(root, suite):
+
+def compose_override(manifest, suite):
     if suite not in ('storage-demo', 'incremental-recovery'):
         raise ValueError('prebuilt route is bounded to owned storage proof suites')
+    images = {'test': manifest['images']['storage-test']['id'],
+              'timescaledb': manifest['images']['database' if suite == 'incremental-recovery' else 'storage-database']['id']}
+    if suite == 'incremental-recovery':
+        images['restored'] = manifest['images']['database']['id']
+    # Explicitly remove inherited build recipes. compose run has no --no-build;
+    # an image-only model plus --pull never cannot rebuild/substitute a runtime.
+    return 'services:\n' + ''.join(
+        '  ' + name + ':\n    image: ' + json.dumps(image) + '\n    build: !reset null\n    pull_policy: never\n'
+        for name, image in images.items())
+
+
+def prebuilt(root, suite):
     manifest = read(root / 'proof-manifest.json')
     verify_manifest(manifest)
     image_snapshot(manifest)
-    model = read(root / ('compose-' + suite + '.json'))
-    expected = {'test': {'image': manifest['images']['storage-test']['id']},
-                'timescaledb': {'image': manifest['images']['database' if suite == 'incremental-recovery' else 'storage-database']['id']}}
-    if suite == 'incremental-recovery':
-        expected['restored'] = {'image': manifest['images']['database']['id']}
-    if model != {'services': expected}:
+    expected = compose_override(manifest, suite)
+    if (root / ('compose-' + suite + '.yml')).read_text() != expected:
         raise ValueError('unexpected prebuilt Compose override')
+
+def validate_compose_model(manifest, suite, model):
+    expected = {'test': manifest['images']['storage-test']['id'],
+                'timescaledb': manifest['images']['database' if suite == 'incremental-recovery' else 'storage-database']['id']}
+    if suite == 'incremental-recovery':
+        expected['restored'] = manifest['images']['database']['id']
+    if suite not in ('storage-demo', 'incremental-recovery') or set(model.get('services', {})) != set(expected):
+        raise ValueError('unexpected proof Compose services')
+    for name, image in expected.items():
+        service = model['services'][name]
+        if (service.get('image') != image or service.get('build') is not None
+                or service.get('pull_policy') != 'never' or service.get('ports')):
+            raise ValueError('proof Compose model permits image substitution/build/pull or host ports')
+    if model.get('networks', {}).get('default', {}).get('internal') is not True:
+        raise ValueError('proof Compose network must remain internal')
+    print('ci_prebuilt_model_verified suite=' + suite)
+
 
 def run(root, group, evidence):
     if group not in GROUPS:
@@ -264,7 +285,7 @@ def aggregate(manifest, receipts):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('pack', 'load', 'prebuilt', 'run', 'aggregate'))
+    p.add_argument('action', choices=('pack', 'load', 'prebuilt', 'compose-model', 'run', 'aggregate'))
     p.add_argument('--root', type=Path, required=True)
     p.add_argument('--group', choices=GROUPS)
     p.add_argument('--suite')
@@ -274,6 +295,11 @@ def main():
     if args.action == 'pack': pack(root)
     elif args.action == 'load': load(root)
     elif args.action == 'prebuilt': prebuilt(root, args.suite)
+    elif args.action == 'compose-model':
+        import sys
+        manifest = read(root / 'proof-manifest.json')
+        verify_manifest(manifest)
+        validate_compose_model(manifest, args.suite, json.load(sys.stdin))
     elif args.action == 'run': run(root, args.group, args.evidence)
     else:
         manifest = read(root / 'proof-manifest.json')

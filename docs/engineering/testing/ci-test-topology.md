@@ -99,7 +99,9 @@ between shard runners. The real expiry and Timescale recovery waits are unchange
 Every consumer checks the exact workflow checkout, source hash, run/attempt,
 transport checksum and loaded image identities. Prebuilt Compose overrides may
 only select these admitted image IDs in the two existing storage proof suites;
-no consumer rebuilds or pulls a substitute test image. Local/default runner
+no consumer rebuilds or pulls a substitute test image. Each prebuilt proof also
+renders the actual Compose model and refuses inherited build recipes, changed
+image IDs, pulls, host ports or a non-internal network. Local/default runner
 behavior remains unchanged.
 
 The aggregate requires all independent jobs to succeed and reads their retained
