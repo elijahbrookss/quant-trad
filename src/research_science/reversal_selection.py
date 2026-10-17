@@ -43,6 +43,12 @@ RULES = {
 }
 
 
+def _log_ratio(current, previous):
+    """Preserve ordinary arithmetic; avoid finite-price ratio overflow/underflow."""
+    ratio = current/previous
+    return math.log(ratio) if 0 < ratio < math.inf else math.log(current)-math.log(previous)
+
+
 def stage_availability(event):
     """A separately named v2 view; original event identity/record is unchanged."""
     by_name = {s.name: s for s in event.stages}
@@ -161,13 +167,13 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
         checkpoint()
         if i < 97 or not evaluation_start <= bar.close_time < evaluation_end:
             continue
-        sigma = math.sqrt(math.fsum(math.log(closes[k]/closes[k-1])**2 for k in range(i-96, i))/96)
+        sigma = math.sqrt(math.fsum(_log_ratio(closes[k], closes[k-1])**2 for k in range(i-96, i))/96)
         if not sigma:
             continue
         count = bisect_left(all_clocks, i)-bisect_left(all_clocks, i-12)
-        base[i] = {"sigma": sigma, "z_pre12": math.log(closes[i-1]/closes[i-13])/(sigma*math.sqrt(12)),
-            "z_pre96": math.log(closes[i-1]/closes[i-97])/(sigma*math.sqrt(96)),
-            "body": math.log(bar.close/bar.open)/sigma, "range": math.log(bar.high/bar.low)/sigma,
+        base[i] = {"sigma": sigma, "z_pre12": _log_ratio(closes[i-1], closes[i-13])/(sigma*math.sqrt(12)),
+            "z_pre96": _log_ratio(closes[i-1], closes[i-97])/(sigma*math.sqrt(96)),
+            "body": _log_ratio(bar.close, bar.open)/sigma, "range": _log_ratio(bar.high, bar.low)/sigma,
             "prior_completion_stratum": min(count, 2),
             "block": int((bar.close_time-evaluation_start)//timedelta(days=28)),
             "utc6h": bar.close_time.hour//6}

@@ -173,3 +173,17 @@ def test_ancestry_component_reports_its_full_population_and_actual_origin_span()
     assert component['latest_support']==max(g['latest_support'] for g in graph['direct_support_and_pair_components'])
     assert set(component['direct_component_ids'])=={g['component_id'] for g in graph['direct_support_and_pair_components']}
     assert graph['independent_sample_size'] is None
+
+
+def test_finite_extreme_prices_do_not_overflow_or_underflow_log_features():
+    _,event=fixture()
+    prices=[1e-250 if i%2==0 else 1e250 for i in range(900)]
+    bars=tuple(RecognitionCandle(str(i),'source',t(i),t(i+1),t(i+1),
+        prices[i-1] if i else prices[i],max(prices[i-1] if i else prices[i],prices[i])*1.001,
+        min(prices[i-1] if i else prices[i],prices[i])*.999,prices[i]) for i in range(900))
+    result=run(bars,[event()])
+    assert result['selection_summary']['feature_eligible']['chains']==1
+    assert result['cases'][0]['features']['sigma']>1000
+    import json
+    json.dumps(result,allow_nan=False)
+    assert not result['outcomes_calculated']
