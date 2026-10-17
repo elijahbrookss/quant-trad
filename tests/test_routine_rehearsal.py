@@ -57,7 +57,7 @@ def test_synthetic_package_api_matches_actual_package_verifier(tmp_path,monkeypa
 
 def test_workflow_keeps_generated_environment_private_and_runs_routine_path():
     workflow=yaml.safe_load((ROOT/'.github/workflows/test.yaml').read_text())
-    job=workflow['jobs']['deployment-contract']
+    job=workflow['jobs']['deployment-proof-build']
     setup=next(s for s in job['steps'] if s.get('name')=='Generate disposable operator environment')
     path=setup['env']['QT_SINGLE_NODE_ENV_FILE']
     assert setup['env']['QT_SERVER_ENV_FILE']==path

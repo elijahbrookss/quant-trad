@@ -41,10 +41,12 @@ elif '/attempts/1/jobs?' in path:
     sha = identity.read_text()
     names = ['pr-suite', 'frontend', 'deployment-contract', 'clean-database-bootstrap', 'deployment-rehearsal']
     names += ['committed-recovery (' + runtime + ')' for runtime in runtimes]
+    names += ['deployment-proof-build', 'deployment-proof-alerts', 'deployment-proof-lifecycle', 'deployment-proof-restore', 'deployment-proof-core']
+    names += ['deployment-proof-online (' + str(i) + ')' for i in range(6)]
     jobs = [dict(id=index+1, name=name, head_sha=sha, run_id=1, run_attempt=1,
         status='completed', conclusion='success', started_at='2026-10-10T01:00:00Z',
         completed_at='2026-10-10T02:00:00Z',
-        steps=[dict(name='Attest and pack disposable qualification evidence', conclusion='success')])
+        steps=[dict(name='Attest and pack disposable qualification evidence', conclusion='success'), dict(name='Attest complete deployment proof coverage', conclusion='success')])
         for index, name in enumerate(names)]
     if os.environ.get('QT_FIXTURE_PACKAGE'):
         for job in jobs:

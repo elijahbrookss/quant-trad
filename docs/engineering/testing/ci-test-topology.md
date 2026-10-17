@@ -16,7 +16,7 @@ for pull requests targeting `develop` or `main`.
 
 ## Current Workflow Topology
 
-The workflow defines nine jobs. `changes` computes requirements before the six
+The workflow defines fifteen jobs. `changes` computes requirements before the six
 existing qualification jobs and the new `docs` check. Those checks can run
 concurrently; `ci-required` always runs after their results. The numbering below
 identifies the six existing qualification jobs for reproduction.
@@ -80,30 +80,53 @@ accessibility conformance.
 
 ### 3. `deployment-contract`
 
-Runner: `ubuntu-latest`, with a 90-minute timeout.
+The stable `deployment-contract` check aggregates six independent proof job
+families. `deployment-proof-build` builds and source-attests production and test
+images once, collects the original explicit online selection, and publishes an
+immutable transport bound to source, run, attempt, archive SHA-256 and image IDs.
+The transport is provisional; it is not a qualified release package.
 
-The workflow steps are:
+Four separate runners own the unchanged alert, lifecycle/prepared-key recovery,
+application/current-and-frozen-reader restore, and core/storage-layout groups.
+`deployment-proof-online` assigns the complete collected node IDs to six shards,
+including individual parameter cases within the long controller file. At most
+four online shard runners execute concurrently. The scheduling seed comes from
+run 38999753104; new collected cases are included automatically. It never filters
+coverage. Each shard retains its own generated Docker project, credentials,
+internal network, database and source/history volumes. No tests share a database
+between shard runners. The real expiry and Timescale recovery waits are unchanged.
 
-1. `Checkout repository`;
-2. `Generate disposable operator environment` by running
-   `bash scripts/automation/server_deploy.sh init-env` with
-   `QT_SINGLE_NODE_ENV_FILE` bound to `qt-disposable.env` inside an explicitly
-   private runner-temp operator directory;
-3. `Validate shell and Compose contracts` by syntax-checking both server
-   scripts, computing the Git revision and source-tree hash, and running
-   `docker compose ... config --quiet`; and
-4. `Build production images with source attestation` by recomputing the
-   revision/tree hash and building `tsdb`, `backend`, `frontend`, and
-   `frontend-v2` from `docker/docker-compose.server.yml`.
+Every consumer checks the exact workflow checkout, source hash, run/attempt,
+transport checksum and loaded image identities. Prebuilt Compose overrides may
+only select these admitted image IDs in the two existing storage proof suites;
+no consumer rebuilds or pulls a substitute test image. Each prebuilt proof also
+renders the actual Compose model and refuses inherited build recipes, changed
+image IDs, pulls, host ports or a non-internal network. Local/default runner
+behavior remains unchanged.
 
-The job also proves Grafana email delivery and physical storage alert queries,
-then runs `python3 scripts/ci/test_server_core_recreation.py` after building.
-That smoke starts actual QT core images with disposable PostgreSQL/archive
-storage, checks initialization and health, cleanly stops the collector, and
-recreates services while verifying retained data and a fresh worker heartbeat.
-Enrollment is disabled and the runtime network is internal. It does not contact
-providers, deploy a host, mount the Docker socket into the backend, or validate
-an arbitrary historical schema upgrade.
+The aggregate requires all independent jobs to succeed and reads their retained
+receipts and diagnostic logs. It rejects missing/duplicate groups, missing or
+duplicate online cases/phases, wrong source/image/attempt, checksum drift,
+failures, cancellation and unexpected skips. Only the existing prepared-
+transaction case may skip with its exact max_prepared_transactions reason.
+It rechecks image identities before exporting the qualified routine package.
+The external exact-source admission helper also requires every expanded proof
+job and the successful aggregate attestation, rather than trusting a green
+wrapper alone. Partial diagnostics are uploaded on failure. The existing current
+and first-release committed recovery jobs remain separately mandatory.
+
+The fifteen job definitions expand to twenty-one jobs, including both recovery
+variants and all six online shards. `ci-required` keeps its stable name and
+computed scope; develop/main and PR release qualification remain full. Superseded
+feature/hotfix PR runs now cancel using `github.head_ref`, while protected-branch
+push behavior is preserved. There is no permission, protected-rule or production
+trigger change.
+
+Timing is a measured-trial question. Shard projections from one historical run
+exclude transport/build overhead and queue variance. The whole-workflow 20–25
+minute goal is not a performance claim until a complete instrumented run passes.
+`QT_CI_TEST_PHASES=1`, per-group wall time, setup/call/teardown outcomes and all
+original logs support the comparison.
 
 ### 4. `clean-database-bootstrap`
 
