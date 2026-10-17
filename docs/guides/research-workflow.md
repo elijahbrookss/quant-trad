@@ -52,6 +52,103 @@ does not change either.
 Reviewed 2026-10-12: general agent research guidance; no research outcome or
 operational authority is implied.
 
+## Writing Research For Human Inspection
+
+The portal is a reading surface; exact Check evidence remains the scientific
+record. Write the human explanation as part of research work, then inspect its
+actual rendering once before publication. This is an author/reviewer practice,
+not a new CI gate, schema, editor or research execution requirement.
+
+- **Title:** name the question or finding in ordinary words. Use spaces between
+  quantities and units. Put campaign codes, versions and hashes in existing
+  evidence/provenance fields, unless a short code materially disambiguates work.
+- **Study conclusion:** lead with what was learned and the operational research
+  decision. Aim for one short paragraph and, where useful, two to four supporting
+  bullets. Select only the numbers needed to understand the finding and its
+  limits. Do not turn the whole conclusion into a large-type technical report.
+- **Scope:** describe the actual assets, native timeframe, source, dates and
+  comparator. Distinguish recognition/warmup from evaluation windows and state
+  end-exclusive boundaries where material. A multi-asset Study need not acquire
+  a fictitious single symbol or interval just to fill a table cell.
+- **Limitations:** keep qualifications that change interpretation visible next
+  to the finding: insufficient support, selective populations, dependence,
+  exposure, missing inputs, inferred clocks, untested outcomes or confounding.
+  Do not bury these behind a disclosure or replace them with generic caveats.
+- **Observations:** use existing title/body to state the retained finding and
+  link its exact Check/review. Distinguish a reviewer-reported verification from
+  verification actually performed here. **Hypotheses:** state a testable proposed
+  relationship and comparator without implying a result. **Checks:** retain
+  typed definitions, parameters, outputs, units and exact hashes; give a readable
+  title, but do not rewrite their immutable evidence to simplify presentation.
+- Put full precision, complete counts, exclusions, reproduction identities and
+  method diagnostics in existing Check payloads, linked evidence, reports and
+  explicit technical detail. Human summaries may round for readability only
+  when units and the unrounded source are clear; never change an evidence value,
+  gate, denominator or verdict. Do not imply independent samples or profitability.
+
+### Formatting And Progressive Detail
+
+Separate ideas with blank lines. Prefer short descriptive headings and genuine
+lists for parallel findings, rather than a dense paragraph of comma-separated
+numbers. Meaning comes first; supporting numbers follow; exact evidence opens
+on demand. Do not rely on color, truncation or a tooltip to carry a limitation.
+
+Current portal behavior is plain escaped React text: conclusion and body preserve
+newlines, but scope/limitations collapse them. Markdown headings, list syntax and
+emphasis are not currently interpreted. Until a renderer change is separately
+reviewed, use readable plain paragraphs and literal bullet characters with real
+newlines, and check the resulting screen. Do not store literal backslash-n escape
+sequences as paragraph breaks.
+
+The smallest proposed renderer extension is a text-only block subset: blank-line
+paragraphs, shallow `- ` / `* ` lists and short `## ` headings mapped to semantic
+React elements, with consistent spacing. This is a proposal, not implemented
+support. Preserve the source string; never use raw HTML/`dangerouslySetInnerHTML`,
+execute embedded content, automatically decode escapes, or parse arbitrary
+Markdown. Keep links to evidence controlled by existing route components.
+Full rich text, nested markup, tables and an editor are unnecessary here.
+
+### Research Content And Operational Receipts
+
+Human-facing title/body/conclusion/scope are not an authorization log. Exclude
+user-message IDs, approval quotations, agent coordination, attempt accounting,
+PR/CI receipts and local paths unless the record explicitly documents that
+operational incident. Even there, lead with the failure and its consequence;
+put exact mechanics in existing evidence/receipt detail. Keep method provenance
+that changes scientific interpretation: fixed/predeclared rules, actual source
+and Dataset identity, missing data, replay status, and known-at assumptions.
+
+Retain approvals in existing custody/operator receipts and actual audit facilities
+that already own the operation. A publication has no arbitrary authorization field;
+do not invent one or misuse scientific-authority audit events. Link existing
+operational evidence when appropriate; never copy an entire permission transcript
+into a scientific conclusion. Presentation choices are not access controls:
+collapsing a section does not make private content private. Exports and historical
+versions retain their existing access rules and can still contain earlier prose.
+
+### One-Time Review And Historical Correction
+
+Read the title and first screen without opening technical detail. Confirm that a
+reader can identify the question, answer/decision, scope and central limitation.
+Inspect desktop and phone paragraphs, list spacing, long identifiers, units and
+empty states. Check that each displayed “not recorded”, “not applicable”, “multiple”
+or “unresolved” label describes the actual condition; never infer scope from prose
+or a campaign code automatically. Use existing authoritative instrument lookup
+when an explicit instrument ID is available, and preserve the ID/provenance.
+
+Before correcting history, inventory exact record IDs, selected revisions/hashes,
+incoming references and fields. Changing title/body/metadata changes reasoning
+content identity. Preserve original records and frozen snapshots. Use the existing append-only publication revision with `expected_previous_hash`
+for a published narrative correction; retain unchanged exact references when only
+the Study prose changes. Create a corrected Observation only if that referenced
+Observation also needs correction, as in the audited B2 case. Pin unchanged
+Check/evidence identities and retain previous versions. Do not silently edit an
+old conclusion, backfill metadata, alter a question adopted immutably, or treat a
+presentation correction as permission to rerun research. A new version alone does
+not remove old prose from History/export; any actual confidentiality issue needs
+separate scoped access/remediation review.
+
+
 ## 1. Begin With A Falsifiable Idea
 
 Start with a sentence about observable market behavior, not a Strategy name.

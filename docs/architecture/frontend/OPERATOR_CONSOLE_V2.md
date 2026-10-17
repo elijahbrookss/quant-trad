@@ -411,3 +411,17 @@ storage work itself. Missing status and blocked plans stay explicit.
 
 Physical policy activation remains unavailable until its executor and migration
 are implemented. See [storage management](../persistence/STORAGE_MANAGEMENT.md).
+
+
+## Human Narrative Readability Review
+
+The one-time authoring and visual-review guidance is in
+[Writing research for human inspection](../../guides/research-workflow.md#writing-research-for-human-inspection).
+The current narrative surface renders escaped plain text, not Markdown: conclusion
+and body preserve newlines; scope and limitations currently collapse them. A
+small semantic block renderer and consistent readable spacing are proposed for
+review, not implemented by this documentation change. Human explanations belong
+in existing title/body and versioned conclusion/scope/limitations fields; immutable
+Check evidence, technical identities and operational receipts retain their owners.
+Missing top-level Study metadata must not be presented as unknown underlying
+scientific evidence, nor automatically inferred from free text.
