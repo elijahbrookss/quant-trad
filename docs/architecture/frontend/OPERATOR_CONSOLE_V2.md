@@ -16,6 +16,9 @@ tags:
 code_paths:
   - portal/frontend/src/main-v2.jsx
   - portal/frontend/src/v2
+  - portal/frontend/src/features/research
+  - portal/backend/service/research/scope.py
+  - portal/backend/service/research/activity_range.py
   - portal/frontend/src/features/overview
   - portal/frontend/src/features/operations
   - portal/frontend/src/features/collectors
@@ -417,11 +420,39 @@ are implemented. See [storage management](../persistence/STORAGE_MANAGEMENT.md).
 
 The one-time authoring and visual-review guidance is in
 [Writing research for human inspection](../../guides/research-workflow.md#writing-research-for-human-inspection).
-The current narrative surface renders escaped plain text, not Markdown: conclusion
-and body preserve newlines; scope and limitations currently collapse them. A
-small semantic block renderer and consistent readable spacing are proposed for
-review, not implemented by this documentation change. Human explanations belong
-in existing title/body and versioned conclusion/scope/limitations fields; immutable
-Check evidence, technical identities and operational receipts retain their owners.
-Missing top-level Study metadata must not be presented as unknown underlying
-scientific evidence, nor automatically inferred from free text.
+The human-facing tab, filters and history say Summary; `?tab=interpretation`
+and existing versioned publication contracts remain compatible. A small escaped
+text renderer supports paragraphs, shallow lists, short headings and strong text
+without HTML, executable content, arbitrary Markdown or untrusted links. Scope
+and limitations use the same readable blocks as conclusions. Exact identity and
+machine terminology stay in disclosures; scientific qualifications remain visible.
+
+Explicit instrument IDs resolve in one batch through the existing catalog.
+Study detail projects only current metadata of directly referenced Checks from
+the selected summary, checking custody and matching stored result/evidence
+identities to each reference. It does not certify frozen scope from mutable root
+metadata. List enrichment uses latest references only: at most 1,000 direct refs
+and 64 distinct Checks per page; overflow is explicit. Each Study keeps its own
+reference identity/partial-state checks. Missing scope is not inferred from titles,
+multiple IDs are not collapsed just because symbols match, and catalog names do
+not replace frozen evidence identities. No metadata backfill is implicit.
+
+`GET /api/research/activity/range` accepts explicit timezone-bearing `from`/`to`
+and type, validates a positive range no longer than 366 days and applies `[from,to)`
+in SQL across all matching saved records. It returns UTC minute buckets through
+two hours, hour buckets through seven days, and day buckets thereafter, with
+at most 367 buckets. Checks use saved `created_at` after evaluation, hypotheses
+and Observations use creation time, and completed backtests use persisted
+`ended_at` with completed/backtest qualification. These are activity clocks, not
+market-data periods or publication approval times. Existing daily endpoints remain
+compatible. The range read uses the scoped 20-second control and five-second
+statement timeout/read-only repeatable-read session; client abort does not promise
+synchronous server cancellation. Actual PostgreSQL query/release latency is a
+separate qualification result.
+
+Overview offers Last 5 minutes, 2 hours, 24 hours, 7 days and custom native date/time
+inputs explicitly interpreted as UTC. Applying a relative range freezes absolute
+bounds in URL/cache identity; refresh moves the anchor. Changing activity type
+keeps the same bounds. Minute-level activity is never inferred from daily totals
+or the current inventory page. Empty, unavailable and cancelled reads remain
+distinct. No new research execution, acquisition, persistence or framework occurs.

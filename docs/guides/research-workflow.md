@@ -93,20 +93,17 @@ lists for parallel findings, rather than a dense paragraph of comma-separated
 numbers. Meaning comes first; supporting numbers follow; exact evidence opens
 on demand. Do not rely on color, truncation or a tooltip to carry a limitation.
 
-Current portal behavior is plain escaped React text: conclusion and body preserve
-newlines, but scope/limitations collapse them. Markdown headings, list syntax and
-emphasis are not currently interpreted. Until a renderer change is separately
-reviewed, use readable plain paragraphs and literal bullet characters with real
-newlines, and check the resulting screen. Do not store literal backslash-n escape
-sequences as paragraph breaks.
+The portal supports a small escaped text subset in Summary, Scope, Limitations
+and record bodies: blank-line paragraphs, shallow `- ` / `* ` / `• ` lists,
+`## ` headings and `**strong emphasis**`. Use real newlines, not literal
+backslash-n escape sequences. All qualifications remain rendered; long historical
+conclusions are not automatically truncated or interpreted as clean summaries.
 
-The smallest proposed renderer extension is a text-only block subset: blank-line
-paragraphs, shallow `- ` / `* ` lists and short `## ` headings mapped to semantic
-React elements, with consistent spacing. This is a proposal, not implemented
-support. Preserve the source string; never use raw HTML/`dangerouslySetInnerHTML`,
-execute embedded content, automatically decode escapes, or parse arbitrary
-Markdown. Keep links to evidence controlled by existing route components.
-Full rich text, nested markup, tables and an editor are unnecessary here.
+The renderer maps these blocks to semantic React elements with consistent
+spacing. It preserves the source string and never uses raw HTML, executes embedded
+content, automatically decodes escapes, parses arbitrary Markdown or turns
+untrusted text into links. Evidence links remain controlled by existing route
+components. Full rich text, nested markup, tables and an editor are unnecessary.
 
 ### Research Content And Operational Receipts
 

@@ -77,3 +77,7 @@ export function fetchRunResearchEvidence(runId, options = {}) {
 export function fetchResearchComparison(left, right, options = {}) {
   return request(`/api/research/browse/compare${buildQuery({ left, right })}`, options)
 }
+
+export function fetchActivityRange(type, range, options = {}) {
+  return request(`/api/research/activity/range${buildQuery({ type, ...range })}`, { cache: true, ...options })
+}

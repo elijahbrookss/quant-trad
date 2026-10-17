@@ -22,8 +22,8 @@ describe('Generic Study inspection', () => {
   it('keeps legacy deep links, separates conclusion from lifecycle, and defers evidence/images', async () => {
     mount()
     expect(await screen.findByText('Inconclusive finding')).toBeVisible()
-    expect(screen.getByText('Limitations: Insufficient outcomes')).toBeVisible()
-    expect(screen.getByText(/scientific validity and actual replay/)).toBeVisible()
+    expect(screen.getByText('Insufficient outcomes')).toBeVisible()
+    expect(screen.getByText(/Saved summary, not scientific certification/)).toBeVisible()
     expect(api.fetchResearchRelationships).not.toHaveBeenCalled()
     expect(api.fetchResearchImages).not.toHaveBeenCalled()
     expect(api.fetchResearchRecord).not.toHaveBeenCalled()
@@ -51,7 +51,7 @@ describe('Generic Study inspection', () => {
     expect(oldSignal.aborted).toBe(true)
     await act(async () => finish(summary('question')))
     expect(screen.queryByText('Question question')).not.toBeInTheDocument()
-    expect(screen.getByText('No published interpretation')).toBeVisible()
+    expect(screen.getByText('No published summary')).toBeVisible()
   })
   it('shows section errors and missing raw-input disclosure before export', async () => {
     api.fetchResearchExportPreflight.mockResolvedValue({ file_count: 2, uncompressed_bytes: 200, selected_revision: 1, files: [], exclusions: ['Raw OHLCV not included.'] })

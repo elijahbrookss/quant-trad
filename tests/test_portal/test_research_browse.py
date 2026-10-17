@@ -33,6 +33,7 @@ def test_inventory_selects_metadata_not_full_payload_and_bounds_page(monkeypatch
     def session():
         yield Session()
     monkeypatch.setattr(browse, "read_session", session)
+    monkeypatch.setattr(browse.scope_projection, "inventory", lambda *args: None)
     result = browse.inventory(kind="study", limit=2, q="100%_BTC")
     assert len(result["items"]) == 2 and result["total"] == 654 and result["next_cursor"]
     sql = str(statements[-1].compile(dialect=postgresql.dialect()))
