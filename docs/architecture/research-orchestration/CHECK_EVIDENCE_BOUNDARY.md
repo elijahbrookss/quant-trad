@@ -20,6 +20,8 @@ code_paths:
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
   - src/research_science/reversal_selection.py
+  - src/research_science/reversal_six_block_selection.py
+  - portal/backend/service/research/reversal_six_block_selection_evaluator.py
   - portal/backend/service/research/reversal_selection_evaluator.py
   - portal/backend/service/research/reversal_first_passage_evaluator.py
   - portal/backend/service/research/reversal_recognition_evaluator.py
@@ -1052,3 +1054,19 @@ change the candle timeframe. Historical derived evidence and replay definitions
 remain immutable and accurately labeled; this policy adds no subsystem or
 automatic source substitution. Record any source-policy amendment before
 selection, without changing a historical result.
+
+
+## Fixed six-block reversal selection extension
+
+`raw_forward_outcome@12` / `reversal_selection_only.v2` extends the decision
+range to February1-July19,2025, retaining January1 recognition origin and six
+28-day blocks. The shared selection kernel keeps v1 output unchanged. A separate
+B2 identity-namespace ordering key preserves same-clock matching order while
+retaining actual expanded event IDs. Stage view v3 removes only duplicated
+availability fields and decodes losslessly to v2. Cases/pairs appear once;
+old/new/combined summaries use separately normalized completion-moment weights
+and report their own direct and ancestry-aware dependence. No outcomes or
+automatic follow-up are supplied. The fixed19,104bar ceiling is explicit;
+existing comparison/time/input/result bounds fail rather than truncate or expand.
+See the [six-block procedure](../../guides/reversal-six-block-selection.md) and
+its [fixed protocol](../../guides/reversal-six-block-selection-v1.json).

@@ -148,11 +148,12 @@ def _components(cases, pairs, *, recognition_origin):
         "independent_sample_size": None}
 
 
-def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
-                       checkpoint: Callable[[], None] = lambda: None,
-                       max_comparisons=20000000):
+def _select_comparisons(candles, events, *, evaluation_start, evaluation_end,
+                        rules, checkpoint: Callable[[], None] = lambda: None,
+                        max_comparisons=20000000, order_keys=None,
+                        timing_view=stage_availability, population_ranges=()):
     """Run only inside the admitted Check. No access after own decision for features."""
-    if not candles or len(candles) > RULES["limits"]["candles"]:
+    if not candles or len(candles) > rules["limits"]["candles"]:
         raise ValueError("reversal_selection_limit: invalid candle count")
     if type(max_comparisons) is not int or not 1 <= max_comparisons <= 20000000:
         raise ValueError("reversal_selection_limit: invalid comparison resource bound")
@@ -211,7 +212,8 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
         if i not in completed_indices:
             eligible_controls[(f["block"], f["utc6h"], f["prior_completion_stratum"])].append(i)
     cases, pairs, used, comparisons = [], [], set(), 0
-    for event in sorted(events, key=lambda e: (e.known_at, e.event_id)):
+    for event in sorted(events, key=lambda e: (e.known_at,
+            order_keys[e.event_id] if order_keys is not None else e.event_id)):
         checkpoint()
         if not evaluation_start <= event.known_at < evaluation_end:
             continue
@@ -224,8 +226,10 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
             "boundary_geometry": {"E": closes[i], "L": trailing_lows(n)[i],
                 "upper": closes[i]+(closes[i]-trailing_lows(n)[i]), "known_at": plain(event.known_at)},
             "support_start": plain(candles[start_index].open_time), "support_end": plain(event.known_at+12*step),
-            "features": geometry(i, n), "timing": stage_availability(event),
+            "features": geometry(i, n), "timing": timing_view(event),
             "source_reference_ids": [s.event_id for s in event.source_events], "match_status": "unmatched"}
+        if order_keys is not None:
+            record["b2_compatibility_order_key"] = order_keys[event.event_id]
         cases.append(record)
         if record["features"] is None:
             record["match_status"] = "invalid_features_or_risk"
@@ -276,15 +280,45 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
                 "upper": closes[j]+(closes[j]-trailing_lows(n)[j]), "known_at": plain(candles[j].known_at)},
             "support_start": plain(support_start), "support_end": plain(support_end), "features": g}
         pairs.append({"event_id": event.event_id, "decision_at": record["decision_at"], "distance_squared": key[0], "control": control})
+    result = _summarize_selection(cases, pairs, candles=candles,
+        completed_indices=completed_indices, base=base, evaluation_start=evaluation_start,
+        evaluation_end=evaluation_end, comparisons=comparisons, rules=rules)
+    if population_ranges:
+        result["populations"] = {}
+        for name, start, end in population_ranges:
+            subset = [r for r in cases if start <= by_close_time(r["decision_at"]) < end]
+            members = {r["event_id"] for r in subset}
+            selected = [p for p in pairs if p["event_id"] in members]
+            examined = sum(sum(r.get("candidate_rejections", {}).values()) +
+                           r.get("eligible_candidate_count", 0) for r in subset)
+            summary = _summarize_selection(subset, selected, candles=candles,
+                completed_indices=completed_indices, base=base, evaluation_start=start,
+                evaluation_end=end, comparisons=examined, rules=rules, attach_weights=False)
+            result["populations"][name] = {
+                "evaluation_range": {"start": plain(start), "end_exclusive": plain(end)},
+                "selection_summary": summary["selection_summary"], "dependence": summary["dependence"],
+                "weighting": "Summary weights normalize within this population;root row weights normalize across combined population."}
+    return result
+
+
+def by_close_time(value):
+    from .recognition import utc
+    return utc(value)
+
+
+def _summarize_selection(cases, pairs, *, candles, completed_indices, base,
+                         evaluation_start, evaluation_end, comparisons, rules,
+                         attach_weights=True):
     matched = [r for r in cases if r["match_status"] == "matched"]
     eligible = [r for r in cases if r["features"]]
     all_weights, eligible_weights, matched_weights = moment_weights(cases), moment_weights(eligible), moment_weights(matched)
     groups, matched_groups = Counter(r["decision_at"] for r in cases), Counter(r["decision_at"] for r in matched)
-    for record in cases:
-        record["full_population_moment_weight"] = all_weights[record["event_id"]]
-        record["matched_population_moment_weight"] = matched_weights.get(record["event_id"], 0.)
-    for pair in pairs:
-        pair["completion_moment_weight"] = matched_weights[pair["event_id"]]
+    if attach_weights:
+        for record in cases:
+            record["full_population_moment_weight"] = all_weights[record["event_id"]]
+            record["matched_population_moment_weight"] = matched_weights.get(record["event_id"], 0.)
+        for pair in pairs:
+            pair["completion_moment_weight"] = matched_weights[pair["event_id"]]
     def counts(records):
         return {"chains": len(records), "completion_clocks": len({r["decision_at"] for r in records})}
     strata = defaultdict(lambda: {"all": 0, "matched": 0, "full_population_moment_mass": 0.,
@@ -308,7 +342,7 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
         group["any_matched_completion_clocks"] = len(group.pop("matched_clocks"))
     features = ("sigma", "r", "z_pre12", "q", "z_pre96", "body", "range", "duration_hours")
     controls = [{"event_id": p["event_id"], "features": p["control"]["features"]} for p in pairs]
-    result = {"rules": RULES, "outcomes_calculated": False, "cases": cases, "pairs": pairs,
+    result = {"rules": rules, "outcomes_calculated": False, "cases": cases, "pairs": pairs,
         "selection_summary": {"all": counts(cases), "feature_eligible": counts(eligible),
             "matched": counts(matched), "fully_matched_completion_clocks": sum(matched_groups[t] == k for t, k in groups.items()),
             "partially_matched_completion_clocks": sum(0 < matched_groups[t] < k for t, k in groups.items()),
@@ -320,7 +354,7 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
             "candidate_rejections": dict(sum((Counter(r.get("candidate_rejections", {})) for r in cases), Counter())),
             "candidate_comparisons": comparisons, "strata_chain_counts": dict(sorted(strata.items())),
             "control_universe": {"ordinary_clocks": sum(evaluation_start <= b.close_time < evaluation_end and i not in completed_indices for i, b in enumerate(candles)),
-                "ordinary_clocks_with_valid_prior_features": sum(len(group) for group in eligible_controls.values()),
+                "ordinary_clocks_with_valid_prior_features": sum(evaluation_start <= candles[i].close_time < evaluation_end and i not in completed_indices for i in base),
                 "per_case_n_risk_and_support": "Eligibility/rejections recorded separately per case;control r depends on case n"},
             "context_distributions": {name: {"all_moments": _distribution(cases, all_weights, name),
                 "feature_eligible_moments": _distribution(eligible, eligible_weights, name),
@@ -331,3 +365,12 @@ def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
                        "matched_cases_and_controls": _components(matched, pairs, recognition_origin=plain(candles[0].open_time))}}
     result["selection_manifest_hash"] = stable_hash({"rules": RULES, "cases": cases, "pairs": pairs, "dependence": result["dependence"]})
     return result
+
+
+def select_comparisons(candles, events, *, evaluation_start, evaluation_end,
+                       checkpoint: Callable[[], None] = lambda: None,
+                       max_comparisons=20000000):
+    """Historical v1 entry point; defaults and serialized scientific output unchanged."""
+    return _select_comparisons(candles, events, evaluation_start=evaluation_start,
+        evaluation_end=evaluation_end, rules=RULES, checkpoint=checkpoint,
+        max_comparisons=max_comparisons)
