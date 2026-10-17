@@ -821,8 +821,11 @@ def get_run_research_evidence(run_id: str) -> dict[str, Any]:
 
 
 def compare_research_checks(left_check_id: str, right_check_id: str) -> dict[str, Any]:
-    left = repository.get_item(left_check_id)
-    right = repository.get_item(right_check_id)
+    return compare_research_check_records(repository.get_item(left_check_id), repository.get_item(right_check_id))
+
+
+def compare_research_check_records(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    """Same saved-output comparison math, over caller-admitted exact snapshots."""
     if left.get("kind") != "research_check" or right.get("kind") != "research_check":
         raise ValueError("research compare requires two research_check items")
     left_result = _check_result(left)

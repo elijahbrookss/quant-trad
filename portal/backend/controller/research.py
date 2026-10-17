@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -20,6 +21,83 @@ from ..service.research import publication as research_publication
 from ..service.research import images as research_images
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+from core.execution_control import ExecutionControl, ExecutionBudgetExceededError, controlled_execution
+from sqlalchemy.exc import DBAPIError
+from ..service.research import browse as research_browse
+from ..service.research import evidence_export as research_export
+
+
+def _read_call(handler, *args, _value_error_status=409, **kwargs):
+    control = ExecutionControl()
+    control.limit(seconds=20)
+    try:
+        with controlled_execution(control):
+            return handler(*args, **kwargs)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status = 403 if "inaccessible" in message else 429 if "export_busy" in message else _value_error_status
+        raise HTTPException(status, message) from exc
+    except (DBAPIError, ExecutionBudgetExceededError) as exc:
+        logger.warning("research_read_unavailable | operation=%s phase=read error_type=%s", handler.__name__, type(exc).__name__)
+        raise HTTPException(503, "Research read unavailable or deadline exceeded; retry this section") from exc
+
+
+@router.get("/browse")
+def browse_research(kind: str = Query("study"), q: str = Query("", max_length=200),
+    status: Optional[str] = Query(None, max_length=64), symbol: Optional[str] = Query(None, max_length=64),
+    timeframe: Optional[str] = Query(None, max_length=64), publication_state: Optional[str] = Query(None),
+    limit: int = Query(25, ge=1, le=100), cursor: Optional[str] = Query(None, max_length=2048)):
+    return _read_call(research_browse.inventory, kind=kind, q=q, status=status, symbol=symbol,
+        timeframe=timeframe, publication_state=publication_state, limit=limit, cursor=cursor)
+
+
+@router.get("/browse/compare")
+def research_comparison(left: str = Query(..., min_length=1, max_length=64), right: str = Query(..., min_length=1, max_length=64)):
+    return _read_call(research_export.comparison, left, right)
+
+
+@router.get("/overview")
+def research_overview():
+    return _read_call(research_browse.overview)
+
+
+@router.get("/items/{item_id}/summary")
+def research_item_summary(item_id: str, revision: Optional[int] = Query(None, ge=1)):
+    return _read_call(research_browse.detail, item_id, revision)
+
+
+@router.get("/items/{item_id}/relationships")
+def research_item_relationships(item_id: str, limit: int = Query(50, ge=1, le=100)):
+    return _read_call(research_browse.relationships, item_id, limit)
+
+
+@router.get("/items/{item_id}/record")
+def research_item_record_download(item_id: str):
+    item = _read_call(research_export.record_snapshot, item_id)
+    return Response(research_export.json_bytes(item), media_type="application/json", headers={
+        "Content-Disposition": 'attachment; filename="research-record.json"',
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+
+
+@router.get("/items/{item_id}/export/preflight")
+def research_export_preflight(item_id: str, revision: Optional[int] = Query(None, ge=1),
+    publication_hash: Optional[str] = Query(None, max_length=128)):
+    return _read_call(research_export.preflight, item_id, revision, publication_hash)
+
+
+@router.get("/items/{item_id}/export/content")
+def research_export_content(item_id: str, revision: Optional[int] = Query(None, ge=1),
+    publication_hash: Optional[str] = Query(None, max_length=128)):
+    content = _read_call(research_export.bundle, item_id, revision, publication_hash)
+    return Response(content, media_type="application/zip", headers={
+        "Content-Disposition": 'attachment; filename="research-evidence.zip"',
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+
+
 
 
 class ResearchImageRequest(BaseModel):
@@ -47,12 +125,12 @@ def attach_research_image(item_id: str, body: ResearchImageRequest) -> Dict[str,
 
 @router.get("/items/{item_id}/images")
 def list_research_images(item_id: str) -> Dict[str, Any]:
-    return _image_call(research_images.list_images, item_id)
+    return _read_call(research_images.list_images, item_id)
 
 
 @router.get("/items/{item_id}/images/{image_id}/content")
 def get_research_image_content(item_id: str, image_id: str) -> Response:
-    content, manifest = _image_call(research_images.get_content, item_id, image_id)
+    content, manifest = _read_call(research_images.get_content, item_id, image_id)
     return Response(content, media_type=manifest["media_type"], headers={
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -369,10 +447,8 @@ def get_research_activity(
     """Return a complete zero-filled UTC activity projection."""
 
     try:
-        return research_service.get_research_activity(
-            activity_type=type,
-            days=days,
-        )
+        return _read_call(research_service.get_research_activity,
+            activity_type=type, days=days, _value_error_status=400)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

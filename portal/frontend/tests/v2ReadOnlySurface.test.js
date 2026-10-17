@@ -60,11 +60,12 @@ test('v2 UI surface never imports bot-mutation adapter functions', () => {
   assert.deepEqual(offenders, [])
 })
 
-test('v2 primary navigation is bounded to Overview and Operations', () => {
+test('v2 primary navigation is research-centered with compatible exact routes', () => {
   const app = source(path.join('v2', 'AppV2.jsx'))
   const roomBlock = app.slice(app.indexOf('const ROOMS'), app.indexOf('function initialSidebarCollapsed'))
   assert.match(roomBlock, /Overview/)
-  assert.match(roomBlock, /Operations/)
+  assert.match(roomBlock, /Studies/)
+  assert.doesNotMatch(roomBlock, /Operations/)
   assert.match(app, /qt2-sidebar-toggle/)
   assert.match(app, /SIDEBAR_STORAGE_KEY/)
   assert.doesNotMatch(roomBlock, /Fleet|Studio|Research|Reports/)
