@@ -55,6 +55,13 @@ def browse_research(kind: str = Query("study"), q: str = Query("", max_length=20
         timeframe=timeframe, publication_state=publication_state, limit=limit, cursor=cursor)
 
 
+@router.get("/activity/range")
+def research_activity_range(type: str = Query("checks_completed"),
+    start: str = Query(..., alias="from", max_length=64), end: str = Query(..., alias="to", max_length=64)):
+    from ..service.research.activity_range import activity
+    return _read_call(activity, type, start, end, _value_error_status=400)
+
+
 @router.get("/browse/compare")
 def research_comparison(left: str = Query(..., min_length=1, max_length=64), right: str = Query(..., min_length=1, max_length=64)):
     return _read_call(research_export.comparison, left, right)

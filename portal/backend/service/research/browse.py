@@ -13,6 +13,7 @@ from sqlalchemy.orm import aliased
 from portal.backend.db.models import ResearchItemRecord as Item, ResearchLinkRecord as Link
 from portal.backend.db.session import db
 from . import publication
+from . import scope as scope_projection
 
 KINDS = {"study", "research_check", "observation", "hypothesis"}
 SCALARS = ("id", "kind", "title", "status", "symbol", "instrument_id", "timeframe",
@@ -95,8 +96,10 @@ def inventory(*, limit=25, cursor=None, **filters):
     with read_session() as session:
         total = session.scalar(select(func.count()).select_from(Item).where(*where))
         rows = session.execute(query.order_by(Item.created_at.desc(), Item.id.desc()).limit(limit + 1)).all()
+        items = [compact(row) for row in rows[:limit]]
+        scope_projection.instruments(items, session)
+        scope_projection.inventory(items, session)
     more = len(rows) > limit
-    items = [compact(row) for row in rows[:limit]]
     next_cursor = None
     if more:
         last = rows[limit - 1]
@@ -174,10 +177,12 @@ def detail(item_id: str, revision: int | None = None):
                 raise KeyError("Study interpretation revision not found")
         elif revision is not None:
             raise KeyError("Study has no interpretation revision")
+        scope_projection.instruments([item], session)
+        scope_context = scope_projection.context(item, selected, session)
         if selected:
             selected = {**{key: selected.get(key) for key in ("revision", "publication_hash", "conclusion", "scope", "limitations", "published_at", "completion_meaning")}, "references": [{key: value for key, value in ref.items() if key not in {"snapshot", "relationships"}} for ref in selected["references"]]}
     return {"schema_version": "research_detail.v1", "item": item, "question": contract.get("question") if contract else None,
-            "publication": selected, "history": history}
+            "publication": selected, "history": history, "scope": scope_context}
 
 
 def relationships(item_id: str, limit=50):
@@ -198,5 +203,7 @@ def relationships(item_id: str, limit=50):
         for row in rows[:limit]:
             if row.id:
                 _assert_item_access(row.id, session)
+        related = [compact(row) for row in rows[:limit]]
+        scope_projection.instruments(related, session)
     return {"schema_version": "research_relationships.v1", "item_id": item_id,
-            "items": [compact(row) for row in rows[:limit]], "truncated": len(rows) > limit, "limit": limit}
+            "items": related, "truncated": len(rows) > limit, "limit": limit}
