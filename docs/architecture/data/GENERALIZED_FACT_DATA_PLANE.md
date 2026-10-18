@@ -1591,9 +1591,13 @@ table lock causes a safe retry rather than a queued ingestion stall.
 
 The audit count of overlapping Dataset bindings first uses the already verified
 archive-series bounds to exclude unrelated ranges, then checks exact canonical
-headers and each binding's frozen commit cutoff. Bounds are conservative: gaps
-are not matches, range ends stay exclusive, and placement day is not observation
-time. This reuses the existing catalog after complete evidence checks; it adds
+headers and each binding's frozen commit cutoff. Overlapping page bounds form
+one conservative observation envelope per binding, restricting the indexed
+header seek to that envelope rather than the full Dataset window. The page's
+last observation is inclusive; the Dataset range end remains exclusive. Grouping
+retains Dataset identity, so identical windows in distinct frozen Datasets still
+count separately. Bounds can contain gaps, which still require exact header
+matches, and placement day is not observation time. This reuses the existing catalog after complete evidence checks; it adds
 no authority to delete and does not exempt pinned data from preservation.
 
 The only destructive statement is `DROP TABLE` for that single daily hot-payload
