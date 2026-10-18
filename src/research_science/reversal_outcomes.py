@@ -47,10 +47,24 @@ def first_passage(event: RecognitionEvent, candles: tuple[RecognitionCandle, ...
         raise ValueError("reversal_outcome_invalid: completion anchor/path unavailable")
     low = min(c.low for c in formation)
     entry = anchor.close
+    return first_passage_path(anchor_at=event.occurred_at, known_at=event.known_at,
+        entry=entry, low=low, source_identity_key=event.context.source_identity_key,
+        timeframe_seconds=event.context.timeframe_seconds, by_open=by_open,
+        evaluation_end=evaluation_end, checkpoint=checkpoint)
+
+
+def first_passage_path(*, anchor_at, known_at, entry, low, source_identity_key,
+                       timeframe_seconds, by_open, evaluation_end, checkpoint=None):
+    """Shared path calculation for a locked observational anchor and barriers.
+
+    The caller owns formation/control geometry. This function does not recognize
+    events, select pairs, infer intrabar ordering or change the fixed horizon.
+    """
+    step = timedelta(seconds=timeframe_seconds)
     upper = entry+(entry-low)
-    nominal_end = event.occurred_at+HORIZON_BARS*step
-    result = {"anchor_price": entry, "anchor_known_at": plain(anchor.known_at),
-              "formation_low": low, "formation_low_known_at": plain(event.known_at),
+    nominal_end = anchor_at+HORIZON_BARS*step
+    result = {"anchor_price": entry, "anchor_known_at": plain(known_at),
+              "formation_low": low, "formation_low_known_at": plain(known_at),
               "continuation_level": upper if math.isfinite(upper) else None, "failure_level": low,
               "nominal_end": plain(nominal_end), "observed_bars": 0}
 
@@ -58,21 +72,21 @@ def first_passage(event: RecognitionEvent, candles: tuple[RecognitionCandle, ...
         return {**result, "classification": label, "reason": reason, "outcome_known_at": plain(known)}
 
     if entry <= low:
-        return finish("unresolved", "invalid_nonpositive_formation_risk", event.known_at)
+        return finish("unresolved", "invalid_nonpositive_formation_risk", known_at)
     if not math.isfinite(upper):
-        return finish("unresolved", "invalid_nonfinite_continuation_barrier", event.known_at)
+        return finish("unresolved", "invalid_nonfinite_continuation_barrier", known_at)
 
     for offset in range(HORIZON_BARS):
         if checkpoint:
             checkpoint()
-        opened = event.occurred_at+offset*step
+        opened = anchor_at+offset*step
         # Input opens are [origin,end);a final candle closing at end is usable.
         if opened >= evaluation_end:
             return finish("unresolved", "evaluation_boundary", None)
         bar = by_open.get(opened)
         if bar is None:
             return finish("unresolved", "candle_missing", None)
-        if bar.source_identity_key != event.context.source_identity_key or bar.known_at != bar.close_time:
+        if bar.source_identity_key != source_identity_key or bar.known_at != bar.close_time:
             return finish("unresolved", "source_or_close_availability_mismatch", None)
         result["observed_bars"] += 1
         up, down = bar.high >= upper, bar.low <= low
@@ -80,7 +94,7 @@ def first_passage(event: RecognitionEvent, candles: tuple[RecognitionCandle, ...
             return finish("unresolved", "intrabar_order_unknown", bar.known_at)
         if up or down:
             return finish("continuation" if up else "failure", "first_touch", bar.known_at)
-    return finish("neither", "no_touch_in_complete_horizon", by_open[event.occurred_at+(HORIZON_BARS-1)*step].known_at)
+    return finish("neither", "no_touch_in_complete_horizon", by_open[anchor_at+(HORIZON_BARS-1)*step].known_at)
 
 
 def overlap_components(events: tuple[RecognitionEvent, ...]) -> tuple[dict, ...]:
