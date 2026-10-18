@@ -19,6 +19,8 @@ code_paths:
   - src/research_science/recognition.py
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
+  - src/research_science/reversal_matched_progress.py
+  - portal/backend/service/research/reversal_matched_progress_evaluator.py
   - src/research_science/reversal_matched_outcomes.py
   - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
   - src/research_science/reversal_selection.py
@@ -1092,3 +1094,17 @@ is retained. Saved selection coverage and support/ancestry dependence remain
 visible; there is no coverage gate or independent-trial inference. Historical
 first-passage wrappers, definitions and results are unchanged. See the
 [fixed consumer procedure](../../guides/reversal-matched-outcomes.md).
+
+
+## Saved BTC target progress
+
+`raw_forward_outcome@15` consumes the exact v12 selection and v13 first-passage
+Checks on their identical original frozen input. It retains original classes,
+pairs, weights and barriers, verifies the saved classes through the shared
+first-passage kernel, then reads all twelve bars for uncapped target progress.
+Full-window progress may occur after failure. Pre-failure OHLC ordering is
+reported as conservative bounds. Partial horizons retain observed lower bounds,
+counts and original mass outside complete-window distributions. Fixed quarter
+bins and weighted quantiles are post-outcome descriptions, not optimized targets.
+No schema, provider, acquisition or UI changes are introduced. Historical methods
+and evidence stay unchanged. See the [fixed procedure](../../guides/reversal-matched-progress.md).

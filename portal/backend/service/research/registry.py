@@ -36,6 +36,7 @@ from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
 from .reversal_selection_evaluator import (ReversalSelectionEvaluator, SCHEMA as SELECTION_SCHEMA, RULES as SELECTION_RULES, normalize_configuration as normalize_selection_configuration)
 from .reversal_six_block_selection_evaluator import (ReversalSixBlockSelectionEvaluator, SCHEMA as SIX_BLOCK_SCHEMA, RULES as SIX_BLOCK_RULES, normalize_configuration as normalize_six_block_configuration)
+from .reversal_matched_progress_evaluator import (ReversalMatchedProgressEvaluator, SCHEMA as MATCHED_PROGRESS_SCHEMA, RULES as MATCHED_PROGRESS_RULES, normalize_configuration as normalize_matched_progress_configuration)
 from .reversal_matched_outcomes_evaluator import (ReversalMatchedOutcomesEvaluator, SCHEMA as MATCHED_OUTCOME_SCHEMA, RULES as MATCHED_OUTCOME_RULES, normalize_configuration as normalize_matched_outcomes_configuration)
 from .reversal_first_passage_evaluator import (ReversalFirstPassageEvaluator,
     SCHEMA as FIRST_PASSAGE_SCHEMA, RULES as FIRST_PASSAGE_RULES,
@@ -427,10 +428,23 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_matched_progress = ReversalMatchedProgressEvaluator()
+CHECK_REGISTRY.register_evaluator(_matched_progress)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="15", evaluator_id=_matched_progress.evaluator_id,
+    evaluator_version="15", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "saved_check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": MATCHED_PROGRESS_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive", "progress_rules": MATCHED_PROGRESS_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v13 pairs."""
+    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v13 and v15 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "15"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -1013,7 +1027,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("13" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("15" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == MATCHED_PROGRESS_SCHEMA
+            else "13" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == MATCHED_OUTCOME_SCHEMA
             else "12" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == SIX_BLOCK_SCHEMA
@@ -1079,7 +1095,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "15"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1134,6 +1150,11 @@ def materialize_check_definition(
         raise ValueError(
             "event_fact_check_invalid: fact_snapshot does not support reset_rewarm"
         )
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "15":
+        outcomes = normalize_matched_progress_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("matched_progress_invalid: no rewarm or scientific assertions")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "13":
         outcomes = normalize_matched_outcomes_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)

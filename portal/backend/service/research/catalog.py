@@ -369,7 +369,12 @@ _EXAMPLES["raw_forward_outcome@13"].update(mode="evidence", dataset_id=MATCHED_D
     detector=deepcopy(MATCHED_DETECTOR), outcomes=deepcopy(MATCHED_OUTCOMES))
 _EXAMPLES["raw_forward_outcome@13"]["scope"]["instrument_id"] = MATCHED_INSTRUMENT_ID
 
+from .reversal_matched_progress_evaluator import OUTCOMES as PROGRESS_OUTCOMES
+_EXAMPLES["raw_forward_outcome@15"] = deepcopy(_EXAMPLES["raw_forward_outcome@13"])
+_EXAMPLES["raw_forward_outcome@15"]["outcomes"] = deepcopy(PROGRESS_OUTCOMES)
+
 _PURPOSES = {
+    "raw_forward_outcome@15": "Describe maximum original-target progress on the fixed saved BTC pairs; full-window versus pre-failure bounds, censoring, fixed quarter bins and original weights; no target optimization.",
     "raw_forward_outcome@13": "Describe twelve-bar first passages on the999saved BTC B3pairs with exact selected barriers and weights;old/new/combined views,no rematching or independent-trial inference.",
     "raw_forward_outcome@12": "Assess the fixed six-block reversal comparison extension without outcomes; report old,new,combined coverage and dependence with B2-compatible tie order and lossless compact timing.",
     "raw_forward_outcome@11": "Assess one fixed smaller-design completed-reversal comparison population without outcomes;equal completion-moment weights,all chains,explicit exclusions and dependence;no numeric coverage pass gates.",
@@ -468,6 +473,10 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             fields = {key: value for key, value in fields.items() if key in {"scope", "assertions[]", "gap_rewarm_bars"}}
             fields["scope"]["constraints"] = "Instrument and Candle Stats IDs are bindable; parameters remain pinned. Fixed 1m, 200-bar initialization, whole-minute UTC boundaries, single calendar year, <=370 days including seed, no outcome tail."
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
+        return fields
+    if family == "raw_forward_outcome" and version == "15":
+        fields = _settings_fields(family, "13")
+        fields["outcomes"] = {"fixed": deepcopy(PROGRESS_OUTCOMES), "meaning": "Exact saved selection and first-passage references; fixed twelve-bar descriptive progress; no new target or selection."}
         return fields
     if family == "raw_forward_outcome" and version == "13":
         return {"scope": {"constraints": "Exact saved BTC B3 scope and original frozen Dataset; evidence mode only."},
@@ -675,6 +684,10 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["outcomes"] = {"type": "object", "unit": "candidate/event counts", "meaning": "Funnel, stage/status/terminal/reason counts and lifecycle-contract issues; not predictive outcomes."}
     elif family == "run_signal_summary":
         fields["outcomes"] = {"type": "object", "unit": "record counts", "meaning": "Declared buckets, decision states and linked trade counts from existing run evidence."}
+    elif family == "raw_forward_outcome" and version == "15":
+        fields["sample_count"] = {"type": "integer", "meaning": "Matched completion clocks; not independent trials."}
+        fields["pairs"] = {"type": "array", "meaning": "Saved identities, weights and original classes with full-window maxima and conservative pre-failure bounds; censored paths retained."}
+        fields["progress_comparison"] = {"type": "object", "meaning": "Old/new/combined formations and controls, all and originally neither; original-weight quantiles, fixed quarter bins and explicit missing mass."}
     elif family == "raw_forward_outcome" and version == "13":
         fields["sample_count"] = {"type": "integer", "meaning": "Matched completion moments; not independent trials."}
         fields["pairs"] = {"type": "array", "meaning": "Saved pair identities and weights; both arms retain first-passage classes and unresolved reasons."}
@@ -804,7 +817,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),
