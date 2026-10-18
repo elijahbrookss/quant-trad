@@ -747,3 +747,43 @@ discover `raw_forward_outcome` version11 and read
 matched/excluded populations, completion-moment weights and dependence without
 forward outcomes, arbitrary coverage gates or repeated matching adjustments.
 It does not acquire data or relax canonical derivation resource limits.
+
+
+## Reusing Check recipes
+
+Start with `qt research check definitions` and
+`qt research check definition <family> --version <version>`. The same read-only
+catalog is available through MCP `list_research_check_definitions` and
+`get_research_check_definition`. Settings/examples and returned-field metadata
+come from the existing backend catalog; discovery never prepares data or runs
+science. The `discovery` annotation identifies fixed historical profiles and a
+preferred reusable route where one exists. Normalizers remain authoritative.
+
+For configured reversal populations, method17 supplies outcome-blind selection
+and method18 measures a validated saved population. Bind dates, symbol, original
+frozen input and report populations within the published bounds instead of
+copying an evaluator for a question. Keep recognition/selection identity separate
+from subsequent outcome interpretation. Historical methods and their accepted
+requests remain available for exact replay.
+
+Use declared measurement units and missingness policies. Generic fractional
+excursions can be negative relative to the anchor; target-relative progress
+starts at zero and may exceed 100 percent or occur after failure. Historical
+`_pct` field aliases retain fractional units. Extrema timing is not inferred from
+an endpoint timestamp. Weighted/unweighted summaries and different accumulation
+or interpolation policies are not interchangeable. Neither matched pairs nor
+support components automatically provide independent observations.
+
+
+### Inspect controlled-reversal excursions
+
+For new controlled-reversal requests that need saved excursions, inspect
+`raw_forward_outcome@19` and its `controlled_reversal_comparison.v3` example
+through the existing definition list/detail API, CLI or MCP catalog. It uses the
+same configurable matching choices as v5 and keeps the original endpoint-return
+analysis. Each saved treated/control arm now carries fractional MFE/MAE and
+first-attaining future-candle offset/open/close/known-at, with explicit long
+entry-close anchor, horizon, status and unresolved reason. The first tied candle
+wins. The entry candle is excluded; no new tail is loaded. Candle clocks cannot
+establish intrabar order or a fill. Historical v4/v5 remain replayable with their
+original output shape; do not retrofit old saved evidence.

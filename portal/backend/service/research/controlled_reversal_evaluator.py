@@ -6,6 +6,9 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import ClassVar
+from copy import deepcopy
+from research_science.price_paths import first_extrema_candles
 import math
 
 import numpy as np
@@ -181,19 +184,29 @@ def prepare_pairs(candidates, *, choices=None, features=FEATURES, calipers=CALIP
     return pairs, unmatched, comparisons
 
 
-def resolve_candidate(candidate, *, rows, by_open, end, choices=None):
+def resolve_candidate(candidate, *, rows, by_open, end, choices=None, retain_path_observations=False):
     step = timedelta(seconds=INTERVALS[choices["interval"]]) if choices else STEP
     horizon = choices["outcome_horizon_bars"] if choices else HORIZON
     lag = choices["entry_lag_bars"] if choices else 1
     event_open = _clock(candidate["event_time"],"event")
     entry_open = event_open+lag*step
-    if choices and any(event_open+step*i not in by_open for i in range(lag+1)):
-        return {"status": "unresolved", "reason": "gap_in_entry_path"}
     entry = by_open.get(entry_open)
+    observation = ({'return_unit': 'fraction', 'direction': 'long',
+        'horizon_bars': horizon, 'horizon_seconds': int(step.total_seconds())*horizon,
+        'entry_price': entry['close'] if entry else None,
+        'entry_open_time': _iso(entry_open),
+        'entry_close_time': _iso(entry['close_time']) if entry else None,
+        'entry_known_at': _iso(entry['known_at']) if entry else None,
+        'maximum_favorable_excursion': None, 'maximum_adverse_excursion': None,
+        'favorable_extreme': None, 'adverse_extreme': None} if retain_path_observations else {})
+    def unresolved(reason):
+        return {**observation, 'status': 'unresolved', 'reason': reason}
+    if choices and any(event_open+step*i not in by_open for i in range(lag+1)):
+        return unresolved('gap_in_entry_path')
     if entry is None:
-        return {"status": "unresolved", "reason": "gap_in_entry_path"}
+        return unresolved('gap_in_entry_path')
     if entry["known_at"] > entry["close_time"]:
-        return {"status": "unresolved", "reason": "entry_price_known_after_close"}
+        return unresolved('entry_price_known_after_close')
     row = {"outcomes": {}}
     resolve_event_outcomes(row=row, outcomes={"horizons": [horizon], "horizon_kind": "bars"},
         detector_type=checks.RAW_FORWARD_OUTCOME, entry_time=entry_open,
@@ -202,11 +215,17 @@ def resolve_candidate(candidate, *, rows, by_open, end, choices=None):
         event_payload={}, horizon_resolution={horizon: Counter()}, invalidation_resolution=Counter())
     result = row["outcomes"][str(horizon)]
     if result["status"] != "resolved":
-        return {"status": "unresolved", "reason": result["reason"]}
+        return unresolved(result['reason'])
     if not math.isfinite(result["forward_return"]):
-        return {"status": "unresolved", "reason": "outcome_numeric_unavailable"}
+        return unresolved('outcome_numeric_unavailable')
     path = [by_open[entry_open+step*i] for i in range(horizon+1)]
-    return {"status": "resolved", "forward_return": result["forward_return"],
+    if retain_path_observations:
+        extrema = first_extrema_candles(path[1:], direction=1.)
+        observation.update(maximum_favorable_excursion=result['maximum_favorable_excursion'],
+            maximum_adverse_excursion=result['maximum_adverse_excursion'],
+            favorable_extreme={k: _iso(v) if k != 'bar_offset' else v for k,v in extrema['favorable'].items()},
+            adverse_extreme={k: _iso(v) if k != 'bar_offset' else v for k,v in extrema['adverse'].items()}, reason=None)
+    return {**observation, "status": "resolved", "forward_return": result["forward_return"],
             "entry_known_at": _iso(entry["known_at"]),
             "outcome_known_at": _iso(max(r["known_at"] for r in path))}
 
@@ -338,10 +357,10 @@ CONFIGURABLE_RULES.update({
 })
 
 
-def validate_choices(outcomes, scope):
+def validate_choices(outcomes, scope, *, schema=CONFIGURABLE_SCHEMA):
     keys = {"schema_version", "interval", "trend_lookback_bars", "volatility_lookback_bars",
             "entry_lag_bars", "outcome_horizon_bars", "matching_policy", "comparison_window_days"}
-    if set(outcomes) != keys or outcomes.get("schema_version") != CONFIGURABLE_SCHEMA:
+    if set(outcomes) != keys or outcomes.get("schema_version") != schema:
         raise ValueError("controlled_reversal_invalid: explicit v2 research choices required")
     c = dict(outcomes)
     interval = c["interval"]
@@ -387,11 +406,13 @@ def normalize_configurable_configuration(*, detector, outcomes, statistics, inpu
 class ConfigurableControlledReversalEvaluator:
     evaluator_id: str = checks.RAW_FORWARD_OUTCOME
     version: str = "5"
+    configuration_schema: ClassVar[str] = CONFIGURABLE_SCHEMA
+    retain_path_observations: ClassVar[bool] = False
     result_schema_version: str = "controlled_reversal_comparison_result.v2"
 
     def declare_requirements(self, *, definition, request):
         del definition
-        c, _, _ = validate_choices(request.parameters["outcomes"], request.scope)
+        c, _, _ = validate_choices(request.parameters["outcomes"], request.scope, schema=self.configuration_schema)
         return {"input_kind": "market_data", "indicator_ids": [], "warmup_floor_bars": 0,
             "feature_lookback_bars": c["volatility_lookback_bars"]+1, "feature_windows_seconds_by_alias": {},
             "outcome_horizons": [c["outcome_horizon_bars"]], "required_outcome_horizons": [c["outcome_horizon_bars"]],
@@ -403,7 +424,7 @@ class ConfigurableControlledReversalEvaluator:
         primary = next(r for r in plan.market_data_requirements if r["alias"] == "primary_bars")
         raw = inputs["outcomes"]
         c, start, end = validate_choices(raw, {"timeframe": raw["interval"],
-            "start": plan.evaluation_range["start"], "end": plan.evaluation_range["end_exclusive"]})
+            "start": plan.evaluation_range["start"], "end": plan.evaluation_range["end_exclusive"]}, schema=self.configuration_schema)
         seconds = INTERVALS[c["interval"]]
         if primary["timeframe_seconds"] != seconds:
             raise ValueError("controlled_reversal_invalid: canonical requirement interval differs from pinned choices")
@@ -414,7 +435,8 @@ class ConfigurableControlledReversalEvaluator:
         by_open = {r["open_time"]: r for r in rows}
         for pair in pairs:
             execution_checkpoint()
-            pair["outcomes"] = {arm: resolve_candidate(pair[arm], rows=rows, by_open=by_open, end=end, choices=c)
+            pair["outcomes"] = {arm: resolve_candidate(pair[arm], rows=rows, by_open=by_open, end=end, choices=c,
+                retain_path_observations=self.retain_path_observations)
                                 for arm in ("treated", "control")}
         treated = sum(c["treated"] for c in candidates)
         analysis = summarize_pairs(pairs, eligible_treated=treated, both_arm_days=True)
@@ -436,3 +458,39 @@ class ConfigurableControlledReversalEvaluator:
                 "Cross-date controls may be later; pairing is retrospective and either-arm day deletion does not establish independence.",
                 "Decline and RMS are interval-specific summaries, not a broad regime or annualized volatility.",
                 "Inferred interval-close availability is not measured publication latency."]}
+
+
+PATH_SCHEMA = 'controlled_reversal_comparison.v3'
+PATH_OBSERVATION_CONTRACT = {
+    'unit': 'fraction', 'direction': 'long', 'anchor': 'entry candle close',
+    'path': 'Offsets1throughdeclared horizon after entry candle;entry excluded;no new tail',
+    'sign': 'MFE=maximum future high/entry-1;MAE=minimum future low/entry-1;neither clamped to zero',
+    'ties': 'First chronological candle attaining the extreme',
+    'timing': 'One-based candle offset and candle open/close/known-at;not intrabar time,ordering or executable fill',
+    'availability': 'Extreme candle known-at is its own availability;outcome_known_at includes the full admitted path',
+    'unresolved': 'Original entry/horizon failure reason retained;excursions and extrema null;no partial estimate',
+}
+PATH_RULES = deepcopy(CONFIGURABLE_RULES)
+PATH_RULES.update(choices_contract=PATH_SCHEMA, path_observation=PATH_OBSERVATION_CONTRACT)
+
+
+def normalize_path_configuration(**kwargs):
+    outcomes = kwargs['outcomes']
+    if not isinstance(outcomes, Mapping) or outcomes.get('schema_version') != PATH_SCHEMA:
+        raise ValueError('controlled_reversal_invalid: explicit v3 path output schema required')
+    # Reuse every v5 choice/guard, preserving the new schema in material settings.
+    normalize_configurable_configuration(**{**kwargs, 'outcomes': {**outcomes, 'schema_version': CONFIGURABLE_SCHEMA}})
+    return dict(outcomes)
+
+
+@dataclass(frozen=True)
+class ControlledReversalPathEvaluator(ConfigurableControlledReversalEvaluator):
+    version: str = '19'
+    result_schema_version: str = 'controlled_reversal_comparison_result.v3'
+    configuration_schema: ClassVar[str] = PATH_SCHEMA
+    retain_path_observations: ClassVar[bool] = True
+
+    def evaluate(self, *, plan, inputs):
+        result = super().evaluate(plan=plan, inputs=inputs)
+        result['path_observation_contract'] = deepcopy(PATH_OBSERVATION_CONTRACT)
+        return result

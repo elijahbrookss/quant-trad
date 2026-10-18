@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from research_science.price_paths import safe_ratio as _safe_ratio, difference_path_observation
+
 from core.execution_control import execution_checkpoint
 
 from collections import Counter, defaultdict
@@ -1933,7 +1935,6 @@ def _event_outcome(
             outcomes={},
         )
     entry_close = float(frame.iloc[entry_idx]["close"])
-    sign = -1.0 if direction == "short" else 1.0
     outcomes: dict[int, dict[str, float]] = {}
     for bars in forward_bars:
         execution_checkpoint()
@@ -1944,17 +1945,14 @@ def _event_outcome(
         future_close = float(frame.iloc[end_idx]["close"])
         high = float(future["high"].max())
         low = float(future["low"].min())
-        if direction == "short":
-            mfe = _safe_ratio(entry_close - low, entry_close)
-            mae = _safe_ratio(entry_close - high, entry_close)
-        else:
-            mfe = _safe_ratio(high - entry_close, entry_close)
-            mae = _safe_ratio(low - entry_close, entry_close)
+        observation = difference_path_observation(entry_price=entry_close, endpoint_price=future_close,
+            high=high, low=low, short=direction == "short")
         outcomes[int(bars)] = {
-            "forward_return_pct": _safe_ratio(future_close - entry_close, entry_close) * sign,
-            "max_favorable_excursion_pct": mfe,
-            "max_adverse_excursion_pct": mae,
+            "forward_return_pct": observation.direction_signed_return,
+            "max_favorable_excursion_pct": observation.maximum_favorable_excursion,
+            "max_adverse_excursion_pct": observation.maximum_adverse_excursion,
         }
+
     return EventOutcome(
         event_index=idx,
         event_time=pd.Timestamp(frame.iloc[idx]["time"]).isoformat().replace("+00:00", "Z"),
@@ -2025,12 +2023,6 @@ def _summarize_outcomes(
     else:
         recommendation = "refine"
     return {"by_window": by_window, "recommendation": recommendation, "caveats": sorted(set(caveats))}
-
-
-def _safe_ratio(numerator: float, denominator: float) -> float:
-    if denominator == 0:
-        return 0.0
-    return float(numerator) / float(denominator)
 
 
 def _mean(values: Sequence[float]) -> float | None:

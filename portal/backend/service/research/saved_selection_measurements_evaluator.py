@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 import json
 from time import monotonic
+from typing import ClassVar
 
 from core.execution_control import execution_checkpoint
 from research_science.recognition import RecognitionCandle, utc
-from research_science.reversal_matched_outcomes import describe_selected_pairs, RULES as PASSAGE_RULES
-from research_science.reversal_matched_progress import describe_progress, RULES as PROGRESS_RULES
+from research_science.reversal_matched_outcomes import describe_selected_pairs, summarize_matched_outcomes, RULES as PASSAGE_RULES
+from research_science.reversal_matched_progress import describe_progress, summarize_progress, RULES as PROGRESS_RULES
 from research_science.study import stable_hash
 from . import repository
 from .raw_candle_evaluator import _prepare
@@ -30,10 +31,18 @@ RULES = {
 }
 
 
-def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy):
+REUSABLE_SCHEMA = 'reversal_saved_measurements.v2'
+REUSABLE_RESULT_SCHEMA = 'reversal_saved_measurements_result.v2'
+REUSABLE_RULES = deepcopy(RULES)
+REUSABLE_RULES.update(version=REUSABLE_SCHEMA,
+    selection_contracts=['raw_forward_outcome@12', 'raw_forward_outcome@14', 'raw_forward_outcome@17'],
+    reporting='Whole saved scope and its declared populations;original root weights normalized only within each named reporting view')
+
+
+def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy, schema=SCHEMA):
     if (detector != DETECTOR or not isinstance(outcomes, dict)
             or set(outcomes) != {'schema_version', 'selection_reference', 'frozen_context'}
-            or outcomes['schema_version'] != SCHEMA or statistics or inputs or gap_policy != 'reject'
+            or outcomes['schema_version'] != schema or statistics or inputs or gap_policy != 'reject'
             or scope.get('timeframe') != '15m' or scope.get('indicator_id') or scope.get('indicator_param_overrides')):
         invalid('fixed saved-selection measurement protocol required')
     declared = context(outcomes['frozen_context'])
@@ -43,7 +52,7 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
             or utc(scope.get('end')) != utc(declared['decision_end_exclusive'])
             or ('warmup_bars' in scope and (type(scope['warmup_bars']) is not int or scope['warmup_bars'] != warmup))):
         invalid('request scope must match the original saved input/decision scope')
-    return {'schema_version': SCHEMA, 'selection_reference': reference(outcomes['selection_reference']),
+    return {'schema_version': schema, 'selection_reference': reference(outcomes['selection_reference']),
             'frozen_context': declared}
 
 
@@ -52,11 +61,17 @@ class SavedSelectionMeasurementsEvaluator:
     evaluator_id: str = 'raw_forward_outcome'
     version: str = '16'
     result_schema_version: str = RESULT_SCHEMA
+    configuration_schema: str = SCHEMA
+    admitted_selection_versions: tuple = ('12','14')
+    measurement_rules: ClassVar[dict] = RULES
+
+    def additional_measurements(self, selection, passage, progress):
+        return {}
 
     def declare_requirements(self, *, definition, request):
         config = normalize_configuration(detector=request.parameters['detector'], outcomes=request.parameters['outcomes'],
             statistics=request.parameters['statistics'], inputs=request.parameters['inputs'],
-            scope=request.scope, gap_policy=request.parameters['gap_policy'])
+            scope=request.scope, gap_policy=request.parameters['gap_policy'], schema=self.configuration_schema)
         declared = config['frozen_context']
         if request.mode != 'evidence' or request.dataset_id != declared['dataset_id']:
             invalid('evidence mode and original frozen Dataset required')
@@ -77,9 +92,9 @@ class SavedSelectionMeasurementsEvaluator:
         config = normalize_configuration(detector=inputs['detector'], outcomes=inputs['outcomes'],
             statistics=inputs['statistics'], inputs=inputs.get('inputs', []), gap_policy=plan.gap_policy,
             scope={'instrument_id': primary['instrument_id'], 'timeframe': '15m',
-                   'start': plan.evaluation_range['start'], 'end': plan.evaluation_range['end_exclusive']})
+                   'start': plan.evaluation_range['start'], 'end': plan.evaluation_range['end_exclusive']}, schema=self.configuration_schema)
         saved = load_saved_selection(config['selection_reference'], config['frozen_context'],
-            item_loader=repository.get_item, checkpoint=checkpoint)
+            item_loader=repository.get_item, checkpoint=checkpoint, admitted_versions=self.admitted_selection_versions)
         ctx = saved.context
         if (inputs.get('frozen_input_binding') != saved.binding or plan.indicator_graph
                 or utc(plan.materialization_range['start']) != utc(ctx['input_start'])
@@ -105,8 +120,8 @@ class SavedSelectionMeasurementsEvaluator:
         progress = describe_progress(saved.selection, passage, candles,
             evaluation_end=utc(ctx['input_end_exclusive']), checkpoint=checkpoint)
         # New explicit composition: no fabricated saved outcome identity or historical BTC labels.
-        result = {'schema_version': RESULT_SCHEMA, 'check_family': self.evaluator_id, 'status': 'completed',
-            'rules': deepcopy(RULES), 'selection_reference': saved.reference, 'frozen_context': ctx,
+        result = {'schema_version': self.result_schema_version, 'check_family': self.evaluator_id, 'status': 'completed',
+            'rules': deepcopy(self.measurement_rules), 'selection_reference': saved.reference, 'frozen_context': ctx,
             'outcome_provenance': {'kind': 'computed_in_this_check',
                 'first_passage_kernel': PASSAGE_RULES['version'], 'progress_kernel': PROGRESS_RULES['version']},
             'pairs': progress['pairs'], 'measurements': {
@@ -124,6 +139,7 @@ class SavedSelectionMeasurementsEvaluator:
                 'Full-window progress can follow failure and never reclassifies first passage.',
                 'Pre-failure OHLC bounds retain intrabar ambiguity; censored mass remains explicit.',
                 'No new tail, recognition, matching or target optimization.']}
+        result.update(self.additional_measurements(saved.selection, passage, progress))
         result = json.loads(json.dumps(result, allow_nan=False))
         result['measurement_manifest_fields'] = list(result)+['measurement_manifest_fields']
         result['measurement_manifest_hash'] = stable_hash({k: result[k] for k in result['measurement_manifest_fields']})
@@ -131,3 +147,32 @@ class SavedSelectionMeasurementsEvaluator:
         if len(json.dumps(result, allow_nan=False, separators=(',', ':')).encode()) > RULES['limits']['result_bytes']:
             raise ValueError('saved_selection_limit: result exceeds16MiB')
         return result
+
+
+def normalize_reusable_configuration(**kwargs):
+    return normalize_configuration(**kwargs, schema=REUSABLE_SCHEMA)
+
+
+@dataclass(frozen=True)
+class ReusableSelectionMeasurementsEvaluator(SavedSelectionMeasurementsEvaluator):
+    """Same measurement composition, explicitly admitting configured populations."""
+    version: str = '18'
+    result_schema_version: str = REUSABLE_RESULT_SCHEMA
+    configuration_schema: str = REUSABLE_SCHEMA
+    admitted_selection_versions: tuple = ('12','14','17')
+    measurement_rules: ClassVar[dict] = REUSABLE_RULES
+
+
+    def additional_measurements(self, selection, passage, progress):
+        views={}
+        for name,population in selection['populations'].items():
+            scope=population['evaluation_range']
+            start,end=utc(scope['start']),utc(scope['end_exclusive'])
+            selected=[row for row in progress['pairs'] if start<=utc(row['decision_at'])<end]
+            first=[row for row in passage['pairs'] if start<=utc(row['decision_at'])<end]
+            views[name]={'evaluation_range':deepcopy(scope),'first_passage':summarize_matched_outcomes(first),
+                'progress':{role:{'all':summarize_progress(selected,role),
+                    'originally_neither':summarize_progress([row for row in selected
+                        if row[role]['original_outcome']['classification']=='neither'],role)}
+                    for role in ('case','control')}}
+        return {'measurements_by_population':views}

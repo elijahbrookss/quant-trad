@@ -14,7 +14,8 @@ from research_science.reversal_selection import moment_weights
 from research_science.study import stable_hash
 
 MANIFEST_FIELDS = ('rules', 'cases', 'pairs', 'dependence', 'populations', 'compatibility')
-SCHEMAS = {'12': 'reversal_selection_only_result.v2', '14': 'reversal_two_block_selection_result.v1'}
+SCHEMAS = {'12': 'reversal_selection_only_result.v2', '14': 'reversal_two_block_selection_result.v1',
+           '17': 'reversal_population_selection_result.v1'}
 STEP = timedelta(minutes=15)
 CONTEXT_KEYS = {'dataset_id', 'dataset_hash', 'input_binding_hash', 'max_commit_seq', 'instrument_id',
     'input_start', 'input_end_exclusive', 'decision_start', 'decision_end_exclusive',
@@ -50,6 +51,8 @@ def context(value):
     for key in ('dataset_id', 'instrument_id'):
         if not isinstance(result[key], str) or not result[key].strip():
             invalid('invalid '+key)
+    if type(result['pair_count']) is int and result['pair_count'] > 999:
+        invalid('saved measurement supports at most999pairs; entire selection rejected without truncation or rematching')
     for key, maximum in (('input_rows', 19104), ('case_count', 10000), ('pair_count', 999),
                          ('completion_clock_count', 999), ('max_commit_seq', 2**63-1)):
         if type(result[key]) is not int or not 0 <= result[key] <= maximum:
@@ -69,6 +72,33 @@ def context(value):
     return result
 
 
+def native_candle_series(binding, *, dataset_id, source_key=None):
+    """One existing frozen native15m input contract, independent of measurement."""
+    if not isinstance(binding,dict):
+        invalid('actual frozen input binding required')
+    series = binding['series']
+    if (len(series) != 1 or binding['provider_access'] != 'disabled' or binding['provider_call_performed'] is not False
+            or binding['recorded_gaps'] or binding['dataset_id'] != dataset_id):
+        invalid('one complete provider-free frozen series required')
+    series = series[0]
+    source = series['source_binding']
+    if source_key is None:
+        keys = source.get('resolved_source_identity_keys',[])
+        if len(keys) != 1:
+            invalid('one exact native source required')
+        source_key = keys[0]
+    if (series['alias'] != 'primary_bars' or series['fact_type'] != 'candle.ohlcv'
+            or series['contract_version'] != 'candle.ohlcv.v1' or series['timeframe_seconds'] != 900
+            or series.get('recorded_gaps') or series.get('disclosed_gaps')
+            or source['mode'] != 'exact' or source['resolved_source_identity_keys'] != [source_key]
+            or set(source['sources']) != {source_key}
+            or source['sources'][source_key]['source_kind'] != 'historical_api'
+            or not source['sources'][source_key]['adapter_version'].endswith('Provider:candle.ohlcv.v1')
+            or source['source_summary']['counts'] != {source_key: series['row_count']}):
+        invalid('exact native historical15m source and complete rows required')
+    return series, source_key
+
+
 @dataclass(frozen=True)
 class SavedSelection:
     selection: dict
@@ -78,11 +108,14 @@ class SavedSelection:
     evaluator_version: str
 
 
-def load_saved_selection(raw_reference, declared_context, *, item_loader, checkpoint=lambda: None):
+def load_saved_selection(raw_reference, declared_context, *, item_loader, checkpoint=lambda: None,
+                         admitted_versions=('12','14')):
     """Validate immutable envelopes/context without ScientificAttempt resolution."""
     from .registry import reconstruct_pinned_check_definition, CHECK_REGISTRY
     from research_science.reversal_six_block_selection import RULES as SIX_BLOCK_RULES
     from research_science.reversal_two_block_selection import RULES as TWO_BLOCK_RULES
+    from research_science.reversal_population import RULES as POPULATION_RULES, MANIFEST_FIELDS as POPULATION_FIELDS
+    from .reversal_population_evaluator import population_for
     ref, expected = reference(raw_reference), context(declared_context)
     item = item_loader(ref['source_check_id'])
     if not isinstance(item, dict) or not isinstance(item.get('payload'), dict):
@@ -98,7 +131,7 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
     result = CheckResult.from_dict(payload['result'])
     evidence = CheckEvidenceBinding.from_dict(payload['evidence'])
     version = result.evaluator_version
-    if (result.evaluator_id != 'raw_forward_outcome' or version not in SCHEMAS
+    if (result.evaluator_id != 'raw_forward_outcome' or version not in admitted_versions or version not in SCHEMAS
             or definition.evaluator_id != result.evaluator_id or definition.evaluator_version != version
             or definition.definition_id != result.evaluator_id or definition.definition_version.split('+')[0] != version
             or request.mode != 'evidence' or evidence.evidence_kind != 'frozen_market_data'
@@ -114,12 +147,14 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
                 definition=definition, request=request))):
         invalid('saved selection execution/support contract differs')
     selection, binding = deepcopy(dict(result.result)), deepcopy(dict(evidence.input_binding))
+    source_rules = {'12': SIX_BLOCK_RULES, '14': TWO_BLOCK_RULES, '17': POPULATION_RULES}[version]
+    fields = POPULATION_FIELDS if version == '17' else MANIFEST_FIELDS
     if (selection['schema_version'] != SCHEMAS[version] or selection['outcomes_calculated'] is not False
-            or selection['rules'] != (SIX_BLOCK_RULES if version == '12' else TWO_BLOCK_RULES)
+            or selection['rules'] != source_rules
             or selection['status'] != 'completed' or selection['selection_manifest_hash'] != ref['selection_manifest_hash']
             or len(json.dumps(selection, allow_nan=False).encode()) > 16777216):
         invalid('unsupported or oversized saved selection')
-    manifest = deepcopy({key: selection[key] for key in MANIFEST_FIELDS})
+    manifest = deepcopy({key: selection[key] for key in fields})
     if version == '12':
         # Preserve the historical int-key hash projection, including numeric order.
         for population in manifest['populations'].values():
@@ -128,27 +163,16 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
                 invalid('historical v12 histogram key encoding differs')
             population['selection_summary']['chains_per_completion_clock_histogram'] = {int(k): v for k,v in histogram.items()}
     else:
-        if selection['selection_manifest_fields'] != list(MANIFEST_FIELDS):
-            invalid('v14 manifest fields differ')
+        if selection['selection_manifest_fields'] != list(fields):
+            invalid('JSON-canonical manifest fields differ')
         manifest = json.loads(json.dumps(manifest, allow_nan=False))
+    if version == '17' and selection['population_recipe'] != population_for(
+            request.parameters['detector'], request.scope, request.parameters['outcomes']['populations']).to_dict():
+        invalid('saved population configuration differs from its pinned request')
     if stable_hash(manifest) != ref['selection_manifest_hash']:
         invalid('selection manifest differs')
-    series = binding['series']
-    if (len(series) != 1 or binding['provider_access'] != 'disabled' or binding['provider_call_performed'] is not False
-            or binding['recorded_gaps'] or binding['dataset_id'] != request.dataset_id):
-        invalid('one complete provider-free frozen series required')
-    series = series[0]
-    source = series['source_binding']
-    source_key = selection['source_identity_key']
-    if (series['alias'] != 'primary_bars' or series['fact_type'] != 'candle.ohlcv'
-            or series['contract_version'] != 'candle.ohlcv.v1' or series['timeframe_seconds'] != 900
-            or series.get('recorded_gaps') or series.get('disclosed_gaps')
-            or source['mode'] != 'exact' or source['resolved_source_identity_keys'] != [source_key]
-            or set(source['sources']) != {source_key}
-            or source['sources'][source_key]['source_kind'] != 'historical_api'
-            or not source['sources'][source_key]['adapter_version'].endswith('Provider:candle.ohlcv.v1')
-            or source['source_summary']['counts'] != {source_key: series['row_count']}):
-        invalid('exact native historical15m source and complete rows required')
+    series, source_key = native_candle_series(binding, dataset_id=request.dataset_id,
+        source_key=selection['source_identity_key'])
     cases, pairs = selection['cases'], selection['pairs']
     case_ids = [c['event_id'] for c in cases]
     matched = [c for c in cases if c['match_status'] == 'matched']

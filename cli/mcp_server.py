@@ -485,6 +485,14 @@ class QuantTradMcpServer:
             raise McpError("request must be an object", code=-32602)
         return dict(request)
 
+    def _tool_list_research_check_definitions(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._research_operations().definitions()
+
+    def _tool_get_research_check_definition(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._research_operations().definition(
+            _required_str(arguments, "definition_id"), _required_str(arguments, "version")
+        )
+
     def _tool_get_research_check_requirements(
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1255,6 +1263,19 @@ class QuantTradMcpServer:
                     required=["collector_kind", "collector_id", "action", "reason"],
                 ),
                 "handler": self._tool_operate_collector,
+            },
+            "list_research_check_definitions": {
+                "description": "Read registered Check recipes, supported settings, outputs and compatibility guidance. No preparation or scientific execution.",
+                "inputSchema": _object_schema({}),
+                "handler": self._tool_list_research_check_definitions,
+            },
+            "get_research_check_definition": {
+                "description": "Read one exact Check version, configured example and supported input/output policy. No writes or execution.",
+                "inputSchema": _object_schema(
+                    {"definition_id": _string_schema(), "version": _string_schema()},
+                    required=["definition_id", "version"],
+                ),
+                "handler": self._tool_get_research_check_definition,
             },
             "get_research_check_requirements": {
                 "description": "Resolve direct and transitive Check requirements without provider acquisition.",

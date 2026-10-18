@@ -6,6 +6,38 @@ recognizer retains every retreat-inclusive completed chain, with no expiry,
 minimum move, winner selection or block reset. This is a feasibility report,
 not evidence of a predictive, causal, profitable or independent-trial effect.
 
+## Configurable route for new supported populations
+
+Use `raw_forward_outcome@17` with
+`outcomes.schema_version: reversal_population_selection.v1`. Bind an existing
+native frozen Dataset, instrument and explicit `scope.start`/`scope.end`; retain
+an explicit detector `computation_origin`. The same recognizer/selector handles
+supported date and symbol changes without another evaluator implementation.
+
+The scope contains one through six complete 28-day decision blocks, with aligned
+15-minute clocks and at most 19,104 origin-to-end candles. Recognition settings
+remain retreat-inclusive, retain-all, with the existing 19,104-bar identity
+namespace and 10,000-candidate bound. Scientific matching thresholds, strata,
+ties, control reuse, weighting and nominal support are fixed. Gaps, reset/rewarm,
+extra inputs, statistics, assertions and outcome measurement are rejected.
+
+`outcomes.populations` is a list of at most two objects containing `name`,
+`start_block` (zero based) and `block_count`. Names must be unique; `combined`
+is reserved and always supplied. Views stay within the decision range. They
+change only reporting denominators; pair membership and combined root weights
+are unchanged. The Check retains the exact population recipe and a JSON-stable
+selection manifest. Selection does not automatically trigger measurements.
+
+The Dataset must bind the exact origin-to-end input range, not a larger frozen
+series. For another date scope, use the existing preparation/freeze operation
+on the native canonical data. This changes input custody, not the selector or
+its thresholds, and does not authorize provider acquisition.
+
+Fetch the current catalog example for the complete request. Frozen context,
+native availability and resource admission still apply. The fixed historical
+v11/v12/v14 profiles remain available; the remainder of this guide describes the
+original v11 scientific design, not configurable changes to its saved evidence.
+
 ## Fixed selected design
 
 Use 15-minute canonical candles, an explicit computation origin, and 84
@@ -128,3 +160,14 @@ The separate [six-block selection procedure](reversal-six-block-selection.md)
 uses version12. Version11 and its historical results remain unchanged. Extending
 the reporting period does not create old-block controls, independent episodes
 or permission to inspect future outcomes.
+
+
+### Configured-profile limits and downstream admission
+
+Method17's native15m clock, whole28day blocks, one-through-six-block span and
+19,104-bar ceiling describe the current supported recipe and inherited resource
+allowance. They are not universal scientific limits. Its result populations are
+zero through two caller-named block views plus `combined`, not fixed old/new
+labels. Views preserve root pairs/weights and normalize only their summaries.
+Method17 may select more than 999 pairs; method18 measures at most 999 and fails
+explicitly on the entire larger population, without truncation or rematching.
