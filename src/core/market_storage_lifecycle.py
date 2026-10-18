@@ -36,6 +36,7 @@ class CanonicalFactRetentionPolicy:
     execution_enabled: bool = False
     max_steps_per_run: int = 4
     max_run_seconds: int = 60
+    max_handoff_seconds: int = 10
     execution_statement_timeout_ms: int = 5000
     max_page_rows: int = 10_000
     max_page_logical_bytes: int = 64 * 1024**2
@@ -53,6 +54,7 @@ class CanonicalFactRetentionPolicy:
             "max_plan_seconds": (1, 300),
             "max_steps_per_run": (1, 128),
             "max_run_seconds": (1, 3600),
+            "max_handoff_seconds": (1, 60),
             "execution_statement_timeout_ms": (1, 60000),
             "max_page_rows": (1, 100_000),
             "max_page_logical_bytes": (1, 1024**3),

@@ -221,3 +221,29 @@ def test_sql_or_data_failure_is_not_hidden_by_run_budget(tmp_path, monkeypatch, 
     assert "actual query or data failure" in result["outcomes"][0]["error"]
     assert result["next_after_storage_day"] == DAY.isoformat()
     assert "canonical_retention_step_failed" in caplog.text
+
+
+@pytest.mark.parametrize("seconds", [1, 10, 60])
+def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_bound(tmp_path, monkeypatch, seconds):
+    executor, _ = _executor([])
+    executor.repository.database = object()
+    seen = []
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
+                        lambda **kwargs: SimpleNamespace(**kwargs))
+
+    class Reclaimer:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+        def reclaim_partition(self, day, **kwargs):
+            assert day == DAY and kwargs["execute"] is True
+            return {"status": "partition_reclaimed"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository", Reclaimer)
+    policy = CanonicalFactRetentionPolicy(max_handoff_seconds=seconds)
+    executor._execute_step(item=_item("reclaim_partition"), policy=policy,
+        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=600)
+    assert seen[0]["enabled"] is True
+    assert seen[0]["limits"].max_handoff_seconds == seconds
+    assert seen[0]["limits"].statement_timeout_ms == 1000

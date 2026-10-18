@@ -1992,3 +1992,22 @@ unchanged. Other source-closure callers retain their aggregate preflight.
 This permits a checkpoint closure spanning several individually admissible cold
 pages without raising global limits, splitting historical pages, replacing old
 receipts, dropping dependencies or changing retention/scientific behavior.
+
+### Configurable final reclamation handoff budget
+
+`canonical_retention.max_handoff_seconds` (environment
+`QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_HANDOFF_SECONDS`) defaults to 10 and
+accepts integers from 1 through 60. The same upper bound applies to direct
+reclaimer limits. It bounds the existing cooperative final handoff separately
+from `max_run_seconds`; increasing the overall run allowance alone does not
+increase this final allowance. The executor retains the at-most-1000ms statement
+timeout and the enclosing run/cancellation checks. This is not a hard
+commit/fsync or publication-delay guarantee.
+
+A longer handoff permits a longer canonical-publication pause under the existing
+exclusive lifecycle and SHARE table fences, and can delay new protected reads
+and pins. Change it only with an explicit disruption allowance and observe
+collector recovery. No bound overrides integrity, freshness, saved history
+policy, pin protection, archive mount/free-space checks, NOWAIT admission or
+transaction rollback. A read-only profile cannot establish fenced/DROP duration.
+Retain the previous settings and restore them after an unsuccessful trial.

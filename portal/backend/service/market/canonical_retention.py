@@ -101,7 +101,8 @@ class CanonicalFactRetentionExecutor:
             return archive.restart_partition_verification(day)
         if action == "reclaim_partition":
             reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True,
-                limits=FactReclamationLimits(statement_timeout_ms=min(1000, policy.execution_statement_timeout_ms)))
+                limits=FactReclamationLimits(statement_timeout_ms=min(1000, policy.execution_statement_timeout_ms),
+                                             max_handoff_seconds=policy.max_handoff_seconds))
             return reclaimer.reclaim_partition(day, eligible_before=date.fromisoformat(item["eligible_before"]),
                                                 execute=True, verification_limits=verification)
         raise ValueError(f"canonical_retention_action_invalid: action={action}")

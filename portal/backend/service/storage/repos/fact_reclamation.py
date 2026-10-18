@@ -48,6 +48,8 @@ class FactReclamationLimits:
         for field in ("statement_timeout_ms", "max_handoff_seconds"):
             if type(getattr(self, field)) is not int or getattr(self, field) <= 0:
                 raise ValueError(f"canonical_reclaim_limit_invalid: field={field}")
+        if self.max_handoff_seconds > 60:
+            raise ValueError("canonical_reclaim_limit_invalid: field=max_handoff_seconds")
 
 
 class PostgresCanonicalFactReclamationRepository:

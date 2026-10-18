@@ -90,3 +90,10 @@ def test_reclamation_mount_admission_requires_writability_on_every_recheck(monke
     with pytest.raises(StorageMountError, match="storage_mount_read_only"):
         reclaimer._assert_archive_admission(objects)
     assert len(events) == 3
+
+
+def test_final_handoff_default_and_upper_bound():
+    assert FactReclamationLimits().max_handoff_seconds == 10
+    assert FactReclamationLimits(max_handoff_seconds=60).max_handoff_seconds == 60
+    with pytest.raises(ValueError, match="field=max_handoff_seconds"):
+        FactReclamationLimits(max_handoff_seconds=61)
