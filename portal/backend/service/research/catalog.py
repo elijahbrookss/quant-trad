@@ -369,7 +369,12 @@ _EXAMPLES["raw_forward_outcome@13"].update(mode="evidence", dataset_id=MATCHED_D
     detector=deepcopy(MATCHED_DETECTOR), outcomes=deepcopy(MATCHED_OUTCOMES))
 _EXAMPLES["raw_forward_outcome@13"]["scope"]["instrument_id"] = MATCHED_INSTRUMENT_ID
 
+_EXAMPLES["raw_forward_outcome@14"] = deepcopy(_EXAMPLES["raw_forward_outcome@12"])
+_EXAMPLES["raw_forward_outcome@14"]["scope"]["end"] = "2025-03-29T00:00:00Z"
+_EXAMPLES["raw_forward_outcome@14"]["outcomes"] = {"schema_version":"reversal_two_block_selection.v1"}
+
 _PURPOSES = {
+    "raw_forward_outcome@14": "Assess the first two complete28day blocks from unchangedJan1origin;reuse formation/matching kernel and compare with the savedBTCprefix without gap resets or outcomes.",
     "raw_forward_outcome@13": "Describe twelve-bar first passages on the999saved BTC B3pairs with exact selected barriers and weights;old/new/combined views,no rematching or independent-trial inference.",
     "raw_forward_outcome@12": "Assess the fixed six-block reversal comparison extension without outcomes; report old,new,combined coverage and dependence with B2-compatible tie order and lossless compact timing.",
     "raw_forward_outcome@11": "Assess one fixed smaller-design completed-reversal comparison population without outcomes;equal completion-moment weights,all chains,explicit exclusions and dependence;no numeric coverage pass gates.",
@@ -468,6 +473,11 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             fields = {key: value for key, value in fields.items() if key in {"scope", "assertions[]", "gap_rewarm_bars"}}
             fields["scope"]["constraints"] = "Instrument and Candle Stats IDs are bindable; parameters remain pinned. Fixed 1m, 200-bar initialization, whole-minute UTC boundaries, single calendar year, <=370 days including seed, no outcome tail."
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
+        return fields
+    if family == "raw_forward_outcome" and version == "14":
+        fields = _settings_fields(family, "12")
+        fields["scope"]["constraints"] = "Fixed2025-02-01 through2025-03-29 exclusive;first two original28dayblocks;Jan1origin;8352native15mbars;no outcomes."
+        fields["outcomes"] = {"fixed":{"schema_version":"reversal_two_block_selection.v1"},"meaning":"Explicit clean-prefix scope;unchanged formation,calipers,strata,support,reuse,weights and resource namespace."}
         return fields
     if family == "raw_forward_outcome" and version == "13":
         return {"scope": {"constraints": "Exact saved BTC B3 scope and original frozen Dataset; evidence mode only."},
@@ -680,14 +690,14 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["pairs"] = {"type": "array", "meaning": "Saved pair identities and weights; both arms retain first-passage classes and unresolved reasons."}
         fields["matched_outcome_comparison"] = {"type": "object", "meaning": "Old,new,combined four-class weighted fractions and case-minus-control differences; no inference."}
         fields["outcomes_calculated"] = {"fixed": True}
-    elif family == "raw_forward_outcome" and version in {"11", "12"}:
+    elif family == "raw_forward_outcome" and version in {"11", "12", "14"}:
         fields["sample_count"] = {"type": "integer", "meaning": "Matched completion clocks;not independent observations."}
         fields["cases"] = {"type": "array", "meaning": "Every chain retained,explicit selection status,features,weights and versioned availability view."}
         fields["pairs"] = {"type": "array", "meaning": "Deterministic control choices and support;no forward outcomes."}
         fields["selection_summary"] = {"type": "object", "meaning": "All versus matched coverage,partial moments,context shifts and exclusions;no numeric scientific pass gate."}
         fields["outcomes_calculated"] = {"fixed": False}
-        if version == "12":
-            fields["populations"] = {"type": "object", "meaning": "Old first3blocks,new last3blocks,combined;separately normalized coverage/context and direct/ancestry dependence."}
+        if version in {"12", "14"}:
+            fields["populations"] = {"type": "object", "meaning": "Block1,block2,combined clean-prefix populations;separately normalized coverage/context and direct/ancestry dependence." if version == "14" else "Old first3blocks,new last3blocks,combined;separately normalized coverage/context and direct/ancestry dependence."}
             fields["compatibility"] = {"type": "object", "meaning": "B2 namespace ordering projection;actual event identities and historical results preserved."}
     elif family == "raw_forward_outcome" and version == "10":
         fields["sample_count"] = {"type": "integer", "meaning": "Transitive overlap components;not independent observations."}
@@ -804,7 +814,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "selection_summary" if definition.definition_id == "raw_forward_outcome" and version == "14" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),
