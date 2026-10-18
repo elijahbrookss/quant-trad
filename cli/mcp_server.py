@@ -493,6 +493,20 @@ class QuantTradMcpServer:
             _required_str(arguments, "definition_id"), _required_str(arguments, "version")
         )
 
+    def _tool_prepare_saved_selection_measurement_request(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        expected = arguments.get("expected_hashes", {})
+        if not isinstance(expected, dict):
+            raise McpError("expected_hashes must be an object", code=-32602)
+        return self._research_operations().prepare_saved_selection_measurement_request(
+            _required_str(arguments, "source_check_id"),
+            measurement_profile=_optional_str(arguments, "measurement_profile") or "18",
+            expected_hashes=expected)
+
+    def _tool_get_research_execution_snapshot(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        request = self._research_request(arguments) if "request" in arguments else None
+        return self._research_operations().execution_snapshot(request=request,
+            job_id=_optional_str(arguments, "job_id"), limit=arguments.get("limit", 25))
+
     def _tool_get_research_check_requirements(
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1276,6 +1290,19 @@ class QuantTradMcpServer:
                     required=["definition_id", "version"],
                 ),
                 "handler": self._tool_get_research_check_definition,
+            },
+            "prepare_saved_selection_measurement_request": {
+                "description": "Read a saved v12/v14/v17 selection and validate exact hashes/context to build a method18 request. No candles, science, provider calls, writes or dispatch.",
+                "inputSchema": _object_schema({"source_check_id": _string_schema(),
+                    "measurement_profile": {"type": "string", "enum": ["18"], "default": "18"},
+                    "expected_hashes": _free_object_schema()}, required=["source_check_id"]),
+                "handler": self._tool_prepare_saved_selection_measurement_request,
+            },
+            "get_research_execution_snapshot": {
+                "description": "Read bounded inflight jobs, actual research owner, exact-request matches and optional existing job status. Point-in-time diagnostic, never admission, budget or retry authority.",
+                "inputSchema": _object_schema({"request": _free_object_schema(), "job_id": _string_schema(),
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25}}),
+                "handler": self._tool_get_research_execution_snapshot,
             },
             "get_research_check_requirements": {
                 "description": "Resolve direct and transitive Check requirements without provider acquisition.",

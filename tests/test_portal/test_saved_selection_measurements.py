@@ -1,7 +1,7 @@
 """Synthetic typed saved populations: shared binding, composition and legacy parity."""
 from copy import deepcopy
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 from types import SimpleNamespace
 
@@ -127,6 +127,17 @@ def synthetic(version='14'):
     return item,reseal(item),ctx,bars
 
 
+def repository_envelope(item):
+    # Exercise the production get_item -> ResearchItemRecord.to_dict boundary
+    # with an in-memory record/session; no DB or scientific replay is involved.
+    from portal.backend.db.models import ResearchItemRecord
+    record = ResearchItemRecord(**{key: deepcopy(item[key]) for key in
+        ('id', 'kind', 'status', 'instrument_id', 'timeframe', 'payload')},
+        created_at=datetime(2025,1,1), updated_at=datetime(2025,1,1))
+    return adapter.repository.get_item(item['id'],
+        session=SimpleNamespace(get=lambda model, key: record))
+
+
 def payload(ref,ctx,measurement_version='16'):
     return {'check_family':'raw_forward_outcome','mode':'evidence','dataset_id':ctx['dataset_id'],
         'scope':{'instrument_id':ctx['instrument_id'],'timeframe':'15m','start':ctx['decision_start'],'end':ctx['decision_end_exclusive']},
@@ -203,7 +214,10 @@ def test_no_scope_tuning_protocol_expansion_or_scientific_gate(change):
 
 @pytest.mark.parametrize('source_version,measurement_version',[('14','16'),('12','18'),('14','18'),('17','18')])
 def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monkeypatch,source_version,measurement_version):
-    item,ref,ctx,bars=synthetic(source_version);definition,request,plan=planned(payload(ref,ctx,measurement_version))
+    item,ref,ctx,bars=synthetic(source_version)
+    # repository.get_item returns persisted fields, before API classification.
+    item = repository_envelope(item)
+    definition,request,plan=planned(payload(ref,ctx,measurement_version))
     plan=replace(plan,plan_hash='',materialization_range={**plan.materialization_range,'as_of_commit_seq':10})
     opened=pd.date_range('2025-01-01',periods=ctx['input_rows'],freq='15min',tz='UTC')
     frame=pd.DataFrame({'timestamp':opened,'close_time':opened+timedelta(minutes=15),'known_at':opened+timedelta(minutes=15),
@@ -307,3 +321,33 @@ def test_pair_admission_above999_is_explicit_and_never_truncates():
         assert '999' in get_check_definition('raw_forward_outcome',version)['discovery']['composition_limit']
     population=get_check_definition('raw_forward_outcome','17')['result_shape']['analytical_fields']['populations']['meaning']
     assert 'Caller-named' in population and '1through6' in population and 'first3blocks' not in population
+
+
+@pytest.mark.parametrize('version', ['12', '14', '17'])
+def test_raw_repository_envelope_matches_projected_saved_selection(version):
+    projected, ref, ctx, _ = synthetic(version)
+    raw = repository_envelope(projected)
+    assert 'replayable' not in raw and 'observation_eligible' not in raw
+    before = deepcopy(raw)
+    kwargs = {'admitted_versions': ('12', '14', '17')}
+    expected = load_saved_selection(ref, ctx, item_loader=lambda key: projected, **kwargs)
+    actual = load_saved_selection(ref, ctx, item_loader=lambda key: raw, **kwargs)
+    assert actual == expected and raw == before
+
+
+@pytest.mark.parametrize('flag', ['replayable', 'observation_eligible'])
+@pytest.mark.parametrize('value', [False, None, 'true', 1])
+def test_raw_repository_envelope_requires_true_persisted_eligibility(flag, value):
+    raw, ref, ctx, _ = synthetic()
+    raw.pop('replayable'); raw.pop('observation_eligible')
+    raw['payload'][flag] = value
+    with pytest.raises(ValueError, match='completed replayable eligible frozen Check required'):
+        load_saved_selection(ref, ctx, item_loader=lambda key: raw)
+
+
+@pytest.mark.parametrize('flag', ['replayable', 'observation_eligible'])
+def test_projected_envelope_cannot_override_false_persisted_eligibility(flag):
+    projected, ref, ctx, _ = synthetic()
+    projected['payload'][flag] = False
+    with pytest.raises(ValueError, match='completed replayable eligible frozen Check required'):
+        load_saved_selection(ref, ctx, item_loader=lambda key: projected)

@@ -312,3 +312,31 @@ the same versioned settings, outputs, examples and compatibility guidance as the
 API and `qt research check definitions`/`definition`. They require no mutation
 confirmation and perform no prepare, freeze, dispatch or replay action. Existing
 write tools and their confirmation/admission behavior are unchanged.
+
+
+## Saved-selection request preparation and execution snapshot
+
+`prepare_saved_selection_measurement_request` accepts `source_check_id`,
+`measurement_profile` (currently `"18"`) and optional `expected_hashes` containing
+result/evidence/selection manifest hashes. It returns the validated exact saved
+reference/context and a request for the existing requirements/dispatch tools.
+Only saved selection 12/14/17 contracts are admitted. It shares the backend binding
+validator and never loads candles, calls providers, calculates outcomes, freezes
+inputs, allocates attempts or writes records. Persisted eligibility flags belong
+in the saved Check payload; optional API-projected copies are not required when
+reading the raw repository record, and contradictory supplied copies still fail.
+
+`get_research_execution_snapshot` accepts an optional existing request, optional
+`job_id` and integer `limit` 1..100 (default 25). It uses the existing dispatch
+fingerprint and actual PostgreSQL research-lock identity. It reports server
+`observed_at`, global nonterminal jobs, owner-held state, matching jobs across all
+statuses, the existing requested-job status schema and explicit truncation flags.
+It does not return arbitrary SQL, reserve a slot, allocate a budget, authorize a
+retry or alter a ledger. Requested-job status can be observed slightly later.
+Both tools use `ResearchOperations`; neither requires mutation confirmation.
+
+Existing JSON dispatch receipts, job status/result and item list/get should be
+used for reconciliation and ledger readback. If QT MCP is not configured/exposed
+in the task, use the matching `qt research check from-selection` and
+`qt research jobs snapshot` CLI commands rather than internal planner imports or
+manual database queries. This adds no parallel admission or accounting authority.

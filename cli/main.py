@@ -2079,6 +2079,22 @@ def _cmd_research_check_definition(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_research_check_from_selection(args: argparse.Namespace) -> int:
+    expected = {key: getattr(args, key) for key in
+        ("result_hash", "evidence_hash", "selection_manifest_hash") if getattr(args, key)}
+    result = ResearchOperations(_client(args)).prepare_saved_selection_measurement_request(
+        args.source_check_id, measurement_profile=args.profile, expected_hashes=expected)
+    _print_json(result["request"] if args.request_only else result)
+    return 0
+
+
+def _cmd_research_execution_snapshot(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).execution_snapshot(
+        request=_canonical_research_request(args) if args.request_json else None,
+        job_id=args.job_id, limit=args.limit))
+    return 0
+
+
 def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
     _print_json(
         ResearchOperations(_client(args)).requirements(
@@ -4457,6 +4473,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_jobs = research_sub.add_parser("jobs", help="Asynchronous research check job commands.")
     research_jobs_sub = research_jobs.add_subparsers(dest="research_jobs_command", required=True)
+    research_jobs_snapshot = research_jobs_sub.add_parser("snapshot", help="Read bounded jobs/owner/exact-request matches; diagnostic only, no admission or retry grant.")
+    research_jobs_snapshot.add_argument("--request-json", help="Exact request to compare with existing dispatch fingerprints.")
+    research_jobs_snapshot.add_argument("--job-id")
+    research_jobs_snapshot.add_argument("--limit", type=int, default=25)
+    research_jobs_snapshot.set_defaults(func=_cmd_research_execution_snapshot)
     research_jobs_status = research_jobs_sub.add_parser("status", help="Show a dispatched research job status.")
     research_jobs_status.add_argument("job_id")
     research_jobs_status.add_argument("--json", action="store_true", help="Print the machine-readable status payload.")
@@ -4507,6 +4528,14 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_definition.add_argument("definition_id")
     research_check_definition.add_argument("--version", required=True)
     research_check_definition.set_defaults(func=_cmd_research_check_definition)
+    research_check_from_selection = research_check_sub.add_parser("from-selection", help="Build a validated measurement request from saved selection metadata; no science, acquisition or writes.")
+    research_check_from_selection.add_argument("source_check_id")
+    research_check_from_selection.add_argument("--profile", choices=["18"], default="18")
+    research_check_from_selection.add_argument("--result-hash")
+    research_check_from_selection.add_argument("--evidence-hash")
+    research_check_from_selection.add_argument("--selection-manifest-hash")
+    research_check_from_selection.add_argument("--request-only", action="store_true", help="Print only the request for existing requirements/dispatch commands.")
+    research_check_from_selection.set_defaults(func=_cmd_research_check_from_selection)
     research_check_requirements = research_check_sub.add_parser(
         "requirements",
         help="Resolve direct and transitive Check requirements without acquisition.",
