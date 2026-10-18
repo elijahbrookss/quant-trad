@@ -121,8 +121,12 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
     if not isinstance(item, dict) or not isinstance(item.get('payload'), dict):
         invalid('saved Check unavailable: '+ref['source_check_id'])
     payload = item['payload']
+    # Eligibility is persisted in the payload. API views additionally project
+    # these flags at the top level; repository.get_item does not. If supplied,
+    # a projected flag must still agree with the required persisted True.
     if (item['id'] != ref['source_check_id'] or item['kind'] != 'research_check' or item['status'] != 'tested'
-            or item.get('replayable') is not True or item.get('observation_eligible') is not True
+            or any(flag in item and item[flag] is not True
+                   for flag in ('replayable', 'observation_eligible'))
             or payload.get('replayable') is not True or payload.get('observation_eligible') is not True):
         invalid('completed replayable eligible frozen Check required')
     definition = CheckDefinition.from_dict(payload['definition'])
