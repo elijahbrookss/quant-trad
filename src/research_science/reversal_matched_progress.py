@@ -88,10 +88,10 @@ def distribution(rows, role, field):
     mass, total = _mass(available), _mass(rows)
     values = sorted((r[role]['progress'][field], r['completion_moment_weight']) for r in available)
     def quantile(p):
-        cumulative = 0.
+        prefix_weights = []
         for value, weight in values:
-            cumulative = math.fsum((cumulative, weight))
-            if cumulative >= mass*p:
+            prefix_weights.append(weight)
+            if math.fsum(prefix_weights) >= mass*p:
                 return value
         return values[-1][0] if values else None
     def bin_index(value):

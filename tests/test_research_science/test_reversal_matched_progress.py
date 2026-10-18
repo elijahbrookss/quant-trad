@@ -126,3 +126,10 @@ def test_changed_source_and_missing_after_passage_do_not_silently_become_complet
     changed = tuple(replace(b, source_identity_key='other') if b.open_time == utc('2025-02-01T04:00:00Z') else b for b in bars)
     with pytest.raises(ValueError, match='source or availability changed'):
         describe_progress(selection, saved, changed, evaluation_end=end)
+
+
+def test_weighted_quantile_uses_accurate_prefix_at_exact_boundary():
+    rows = [{'completion_moment_weight': w, 'case': {'progress': {'x': float(i)}}}
+            for i, w in enumerate([.05]*10+[.5])]
+    result = distribution(rows, 'case', 'x')
+    assert result['quantiles_percent']['0.5'] == 9.
