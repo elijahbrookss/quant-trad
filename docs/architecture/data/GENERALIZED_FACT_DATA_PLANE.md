@@ -1612,6 +1612,26 @@ alone or historically bypassed constraints. Invalid/disabled enforcement,
 changed relation identity or topology refuses. Short `SHARE ... NOWAIT` locks
 hold this contract and the checked header/catalog rows stable through DROP.
 
+Final receipt reads use the existing bounded manifest batch (at most100 pages).
+Catalog revalidation transports at most16 manifests per SQL statement, further
+splitting at256KiB of tuple-hint text; a larger single page retains the prior
+one-page path under the unchanged witness-memory bound. Each manifest still has
+its own fresh full-field digest, hinted-row count and total logical count in
+that statement's snapshot. Results must contain exactly the requested IDs,
+including empty catalogs. No page is marked current until all its batch's
+catalogs match; changed receipts, additions, moved/reused tuples, deadline and
+cancellation failures still refuse. This replaces repeated query transport,
+not any fresh proof. Phase progress logs expose final admission, header checks,
+catalog batches and completed evidence for whole-cycle observation.
+
+The October18 normal-worker600-second trial reached shared preparation but
+failed the unchanged10-second final budget while checking catalogs. Its7.09-second
+header-preparation measurement was in the shared phase; it does not establish
+the final header-check duration. Retained PostgreSQL logs only include statements
+at least200ms and do not provide a complete final-stage time split. Bounded SQL
+call-count regressions and small PostgreSQL fixtures are not full-cycle latency
+proof; installed exact-source normal-path observation remains required.
+
 All dependency targets are checked for current expiry after their catalog contents
 match, once per distinct kind/ID in this exclusive transaction. No expiry result
 is reused from the first pass or a previous invocation. The original statement,
