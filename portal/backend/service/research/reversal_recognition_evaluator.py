@@ -59,10 +59,21 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
     return {"schema_version": SCHEMA}
 
 
-def prepare_recognition(*, plan, inputs, schema=SCHEMA, checkpoint=None):
+def recognition_requirements(warmup_bars):
+    """Common outcome-blind candle requirements for recognition and selection."""
+    return {"input_kind": "market_data", "indicator_ids": [], "warmup_floor_bars": warmup_bars,
+        "feature_lookback_bars": warmup_bars, "feature_windows_seconds_by_alias": {},
+        "outcome_horizons": [], "required_outcome_horizons": [], "horizon_kind": "bars",
+        "entry_lag_bars": 0, "invalidation_max_bars": 0,
+        "outcome_boundary": "evaluation_end_exclusive",
+        "primary_candle_required_fields": ["open", "high", "low", "close", "known_at"]}
+
+
+def prepare_recognition(*, plan, inputs, schema=SCHEMA, checkpoint=None, expected_outcomes=None):
     """Shared canonical preparation and one sequential recognizer for both Checks."""
     settings = choices(inputs["detector"])
-    if inputs["outcomes"] != {"schema_version": schema} or plan.gap_policy != "reject":
+    expected = {"schema_version": schema} if expected_outcomes is None else expected_outcomes
+    if inputs["outcomes"] != expected or plan.gap_policy != "reject":
         raise ValueError("reversal_recognition_invalid: pinned inputs required")
     primary = next(x for x in plan.market_data_requirements if x["alias"] == "primary_bars")
     seconds = int(primary["timeframe_seconds"])
@@ -92,12 +103,7 @@ class ReversalRecognitionEvaluator:
             scope=request.scope, gap_policy=request.parameters["gap_policy"])
         step = interval_to_timedelta(request.scope["timeframe"])
         n = int((utc(request.scope["start"])-utc(request.parameters["detector"]["computation_origin"]))/step)
-        return {"input_kind": "market_data", "indicator_ids": [], "warmup_floor_bars": n,
-            "feature_lookback_bars": n, "feature_windows_seconds_by_alias": {},
-            "outcome_horizons": [], "required_outcome_horizons": [], "horizon_kind": "bars",
-            "entry_lag_bars": 0, "invalidation_max_bars": 0,
-            "outcome_boundary": "evaluation_end_exclusive",
-            "primary_candle_required_fields": ["open", "high", "low", "close", "known_at"]}
+        return recognition_requirements(n)
 
     def evaluate(self, *, plan, inputs):
         settings, snapshot, rows, start, end, _ = prepare_recognition(plan=plan, inputs=inputs)

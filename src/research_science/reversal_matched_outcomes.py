@@ -21,6 +21,19 @@ RULES={
  'limits':{'candles':19104,'pairs':10000,'wall_seconds':120,'input_bytes':268435456,'result_bytes':16777216}}
 
 
+def summarize_matched_outcomes(subset):
+    mass=math.fsum(p['completion_moment_weight'] for p in subset)
+    arms={}
+    for role in ('case','control'):
+        counts=Counter(p[role]['classification'] for p in subset)
+        fractions={k:math.fsum(p['completion_moment_weight'] for p in subset if p[role]['classification']==k)/mass if mass else None for k in CLASSES}
+        arms[role]={'class_counts':{k:counts[k] for k in CLASSES},'weighted_class_fractions':fractions,
+            'unresolved_reasons':dict(Counter(p[role]['reason'] for p in subset if p[role]['classification']=='unresolved'))}
+    return {'pairs':len(subset),'case_completion_moments':len({p['decision_at'] for p in subset}),
+        'saved_weight_mass':mass,**arms,'case_minus_control':{k:arms['case']['weighted_class_fractions'][k]-arms['control']['weighted_class_fractions'][k] if mass else None for k in CLASSES},
+        'independent_sample_size':None,'inference_claim':False}
+
+
 def describe_selected_pairs(selection, candles, *, evaluation_end, checkpoint=lambda:None):
     by_open={c.open_time:c for c in candles}
     by_close={c.close_time:c for c in candles}
@@ -63,22 +76,11 @@ def describe_selected_pairs(selection, candles, *, evaluation_end, checkpoint=la
         rows.append({'event_id':pair['event_id'],'control_id':control['control_id'],
             'decision_at':case['decision_at'],'control_decision_at':control['decision_at'],
             'block':case['block'],'completion_moment_weight':weight,**outcomes})
-    def summary(subset):
-        mass=math.fsum(p['completion_moment_weight'] for p in subset)
-        arms={}
-        for role in ('case','control'):
-            counts=Counter(p[role]['classification'] for p in subset)
-            fractions={k:math.fsum(p['completion_moment_weight'] for p in subset if p[role]['classification']==k)/mass if mass else None for k in CLASSES}
-            arms[role]={'class_counts':{k:counts[k] for k in CLASSES},'weighted_class_fractions':fractions,
-                'unresolved_reasons':dict(Counter(p[role]['reason'] for p in subset if p[role]['classification']=='unresolved'))}
-        return {'pairs':len(subset),'case_completion_moments':len({p['decision_at'] for p in subset}),
-            'saved_weight_mass':mass,**arms,'case_minus_control':{k:arms['case']['weighted_class_fractions'][k]-arms['control']['weighted_class_fractions'][k] if mass else None for k in CLASSES},
-            'independent_sample_size':None,'inference_claim':False}
     views={'old':[p for p in rows if p['block']<3],'new':[p for p in rows if p['block']>=3],'combined':rows}
     result={'rules':RULES,'outcomes_calculated':True,'pairs':rows,
-        'matched_outcome_comparison':{name:summary(p) for name,p in views.items()},
-        'by_block':{str(i):summary([p for p in rows if p['block']==i]) for i in range(6)},
-        'by_case_completion_day':{day:summary([p for p in rows if p['decision_at'][:10]==day]) for day in sorted({p['decision_at'][:10] for p in rows})},
+        'matched_outcome_comparison':{name:summarize_matched_outcomes(p) for name,p in views.items()},
+        'by_block':{str(i):summarize_matched_outcomes([p for p in rows if p['block']==i]) for i in range(6)},
+        'by_case_completion_day':{day:summarize_matched_outcomes([p for p in rows if p['decision_at'][:10]==day]) for day in sorted({p['decision_at'][:10] for p in rows})},
         'selection_audit':{'all':selection['selection_summary']['all'],'matched':selection['selection_summary']['matched'],
             'retained_full_population_moment_mass':selection['selection_summary']['retained_full_population_moment_mass'],
             'case_status_counts':selection['selection_summary']['case_status_counts']},

@@ -302,3 +302,13 @@ rebuild reports or inspect runtime internals.
 - Detached experiment orchestration is deferred. Check evidence can dispatch to
   the shared research-job store and is inspected through the same job
   status/result contract as the CLI.
+
+
+## Check catalog parity
+
+`list_research_check_definitions` and `get_research_check_definition` call the
+existing `ResearchOperations.definitions`/`definition` GET operations. They expose
+the same versioned settings, outputs, examples and compatibility guidance as the
+API and `qt research check definitions`/`definition`. They require no mutation
+confirmation and perform no prepare, freeze, dispatch or replay action. Existing
+write tools and their confirmation/admission behavior are unchanged.

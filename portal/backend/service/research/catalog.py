@@ -393,7 +393,19 @@ _EXAMPLES["raw_forward_outcome@16"] = {
             "source_identity_key": "e"*64, "input_rows": 8352, "case_count": 2,
             "pair_count": 2, "completion_clock_count": 1}}}
 
+_EXAMPLES["raw_forward_outcome@17"] = deepcopy(_EXAMPLES["raw_forward_outcome@14"])
+_EXAMPLES["raw_forward_outcome@17"].update(mode="evidence", dataset_id="mds_"+"a"*32)
+_EXAMPLES["raw_forward_outcome@17"]["scope"]["instrument_id"] = "instrument-1"
+_EXAMPLES["raw_forward_outcome@17"]["outcomes"] = {"schema_version": "reversal_population_selection.v1",
+    "populations": [{"name":"first_block", "start_block":0, "block_count":1},
+                    {"name":"second_block", "start_block":1, "block_count":1}]}
+
+_EXAMPLES["raw_forward_outcome@18"] = deepcopy(_EXAMPLES["raw_forward_outcome@16"])
+_EXAMPLES["raw_forward_outcome@18"]["outcomes"]["schema_version"] = "reversal_saved_measurements.v2"
+
 _PURPOSES = {
+    "raw_forward_outcome@18": "Compose existing first-passage and progress measurements on validated fixed or configured saved populations, retaining original input, weights, support and explicit units/censoring; no reselection.",
+    "raw_forward_outcome@17": "Select reversal comparisons with explicit bounded dates, symbol and reporting populations over the existing outcome-blind kernel; fixed scientific matching rules, original weights and nominal support.",
     "raw_forward_outcome@16": "Validate a saved v12/v14 selection and its exact native frozen input, then compose existing twelve-bar first-passage and progress descriptions; no recognition, rematching or target tuning.",
     "raw_forward_outcome@15": "Describe maximum original-target progress on the fixed saved BTC pairs; full-window versus pre-failure bounds, censoring, fixed quarter bins and original weights; no target optimization.",
     "raw_forward_outcome@14": "Assess the first two complete28day blocks from unchangedJan1origin;reuse formation/matching kernel and compare with the savedBTCprefix without gap resets or outcomes.",
@@ -431,6 +443,18 @@ _PURPOSES = {
 
 
 # Descriptive field metadata only: these values never validate or execute a Check.
+def _discovery(family, version):
+    if family == "raw_forward_outcome" and version in {"11", "12", "14"}:
+        return {"new_requests": False, "preferred_profile": "raw_forward_outcome@17",
+            "meaning": "Fixed historical population profile; exact replay and explicit requests remain supported."}
+    if family == "raw_forward_outcome" and version in {"13", "15", "16"}:
+        return {"new_requests": False, "preferred_profile": "raw_forward_outcome@18",
+            "meaning": "Historical binding/projection contract retained; use the reusable saved-population route for new supported contexts."}
+    if (family == "raw_forward_outcome" and version == "2") or (family == "event_fact_analysis" and version == "3") or family == "indicator_forward_outcome":
+        return {"new_requests": False, "meaning": "Historical compatibility method; select an admitted current recipe whose scientific semantics match the question. Replay remains available."}
+    return {"new_requests": True, "meaning": "Use only the settings and scientific policy admitted by this method; catalog discovery never executes science."}
+
+
 def _settings_fields(family: str, version: str) -> dict[str, Any]:
     from . import checks, event_fact_evaluator as event
     from research_science.check import ASSERTION_OPERATORS
@@ -501,6 +525,16 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
         fields["scope"]["constraints"] = "Fixed2025-02-01 through2025-03-29 exclusive;first two original28dayblocks;Jan1origin;8352native15mbars;no outcomes."
         fields["outcomes"] = {"fixed":{"schema_version":"reversal_two_block_selection.v1"},"meaning":"Explicit clean-prefix scope;unchanged formation,calipers,strata,support,reuse,weights and resource namespace."}
         return fields
+    if family == "raw_forward_outcome" and version == "18":
+        fields = _settings_fields(family, "16")
+        fields["outcomes"]["schema_version"] = "reversal_saved_measurements.v2"
+        fields["outcomes"]["meaning"] = "Admits saved12/14/17 populations through the same verified binding and twelve-bar measurement kernels; no per-symbol/date evaluator."
+        return fields
+    if family == "raw_forward_outcome" and version == "17":
+        return {"scope": {"constraints": "Explicit instrument/native15m dates; one through six complete28day decision blocks; origin-to-end at most19104bars; evidence-only frozen Dataset."},
+            "detector": {"meaning": "Existing retreat-inclusive recognizer; retain all chains; fixed19104bar identity namespace and10000candidate bound; explicit computation_origin."},
+            "outcomes": {"schema_version": "reversal_population_selection.v1", "populations": "At most two named block views plus combined; these change reporting only, not pairs or root weights.",
+                "meaning": "Selection only; no outcomes, thresholds, models or inference."}}
     if family == "raw_forward_outcome" and version == "16":
         return {"scope": {"constraints": "Exact saved v12/v14 decision scope and original frozen native15m Dataset; evidence mode only; no tail."},
             "detector": {"fixed": {"type": "saved_reversal_selection"}},
@@ -718,12 +752,14 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["outcomes"] = {"type": "object", "unit": "candidate/event counts", "meaning": "Funnel, stage/status/terminal/reason counts and lifecycle-contract issues; not predictive outcomes."}
     elif family == "run_signal_summary":
         fields["outcomes"] = {"type": "object", "unit": "record counts", "meaning": "Declared buckets, decision states and linked trade counts from existing run evidence."}
-    elif family == "raw_forward_outcome" and version == "16":
+    elif family == "raw_forward_outcome" and version in {"16", "18"}:
         fields["sample_count"] = {"type": "integer", "meaning": "Matched completion clocks, not independent trials."}
         fields["pairs"] = {"type": "array", "meaning": "Original pair identities/weights, both arms' first passages and full-window/pre-failure progress; censoring retained."}
         fields["measurements"] = {"type": "object", "meaning": "Whole saved-scope class fractions and progress distributions with original mass, fixed quarter bins and quantiles."}
         fields["frozen_context"] = {"type": "object", "meaning": "Context derived from validated immutable saved selection evidence and matched to actual frozen execution input."}
         fields["saved_dependence"] = {"type": "object", "meaning": "Unchanged saved support/ancestry components; no independence claim."}
+        if version == "18":
+            fields["measurements_by_population"] = {"type": "object", "meaning": "Saved reporting populations use original pair weights, explicit scope, and the same first-passage/progress summary functions; no rematching or recalculation."}
     elif family == "raw_forward_outcome" and version == "15":
         fields["sample_count"] = {"type": "integer", "meaning": "Matched completion clocks; not independent trials."}
         fields["pairs"] = {"type": "array", "meaning": "Saved identities, weights and original classes with full-window maxima and conservative pre-failure bounds; censored paths retained."}
@@ -733,13 +769,13 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["pairs"] = {"type": "array", "meaning": "Saved pair identities and weights; both arms retain first-passage classes and unresolved reasons."}
         fields["matched_outcome_comparison"] = {"type": "object", "meaning": "Old,new,combined four-class weighted fractions and case-minus-control differences; no inference."}
         fields["outcomes_calculated"] = {"fixed": True}
-    elif family == "raw_forward_outcome" and version in {"11", "12", "14"}:
+    elif family == "raw_forward_outcome" and version in {"11", "12", "14", "17"}:
         fields["sample_count"] = {"type": "integer", "meaning": "Matched completion clocks;not independent observations."}
         fields["cases"] = {"type": "array", "meaning": "Every chain retained,explicit selection status,features,weights and versioned availability view."}
         fields["pairs"] = {"type": "array", "meaning": "Deterministic control choices and support;no forward outcomes."}
         fields["selection_summary"] = {"type": "object", "meaning": "All versus matched coverage,partial moments,context shifts and exclusions;no numeric scientific pass gate."}
         fields["outcomes_calculated"] = {"fixed": False}
-        if version in {"12", "14"}:
+        if version in {"12", "14", "17"}:
             fields["populations"] = {"type": "object", "meaning": "Block1,block2,combined clean-prefix populations;separately normalized coverage/context and direct/ancestry dependence." if version == "14" else "Old first3blocks,new last3blocks,combined;separately normalized coverage/context and direct/ancestry dependence."}
             fields["compatibility"] = {"type": "object", "meaning": "B2 namespace ordering projection;actual event identities and historical results preserved."}
     elif family == "raw_forward_outcome" and version == "10":
@@ -857,11 +893,12 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "measurements" if definition.definition_id == "raw_forward_outcome" and version == "16" else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),
                         "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."}],
+        "discovery": _discovery(definition.definition_id, version),
         "compatibility": "Historical replay definition; no current request selects it." if example is None else "Documentation metadata does not change the definition hash or calculation.",
     }
 

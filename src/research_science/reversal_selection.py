@@ -14,6 +14,7 @@ from typing import Callable
 
 from .recognition import plain
 from .study import stable_hash
+from .weighted_summaries import first_crossing_quantiles, sequential_prefixes
 
 SCHEMA = "reversal_selection_only.v1"
 RULES = {
@@ -87,16 +88,8 @@ def _distribution(records, weights, field):
     if not mass:
         return {"observed_weight": 0., "missing_weight": missing, "mean": None, "quantiles": {}}
     pairs.sort()
-    quantiles = {}
-    for q in (0., .25, .5, .75, .9, .95, 1.):
-        total = 0.
-        value = pairs[-1][0]
-        for x, w in pairs:
-            total += w
-            if total >= q*mass:
-                value = x
-                break
-        quantiles[str(q)] = value
+    quantiles = first_crossing_quantiles(pairs, (0., .25, .5, .75, .9, .95, 1.),
+        total_weight=mass, prefixes=sequential_prefixes)
     return {"observed_weight": mass, "missing_weight": missing, "mean": math.fsum(x*w for x, w in pairs)/mass,
             "quantiles": quantiles, "quantile_rule": "first weighted CDF crossing;no interpolation"}
 

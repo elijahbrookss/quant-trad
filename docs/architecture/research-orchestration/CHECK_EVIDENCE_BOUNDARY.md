@@ -25,6 +25,10 @@ code_paths:
   - portal/backend/service/research/reversal_matched_progress_evaluator.py
   - src/research_science/reversal_matched_outcomes.py
   - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
+  - src/research_science/reversal_population.py
+  - src/research_science/price_paths.py
+  - src/research_science/weighted_summaries.py
+  - portal/backend/service/research/reversal_population_evaluator.py
   - src/research_science/reversal_selection.py
   - src/research_science/reversal_six_block_selection.py
   - src/research_science/reversal_two_block_selection.py
@@ -1148,3 +1152,45 @@ new persistence, generic composition framework, or inferential claim is added.
 See [the procedure](../../guides/reversal-saved-measurements.md) for context
 fields, fixed twelve-bar semantics and limits. Source qualification and a separate
 activation decision precede any normal single-attempt scientific dispatch.
+
+
+## Configured populations and reusable measurements
+
+For new supported reversal populations, `raw_forward_outcome@17` configures the
+existing selector with explicit origin, dates, instrument and reporting views.
+One to six whole 28-day decision blocks must fit the existing 19,104-bar native
+15-minute input bound. At most two named block views accompany the combined
+view. Views affect summaries only: matching, original root weights, nominal
+support and event identities remain governed by the same fixed scientific policy.
+The selector declares no outcome horizons and calls no measurement procedure.
+Recognition/selection adapters share the same outcome-blind requirement builder
+and canonical preparation. Fixed v11/v12/v14 entry points retain their exact
+request/result behavior and replay identity.
+
+`raw_forward_outcome@18` explicitly admits saved v12/v14/v17 selections through
+the shared binding and measurement adapter. It validates the configured v17
+population recipe against its pinned request and JSON-stable manifest. Method16
+continues to admit only its original v12/v14 contracts. Both profiles reuse the
+same first-passage/progress functions and retain the 999-pair measurement ceiling;
+a larger selection is not silently truncated. No population is rematched to fit
+a downstream measurement request.
+
+`price_paths.py` owns reusable fractional endpoint/excursion arithmetic. The
+legacy difference-over-entry and event/fact ratio-minus-one policies remain
+separate named functions because floating rounding, signed zero and zero-entry
+behavior can differ. Callers still own native clock/known-at validation, entry,
+complete versus unresolved horizons and output projection. Barrier first passage
+and full-window target progress retain their explicit distinct kernels. This is
+ordinary function composition, not a universal evaluator or new timeline.
+
+`weighted_summaries.py` shares first-CDF-crossing projection while callers retain
+quantiles, units, bins, filtering and original available/missing mass. Historical
+selection uses sequential prefixes; progress uses accurate `math.fsum` prefixes.
+The exact-boundary difference is regression-tested. Unweighted summaries with
+different means, finite filtering or interpolation are not silently standardized.
+
+The catalog marks fixed historical profiles and recommends the reusable routes
+for supported new contexts. These are discovery annotations, not admission.
+API, CLI and MCP read the same catalog through existing operations; explicit
+historical requests remain supported. See the existing selection and measurement
+guides for settings, constraints and stopping behavior.

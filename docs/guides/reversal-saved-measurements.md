@@ -64,3 +64,29 @@ input and 16 MiB result. Fail rather than truncate, tune, expand limits or acqui
 a tail. Registration and synthetic tests do not authorize scientific execution.
 Use the normal qualified-source release, explicit activation decision, fresh
 admission and single-attempt dispatch/readback path; stop on uncertain outcome.
+
+
+## Configured populations
+
+For new supported requests use `raw_forward_outcome@18` with
+`reversal_saved_measurements.v2`. It uses the same binding and measurement
+implementation and additionally admits a saved v17 configured selection. Method16
+keeps its v12/v14-only contract. Take the exact original Dataset/context and
+reference hashes from the saved source Check; never substitute a new scope,
+instrument, watermark or pair count. The declared population recipe and internal
+manifest must agree with the pinned source request. No recognition or matching
+is repeated.
+
+Measurements still require at most 999 saved pairs, 19,104 candles, the original
+12-bar horizon and fixed geometry/summary policies. A valid larger selection
+can exist without fitting this measurement bound; do not truncate it, expand the
+limit or rematch. First-passage and progress remain different observations, with
+explicit outcome provenance and missing mass. The 120-second evaluator budget
+is cooperative: it cannot interrupt a synchronous DB call and does not include
+input loading before evaluation. No latency claim follows from registration.
+
+Method18 also projects each saved reporting population through the same reusable
+first-passage and progress summary functions. Original root pair weights remain
+unchanged; each named view reports its own original mass and conditional
+distributions, including empty views and missing endpoints. Projection does not
+read another candle, recalculate paths, or change selection membership.

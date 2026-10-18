@@ -7,7 +7,7 @@ from time import monotonic
 from core.execution_control import execution_checkpoint
 from research_science.recognition import plain, utc
 from research_science.reversal_selection import SCHEMA, RULES, select_comparisons
-from .reversal_recognition_evaluator import choices, prepare_recognition
+from .reversal_recognition_evaluator import choices, prepare_recognition, recognition_requirements
 
 RESULT_SCHEMA = "reversal_selection_only_result.v1"
 
@@ -40,11 +40,7 @@ class ReversalSelectionEvaluator:
             statistics=request.parameters["statistics"], inputs=request.parameters["inputs"],
             scope=request.scope, gap_policy=request.parameters["gap_policy"])
         n = int((utc(request.scope["start"])-utc(request.parameters["detector"]["computation_origin"])).total_seconds())//900
-        return {"input_kind": "market_data", "indicator_ids": [], "warmup_floor_bars": n,
-            "feature_lookback_bars": n, "feature_windows_seconds_by_alias": {},
-            "outcome_horizons": [], "required_outcome_horizons": [], "horizon_kind": "bars",
-            "entry_lag_bars": 0, "invalidation_max_bars": 0, "outcome_boundary": "evaluation_end_exclusive",
-            "primary_candle_required_fields": ["open", "high", "low", "close", "known_at"]}
+        return recognition_requirements(n)
 
     def evaluate(self, *, plan, inputs):
         started = monotonic()

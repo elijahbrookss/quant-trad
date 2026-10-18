@@ -6,6 +6,7 @@ import math
 from .recognition import utc, plain
 from .reversal_outcomes import first_passage_path, HORIZON_BARS
 from .study import stable_hash
+from .weighted_summaries import first_crossing_quantiles, accurate_prefixes
 
 SCHEMA = 'reversal_matched_progress.v1'
 QUANTILES = (.10, .25, .50, .75, .90)
@@ -87,13 +88,7 @@ def distribution(rows, role, field):
     available = [r for r in rows if r[role]['progress'][field] is not None]
     mass, total = _mass(available), _mass(rows)
     values = sorted((r[role]['progress'][field], r['completion_moment_weight']) for r in available)
-    def quantile(p):
-        prefix_weights = []
-        for value, weight in values:
-            prefix_weights.append(weight)
-            if math.fsum(prefix_weights) >= mass*p:
-                return value
-        return values[-1][0] if values else None
+    quantiles = first_crossing_quantiles(values, QUANTILES, total_weight=mass, prefixes=accurate_prefixes)
     def bin_index(value):
         return min(int(value//25), 4)
     bins = []
@@ -105,7 +100,17 @@ def distribution(rows, role, field):
         'available_count': len(available), 'available_saved_weight_mass': mass,
         'unavailable_count': len(rows)-len(available),
         'unavailable_saved_weight_mass': _mass([r for r in rows if r[role]['progress'][field] is None]),
-        'quantiles_percent': {str(p): quantile(p) for p in QUANTILES}, 'bins': bins}
+        'quantiles_percent': quantiles, 'bins': bins}
+
+
+def summarize_progress(subset, role):
+    fields = ('full_window_max_progress_percent', 'pre_failure_progress_lower_percent', 'pre_failure_progress_upper_percent')
+    return {'count': len(subset), 'saved_weight_mass': _mass(subset),
+        'original_class_counts': dict(Counter(r[role]['original_outcome']['classification'] for r in subset)),
+        'distributions': {f: distribution(subset, role, f) for f in fields},
+        'censored_rows': [{**{k: r[k] for k in ('event_id', 'control_id', 'completion_moment_weight')},
+            'original_outcome': r[role]['original_outcome'], 'progress': r[role]['progress']}
+            for r in subset if not r[role]['progress']['complete_horizon']]}
 
 
 def describe_progress(selection, saved_outcomes, candles, *, evaluation_end, checkpoint=lambda: None):
@@ -144,19 +149,11 @@ def describe_progress(selection, saved_outcomes, candles, *, evaluation_end, che
     if rows and (any(not math.isfinite(r['completion_moment_weight']) or r['completion_moment_weight'] <= 0 for r in rows)
                  or not math.isclose(_mass(rows), 1., abs_tol=1e-12)):
         raise ValueError('matched_progress_invalid: original weights invalid')
-    fields = ('full_window_max_progress_percent', 'pre_failure_progress_lower_percent', 'pre_failure_progress_upper_percent')
-    def summarize(subset, role):
-        return {'count': len(subset), 'saved_weight_mass': _mass(subset),
-            'original_class_counts': dict(Counter(r[role]['original_outcome']['classification'] for r in subset)),
-            'distributions': {f: distribution(subset, role, f) for f in fields},
-            'censored_rows': [{**{k: r[k] for k in ('event_id', 'control_id', 'completion_moment_weight')},
-                'original_outcome': r[role]['original_outcome'], 'progress': r[role]['progress']}
-                for r in subset if not r[role]['progress']['complete_horizon']]}
     views = {}
     for name, subset in (('old', [r for r in rows if r['block'] < 3]),
                          ('new', [r for r in rows if r['block'] >= 3]), ('combined', rows)):
-        views[name] = {role: {'all': summarize(subset, role), 'originally_neither':
-            summarize([r for r in subset if r[role]['original_outcome']['classification'] == 'neither'], role)}
+        views[name] = {role: {'all': summarize_progress(subset, role), 'originally_neither':
+            summarize_progress([r for r in subset if r[role]['original_outcome']['classification'] == 'neither'], role)}
             for role in ('case', 'control')}
     result = {'rules': RULES, 'pairs': rows, 'progress_comparison': views,
         'sample_count': len({r['decision_at'] for r in rows}),

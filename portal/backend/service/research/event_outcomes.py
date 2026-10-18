@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
+from research_science.price_paths import ratio_path_observation
 from .event_time import _utc
 from .event_features import _path
 from .event_configuration import _INDICATOR_EVENT_DETECTOR, _FACT_SNAPSHOT_DETECTOR
@@ -78,44 +79,19 @@ def resolve_event_outcomes(
             }
             horizon_resolution[horizon_value][f"unresolved:{reason}"] += 1
             continue
-        forward_return = (float(target["close"]) / entry_close) - 1.0
-        signed_return = (
-            forward_return * direction
-            if detector_type == _INDICATOR_EVENT_DETECTOR
-            else forward_return
-        )
         path_rows = (
             [candle_by_open[value] for value in required_times]
             if required_times
             else [target]
         )
-        if detector_type == _FACT_SNAPSHOT_DETECTOR:
-            favorable = (
-                max(float(value["high"]) for value in path_rows)
-                / entry_close
-            ) - 1.0
-            adverse = (
-                min(float(value["low"]) for value in path_rows)
-                / entry_close
-            ) - 1.0
-        elif direction > 0:
-            favorable = (
-                max(float(value["high"]) for value in path_rows)
-                / entry_close
-            ) - 1.0
-            adverse = (
-                min(float(value["low"]) for value in path_rows)
-                / entry_close
-            ) - 1.0
-        else:
-            favorable = 1.0 - (
-                min(float(value["low"]) for value in path_rows)
-                / entry_close
-            )
-            adverse = 1.0 - (
-                max(float(value["high"]) for value in path_rows)
-                / entry_close
-            )
+        observation = ratio_path_observation(entry_price=entry_close, endpoint_price=float(target["close"]),
+            high=max(float(value["high"]) for value in path_rows),
+            low=min(float(value["low"]) for value in path_rows),
+            direction=1.0 if detector_type == _FACT_SNAPSHOT_DETECTOR else direction)
+        forward_return = observation.endpoint_return
+        signed_return = (observation.direction_signed_return
+            if detector_type == _INDICATOR_EVENT_DETECTOR else forward_return)
+        favorable, adverse = observation.maximum_favorable_excursion, observation.maximum_adverse_excursion
         row["outcomes"][str(horizon_value)] = {
             "status": "resolved",
             "reason": None,

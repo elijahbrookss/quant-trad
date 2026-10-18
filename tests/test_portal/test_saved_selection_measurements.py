@@ -18,6 +18,7 @@ from research_science.recognition import utc, plain, RecognitionCandle
 from research_science.reversal_selection import moment_weights
 from research_science.reversal_six_block_selection import RULES as SIX_BLOCK_RULES
 from research_science.reversal_two_block_selection import RULES as TWO_BLOCK_RULES
+from research_science.reversal_population import RULES as POPULATION_RULES, SelectionPopulation, MANIFEST_FIELDS as POPULATION_FIELDS
 from research_science.reversal_matched_outcomes import describe_selected_pairs
 from research_science.reversal_matched_progress import describe_progress
 from research_science.study import stable_hash
@@ -35,10 +36,11 @@ def planned(payload):
 
 
 def seal_selection(selection, version):
-    material = deepcopy({k: selection[k] for k in MANIFEST_FIELDS})
-    if version == '14':
+    fields = POPULATION_FIELDS if version == '17' else MANIFEST_FIELDS
+    material = deepcopy({k: selection[k] for k in fields})
+    if version in {'14','17'}:
         material = json.loads(json.dumps(material))
-        selection['selection_manifest_fields'] = list(MANIFEST_FIELDS)
+        selection['selection_manifest_fields'] = list(fields)
     selection['selection_manifest_hash'] = stable_hash(material)
 
 
@@ -73,14 +75,28 @@ def synthetic(version='14'):
     selection['selection_summary'].update(all={'chains':count,'completion_clocks':clocks},matched={'chains':count,'completion_clocks':clocks},case_status_counts={'matched':count})
     for pop in selection['populations'].values():
         pop['selection_summary'] = {'chains_per_completion_clock_histogram': {2:1, 11:1}}
-    selection.update(schema_version=('reversal_two_block_selection_result.v1' if version == '14' else 'reversal_selection_only_result.v2'),
+    selection.update(schema_version=('reversal_two_block_selection_result.v1' if version == '14' else 'reversal_population_selection_result.v1' if version == '17' else 'reversal_selection_only_result.v2'),
         status='completed',outcomes_calculated=False,source_identity_key=SOURCE,computation_origin=plain(origin),
         processed_bars=rows,candidate_count=count,sample_count=clocks,evaluation_range={'start':'2025-02-01T00:00:00Z','end_exclusive':end},
-        dependence={'ancestry': 'synthetic retained'},rules=deepcopy(SIX_BLOCK_RULES if version=='12' else TWO_BLOCK_RULES),compatibility={'synthetic':True})
+        dependence={'ancestry': 'synthetic retained'},rules=deepcopy(SIX_BLOCK_RULES if version=='12' else POPULATION_RULES if version=='17' else TWO_BLOCK_RULES),compatibility={'synthetic':True})
+    if version=='17':
+        selection['population_recipe']=SelectionPopulation.from_configuration(origin=origin,start='2025-02-01T00:00:00Z',end=end,
+            views=[{'name':'old','start_block':0,'block_count':3},{'name':'new','start_block':3,'block_count':3}]).to_dict()
+    if version=='17':
+        recipe=SelectionPopulation.from_configuration(origin=origin,start='2025-02-01T00:00:00Z',end=end,views=selection['population_recipe']['views'])
+        for name,left,right in recipe.ranges():
+            selection['populations'][name]['evaluation_range']={'start':plain(left),'end_exclusive':plain(right)}
+    if version in {'12','14'}:
+        mid='2025-03-01T00:00:00Z' if version=='14' else '2025-04-26T00:00:00Z'
+        for name,left,right in [('old','2025-02-01T00:00:00Z',mid),('new',mid,end),('combined','2025-02-01T00:00:00Z',end)]:
+            selection['populations'][name]['evaluation_range']={'start':plain(utc(left)),'end_exclusive':plain(utc(right))}
     seal_selection(selection,version)
     payload = deepcopy(catalog.get_check_definition('raw_forward_outcome',version)['examples'][0]['request'])
     payload.update(mode='evidence',dataset_id='mds_'+'a'*32)
     payload['scope']['instrument_id'] = 'instrument-1'
+    if version=='17':
+        payload['scope']['end']=end
+        payload['outcomes']['populations']=selection['population_recipe']['views']
     definition, request, plan = planned(payload)
     plan = replace(plan,plan_hash='',materialization_range={**plan.materialization_range,'as_of_commit_seq':10})
     definition,request,plan = pin_check_definition_to_plan(definition,request,plan)
@@ -111,10 +127,10 @@ def synthetic(version='14'):
     return item,reseal(item),ctx,bars
 
 
-def payload(ref,ctx):
+def payload(ref,ctx,measurement_version='16'):
     return {'check_family':'raw_forward_outcome','mode':'evidence','dataset_id':ctx['dataset_id'],
         'scope':{'instrument_id':ctx['instrument_id'],'timeframe':'15m','start':ctx['decision_start'],'end':ctx['decision_end_exclusive']},
-        'detector':deepcopy(adapter.DETECTOR),'outcomes':{'schema_version':adapter.SCHEMA,'selection_reference':ref,'frozen_context':ctx},'gap_policy':'reject'}
+        'detector':deepcopy(adapter.DETECTOR),'outcomes':{'schema_version':adapter.REUSABLE_SCHEMA if measurement_version=='18' else adapter.SCHEMA,'selection_reference':ref,'frozen_context':ctx},'gap_policy':'reject'}
 
 
 @pytest.mark.parametrize('version',['12','14'])
@@ -185,10 +201,11 @@ def test_no_scope_tuning_protocol_expansion_or_scientific_gate(change):
     with pytest.raises(ValueError):planned(p)
 
 
-def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monkeypatch):
-    item,ref,ctx,bars=synthetic();definition,request,plan=planned(payload(ref,ctx))
+@pytest.mark.parametrize('source_version,measurement_version',[('14','16'),('12','18'),('14','18'),('17','18')])
+def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monkeypatch,source_version,measurement_version):
+    item,ref,ctx,bars=synthetic(source_version);definition,request,plan=planned(payload(ref,ctx,measurement_version))
     plan=replace(plan,plan_hash='',materialization_range={**plan.materialization_range,'as_of_commit_seq':10})
-    opened=pd.date_range('2025-01-01',periods=8352,freq='15min',tz='UTC')
+    opened=pd.date_range('2025-01-01',periods=ctx['input_rows'],freq='15min',tz='UTC')
     frame=pd.DataFrame({'timestamp':opened,'close_time':opened+timedelta(minutes=15),'known_at':opened+timedelta(minutes=15),
         'source_identity_key':SOURCE,'known_at_method':'interval_close_inferred','open':100.,'high':100.5,'low':99.5,'close':100.})
     index={v:i for i,v in enumerate(opened)}
@@ -212,6 +229,10 @@ def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monk
     assert result['pairs']==progress['pairs']
     assert result['measurements']['first_passage']==passage['matched_outcome_comparison']['combined']
     assert result['measurements']['progress']==progress['progress_comparison']['combined']
+    if measurement_version=='18':
+        for name in (('old','new','combined') if source_version in {'12','17'} else ('combined',)):
+            assert result['measurements_by_population'][name]['first_passage']==passage['matched_outcome_comparison'][name]
+            assert result['measurements_by_population'][name]['progress']==progress['progress_comparison'][name]
     assert result['outcome_provenance']['kind']=='computed_in_this_check' and not result['reselection_performed']
     retained=json.loads(json.dumps(result));assert stable_hash({k:retained[k] for k in retained['measurement_manifest_fields']})==retained['measurement_manifest_hash']
     for field,value in [('max_commit_seq',11),('dataset_hash','f'*64)]:
@@ -258,3 +279,17 @@ def test_handoff_binding_is_not_new_historical_execution_hash_material():
 def test_no_mutable_or_other_dataset_execution(mode,dataset):
     _,ref,ctx,_=synthetic();p=payload(ref,ctx);p.update(mode=mode,dataset_id=dataset)
     with pytest.raises(ValueError,match='original frozen Dataset'):planned(p)
+
+
+def test_configured_selection_admission_is_explicit_and_does_not_expand_historical16():
+    item,ref,ctx,_=synthetic('17')
+    with pytest.raises(ValueError,match='saved_selection_invalid'):
+        load_saved_selection(ref,ctx,item_loader=lambda key:item)
+    saved=load_saved_selection(ref,ctx,item_loader=lambda key:item,admitted_versions=('12','14','17'))
+    assert saved.evaluator_version=='17'
+    definition,request,plan=planned(payload(ref,ctx,'18'))
+    assert definition.evaluator_version=='18' and plan.outcome_tail['seconds']==0
+    selection=item['payload']['result']['result'];selection['population_recipe']['views'][0]['name']='changed'
+    seal_selection(selection,'17');ref=reseal(item)
+    with pytest.raises(ValueError,match='population configuration'):
+        load_saved_selection(ref,ctx,item_loader=lambda key:item,admitted_versions=('12','14','17'))

@@ -17,6 +17,10 @@ class _FakeClient:
 
     def request_json(self, method: str, path: str, *, params=None, payload=None):
         self.calls.append((method, path, params, payload))
+        if method == "GET" and path == "/api/research/checks/definitions":
+            return {"definitions": []}
+        if method == "GET" and path.startswith("/api/research/checks/definitions/"):
+            return {"definition": {"id": "synthetic"}}
         if method == "GET" and path == "/api/health":
             return {"status": "ok"}
         if (
@@ -796,3 +800,15 @@ def test_mcp_single_attempt_schema_and_confirmation_guard(tmp_path):
     assert response["error"]["code"] == -32602
     assert "confirm=true" in response["error"]["message"]
     assert client.calls == []
+
+
+def test_research_catalog_tools_use_existing_readonly_api_contract(tmp_path):
+    client=_FakeClient();server=_server(tmp_path,client=client)
+    before=len(client.calls)
+    server.call_tool('list_research_check_definitions',{})
+    server.call_tool('get_research_check_definition',{'definition_id':'raw_forward_outcome','version':'17'})
+    calls=client.calls[before:]
+    assert len(calls)==2 and all(call[0]=='GET' for call in calls)
+    assert calls[0][1]=='/api/research/checks/definitions'
+    assert calls[1][1]=='/api/research/checks/definitions/raw_forward_outcome/17'
+    with pytest.raises(McpError):server.call_tool('get_research_check_definition',{'definition_id':'raw_forward_outcome'})
