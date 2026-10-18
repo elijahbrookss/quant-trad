@@ -95,3 +95,10 @@ source and refresh normal global/duplicate/attempt admission before one
 selection-only run. No outcome run or further allocation follows automatically.
 Keep operational approvals and attempt accounting in their separate receipts;
 scientific summaries contain findings, methods and limitations.
+
+
+The separate [saved-pair outcome consumer](reversal-matched-outcomes.md) can
+describe subsequent BTC paths without changing this selection result. ETH spot
+uses this same selection method with its own native frozen input and separate
+symbol binding; missing native bars remain a gap-policy blocker, never a reason
+to aggregate lower-timeframe candles or change the formation rules.

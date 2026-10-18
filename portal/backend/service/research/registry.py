@@ -36,6 +36,7 @@ from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
 from .reversal_selection_evaluator import (ReversalSelectionEvaluator, SCHEMA as SELECTION_SCHEMA, RULES as SELECTION_RULES, normalize_configuration as normalize_selection_configuration)
 from .reversal_six_block_selection_evaluator import (ReversalSixBlockSelectionEvaluator, SCHEMA as SIX_BLOCK_SCHEMA, RULES as SIX_BLOCK_RULES, normalize_configuration as normalize_six_block_configuration)
+from .reversal_matched_outcomes_evaluator import (ReversalMatchedOutcomesEvaluator, SCHEMA as MATCHED_OUTCOME_SCHEMA, RULES as MATCHED_OUTCOME_RULES, normalize_configuration as normalize_matched_outcomes_configuration)
 from .reversal_first_passage_evaluator import (ReversalFirstPassageEvaluator,
     SCHEMA as FIRST_PASSAGE_SCHEMA, RULES as FIRST_PASSAGE_RULES,
     normalize_configuration as normalize_first_passage_configuration)
@@ -413,10 +414,23 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_matched_outcomes = ReversalMatchedOutcomesEvaluator()
+CHECK_REGISTRY.register_evaluator(_matched_outcomes)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="13", evaluator_id=_matched_outcomes.evaluator_id,
+    evaluator_version="13", request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={"family": checks.RAW_FORWARD_OUTCOME, "event_ownership": "saved_check",
+        "input_policy": "canonical_candle_clock_path.v1", "outcome_schema": MATCHED_OUTCOME_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive", "matched_outcome_rules": MATCHED_OUTCOME_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v12 pairs."""
+    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v13 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -999,7 +1013,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("12" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("13" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == MATCHED_OUTCOME_SCHEMA
+            else "12" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == SIX_BLOCK_SCHEMA
             else "11" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == SELECTION_SCHEMA
@@ -1024,7 +1040,7 @@ def _resolve_definition_version(payload, *, family, base_version):
     if retrospective is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "13"
             or any(v is not None for v in (matched_origin, shared_landmark, first_return, forward_risk))):
         raise ValueError("retrospective_invalid: requires standalone event_fact_analysis version 13")
-    if resolved_base_version == "13" and retrospective is None:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "13" and retrospective is None:
         raise ValueError("retrospective_invalid: explicit analysis contract required")
     if availability_trigger and resolved_base_version != "5":
         raise ValueError(
@@ -1063,7 +1079,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1118,6 +1134,11 @@ def materialize_check_definition(
         raise ValueError(
             "event_fact_check_invalid: fact_snapshot does not support reset_rewarm"
         )
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "13":
+        outcomes = normalize_matched_outcomes_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("matched_outcomes_invalid: no rewarm or scientific assertions")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "12":
         outcomes = normalize_six_block_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)

@@ -19,6 +19,8 @@ code_paths:
   - src/research_science/recognition.py
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
+  - src/research_science/reversal_matched_outcomes.py
+  - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
   - src/research_science/reversal_selection.py
   - src/research_science/reversal_six_block_selection.py
   - portal/backend/service/research/reversal_six_block_selection_evaluator.py
@@ -1070,3 +1072,23 @@ automatic follow-up are supplied. The fixed19,104bar ceiling is explicit;
 existing comparison/time/input/result bounds fail rather than truncate or expand.
 See the [six-block procedure](../../guides/reversal-six-block-selection.md) and
 its [fixed protocol](../../guides/reversal-six-block-selection-v1.json).
+
+
+## Saved reversal matched outcomes
+
+`raw_forward_outcome@13` consumes the pinned BTC B3 selection Check on its
+original native frozen input. It validates existing typed Check result/evidence
+hashes without replay, restores only the historical v12 integer histogram key
+types for its internal manifest hash, validates saved barriers against frozen
+candles and reuses `first_passage_path`. It never fabricates recognized controls
+or reruns recognition/matching. Exact selection reference hashes are method
+configuration and copied into the result; missing/changed prior evidence fails.
+
+All saved pairs and completion-moment weights remain. Old/new/combined and
+block/day views normalize only within their reporting population; every
+continuation/failure/neither/unresolved class remains in the denominator.
+The original frozen end remains the outcome boundary, so unresolved censoring
+is retained. Saved selection coverage and support/ancestry dependence remain
+visible; there is no coverage gate or independent-trial inference. Historical
+first-passage wrappers, definitions and results are unchanged. See the
+[fixed consumer procedure](../../guides/reversal-matched-outcomes.md).
