@@ -44,7 +44,7 @@ Common agent/tool workflow commands:
 - `qt indicators types`
 - `qt indicators validate-config --type <type> --params-json '<json>'`
 - `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
-- `qt data derive-candles --dataset-id <frozen_id> --source-series-id <id> --start <iso> --end <iso> --timeframe <coarser_interval>`
+- `qt data ingest-candles --instrument-id <id> --start <iso> --end <iso> --timeframe <provider-native-interval>`
 - `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
 - `qt research check requirements --request-json <request.json>`
 - `qt research check preview --request-json <request.json>`
@@ -65,6 +65,13 @@ Common agent/tool workflow commands:
 - `qt experiments resume <experiment_id>`
 - `qt experiments status <experiment_id>`
 - `qt experiments collect <experiment_id> --wait --export`
+
+New candle inputs must be provider-native at the requested timeframe and
+frozen directly. Do not aggregate, split/upsample or synthesize candles from
+other intervals. Native request pagination is transport, not candle conversion.
+The existing `qt data derive-candles` implementation is retained historical
+compatibility for already-derived evidence, not a new-research preparation step.
+Preserve its historical inputs, lineage, behavior and results without relabeling.
 
 For research calculations, use the sequence above. Preview is ephemeral and
 cannot support an evidence-bearing Observation. Preparation may acquire only
@@ -208,7 +215,7 @@ python scripts/automation/check_release_ci.py <final-full-commit> --handoff-bran
 ```
 
 The caller must compare the receipt revision with the clean final tree being
-handed off. The helper requires the latest exact-commit push, all seven expanded
+handed off. The helper requires the latest exact-commit push, all mandatory expanded
 job labels in the same workflow attempt, and both unexpired recovery artifacts
 with SHA-256 digests and creation times bound to their producing jobs. Each
 recovery bundle includes `qualification-source.json`, binding the full workflow
@@ -224,7 +231,7 @@ The coverage map is explicit:
 | CI proof | Scope and exclusions |
 | --- | --- |
 | `clean-database-bootstrap` | Broad `pytest -m db` with isolated DB inputs; clean-bootstrap and header-namespace files are excluded there and executed separately in this same job. `QT_CLEAN_BOOTSTRAP_TEST_DSN` enables the clean-install case. |
-| `deployment-contract` | `incremental-recovery` enables `QT_STORAGE_DEMO=1`, `QT_INCREMENTAL_APPLICATION_TEST=1`, production-derived test images, UID/PID ownership and private storage/restore volumes. Runs the application restore and retained-raw-placement cases separately. Its `storage-demo` selection includes the default `test_storage_end_to_end_db.py` plus the explicitly listed online copy/switch cases, with owned storage topology. Other named worker/core/storage-layout rehearsals remain required. |
+| `deployment-contract` | `incremental-recovery` enables `QT_STORAGE_DEMO=1`, `QT_INCREMENTAL_APPLICATION_TEST=1`, production-derived test images, UID/PID ownership and private storage/restore volumes. Runs the application restore and retained-raw-placement cases separately. Its independent aggregate requires all four proof groups and six isolated online node shards. Its `storage-demo` selection includes the default `test_storage_end_to_end_db.py` plus the explicitly listed online copy/switch cases, with owned storage topology. Other named worker/core/storage-layout rehearsals remain required. |
 | `committed-recovery (current)` and `committed-recovery (24357ff387776822f676ae2a8b1cce7f209c313e)` | Both actual expiry/committed-switch recovery variants and their independently bound evidence bundles are mandatory. |
 | `pr-suite`, `frontend`, `deployment-rehearsal` | Remain mandatory companions; they do not replace DB/recovery scope. |
 
@@ -403,3 +410,23 @@ while retaining the original v1 matching contract. Use the catalog's exact
 request template. The [Check evidence boundary](../architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md#fixed-atr-ratio-pair-filter)
 owns the fixed rule, separate support denominators and compatibility behavior.
 This analytical extension requires no schema migration or new Dataset.
+
+
+## Change-impact iteration and routine promotion
+
+Work-branch CI now computes required checks from the conservative matrix in
+[CI test topology](testing/ci-test-topology.md#conservative-work-branch-selection).
+Docs, exact reviewed frontend presentation files and a few reviewed research calculation modules can
+avoid unrelated database/storage rehearsals. Unlisted or mixed high-risk changes
+run everything. Selection includes the branch contribution since its explicitly
+configured integration merge base, even when earlier push runs were cancelled. A manual force-full run remains available. Keep focused local
+feedback and the normal validation matrix; a short CI run is not the full
+exact-source handoff receipt described above. Develop/main release qualification
+and its seven original expanded jobs/recovery artifacts remain mandatory.
+
+Routine deployment eligibility is narrower than test selection. The first path
+allows documentation and frontend presentation only, with unchanged backend,
+schema, registry, serialization, dependencies, configuration and storage. Check
+calculation updates still require reviewed manual compatibility promotion.
+See [server deployment](server-deployment.md#qualified-routine-promotion) for the
+artifact, read-only preflight, recovery evidence and activation boundary.

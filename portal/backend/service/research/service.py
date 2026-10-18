@@ -71,8 +71,7 @@ from .planning import (
 )
 from .registry import (
     CHECK_REGISTRY,
-    DURABLE_EVIDENCE_CHECK_FAMILIES,
-    PREVIEW_ONLY_CHECK_FAMILIES,
+    definition_allows_evidence,
     normalize_check_preparation_request,
     normalize_check_request,
     pin_check_definition_to_plan,
@@ -496,7 +495,7 @@ def _validate_plan_binding_alignment(
 
 
 def _definition_evidence_classification(definition: CheckDefinition) -> str:
-    if definition.definition_id in PREVIEW_ONLY_CHECK_FAMILIES:
+    if not definition_allows_evidence(definition):
         return "frozen_replayable_unqualified"
     if definition.definition_id in {SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}:
         return "frozen_replayable_diagnostic"
@@ -577,8 +576,7 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
             projected["replayable"] = True
             projected["observation_eligible"] = (
                 str(result.result.get("status") or "") == "completed"
-                and definition.definition_id
-                in DURABLE_EVIDENCE_CHECK_FAMILIES
+                and definition_allows_evidence(definition)
             )
     else:
         projected["evidence_classification"] = "legacy_unpinned"
@@ -823,8 +821,11 @@ def get_run_research_evidence(run_id: str) -> dict[str, Any]:
 
 
 def compare_research_checks(left_check_id: str, right_check_id: str) -> dict[str, Any]:
-    left = repository.get_item(left_check_id)
-    right = repository.get_item(right_check_id)
+    return compare_research_check_records(repository.get_item(left_check_id), repository.get_item(right_check_id))
+
+
+def compare_research_check_records(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    """Same saved-output comparison math, over caller-admitted exact snapshots."""
     if left.get("kind") != "research_check" or right.get("kind") != "research_check":
         raise ValueError("research compare requires two research_check items")
     left_result = _check_result(left)
@@ -1266,7 +1267,7 @@ def persist_research_check_evidence(
 
     if request.mode != CHECK_MODE_EVIDENCE:
         raise ValueError("check_evidence_persistence_requires_evidence_mode")
-    if definition.definition_id not in DURABLE_EVIDENCE_CHECK_FAMILIES:
+    if not definition_allows_evidence(definition):
         raise ValueError(
             "check_evidence_family_preview_only: this evaluator cannot create new "
             f"durable evidence family={definition.definition_id}"
@@ -1278,7 +1279,7 @@ def persist_research_check_evidence(
     evidence_classification = _definition_evidence_classification(definition)
     observation_eligible = (
         status == "tested"
-        and definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
+        and definition_allows_evidence(definition)
     )
     envelope = {
         "schema_version": "research_check_payload.v2",

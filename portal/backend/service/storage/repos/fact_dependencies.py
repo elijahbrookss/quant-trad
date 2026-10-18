@@ -158,6 +158,94 @@ def read_canonical_dependency_rows(session, identities, *, reader, max_logical_b
     return reader.read_rows_by_ids(session, identities)
 
 
+def _checkpoint_source_groups(session, identities, max_objects, check_budget):
+    """Locate exact identities without decoding payloads; one cold page per group."""
+    groups, manifests = defaultdict(list), {}
+    for offset in range(0, len(identities), 1000):
+        if check_budget is not None:
+            check_budget()
+        batch = identities[offset:offset + 1000]
+        locations = session.execute(text(
+            "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
+        ), {"ids": batch}).mappings().all()
+        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+            raise RuntimeError("canonical_checkpoint_source_identity_coverage_invalid")
+        rows = session.execute(text("""
+            SELECT source.id AS requested_id, hot.id AS hot_id, manifests.*
+            FROM market.fact_versions AS source
+            LEFT JOIN market.fact_hot_payloads AS hot
+              ON hot.storage_day=source.storage_day AND hot.id=source.id
+            LEFT JOIN market.fact_archive_manifests AS manifests
+              ON hot.id IS NULL AND manifests.storage_day=source.storage_day
+             AND (manifests.first_commit_seq,manifests.first_id)<=(source.market_commit_seq,source.id)
+             AND (manifests.last_commit_seq,manifests.last_id)>=(source.market_commit_seq,source.id)
+            WHERE source.id=ANY(:ids) AND source.storage_day=ANY(:days)
+            ORDER BY source.id,manifests.page_ordinal LIMIT :limit
+        """), {"ids": batch, "days": sorted({row["storage_day"] for row in locations}),
+               "limit": len(batch) + 1}).mappings().all()
+        if len(rows) != len(batch) or {row["requested_id"] for row in rows} != set(batch):
+            raise RuntimeError("canonical_checkpoint_source_archive_coverage_invalid")
+        for row in rows:
+            if row["hot_id"] is not None:
+                groups[None].append(row["requested_id"])
+                continue
+            if row["id"] is None:
+                raise RuntimeError("canonical_checkpoint_source_archive_coverage_invalid")
+            manifest = _catalog_manifest(row)
+            prior = manifests.setdefault(manifest.manifest_id, manifest)
+            if len(manifests) > max_objects:
+                raise RuntimeError("canonical_checkpoint_source_object_budget_exceeded")
+            if prior != manifest:
+                raise RuntimeError("canonical_checkpoint_source_archive_catalog_conflict")
+            groups[manifest.manifest_id].append(row["requested_id"])
+    return groups, manifests
+
+
+def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifier,
+                                    max_logical_bytes, max_objects, check_budget=None):
+    """Bound retained selected rows plus one cold decode, not all backing pages.
+
+    Only checkpoint admission uses this path. The caller retains its exact
+    causal selection and lifecycle fence. Every backing object joins the same
+    cumulative verification count/byte budget as raw/checkpoint dependencies.
+    No page, identity or integrity check is skipped to fit the working set.
+    """
+    identities = sorted(set(identities))
+    if not identities:
+        return {}
+    groups, manifests = _checkpoint_source_groups(session, identities, max_objects, check_budget)
+    result, retained_bytes = {}, 0
+    for manifest_id, batch in groups.items():
+        if check_budget is not None:
+            check_budget()
+        remaining = max_logical_bytes - retained_bytes
+        if manifest_id is not None:
+            manifest = manifests[manifest_id]
+            if manifest.logical_byte_count > remaining:
+                raise CanonicalSourceByteBudgetExceeded(
+                    logical_bytes=retained_bytes + manifest.logical_byte_count,
+                    max_logical_bytes=max_logical_bytes)
+            byte_verifier.verify(manifest.object_key, manifest.object_sha256,
+                                 expected_bytes=manifest.byte_count)
+        # Recheck current placement and its whole-page charge immediately before
+        # hydration. The common reader verifies all cold bytes and envelopes.
+        selected = read_canonical_dependency_rows(session, batch, reader=reader,
+            max_logical_bytes=remaining, check_budget=check_budget)
+        if set(selected) != set(batch):
+            raise RuntimeError("canonical_checkpoint_source_identity_coverage_invalid")
+        for identity, row in selected.items():
+            if check_budget is not None:
+                check_budget()
+            # Match the existing conservative hot-document multiplier. Only
+            # selected rows survive a group; full decoded pages stay in reader.
+            retained_bytes += 6 * len(json.dumps(row, default=str).encode("utf-8"))
+            if retained_bytes > max_logical_bytes:
+                raise CanonicalSourceByteBudgetExceeded(
+                    logical_bytes=retained_bytes, max_logical_bytes=max_logical_bytes)
+            result[identity] = row
+    return result
+
+
 def verify_canonical_source_placements(session, dependencies, *, objects=None, check_budget=None):
     """Recheck exact source headers and cold bytes while lifecycle-fenced.
 
@@ -174,15 +262,29 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
         if check_budget is not None:
             check_budget()
         batch = identities[offset:offset + 1000]
+        # Permanent identities route the lookup; actual headers, hashes and
+        # current hot/cold placement remain independently checked below.
+        locations = session.execute(text(
+            "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
+        ), {"ids": batch}).mappings().all()
+        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+            raise RuntimeError("canonical_source_dependency_missing")
+        location_days = {row["id"]: row["storage_day"] for row in locations}
+        days = sorted(set(location_days.values()))
+        if check_budget is not None:
+            check_budget()
         headers = session.execute(text("""
             SELECT versions.id, versions.row_hash, versions.storage_day,
                    hot.id IS NOT NULL AS hot_present
             FROM market.fact_versions AS versions
             LEFT JOIN market.fact_hot_payloads AS hot
               ON hot.storage_day=versions.storage_day AND hot.id=versions.id
-            WHERE versions.id=ANY(:ids) ORDER BY versions.id
-        """), {"ids": batch}).mappings().all()
-        if {item["id"] for item in headers} != set(batch):
+             AND hot.storage_day=ANY(:days)
+            WHERE versions.id=ANY(:ids) AND versions.storage_day=ANY(:days)
+            ORDER BY versions.id
+        """), {"ids": batch, "days": days}).mappings().all()
+        if ({item["id"] for item in headers} != set(batch)
+                or any(item["storage_day"] != location_days[item["id"]] for item in headers)):
             raise RuntimeError("canonical_source_dependency_missing")
         cold = [item["id"] for item in headers if not item["hot_present"]]
         pages = defaultdict(list)
@@ -195,8 +297,10 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
                 JOIN market.fact_archive_manifests AS manifests ON manifests.storage_day=source.storage_day
                   AND (manifests.first_commit_seq,manifests.first_id)<=(source.market_commit_seq,source.id)
                   AND (manifests.last_commit_seq,manifests.last_id)>=(source.market_commit_seq,source.id)
-                WHERE source.id=ANY(:ids) ORDER BY source.id,manifests.page_ordinal LIMIT :limit
-            """), {"ids": cold, "limit": len(cold) + 1}).mappings().all()
+                WHERE source.id=ANY(:ids) AND source.storage_day=ANY(:days)
+                ORDER BY source.id,manifests.page_ordinal LIMIT :limit
+            """), {"ids": cold, "days": sorted({row["storage_day"] for row in headers if not row["hot_present"]}),
+                    "limit": len(cold) + 1}).mappings().all()
             if len(matches) != len(cold):
                 raise RuntimeError("canonical_source_dependency_archive_coverage_invalid")
             for item in matches:

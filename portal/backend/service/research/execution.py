@@ -279,7 +279,13 @@ def _load_market_inputs(
                 primary_instrument_id=instrument_id,
                 start=_utc(requirement["required_start"]),
                 end=_utc(requirement["required_end"]),
-                evaluation_time=_utc(plan.materialization_range["end_exclusive"]),
+                evaluation_time=_utc(
+                    request.parameters["outcomes"]["retrospective"]["analysis_as_of"]
+                    if request.definition_id == "event_fact_analysis" and request.definition_version.split("+", 1)[0] == "13"
+                    else request.parameters["outcomes"]["analysis_as_of"]
+                    if request.definition_id == "event_fact_analysis" and request.definition_version.split("+", 1)[0] == "14"
+                    else plan.materialization_range["end_exclusive"]
+                ),
             )
         inputs["fact_requirements_by_alias"] = requirements
         inputs["fact_records_by_alias"] = histories

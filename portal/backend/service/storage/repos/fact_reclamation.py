@@ -112,22 +112,29 @@ class PostgresCanonicalFactReclamationRepository:
         # headers and their complete cold payloads survive, so no pinned range
         # is subtracted from the source. Count overlapping bindings for audit.
         # Both callers have just checked complete partition/catalog evidence.
-        # Materialize the cheap conservative overlap first: a direct semi-join
-        # can hash every header in the day just to audit unrelated Datasets.
-        # Bounds can contain gaps; the per-binding header check remains exact.
+        # Materialize one conservative envelope per binding from overlapping
+        # verified pages. Clamp the indexed header seek to that envelope, not
+        # the Dataset's potentially much longer window. Keep dataset_id in the
+        # grouping: equal windows in different frozen Datasets are separate pins.
+        # Bounds can contain gaps; the header, placement day, exclusive range
+        # end and frozen commit checks remain exact. The page's last clock is
+        # inclusive and is not a substitute for the binding's exclusive end.
         return session.execute(text("""
             WITH candidates AS MATERIALIZED (
-                SELECT pins.series_id, pins.range_start, pins.range_end, pins.max_commit_seq
-                FROM market.dataset_series AS pins WHERE EXISTS (
-                    SELECT 1 FROM market.fact_archive_series AS bounds
-                    JOIN market.fact_archive_manifests AS pages ON pages.id=bounds.manifest_id
-                    WHERE pages.storage_day=:day AND bounds.series_id=pins.series_id
-                      AND bounds.first_observation_at<pins.range_end
-                      AND bounds.last_observation_at>=pins.range_start)
+                SELECT pins.dataset_id, pins.series_id, pins.range_end, pins.max_commit_seq,
+                       GREATEST(pins.range_start, min(bounds.first_observation_at)) AS first_observation_at,
+                       max(bounds.last_observation_at) AS last_observation_at
+                FROM market.dataset_series AS pins
+                JOIN market.fact_archive_series AS bounds ON bounds.series_id=pins.series_id
+                JOIN market.fact_archive_manifests AS pages ON pages.id=bounds.manifest_id
+                WHERE pages.storage_day=:day AND bounds.first_observation_at<pins.range_end
+                  AND bounds.last_observation_at>=pins.range_start
+                GROUP BY pins.dataset_id, pins.series_id, pins.range_start, pins.range_end, pins.max_commit_seq
             )
             SELECT count(*) FROM candidates AS pins CROSS JOIN LATERAL (
                 SELECT 1 FROM market.fact_versions AS versions WHERE versions.storage_day=:day
-                  AND versions.series_id=pins.series_id AND versions.observation_time>=pins.range_start
+                  AND versions.series_id=pins.series_id AND versions.observation_time>=pins.first_observation_at
+                  AND versions.observation_time<=pins.last_observation_at
                   AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq
                 LIMIT 1
             ) AS matched
@@ -164,7 +171,8 @@ class PostgresCanonicalFactReclamationRepository:
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
             objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,
                                                check_budget=self.archive.check_budget)
-            evidence = self.archive._partition_evidence(session, partition, limits=verification_limits, objects=objects)
+            with objects.distinct_references():
+                evidence = self.archive._partition_evidence(session, partition, limits=verification_limits, objects=objects)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             self._assert_archive_admission(objects)

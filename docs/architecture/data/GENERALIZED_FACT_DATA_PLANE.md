@@ -687,6 +687,17 @@ returned 14 mappings in 278 ms. The bindings were reconstructed from current
 prefix metadata because the failure log truncated its list, so this is a
 representative observation, not an exact replay or a throughput guarantee.
 
+The prefix query materializes the paired manifest selection before joining its
+mappings. PostgreSQL could otherwise flatten the semijoin and apply the exact
+manifest filter after mapping expansion. A later 19-endpoint lookup exceeded the
+five-second production statement limit with that flattened plan. Its bounded
+metadata reconstruction selected 19 manifests (1,219 declared records), compared
+with 352 manifests (22,281 records) before paired filtering; the materialized
+candidate returned 19 mappings in 404 ms in one read-only diagnostic. This is
+query-level evidence, not a whole-retention speedup or deployment receipt. The
+native sparse-prefix test checks the executed manifest subplan as well as exact
+references, overlapping witnesses and inaccessible intervening archive files.
+
 ### Exact Raw-Revision Evidence
 
 #### Hot Backlog And Reference Lifetime
@@ -1343,6 +1354,16 @@ sample is not an archive-throughput estimate, and normal maintenance budgets
 still apply. Hydrated rows must
 prove their actual material, series, family, observation and causal clocks.
 
+Legacy material-source selection groups at most 128 requests sharing one exact
+legacy provenance witness per SQL statement. Canonical-only requests retain
+128-request batches. This avoids a measured many-witness plan enabling hundreds
+of optimized JIT functions across hot payload partitions, without changing the
+SQL predicates, causal clocks, complete revision set, hydration checks, edge
+budget, verifier version or retention policy. A statement retains every root and
+role separately; grouping never selects the latest revision. Planner estimates
+are diagnostic evidence, not a wall-clock performance guarantee.
+
+
 The existing BBO decoder and basis derivation owner validate the declared pair,
 mids, staleness, input fingerprint and retained typed material hash. Immutable
 role-mapping metadata must exist with matching instruments, `spot_reference`
@@ -1492,6 +1513,17 @@ File device/inode/mode/size/mtime/ctime are checked around reads and again befor
 admission. These short-handoff checks never replace a fresh checksum on a later
 run. The object-store mount/root guards apply to every path lookup.
 
+Whole-partition verification and the reclaimer's initial current-byte proof use
+an explicit `ArchiveVerificationBatch.distinct_references()` scope under their
+existing lifecycle fence. Every reference still checks its hash/size claim and
+cooperative budget; each distinct file receives a fresh checksum. Repeated
+references defer only redundant path/mount/stamp checks to the scope's mandatory
+successful-exit fence over every verified object. Other callers retain immediate
+repeat checks. Reclamation also retains its existing mount/path/stamp checks
+around the exclusive handoff and transactional drop. Exceptions or cancellation
+cannot complete the scope or admit evidence. No cross-run cache, receipt/schema
+change or resource-limit increase is involved.
+
 Dependency expiration checks use batches of at most 128 exact `(target_kind,
 target_id)` pairs under the existing lifecycle fence, instead of one SQL round
 trip per dependency. Publication uses this same bounded check for its collected
@@ -1547,6 +1579,11 @@ current placement; each cold source page is freshly hashed too. A separate
 ephemeral placement hash detects a hot-to-cold move between the two phases and
 requires a retry. Placement is deliberately excluded from immutable receipt
 hashes so a legitimate move cannot invalidate a dependent forever.
+Source-placement lookups first use the permanent identity directory to restrict
+partitioned header and hot-payload queries to the referenced storage days. Each
+returned header must still match its individual directory day and expected hash;
+cold-page coverage and current object bytes remain independently verified. This
+routing adds no persistent verification cache, receipt change, or relaxed budget.
 It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
@@ -1554,9 +1591,13 @@ table lock causes a safe retry rather than a queued ingestion stall.
 
 The audit count of overlapping Dataset bindings first uses the already verified
 archive-series bounds to exclude unrelated ranges, then checks exact canonical
-headers and each binding's frozen commit cutoff. Bounds are conservative: gaps
-are not matches, range ends stay exclusive, and placement day is not observation
-time. This reuses the existing catalog after complete evidence checks; it adds
+headers and each binding's frozen commit cutoff. Overlapping page bounds form
+one conservative observation envelope per binding, restricting the indexed
+header seek to that envelope rather than the full Dataset window. The page's
+last observation is inclusive; the Dataset range end remains exclusive. Grouping
+retains Dataset identity, so identical windows in distinct frozen Datasets still
+count separately. Bounds can contain gaps, which still require exact header
+matches, and placement day is not observation time. This reuses the existing catalog after complete evidence checks; it adds
 no authority to delete and does not exempt pinned data from preservation.
 
 The only destructive statement is `DROP TABLE` for that single daily hot-payload
@@ -1875,3 +1916,25 @@ bytes, fills/hits/bypasses/evictions and `archive_cache_fill`, `archive_verify`,
 control. These stages are nested: do not sum them as independent wall time.
 Application read bytes are not physical disk I/O; OS cache and device counters
 must be measured separately. Cache-hit reads still verify content and semantics.
+
+### Bounded checkpoint-source hydration
+
+Checkpoint admission retains its complete committed checkpoint set and exact
+causal source identities. Source placement metadata groups additional identities
+by their existing cold page. Each group admits the retained selected-row charge
+plus one full-page decode against the unchanged page logical-byte limit; full
+unselected page contents are released by the common reader before the next group.
+The selected rows use the existing conservative sixfold document-size allowance.
+This is a serialized working-set admission bound, not a measured RSS guarantee.
+
+Cold source objects also join the same cumulative verification object/count/byte
+budget as raw and checkpoint objects. Every group rechecks placement and runs the
+existing hash, manifest, envelope and canonical-record validation. Missing or
+ambiguous coverage, oversized individual pages, retained-row overflow, changed
+bytes, cancellation and cumulative object-budget exhaustion still refuse
+admission. The checkpoint scope/state and source revision/known-at checks are
+unchanged. Other source-closure callers retain their aggregate preflight.
+
+This permits a checkpoint closure spanning several individually admissible cold
+pages without raising global limits, splitting historical pages, replacing old
+receipts, dropping dependencies or changing retention/scientific behavior.

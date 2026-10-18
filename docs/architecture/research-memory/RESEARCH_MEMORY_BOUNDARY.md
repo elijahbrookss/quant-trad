@@ -72,6 +72,46 @@ Research memory must not:
 - fetch provider data outside existing data-boundary services,
 - reconstruct report truth or runtime truth.
 
+## Static Check and Study images
+
+`qt research images attach <item_id> --file chart.png --request-json image.json`
+uploads bounded static PNG/JPEG bytes into `portal_research_images` in the existing
+PostgreSQL database (`PG_DSN`). `image.json` requires `title`, `explanation`,
+`alt_text`, and `binding`. For a durable Check, binding contains its exact
+`result_hash` and `evidence_hash`; the server retains definition, request, plan,
+input and frozen Dataset/run identities from the validated Check. For a Study,
+binding contains an existing `publication_hash`; the server retains that
+interpretation revision and its exact evidence reference identities. An image
+can explain an earlier revision after a later interpretation is published.
+
+Admission verifies decoded image structure and pixels, limits each image to
+4 MiB, 24 megapixels and 12,000 pixels per side, and limits each item to 16 images
+and 32 MiB. Identical bytes/text/binding retries return the existing image.
+Corrections append a new image; no public update or deletion operation exists.
+The original item, Check hashes, Study publications and relationship history are
+unchanged. Presentation custody establishes source attribution, not correctness
+of plotted values, new scientific results, replay or certification.
+
+`qt research images list <item_id>` returns metadata and exact bindings without
+binary content. `qt research images download <item_id> <image_id> --output chart.png`
+retrieves server bytes and requires a new destination file. HTTP operations use
+`/api/research/items/{item_id}/images` and `/{image_id}/content`; content reads
+recheck evidence/access and SHA-256 integrity. Sealed evidence remains restricted.
+The v2 research evidence room displays images beside their explanations with
+expandable source identities; all browser operations remain read-only.
+
+Image bytes are database custody, covered by the existing database backup and
+restore boundary; deleting a source computer's file does not remove them. The
+ORM defines clean provisioning; optional explicit provisioning SQL is retained
+at `scripts/db/manual_migration_research_images_v1.sql`. Existing deployments
+still require separate qualification and operator deployment authorization.
+No migration or deployment is performed by upload.
+
+SVG, animated images and HTML are rejected. No isolated interactive HTML serving
+contract exists here; adding one requires a separately reviewed isolation and
+credential-free serving boundary. This capability adds no renderer framework,
+Check procedure, provider acquisition, research dispatch or concurrency setting.
+
 ## Research Memory Text Admission
 
 Item creation and explicit Check-to-Observation admission accept an optional
@@ -518,3 +558,22 @@ interpretation. Published references retain the Check owner's assurance
 classification. Small reasoning snapshots explicitly remain
 `reasoning_snapshot_not_calculated_evidence`, including manual/legacy findings;
 a copied result inside a note does not acquire canonical calculated authority.
+
+
+## Compact inspection and saved-record bundles
+
+The v2 browser uses bounded SQL metadata projections for Study inventory and
+aggregate coverage; it does not calculate scientific outcomes or infer
+independent evidence from record counts. Exact interpretations retain their
+existing immutable revision/hash and reference snapshots. Compact dependency
+checks defer sealed access decisions to current protocol custody.
+
+Read-only export pins the selected publication and reference identities,
+includes exact Check payloads and historical reasoning snapshots, and reuses
+native image custody. SHA-256 manifests support saved-record verification only.
+No separate raw-source or OHLCV files are acquired or included; exact saved
+record payloads remain preserved and their source completeness is not certified; raw-input recomputation and actual
+replay are not claimed. Existing encoded reports remain original JSON payload
+content until an explicit typed extraction mapping is reviewed. No schema,
+admission rule, historical definition/result, publication history or image
+identity is changed. See [Frontend V2](../frontend/OPERATOR_CONSOLE_V2.md).

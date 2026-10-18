@@ -16,14 +16,42 @@ tags:
   - mcp
 code_paths:
   - src/research_science/check.py
+  - src/research_science/recognition.py
+  - src/research_science/reversal_recognition.py
+  - src/research_science/reversal_outcomes.py
+  - src/research_science/reversal_matched_outcomes.py
+  - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
+  - src/research_science/reversal_selection.py
+  - src/research_science/reversal_six_block_selection.py
+  - portal/backend/service/research/reversal_six_block_selection_evaluator.py
+  - portal/backend/service/research/reversal_selection_evaluator.py
+  - portal/backend/service/research/reversal_first_passage_evaluator.py
+  - portal/backend/service/research/reversal_recognition_evaluator.py
+  - scripts/reporting/reversal_recognition_preview.py
   - src/market_data/frozen.py
   - portal/backend/service/research/registry.py
   - portal/backend/service/research/catalog.py
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
+  - portal/backend/service/research/candle_distribution_evaluator.py
+  - portal/backend/service/research/volume_cohort_evaluator.py
+  - portal/backend/service/research/liquidity_episode_evaluator.py
+  - portal/backend/service/research/raw_candle_evaluator.py
+  - portal/backend/service/research/controlled_reversal_evaluator.py
   - portal/backend/service/research/event_fact_evaluator.py
+  - portal/backend/service/research/event_features.py
+  - portal/backend/service/research/event_configuration.py
+  - portal/backend/service/research/event_time.py
+  - portal/backend/service/research/retrospective_numeric.py
+  - portal/backend/service/research/event_facts.py
+  - portal/backend/service/research/event_preparation.py
+  - portal/backend/service/research/event_observations.py
+  - portal/backend/service/research/event_outcomes.py
+  - portal/backend/service/research/event_statistics.py
+  - portal/backend/service/research/directional_model.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
+  - portal/backend/service/research/first_return_evaluator.py
   - portal/backend/service/research/forward_risk_evaluator.py
   - portal/backend/service/research/crossing_state_comparison.py
   - portal/backend/service/research/service.py
@@ -83,6 +111,29 @@ CheckEvaluator. An evaluator is an ordinary Python implementation, not another
 managed entity. Definition 11/evaluator 10 remains a fixed volatility-specific
 method. Shared functions are appropriate when calculations actually recur;
 discovery adds no DSL, schema, new engine or configurable scientific policy.
+
+## Shared calculations and procedure ownership
+
+The event-and-fact evaluator orchestrates named preparation, causal Fact,
+observation/entry, outcome and statistical functions. Settings normalization lives
+in `event_configuration.py`; the registry keeps literal historical version
+precedence in `_resolve_definition_version`. Feature calculation and paired model
+fitting/scoring use `event_features.py` and `directional_model.py`.
+
+Matched-origin, shared-landmark and first-return keep their distinct orchestration.
+A call-scoped `EventCandlePreparation` shares candle conversion/indexes and ATR on
+the same unchanged input object. Readonly row/index views prevent consumer writes;
+they are shallow, and the owned frozen inputs must remain unchanged during the
+call. Causal Fact/event selection and outcomes are recalculated for each detector
+or shifted endpoint. No preparation survives a public evaluation or is shared
+with another job. Forward-risk retains its separate calculation.
+
+This extraction changes no accepted settings, scientific choices, definition IDs,
+result schemas or evaluator versions. Producing source identity changes with code;
+old source-bound evidence retains its exact-source custody rather than being
+relabeled. Verification compares scientific material on identical input fixtures;
+wall-clock performance metadata and producing-source identity are separate from
+that comparison. Synthetic coverage does not establish saved real-Check parity.
 
 ## Purpose
 
@@ -203,6 +254,56 @@ alias, fact type/version, subject, alignment, staleness, and source policy.
 deterministically. Unconstrained provider selection is rejected for evidence.
 The same semantic fact may be bound under multiple aliases to compare exact
 sources without identity collision.
+
+## Canonical raw-candle evidence
+
+`raw_forward_outcome` definition/evaluator v3 is explicitly selected by
+`outcomes.schema_version: raw_candle_forward_outcome.v1`. Without that selector,
+v2 remains the default preview method. Its definition, arithmetic and historical
+reconstruction are unchanged. Eligibility is definition/evaluator-version aware
+in normalization, preparation, persistence, saved-evidence projection and method
+discovery; enabling a whole legacy family cannot qualify v2.
+
+V3 uses the existing canonical candle reader, frozen binding, source ownership,
+generic raw `all`/`any`/`not` predicates, shared outcome calculation, summaries and
+Check persistence/replay. It adds no Indicator, provider adapter, strategy,
+statistical procedure or table. Required volume is declared only when a predicate
+uses volume. Immediately previous fields require the actual prior interval, not
+the previous retained row. Missing, nonfinite or negative predicate volume is an
+explicit candidate exclusion; a real source-established zero remains zero.
+Canonical source/clock fields must exist, identities must be ordered and unique,
+and malformed/nonpositive OHLC, inconsistent observed cadence, ambiguous sources
+or clocks fail the input
+contract rather than being repaired or dropped. Source admission still owns
+whether retained volume and availability provenance suit a scientific question.
+
+The analytical price proxy is the configured exact contiguous entry candle's
+**close**. Every required predicate candle must be known by that close, and the
+entry price must itself be available by its close. Lag paths cannot bridge gaps.
+Forward outcomes use exact contiguous subsequent candles. Entry and target close
+must be strictly before the evaluation end; planning adds no future tail. Missing
+paths, late entry inputs and boundary censoring retain separate reason counts.
+Retrospective outcome known-at is the maximum entry/path availability, distinct
+from decision information. Known-at method labels are retained: inferred interval
+close is not measured provider publication latency.
+
+The result reports matched, complete, predicate-eligible and excluded populations,
+per-horizon resolution, bounded examples and descriptive summaries. Retained
+`*_pct` summary names contain **fractions**, as existing raw summaries do; multiply
+by 100 only for percentage display. An all-bar baseline edge is not an opposing
+cohort contrast. Overlap, descriptive support thresholds and a screening
+recommendation confer no independence, significance, causality, profitability,
+scientific allocation or trading authority.
+
+The evaluator accepts at most 100,000 candles, 20 declared horizons, a total
+lag+horizon of 10,000 bars and 1,000 examples, within the existing execution byte,
+ownership and cancellation limits. Requirement declaration rejects oversized
+nominal materialization ranges before source inspection or hydration; existing
+read-byte/row limits still bound actual canonical reads. The initial policy is explicit
+`continue_degraded` with local complete-path exclusions. Existing history cache,
+source-binding, frozen Dataset and exact producing-source replay guards remain
+unchanged. Deployment exposes this capability; scientific dispatch requires its
+own admitted fixed protocol, source and budget.
 
 ## Generic Event-And-Fact Checks
 
@@ -622,3 +723,372 @@ Existing frozen Datasets, evidence budgets, cancellation, correction isolation,
 Observation admission and provider-free replay own this extension. It requires
 no physical storage cutover. Deployment exposes the method; scientific dispatch
 still requires a prospective protocol and its separately allocated budget.
+
+
+## Comparing engulfing with comparable bullish reversals
+
+`raw_forward_outcome` version 4 selects the explicit
+`controlled_reversal_comparison.v1` outcome schema and
+`controlled_bullish_reversal` detector. It owns one joint comparison; running
+separate treatment and control Checks cannot substitute for its common-support
+matching. Versions 2 and 3 retain their prior behavior and identities.
+
+The method uses one-minute canonical candles and declares 21 prior candles,
+without an Indicator, extra Fact aliases or volume. A candidate has a bullish
+current candle, bearish immediately preceding candle, and negative close return
+from t-6 to t-1. The treatment inclusively contains the previous candle's body;
+controls are the complementary candidates. Features are log of positive current
+log-body size, log of RMS of the 20 simple returns ending at t-1, and the prior
+five-interval decline divided by sqrt(5) times that RMS. Missing history and
+features known after nominal entry close are explicit exclusions.
+
+The Check matches within the UTC date and hour of current candle close. Treated
+candidates are processed chronologically. Controls are never reused. Absolute
+feature differences must be at most log(1.25), log(1.25), and 0.5 respectively;
+the minimum sum of squared caliper-normalized differences wins. Ties prefer the
+smaller absolute event-time distance, then the earlier control. Comparisons use
+binary64 inclusive boundaries without epsilon or rounding. Entry is the next
+candle close and the endpoint is five further bars later, strictly before the
+evaluation end. Closed entry-to-target intervals within each pair must be
+strictly disjoint, so touching endpoints count as overlap.
+
+Features, matched identities and the joint nonoverlap subset are frozen before
+entry availability or future paths are resolved. The subset processes pairs in
+treated chronological order and retains a pair only when neither interval
+intersects an already retained interval. Missing either outcome removes the
+whole pair, with both reasons retained and no replacement or rematching. The
+existing canonical candle validator and forward-outcome resolver own input and
+path semantics; the existing population-SMD helper owns balance arithmetic.
+
+The primary statistic is mean paired return difference, engulfing minus control,
+with both arm means, medians and positive fractions. Support requires 100
+complete pairs on 10 UTC days, 50% of eligible treated candidates matched, 95%
+complete matched pairs, and absolute population SMD at most 0.10 for every
+feature. Undefined SMD fails support; equal constant arms have SMD zero.
+Leave-one-UTC-day-out comparisons never rematch. The fixed nonoverlap subset
+requires 30 complete pairs on six days. A positive descriptive lead requires all
+primary support gates, positive primary contrast, every defined day-deletion
+contrast positive, and a supported positive nonoverlap contrast. Other outcomes
+are `unsupported`, `nonpositive`, or `mixed`; none establishes significance,
+causality, live fill quality or profitability.
+
+Requests cannot tune this procedure. The range must have whole-minute boundaries
+and span at most 32 days, with exactly 21 warmup bars when supplied and no tail.
+The existing 100,000-candle, execution, cancellation, evidence and result budgets
+remain enforced, plus a three-million candidate-comparison guard. Results retain
+the feature-map hash, every matched pair and unmatched treated identity, clocks,
+subset membership, outcome missingness, balance and dependence outputs. An
+unsupported result is still a completed Check, not permission to search new
+thresholds or dates. Inferred interval-close labels remain explicit and do not
+certify measured publication latency.
+
+
+## Configurable controlled reversal and retrospective numeric comparison
+
+`raw_forward_outcome@5` extends the existing controlled-reversal procedure with
+explicit `controlled_reversal_comparison.v2` choices. V4 retains its immutable
+1m/21-prior/5-return/5-outcome/date-hour rules and result hashes. V5 accepts
+1m, 15m, 30m or 1h sampling without another evaluator per interval. The scope
+timeframe must equal `interval`; UTC boundaries align to that interval and the
+evaluation lasts at most 32 days. Trend and volatility lookbacks, entry lag and
+outcome horizon are integer interval counts. Decline must fit the prior RMS
+window; warmup equals volatility returns plus one prior candle. Every expected
+timestamp must exist: gaps never compress physical time.
+
+The January 2022 prospective example is 15m, 12 prior decline returns, 96 prior
+RMS returns, next-candle-close entry and 12 forward intervals. That means a
+three-hour prior decline, a 24-hour prior RMS window excluding the pattern,
+entry 15 minutes after pattern close, and three hours from entry to target.
+RMS is a fractional-return summary, not annualized volatility. Features must be
+known by entry close; missing entry/outcome paths remove a whole frozen pair
+without replacement. Exact-source coarsening remains an explicit preparation
+operation outside the evaluator.
+
+Matching keeps existing calipers, ranking, no control reuse and closed-interval
+overlap rules. `same_utc_close_slot` admits dates within an explicit 1..31-day
+radius; the example fixes seven days. Controls may be later observations, so
+this is a retrospective matched association. `same_date_hour` needs radius zero
+and enough within-hour separation for two disjoint closed outcome paths. Support gates retain treated-close day
+counts; both-arm coverage is separately reported. Day deletion omits a whole
+pair when either arm's candle-close date is omitted, over the union of dates,
+without rematching. The feature-frozen joint nonoverlap subset remains shared.
+Neither diagnostic establishes independence, significance or causality.
+
+`event_fact_analysis@13` requires an explicit
+`outcomes.retrospective.schema_version: retrospective_numeric_comparison.v1`,
+real `analysis_as_of`, and `bucket_time_interpretation: bucket_start_unverified`.
+It compares one next-hour raw-return-direction outcome in an aligned hourly
+sample of at most 60 days. The fixed baseline is one-bar lagged return and
+ATR fraction period 14; one or two exact numeric `latest_value` features use
+exact completed-hour alignment (`dimensions.bucket_seconds=3600`) and explicit
+3600-second staleness. Exactly one chronological train/validation logistic
+comparison reuses existing training-only standardization, L2 fitting, paired
+complete-case scoring with a one-bar purge and zero embargo. No additional bins/tests/bootstrap
+are admitted. Those chronological windows are analytical partitions, not a
+point-in-time forecast or a fresh holdout claim.
+
+The existing source-constrained frozen-history reader runs at the declared
+analysis cutoff for this version only. Latest active revisions are selected
+per observation at that real cutoff, then matched to the exact completed
+bucket; at most 10,000 frozen revisions per alias are admitted. Missing observations never become zero. Real `known_at`, publication,
+receipt, acceptance, revision, source identity and provider provenance remain
+in output references. Coinalyze's current adapter interprets provider `t` as
+bucket start; this remains explicitly unverified. Its long and short BTC
+volumes are separate exact numeric series for Binance BTCUSDT_PERP.A; Coinbase
+BTC-USD price outcomes are a different venue and spot product.
+
+V13 results identify `retrospective_conditional_association`, replace historical
+decision labels with sample time, and explicitly set point-in-time predictive,
+backtest-certified and scientific-certification eligibility to false. Durable
+frozen/replayable evidence means repeatable arithmetic under those assumptions,
+not certification. V3/V4/V5 causal Fact selection is unchanged. Existing exact-bucket gap semantics
+remain: missing buckets exclude samples (with gap/missing reasons), while real
+present observations may be used under `continue_degraded` with recorded gaps
+and completeness uncertainty retained; `reject` blocks recorded gaps. No zero
+is invented and no provider-completeness claim follows; no timestamp
+is backdated. Existing Fact payload registry, providers, collection, persistence,
+scientific budgets and concurrency are unchanged by these method extensions.
+Catalogue examples are templates; prepare/freeze and scientific dispatch remain
+separate authorized operations.
+
+
+## Retrospective complete paired inputs
+
+The hourly v13 numeric comparison optionally declares
+`outcomes.retrospective.input_coverage_policy: complete_paired_rows`. This is an
+explicit input-admission branch, pinned in the request, configured definition,
+plan and frozen binding. Omitting it preserves the historical planning rules.
+It changes no feature, sample-selection calculation, logistic fit, chronological
+fold, purge or score rule.
+
+This branch requires only completed numeric buckets inside the evaluation
+range, retaining the existing price lookback. The primary materialization ends
+at the fixed exclusive boundary rather than acquiring an outcome tail. The
+existing evaluator counts missing numeric values and unavailable final outcomes
+as exclusions and fits baseline/enriched models on identical complete rows.
+
+The planner and frozen binding accept source-bound immutable `partial` range
+custody in addition to `complete` custody only under this explicit policy.
+`failed`, unknown and unacquired intervals still fail admission. Partial does
+not become complete: coverage status, gaps, source identity, revision clocks and
+provider-completeness uncertainty remain pinned. Acquisition caches and ordinary
+causal consumers still require complete coverage. Check execution remains
+provider-free. The real analysis cutoff and `bucket_start_unverified` limitation
+remain mandatory; this is conditional retrospective association, with no
+historical-availability, predictive, causal or certification claim.
+
+
+## Complete distributions and bounded liquidity episodes
+
+`raw_forward_outcome` v6 explicitly selects `raw_candle_distribution.v1`.
+It reuses v3 preparation/predicate/close-outcome arithmetic through an internal
+complete-event collector; historical v3 output and registrations are unchanged.
+Complete volume-cohort events, fixed tail/quantile/day diagnostics and overlap
+identities belong to the Check, not shell/report calculations. A complete-table
+resource limit fails rather than truncating scientific support.
+
+`event_fact_analysis` v14 explicitly selects `liquidity_episode.v1` with a real
+analysis cutoff. It uses canonical typed frozen Fact histories and the existing
+revision selector at that cutoff, then admits complete short book/flow/trade
+paths. It retains actual information clocks and prohibits retrospective sequence
+inspection from claiming historical decisions. It is a distinct descriptive
+procedure, not a reinterpretation of causal v5 or hourly retrospective v13.
+
+The fixed exposed-data pilot rules, threshold rationale, missingness, reuse,
+allocation and stopping decisions are recorded in
+[the bounded C/A protocol](../../research-campaigns/episode-distribution-pilots-20261014.md).
+Method registration does not authorize deployment, acquisition, extra attempts,
+sealed-data access or trading. Historical definitions/results remain replayable.
+
+
+### Configured volume-cohort matching
+
+`raw_forward_outcome` v7 explicitly selects `volume_cohort_matched.v1`.
+The request supplies the raw event predicate, source/Dataset, instrument, range,
+timeframe, direction, entry lag and one outcome horizon. Its `comparison` selects
+the supported volume cohort split and matching policy, prior volatility candle
+count and each feature ratio caliper. There are no study-specific candle IDs,
+dates, venues, assets, outcome values or expected membership counts in the method.
+
+Raw predicate preparation is shared with v3/v6; prior context is shared with v6.
+The procedure freezes its outcome-free candidate ledger, pairs and feature hash
+before calling the existing distribution/outcome evaluator. Missing context and
+unmatched cases stay in the original event ledger. One-bar source binding is
+retained; requesting a longer prior feature window does not acquire extra data.
+The full-population v6 context remains explicitly a 20-prior-candle diagnostic;
+`events[].matching_context` uses the configured window for the v7 comparison.
+
+V7 configures the existing chronological nearest-caliper matching and paired
+support/deletion calculations with explicit feature names and arm labels. V4/v5
+callers retain their old defaults. Full feature-through-target support is an
+explicit new caller choice for the joint nonoverlap sensitivity; within-pair
+matching still checks nominal outcome intervals only. Selected and complete pair
+balance, original/eligible matching denominators, calendar-day missingness, both
+arm overlap components, and all original and complete-pair tails are emitted.
+No imputation, trimming, control reuse, future-valid replacement or automatic
+rematching is provided. The support gates are descriptive requirements, not a
+power calculation. Exact source qualification and separate attempt allocation
+remain prerequisites for scientific execution.
+
+
+### Native episode admission
+
+Requirement planning and frozen-input preparation retain the canonical Fact
+view for native trades and trade-flow buckets. The legacy typed read API is
+unchanged; its projection is not used to reconstruct source identities during
+admission. Canonical source, revision, watermark and known-at predicates remain
+owned by the existing repository. Native effective timestamps use the shared
+canonical record accessor when no legacy common clock is present.
+
+Liquidity episode v14 declares its Fact histories bounded by the evaluation
+range. Explicit external lookback requests fail rather than being clamped.
+Generic staleness settings do not create a predecessor outside its fixed
+window; all pre/post support remains inside that window. Other procedures retain
+their existing lookback policy. HTTP requirements and preparation dry-run tests
+cover the complete five-alias path with disposable canonical records; the native
+PostgreSQL fixture additionally checks real source selection, explicit sparse
+coverage, preparation resolution and cutoff/watermark-bound causal history.
+These tests do not execute a scientific Check or authorize acquisition/freezing.
+
+
+### Nearby-date volume comparison
+
+`raw_forward_outcome` v8 selects `volume_cohort_matched.v2`. It reuses v7 raw
+selection, preparation, feature calculation, outcome resolution, balance,
+support and dependence calculations. The caller explicitly supplies
+`comparison_window_days` (integer 1..31) and `matching_slot_seconds` (60 or 3600)
+with `matching_policy=same_utc_close_slot`. The existing controlled-reversal
+`prepare_pairs` performs the inclusive elapsed-radius test unchanged. V5's
+minute slot and v7's same-date/hour semantics are unchanged.
+
+A 3600-second slot preserves UTC close hour while allowing nearby dates; a
+60-second slot preserves the exact UTC close minute. Neither implies permission
+to search these settings. Candidate records must still come from the declared
+evaluation range; a wider match radius never expands Dataset reads. Pair
+identities are frozen before outcomes. Both arm dates and signed control-time
+distances are retained, with whole-pair deletion on either arm date. These are
+influence/dependence diagnostics, not independent-day or causal assurance.
+
+V8 has its own immutable registration, rules and result schema; v7 remains
+replayable with unchanged default output and hashes. No new persistence,
+framework, provider or deployment capability is introduced.
+
+
+## Composable recognition candidates before outcome science
+
+`raw_forward_outcome@9` explicitly selects `reversal_recognition.v1`. It calls
+the domain `ReversalRecognizer` through typed candle/context/event contracts;
+the offline preview calls the same `initialize -> apply_bar -> snapshot` state.
+Origin and validated settings enter material identity. The adapter uses the
+existing canonical candle preparation and pinned Check evidence without a new
+registry, persistence model or workflow language. Historical methods keep their
+versions and semantics.
+
+The first consumer records provisional decline/rebound/lower-low/recovery/reclaim
+chains. Numeric reference availability and reference-role availability are
+separate clocks. Source-event links preserve the exact confirmed reference,
+definition version and consumption clock. Competing chains remain visible;
+neither implicit deduplication nor a minimum-size filter settles Study ownership.
+Candidate counts are not an independent event population: sample count and
+admitted Study events are zero, and no outcomes or statistics are calculated.
+
+The method requires fixed-origin contiguous close-available candles, rejects gaps
+and delayed-close reinterpretation, and fails explicit resource bounds rather
+than returning a partial population. It has no outcome tail. Candidate completion
+membership is `[evaluation_start,evaluation_end)`; contextual references and
+pending chains are labeled with the full input snapshot clock at evaluation end.
+The [definition guide](../../guides/research-recognition-definitions.md) describes
+settings, ordinary-function composition, immutable outputs, shared visual use
+and the reviewed separation from Indicator signals and execution consumers.
+Registration and synthetic qualification do not authorize a real-data dispatch.
+
+
+## Completed-formation first-passage description
+
+`raw_forward_outcome@10` explicitly selects `reversal_first_passage.v1`. It pins
+the user's retreat-inclusive reference choice and reuses v9's canonical input
+preparation and sequential recognizer without changing historical v9 outputs.
+The domain outcome procedure anchors at the observational completion close E,
+locks the entire formation low L, verifies E>L, and tracks inclusive first touches
+of L or E+(E-L) over the next twelve15m candles. Ambiguous same-bar order,
+invalid risk and unavailable horizons remain explicit unresolved cases; a full
+untouched horizon is neither. The evaluation boundary prevents a future tail.
+
+Before reading outcomes, closed formation-start through nominal-horizon
+intervals form transitive overlap components. Every chain is retained. Outputs
+show all four classes, raw chain shares, equal-component within-component class
+shares, component sizes, UTC-day counts and descriptive concentration. Neither
+component counts nor inverse HHI claim independent observations. Existing
+Check/version/input binding, job admission, evidence and Research Memory paths
+own persistence and execution; there is no new scientific runtime or matching
+campaign. See the [fixed January protocol](../../research-campaigns/reversal-first-passage-20261016.md)
+for exposure, availability, censoring, resource and single-attempt stopping rules.
+
+
+## Completed reversal selection without outcomes
+
+`raw_forward_outcome@11` is the fixed smaller-design selection-only method.
+It consumes the same canonical sequential recognizer as v9/v10; historical
+definitions and evidence remain unchanged. It declares no outcome horizons or
+tail reads and imports no first-passage procedure. New stage-availability views
+distinguish candle clocks from role/parent recognition without rewriting v1.
+
+Selection matches only prior volatility, fractional boundary distance and
+strictly pre-decision movement. Body/range and derived normalized distance are
+diagnostics. Every chain remains explicit, while reporting gives completion
+moments equal weight and exposes partially matched moments. Within-pair direct
+histories must be disjoint; cross-pair and shared recognition ancestry remain
+reported dependence, not independent observations. There are no numeric
+coverage or power pass gates and no rescue tuning.
+
+See [the fixed procedure](../../guides/reversal-selection-only.md) and its
+retained selected protocol JSON. A qualified method, frozen data and normal
+admission remain prerequisites. Method availability and a selection report do
+not authorize an outcome run or a capacity-limit bypass in data preparation.
+
+
+## Provider native candle source policy
+
+New candle evidence uses the provider's requested timeframe and is frozen
+directly. Internal coarsening, higher-bar splitting/upsampling and synthetic gap
+fills are not new research preparation routes. Transport pagination does not
+change the candle timeframe. Historical derived evidence and replay definitions
+remain immutable and accurately labeled; this policy adds no subsystem or
+automatic source substitution. Record any source-policy amendment before
+selection, without changing a historical result.
+
+
+## Fixed six-block reversal selection extension
+
+`raw_forward_outcome@12` / `reversal_selection_only.v2` extends the decision
+range to February1-July19,2025, retaining January1 recognition origin and six
+28-day blocks. The shared selection kernel keeps v1 output unchanged. A separate
+B2 identity-namespace ordering key preserves same-clock matching order while
+retaining actual expanded event IDs. Stage view v3 removes only duplicated
+availability fields and decodes losslessly to v2. Cases/pairs appear once;
+old/new/combined summaries use separately normalized completion-moment weights
+and report their own direct and ancestry-aware dependence. No outcomes or
+automatic follow-up are supplied. The fixed19,104bar ceiling is explicit;
+existing comparison/time/input/result bounds fail rather than truncate or expand.
+See the [six-block procedure](../../guides/reversal-six-block-selection.md) and
+its [fixed protocol](../../guides/reversal-six-block-selection-v1.json).
+
+
+## Saved reversal matched outcomes
+
+`raw_forward_outcome@13` consumes the pinned BTC B3 selection Check on its
+original native frozen input. It validates existing typed Check result/evidence
+hashes without replay, restores only the historical v12 integer histogram key
+types for its internal manifest hash, validates saved barriers against frozen
+candles and reuses `first_passage_path`. It never fabricates recognized controls
+or reruns recognition/matching. Exact selection reference hashes are method
+configuration and copied into the result; missing/changed prior evidence fails.
+
+All saved pairs and completion-moment weights remain. Old/new/combined and
+block/day views normalize only within their reporting population; every
+continuation/failure/neither/unresolved class remains in the denominator.
+The original frozen end remains the outcome boundary, so unresolved censoring
+is retained. Saved selection coverage and support/ancestry dependence remain
+visible; there is no coverage gate or independent-trial inference. Historical
+first-passage wrappers, definitions and results are unchanged. See the
+[fixed consumer procedure](../../guides/reversal-matched-outcomes.md).

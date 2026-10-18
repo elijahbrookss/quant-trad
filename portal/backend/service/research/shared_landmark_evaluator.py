@@ -1,6 +1,8 @@
 """Fixed-landmark descriptive groups and profile influence on canonical snapshots."""
 from __future__ import annotations
 
+from .event_preparation import EventCandlePreparation
+
 from core.execution_control import execution_checkpoint
 
 from collections import Counter
@@ -156,7 +158,8 @@ class SharedLandmarkEvaluator(MatchedOriginEvaluator):
     def evaluate(self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
         outcomes = dict(inputs["outcomes"])
         config = normalize_shared_landmark(outcomes.get("shared_landmark"), outcomes=outcomes, gap_policy=plan.gap_policy)
-        result = dict(super().evaluate(plan=plan, inputs=inputs))
+        preparation = EventCandlePreparation()
+        result = dict(super()._evaluate_matched(plan=plan, inputs=inputs, preparation=preparation))
         if result["status"] == "blocked":
             return result
         shift = config["sample_lag_bars"] - outcomes["entry_lag_bars"]
@@ -165,10 +168,10 @@ class SharedLandmarkEvaluator(MatchedOriginEvaluator):
             "required_horizons": [h - shift for h in outcomes.get("required_horizons", [])]}
         delayed_outcomes.pop("matched_origin", None)
         delayed_outcomes.pop("shared_landmark", None)
-        delayed = EventFactEvaluator.evaluate(self, plan=plan, inputs={**inputs, "outcomes": delayed_outcomes})
+        delayed = EventFactEvaluator._evaluate(self, plan=plan, inputs={**inputs, "outcomes": delayed_outcomes}, preparation=preparation)
         if len(result["events"]) != len(delayed["events"]):
             raise ValueError("shared_landmark_invalid: origin membership changed")
-        candles = {_time(c["open_time"]): c for c in _candle_rows(inputs["indicator_evidence"]["candles"], field="indicator_evidence.candles")}
+        candles = {_time(c["open_time"]): c for c in preparation.rows(inputs["indicator_evidence"]["candles"], field="indicator_evidence.candles")}
         contexts = {}
         for output in inputs["indicator_evidence"]["outputs"]:
             if output.get("output_name") == "value_location" and output.get("output_type") == "context":

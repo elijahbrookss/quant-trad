@@ -16,8 +16,10 @@ for pull requests targeting `develop` or `main`.
 
 ## Current Workflow Topology
 
-The workflow defines exactly six jobs. None declares `needs`, so GitHub may run
-them concurrently. The numbering below is for documentation only.
+The workflow defines fifteen jobs. `changes` computes requirements before the six
+existing qualification jobs and the new `docs` check. Those checks can run
+concurrently; `ci-required` always runs after their results. The numbering below
+identifies the six existing qualification jobs for reproduction.
 
 | # | Job ID | Primary boundary |
 | ---: | --- | --- |
@@ -45,7 +47,7 @@ Runner: `ubuntu-latest` with Python 3.12 and pip caching keyed by
 
 The workflow steps are:
 
-1. `Checkout repository` with full Git history;
+1. `Checkout repository`;
 2. `Set up Python`;
 3. `Install dependencies` with `pip install --no-deps -r requirements.lock`
    followed by `python -m pip check`; and
@@ -78,29 +80,53 @@ accessibility conformance.
 
 ### 3. `deployment-contract`
 
-Runner: `ubuntu-latest`, with a 90-minute timeout.
+The stable `deployment-contract` check aggregates six independent proof job
+families. `deployment-proof-build` builds and source-attests production and test
+images once, collects the original explicit online selection, and publishes an
+immutable transport bound to source, run, attempt, archive SHA-256 and image IDs.
+The transport is provisional; it is not a qualified release package.
 
-The workflow steps are:
+Four separate runners own the unchanged alert, lifecycle/prepared-key recovery,
+application/current-and-frozen-reader restore, and core/storage-layout groups.
+`deployment-proof-online` assigns the complete collected node IDs to six shards,
+including individual parameter cases within the long controller file. At most
+four online shard runners execute concurrently. The scheduling seed comes from
+run 38999753104; new collected cases are included automatically. It never filters
+coverage. Each shard retains its own generated Docker project, credentials,
+internal network, database and source/history volumes. No tests share a database
+between shard runners. The real expiry and Timescale recovery waits are unchanged.
 
-1. `Checkout repository`;
-2. `Generate disposable operator environment` by running
-   `bash scripts/automation/server_deploy.sh init-env` with
-   `QT_SINGLE_NODE_ENV_FILE` bound to the checkout's `secrets.env`;
-3. `Validate shell and Compose contracts` by syntax-checking both server
-   scripts, computing the Git revision and source-tree hash, and running
-   `docker compose ... config --quiet`; and
-4. `Build production images with source attestation` by recomputing the
-   revision/tree hash and building `tsdb`, `backend`, `frontend`, and
-   `frontend-v2` from `docker/docker-compose.server.yml`.
+Every consumer checks the exact workflow checkout, source hash, run/attempt,
+transport checksum and loaded image identities. Prebuilt Compose overrides may
+only select these admitted image IDs in the two existing storage proof suites;
+no consumer rebuilds or pulls a substitute test image. Each prebuilt proof also
+renders the actual Compose model and refuses inherited build recipes, changed
+image IDs, pulls, host ports or a non-internal network. Local/default runner
+behavior remains unchanged.
 
-The job also proves Grafana email delivery and physical storage alert queries,
-then runs `python3 scripts/ci/test_server_core_recreation.py` after building.
-That smoke starts actual QT core images with disposable PostgreSQL/archive
-storage, checks initialization and health, cleanly stops the collector, and
-recreates services while verifying retained data and a fresh worker heartbeat.
-Enrollment is disabled and the runtime network is internal. It does not contact
-providers, deploy a host, mount the Docker socket into the backend, or validate
-an arbitrary historical schema upgrade.
+The aggregate requires all independent jobs to succeed and reads their retained
+receipts and diagnostic logs. It rejects missing/duplicate groups, missing or
+duplicate online cases/phases, wrong source/image/attempt, checksum drift,
+failures, cancellation and unexpected skips. Only the existing prepared-
+transaction case may skip with its exact max_prepared_transactions reason.
+It rechecks image identities before exporting the qualified routine package.
+The external exact-source admission helper also requires every expanded proof
+job and the successful aggregate attestation, rather than trusting a green
+wrapper alone. Partial diagnostics are uploaded on failure. The existing current
+and first-release committed recovery jobs remain separately mandatory.
+
+The fifteen job definitions expand to twenty-one jobs, including both recovery
+variants and all six online shards. `ci-required` keeps its stable name and
+computed scope; develop/main and PR release qualification remain full. Superseded
+feature/hotfix PR runs now cancel using `github.head_ref`, while protected-branch
+push behavior is preserved. There is no permission, protected-rule or production
+trigger change.
+
+Timing is a measured-trial question. Shard projections from one historical run
+exclude transport/build overhead and queue variance. The whole-workflow 20–25
+minute goal is not a performance claim until a complete instrumented run passes.
+`QT_CI_TEST_PHASES=1`, per-group wall time, setup/call/teardown outcomes and all
+original logs support the comparison.
 
 ### 4. `clean-database-bootstrap`
 
@@ -143,7 +169,7 @@ does not claim per-test database isolation for the rest of the DB corpus.
 
 ## What The Workflow Protects
 
-The four-job workflow catches:
+The workflow catches:
 
 - non-database backend import, logic, provider-wiring, runtime, accounting,
   reporting, BotLens, CLI, MCP, and service-contract regressions;
@@ -203,7 +229,10 @@ Run this only in a disposable checkout because `init-env` writes the named
 operator-environment file.
 
 ```bash
-export QT_SINGLE_NODE_ENV_FILE="$PWD/secrets.env"
+qt_ci_private="$(mktemp -d "${TMPDIR:-/tmp}/qt-disposable-operator.XXXXXX")"
+chmod 0700 "$qt_ci_private"
+export QT_SINGLE_NODE_ENV_FILE="$qt_ci_private/qt-disposable.env"
+export QT_SERVER_ENV_FILE="$QT_SINGLE_NODE_ENV_FILE"
 bash scripts/automation/server_deploy.sh init-env
 bash -n scripts/automation/server_deploy.sh
 bash -n scripts/automation/server_host_bootstrap.sh
@@ -218,11 +247,11 @@ export QT_RELEASE_REVISION="$qt_ci_revision"
 export QT_SOURCE_TREE_HASH="$qt_ci_tree_hash"
 
 docker compose \
-  --env-file secrets.env \
+  --env-file "$QT_SINGLE_NODE_ENV_FILE" \
   --file docker/docker-compose.server.yml \
   config --quiet
 docker compose \
-  --env-file secrets.env \
+  --env-file "$QT_SINGLE_NODE_ENV_FILE" \
   --file docker/docker-compose.server.yml \
   build tsdb backend frontend frontend-v2
 ```
@@ -330,3 +359,99 @@ encrypted pair and read-only completion checks must pass afterward. This test
 uses generated disposable inputs; it does not measure production outage or grant
 production operation authority. Its 25-minute job bound includes image builds
 and deliberate expiry waits, not a production completion estimate.
+
+
+## Conservative work-branch selection
+
+`scripts/ci/ci_impact.py` owns the small allowlist. Feature/hotfix pushes compare
+all branch contributions to the merge base with the workflow's explicit
+`QT_CI_INTEGRATION_REF` (default `origin/develop`). Earlier changes remain in
+scope even if a predecessor push run was cancelled. A deleted path and its
+renamed replacement both participate. For a separately coordinated feature
+integration, review and set that baseline explicitly; do not infer it from the
+last push or an unqualified predecessor. PRs into release branches, develop/main pushes,
+and manual workflow dispatch retain complete qualification. Use Actions **Run
+workflow** with **force_full** to request complete checks on a work branch.
+Missing/zero bases, missing history, invalid comparisons, unknown paths and empty
+diffs select all checks. Mixed changes take the union, and any high-risk path
+selects the complete workflow. The plan records base/head, paths and requirements
+in the selection log; it never treats unavailable coverage as a passing test.
+
+| Scope | Work-branch requirement |
+| --- | --- |
+| Markdown and static documentation assets | `docs` |
+| Exact reviewed presentation files in `ci_impact.PRESENTATION` | `docs`, `frontend` |
+| Reviewed event_statistics, directional_model, metrics modules and test_event_fact_check | `docs`, complete ordinary `pr-suite` |
+| Evaluators, registry/catalog, request/result serialization, frozen bindings, repositories, dependencies, configuration, storage, migrations, shared infrastructure or any unlisted path | Complete workflow |
+
+The calculation allowlist is a test-environment boundary, not permission to
+change historical scientific meanings or eligibility for automatic deployment.
+The presentation inventory currently contains index.css, v2.css,
+v2-operator.css, ActivityHeatmap.jsx, WarningPanel.jsx and BotLensHeader.jsx at
+the exact paths in the selector. Credential dialogs, mixed chart containers,
+application roots and new/unlisted frontend files select the full workflow.
+Do not add evaluator or frontend globs. New eligible files require review of imports,
+durable contract ownership and regression scope. Changes to the selector itself
+receive full qualification.
+
+`ci-required` checks every computed required job for success. Failure,
+cancellation, a missing result or an unexpected skip fails the gate; an explicitly
+unrequired skip remains a skip. The existing release receipt still requires all
+seven expanded original jobs and both recovery bundles. A selected iteration run
+cannot satisfy it. GitHub must require the stable `ci-required` check when this
+policy is activated; changing repository rules needs separate approval. This
+component does not change GitHub rules or any production trigger.
+
+The deployment-contract job captures image IDs before runtime proofs, verifies
+they are unchanged afterward, and exports backend/frontend/frontend-v2 in the
+`routine-release-package` artifact with source SHA/hash, run/attempt, image IDs
+and archive checksum. It adds artifact export time and storage proportional to
+the images; seven-day retention matches recovery evidence. Infrastructure images
+are not exported or upgraded by routine promotion.
+
+The workflow gives its GitHub token read-only repository contents access and
+disables checkout credential persistence. PR source still runs on disposable
+runners without production secrets; PR evidence never qualifies a deployment.
+
+
+### Actual routine-path disposable rehearsal
+
+The existing `deployment-rehearsal` job now runs its original compatible operator
+rehearsal and `test_server_promotion.py --routine`. The latter is admitted only
+on a GitHub-hosted runner using its default local Docker socket; remote contexts
+and local/production execution refuse before creating resources. It uses a unique
+Compose project, private runner-temp fixture Git repo/environment, internal
+networks, no host ports and owned volumes. Runtime applications are tiny synthetic
+processes, not QT/provider clients; every enrollment flag is disabled. The actual
+PostgreSQL container and psql/schema probe are real.
+
+The routine mode invokes the actual `promote-routine` controller, package
+capture/export/ZIP/load and immutable-ID pinning. It removes candidate image tags
+before admission so a cached build cannot substitute for loading the package.
+Local fake GitHub responses model a completed exact develop attempt and artifact
+digest; they are explicitly synthetic admission metadata, not GitHub release
+qualification. An actual tiny dump is restored on an independent owned PostgreSQL
+volume before generating fixture-only recovery admission. The rehearsal checks
+retained rows/schema/cluster, compatible success, active-hold/credential-scope/
+changed-artifact/stale-restore refusal, unhealthy rollout recovery, interrupted
+schema-drift hold and explicit reconciliation followed by offline recovery.
+Docker-call traces reject build/pull during routine activation and recovery.
+
+A ten-minute operation deadline, existing fifteen-minute job limit and bounded
+owned cleanup constrain this test. Failure preserves a small `qualification.json`
+with source, phases, outcome and cleanup errors. The `routine-controller-rehearsal`
+artifact contains that receipt only; no environment, resolved recovery snapshot,
+backup payload or credential is uploaded. Cleanup targets only the recorded
+unique fixture resources, never a daemon-wide prune.
+
+A passing non-Docker unit suite does not certify this path. The hosted run must
+actually finish this routine step and its existing companions successfully.
+After the source run completes, independently validate its real exported
+`routine-release-package` download/digest/job/attempt binding. A work-branch
+receipt remains handoff evidence only; production admission still requires an
+exact develop push and the separately authorized installation/activation.
+
+The routine fixture also proves that edits to its private operator file and
+caller configuration overrides refuse before recovery-snapshot creation or
+container replacement. Configuration fingerprints remain private to the fixture;
+the uploaded receipt contains phase results only.

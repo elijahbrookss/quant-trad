@@ -191,6 +191,10 @@ Materialization status/readiness of RunResearchDataset.
 
 Bounded analytical operation over declared inputs.
 
+A CheckDefinition identifies the versioned analytical method and admitted settings;
+its evaluator is ordinary Python code. Different questions can configure the same
+method, while genuinely different procedures may share calculations.
+
 **Use:** Not acquisition, Indicator evaluation, Strategy decision, or promotion authority.
 
 **Defined by:**

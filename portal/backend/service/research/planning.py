@@ -13,9 +13,10 @@ from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
     MarketDataRequirement,
+    record_effective_time as canonical_record_effective_time,
 )
 from market_data.acquisition_coverage import (
-    missing_complete_coverage,
+    missing_recorded_coverage,
     normalize_acquisition_coverage,
 )
 from market_data.fact_registry import get_fact_contract
@@ -41,6 +42,7 @@ from portal.backend.service.market.frozen_dataset_service import (
     candle_selection_times,
     matching_source_identity_keys,
     matching_source_keys,
+    read_requirement_records,
 )
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
@@ -167,6 +169,11 @@ def _record_time(record: Any) -> datetime:
         or getattr(fact, "observation_time", None)
         or getattr(fact, "effective_at", None)
     )
+    if value is None:
+        try:
+            value = canonical_record_effective_time(record)
+        except TypeError as exc:
+            raise ValueError("check_requirement_plan_invalid: record.time is required") from exc
     return _utc(value, field="record.time")
 
 
@@ -284,7 +291,7 @@ def _coverage_for_requirement(
             as_of_commit_seq=as_of_commit_seq, source_identity_keys=requested_source_keys,
         )
         candle_selection = inspect_candles(**selection_args) if callable(inspect_candles) else None
-        records = [] if candle_selection is not None else list(store.read_series_records(**selection_args))
+        records = [] if candle_selection is not None else read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
         if policy_mode == "current":
             selected_source_keys: tuple[str, ...] = ()
         elif policy_mode == "exact" and requested_source_keys:
@@ -300,7 +307,7 @@ def _coverage_for_requirement(
                 if candle_selection is not None:
                     candle_selection = inspect_candles(**selection_args)
                 else:
-                    records = list(store.read_series_records(**selection_args))
+                    records = read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
             records_by_series[int(candidate["series_id"])] = records
             if candle_selection is not None:
                 candle_selections[int(candidate["series_id"])] = candle_selection
@@ -377,11 +384,12 @@ def _coverage_for_requirement(
                     end=_utc(requirement["required_end"], field="required_end"),
                 )
             )
-            uncovered_ranges = missing_complete_coverage(
+            uncovered_ranges = missing_recorded_coverage(
                 start=requirement["required_start"],
                 end=requirement["required_end"],
                 source_identity_keys=tuple(sorted(resolved_source_keys)),
                 coverage=coverage,
+                allow_partial=requirement.get("coverage_policy") == "recorded_partial",
             )
             acquisition_coverage_proves_range = bool(resolved_source_keys) and not (
                 uncovered_ranges
@@ -564,7 +572,8 @@ def plan_research_check(
             "alignment": "exact_interval",
             "max_staleness_seconds": None,
             "known_at_required": True,
-            "required_fields": ["open", "high", "low", "close", "known_at"],
+            "required_fields": list(declaration.get("primary_candle_required_fields") or
+                ["open", "high", "low", "close", "known_at"]),
             "series_required": True,
             "frame_missing_policy": "indicator_owned",
             "source_policy": {
@@ -641,10 +650,21 @@ def plan_research_check(
         )
         if requirement.key in feature_predecessor_aliases:
             lookback_seconds += max(lookback_seconds, timeframe_seconds)
+        complete_paired = declaration.get("input_coverage_policy") == "complete_paired_rows"
+        bounded_history = declaration.get("fact_history_boundary") == "evaluation_range"
+        if bounded_history and (requirement.lookback_seconds or requirement.lookback_bars
+                or feature_window_seconds or requirement.key in feature_predecessor_aliases):
+            raise ValueError("check_requirement_plan_invalid: evaluation-bounded Fact history cannot request external lookback")
+        if complete_paired or bounded_history:
+            # Owned in-scope histories do not sample a predecessor outside the window.
+            # Completed-bucket snapshots at each primary close need the matching
+            # evaluation bucket, never a staleness-based predecessor interval.
+            lookback_seconds = 0
         requirements.append(
             {
                 **resolved_series.to_dict(),
                 "alias": requirement.key,
+                **({"coverage_policy": "recorded_partial"} if complete_paired else {}),
                 "consumer_id": "check",
                 "instrument_id": resolved_series.instrument_id,
                 "series_required": bool(raw.get("series_required", True)),

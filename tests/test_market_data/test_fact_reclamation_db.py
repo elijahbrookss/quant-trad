@@ -107,7 +107,8 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
     assert any(record.revision == 3 for record in _read(storage))
 
 
-def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch):
+@pytest.mark.parametrize("page_rows", [1, 16])
+def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch, page_rows):
     day = storage.today - timedelta(days=2)
     assert day != BASE.date(), "placement day is not observation time"
 
@@ -131,16 +132,27 @@ def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_coun
         _ingest(storage, replace(storage.fact, observation_key=f"audit-{seconds}",
             observation_time=observed, accepted_at=observed, known_at=observed,
             received_at=observed, source_published_at=observed))
-    freeze(BASE - timedelta(seconds=1), BASE + timedelta(seconds=11))
+    first = freeze(BASE - timedelta(seconds=1), BASE + timedelta(seconds=11))
     freeze(BASE - timedelta(seconds=2), BASE + timedelta(seconds=12))
     freeze(BASE + timedelta(seconds=10), BASE + timedelta(seconds=11))
     freeze(BASE + timedelta(seconds=4), BASE + timedelta(seconds=6))  # Catalog range contains a hole.
     freeze(BASE - timedelta(seconds=1), BASE)  # End is exclusive.
     freeze(BASE + timedelta(seconds=12), BASE + timedelta(seconds=14))
 
+    # Add a second Dataset with an identical target window AND cutoff; its
+    # extra binding is valid only in the other placement day. Grouping without
+    # dataset_id would incorrectly collapse these two protected target pins.
+    second = storage.repo.freeze_dataset([
+        DatasetSeriesRequest(storage.series_id, BASE - timedelta(seconds=1), BASE + timedelta(seconds=11)),
+        DatasetSeriesRequest(storage.series_id, BASE + timedelta(seconds=12), BASE + timedelta(seconds=14)),
+    ])
+    assert second.dataset_id != first.dataset_id
+    assert second.max_commit_seq == first.max_commit_seq
+
     archive = PostgresCanonicalFactArchiveRepository(database=storage.database,
         object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
-        temporary_directory=tmp_path / "staging")
+        temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=page_rows, row_group_size=page_rows))
     archive.seal_partition(day)
     while archive.stage_next_page(day)["status"] != "source_exhausted":
         pass
@@ -154,7 +166,7 @@ def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_coun
                   AND versions.series_id=pins.series_id AND versions.observation_time>=pins.range_start
                   AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq)
         """), {"day": day}).scalar_one()
-        assert expected == 3
+        assert expected == 4
         assert PostgresCanonicalFactReclamationRepository._pinned_ranges(session, day) == expected
 
 
@@ -296,3 +308,33 @@ def test_reclamation_handoff_fences_readers_and_never_waits_for_parent_read_lock
         finally:
             release.set()
         assert future.result(timeout=30)["status"] == "partition_reclaimed"
+
+
+@pytest.mark.parametrize("action", ["verify", "reclaim"])
+def test_distinct_proof_exit_fence_refuses_changed_bytes_before_admission(storage, tmp_path, monkeypatch, action):
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    initial = archive.inspect_partition(day)
+    with storage.database.session() as session:
+        key = session.execute(text("SELECT object_key FROM market.fact_archive_manifests WHERE storage_day=:day"),
+                              {"day": day}).scalar_one()
+    path = archive.object_store.local_path(key)
+    original = path.read_bytes()
+    original_evidence = archive._partition_evidence
+
+    def changed_after_evidence(*args, **kwargs):
+        evidence = original_evidence(*args, **kwargs)
+        if kwargs.get("objects") is not None:
+            path.write_bytes(b"x" * len(original))
+        return evidence
+
+    monkeypatch.setattr(archive, "_partition_evidence", changed_after_evidence)
+    try:
+        with pytest.raises(RuntimeError, match="object_changed"):
+            if action == "verify":
+                archive.verify_partition(day)
+            else:
+                reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    finally:
+        path.write_bytes(original)
+    assert archive.inspect_partition(day) == initial
+    assert _physical(storage, day)["hot_rows"] == 3

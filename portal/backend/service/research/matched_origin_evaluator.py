@@ -1,6 +1,8 @@
 """Check-owned descriptive attribution on one canonical Indicator timeline."""
 from __future__ import annotations
 
+from .event_preparation import EventCandlePreparation
+
 from core.execution_control import execution_checkpoint
 
 from collections import Counter
@@ -284,20 +286,23 @@ class MatchedOriginEvaluator(EventFactEvaluator):
     descriptive_outcomes_enabled: bool = True
 
     def evaluate(self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self._evaluate_matched(plan=plan, inputs=inputs, preparation=EventCandlePreparation())
+
+    def _evaluate_matched(self, *, plan, inputs, preparation):
         outcomes = dict(inputs.get("outcomes") or {})
         config = normalize_matched_origin(
             outcomes.get("matched_origin"), detector=inputs["detector"],
             outcomes=outcomes, statistics=inputs["statistics"],
         )
         if inputs.get("indicator_gap_rejection"):
-            return super().evaluate(plan=plan, inputs=inputs)
-        candle_rows = _candle_rows(inputs.get("indicator_evidence", {}).get("candles"), field="indicator_evidence.candles")
+            return super()._evaluate(plan=plan, inputs=inputs, preparation=preparation)
+        candle_rows = preparation.rows(inputs.get("indicator_evidence", {}).get("candles"), field="indicator_evidence.candles")
         for candle in candle_rows:
             _number(candle.get("close"), field="candle.close", positive=True)
-        raw = dict(super().evaluate(plan=plan, inputs=inputs))
+        raw = dict(super()._evaluate(plan=plan, inputs=inputs, preparation=preparation))
         if raw["status"] == "blocked":
             return raw
-        followup = super().evaluate(plan=plan, inputs={**inputs, "detector": config["detector"]})
+        followup = super()._evaluate(plan=plan, inputs={**inputs, "detector": config["detector"]}, preparation=preparation)
         # Reuse the single admitted graph's public snapshots and existing outcome
         # evaluator. No second engine run, external result ingestion or Fact synthesis.
         attribution = _attribute(

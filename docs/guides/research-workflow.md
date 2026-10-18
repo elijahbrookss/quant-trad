@@ -52,6 +52,100 @@ does not change either.
 Reviewed 2026-10-12: general agent research guidance; no research outcome or
 operational authority is implied.
 
+## Writing Research For Human Inspection
+
+The portal is a reading surface; exact Check evidence remains the scientific
+record. Write the human explanation as part of research work, then inspect its
+actual rendering once before publication. This is an author/reviewer practice,
+not a new CI gate, schema, editor or research execution requirement.
+
+- **Title:** name the question or finding in ordinary words. Use spaces between
+  quantities and units. Put campaign codes, versions and hashes in existing
+  evidence/provenance fields, unless a short code materially disambiguates work.
+- **Study conclusion:** lead with what was learned and the operational research
+  decision. Aim for one short paragraph and, where useful, two to four supporting
+  bullets. Select only the numbers needed to understand the finding and its
+  limits. Do not turn the whole conclusion into a large-type technical report.
+- **Scope:** describe the actual assets, native timeframe, source, dates and
+  comparator. Distinguish recognition/warmup from evaluation windows and state
+  end-exclusive boundaries where material. A multi-asset Study need not acquire
+  a fictitious single symbol or interval just to fill a table cell.
+- **Limitations:** keep qualifications that change interpretation visible next
+  to the finding: insufficient support, selective populations, dependence,
+  exposure, missing inputs, inferred clocks, untested outcomes or confounding.
+  Do not bury these behind a disclosure or replace them with generic caveats.
+- **Observations:** use existing title/body to state the retained finding and
+  link its exact Check/review. Distinguish a reviewer-reported verification from
+  verification actually performed here. **Hypotheses:** state a testable proposed
+  relationship and comparator without implying a result. **Checks:** retain
+  typed definitions, parameters, outputs, units and exact hashes; give a readable
+  title, but do not rewrite their immutable evidence to simplify presentation.
+- Put full precision, complete counts, exclusions, reproduction identities and
+  method diagnostics in existing Check payloads, linked evidence, reports and
+  explicit technical detail. Human summaries may round for readability only
+  when units and the unrounded source are clear; never change an evidence value,
+  gate, denominator or verdict. Do not imply independent samples or profitability.
+
+### Formatting And Progressive Detail
+
+Separate ideas with blank lines. Prefer short descriptive headings and genuine
+lists for parallel findings, rather than a dense paragraph of comma-separated
+numbers. Meaning comes first; supporting numbers follow; exact evidence opens
+on demand. Do not rely on color, truncation or a tooltip to carry a limitation.
+
+The portal supports a small escaped text subset in Summary, Scope, Limitations
+and record bodies: blank-line paragraphs, shallow `- ` / `* ` / `• ` lists,
+`## ` headings and `**strong emphasis**`. Use real newlines, not literal
+backslash-n escape sequences. All qualifications remain rendered; long historical
+conclusions are not automatically truncated or interpreted as clean summaries.
+
+The renderer maps these blocks to semantic React elements with consistent
+spacing. It preserves the source string and never uses raw HTML, executes embedded
+content, automatically decodes escapes, parses arbitrary Markdown or turns
+untrusted text into links. Evidence links remain controlled by existing route
+components. Full rich text, nested markup, tables and an editor are unnecessary.
+
+### Research Content And Operational Receipts
+
+Human-facing title/body/conclusion/scope are not an authorization log. Exclude
+user-message IDs, approval quotations, agent coordination, attempt accounting,
+PR/CI receipts and local paths unless the record explicitly documents that
+operational incident. Even there, lead with the failure and its consequence;
+put exact mechanics in existing evidence/receipt detail. Keep method provenance
+that changes scientific interpretation: fixed/predeclared rules, actual source
+and Dataset identity, missing data, replay status, and known-at assumptions.
+
+Retain approvals in existing custody/operator receipts and actual audit facilities
+that already own the operation. A publication has no arbitrary authorization field;
+do not invent one or misuse scientific-authority audit events. Link existing
+operational evidence when appropriate; never copy an entire permission transcript
+into a scientific conclusion. Presentation choices are not access controls:
+collapsing a section does not make private content private. Exports and historical
+versions retain their existing access rules and can still contain earlier prose.
+
+### One-Time Review And Historical Correction
+
+Read the title and first screen without opening technical detail. Confirm that a
+reader can identify the question, answer/decision, scope and central limitation.
+Inspect desktop and phone paragraphs, list spacing, long identifiers, units and
+empty states. Check that each displayed “not recorded”, “not applicable”, “multiple”
+or “unresolved” label describes the actual condition; never infer scope from prose
+or a campaign code automatically. Use existing authoritative instrument lookup
+when an explicit instrument ID is available, and preserve the ID/provenance.
+
+Before correcting history, inventory exact record IDs, selected revisions/hashes,
+incoming references and fields. Changing title/body/metadata changes reasoning
+content identity. Preserve original records and frozen snapshots. Use the existing append-only publication revision with `expected_previous_hash`
+for a published narrative correction; retain unchanged exact references when only
+the Study prose changes. Create a corrected Observation only if that referenced
+Observation also needs correction, as in the audited B2 case. Pin unchanged
+Check/evidence identities and retain previous versions. Do not silently edit an
+old conclusion, backfill metadata, alter a question adopted immutably, or treat a
+presentation correction as permission to rerun research. A new version alone does
+not remove old prose from History/export; any actual confidentiality issue needs
+separate scoped access/remediation review.
+
+
 ## 1. Begin With A Falsifiable Idea
 
 Start with a sentence about observable market behavior, not a Strategy name.
@@ -105,6 +199,14 @@ qt data prepare-backtest-dataset --help
 qt data freeze-dataset --help
 qt data dataset <dataset_id>
 ```
+
+For new candle inputs, acquire provider-native candles at the requested
+timeframe and freeze them directly. Do not coarsen, split, upsample or synthesize
+candles from other timeframes, even when the arithmetic appears equivalent.
+Provider pagination may divide requests in time while preserving the native
+timeframe. Missing native coverage stays missing; it is not filled from another
+interval. Preserve earlier derived inputs/results with their original lineage
+for historical custody/replay; do not rewrite or relabel them as provider-native.
 
 Acquisition is a separate, explicit operation. A backtest or evidence replay
 must not fill a missing range by contacting a provider behind your back.
@@ -198,6 +300,42 @@ return.
 If the Check does not support the idea, keep that result. A clear rejection is
 valuable research evidence and protects the next experiment from repeating the
 same hidden choice.
+
+### Dispatch And Keep The Receipt
+
+For an approved asynchronous evidence run, retain the complete machine-readable
+receipt:
+
+```bash
+qt research check run \
+  --request-json <request.json> \
+  --dataset-id <dataset_id> \
+  --dispatch --single-attempt --format json
+```
+
+`--single-attempt` requires `--dispatch` and selects the distinct run-once API;
+an older server must reject that route rather than silently use another policy.
+Omitting the flag preserves normal dispatch. The matching MCP tool is
+`dispatch_research_check_evidence` with `request`, optional `dataset_id`,
+`single_attempt: true`, and `confirm: true`; its omitted/default
+`single_attempt` is false. Both adapters use the existing
+`ResearchOperations.dispatch_evidence` method.
+
+The `research_job_dispatch.v1` receipt includes the job ID/type, actual status,
+`reused`, `attempts`, persisted `max_attempts`, `request_fingerprint`, and status
+and result URLs. Keep those fields, including when QT reuses an in-flight job.
+`--format auto` (the default) preserves the existing text dispatch receipt;
+`--format text` is explicit text output and requires `--dispatch`.
+Synchronous execution remains JSON and accepts `--format json`.
+
+A dispatch error may arrive after a job was enqueued or reused. Preserve its
+HTTP status/body, job ID and reconciliation instructions. MCP dispatch errors
+retain that status/body in JSON-RPC error data. Inspect the existing job before
+retrying; do not switch policies or redispatch automatically after a receipt
+failure, policy mismatch or timeout. If the response supplied no job ID, the
+outcome may remain unknown. A client timeout does not acknowledge that server
+work stopped. Use the existing job status/result and explicit cancellation
+contracts; requesting cancellation is not acknowledgement of stopped work.
 
 ### When A Check Becomes A Research Observation
 
@@ -502,6 +640,35 @@ new database entity. Reuse an existing method when its declared inputs and
 settings express the question. Changing a symbol or supported sample does not
 require another implementation.
 
+Before adding code, distinguish four ordinary choices:
+
+- Configure an existing method when its admitted settings express the question.
+- Reuse an existing calculation when the same operation occurs in another procedure.
+- Extend a method through a reviewed version when its scientific meaning changes.
+- Implement a distinct procedure when selection, outcomes or inference actually differ.
+
+These are review decisions, not a fixed taxonomy of future research. A new question
+alone does not require another evaluator. Spread and book-imbalance directional
+comparisons already share fitting/scoring; first-return classification and future
+realized-risk analysis have distinct procedures. Volatility as a directional
+predictor is a different question from measuring future volatility. Existing ATR
+baseline support does not admit ATR as an enriched feature.
+
+The event-and-fact code keeps accepted settings in `event_configuration.py` and
+historical procedure selection in the registry's `_resolve_definition_version`.
+`event_preparation.py` selects public events; `event_facts.py` owns causal Fact
+selection/features. `event_observations.py` admits observations and entry clocks,
+`event_outcomes.py` resolves horizons/invalidation, and `event_statistics.py`
+orchestrates distributions, folds, bins and direct tests. Existing baseline
+features and paired fitting/scoring remain in `event_features.py` and
+`directional_model.py`.
+
+Distinct procedures retain their own attribution/classification orchestration.
+They share readonly candle/index/ATR preparation only within one owned call on
+unchanged inputs; causal selections and shifted outcomes still execute for each
+pass. Public evaluations start fresh. Fixed protocol choices remain fixed, and
+cohesion remains an agent/reviewer responsibility without a scanning system.
+
 For a new method, implement the existing `CheckEvaluator` interface in
 `src/research_science/check.py`: `declare_requirements(definition, request)`
 describes needed evidence and `evaluate(plan, inputs)` computes the result from
@@ -526,3 +693,57 @@ stated version through the real normalizer and reach the existing prepare
 contract, with API/CLI parity. Frozen data, scientific admission and accounting
 remain with their existing owners. There is no plugin installer, expression
 language, saved configuration resource or independent evaluator lifecycle.
+
+### Raw candle predicates with durable evidence
+
+Discover `raw_forward_outcome` version 3 through `qt research check definition
+raw_forward_outcome --version 3`. Select it explicitly with
+`outcomes.schema_version: raw_candle_forward_outcome.v1` and use the existing
+requirements, prepare, frozen evidence and replay workflow. Version 2 remains
+preview-only. V3 requires canonical clocks and source identity, real contiguous
+entry/outcome paths, and genuine volume where used. Its entry is a causal candle
+close; targets end strictly before the declared evaluation boundary. Use
+`continue_degraded` and inspect local exclusions and complete support counts.
+
+The canonical `mean_forward_return_pct` and related `_pct` fields are fractions;
+percentage display multiplies by 100. Compare requested cohort summaries as
+emitted; the all-bar baseline edge is a different comparison. Method availability
+and successful deployment do not allocate a scientific experiment or permit
+tuning, more dates, extra Checks, or external order submission.
+
+
+Use `qt research check definition raw_forward_outcome --version 5` for the
+configurable controlled-reversal template. Keep physical windows fixed when
+changing interval: the three-hour decline/outcome and 24-hour RMS choice uses
+12/96/12 bars at 15m, 6/48/6 at 30m and 3/24/3 at 1h, with warmup 97/49/25.
+That expresses supported variations without implementing another method. It
+does not authorize new studies or choose a timeframe from favorable results.
+
+Use `qt research check definition event_fact_analysis --version 13` for explicit
+retrospective numeric association. Declare the real analysis cutoff; preserve
+late receipts. The July 25–September 23 exclusive hourly example has 1,440
+nominal buckets, separate long/short liquidation inputs and one fixed paired
+logistic comparison beyond recent return and ATR. Its dates and train/validation
+split are a template to fix before dispatch, not an allocation or measured
+coverage claim. Results are conditional on unverified bucket-start meaning and
+cannot supply point-in-time predictive, backtest or certification evidence.
+
+
+For an explicitly bounded complete-case comparison, add
+`outcomes.retrospective.input_coverage_policy: complete_paired_rows` to v13.
+It admits acquired partial source ranges without relabeling them as complete,
+requires liquidation buckets only within the fixed dates, and does not acquire
+prices beyond the exclusive end. Missing values on either side and unavailable
+boundary outcomes are excluded and counted; returned zeros remain values.
+Inspect both fold counts and the retained source-quality evidence. Omitting the
+option preserves the historical strict input plan. Preparation and execution
+still use the existing freeze/run operations; do not backdate receipts or repair
+missing buckets with invented zero values.
+
+
+For the user-selected completed-reversal comparison feasibility question,
+discover `raw_forward_outcome` version11 and read
+[selection only](reversal-selection-only.md). This fixed84-day method reports
+matched/excluded populations, completion-moment weights and dependence without
+forward outcomes, arbitrary coverage gates or repeated matching adjustments.
+It does not acquire data or relax canonical derivation resource limits.

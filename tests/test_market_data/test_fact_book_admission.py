@@ -123,7 +123,7 @@ def test_every_revision_checks_validity_not_just_latest_position():
         admission.verify_book_metadata_and_checkpoints(session, rows=rows, object_store=None, byte_verifier=None, max_objects=10)
 
 
-@pytest.mark.parametrize("mode", ["valid", "state", "missing", "scope", "raw_mapping"])
+@pytest.mark.parametrize("mode", ["valid", "state", "missing", "scope", "raw_mapping", "additional"])
 def test_checkpoint_requires_exact_canonical_state_as_well_as_valid_bytes(monkeypatch, mode):
     row = {**_source(), "market_commit_seq": 12}
     opening = {"series_id": 1, "status": "open_valid", "reconstruction_version": admission.BOOK_RECONSTRUCTION_VERSION,
@@ -152,12 +152,26 @@ def test_checkpoint_requires_exact_canonical_state_as_well_as_valid_bytes(monkey
     restored = []
     verified = []
     monkeypatch.setattr(admission, "restore_book_checkpoint_parquet", lambda *args, **kwargs: restored.append(kwargs["expected"]["id"]))
-    kwargs = dict(rows=[row], object_store=SimpleNamespace(local_path=lambda key: key), max_objects=10,
+    roots = [row]
+    decoded = []
+    if mode == "additional":
+        root = deepcopy(row)
+        root["id"] = "root"
+        root["provenance"]["_qt_l2_evidence"]["receive_ordinal"] = 4
+        roots = [root]
+        def grouped(_session, identities, **kwargs):
+            assert identities == [row["id"]]
+            assert kwargs["max_logical_bytes"] == 64 * 1024**2
+            return {row["id"]: row}
+        monkeypatch.setattr(admission, "read_checkpoint_dependency_rows", grouped)
+        monkeypatch.setattr(admission, "record_from_storage_row", lambda source: decoded.append(source["id"]))
+    kwargs = dict(rows=roots, object_store=SimpleNamespace(local_path=lambda key: key), max_objects=10,
                   byte_verifier=SimpleNamespace(verify=lambda *args, **kwargs: verified.append(args)))
-    if mode == "valid":
+    if mode in {"valid", "additional"}:
         objects, sources = admission.verify_book_metadata_and_checkpoints(SimpleNamespace(execute=execute), **kwargs)
         assert sources == [row] and objects[0]["target_id"] == "checkpoint"
         assert restored == ["checkpoint"] and len(verified) == 1
+        assert decoded == ([row["id"]] if mode == "additional" else [])
     else:
         with pytest.raises(RuntimeError, match="canonical_book_checkpoint_source_"):
             admission.verify_book_metadata_and_checkpoints(SimpleNamespace(execute=execute), **kwargs)
@@ -189,3 +203,148 @@ def test_source_placement_proof_checks_exact_header(mode):
     else:
         with pytest.raises(RuntimeError, match="canonical_source_dependency_"):
             fact_dependencies.verify_canonical_source_placements(session, dependencies)
+
+
+class _CheckpointSources:
+    """Metadata-only placement fixture with independently bounded cold pages."""
+    def __init__(self):
+        self.rows = {identity: {"id": identity, "revision": index + 1, "known_at": BASE,
+                               "market_commit_seq": index + 5, "payload": {"state": identity}}
+                     for index, identity in enumerate(("a", "b", "c"))}
+        self.page_for = {"a": "page-1", "b": "page-1", "c": "page-2"}
+        self.manifests = {key: SimpleNamespace(manifest_id=key, logical_byte_count=2500,
+            object_key=key + ".parquet", object_sha256=key, byte_count=100) for key in set(self.page_for.values())}
+        self.calls, self.verified = [], []
+        self.coverage = "valid"
+        self.hot = set()
+
+    def execute(self, statement, params):
+        sql = str(statement)
+        ids = params["ids"]
+        if "fact_identities" in sql:
+            rows = [{"id": identity, "storage_day": BASE.date()} for identity in ids]
+            if self.coverage == "identity":
+                rows.pop()
+        elif "AS requested_id" in sql:
+            rows = [{"requested_id": identity, "hot_id": identity if identity in self.hot else None,
+                     "id": None if identity in self.hot else self.page_for[identity]} for identity in ids]
+            if self.coverage == "ambiguous":
+                rows.append(dict(rows[0]))
+            elif self.coverage == "missing":
+                rows[0]["id"] = None
+        elif "coalesce(sum" in sql:
+            return SimpleNamespace(scalar_one=lambda: 0)
+        else:
+            assert "SELECT DISTINCT manifests.*" in sql
+            rows = [{"id": key} for key in sorted({self.page_for[i] for i in ids if i not in self.hot})]
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: rows))
+
+    def read_rows_by_ids(self, _session, ids):
+        self.calls.append(list(ids))
+        return {identity: deepcopy(self.rows[identity]) for identity in ids}
+
+    def verify(self, key, digest, *, expected_bytes):
+        assert expected_bytes == 100
+        self.verified.append(key)
+
+
+def _checkpoint_reader(monkeypatch, fixture, budget=4096, max_objects=10, **kwargs):
+    monkeypatch.setattr(fact_dependencies, "_catalog_manifest", lambda row: fixture.manifests[row["id"]])
+    return fact_dependencies.read_checkpoint_dependency_rows(fixture, ["a", "b", "c"],
+        reader=fixture, byte_verifier=fixture, max_logical_bytes=budget, max_objects=max_objects, **kwargs)
+
+
+def test_checkpoint_cold_groups_preserve_all_rows_with_a_bounded_decode(monkeypatch):
+    fixture = _CheckpointSources()
+    monkeypatch.setattr(fact_dependencies, "_catalog_manifest", lambda row: fixture.manifests[row["id"]])
+    with pytest.raises(fact_dependencies.CanonicalSourceByteBudgetExceeded):
+        fact_dependencies.read_canonical_dependency_rows(fixture, ["a", "b", "c"],
+            reader=fixture, max_logical_bytes=4096)
+    assert fixture.calls == []
+    previous = fact_dependencies.read_canonical_dependency_rows(fixture, ["a", "b", "c"],
+        reader=fixture, max_logical_bytes=8192)
+    fixture.calls.clear()
+    assert _checkpoint_reader(monkeypatch, fixture) == previous
+    assert fixture.calls == [["a", "b"], ["c"]]
+    assert fixture.verified == ["page-1.parquet", "page-2.parquet"]
+
+
+@pytest.mark.parametrize("coverage", ["identity", "ambiguous", "missing"])
+def test_checkpoint_groups_refuse_missing_or_ambiguous_placement_before_read(monkeypatch, coverage):
+    fixture = _CheckpointSources()
+    fixture.coverage = coverage
+    with pytest.raises(RuntimeError, match="canonical_checkpoint_source_.*coverage_invalid"):
+        _checkpoint_reader(monkeypatch, fixture)
+    assert fixture.calls == fixture.verified == []
+
+
+@pytest.mark.parametrize("mode", ["single_page", "retained_rows", "object_budget", "cancelled", "identity_changed"])
+def test_checkpoint_group_resource_and_integrity_refusals(monkeypatch, mode):
+    fixture = _CheckpointSources()
+    if mode == "single_page":
+        fixture.manifests["page-1"].logical_byte_count = 4097
+    elif mode == "retained_rows":
+        fixture.rows["a"]["payload"]["large"] = "x" * 200
+    elif mode == "object_budget":
+        fixture.verify = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("archive_verification_byte_budget_exceeded"))
+    elif mode == "identity_changed":
+        fixture.read_rows_by_ids = lambda *a: {}
+    checks = []
+    def check():
+        checks.append(1)
+        if mode == "cancelled" and fixture.calls:
+            raise RuntimeError("cancelled")
+    with pytest.raises(RuntimeError):
+        _checkpoint_reader(monkeypatch, fixture, check_budget=check)
+    assert checks
+    if mode in {"single_page", "object_budget"}:
+        assert fixture.calls == []
+    elif mode in {"retained_rows", "cancelled", "identity_changed"}:
+        assert fixture.calls == ([] if mode == "identity_changed" else [["a", "b"]])
+
+
+def test_checkpoint_cold_group_shares_existing_object_budget_with_other_dependencies(monkeypatch, tmp_path):
+    from market_data.archive import FilesystemRawArchiveObjectStore
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    import hashlib
+    fixture = _CheckpointSources()
+    for key in ("prior", "page-1", "page-2"):
+        (tmp_path / (key + ".parquet")).write_bytes(b"x" * 100)
+    objects = ArchiveVerificationBatch(FilesystemRawArchiveObjectStore(tmp_path),
+        limits=ArchiveVerificationLimits(max_objects=3, max_bytes=250))
+    digest = hashlib.sha256(b"x" * 100).hexdigest()
+    objects.verify("prior.parquet", digest, expected_bytes=100)
+    for manifest in fixture.manifests.values():
+        manifest.object_sha256 = digest
+    fixture.verify = objects.verify
+    with pytest.raises(RuntimeError, match="archive_verification_byte_budget_exceeded"):
+        _checkpoint_reader(monkeypatch, fixture)
+    assert fixture.calls == [["a", "b"]]
+    assert objects.byte_count == 200
+
+
+def test_checkpoint_groups_join_page_members_across_bounded_metadata_batches(monkeypatch):
+    fixture = _CheckpointSources()
+    fixture.rows = {f"source-{index:04}": {"id": f"source-{index:04}", "revision": index + 1}
+                    for index in range(1002)}
+    fixture.page_for = {identity: "page-1" for identity in fixture.rows}
+    monkeypatch.setattr(fact_dependencies, "_catalog_manifest", lambda row: fixture.manifests[row["id"]])
+    execute = fixture.execute
+    sizes = []
+    def bounded(statement, params):
+        sizes.append(len(params["ids"]))
+        assert len(params["ids"]) <= 1000
+        return execute(statement, params)
+    fixture.execute = bounded
+    assert fact_dependencies.read_checkpoint_dependency_rows(fixture, list(reversed(fixture.rows)),
+        reader=fixture, byte_verifier=fixture, max_logical_bytes=1024**2, max_objects=10) == fixture.rows
+    assert max(sizes) == 1000
+    assert len(fixture.calls) == 1
+    assert fixture.verified == ["page-1.parquet"]
+
+
+def test_checkpoint_source_metadata_obeys_existing_object_count_limit_before_read(monkeypatch):
+    fixture = _CheckpointSources()
+    with pytest.raises(RuntimeError, match="canonical_checkpoint_source_object_budget_exceeded"):
+        _checkpoint_reader(monkeypatch, fixture, max_objects=1)
+    assert fixture.calls == fixture.verified == []
