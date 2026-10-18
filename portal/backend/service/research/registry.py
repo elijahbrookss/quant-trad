@@ -50,7 +50,7 @@ from .reversal_recognition_evaluator import (ReversalRecognitionEvaluator,
 from .controlled_reversal_evaluator import (ControlledReversalEvaluator, FIXED_RULES,
     OUTCOME_SCHEMA as REVERSAL_SCHEMA, normalize_configuration as normalize_reversal_configuration,
     ConfigurableControlledReversalEvaluator, CONFIGURABLE_RULES, CONFIGURABLE_SCHEMA,
-    normalize_configurable_configuration)
+    normalize_configurable_configuration, ControlledReversalPathEvaluator, PATH_SCHEMA, PATH_RULES, normalize_path_configuration)
 from .retrospective_numeric import SCHEMA as RETROSPECTIVE_SCHEMA, normalize_retrospective
 from .matched_origin_evaluator import MatchedOriginEvaluator, normalize_matched_origin
 from .shared_landmark_evaluator import SharedLandmarkEvaluator, normalize_shared_landmark
@@ -495,10 +495,22 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_controlled_paths = ControlledReversalPathEvaluator()
+CHECK_REGISTRY.register_evaluator(_controlled_paths)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version='19', evaluator_id=_controlled_paths.evaluator_id,
+    evaluator_version='19', request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={'family': checks.RAW_FORWARD_OUTCOME, 'event_ownership': 'check',
+        'input_policy': 'canonical_candle_clock_path.v1', 'outcome_schema': PATH_SCHEMA, **PATH_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v18 pairs."""
+    """Keep historical raw v2 unqualified; admit exact registered raw v3 through v19 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -1081,7 +1093,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("18" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("19" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == PATH_SCHEMA
+            else "18" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == REUSABLE_MEASUREMENTS_SCHEMA
             else "17" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == POPULATION_SCHEMA
@@ -1157,7 +1171,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1282,6 +1296,11 @@ def materialize_check_definition(
             raise ValueError("candle_distribution_invalid: no configurable gap rewarm")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "4":
         outcomes = normalize_reversal_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars:
+            raise ValueError("controlled_reversal_invalid: no configurable gap rewarm")
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "19":
+        outcomes = normalize_path_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
         if gap_rewarm_bars:
             raise ValueError("controlled_reversal_invalid: no configurable gap rewarm")

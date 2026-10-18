@@ -1194,3 +1194,29 @@ for supported new contexts. These are discovery annotations, not admission.
 API, CLI and MCP read the same catalog through existing operations; explicit
 historical requests remain supported. See the existing selection and measurement
 guides for settings, constraints and stopping behavior.
+
+
+## Controlled-reversal saved path observations
+
+`raw_forward_outcome@19` / `controlled_reversal_comparison.v3` adds saved
+per-arm observations to the existing configurable controlled-reversal recipe.
+Historical v4/v5 definitions, outputs and replay stay unchanged. All v5 interval,
+lookback, lag, horizon, matching, caliper, boundary and support choices remain;
+there is no new matching policy, summary estimand or resource allowance.
+
+Every matched pair retains treated and control records, including unresolved
+arms. Resolved records retain the already calculated MFE/MAE in fractional units
+relative to the long entry-candle close: maximum future high / entry minus one,
+and minimum future low / entry minus one. Neither is clamped to zero, so MFE may
+be negative and MAE positive. Endpoint return and the existing descriptive
+analysis are unchanged. Unresolved records keep their original reason and null
+excursion/timing fields rather than a partial-path estimate or replacement pair.
+
+Timing uses that same admitted future path, offsets 1 through the declared
+horizon; the entry candle is excluded. Ties select the first chronological
+candle attaining the extreme. Save one-based bar offset and that candle's open,
+close and known-at. These are candle/availability clocks, not an intrabar high/low
+order, tick time or executable fill. The extreme's own known-at can differ from
+its close; whole-outcome known-at still covers the complete admitted path.
+There is no new tail, provider call or historical evidence rewrite. Results save
+the complete pair observations, not only truncated display examples.

@@ -228,3 +228,113 @@ def test_actual_planner_declares_history_and_never_requests_future_tail():
     assert plan.outcome_tail["boundary"] == "evaluation_end_exclusive"
     assert plan.market_data_requirements[0]["required_start"].startswith("2022-01-01T00:00:00")
     assert plan.materialization_range["end_exclusive"] == plan.evaluation_range["end_exclusive"]
+
+
+# New output profile reuses the same candidates, controls and return estimand.
+def path_payload(schema=None):
+    p=payload()
+    p['outcomes']={'schema_version': schema or cr.PATH_SCHEMA, 'interval':'1m',
+        'trend_lookback_bars':5, 'volatility_lookback_bars':20, 'entry_lag_bars':1,
+        'outcome_horizon_bars':5, 'matching_policy':'same_date_hour', 'comparison_window_days':0}
+    return p
+
+
+def run_paths(frame=None):
+    _,request,plan=contract(path_payload())
+    return cr.ControlledReversalPathEvaluator().evaluate(plan=plan,inputs={**request.parameters,
+        'candles':candles() if frame is None else frame})
+
+
+def test_legacy_v4_v5_exact_result_hashes_and_new_profile_matching_parity():
+    assert semantic_hash(run())=='ce94b9f192684d7a8aa89c4f79094351acf341ccb2c67f24284e461765061616'
+    _,request,plan=contract(path_payload(cr.CONFIGURABLE_SCHEMA))
+    old=cr.ConfigurableControlledReversalEvaluator().evaluate(plan=plan,inputs={**request.parameters,'candles':candles()})
+    assert semantic_hash(old)=='1b5159682f7fb819a141b8c11a8828f35b6dd649bb5411f84f616cc7c43b3937'
+    new=run_paths()
+    for field in ('feature_frozen_hash','unmatched','candidate_comparisons','controlled_reversal_comparison'):
+        assert new[field]==old[field]
+    assert len(new['pairs'])==len(old['pairs'])==1
+    for arm in ('treated','control'):
+        assert new['pairs'][0][arm]==old['pairs'][0][arm]
+        assert {k:new['pairs'][0]['outcomes'][arm][k] for k in old['pairs'][0]['outcomes'][arm]}==old['pairs'][0]['outcomes'][arm]
+
+
+def test_new_profile_saves_both_arm_excursions_and_explicit_contract_round_trip():
+    import json
+    result=run_paths(); restored=json.loads(json.dumps(result,allow_nan=False))
+    assert restored==result
+    assert restored['schema_version']=='controlled_reversal_comparison_result.v3'
+    assert restored['path_observation_contract']['unit']=='fraction'
+    for arm in ('treated','control'):
+        value=restored['pairs'][0]['outcomes'][arm]
+        assert value['status']=='resolved' and value['reason'] is None
+        assert value['return_unit']=='fraction' and value['direction']=='long'
+        assert value['horizon_bars']==5 and value['horizon_seconds']==300
+        assert value['entry_price']==117.8
+        assert value['maximum_favorable_excursion']==118.7/117.8-1.
+        assert value['maximum_adverse_excursion']==116.3/117.8-1.
+        assert value['favorable_extreme']['bar_offset']==1
+        assert value['adverse_extreme']['bar_offset']==5
+
+
+def test_extrema_first_ties_exclude_entry_candle_and_preserve_selection():
+    original=run_paths(); frame=candles()
+    frame.loc[22,['high','low']]=[1000.,1.]
+    frame.loc[[24,25],'high']=130.; frame.loc[[26,27],'low']=100.
+    value=run_paths(frame)
+    assert value['feature_frozen_hash']==original['feature_frozen_hash']
+    treated=value['pairs'][0]['outcomes']['treated']
+    assert treated['maximum_favorable_excursion']==130./117.8-1.
+    assert treated['maximum_adverse_excursion']==100./117.8-1.
+    assert treated['favorable_extreme']=={'bar_offset':2,'open_time':time(24),'close_time':time(25),'known_at':time(25)}
+    assert treated['adverse_extreme']=={'bar_offset':4,'open_time':time(26),'close_time':time(27),'known_at':time(27)}
+
+
+def test_negative_favorable_excursion_is_not_clamped_to_entry():
+    frame=candles();frame.loc[22,['close','high']]=[120.,121.]
+    value=run_paths(frame)['pairs'][0]['outcomes']['treated']
+    assert value['maximum_favorable_excursion']==118.7/120.-1.<0
+    assert value['favorable_extreme']['bar_offset']==1
+
+
+@pytest.mark.parametrize('removed,reason',[(22,'gap_in_entry_path'),(25,'gap_in_horizon'),(27,'target_bar_missing')])
+def test_new_unresolved_arms_preserved_without_partial_extrema_or_rematching(removed,reason):
+    original=run_paths(); value=run_paths(candles().drop(index=removed))
+    assert value['feature_frozen_hash']==original['feature_frozen_hash']
+    assert value['sample_count']==1 and value['complete_sample_count']==0
+    arms=value['pairs'][0]['outcomes']; assert set(arms)=={'treated','control'}
+    assert arms['control']['status']=='resolved'
+    assert arms['treated']['status']=='unresolved' and arms['treated']['reason']==reason
+    for key in ('maximum_favorable_excursion','maximum_adverse_excursion','favorable_extreme','adverse_extreme'):
+        assert arms['treated'][key] is None
+    assert arms['treated']['horizon_bars']==5
+
+
+def test_new_entry_late_unresolved_and_extreme_availability_is_not_horizon_availability():
+    frame=candles();frame.loc[22,'known_at']=time(24)
+    assert run_paths(frame)['pairs'][0]['outcomes']['treated']['reason']=='entry_price_known_after_close'
+    frame=candles();frame.loc[23,'known_at']=time(95)
+    value=run_paths(frame)['pairs'][0]['outcomes']['treated']
+    assert value['status']=='resolved' and value['favorable_extreme']['known_at']==time(95)
+    assert value['favorable_extreme']['close_time']==time(24)
+    assert value['outcome_known_at']==time(95)
+
+
+def test_new_profile_registry_reconstruction_catalog_and_zero_tail():
+    from portal.backend.service.research.planning import plan_research_check
+    definition,request,_=contract(path_payload())
+    assert definition.definition_version.startswith('19+') and definition_allows_evidence(definition)
+    plan=plan_research_check(definition,request,inspect_coverage=False,
+        instrument_loader=lambda key:{'id':key,'symbol':'SYNTHETIC'},
+        indicator_planner=lambda ids,**kwargs:{'indicators':[],'requirements':[],'warmup_bars':0})
+    assert plan.outcome_tail['seconds']==0 and plan.warmup['bars']==21
+    pinned,request,plan=pin_check_definition_to_plan(definition,request,plan)
+    assert reconstruct_pinned_check_definition(request,plan).to_dict()==pinned.to_dict()
+    detail=catalog.get_check_definition('raw_forward_outcome','19')
+    assert detail['result_shape']['analysis_field']=='controlled_reversal_comparison'
+    fields=detail['result_shape']['analytical_fields']
+    assert fields['pairs[].outcomes.{treated,control}']['unit']=='fraction'
+    assert 'path_observation_contract' in fields
+    # Entry and path choices remain the same v5 envelope; schema is the only new choice.
+    for key,value in path_payload()['outcomes'].items():
+        if key!='schema_version': assert request.parameters['outcomes'][key]==value

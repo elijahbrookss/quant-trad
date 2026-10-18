@@ -29,3 +29,17 @@ def test_zero_denominator_policies_remain_distinct():
     value=difference_path_observation(entry_price=0.,endpoint_price=1.,high=2.,low=0.,short=False)
     assert value.endpoint_return==value.maximum_favorable_excursion==0.
     with pytest.raises(ZeroDivisionError):ratio_path_observation(entry_price=0.,endpoint_price=1.,high=2.,low=0.,direction=1.)
+
+
+def test_extrema_first_candle_ties_and_short_direction_are_explicit():
+    from research_science.price_paths import first_extrema_candles
+    path=[{'open_time':i,'close_time':i+1,'known_at':i+2,'high':high,'low':low}
+          for i,(high,low) in enumerate([(105.,98.),(105.,96.),(104.,96.)])]
+    long=first_extrema_candles(path,direction=1.)
+    short=first_extrema_candles(path,direction=-1.)
+    assert long['favorable']['bar_offset']==1 and long['adverse']['bar_offset']==2
+    assert short['favorable']==long['adverse'] and short['adverse']==long['favorable']
+    value=ratio_path_observation(entry_price=100.,endpoint_price=97.,high=105.,low=96.,direction=-1.)
+    assert value.direction_signed_return==-(97./100.-1.)
+    assert value.maximum_favorable_excursion==1.-96./100.
+    assert value.maximum_adverse_excursion==1.-105./100.<0

@@ -51,6 +51,8 @@ def context(value):
     for key in ('dataset_id', 'instrument_id'):
         if not isinstance(result[key], str) or not result[key].strip():
             invalid('invalid '+key)
+    if type(result['pair_count']) is int and result['pair_count'] > 999:
+        invalid('saved measurement supports at most999pairs; entire selection rejected without truncation or rematching')
     for key, maximum in (('input_rows', 19104), ('case_count', 10000), ('pair_count', 999),
                          ('completion_clock_count', 999), ('max_commit_seq', 2**63-1)):
         if type(result[key]) is not int or not 0 <= result[key] <= maximum:

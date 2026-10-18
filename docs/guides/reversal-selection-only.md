@@ -160,3 +160,14 @@ The separate [six-block selection procedure](reversal-six-block-selection.md)
 uses version12. Version11 and its historical results remain unchanged. Extending
 the reporting period does not create old-block controls, independent episodes
 or permission to inspect future outcomes.
+
+
+### Configured-profile limits and downstream admission
+
+Method17's native15m clock, whole28day blocks, one-through-six-block span and
+19,104-bar ceiling describe the current supported recipe and inherited resource
+allowance. They are not universal scientific limits. Its result populations are
+zero through two caller-named block views plus `combined`, not fixed old/new
+labels. Views preserve root pairs/weights and normalize only their summaries.
+Method17 may select more than 999 pairs; method18 measures at most 999 and fails
+explicitly on the entire larger population, without truncation or rematching.

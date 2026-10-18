@@ -90,3 +90,10 @@ first-passage and progress summary functions. Original root pair weights remain
 unchanged; each named view reports its own original mass and conditional
 distributions, including empty views and missing endpoints. Projection does not
 read another candle, recalculate paths, or change selection membership.
+
+
+The method17-to18 composition limit is an admission boundary, not an automatic
+selection cap: a valid method17 population may exceed 999 pairs. Method18 then
+rejects the entire saved population with an explicit at-most-999-pairs error;
+it never truncates, rematches or changes weights. Its native15m, fixed12bar and
+resource envelope is this supported profile, not a universal scientific limit.

@@ -293,3 +293,17 @@ def test_configured_selection_admission_is_explicit_and_does_not_expand_historic
     seal_selection(selection,'17');ref=reseal(item)
     with pytest.raises(ValueError,match='population configuration'):
         load_saved_selection(ref,ctx,item_loader=lambda key:item,admitted_versions=('12','14','17'))
+
+
+def test_pair_admission_above999_is_explicit_and_never_truncates():
+    from portal.backend.service.research.saved_selection_binding import context
+    from portal.backend.service.research.catalog import get_check_definition
+    # Start from the actual supported template, change only the over-limit count.
+    detail=get_check_definition('raw_forward_outcome','18')
+    frozen=detail['examples'][0]['request']['outcomes']['frozen_context']
+    with pytest.raises(ValueError,match='at most999pairs.*without truncation'):
+        context({**frozen,'pair_count':1000})
+    for version in ('17','18'):
+        assert '999' in get_check_definition('raw_forward_outcome',version)['discovery']['composition_limit']
+    population=get_check_definition('raw_forward_outcome','17')['result_shape']['analytical_fields']['populations']['meaning']
+    assert 'Caller-named' in population and '1through6' in population and 'first3blocks' not in population

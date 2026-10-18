@@ -773,3 +773,17 @@ starts at zero and may exceed 100 percent or occur after failure. Historical
 an endpoint timestamp. Weighted/unweighted summaries and different accumulation
 or interpolation policies are not interchangeable. Neither matched pairs nor
 support components automatically provide independent observations.
+
+
+### Inspect controlled-reversal excursions
+
+For new controlled-reversal requests that need saved excursions, inspect
+`raw_forward_outcome@19` and its `controlled_reversal_comparison.v3` example
+through the existing definition list/detail API, CLI or MCP catalog. It uses the
+same configurable matching choices as v5 and keeps the original endpoint-return
+analysis. Each saved treated/control arm now carries fractional MFE/MAE and
+first-attaining future-candle offset/open/close/known-at, with explicit long
+entry-close anchor, horizon, status and unresolved reason. The first tied candle
+wins. The entry candle is excluded; no new tail is loaded. Candle clocks cannot
+establish intrabar order or a fill. Historical v4/v5 remain replayable with their
+original output shape; do not retrofit old saved evidence.

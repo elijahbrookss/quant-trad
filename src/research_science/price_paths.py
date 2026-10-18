@@ -46,3 +46,20 @@ def difference_path_observation(*,entry_price,endpoint_price,high,low,short):
         favorable=safe_ratio(high-entry_price,entry_price)
         adverse=safe_ratio(low-entry_price,entry_price)
     return FractionalPathObservation(endpoint,endpoint*(-1.0 if short else 1.0),favorable,adverse)
+
+
+def first_extrema_candles(path, *, direction):
+    """First chronological attaining candle, without entry insertion or OHLC ordering.
+
+    The caller supplies its already admitted future path in chronological order.
+    Offsets are one-based from the excluded entry candle. A tie keeps the first
+    candle; its availability is distinct from the completed horizon's known-at.
+    """
+    high = max(enumerate(path, 1), key=lambda item: float(item[1]['high']))
+    low = min(enumerate(path, 1), key=lambda item: float(item[1]['low']))
+    favorable, adverse = (high, low) if direction > 0 else (low, high)
+    def located(item):
+        offset, candle = item
+        return {'bar_offset': offset, 'open_time': candle['open_time'],
+                'close_time': candle['close_time'], 'known_at': candle['known_at']}
+    return {'favorable': located(favorable), 'adverse': located(adverse)}
