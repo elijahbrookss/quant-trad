@@ -118,13 +118,17 @@ def test_source_handoff_requires_current_binding_placement_and_unique_cold_cover
             leaf = fact_partition_name(flow.source_day)
             session.execute(text(f'TRUNCATE market."{leaf}"'))
         else:
+            # Respect descriptor binding and unique object keys. This must reach
+            # the fresh cold-coverage refusal, not fail during fixture INSERT.
             session.execute(text("""
                 INSERT INTO market.fact_archive_manifests
                     (id,storage_day,page_ordinal,object_key,object_sha256,manifest_hash,row_count,
                      byte_count,first_commit_seq,first_id,last_commit_seq,last_id,descriptor,acknowledged_at)
                 SELECT :id,storage_day,(SELECT max(page_ordinal)+1 FROM market.fact_archive_manifests
-                    WHERE storage_day=:day),object_key,object_sha256,manifest_hash,row_count,
-                    byte_count,first_commit_seq,first_id,last_commit_seq,last_id,descriptor,acknowledged_at
+                    WHERE storage_day=:day),object_key||'.handoff-overlap',object_sha256,manifest_hash,row_count,
+                    byte_count,first_commit_seq,first_id,last_commit_seq,last_id,
+                    descriptor||jsonb_build_object('manifest_id',CAST(:id AS text),
+                        'object_key',object_key||'.handoff-overlap'),acknowledged_at
                 FROM market.fact_archive_manifests WHERE storage_day=:day ORDER BY page_ordinal LIMIT 1
             """), {"id": "fam_" + "f" * 64, "day": flow.source_day})
     monkeypatch.setattr(reclaimer, "_timeouts", inject)
