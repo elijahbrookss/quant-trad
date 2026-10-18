@@ -61,6 +61,17 @@ bounded source working set near the exclusive check. It consumes the existing
 run budget; it neither extends the exclusive deadline nor replaces any fresh
 exclusive-phase read. Cold representative timing alone cannot justify it.
 
+Final receipt lookup is batched with the existing bounded page enumeration.
+Final catalog statements group at most16 requested manifests and split at256KiB
+of tuple-hint text, preserving a single large page's existing admissibility.
+Each result remains bound to one requested manifest, exact typed digest and
+both hinted and logical counts. A missing/extra result or late mismatch fails
+the entire batch before its pages are marked fresh. This reduces repeated SQL
+transport without retaining final-proof authority across statements or runs.
+The10-second exclusive bound and1-second statements are unchanged. Progress
+logs distinguish final admission, headers, catalog batches and complete evidence;
+only a qualified full normal-path observation can establish capacity.
+
 All mount/file guards, source coverage, pinned-Dataset audit, cancellation,
 per-statement and overall budgets, final NOWAIT parent/child locks, DROP and
 post-DROP rollback checks remain. No schema/index migration, persisted receipt,

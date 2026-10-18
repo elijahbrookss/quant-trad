@@ -81,8 +81,8 @@ def test_fresh_catalog_rejects_missing_added_or_reused_rows(change):
     sql = []
     def execute(statement, parameters):
         sql.append(str(statement))
-        return SimpleNamespace(mappings=lambda: SimpleNamespace(one=lambda: {
-            "hinted_count": 1, "logical_count": 1, "digest": "expected", **change}))
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [{
+            "manifest_id": "page", "hinted_count": 1, "logical_count": 1, "digest": "expected", **change}]))
     with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
         proof.verify_catalogs(SimpleNamespace(execute=execute), page, receipt, lambda: None)
     assert len(sql) == 1 and "logical_count" in sql[0] and "q.ctid=ANY" in sql[0]
@@ -206,3 +206,111 @@ def test_preparation_does_not_admit_or_make_cached_source_hash_current(monkeypat
         proof.verify_headers(None, lambda: None)
     with pytest.raises(RuntimeError, match="source_proof_not_current"):
         proof.verify_sources(None, "page", lambda: None)
+
+
+def _catalog_batch_fixture(count, *, tid_chars=8):
+    proof = handoff.FactHandoffProof(check_budget=lambda: None)
+    proof.admitted = True
+    pages = []
+    for index in range(count):
+        identity = f"page-{index:04d}"
+        page, receipt = {"id": identity}, {"verification_hash": identity}
+        proof.pages[identity] = (page, receipt)
+        proof.catalogs[identity] = {name: handoff._Rows(
+            1, (("manifest_id", "text"),) + columns, '{"(1,1)"}' + " " * tid_chars,
+            index % 3, identity + name) for name, (_, columns) in handoff._CATALOGS.items()}
+        pages.append((page, receipt))
+    return proof, pages
+
+
+def _batch_session(proof, *, change=None):
+    calls = []
+    def execute(statement, parameters):
+        sql = str(statement)
+        name = next(name for name, (table, _) in handoff._CATALOGS.items() if f"market.{table} " in sql)
+        parameters = {"ids": [parameters[f"id_{i}"] for i in range(len(parameters) // 2)],
+                      "tids": [parameters[f"tids_{i}"] for i in range(len(parameters) // 2)]}
+        calls.append((name, parameters))
+        assert "requested.tids" not in sql
+        if len(parameters["ids"]) > 1:
+            assert "UNION ALL" in sql
+        rows = [{"manifest_id": identity, "hinted_count": proof.catalogs[identity][name].count,
+                 "logical_count": proof.catalogs[identity][name].count,
+                 "digest": proof.catalogs[identity][name].digest} for identity in parameters["ids"]]
+        if change is not None:
+            rows = change(name, parameters["ids"], rows)
+        # Result ordering must not become proof authority.
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: rows[::-1]))
+    return SimpleNamespace(execute=execute), calls
+
+
+def test_many_pages_keep_every_catalog_check_with_bounded_round_trips():
+    proof, pages = _catalog_batch_fixture(464)
+    session, calls = _batch_session(proof)
+    # Same metadata batching as the actual partition evidence loop.
+    for offset in range(0, len(pages), 100):
+        proof.verify_catalog_batch(session, pages[offset:offset + 100], lambda: None)
+    assert proof.fresh_catalogs == set(proof.pages)
+    assert len(calls) == 128  # Formerly four calls per page = 1,856.
+    for name in handoff._CATALOGS:
+        checked = [identity for actual, params in calls if actual == name for identity in params["ids"]]
+        assert checked == [page["id"] for page, _ in pages]
+    assert all(1 <= len(params["ids"]) <= 16 for _, params in calls)
+
+
+@pytest.mark.parametrize("change", ["digest", "logical_count", "hinted_count", "missing", "extra", "duplicate"])
+def test_late_catalog_mismatch_never_marks_batch_current(change):
+    proof, pages = _catalog_batch_fixture(17)
+    def mutate(name, identities, rows):
+        if name != "canonical_dependencies" or "page-0016" not in identities:
+            return rows
+        if change == "missing":
+            return []
+        if change == "extra":
+            return rows + [{**rows[0], "manifest_id": "unrequested"}]
+        if change == "duplicate":
+            return rows + rows
+        return [{**row, change: "bad" if change == "digest" else 500} for row in rows]
+    session, calls = _batch_session(proof, change=mutate)
+    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        proof.verify_catalog_batch(session, pages, lambda: None)
+    assert calls and proof.fresh_catalogs == set()
+
+
+def test_catalog_parameter_volume_is_bounded_and_large_single_page_stays_supported():
+    proof, pages = _catalog_batch_fixture(3, tid_chars=150000)
+    session, calls = _batch_session(proof)
+    proof.verify_catalog_batch(session, pages, lambda: None)
+    assert all(len(params["ids"]) == 1 for _, params in calls)
+    proof, pages = _catalog_batch_fixture(1, tid_chars=300000)
+    session, calls = _batch_session(proof)
+    proof.verify_catalog_batch(session, pages, lambda: None)
+    assert len(calls) == 4 and proof.fresh_catalogs == {"page-0000"}
+
+
+def test_budget_expiry_after_batch_sql_does_not_make_catalogs_current():
+    proof, pages = _catalog_batch_fixture(17)
+    session, calls = _batch_session(proof)
+    def deadline():
+        if calls:
+            raise RuntimeError("handoff deadline")
+    with pytest.raises(RuntimeError, match="handoff deadline"):
+        proof.verify_catalog_batch(session, pages, deadline)
+    assert len(calls) == 1 and not proof.fresh_catalogs
+
+
+@pytest.mark.parametrize("change", ["page", "receipt", "duplicate", "unadmitted"])
+def test_batch_scope_is_exact_before_sql(change):
+    proof, pages = _catalog_batch_fixture(2)
+    if change == "page":
+        pages[1] = ({**pages[1][0], "row_count": 99}, pages[1][1])
+    elif change == "receipt":
+        pages[1] = (pages[1][0], {"verification_hash": "changed"})
+    elif change == "duplicate":
+        pages.append(pages[0])
+    else:
+        proof.admitted = False
+    session, calls = _batch_session(proof)
+    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        proof.verify_catalog_batch(session, pages, lambda: None)
+    assert not calls and not proof.fresh_catalogs

@@ -11,6 +11,7 @@ from dataclasses import asdict
 from datetime import date
 import logging
 from pathlib import Path
+from time import perf_counter
 
 from sqlalchemy import text
 
@@ -682,8 +683,13 @@ class PostgresCanonicalFactArchiveRepository:
         check_budget = check_budget or self.check_budget
         final_handoff = handoff is not None and objects is None
         if final_handoff:
+            final_started = perf_counter()
             handoff.admit(session, partition, limits, check_budget=check_budget)
+            logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=admitted seconds=%s",
+                        day, perf_counter() - final_started)
             handoff.verify_headers(session, check_budget)
+            logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=headers_current seconds=%s",
+                        day, perf_counter() - final_started)
             check_budget()
         last_cursor = (0, "")
         ordinal = 0
@@ -702,6 +708,22 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"day": day, "ordinal": ordinal, "limit": min(100, limits.max_pages - ordinal + 1)}).mappings().all()
             if not pages:
                 break
+            if final_handoff:
+                # Same bounded metadata page, same final transaction. Read
+                # receipts once per batch rather than once per manifest.
+                receipts = session.execute(text("""
+                    SELECT manifest_id, verifier_version, manifest_hash, catalog_hash, verification_hash
+                    FROM market.fact_archive_verifications
+                    WHERE manifest_id=ANY(CAST(:ids AS text[])) AND verifier_version=:version
+                """), {"ids": [page["id"] for page in pages],
+                        "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().all()
+                receipt_by_id = {row["manifest_id"]: row for row in receipts}
+                if len(receipts) != len(pages) or set(receipt_by_id) != {page["id"] for page in pages}:
+                    raise RuntimeError("canonical_archive_verification_missing_or_stale: handoff receipt scope")
+                handoff.verify_catalog_batch(session,
+                    [(page, receipt_by_id[page["id"]]) for page in pages], check_budget)
+                logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=catalogs_current first_page=%s pages=%s seconds=%s",
+                            day, ordinal, len(pages), perf_counter() - final_started)
             for page in pages:
                 if check_budget is not None:
                     check_budget()
@@ -716,14 +738,11 @@ class PostgresCanonicalFactArchiveRepository:
                     catalogs, physical = self._page_catalogs(session, manifest.manifest_id, handoff=handoff)
                 else:
                     catalogs = self._page_catalogs(session, manifest.manifest_id)
-                receipt = session.execute(text("""
+                receipt = (receipt_by_id[manifest.manifest_id] if final_handoff else session.execute(text("""
                     SELECT manifest_id, verifier_version, manifest_hash, catalog_hash, verification_hash
                     FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version
-                """), {"id": manifest.manifest_id, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+                """), {"id": manifest.manifest_id, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none())
                 if final_handoff:
-                    if receipt is None:
-                        raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
-                    handoff.verify_catalogs(session, page, receipt, check_budget)
                     handoff.verify_sources(session, manifest.manifest_id, check_budget)
                     source_placements.append(handoff.source_hash(manifest.manifest_id))
                 else:
@@ -769,6 +788,9 @@ class PostgresCanonicalFactArchiveRepository:
         # pages, before the first, or after the last page.
         if count != partition["expected_rows"] or total_rows != count:
             raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day} source_rows={count} archived_rows={total_rows}")
+        if final_handoff:
+            logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=evidence_current pages=%s seconds=%s",
+                        day, ordinal, perf_counter() - final_started)
         return {"storage_day": day, "page_count": ordinal, "row_count": total_rows,
                 "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs),
                 "source_placement_hash": archive_evidence_hash({"pages": source_placements})}

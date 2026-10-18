@@ -198,6 +198,8 @@ class PostgresCanonicalFactReclamationRepository:
                 return {**evidence, "status": "dry_run", "enabled": self.enabled, "reclaimable_bytes": size}
 
         started = monotonic()
+        logger.info("canonical_reclaim_handoff_started | storage_day=%s pages=%s max_seconds=%s",
+                    day, evidence["page_count"], self.limits.max_handoff_seconds)
         def check_budget():
             self.archive._check_budget()
             if monotonic() - started >= self.limits.max_handoff_seconds:

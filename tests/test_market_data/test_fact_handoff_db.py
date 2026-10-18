@@ -139,3 +139,58 @@ def test_source_handoff_requires_current_binding_placement_and_unique_cold_cover
     after = _physical(storage, flow.flow_day)
     assert (after["relation"], after["hot_rows"], after["header_rows"]) == (
         physical["relation"], physical["hot_rows"], physical["header_rows"])
+
+
+@pytest.mark.parametrize("mutate_last_page", [False, True])
+def test_batched_final_catalogs_keep_multipage_history_and_late_mutation_refusal(
+        storage, tmp_path, monkeypatch, mutate_last_page):
+    from sqlalchemy import event
+    from market_data.contracts import DatasetSeriesRequest
+    from tests.test_market_data.test_fact_storage_tiers_db import BASE
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch, rows=257)
+    frozen = storage.repo.freeze_dataset([
+        DatasetSeriesRequest(storage.series_id, BASE - timedelta(days=1), BASE + timedelta(days=1))])
+    revisions = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id)
+    initial, physical = archive.inspect_partition(day), _physical(storage, day)
+    original_timeouts = reclaimer._timeouts
+    phases = 0
+    statements = []
+    def timeouts(session):
+        nonlocal phases
+        original_timeouts(session)
+        phases += 1
+        if phases == 2 and mutate_last_page:
+            # The last page crosses the16-manifest batch boundary. It must not
+            # inherit another page's empty-alias proof or first-pass authority.
+            session.execute(text("""
+                INSERT INTO market.fact_archive_material_aliases
+                    (manifest_id,fact_version_id,series_id,evidence_key,material_hash)
+                SELECT id,first_id,:series,'late-batch-alias',:hash
+                FROM market.fact_archive_manifests WHERE storage_day=:day
+                ORDER BY page_ordinal DESC LIMIT 1
+            """), {"day":day,"series":storage.series_id,"hash":"b"*64})
+    def query(_connection, _cursor, statement, *_):
+        if phases == 2:
+            statements.append(statement)
+    monkeypatch.setattr(reclaimer, "_timeouts", timeouts)
+    event.listen(storage.database._engine, "before_cursor_execute", query)
+    try:
+        if mutate_last_page:
+            with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+                reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+            assert archive.inspect_partition(day) == initial
+            after = _physical(storage, day)
+            assert (after["relation"],after["hot_rows"],after["header_rows"]) == (
+                physical["relation"],physical["hot_rows"],physical["header_rows"])
+        else:
+            result = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+            assert result["status"] == "partition_reclaimed" and result["page_count"] == 17
+            assert _physical(storage, day)["relation"] is None
+            assert result["reclaimed_bytes"] > 0
+    finally:
+        event.remove(storage.database._engine, "before_cursor_execute", query)
+    catalogs = [q for q in statements if "AS manifest_id, proof.*" in q]
+    receipts = [q for q in statements if "FROM market.fact_archive_verifications" in q]
+    assert len(receipts) == 1
+    assert len(catalogs) == (4 if mutate_last_page else 8)
+    assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == revisions
