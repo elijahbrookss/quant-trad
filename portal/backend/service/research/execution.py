@@ -615,6 +615,7 @@ def execute_check_evidence(
             inputs = _load_market_inputs(
                 definition, request, bound_plan, resolver=resolver
             )
+            inputs["frozen_input_binding"] = binding
             result_payload = _evaluate(definition, request, bound_plan, inputs)
     input_hashes = _execution_input_hashes(bound_plan, inputs)
     run_quality = (

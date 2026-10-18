@@ -20,6 +20,8 @@ code_paths:
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
   - src/research_science/reversal_matched_progress.py
+  - portal/backend/service/research/saved_selection_binding.py
+  - portal/backend/service/research/saved_selection_measurements_evaluator.py
   - portal/backend/service/research/reversal_matched_progress_evaluator.py
   - src/research_science/reversal_matched_outcomes.py
   - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
@@ -1014,7 +1016,7 @@ the user's retreat-inclusive reference choice and reuses v9's canonical input
 preparation and sequential recognizer without changing historical v9 outputs.
 The domain outcome procedure anchors at the observational completion close E,
 locks the entire formation low L, verifies E>L, and tracks inclusive first touches
-of L or E+(E-L) over the next twelve15m candles. Ambiguous same-bar order,
+of L or E+(E-L) over the next twelve 15-minute candles. Ambiguous same-bar order,
 invalid risk and unavailable horizons remain explicit unresolved cases; a full
 untouched horizon is neither. The evaluation boundary prevents a future tail.
 
@@ -1101,7 +1103,7 @@ first-passage wrappers, definitions and results are unchanged. See the
 ## Explicit clean-prefix reversal selection
 
 `raw_forward_outcome@14` fixes January1recognition and the first two original
-28daydecision blocks, February1-March29,2025exclusive. Exact8,352bar native
+28daydecision blocks, February 1–March 29,2025exclusive. Exact8,352bar native
 input ends before the retained ETH April25gap. It reuses the existing selector
 and recognizer with unchanged formation,matches,calipers,strata,support,reuse,
 weights and19,104bar resource-derived recognition namespace. The changed scope
@@ -1122,3 +1124,27 @@ counts and original mass outside complete-window distributions. Fixed quarter
 bins and weighted quantiles are post-outcome descriptions, not optimized targets.
 No schema, provider, acquisition or UI changes are introduced. Historical methods
 and evidence stay unchanged. See the [fixed procedure](../../guides/reversal-matched-progress.md).
+
+
+## Validated saved-population composition
+
+`raw_forward_outcome@16` accepts the existing typed v12/v14 selection contracts
+through a shared saved-selection/frozen-context binding adapter. Declaration
+uses bounded caller metadata for planning only; execution validates source
+Check/definition/request/plan/result/evidence/manifest linkage and derives the
+actual context before calculations. Historical v12 integer-key manifest
+compatibility is explicit; v14 and the new output use JSON-stable projections.
+The ordinary frozen execution path passes its existing resolved read binding
+into evaluator inputs. It remains existing evidence material, not a new
+historical execution-input hash, dataset resolver or admission bypass.
+
+The adapter compares that actual binding with the saved selection's complete
+native frozen binding, checks rows/clocks/availability, preserves pairs, weights,
+nominal support and ancestry, and calls the existing first-passage and progress
+functions. In-memory composition has explicit provenance in a new output schema;
+it creates no fake persisted outcome reference. Historical v13/v15 adapters and
+all calculation kernels remain unchanged. No recognition/rematching, tail read,
+new persistence, generic composition framework, or inferential claim is added.
+See [the procedure](../../guides/reversal-saved-measurements.md) for context
+fields, fixed twelve-bar semantics and limits. Source qualification and a separate
+activation decision precede any normal single-attempt scientific dispatch.
