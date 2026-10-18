@@ -23,6 +23,8 @@ code_paths:
   - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
   - src/research_science/reversal_selection.py
   - src/research_science/reversal_six_block_selection.py
+  - src/research_science/reversal_two_block_selection.py
+  - portal/backend/service/research/reversal_two_block_selection_evaluator.py
   - portal/backend/service/research/reversal_six_block_selection_evaluator.py
   - portal/backend/service/research/reversal_selection_evaluator.py
   - portal/backend/service/research/reversal_first_passage_evaluator.py
@@ -1092,3 +1094,16 @@ is retained. Saved selection coverage and support/ancestry dependence remain
 visible; there is no coverage gate or independent-trial inference. Historical
 first-passage wrappers, definitions and results are unchanged. See the
 [fixed consumer procedure](../../guides/reversal-matched-outcomes.md).
+
+
+## Explicit clean-prefix reversal selection
+
+`raw_forward_outcome@14` fixes January1recognition and the first two original
+28daydecision blocks, February1-March29,2025exclusive. Exact8,352bar native
+input ends before the retained ETH April25gap. It reuses the existing selector
+and recognizer with unchanged formation,matches,calipers,strata,support,reuse,
+weights and19,104bar resource-derived recognition namespace. The changed scope
+and block1/block2/combined summaries belong to this explicit version; historical
+versions, the incomplete full-window Dataset and BTC B3 evidence stay intact.
+No post-gap reset, synthetic candle, outcome or coverage pass gate is added.
+See [two-block procedure](../../guides/reversal-two-block-selection.md).
