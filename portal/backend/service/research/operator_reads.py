@@ -84,6 +84,7 @@ def execution_snapshot(*, request=None, job_id=None, limit=25):
             WITH key AS (SELECT hashtextextended(:name,0) AS value)
             SELECT EXISTS(SELECT 1 FROM pg_locks,key WHERE locktype='advisory'
                 AND mode='ExclusiveLock' AND granted AND objsubid=1
+                AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
                 AND classid::bigint=((key.value>>32)&4294967295)
                 AND objid::bigint=(key.value&4294967295))
         """), {'name':_GLOBAL_LOCK})

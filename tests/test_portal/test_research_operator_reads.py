@@ -95,6 +95,7 @@ def test_snapshot_exact_fingerprint_truncation_and_existing_status(monkeypatch,h
     assert result['truncated']=={'global_inflight_jobs':True,'matching_jobs':True}
     assert result['read_only'] and result['admission_granted'] is False
     assert any("mode='ExclusiveLock'" in s and 'pg_locks' in s for s in session.statements)
+    assert any('database=(SELECT oid FROM pg_database WHERE datname=current_database())' in s for s in session.statements)
     assert all(not any(word in s.upper() for word in ['INSERT ','UPDATE ','DELETE ','PG_TRY_ADVISORY']) for s in session.statements)
 
 
