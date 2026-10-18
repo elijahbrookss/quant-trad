@@ -335,6 +335,8 @@ def test_new_profile_registry_reconstruction_catalog_and_zero_tail():
     fields=detail['result_shape']['analytical_fields']
     assert fields['pairs[].outcomes.{treated,control}']['unit']=='fraction'
     assert 'path_observation_contract' in fields
+    assert catalog.get_check_definition('raw_forward_outcome','5')['discovery']['preferred_profile']=='raw_forward_outcome@19'
+    assert catalog.get_check_definition('raw_forward_outcome','4')['discovery']['new_requests'] is True
     # Entry and path choices remain the same v5 envelope; schema is the only new choice.
     for key,value in path_payload()['outcomes'].items():
         if key!='schema_version': assert request.parameters['outcomes'][key]==value

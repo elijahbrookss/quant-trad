@@ -450,7 +450,7 @@ def _discovery(family, version):
     if family == 'raw_forward_outcome' and version in {'17','18'}:
         return {'new_requests': True, 'composition_limit': 'Method17 selection may exceed999pairs; method18 rejects the entire saved population above999pairs;no truncation or rematching.',
             'meaning': 'Supported profile admission bounds, not universal scientific limits; native15m and whole28day blocks apply to17/18 only.'}
-    if family == 'raw_forward_outcome' and version in {'4','5'}:
+    if family == 'raw_forward_outcome' and version == '5':
         return {'new_requests': False, 'preferred_profile': 'raw_forward_outcome@19',
             'meaning': 'Historical output preserved;19 retains excursions and first-attaining future candle clocks with the same admitted matching choices.'}
     if family == "raw_forward_outcome" and version in {"11", "12", "14"}:
