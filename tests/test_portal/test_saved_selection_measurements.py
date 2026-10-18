@@ -1,7 +1,7 @@
 """Synthetic typed saved populations: shared binding, composition and legacy parity."""
 from copy import deepcopy
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 from types import SimpleNamespace
 
@@ -132,7 +132,8 @@ def repository_envelope(item):
     # with an in-memory record/session; no DB or scientific replay is involved.
     from portal.backend.db.models import ResearchItemRecord
     record = ResearchItemRecord(**{key: deepcopy(item[key]) for key in
-        ('id', 'kind', 'status', 'instrument_id', 'timeframe', 'payload')})
+        ('id', 'kind', 'status', 'instrument_id', 'timeframe', 'payload')},
+        created_at=datetime(2025,1,1), updated_at=datetime(2025,1,1))
     return adapter.repository.get_item(item['id'],
         session=SimpleNamespace(get=lambda model, key: record))
 

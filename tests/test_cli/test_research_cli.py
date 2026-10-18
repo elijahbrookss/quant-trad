@@ -809,3 +809,17 @@ def test_check_run_text_without_dispatch_fails_before_network(monkeypatch, capsy
     assert main(["--no-audit-log", "research", "check", "run", "--request-json",
                  '{"scope":{},"detector":{}}', "--format", "text"]) == 2
     assert json.loads(capsys.readouterr().out) == {"error": "--format text requires --dispatch"}
+
+
+def test_saved_selection_request_and_execution_snapshot_use_shared_read_operations(monkeypatch,capsys):
+    ready={"request":{"scope":{"saved":True}},"read_only":True}
+    observed=_capture_request(monkeypatch,json.dumps(ready).encode())
+    assert main(["--no-audit-log","research","check","from-selection","saved-id","--result-hash","a"*64,"--request-only"])==0
+    assert observed=={"method":"POST","path":"/api/research/checks/saved-selection/request",
+        "body":{"source_check_id":"saved-id","measurement_profile":"18","expected_hashes":{"result_hash":"a"*64}}}
+    assert json.loads(capsys.readouterr().out)==ready['request']
+    observed=_capture_request(monkeypatch)
+    assert main(["--no-audit-log","research","jobs","snapshot","--job-id","known","--limit","2",
+        "--request-json",json.dumps({"scope":{},"detector":{}})])==0
+    assert observed=={"method":"POST","path":"/api/research/jobs/snapshot",
+        "body":{"limit":2,"job_id":"known","request":{"scope":{},"detector":{},"mode":"evidence"}}}

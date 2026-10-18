@@ -787,3 +787,64 @@ entry-close anchor, horizon, status and unresolved reason. The first tied candle
 wins. The entry candle is excluded; no new tail is loaded. Candle clocks cannot
 establish intrabar order or a fill. Historical v4/v5 remain replayable with their
 original output shape; do not retrofit old saved evidence.
+
+
+### Saved selection measurements and execution observations
+
+For a new measurement on a supported saved selection, build the exact request
+from server metadata instead of copying hashes and frozen context by hand:
+
+```bash
+qt research check from-selection SAVED_CHECK_ID --profile 18 --request-only > measurement-request.json
+qt research check requirements --request-json measurement-request.json
+qt research jobs snapshot --request-json measurement-request.json --limit 25
+```
+
+`from-selection` reads one persisted Check and runs the existing typed binding,
+manifest, native-input, scope, cardinality, weight and support validation. It
+supports selection versions 12, 14, 17 and measurement profile 18 only. Optional
+`--result-hash`, `--evidence-hash` and `--selection-manifest-hash` reject a changed
+reference. Without `--request-only`, its JSON also includes the validated reference
+and context. It does not read candles, call providers, freeze data, calculate
+outcomes, allocate attempts, dispatch jobs or write a Study/ledger. Requirements
+and actual execution still validate the original frozen input through their
+existing paths; metadata preparation does not replace those checks.
+
+The execution snapshot observes global queued/running/retry jobs and the actual
+existing research execution lock. With a request it also lists exact dispatch
+fingerprint matches, including failed and completed jobs. `--job-id JOB_ID` adds
+the unchanged job-status response. The limit is 1..100 (default 25), with separate
+truncation flags for inflight and matching lists. It never returns SQL or generic
+database access. Its metadata queries use 5-second statement and 250 ms lock limits
+under the existing 20-second read control; these are limits, not latency promises.
+
+This is a point-in-time diagnostic, not a slot reservation, dispatch admission,
+retry grant or budget decision. Request matching uses the same modeled request
+and fingerprint as dispatch, including descriptive fields/defaults; it does not
+claim scientific equivalence between differently worded requests. Job status is
+read through the existing status operation and may be observed slightly later.
+A known failed job remains failed and its consumed attempt remains recorded;
+recovery uses the already authorized scope and normal fresh admission rather
+than hiding or resetting it.
+
+Existing commands already cover machine-readable dispatch, known-job status,
+results and ledger reads. Prefer them over parsing human text or issuing SQL:
+
+```bash
+qt research check run --request-json measurement-request.json --dispatch --single-attempt --format json
+qt research jobs status JOB_ID --json
+qt research jobs result JOB_ID --format json
+qt research items list --kind observation
+qt research items list --kind research_check
+qt research items get ITEM_ID
+```
+
+Use the established item/link operations for this session's Observation ledger;
+typed authority attempt-register/attempt-complete remain the separate existing
+protocol/family budget surface. No additional accounting system is introduced.
+The shared operations are also exposed as read-only MCP tools
+`prepare_saved_selection_measurement_request` and
+`get_research_execution_snapshot` when the configured QT MCP server is available.
+Their HTTP routes are `POST /api/research/checks/saved-selection/request` and
+`POST /api/research/jobs/snapshot`; POST carries structured read inputs and does
+not imply execution or mutation.

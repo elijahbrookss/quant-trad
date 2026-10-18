@@ -812,3 +812,18 @@ def test_research_catalog_tools_use_existing_readonly_api_contract(tmp_path):
     assert calls[0][1]=='/api/research/checks/definitions'
     assert calls[1][1]=='/api/research/checks/definitions/raw_forward_outcome/17'
     with pytest.raises(McpError):server.call_tool('get_research_check_definition',{'definition_id':'raw_forward_outcome'})
+
+
+def test_saved_selection_and_execution_snapshot_mcp_use_shared_operations(tmp_path):
+    client=_FakeClient();server=_server(tmp_path,client=client)
+    server.call_tool('prepare_saved_selection_measurement_request',{'source_check_id':'saved','expected_hashes':{'result_hash':'a'*64}})
+    server.call_tool('get_research_execution_snapshot',{'request':{'scope':{},'detector':{}},'job_id':'known','limit':2})
+    assert client.calls==[
+        ('POST','/api/research/checks/saved-selection/request',None,{'source_check_id':'saved','measurement_profile':'18','expected_hashes':{'result_hash':'a'*64}}),
+        ('POST','/api/research/jobs/snapshot',None,{'limit':2,'request':{'scope':{},'detector':{},'mode':'evidence'},'job_id':'known'})]
+    listed=server.handle({'jsonrpc':'2.0','id':1,'method':'tools/list'})['result']['tools']
+    tools={t['name']:t for t in listed}
+    assert tools['get_research_execution_snapshot']['inputSchema']['properties']['limit']['maximum']==100
+    assert 'confirm' not in tools['prepare_saved_selection_measurement_request']['inputSchema']['properties']
+    with pytest.raises(McpError):
+        server.call_tool('prepare_saved_selection_measurement_request',{'source_check_id':'saved','expected_hashes':'not-an-object'})

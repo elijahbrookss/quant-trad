@@ -194,6 +194,20 @@ class ResearchCheckRunRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
 
 
+class SavedMeasurementRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    source_check_id: str = Field(min_length=1, max_length=64)
+    measurement_profile: str = "18"
+    expected_hashes: Dict[str, str] = Field(default_factory=dict)
+
+
+class ResearchExecutionSnapshotRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    request: Optional[ResearchCheckRunRequest] = None
+    job_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    limit: int = Field(default=25, ge=1, le=100, strict=True)
+
+
 class ResearchObservationFromCheckRequest(BaseModel):
     title: Optional[str] = None
     body: Optional[str] = Field(default=None, max_length=8192)
@@ -505,6 +519,23 @@ def get_research_check_requirements(
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/saved-selection/request")
+def prepare_saved_selection_measurement_request(body: SavedMeasurementRequest):
+    from ..service.research import operator_reads
+    return _read_call(operator_reads.prepare_saved_selection_measurement_request,
+        body.source_check_id, measurement_profile=body.measurement_profile,
+        expected_hashes=body.expected_hashes)
+
+
+@router.post("/jobs/snapshot")
+def research_execution_snapshot(body: ResearchExecutionSnapshotRequest):
+    from ..service.research import operator_reads
+    # Apply exactly the same model defaults as the existing dispatch route.
+    return _read_call(operator_reads.execution_snapshot,
+        request=_model_payload(body.request) if body.request is not None else None,
+        job_id=body.job_id, limit=body.limit)
 
 
 @router.post("/checks/prepare")

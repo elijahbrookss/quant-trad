@@ -181,13 +181,7 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
     case_ids = [c['event_id'] for c in cases]
     matched = [c for c in cases if c['match_status'] == 'matched']
     clocks = {c['decision_at'] for c in matched}
-    actual = context({'dataset_id':binding['dataset_id'], 'dataset_hash':binding['dataset_hash'],
-        'input_binding_hash':binding['binding_hash'], 'max_commit_seq':binding['max_commit_seq'],
-        'instrument_id':series['instrument_id'], 'input_start':series['loaded_range']['start'],
-        'input_end_exclusive':series['loaded_range']['end_exclusive'], 'decision_start':request.scope['start'],
-        'decision_end_exclusive':request.scope['end'], 'source_identity_key':source_key,
-        'input_rows':series['row_count'], 'case_count':len(cases), 'pair_count':len(pairs),
-        'completion_clock_count':len(clocks)})
+    actual = saved_context(selection, binding, request)
     if actual != expected:
         invalid('declared frozen context differs from validated saved population')
     for key, actual_value in (('start',actual['decision_start']), ('end_exclusive',actual['decision_end_exclusive'])):
@@ -244,3 +238,16 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
             or summary['matched'] != {'chains':len(pairs),'completion_clocks':len(clocks)}):
         invalid('saved summary cardinality differs')
     return SavedSelection(selection,binding,actual,ref,version)
+
+
+def saved_context(selection, binding, request):
+    """One context shape, derived from saved contracts and checked by the loader."""
+    series, source_key = native_candle_series(binding, dataset_id=request.dataset_id,
+        source_key=selection['source_identity_key'])
+    return context({'dataset_id':binding['dataset_id'], 'dataset_hash':binding['dataset_hash'],
+        'input_binding_hash':binding['binding_hash'], 'max_commit_seq':binding['max_commit_seq'],
+        'instrument_id':series['instrument_id'], 'input_start':series['loaded_range']['start'],
+        'input_end_exclusive':series['loaded_range']['end_exclusive'], 'decision_start':request.scope['start'],
+        'decision_end_exclusive':request.scope['end'], 'source_identity_key':source_key,
+        'input_rows':series['row_count'], 'case_count':len(selection['cases']), 'pair_count':len(selection['pairs']),
+        'completion_clock_count':len({c['decision_at'] for c in selection['cases'] if c['match_status']=='matched'})})
