@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
-from time import monotonic
+from time import monotonic, perf_counter
 
 from sqlalchemy import text
 
@@ -16,6 +16,7 @@ from core.storage_mounts import require_configured_archive_mount
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from .fact_dependencies import SELF_CONTAINED_FACT_TYPES
+from .fact_handoff import FactHandoffProof
 from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyError
 
 logger = logging.getLogger(__name__)
@@ -171,11 +172,24 @@ class PostgresCanonicalFactReclamationRepository:
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
             objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,
                                                check_budget=self.archive.check_budget)
+            handoff = FactHandoffProof(check_budget=self.archive._check_budget) if execute and not already_reclaimed else None
             with objects.distinct_references():
-                evidence = self.archive._partition_evidence(session, partition, limits=verification_limits, objects=objects)
+                evidence = self.archive._partition_evidence(session, partition, limits=verification_limits,
+                    objects=objects, handoff=handoff)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             self._assert_archive_admission(objects)
+            if handoff is not None:
+                handoff.bind(day, relation_oid, evidence, verification_limits)
+                # Keep the current source working set near the handoff. This
+                # extra shared-phase check is inside the original run budget;
+                # the exclusive phase MUST still read/compare every row again.
+                prepared = perf_counter()
+                handoff.prepare_headers(session, self.archive._check_budget)
+                self._assert_archive_admission(objects)
+                logger.info("canonical_reclaim_handoff_prepared | storage_day=%s source_rows=%s seconds=%s witness_bytes=%s",
+                            day, sum(item.count for item in handoff.source_headers),
+                            perf_counter() - prepared, handoff.retained_bytes)
             evidence["protected_dataset_ranges"] = self._pinned_ranges(session, day)
             if already_reclaimed:
                 return {**evidence, "status": "already_reclaimed", "reclaimed_bytes": partition["reclaimed_bytes"]}
@@ -205,7 +219,8 @@ class PostgresCanonicalFactReclamationRepository:
                 raise RuntimeError(f"canonical_reclaim_progress_changed: storage_day={day}; retry to inspect committed progress")
             if self._relation(session, day) != relation_oid:
                 raise RuntimeError(f"canonical_reclaim_relation_changed: storage_day={day}")
-            current = self.archive._partition_evidence(session, partition, limits=verification_limits, check_budget=check_budget)
+            current = self.archive._partition_evidence(session, partition, limits=verification_limits,
+                check_budget=check_budget, handoff=handoff)
             if current["manifest_set_hash"] != evidence["manifest_set_hash"] or current["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             if current["source_placement_hash"] != evidence["source_placement_hash"]:
