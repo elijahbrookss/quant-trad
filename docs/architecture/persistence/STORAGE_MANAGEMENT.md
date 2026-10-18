@@ -2730,6 +2730,13 @@ The same source hold and host deployment lock stay live. A lost request/reply,
 changed binding or expired deadline leaves the action unresolved; local CLI reaping
 does not cancel the daemon request and this transition has no replay/reentry path.
 
+A quiescence refusal retains the actual target-backend and prepared-transaction
+counts from one maintenance query, plus at most sixteen backend identities and
+an explicit truncation flag. The bounded sample includes backend type, state,
+application name and lifecycle/wait timestamps; it excludes SQL text, users,
+transaction GIDs and connection secrets. This evidence does not grant a retry,
+terminate sessions or relax the zero-backend/zero-prepared-transaction guard.
+
 Database mount readiness grants no collection or runtime activation authority.
 The internal continuation below prepares repositories and confirms native WAL
 delivery. Preserving private spool-copy recovery, matching runtime startup and a
