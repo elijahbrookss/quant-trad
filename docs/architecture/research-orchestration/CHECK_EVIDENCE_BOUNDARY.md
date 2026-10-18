@@ -25,6 +25,9 @@ code_paths:
   - portal/backend/service/research/reversal_matched_progress_evaluator.py
   - src/research_science/reversal_matched_outcomes.py
   - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
+  - src/research_science/completed_event_context.py
+  - src/research_science/reversal_completed_recovery.py
+  - portal/backend/service/research/reversal_completed_recovery_evaluator.py
   - src/research_science/reversal_population.py
   - src/research_science/price_paths.py
   - src/research_science/weighted_summaries.py
@@ -1220,3 +1223,47 @@ order, tick time or executable fill. The extreme's own known-at can differ from
 its close; whole-outcome known-at still covers the complete admitted path.
 There is no new tail, provider call or historical evidence rewrite. Results save
 the complete pair observations, not only truncated display examples.
+
+
+## All-completed reversal description
+
+`raw_forward_outcome@20` explicitly selects `reversal_completed_recovery.v1`.
+It composes the existing sequential retreat-inclusive recognizer, the shared
+call-scoped `CompletedEventContext`, reversal-owned inclusive recovery duration,
+and unchanged `first_passage_path`. The matched selector also uses this context
+constructor, retaining historical arithmetic, records, matching and hashes.
+The native population input validator is shared with version17. No new reader,
+provider, storage table, registry framework or scientific workflow is introduced.
+
+Dates, instrument and up to two reporting block views are configuration. The
+input is one exact frozen native15m historical series, at most19104bars, with
+one through six whole28day decision blocks, unchanged19104/10000 recognition
+identity/candidate bounds and no extra outcome tail. Provider transport, gaps,
+source substitution, watermark/range/cardinality disagreement and extra
+scientific knobs refuse admission through the existing boundaries.
+
+Every completed chain is retained, including simultaneous completions and
+missing context. `recovery_candles` is one plus the number of15m intervals from
+the final `lowest_push.observed_at` close to completion close. Equal lows retain
+the recognizer's first attaining candle; only a strict lower low replaces it.
+This is duration, not intrabar speed. Context fields remain completion-observable;
+sigma96 and z_pre12 exclude the completion return. Missing context is explicit
+and never filters an outcome or duration summary.
+
+Each reporting view computes equal-completion-clock weights over ALL its chains,
+splitting a clock's mass across simultaneous chains. Four separate label summaries
+retain original label mass, observed and missing N mass/count, weighted mean and
+first weighted-CDF-crossing quantiles0/.25/.5/.75/.9/.95/1. The conditional N mean
+and CDF divide by observed N mass within the label; the weights are never rebuilt
+from a label subset. Completion E, whole-formation L, E+(E-L), inclusive first
+touches, twelve subsequent bars, same-bar ambiguity and boundary censoring retain
+the existing path semantics. Late completions receive no additional tail.
+
+Direct supports include the earlier of formation start and prior97 context
+through nominal completion+12bars; conservative common-origin ancestry remains
+separate. There are no new pairs, calipers, strata, adjusted contrasts, SMD tests,
+day-deletion recipe, classifier or independence/inference/trading claim. The
+completion-population hash uses JSON-canonical cases with only `outcome` removed,
+dependence and population_recipe; the outer normal Check result/evidence hashes
+retain complete output and frozen-source custody. Historical versions remain
+replayable with their original definitions and results.

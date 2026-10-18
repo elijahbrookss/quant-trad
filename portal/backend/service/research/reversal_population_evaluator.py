@@ -57,24 +57,8 @@ class ReversalPopulationEvaluator:
         config=normalize_configuration(detector=inputs['detector'],outcomes=inputs['outcomes'],statistics=inputs['statistics'],
             inputs=inputs.get('inputs',[]),scope=scope,gap_policy=plan.gap_policy)
         population=population_for(inputs['detector'],scope,config['populations'])
-        frame=inputs['candles']
-        if len(frame)!=population.input_bars or int(frame.memory_usage(index=True,deep=True).sum())>RULES['limits']['input_bytes']:
-            raise ValueError('reversal_population_limit: exact bounded original input required')
-        binding=inputs.get('frozen_input_binding')
-        if not isinstance(binding,dict):
-            raise ValueError('reversal_population_invalid: actual frozen input binding required')
-        series,source_key=native_candle_series(binding,dataset_id=binding['dataset_id'])
-        if (series['row_count']!=population.input_bars or series['instrument_id']!=primary['instrument_id']
-                or series.get('requirement')!=dict(primary) or len(plan.market_data_requirements)!=1
-                or utc(series['loaded_range']['start'])!=population.origin
-                or utc(series['loaded_range']['end_exclusive'])!=population.end
-                or plan.materialization_range['as_of_commit_seq']!=binding['max_commit_seq']
-                or plan.indicator_graph or plan.outcome_tail['seconds']!=0):
-            raise ValueError('reversal_population_invalid: original frozen native input scope/watermark differs')
-        settings,snapshot,rows,start,end,candles=prepare_recognition(plan=plan,inputs=inputs,schema=SCHEMA,
-            expected_outcomes=config,checkpoint=checkpoint)
-        if any(c.source_identity_key!=source_key or c.known_at!=c.close_time for c in candles):
-            raise ValueError('reversal_population_invalid: exact source and close availability required')
+        settings,snapshot,candles,source_key=prepare_population_input(plan=plan,inputs=inputs,
+            population=population,primary=primary,schema=SCHEMA,config=config,checkpoint=checkpoint)
         result=select_population(candles,snapshot,population,checkpoint=checkpoint)
         result.update(schema_version=RESULT_SCHEMA,check_family=self.evaluator_id,status='completed',
             analysis_status='selection_only',computation_origin=plain(population.origin),recognition_choices=settings.to_dict(),
@@ -91,3 +75,25 @@ class ReversalPopulationEvaluator:
         if len(json.dumps(result,allow_nan=False,separators=(',',':')).encode())>RULES['limits']['result_bytes']:
             raise ValueError('reversal_population_limit: result exceeds16MiB;no truncation')
         return result
+
+
+def prepare_population_input(*, plan, inputs, population, primary, schema, config, checkpoint):
+    frame=inputs['candles']
+    if len(frame)!=population.input_bars or int(frame.memory_usage(index=True,deep=True).sum())>RULES['limits']['input_bytes']:
+        raise ValueError('reversal_population_limit: exact bounded original input required')
+    binding=inputs.get('frozen_input_binding')
+    if not isinstance(binding,dict):
+        raise ValueError('reversal_population_invalid: actual frozen input binding required')
+    series,source_key=native_candle_series(binding,dataset_id=binding['dataset_id'])
+    if (series['row_count']!=population.input_bars or series['instrument_id']!=primary['instrument_id']
+            or series.get('requirement')!=dict(primary) or len(plan.market_data_requirements)!=1
+            or utc(series['loaded_range']['start'])!=population.origin
+            or utc(series['loaded_range']['end_exclusive'])!=population.end
+            or plan.materialization_range['as_of_commit_seq']!=binding['max_commit_seq']
+            or plan.indicator_graph or plan.outcome_tail['seconds']!=0):
+        raise ValueError('reversal_population_invalid: original frozen native input scope/watermark differs')
+    settings,snapshot,rows,start,end,candles=prepare_recognition(plan=plan,inputs=inputs,schema=schema,
+        expected_outcomes=config,checkpoint=checkpoint)
+    if any(c.source_identity_key!=source_key or c.known_at!=c.close_time for c in candles):
+        raise ValueError('reversal_population_invalid: exact source and close availability required')
+    return settings,snapshot,candles,source_key

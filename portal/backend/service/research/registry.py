@@ -36,6 +36,7 @@ from .candle_distribution_evaluator import (CandleDistributionEvaluator, OUTCOME
 from .raw_candle_evaluator import RawCandleEvaluator, OUTCOME_SCHEMA, normalize_configuration as normalize_raw_candle_configuration
 from .reversal_selection_evaluator import (ReversalSelectionEvaluator, SCHEMA as SELECTION_SCHEMA, RULES as SELECTION_RULES, normalize_configuration as normalize_selection_configuration)
 from .reversal_six_block_selection_evaluator import (ReversalSixBlockSelectionEvaluator, SCHEMA as SIX_BLOCK_SCHEMA, RULES as SIX_BLOCK_RULES, normalize_configuration as normalize_six_block_configuration)
+from .reversal_completed_recovery_evaluator import (ReversalCompletedRecoveryEvaluator, SCHEMA as COMPLETED_RECOVERY_SCHEMA, RULES as COMPLETED_RECOVERY_RULES, normalize_configuration as normalize_completed_recovery_configuration)
 from .reversal_population_evaluator import (ReversalPopulationEvaluator, SCHEMA as POPULATION_SCHEMA, RULES as POPULATION_RULES, normalize_configuration as normalize_population_configuration)
 from .saved_selection_measurements_evaluator import (ReusableSelectionMeasurementsEvaluator, REUSABLE_SCHEMA as REUSABLE_MEASUREMENTS_SCHEMA, REUSABLE_RULES as REUSABLE_MEASUREMENTS_RULES, normalize_reusable_configuration, SavedSelectionMeasurementsEvaluator, SCHEMA as SAVED_MEASUREMENTS_SCHEMA, RULES as SAVED_MEASUREMENTS_RULES, normalize_configuration as normalize_saved_measurements_configuration)
 from .reversal_matched_progress_evaluator import (ReversalMatchedProgressEvaluator, SCHEMA as MATCHED_PROGRESS_SCHEMA, RULES as MATCHED_PROGRESS_RULES, normalize_configuration as normalize_matched_progress_configuration)
@@ -507,10 +508,23 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 ))
 
 
+_completed_recovery = ReversalCompletedRecoveryEvaluator()
+CHECK_REGISTRY.register_evaluator(_completed_recovery)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version='20', evaluator_id=_completed_recovery.evaluator_id,
+    evaluator_version='20', request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={'family':checks.RAW_FORWARD_OUTCOME,'event_ownership':'check',
+        'input_policy':'canonical_candle_clock_path.v1','outcome_schema':COMPLETED_RECOVERY_SCHEMA,
+        'outcome_boundary':'evaluation_end_exclusive','composition_rules':COMPLETED_RECOVERY_RULES},
+))
+
+
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
     """Keep historical raw v2 unqualified; admit exact registered raw v3 through v19 pairs."""
     if definition.definition_id == checks.RAW_FORWARD_OUTCOME:
-        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19"}
+        return (definition.definition_version.split("+", 1)[0] in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"}
                 and definition.evaluator_id == checks.RAW_FORWARD_OUTCOME
                 and definition.evaluator_version == definition.definition_version.split("+", 1)[0])
     return definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
@@ -1093,7 +1107,9 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         default_version = "4"
     resolved_base_version = str(
-        base_version or ("19" if family == checks.RAW_FORWARD_OUTCOME and
+        base_version or ("20" if family == checks.RAW_FORWARD_OUTCOME and
+            _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == COMPLETED_RECOVERY_SCHEMA
+            else "19" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == PATH_SCHEMA
             else "18" if family == checks.RAW_FORWARD_OUTCOME and
             _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == REUSABLE_MEASUREMENTS_SCHEMA
@@ -1171,7 +1187,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1236,6 +1252,11 @@ def materialize_check_definition(
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
         if gap_rewarm_bars or assertions:
             raise ValueError("saved_selection_invalid: no rewarm or scientific assertions")
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "20":
+        outcomes = normalize_completed_recovery_configuration(detector=detector, outcomes=outcomes,
+            statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("completed_recovery_invalid: no rewarm or scientific assertions")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "17":
         outcomes = normalize_population_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)

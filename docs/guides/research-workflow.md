@@ -848,3 +848,24 @@ The shared operations are also exposed as read-only MCP tools
 Their HTTP routes are `POST /api/research/checks/saved-selection/request` and
 `POST /api/research/jobs/snapshot`; POST carries structured read inputs and does
 not imply execution or mutation.
+
+
+### Describe every completed reversal
+
+Discover `qt research check definition raw_forward_outcome --version 20` and bind
+the existing catalogue example to an exact native15m frozen Dataset. Select
+`outcomes.schema_version: reversal_completed_recovery.v1`; use explicit computation
+origin, one through six whole28day decision blocks and at most two named block
+views. Run the normal requirements/prepare/admission/dispatch path. There is no
+provider acquisition or extra outcome tail inside this method.
+
+Version20 retains every completed formation, its causal context, inclusive
+trough-to-completion candle duration N and unchanged12bar first-passage label.
+Each view reports all four labels separately with original all-case clock mass,
+observed/missing N mass and count, conditional weighted mean/CDF quantiles, and
+context missingness. It performs no matching or context-adjusted comparison.
+These descriptive summaries do not establish incremental prediction or independent
+samples. An existing Dataset's metadata is not proof of a newly frozen subset:
+validate exact source, slots, revisions, clocks and material/provenance, comparing
+the retained original slice if claiming unchanged historical input. Freeze pins
+its actual current watermark; a metadata reference cannot replace that binding.

@@ -2010,4 +2010,45 @@ and pins. Change it only with an explicit disruption allowance and observe
 collector recovery. No bound overrides integrity, freshness, saved history
 policy, pin protection, archive mount/free-space checks, NOWAIT admission or
 transaction rollback. A read-only profile cannot establish fenced/DROP duration.
-Retain the previous settings and restore them after an unsuccessful trial.
+Retain the previous settings for guarded recovery after an unsafe activation or
+new unsafe failure. An approved operating configuration remains installed after
+a successful cleanup; ordinary budget exhaustion does not silently revert it.
+
+
+### Operating reclamation budgets without rebuilding a release
+
+The dedicated maintenance worker reads the following existing environment-backed
+`market_data_lifecycle.canonical_retention` settings at process startup:
+
+| Environment variable | Field | Strict integer range |
+| --- | --- | --- |
+| `QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_VERIFICATION_OBJECTS` | `max_verification_objects` |1..100000 |
+| `QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_VERIFICATION_BYTES` | `max_verification_bytes` |1..1099511627776 |
+| `QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_VERIFICATION_PAGES` | `max_verification_pages` |1..100000 |
+| `QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_HANDOFF_SECONDS` | `max_handoff_seconds` |1..60 |
+| `QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_RUN_SECONDS` | `max_run_seconds` |1..3600 |
+
+An operator can change the supported private environment configuration and use
+the existing admitted deployment runner to recreate only `storage-maintenance`
+with `--no-deps --no-build --pull never`. No source change, image build or new
+code release is required for later limit changes within these reviewed bounds.
+This is a targeted worker restart, not hot reload: settings are cached in process
+and the supervisor retains its startup policy. Editing the environment alone or
+calling a settings-cache helper elsewhere does not change the running supervisor.
+
+Before restart, establish exclusive deployment ownership and absence of active
+storage handoff, recovery/backup and coordinated research work. Preserve original
+private bytes and permissions, render/compare the complete Compose configuration,
+then verify the new worker's effective policy and unchanged non-maintenance
+containers, release identity, limits file, floors, cadence and single-worker
+ownership. Do not print credentials from the rendered configuration. A longer
+final budget can delay publication; observe the actual fence/waiters and collector
+recovery, rather than interpreting an allowance as a measured pause guarantee.
+
+The reviewed operating profile is32768 distinct verification objects per partition,
+4294967296 verification bytes,1000pages,60seconds final handoff and600seconds overall.
+The byte/page bounds are unchanged. The object allowance covers the measured four
+complete partition catalogues (peak18474objects), not the entire unsized backlog.
+Fresh whole-partition integrity/dependency/pin/placement verification is still
+required for every reclamation. The saved hot-history policy, reserve floors,
+resource cancellation, scheduling and concurrency protections remain unchanged.
