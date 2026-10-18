@@ -495,8 +495,9 @@ class PostgresCanonicalFactArchiveRepository:
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
                 "manifest_id": manifest.manifest_id, "row_count": manifest.row_count}
 
-    def _page_catalogs(self, session, manifest_id):
+    def _page_catalogs(self, session, manifest_id, *, handoff=None):
         catalogs = {}
+        physical = {}
         # Explicit projections define the versioned proof. Fetch one extra row
         # to reject excess metadata without transferring an unbounded catalog.
         for name, table, columns, order, limit in (
@@ -511,12 +512,18 @@ class PostgresCanonicalFactArchiveRepository:
              "fact_version_id, row_hash", "fact_version_id", self.max_raw_mapping_rows),
         ):
             rows = session.execute(text(
-                f"SELECT {columns} FROM market.{table} WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+                f"SELECT {columns}" + (",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff is not None else "")
+                + f" FROM market.{table} WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
             ), {"id": manifest_id, "limit": limit + 1}).mappings().all()
             if len(rows) > limit:
                 raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
-            catalogs[name] = [dict(row) for row in rows]
-        return catalogs
+            if handoff is not None:
+                physical[name] = handoff.catalog_rows(session, name, manifest_id, rows)
+                catalogs[name] = [{key: value for key, value in row.items()
+                                   if key not in {"_handoff_tid", "_handoff_oid"}} for row in rows]
+            else:
+                catalogs[name] = [dict(row) for row in rows]
+        return (catalogs, physical) if handoff is not None else catalogs
 
     def restart_partition_verification(self, day: date) -> dict:
         """Withdraw an older verifier's admission, without deleting any evidence.
@@ -664,7 +671,7 @@ class PostgresCanonicalFactArchiveRepository:
             if expired is not None:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
 
-    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None):
+    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None, handoff=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
         Supplying a byte verifier additionally checks every current cold object.
@@ -673,6 +680,11 @@ class PostgresCanonicalFactArchiveRepository:
         """
         day = partition["storage_day"]
         check_budget = check_budget or self.check_budget
+        final_handoff = handoff is not None and objects is None
+        if final_handoff:
+            handoff.admit(session, partition, limits, check_budget=check_budget)
+            handoff.verify_headers(session, check_budget)
+            check_budget()
         last_cursor = (0, "")
         ordinal = 0
         total_rows = 0
@@ -698,28 +710,55 @@ class PostgresCanonicalFactArchiveRepository:
                 manifest = _catalog_manifest(page)
                 if page["page_ordinal"] != ordinal or manifest.first_cursor <= last_cursor:
                     raise RuntimeError(f"canonical_archive_partition_page_order_invalid: storage_day={day} page_ordinal={page['page_ordinal']}")
-                catalogs = self._page_catalogs(session, manifest.manifest_id)
+                if final_handoff:
+                    catalogs = None
+                elif handoff is not None:
+                    catalogs, physical = self._page_catalogs(session, manifest.manifest_id, handoff=handoff)
+                else:
+                    catalogs = self._page_catalogs(session, manifest.manifest_id)
                 receipt = session.execute(text("""
                     SELECT manifest_id, verifier_version, manifest_hash, catalog_hash, verification_hash
                     FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version
                 """), {"id": manifest.manifest_id, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
-                if receipt is None or dict(receipt) != _receipt(page, archive_evidence_hash(catalogs)):
-                    raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
-                if objects is not None:
-                    objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
-                source_placements.append(verify_canonical_source_placements(
-                    session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget))
-                self._assert_dependencies_unexpired(
-                    session, catalogs["dependencies"], check_budget=check_budget)
-                for dependency in catalogs["dependencies"]:
-                    if check_budget is not None:
-                        check_budget()
+                if final_handoff:
+                    if receipt is None:
+                        raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
+                    handoff.verify_catalogs(session, page, receipt, check_budget)
+                    handoff.verify_sources(session, manifest.manifest_id, check_budget)
+                    source_placements.append(handoff.source_hash(manifest.manifest_id))
+                else:
+                    if receipt is None or dict(receipt) != _receipt(page, archive_evidence_hash(catalogs)):
+                        raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
+                    if handoff is not None:
+                        handoff.capture_page(page, receipt, catalogs, physical)
                     if objects is not None:
-                        objects.verify(dependency["object_key"], dependency["object_sha256"])
+                        objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
+                    placement_hash = verify_canonical_source_placements(
+                        session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget,
+                        handoff=handoff, manifest_id=manifest.manifest_id)
+                    source_placements.append(placement_hash)
+                    if handoff is not None:
+                        handoff.record_source_hash(manifest.manifest_id, placement_hash)
+                    self._assert_dependencies_unexpired(
+                        session, catalogs["dependencies"], check_budget=check_budget)
+                    for dependency in catalogs["dependencies"]:
+                        if check_budget is not None:
+                            check_budget()
+                        if objects is not None:
+                            objects.verify(dependency["object_key"], dependency["object_sha256"])
                 proofs.append(receipt["verification_hash"])
                 total_rows += manifest.row_count
                 last_cursor = manifest.last_cursor
                 ordinal += 1
+        if final_handoff:
+            # All catalog contents were freshly matched above. Check each exact
+            # target once, now, under the exclusive lifecycle fence; no expiry
+            # result survives this transaction or comes from the first pass.
+            self._assert_dependencies_unexpired(session,
+                [{"target_kind": kind, "target_id": identity} for kind, identity in sorted(handoff.targets)],
+                check_budget=check_budget)
+            if ordinal != len(handoff.pages):
+                raise RuntimeError("canonical_handoff_page_scope_changed")
         if check_budget is not None:
             check_budget()
         count = session.execute(text(

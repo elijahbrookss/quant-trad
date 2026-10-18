@@ -52,6 +52,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_normalization_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
+  - portal/backend/service/storage/repos/fact_handoff.py
   - portal/backend/service/storage/repos/fact_lineage.py
   - portal/backend/service/storage/repos/fact_references.py
   - portal/backend/service/storage/repos/fact_reclamation.py
@@ -1579,11 +1580,44 @@ current placement; each cold source page is freshly hashed too. A separate
 ephemeral placement hash detects a hot-to-cold move between the two phases and
 requires a retry. Placement is deliberately excluded from immutable receipt
 hashes so a legitimate move cannot invalidate a dependent forever.
-Source-placement lookups first use the permanent identity directory to restrict
-partitioned header and hot-payload queries to the referenced storage days. Each
-returned header must still match its individual directory day and expected hash;
-cold-page coverage and current object bytes remain independently verified. This
-routing adds no persistent verification cache, receipt change, or relaxed budget.
+The fresh-byte pass uses the permanent identity directory to route exact source
+headers to their storage days and validates every returned ID/day/hash. Executed
+reclamation also captures private, invocation-bound tuple locations and full-field
+fingerprints from those same validated rows. These witnesses are never persisted
+as receipts or accepted as current data. The exclusive phase locks/re-admits each
+physical relation, its filenode, columns and topology, then reads every hinted
+row's current proof fields again. A preparatory current-source comparison near
+the end of the shared phase warms the same bounded working set, inside the
+existing overall run budget. It grants no permission: the exclusive phase still
+repeats every source read/comparison within its original ten seconds. A
+missing/moved/reused tuple or changed field refuses the handoff. Canonical v12 receipt ordering and hashes remain unchanged.
+
+For each catalog, the fresh full-field fingerprint and the unfiltered manifest
+row count are computed in one SQL snapshot. Distinct matching hinted rows plus
+the same total count prove that no rows were added, lost or substituted. Empty
+catalogs still require a current zero count. Source runs are merged in bounded
+physical order; only identical bindings for the same tuple may be deduplicated.
+Retained witness memory is capped at 128 MiB, including container overhead; an
+oversized proof refuses without permission to reclaim.
+
+The final source reads retain exact ID/day/hash/commit comparisons, current hot
+lookup and fresh cold coverage/multiplicity/full manifest material. The separately
+repeated directory read is replaced by re-admission of the canonical keys and
+actively enforced, validated, nondeferrable `(id,storage_day)` foreign key.
+A current header therefore proves its current directory pair; the global identity
+key excludes a different day or duplicate header. The first pass's explicit
+logical directory proof remains required. This relies on the admitted canonical
+constraint contract remaining enforced between phases, not on `convalidated`
+alone or historically bypassed constraints. Invalid/disabled enforcement,
+changed relation identity or topology refuses. Short `SHARE ... NOWAIT` locks
+hold this contract and the checked header/catalog rows stable through DROP.
+
+All dependency targets are checked for current expiry after their catalog contents
+match, once per distinct kind/ID in this exclusive transaction. No expiry result
+is reused from the first pass or a previous invocation. The original statement,
+object, byte, page, run and ten-second handoff limits remain unchanged. Deadline
+and cancellation checks include SQL inside reused schema-admission helpers.
+See [ADR 0080](../decisions/0080-use-ephemeral-fresh-row-handoff-witnesses.md).
 It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
