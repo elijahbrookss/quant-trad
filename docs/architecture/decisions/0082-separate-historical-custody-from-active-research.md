@@ -10,6 +10,10 @@ tags:
   - indicators
   - evidence
 code_paths:
+  - src/core/execution_control.py
+  - src/engines/indicator_engine/runtime_engine.py
+  - portal/backend/service/research/execution.py
+  - portal/backend/service/research/execution_limits.py
   - src/indicators/reversal/definition.py
   - src/indicators/reversal/runtime.py
   - src/engines/indicator_engine/signal_output.py
@@ -92,6 +96,43 @@ eligibility is retained only when anchored by its receipt. Historical
 integrity is not deterministic recomputation. ScientificAttempt result
 references still require actual supported deterministic replay; custody does
 not substitute for that authority. Active replay guards remain unchanged.
+
+## Shared execution observability
+
+Common operational timing, sizing and execution outcomes belong to the shared
+harness, not each Indicator or Check evaluator. Reuse `ExecutionControl`, its
+stage wrappers and existing worker execution snapshots. With an active control,
+`stage_seconds` records inclusive wall time and `stage_outcomes` counts completed,
+failed, cancelled and budget-exceeded entered stage calls. The existing operation log
+adds execution status and error class, including worker-owned controls; nested
+bounded calls share one meter and one outer operation log after scope unwind.
+Admission failures report status/error class with null metrics if no control was
+obtained. A completed build
+operation does not certify later publication or whole-job success.
+
+Check input binding, input preparation, evaluation and persistence are distinct
+stages. Input preparation may include Indicator engine execution; evaluation may
+include lazy input reads and scalar assertions. These are overlapping wall
+measurements, not additive or exclusive CPU measurements. Elapsed time starts
+with the execution-local control, excluding queue residence. Queue timestamps
+and terminal status remain the existing async-job repository's responsibility.
+
+`observed_sizes` holds latest known structural counts, not cumulative totals or
+heap sizes. Unavailable/lazy counts are null. Output counts clear when a new
+frame starts; rejection before entry leaves prior observations unchanged, so
+execution/job status remains authoritative for attempt completion. Read/evidence/result byte counters
+remain existing I/O and budget accounting. Do not traverse lazy inputs or add
+payload serialization solely for metrics. Keep stage/count names stable; use
+structured log/report correlation for IDs, ranges and hashes, not metric labels.
+
+Indicator frames retain shared guard timings and overlay size/warning fields,
+including outside a controlled operation. Component-specific inspection uses
+existing `runtime_diagnostics`, source diagnostics and `RuntimeDetail`; declared
+Check result diagnostics retain their own schema. These are not replacements
+for common timers, and operational observations do not enter scientific result
+or definition hashes. Existing opt-in backtest profiling reports process CPU and
+process-peak RSS; it does not establish per-Indicator/Check CPU or memory use.
+No new tracker, profiling store, telemetry platform or resource limit is added.
 
 ## Consequences
 

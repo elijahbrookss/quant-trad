@@ -200,6 +200,12 @@ A CheckDefinition identifies the versioned analytical method and admitted settin
 its evaluator is ordinary Python code. Different questions can configure the same
 method, while genuinely different procedures may share calculations.
 
+Common Indicator/Check timing, known sizes and operational status belong to the
+shared execution harness, not individual component trackers. Component-specific
+diagnostics use existing structured reports; operational observations do not
+become scientific evidence or per-component CPU/memory attribution. See
+[shared execution observability](../../architecture/decisions/0082-separate-historical-custody-from-active-research.md#shared-execution-observability).
+
 **Use:** Not acquisition, Indicator evaluation, Strategy decision, or promotion authority.
 
 **Defined by:**

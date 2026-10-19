@@ -1266,5 +1266,19 @@ separate. There are no new pairs, calipers, strata, adjusted contrasts, SMD test
 day-deletion recipe, classifier or independence/inference/trading claim. The
 completion-population hash uses JSON-canonical cases with only `outcome` removed,
 dependence and population_recipe; the outer normal Check result/evidence hashes
-retain complete output and frozen-source custody. Historical versions remain
-replayable with their original definitions and results.
+retain complete output and frozen-source custody. Historical definitions and
+results are preserved; actual replay requires a currently supported executor.
+Retired versions use the verified custody boundary described above.
+
+
+## Shared execution observations
+
+Input binding, input preparation and evaluator execution use the existing
+execution-control meter; persistence and I/O retain their existing stages.
+Common sizes/status and timing belong here, not in each evaluator. The meter
+observes known container counts and existing budget byte counters without
+consuming generators or serializing payloads solely for observability.
+Procedure-specific diagnostics remain in their declared result/report schema.
+Operational metrics stay outside Check definition/result/evidence hash material.
+See [ADR0082](../decisions/0082-separate-historical-custody-from-active-research.md#shared-execution-observability)
+for inclusive wall time, nested stages, worker-owned reporting and resource limits.

@@ -1,7 +1,8 @@
 """Canonical preview and frozen-evidence execution for registered Checks."""
 
 from __future__ import annotations
-from core.execution_control import measured_execution
+from core.execution_control import measured_execution, measure_execution_stage, observe_execution_size
+from pandas import DataFrame
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -144,6 +145,7 @@ def _filter_indicator_evidence(
     }
 
 
+@measured_execution("input_preparation")
 def _load_market_inputs(
     definition: CheckDefinition,
     request: CheckRequest,
@@ -299,8 +301,15 @@ def _evaluate(
     plan: ResolvedCheckPlan,
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
+    observe_execution_size("check_evaluator_result_fields", None)
+    candles = inputs.get("candles")
+    observe_execution_size("check_input_candle_rows", len(candles) if isinstance(candles, (DataFrame, list, tuple)) else None)
+    histories = inputs.get("fact_records_by_alias")
+    observe_execution_size("check_input_fact_aliases", len(histories) if isinstance(histories, dict) else None)
+    # Never enumerate lazy histories or candle generators just to obtain a metric.
     evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
     result = dict(evaluator.evaluate(plan=plan, inputs=inputs))
+    observe_execution_size("check_evaluator_result_fields", len(result))
     assertion_result = evaluate_scalar_assertions(result, _assertions(request))
     return {
         **result,
@@ -513,22 +522,23 @@ def execute_check_evidence(
         str(row["instrument_id"]): dict(row.get("snapshot") or {})
         for row in (expected_binding or {}).get("subjects") or []
     }
-    binding = resolve_frozen_dataset_read_binding(
-        dataset_id=request.dataset_id,
-        requirements=plan.market_data_requirements,
-        store=market_data_repo,
-        instrument_loader=(
-            lambda instrument_id: subject_snapshots[str(instrument_id)]
-            if str(instrument_id) in subject_snapshots
-            else (_ for _ in ()).throw(
-                ValueError(
-                    "check_replay_input_binding_mismatch: persisted subject is missing"
+    with measure_execution_stage("input_binding"):
+        binding = resolve_frozen_dataset_read_binding(
+            dataset_id=request.dataset_id,
+            requirements=plan.market_data_requirements,
+            store=market_data_repo,
+            instrument_loader=(
+                lambda instrument_id: subject_snapshots[str(instrument_id)]
+                if str(instrument_id) in subject_snapshots
+                else (_ for _ in ()).throw(
+                    ValueError(
+                        "check_replay_input_binding_mismatch: persisted subject is missing"
+                    )
                 )
             )
+            if expected_binding is not None
+            else None,
         )
-        if expected_binding is not None
-        else None,
-    )
     if expected_binding is not None and binding != expected_binding:
         raise ValueError(
             "check_replay_input_binding_mismatch: frozen input binding changed"
