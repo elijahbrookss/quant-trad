@@ -250,8 +250,12 @@ class RetentionObservability:
         policy = StoragePolicy.from_dict(policy_payload)
         settings = get_settings()
         canonical = settings.market_data_lifecycle.canonical_retention
-        session.execute(text("SET LOCAL statement_timeout = '5000ms'"))
-        session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+        session.execute(text(
+            f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT_MS}ms'"
+        ))
+        session.execute(text(
+            f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT_MS}ms'"
+        ))
         sampled_at = sampled_at or session.scalar(text("SELECT clock_timestamp()"))
         if sampled_at.tzinfo is None:
             sampled_at = sampled_at.replace(tzinfo=UTC)

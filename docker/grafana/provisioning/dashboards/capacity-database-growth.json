@@ -1219,7 +1219,7 @@
       "id": 28,
       "type": "stat",
       "title": "Canonical backlog: eligible source bytes",
-      "description": "Catalog source bytes for non-reclaimed partitions older than the saved default recent-days window. The query returns unavailable when policy is absent or the 2,048-row projection bound is exceeded; eligible open partitions still make byte totals partial until sealed.",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
       "datasource": {
         "type": "postgres",
         "uid": "quanttrad-postgres"
@@ -1233,7 +1233,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "Unavailable: policy missing or page bound exceeded"
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
         },
         "overrides": []
       },
@@ -1256,7 +1256,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH guard AS MATERIALIZED (\n  SELECT set_config('statement_timeout','5s',true) AS statement_timeout,\n         set_config('lock_timeout','250ms',true) AS lock_timeout\n),\npolicy AS MATERIALIZED (\n  SELECT (policy->>'recent_days')::integer AS recent_days\n  FROM portal_storage_policy WHERE id=1 AND policy IS NOT NULL\n),\npartition_page AS MATERIALIZED (\n  SELECT storage_day,state,source_bytes\n  FROM market.fact_retention_partitions\n  ORDER BY storage_day\n  LIMIT 2049\n),\nscan AS (\n  SELECT count(*) > 2048 AS truncated FROM partition_page\n)\nSELECT now() AS time,\n       CASE WHEN policy.recent_days IS NULL OR scan.truncated THEN NULL\n            ELSE (SELECT coalesce(sum(source_bytes) FILTER (\n                WHERE state<>'reclaimed'\n                  AND storage_day < (now() AT TIME ZONE 'UTC')::date-policy.recent_days\n            ),0)::bigint FROM partition_page)\n       END AS value\nFROM guard CROSS JOIN scan LEFT JOIN policy ON true;"
+          "rawSql": "SELECT now() AS time,NULL::bigint AS value WHERE false /* bounded_storage_projection_unavailable */;"
         }
       ]
     },
@@ -1264,7 +1264,7 @@
       "id": 29,
       "type": "stat",
       "title": "Verified source awaiting fresh reclaim guards",
-      "description": "Source bytes in catalog-verified partitions outside the saved default hot window. The query returns unavailable when policy is absent or the 2,048-row projection bound is exceeded. Verification alone is never deletion authority.",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
       "datasource": {
         "type": "postgres",
         "uid": "quanttrad-postgres"
@@ -1278,7 +1278,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "Unavailable: policy missing or page bound exceeded"
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
         },
         "overrides": []
       },
@@ -1301,7 +1301,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH guard AS MATERIALIZED (\n  SELECT set_config('statement_timeout','5s',true) AS statement_timeout,\n         set_config('lock_timeout','250ms',true) AS lock_timeout\n),\npolicy AS MATERIALIZED (\n  SELECT (policy->>'recent_days')::integer AS recent_days\n  FROM portal_storage_policy WHERE id=1 AND policy IS NOT NULL\n),\npartition_page AS MATERIALIZED (\n  SELECT storage_day,state,source_bytes\n  FROM market.fact_retention_partitions\n  ORDER BY storage_day\n  LIMIT 2049\n),\nscan AS (\n  SELECT count(*) > 2048 AS truncated FROM partition_page\n)\nSELECT now() AS time,\n       CASE WHEN policy.recent_days IS NULL OR scan.truncated THEN NULL\n            ELSE (SELECT coalesce(sum(source_bytes) FILTER (\n                WHERE state='verified'\n                  AND storage_day < (now() AT TIME ZONE 'UTC')::date-policy.recent_days\n            ),0)::bigint FROM partition_page)\n       END AS value\nFROM guard CROSS JOIN scan LEFT JOIN policy ON true;"
+          "rawSql": "SELECT now() AS time,NULL::bigint AS value WHERE false /* bounded_storage_projection_unavailable */;"
         }
       ]
     },
@@ -1309,7 +1309,7 @@
       "id": 30,
       "type": "timeseries",
       "title": "Canonical lifecycle byte events",
-      "description": "Separate durable event domains under a 5s statement/250ms lock deadline. Partition domains read at most 2,049 rows and archive/verification domains at most 10,001; the panel returns unavailable when a bound is exceeded.",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
       "datasource": {
         "type": "postgres",
         "uid": "quanttrad-postgres"
@@ -1330,7 +1330,7 @@
             "fillOpacity": 8,
             "showPoints": "never"
           },
-          "noValue": "Unavailable: deadline or page bound"
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
         },
         "overrides": []
       },
@@ -1352,7 +1352,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH guard AS MATERIALIZED (\n  SELECT set_config('statement_timeout','5s',true) AS statement_timeout,\n         set_config('lock_timeout','250ms',true) AS lock_timeout\n),\nsealed_page AS MATERIALIZED (\n  SELECT sealed_at AS at,source_bytes::double precision AS bytes\n  FROM market.fact_retention_partitions\n  WHERE sealed_at IS NOT NULL AND $__timeFilter(sealed_at)\n  ORDER BY sealed_at DESC,storage_day DESC\n  LIMIT 2049\n),\narchive_page AS MATERIALIZED (\n  SELECT acknowledged_at AS at,byte_count::double precision AS bytes\n  FROM market.fact_archive_manifests\n  WHERE $__timeFilter(acknowledged_at)\n  ORDER BY acknowledged_at DESC,storage_day DESC,id DESC\n  LIMIT 10001\n),\nverification_page AS MATERIALIZED (\n  SELECT manifest_id,verifier_version,verified_at\n  FROM market.fact_archive_verifications\n  WHERE $__timeFilter(verified_at)\n  ORDER BY verified_at DESC,manifest_id DESC,verifier_version DESC\n  LIMIT 10001\n),\nverification_events AS (\n  SELECT v.verified_at AS at,m.byte_count::double precision AS bytes\n  FROM verification_page AS v\n  JOIN market.fact_archive_manifests AS m ON m.id=v.manifest_id\n),\nreclaim_page AS MATERIALIZED (\n  SELECT reclaimed_at AS at,reclaimed_bytes::double precision AS bytes\n  FROM market.fact_retention_partitions\n  WHERE reclaimed_at IS NOT NULL AND $__timeFilter(reclaimed_at)\n  ORDER BY reclaimed_at DESC,storage_day DESC\n  LIMIT 2049\n),\ncomplete AS (\n  SELECT 1 FROM guard\n  WHERE (SELECT count(*) FROM sealed_page) <= 2048\n    AND (SELECT count(*) FROM archive_page) <= 10000\n    AND (SELECT count(*) FROM verification_page) <= 10000\n    AND (SELECT count(*) FROM reclaim_page) <= 2048\n),\nevents AS (\n  SELECT at,'intake estimate' AS metric,bytes FROM sealed_page\n  UNION ALL SELECT at,'archive compressed',bytes FROM archive_page\n  UNION ALL SELECT at,'verify compressed',bytes FROM verification_events\n  UNION ALL SELECT at,'reclaim physical hot',bytes FROM reclaim_page\n)\nSELECT $__timeGroupAlias(at,'1h'),metric,sum(bytes)/3600.0 AS value\nFROM complete CROSS JOIN events\nGROUP BY 1,2\nORDER BY 1,2;"
+          "rawSql": "SELECT now() AS time,NULL::text AS metric,NULL::double precision AS value WHERE false /* bounded_storage_projection_unavailable */;"
         }
       ]
     },
@@ -1360,7 +1360,7 @@
       "id": 31,
       "type": "table",
       "title": "Oldest canonical pipeline days",
-      "description": "Oldest non-reclaimed catalog days, limited to 64 rows under a 5s statement/250ms lock deadline. Source bytes and rows are sealed estimates; the next stage is descriptive and does not grant execution authority.",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
       "datasource": {
         "type": "postgres",
         "uid": "quanttrad-postgres"
@@ -1383,7 +1383,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH guard AS MATERIALIZED (\n  SELECT set_config('statement_timeout','5s',true) AS statement_timeout,\n         set_config('lock_timeout','250ms',true) AS lock_timeout\n),\npipeline_page AS MATERIALIZED (\n  SELECT storage_day,state,expected_rows,source_bytes,sealed_at,verified_at,reclaimed_at\n  FROM market.fact_retention_partitions\n  WHERE state<>'reclaimed'\n  ORDER BY storage_day\n  LIMIT 64\n)\nSELECT storage_day,state,expected_rows,source_bytes,sealed_at,verified_at,reclaimed_at,\n       CASE state WHEN 'open' THEN 'seal'\n                  WHEN 'sealed' THEN 'archive / verify'\n                  WHEN 'verified' THEN 'fresh reclaim guards'\n                  ELSE 'complete' END AS next_stage\nFROM guard CROSS JOIN pipeline_page\nORDER BY storage_day;"
+          "rawSql": "SELECT NULL::date AS storage_day,NULL::text AS state,NULL::bigint AS expected_rows,NULL::bigint AS source_bytes,NULL::timestamptz AS sealed_at,NULL::timestamptz AS verified_at,NULL::timestamptz AS reclaimed_at,NULL::text AS next_stage WHERE false /* bounded_storage_projection_unavailable */;"
         }
       ]
     }

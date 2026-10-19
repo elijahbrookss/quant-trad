@@ -435,41 +435,66 @@ def test_projection_lock_timeout_is_unknown_without_poisoning_base_snapshot(post
     assert service.snapshot()["retention"]["state"] == "ready"
 
 
-def _expanded_grafana_sql(sql):
-    return (sql
-        .replace("$__timeGroupAlias(at,'1h')", "date_trunc('hour',at) AS time")
-        .replace("$__timeFilter(sealed_at)",
-                 "sealed_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
-                 "sealed_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'")
-        .replace("$__timeFilter(acknowledged_at)",
-                 "acknowledged_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
-                 "acknowledged_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'")
-        .replace("$__timeFilter(verified_at)",
-                 "verified_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
-                 "verified_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'")
-        .replace("$__timeFilter(reclaimed_at)",
-                 "reclaimed_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
-                 "reclaimed_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'"))
+def test_projection_statement_timeout_cancels_delayed_query_on_fresh_connection(
+        postgres, monkeypatch):
+    engine, tmp_path = postgres
+    service = _configured_service(engine, tmp_path, monkeypatch)
+    engine.dispose()
+    monkeypatch.setattr(module, "STATEMENT_TIMEOUT_MS", 50)
+    monkeypatch.setattr(module, "_PROJECTION_SQL", text("SELECT pg_sleep(5)"))
+
+    started = monotonic()
+    snapshot = service.snapshot()
+    assert monotonic() - started < 1
+    assert snapshot["health"] == "available"
+    assert snapshot["retention"]["state"] == "unknown"
+    assert snapshot["retention"]["reason"] == "bounded_projection_unavailable"
 
 
-def test_added_grafana_sql_executes_with_deadlines_and_missing_policy_is_unavailable(postgres):
+def test_grafana_metadata_panels_refuse_unbounded_queries_even_when_tables_are_locked(postgres):
     engine, _ = postgres
     dashboard = json.loads((Path(__file__).parents[2] /
         "docker/grafana/provisioning/dashboards/capacity-database-growth.json").read_text())
-    sql_by_id = {
-        panel["id"]: _expanded_grafana_sql(panel["targets"][0]["rawSql"])
+    panels_by_id = {
+        panel["id"]: panel
         for panel in dashboard["panels"] if panel.get("id") in {28, 29, 30, 31}
     }
-    assert set(sql_by_id) == {28, 29, 30, 31}
+    assert set(panels_by_id) == {28, 29, 30, 31}
+    assert all("bounded Storage API/UI projection" in panel["description"]
+               for panel in panels_by_id.values())
+    assert all(panel["fieldConfig"]["defaults"]["noValue"] ==
+               "Unavailable: Grafana pre-query deadline unavailable"
+               for panel in (panels_by_id[28], panels_by_id[29], panels_by_id[30]))
+    sql_by_id = {
+        panel_id: panel["targets"][0]["rawSql"]
+        for panel_id, panel in panels_by_id.items()
+    }
+    for sql in sql_by_id.values():
+        assert "bounded_storage_projection_unavailable" in sql
+        assert "fact_retention_partitions" not in sql
+        assert "fact_archive_manifests" not in sql
+        assert "fact_archive_verifications" not in sql
+        assert "set_config" not in sql
 
-    with Session(engine) as session, session.begin():
-        session.execute(text("SET TRANSACTION READ ONLY"))
-        results = {
-            panel_id: list(session.execute(text(sql)).mappings())
-            for panel_id, sql in sql_by_id.items()
-        }
-        assert session.scalar(text("SHOW statement_timeout")) == "5s"
-        assert session.scalar(text("SHOW lock_timeout")) == "250ms"
+    engine.dispose()
+    locker = engine.connect()
+    transaction = locker.begin()
+    try:
+        locker.execute(text(
+            "LOCK TABLE market.fact_retention_partitions,"
+            "market.fact_archive_manifests,market.fact_archive_verifications "
+            "IN ACCESS EXCLUSIVE MODE"
+        ))
+        started = monotonic()
+        with Session(engine) as session, session.begin():
+            session.execute(text("SET TRANSACTION READ ONLY"))
+            results = {
+                panel_id: list(session.execute(text(sql)).mappings())
+                for panel_id, sql in sql_by_id.items()
+            }
+        assert monotonic() - started < 1
+    finally:
+        transaction.rollback()
+        locker.close()
 
-    assert results[28][0]["value"] is None
-    assert results[29][0]["value"] is None
+    assert all(rows == [] for rows in results.values())
