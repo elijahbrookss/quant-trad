@@ -340,7 +340,7 @@ def test_mcp_research_tools_share_api_contract_and_guard_writes(tmp_path):
 
     assert requirements["path"] == "/api/research/checks/requirements"
     assert preview["payload"]["mode"] == "preview"
-    assert prepared["payload"]["preparation"] == {"freeze": False}
+    assert prepared["payload"]["preparation"] == {"freeze": False, "acquire_missing": False}
     assert evidence["payload"]["mode"] == "evidence"
     assert evidence["payload"]["dataset_id"] == "mds-1"
     assert dispatched["path"] == "/api/research/jobs/checks/run"
@@ -827,3 +827,16 @@ def test_saved_selection_and_execution_snapshot_mcp_use_shared_operations(tmp_pa
     assert 'confirm' not in tools['prepare_saved_selection_measurement_request']['inputSchema']['properties']
     with pytest.raises(McpError):
         server.call_tool('prepare_saved_selection_measurement_request',{'source_check_id':'saved','expected_hashes':'not-an-object'})
+
+
+def test_mcp_preparation_acquisition_is_explicit_and_confirmed(tmp_path):
+    server = _server(tmp_path, client=_FakeClient())
+    request = {"scope": {}, "preparation": {"acquire_missing": True, "freeze": True}, "acquire_missing": True}
+    inspected = server.call_tool("prepare_research_check_evidence", {"request": request})
+    assert inspected["payload"]["preparation"] == {"freeze": False, "acquire_missing": False}
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool("prepare_research_check_evidence", {"request": request, "acquire_missing": True})
+    acquired = server.call_tool("prepare_research_check_evidence",
+        {"request": request, "acquire_missing": True, "freeze": True, "confirm": True})
+    assert acquired["path"] == "/api/research/checks/prepare"
+    assert acquired["payload"]["preparation"] == {"freeze": True, "acquire_missing": True}

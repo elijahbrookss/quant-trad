@@ -340,3 +340,17 @@ used for reconciliation and ledger readback. If QT MCP is not configured/exposed
 in the task, use the matching `qt research check from-selection` and
 `qt research jobs snapshot` CLI commands rather than internal planner imports or
 manual database queries. This adds no parallel admission or accounting authority.
+
+## Native input preparation
+
+Use existing `prepare_research_check_evidence` for the whole preparation step.
+Its default is inspect-only. Explicit `acquire_missing=true` requests supported
+public provider-native candle inputs; `freeze=true` freezes the verified input.
+Either effect requires `confirm=true`, and embedded request fields cannot enable
+an effect independently. Coinbase currently declares native intervals; other
+providers without declarations or credential-backed integrations refuse here.
+The backend reuses canonical ingestion, rechecks source-bound coverage and
+returns Dataset/binding/next_request plus complete acquisition receipts or
+partial-failure blockers. It never dispatches a Check. See
+[Check Evidence Boundary](CHECK_EVIDENCE_BOUNDARY.md#explicit-preparation-acquisition)
+for limits, durable partial effects and separately owned execution admission.

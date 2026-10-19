@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import StrictBool, BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from ..service import research as research_service
@@ -187,8 +187,8 @@ class ResearchCheckRunRequest(BaseModel):
     gap_policy: Optional[str] = None
     gap_rewarm_bars: Optional[int] = Field(default=None, ge=0)
     preparation: Dict[str, Any] = Field(default_factory=dict)
-    freeze: Optional[bool] = None
-    acquire_missing: Optional[bool] = None
+    freeze: Optional[StrictBool] = None
+    acquire_missing: Optional[StrictBool] = None
     dataset_name: Optional[str] = None
     created_by: Optional[str] = None
     tags: List[str] = Field(default_factory=list)

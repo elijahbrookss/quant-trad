@@ -40,3 +40,31 @@
   .qt2-storage legend { float: none; width: auto; margin-bottom: 10px; }
   .qt2-storage-advanced > div { grid-template-columns: 1fr; }
 }
+
+.qt2-storage-lifecycle { margin: 28px 0; padding: 20px; border: 1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--bg-secondary, #151c27) 78%, transparent); }
+.qt2-storage-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.qt2-storage-section-heading h2 { margin: 4px 0 0; font-size: 18px; }
+.qt2-storage-state { padding: 4px 8px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 999px; font-size: 12px; }
+.qt2-storage-state-ready { color: var(--accent-color, #37bfa7); }
+.qt2-storage-state-partial { color: #e7b65b; }
+.qt2-storage-sample { margin: 10px 0 18px; opacity: .68; font-size: 12px; overflow-wrap: anywhere; }
+.qt2-storage-current, .qt2-storage-metrics { display: grid; gap: 12px; }
+.qt2-storage-current { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; }
+.qt2-storage-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.qt2-storage-current > div, .qt2-storage-metrics > div { min-width: 0; padding: 12px; border-radius: 7px; background: color-mix(in srgb, currentColor 5%, transparent); }
+.qt2-storage-current strong, .qt2-storage-current span, .qt2-storage-metrics strong, .qt2-storage-metrics span { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.qt2-storage-current span, .qt2-storage-metrics span { opacity: .7; font-size: 12px; line-height: 1.35; }
+.qt2-storage-rate-wrap { margin-top: 18px; overflow-x: auto; }
+.qt2-storage-rates { width: 100%; border-collapse: collapse; font-size: 12px; text-align: right; }
+.qt2-storage-rates caption { padding: 0 0 8px; text-align: left; font-weight: 600; }
+.qt2-storage-rates th, .qt2-storage-rates td { padding: 8px; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); white-space: nowrap; }
+.qt2-storage-rates th:first-child { text-align: left; }
+.qt2-storage-facts { margin-top: 16px; font-size: 12px; line-height: 1.45; }
+.qt2-storage-facts p { margin: 6px 0; }
+
+@media (max-width: 760px) {
+  .qt2-storage-current, .qt2-storage-metrics { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 480px) {
+  .qt2-storage-current, .qt2-storage-metrics { grid-template-columns: 1fr; }
+}

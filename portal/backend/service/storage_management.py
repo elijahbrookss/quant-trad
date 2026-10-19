@@ -23,6 +23,7 @@ from core.storage_targets import STORAGE_ROLES, StoragePolicy, StorageTarget
 from portal.backend.db import db
 from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
 from portal.backend.service.storage.maintenance_status import maintenance_status
+from portal.backend.service.storage.retention_observability import retention_observability
 from portal.backend.db.storage_target_models import StoragePlanRecord, StoragePolicyRecord, StorageTargetRecord
 
 
@@ -67,9 +68,11 @@ def _settings_blockers(config: StoragePolicyRecord, desired: StoragePolicy) -> l
 
 
 class StorageManagementService:
-    def __init__(self, database=None, *, inventory_path: Path | None = None):
+    def __init__(self, database=None, *, inventory_path: Path | None = None,
+                 observability=retention_observability):
         self.database = database if database is not None else db
         self.inventory_path = inventory_path
+        self.observability = observability
 
     def _inventory(self) -> tuple[StorageTarget, ...]:
         path = self.inventory_path or Path(get_settings().storage.inventory_path)
@@ -113,6 +116,20 @@ class StorageManagementService:
             observed_at = session.scalar(text("SELECT clock_timestamp()"))
             maintenance = maintenance_status(workers, policy=policy,
                 revision=config.revision if config else 0, now=observed_at)
+            if policy is None:
+                retention = {"schema_version": "qt.storage_retention_observability.v1",
+                             "state": "unconfigured", "sampled_at": observed_at.isoformat()}
+            else:
+                try:
+                    retention = self.observability.snapshot(session, policy_payload=policy,
+                        revision=config.revision, targets=rows, workers=[dict(row) for row in workers])
+                except Exception as exc:  # observation must not take storage settings offline
+                    logger.exception("storage_retention_observability_failed")
+                    retention = {"schema_version": "qt.storage_retention_observability.v1",
+                                 "state": "unknown", "sampled_at": observed_at.isoformat(),
+                                 "completeness": {"complete": False, "truncated": None,
+                                                  "unknowns": [type(exc).__name__]},
+                                 "reason": "bounded_projection_unavailable"}
             attention = {"unknown", "unavailable", "stale", "failed", "blocked", "cancelled", "overdue"}
             if not registered or policy is None:
                 health = "unconfigured"
@@ -131,6 +148,7 @@ class StorageManagementService:
                 "targets": rows, "candidates": candidates, "plans": [_plan(record) for record in plans],
                 "health": health, "active_plan": _plan(active_plan) if active_plan else None,
                 **maintenance,
+                "retention": retention,
             }
 
     def register(self, target_id: str) -> dict[str, Any]:

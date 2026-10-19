@@ -247,3 +247,27 @@ def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_boun
     assert seen[0]["enabled"] is True
     assert seen[0]["limits"].max_handoff_seconds == seconds
     assert seen[0]["limits"].statement_timeout_ms == 1000
+
+
+def test_progress_observer_reports_existing_boundaries_without_owning_execution(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item("reclaim_partition")])])
+    monkeypatch.setattr(executor, "_execute_step",
+                        lambda **_: {"status": "partition_reclaimed", "reclaimed_bytes": 7})
+    reports = []
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True, progress=reports.append)
+    assert result["outcomes"][0]["reclaimed_bytes"] == 7
+    assert [item["stage"] for item in reports] == ["planning", "executing", "step_finished", "finished"]
+    assert reports[1]["storage_day"] == DAY.isoformat()
+    assert reports[2]["status"] == "partition_reclaimed"
+    assert reports[-1]["completed_steps"] == 1
+
+
+def test_progress_observer_failure_cannot_change_retention_semantics(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item()])])
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: {"status": "page_acknowledged"})
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True,
+                          progress=lambda _: (_ for _ in ()).throw(RuntimeError("observer failed")))
+    assert result["failure_count"] == 0
+    assert result["outcomes"][0]["status"] == "page_acknowledged"

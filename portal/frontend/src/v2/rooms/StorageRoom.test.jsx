@@ -16,7 +16,21 @@ const policy = {
 const target = (id, medium) => ({ target_id: id, label: id.toUpperCase(), medium, roles: ['recent', 'history', 'archives', 'backups'],
   state: 'active', status: 'available', capacity: { total_bytes: 1000, available_bytes: 800 } })
 const snapshot = { revision: 3, policy, targets: [target('ssd', 'ssd'), target('hdd', 'hdd')],
-  candidates: [], plans: [], health: 'available', movement: { state: 'unknown' }, backup: { state: 'unknown' } }
+  candidates: [], plans: [], health: 'available', movement: { state: 'unknown' }, backup: { state: 'unknown' },
+  retention: { state: 'ready', sampled_at: '2026-10-19T18:00:00Z', source_revision: 'a'.repeat(40),
+    policy: { fingerprint: 'b'.repeat(64) }, completeness: { complete: true, truncated: false, unknowns: [] },
+    lifecycle: { current: { state: 'running', name: 'canonical_retention', progress: {
+      stage: 'executing', storage_day: '2026-09-02', action: 'verify_page' } },
+      last_durable_advancement: { stage: 'archive_page_committed', storage_day: '2026-09-02', happened_at: '2026-10-19T17:59:00Z' } },
+    backlog: { eligible_source_bytes: 3000, eligible_partitions: 3, oldest_eligible_age_days: 48,
+      verified_guarded_source_bytes: 1000, verified_guarded_partitions: 1 },
+    storage: { physical_hot: { source_bytes: 5000, estimated_rows: 100 },
+      compressed_archive: { bytes: 2000, verified_bytes: 1500 }, filesystem_delta: { state: 'unavailable' },
+      permanent_metadata_growth: { state: 'unavailable' } },
+    rates: { windows: [{ name: '6h', intake: { estimated_source_bytes: 20 }, archive: { compressed_bytes: 10 },
+      verify: { compressed_bytes: 8 }, reclaim: { physical_hot_bytes: 7 } }],
+      eta: { state: 'unavailable', reason: 'aligned_physical_intake_and_reclaim_series_required' } },
+    recovery_floor: { state: 'above_floor', available_bytes: 800, margin_bytes: 100 } } }
 
 beforeEach(() => {
   api.readStorage.mockResolvedValue(structuredClone(snapshot))
@@ -27,6 +41,16 @@ describe('Storage settings', () => {
     render(<StorageRoom />)
     expect(await screen.findByText(/Movement: unknown/)).toHaveTextContent('Backup: unknown')
     expect(screen.getByText('Advanced').closest('details')).not.toHaveAttribute('open')
+  })
+  it('shows bounded lifecycle stage, durable progress, domains, and no invented ETA', async () => {
+    render(<StorageRoom />)
+    expect(await screen.findByRole('heading', { name: 'Storage lifecycle' })).toBeVisible()
+    expect(screen.getByText('canonical retention')).toBeVisible()
+    expect(screen.getByText(/Day 2026-09-02/)).toHaveTextContent('verify page')
+    expect(screen.getByText('archive page committed')).toBeVisible()
+    expect(screen.getByText('Distinct lifecycle bytes by exact rolling window')).toBeVisible()
+    expect(screen.getByText(/Drain ETA:/).closest('p')).toHaveTextContent('aligned physical intake and reclaim series required')
+    expect(screen.getByText(/Intake is the sealed-partition/)).toBeVisible()
   })
   it('keeps a current backup failure visible alongside an older copy date', async () => {
     api.readStorage.mockResolvedValue({ ...snapshot, health: 'needs_attention',

@@ -54,15 +54,18 @@ def first_passage(event: RecognitionEvent, candles: tuple[RecognitionCandle, ...
 
 
 def first_passage_path(*, anchor_at, known_at, entry, low, source_identity_key,
-                       timeframe_seconds, by_open, evaluation_end, checkpoint=None):
+                       timeframe_seconds, by_open, evaluation_end, checkpoint=None,
+                       target=None, horizon_bars=HORIZON_BARS):
     """Shared path calculation for a locked observational anchor and barriers.
 
     The caller owns formation/control geometry. This function does not recognize
     events, select pairs, infer intrabar ordering or change the fixed horizon.
     """
     step = timedelta(seconds=timeframe_seconds)
-    upper = entry+(entry-low)
-    nominal_end = anchor_at+HORIZON_BARS*step
+    if type(horizon_bars) is not int or not 1 <= horizon_bars <= HORIZON_BARS:
+        raise ValueError("barrier_path_invalid: horizon must be1through12bars")
+    upper = entry+(entry-low) if target is None else target
+    nominal_end = anchor_at+horizon_bars*step
     result = {"anchor_price": entry, "anchor_known_at": plain(known_at),
               "formation_low": low, "formation_low_known_at": plain(known_at),
               "continuation_level": upper if math.isfinite(upper) else None, "failure_level": low,
@@ -73,10 +76,15 @@ def first_passage_path(*, anchor_at, known_at, entry, low, source_identity_key,
 
     if entry <= low:
         return finish("unresolved", "invalid_nonpositive_formation_risk", known_at)
+    if target is not None and (not all(math.isfinite(v) for v in (entry, low)) or entry <= 0 or low <= 0):
+        return finish("unresolved", "invalid_nonpositive_reference_or_failure", known_at)
     if not math.isfinite(upper):
         return finish("unresolved", "invalid_nonfinite_continuation_barrier", known_at)
 
-    for offset in range(HORIZON_BARS):
+    if target is not None and upper <= entry:
+        return finish("unresolved", "invalid_nonpositive_target_distance", known_at)
+
+    for offset in range(horizon_bars):
         if checkpoint:
             checkpoint()
         opened = anchor_at+offset*step
@@ -94,7 +102,7 @@ def first_passage_path(*, anchor_at, known_at, entry, low, source_identity_key,
             return finish("unresolved", "intrabar_order_unknown", bar.known_at)
         if up or down:
             return finish("continuation" if up else "failure", "first_touch", bar.known_at)
-    return finish("neither", "no_touch_in_complete_horizon", by_open[anchor_at+(HORIZON_BARS-1)*step].known_at)
+    return finish("neither", "no_touch_in_complete_horizon", by_open[anchor_at+(horizon_bars-1)*step].known_at)
 
 
 def overlap_components(events: tuple[RecognitionEvent, ...]) -> tuple[dict, ...]:

@@ -1214,6 +1214,177 @@
       ],
       "title": "Capacity authority and discovery status",
       "type": "logs"
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Canonical backlog: eligible source bytes",
+      "description": "Catalog source bytes for non-reclaimed partitions older than the saved default recent-days window. The installed saved-policy adapter clears base fact-family overrides; eligible open partitions still make byte totals partial until sealed.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No eligible catalog bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH policy AS (\n  SELECT COALESCE((policy->>'recent_days')::integer,30) AS recent_days\n  FROM portal_storage_policy WHERE id=1 AND policy IS NOT NULL\n) SELECT now() AS time,COALESCE(sum(source_bytes) FILTER (WHERE state<>'reclaimed' AND storage_day < (now() AT TIME ZONE 'UTC')::date-policy.recent_days),0)::bigint AS value FROM market.fact_retention_partitions CROSS JOIN policy;"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "Verified source awaiting fresh reclaim guards",
+      "description": "Source bytes in catalog-verified partitions outside the saved default hot window. Verification alone is never deletion authority; execution still rechecks all guards.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No verified backlog"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH policy AS (\n  SELECT COALESCE((policy->>'recent_days')::integer,30) AS recent_days\n  FROM portal_storage_policy WHERE id=1 AND policy IS NOT NULL\n) SELECT now() AS time,COALESCE(sum(source_bytes) FILTER (WHERE state='verified' AND storage_day < (now() AT TIME ZONE 'UTC')::date-policy.recent_days),0)::bigint AS value FROM market.fact_retention_partitions CROSS JOIN policy;"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Canonical lifecycle byte events",
+      "description": "Separate domains at their durable event times: sealed source-byte estimate, compressed archive page bytes, compressed verification bytes, and physical hot reclaimed bytes. They are not interchangeable throughput series.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH events AS (SELECT sealed_at AS at,'intake estimate' AS metric,source_bytes::double precision AS bytes FROM market.fact_retention_partitions WHERE sealed_at IS NOT NULL UNION ALL SELECT acknowledged_at,'archive compressed',byte_count::double precision FROM market.fact_archive_manifests UNION ALL SELECT v.verified_at,'verify compressed',m.byte_count::double precision FROM market.fact_archive_verifications v JOIN market.fact_archive_manifests m ON m.id=v.manifest_id UNION ALL SELECT reclaimed_at,'reclaim physical hot',reclaimed_bytes::double precision FROM market.fact_retention_partitions WHERE reclaimed_at IS NOT NULL) SELECT $__timeGroupAlias(at,'1h'),metric,sum(bytes)/3600.0 AS value FROM events WHERE $__timeFilter(at) GROUP BY 1,2 ORDER BY 1,2;"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "table",
+      "title": "Oldest canonical pipeline days",
+      "description": "Oldest non-reclaimed catalog days, limited to 64 rows. Source bytes and rows are sealed estimates; the next stage is descriptive and does not grant execution authority.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT storage_day,state,expected_rows,source_bytes,sealed_at,verified_at,reclaimed_at,CASE state WHEN 'open' THEN 'seal' WHEN 'sealed' THEN 'archive / verify' WHEN 'verified' THEN 'fresh reclaim guards' ELSE 'complete' END AS next_stage FROM market.fact_retention_partitions WHERE state<>'reclaimed' ORDER BY storage_day LIMIT 64;"
+        }
+      ]
     }
   ],
   "refresh": "15s",
@@ -1309,6 +1480,6 @@
   "timezone": "browser",
   "title": "QuantTrad Capacity & Database Growth",
   "uid": "quanttrad-capacity-growth",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

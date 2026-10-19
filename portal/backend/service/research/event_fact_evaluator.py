@@ -80,6 +80,7 @@ class EventFactEvaluator:
     availability_trigger_enabled: bool = False
     descriptive_outcomes_enabled: bool = False
     retrospective_enabled: bool = False
+    barrier_profiles_enabled: bool = False
 
     def _validate_trigger(self, detector: Mapping[str, Any]) -> None:
         if (
@@ -97,6 +98,9 @@ class EventFactEvaluator:
         request: CheckRequest,
     ) -> Mapping[str, Any]:
         del definition
+        if self.barrier_profiles_enabled:
+            from .event_barrier_check import requirements
+            return requirements(request)
         if self.retrospective_enabled:
             from .retrospective_numeric import normalize_retrospective
             normalize_retrospective(request.parameters.get("outcomes", {}).get("retrospective"),
@@ -184,6 +188,9 @@ class EventFactEvaluator:
     def evaluate(
         self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any],
     ) -> Mapping[str, Any]:
+        if self.barrier_profiles_enabled:
+            from .event_barrier_check import evaluate
+            return evaluate(plan=plan,inputs=inputs)
         result = self._evaluate(plan=plan, inputs=inputs, preparation=EventCandlePreparation())
         if self.retrospective_enabled:
             from .retrospective_numeric import qualify_result

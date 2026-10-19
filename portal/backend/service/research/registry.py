@@ -201,6 +201,16 @@ def definition_allows_evidence(definition: CheckDefinition) -> bool:
 
 
 def _register_event_fact_family() -> None:
+    from .event_barrier_check import RULES as BARRIER_RULES
+    barrier = EventFactEvaluator(version="15",result_schema_version="indicator_event_barriers_result.v1",barrier_profiles_enabled=True)
+    CHECK_REGISTRY.register_evaluator(barrier)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION,definition_id=EVENT_FACT_ANALYSIS,
+        definition_version="15",evaluator_id=barrier.evaluator_id,evaluator_version=barrier.version,
+        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={"family":EVENT_FACT_ANALYSIS,"event_ownership":"indicator",
+            "operator_model":"indicator_event_barriers.v1","outcome_boundary":"evaluation_end_exclusive",
+            "composition_rules":BARRIER_RULES}))
     retrospective_evaluator = EventFactEvaluator(version="13",
         result_schema_version="event_fact_analysis_result.v13", retrospective_enabled=True)
     CHECK_REGISTRY.register_evaluator(retrospective_evaluator)
@@ -736,7 +746,10 @@ def _resolve_definition_version(payload, *, family, base_version):
     else:
         risk_version = "10"
     retrospective = _mapping(payload.get("outcomes"), field="outcomes").get("retrospective")
-    if family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == EPISODE_SCHEMA:
+    barrier_schema = family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"),field="outcomes").get("schema_version") == "indicator_event_barriers.v1"
+    if barrier_schema:
+        default_version = "15"
+    elif family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == EPISODE_SCHEMA:
         default_version = "14"
     elif retrospective is not None:
         default_version = "13"
@@ -766,6 +779,8 @@ def _resolve_definition_version(payload, *, family, base_version):
         resolved_base_version = selected
     else:
         resolved_base_version = str(base_version or default_version)
+    if family == EVENT_FACT_ANALYSIS and (barrier_schema != (resolved_base_version == "15") or barrier_schema and any(v is not None for v in (retrospective,matched_origin,shared_landmark,first_return,forward_risk))):
+        raise ValueError("event_barriers_invalid: explicit standalone version15schema required")
     if retrospective is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "13"
             or any(v is not None for v in (matched_origin, shared_landmark, first_return, forward_risk))):
         raise ValueError("retrospective_invalid: requires standalone event_fact_analysis version 13")
@@ -802,7 +817,7 @@ def materialize_check_definition(
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")
     statistics = _mapping(payload.get("statistics"), field="statistics")
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version != "14":
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version not in {"14", "15"}:
         detector, outcomes, statistics = normalize_event_fact_configuration(
             detector=detector,
             outcomes=outcomes,
@@ -812,7 +827,7 @@ def materialize_check_definition(
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10", "11", "12"} and (
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10", "11", "12", "15"} and (
         inputs or detector.get("type") != "indicator_event"
     ):
         raise ValueError(
@@ -833,9 +848,9 @@ def materialize_check_definition(
     if family == EVENT_FACT_ANALYSIS and resolved_base_version == "9":
         outcomes["first_return"] = normalize_first_return(first_return, outcomes=outcomes,
             detector=detector, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
-    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11", "12"}:
+    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11", "12", "15"}:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version != "14":
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version not in {"14", "15"}:
         detector, statistics, inputs = _validate_event_fact_bindings(
             detector=detector,
             statistics=statistics,
@@ -908,6 +923,14 @@ def materialize_check_definition(
             outcomes=outcomes, statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)
         if gap_rewarm_bars:
             raise ValueError("liquidity_episode_invalid: no configurable rewarm")
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "15":
+        if mode != CHECK_MODE_EVIDENCE:
+            raise ValueError("event_barriers_invalid: durable evidence mode required")
+        from .event_barrier_check import normalize_configuration as normalize_barriers
+        detector,outcomes,statistics = normalize_barriers(detector=detector,outcomes=outcomes,
+            statistics=statistics,scope=scope,inputs=inputs,gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError("event_barriers_invalid: no rewarm or scientific assertions")
     material_rules = {
         **dict(base.material_rules),
         "registered_definition": {

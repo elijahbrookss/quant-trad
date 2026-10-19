@@ -719,7 +719,7 @@ def test_canonical_research_check_cli_uses_shared_operation_routes(monkeypatch):
         ("POST", "/api/research/checks/check-1/observations"),
     ]
     assert calls[1][2]["mode"] == "preview"
-    assert calls[2][2]["preparation"] == {"freeze": True, "created_by": "operator-1"}
+    assert calls[2][2]["preparation"] == {"freeze": True, "acquire_missing": False, "created_by": "operator-1"}
     assert calls[3][2]["mode"] == "evidence"
     assert calls[3][2]["dataset_id"] == "mds_1"
     assert calls[5][2] == {"title": "Evidence-backed"}
@@ -823,3 +823,12 @@ def test_saved_selection_request_and_execution_snapshot_use_shared_read_operatio
         "--request-json",json.dumps({"scope":{},"detector":{}})])==0
     assert observed=={"method":"POST","path":"/api/research/jobs/snapshot",
         "body":{"limit":2,"job_id":"known","request":{"scope":{},"detector":{},"mode":"evidence"}}}
+
+
+def test_cli_preparation_explicit_acquisition_flag(monkeypatch):
+    observed = _capture_request(monkeypatch, b'{"status":"frozen"}')
+    request = {"scope": {}, "detector": {}}
+    assert main(["--no-audit-log", "research", "check", "prepare", "--request-json", json.dumps(request),
+                 "--acquire-missing", "--freeze"]) == 0
+    assert observed["path"] == "/api/research/checks/prepare"
+    assert observed["body"]["preparation"] == {"freeze": True, "acquire_missing": True}

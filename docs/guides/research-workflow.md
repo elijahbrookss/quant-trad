@@ -285,6 +285,33 @@ qt research check run \
   --dataset-id <dataset_id>
 ```
 
+Preparation is inspect-only when neither write flag is supplied. If native
+candles are missing and their acquisition is authorized, use the same operation:
+
+```bash
+qt research check prepare --request-json <request.json> --acquire-missing --freeze
+```
+
+This resolves all declared primary and transitive ranges, refuses unsupported
+Facts/providers/source bindings before fetching, calls the existing public
+native-candle ingestor, checks coverage again and freezes exact canonical
+inputs. Coinbase currently declares the supported native intervals; no other
+interval is derived or filled. It never executes the Check. Review the returned
+`next_request` and fresh admission before the separately authorized run.
+`--acquire-missing` without `--freeze` acquires and rechecks only. Existing
+`qt data ingest-candles`, coverage and freeze operations remain available for
+explicit data work and provenance diagnosis; they are not mandatory manual
+steps for supported research preparation.
+
+Retain the complete preparation receipt, including ingestion/source IDs and
+partial failures. Provider failure stops without automatic retry or freeze;
+earlier acquired facts and failure-gap evidence may already be durable.
+Unknown effects are explicit null flags, not rollback claims. Frozen gaps remain
+visible, and each consumer keeps its own readiness policy. MCP exposes the same
+flags on `prepare_research_check_evidence` with `confirm=true` required for
+acquisition or freeze. Embedded JSON cannot enable either effect in place of
+explicit CLI/MCP flags. A Check run remains provider-free.
+
 Preview is useful for shaping a question, but it is exploratory. A durable
 evidence run binds the question to frozen inputs and can later be replayed:
 
@@ -719,6 +746,21 @@ changing interval: the three-hour decline/outcome and 24-hour RMS choice uses
 12/96/12 bars at 15m, 6/48/6 at 30m and 3/24/3 at 1h, with warmup 97/49/25.
 That expresses supported variations without implementing another method. It
 does not authorize new studies or choose a timeframe from favorable results.
+
+Use `qt research check definition event_fact_analysis --version 15` when an
+existing Indicator already emits the completed public event and the question is
+about explicit reference/target/failure barriers plus completion-known features.
+The request must name a complete native 15m frozen Dataset, the exact Indicator,
+an explicit computation origin, a one-to-12-bar horizon and public metadata
+paths. It is evidence-only. Preparation and dispatch continue through the normal
+Check admission path.
+
+The result keeps the original continuation/failure/neither/unresolved label and
+includes strictly-later original-target evidence for failure rows in the same
+Check. A same-bar first target/failure touch is unresolved; a later target does
+not relabel failure or extend the deadline. Inspect original clock weights,
+feature missing mass, support components and the pre-label population hash.
+These are descriptive profiles, not trading or predictive evidence.
 
 Use `qt research check definition event_fact_analysis --version 13` for explicit
 retrospective numeric association. Declare the real analysis cutoff; preserve

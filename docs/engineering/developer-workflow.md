@@ -74,8 +74,9 @@ compatibility for already-derived evidence, not a new-research preparation step.
 Preserve its historical inputs, lineage, behavior and results without relabeling.
 
 For research calculations, use the sequence above. Preview is ephemeral and
-cannot support an evidence-bearing Observation. Preparation may acquire only
-when an explicitly authorized lower-level acquisition operation is requested;
+cannot support an evidence-bearing Observation. The existing preparation operation may acquire supported public native candle
+inputs only with explicit `--acquire-missing` (MCP also requires confirmation),
+then recheck coverage and optionally `--freeze`. Its default remains inspect-only;
 Check execution never acquires. Dataset freeze records known facts and gaps,
 while Indicator, Check, and Strategy/Backtest each own their readiness decision.
 Do not calculate features, joins, outcomes, statistics, pass gates, or evidence
