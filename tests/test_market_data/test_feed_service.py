@@ -360,3 +360,28 @@ def test_provider_checkpoint_cancellation_does_not_publish_failure_gap(monkeypat
             feed_service.HistoricalCandleIngestor(store).ingest_by_instrument(_instrument(),
                 start="2024-01-01T00:00:00Z", end="2024-01-01T00:02:00Z", interval="1m")
     assert not store.gaps and not store.ingest_calls
+
+
+def test_native_request_refuses_unsupported_provider_before_construction(monkeypatch):
+    from data_providers.providers.base import BaseDataProvider
+    class Unsupported(BaseDataProvider):
+        def __init__(self):
+            raise AssertionError("provider construction may call metadata transports")
+    monkeypatch.setattr(feed_service, "get_provider_class", lambda *a, **k: Unsupported)
+    monkeypatch.setattr(feed_service, "get_provider", lambda *a, **k:
+        (_ for _ in ()).throw(AssertionError("provider constructed")))
+    store = FakeStore()
+    with pytest.raises(ValueError, match="native interval declaration"):
+        feed_service.HistoricalCandleIngestor(store).native_request(_instrument(), timeframe_seconds=60)
+    assert not store.ingest_calls and not store.gaps
+
+
+def test_native_request_matches_ingestor_source_identity_without_construction(monkeypatch):
+    from data_providers.providers.coinbase import CoinbaseProvider
+    monkeypatch.setattr(feed_service, "get_provider", lambda *a, **k:
+        (_ for _ in ()).throw(AssertionError("provider constructed")))
+    instrument = {"id": "native", "datasource": "COINBASE", "exchange": "COINBASE_DIRECT", "symbol": "ETP"}
+    ingestor = feed_service.HistoricalCandleIngestor(FakeStore())
+    interval, identity = ingestor.native_request(instrument, timeframe_seconds=900)
+    assert interval == "15m"
+    assert identity == ingestor.source_identity(instrument, object.__new__(CoinbaseProvider))

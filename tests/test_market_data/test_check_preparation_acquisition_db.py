@@ -24,7 +24,8 @@ def test_explicit_prepare_acquires_native_input_and_freezes_without_execution(mo
             short_requires_borrow=False, has_funding=False, extra_metadata={"fixture": token}))
     calls = []
     class Provider:
-        def native_candle_interval(self, seconds):
+        @classmethod
+        def native_candle_interval(cls, seconds):
             assert seconds == 60
             return "1m"
         def fetch_from_api(self, symbol, begin, end, interval):
@@ -33,6 +34,7 @@ def test_explicit_prepare_acquires_native_input_and_freezes_without_execution(mo
                 "open": 100 + index, "high": 102 + index, "low": 99 + index,
                 "close": 101 + index, "volume": 10} for index in range(18)])
     monkeypatch.setattr(feed_service, "get_provider", lambda *a, **k: Provider())
+    monkeypatch.setattr(feed_service, "get_provider_class", lambda *a, **k: Provider)
     monkeypatch.setattr(service, "run_research_check", lambda *a, **k:
         (_ for _ in ()).throw(AssertionError("preparation executed a Check")))
     payload = {"check_family": "raw_forward_outcome", "scope": {"instrument_id": instrument_id,

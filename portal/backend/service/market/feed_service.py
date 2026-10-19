@@ -10,7 +10,7 @@ import pandas as pd
 
 from core.execution_control import execution_checkpoint
 from core.settings import get_settings
-from data_providers.providers.factory import get_provider
+from data_providers.providers.factory import get_provider, get_provider_class
 from data_providers.utils.ohlcv import interval_to_timedelta, split_history_range
 from engines.bot_runtime.live_market import ClosedLiveCandle
 from market_data.contracts import (
@@ -135,16 +135,17 @@ class HistoricalCandleIngestor:
         """Inspect a native request without fetching or registering source facts."""
         provider_name = str(instrument.get("datasource") or "").strip()
         venue = str(instrument.get("exchange") or "").strip()
-        provider = get_provider(provider_name, exchange=venue or None)
-        return provider.native_candle_interval(timeframe_seconds), self.source_identity(instrument, provider)
+        provider_class = get_provider_class(provider_name, exchange=venue or None)
+        return provider_class.native_candle_interval(timeframe_seconds), self.source_identity(instrument, provider_class)
 
     @staticmethod
     def source_identity(instrument: Mapping[str, Any], provider: Any) -> SourceIdentity:
+        provider_class = provider if isinstance(provider, type) else type(provider)
         return SourceIdentity(
             provider=str(instrument.get("datasource") or "").strip(),
             venue=str(instrument.get("exchange") or "").strip(),
             source_kind="historical_api",
-            adapter_version=f"{type(provider).__module__}.{type(provider).__name__}:candle.ohlcv.v1",
+            adapter_version=f"{provider_class.__module__}.{provider_class.__name__}:candle.ohlcv.v1",
         )
 
     def ingest_by_instrument(

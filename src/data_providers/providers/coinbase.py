@@ -885,9 +885,10 @@ class CoinbaseProvider(BaseDataProvider):
             )
         return granularity
 
-    def native_candle_interval(self, timeframe_seconds: int) -> str:
-        for interval, granularity in self.GRANULARITY_MAP.items():
-            if self.GRANULARITY_SECONDS[granularity] == timeframe_seconds:
+    @classmethod
+    def native_candle_interval(cls, timeframe_seconds: int) -> str:
+        for interval, granularity in cls.GRANULARITY_MAP.items():
+            if cls.GRANULARITY_SECONDS[granularity] == timeframe_seconds:
                 return interval
         raise ValueError(f"native_candle_acquisition_unsupported: timeframe_seconds={timeframe_seconds}")
 

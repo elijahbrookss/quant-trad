@@ -198,7 +198,9 @@ acquisition contracts, useful lower-level data operations and Strategy/Bot
 preparation retain their independent authorities and callers. No fake Bot or
 Strategy is constructed for research preparation.
 
-All missing aliases are checked before the first ingestion. Compatible
+All missing aliases are checked before the first ingestion. Native interval
+declarations are read from provider classes before constructing any transport
+adapter; unsupported providers cannot issue constructor-time metadata calls. Compatible
 alias ranges are merged only over their requested union. Existing shared
 research admission, deadline and cumulative input-row budgets apply before
 writes; acquisition charges nominal native slots as well as subsequent actual

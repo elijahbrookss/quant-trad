@@ -179,7 +179,8 @@ def test_first_provider_failure_exposes_unknown_effects_and_retains_durable_gap(
     from portal.backend.service.market import feed_service
     from tests.test_market_data.test_feed_service import FakeStore
     class Provider:
-        def native_candle_interval(self, seconds):
+        @classmethod
+        def native_candle_interval(cls, seconds):
             assert seconds == 900
             return "15m"
         def fetch_from_api(self, *args):
@@ -187,6 +188,7 @@ def test_first_provider_failure_exposes_unknown_effects_and_retains_durable_gap(
     store = FakeStore()
     ingestor = feed_service.HistoricalCandleIngestor(store)
     monkeypatch.setattr(feed_service, "get_provider", lambda *a, **k: Provider())
+    monkeypatch.setattr(feed_service, "get_provider_class", lambda *a, **k: Provider)
     monkeypatch.setattr(acquisition, "historical_candle_ingestor", ingestor)
     result = acquisition.acquire_check_inputs(requirements=[requirement()],
         missing_coverage=[{"alias": "primary_bars", "reason": "series_not_registered"}])
