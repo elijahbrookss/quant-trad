@@ -96,6 +96,7 @@ def test_worker_owned_control_logs_one_outer_operation_and_restores_context(monk
     records = [r.getMessage() for r in caplog.records if "research_execution_metrics |" in r.getMessage()]
     assert len(records) == 1
     assert "operation=outer status=failed error_type=ValueError" in records[0]
+    assert "research_execution_metrics.v1" in records[0]
     assert "preserved" not in records[0]  # No exception payload copied into telemetry.
 
 
@@ -133,3 +134,41 @@ def test_outer_observation_includes_scope_entry_and_unwind_failure(monkeypatch, 
     assert "private" not in records[0]
     assert "metrics=null" in records[0]
     assert not limits._METRICS_OPERATION_ACTIVE.get()
+
+
+def test_worker_owned_error_reporting_does_not_wait_on_interrupt_lock(monkeypatch, caplog):
+    from threading import Event, Thread
+    from portal.backend.service.research import execution_limits as limits
+    control = ExecutionControl()
+    held, release = Event(), Event()
+    error = ValueError("body failed")
+    def hold_interrupt_lock():
+        with control._lock:
+            held.set()
+            release.wait(5)  # Bounded cleanup even if the regression returns.
+            held.clear()
+    @contextmanager
+    def reused_scope(**kwargs):
+        yield control
+    monkeypatch.setattr(limits, "research_execution_scope", reused_scope)
+    @limits.bounded_research_execution
+    def operation():
+        raise error
+    holder = Thread(target=hold_interrupt_lock)
+    with controlled_execution(control):
+        holder.start()
+        try:
+            assert held.wait(2)
+            with caplog.at_level(logging.INFO, logger=limits.__name__):
+                with pytest.raises(ValueError) as caught:
+                    operation()
+            assert caught.value is error
+            assert held.is_set(), "reporting waited until the interrupt lock was released"
+            records = [r.getMessage() for r in caplog.records if "research_execution_metrics |" in r.getMessage()]
+            assert len(records) == 1
+            assert "status=failed error_type=ValueError metrics=null" in records[0]
+            assert not limits._METRICS_OPERATION_ACTIVE.get()
+        finally:
+            release.set()
+            holder.join(timeout=5)
+            assert not holder.is_alive()

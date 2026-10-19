@@ -74,6 +74,15 @@ class ExecutionControl:
                     "stage_outcomes": {name: dict(value) for name, value in self._stage_outcomes.items()},
                     "observed_sizes": dict(self._observed_sizes)}
 
+    def try_snapshot(self) -> dict | None:
+        """Diagnostic-only snapshot; never wait behind an interrupt callback."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self.snapshot()
+        finally:
+            self._lock.release()
+
     def limit(self, *, seconds: float, **resources: int) -> None:
         if not math.isfinite(seconds) or seconds <= 0:
             raise ValueError("execution_budget_seconds_invalid")
