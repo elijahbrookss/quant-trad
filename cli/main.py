@@ -2118,6 +2118,7 @@ def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
         ResearchOperations(_client(args)).prepare(
             _canonical_research_request(args),
             freeze=bool(args.freeze),
+            acquire_missing=bool(args.acquire_missing),
             created_by=args.created_by,
             dataset_name=args.dataset_name,
         )
@@ -4558,13 +4559,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_check_prepare = research_check_sub.add_parser(
         "prepare",
-        help="Resolve evidence requirements and optionally freeze known facts and gaps.",
+        help="Inspect inputs; explicitly acquire missing native candles and/or freeze a Dataset.",
     )
     research_check_prepare.add_argument(
         "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
     )
     research_check_prepare.add_argument(
         "--freeze", action="store_true", help="Create or reuse the immutable Dataset after resolution."
+    )
+    research_check_prepare.add_argument(
+        "--acquire-missing", action="store_true",
+        help="Explicitly acquire unrecorded public native candle ranges; reverify before optional --freeze. Never runs a Check."
     )
     research_check_prepare.add_argument("--created-by")
     research_check_prepare.add_argument("--dataset-name")

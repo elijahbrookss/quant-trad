@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from .execution_limits import bounded_research_execution, research_execution_scope
-from core.execution_control import measured_execution, consume_execution_json, execution_checkpoint
+from core.execution_control import measure_execution_stage, measured_execution, consume_execution_json, execution_checkpoint
 from portal.backend.db.session import db
 
 import logging
@@ -43,6 +43,7 @@ from portal.backend.service.storage.repos import runs as runs_repo
 from market_data.frozen import semantic_hash
 
 from . import repository
+from .preparation_acquisition import acquire_check_inputs
 from .historical_check_custody import (historical_identity, validate_historical_definition, validate_historical_receipt, historical_observation_eligible)
 from .checks import (
     CANDIDATE_LIFECYCLE,
@@ -870,12 +871,15 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
             "check_preparation_invalid: preparation creates the Dataset; omit dataset_id"
         )
     preparation = _mapping_or_empty(request_payload.get("preparation"))
-    freeze = bool(preparation.get("freeze", request_payload.get("freeze", False)))
-    acquire_missing = bool(
-        preparation.get(
-            "acquire_missing", request_payload.get("acquire_missing", False)
-        )
-    )
+    def flag(name: str) -> bool:
+        value = preparation.get(name, request_payload.get(name, False))
+        if value is None:
+            return False
+        if type(value) is not bool:
+            raise ValueError(f"check_preparation_invalid: {name} must be a boolean")
+        return value
+
+    freeze, acquire_missing = flag("freeze"), flag("acquire_missing")
     definition, planning_request = normalize_check_preparation_request(
         request_payload
     )
@@ -888,22 +892,53 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
     definition, planning_request, plan = pin_check_definition_to_plan(
         definition, planning_request, plan
     )
-    if plan.missing_coverage:
+    coverage_before = [dict(row) for row in plan.missing_coverage]
+    acquisition = {"status": "not_requested", "receipts": [], "blockers": [],
+                   "provider_call_performed": False, "acquisition_performed": False}
+    if acquire_missing and plan.missing_coverage:
+        with measure_execution_stage("input_acquisition"):
+            acquisition = acquire_check_inputs(requirements=plan.market_data_requirements,
+                missing_coverage=plan.missing_coverage)
+        if acquisition["status"] == "acquired":
+            # Resolve from the original declared request again, with a fresh
+            # watermark. Never treat an ingestion receipt as coverage proof.
+            try:
+                verified_definition, verified_request = normalize_check_preparation_request(request_payload)
+                verified_plan = plan_research_check(verified_definition, verified_request,
+                    inspect_coverage=True, require_durable_sources=True)
+                definition, planning_request, plan = pin_check_definition_to_plan(
+                    verified_definition, verified_request, verified_plan)
+            except (ValueError, RuntimeError) as error:
+                execution_checkpoint()  # Never turn a stop/budget/ownership failure into success.
+                acquisition = {**acquisition, "status": "acquisition_failed",
+                    "blockers": [{"stage": "coverage_verification", "reason": str(error),
+                                  "partial_effects_possible": True}]}
+                logger.warning("check_preparation_incomplete | stage=coverage_verification error=%s", error)
+    if plan.missing_coverage or acquisition["status"] in {"acquisition_blocked", "acquisition_failed"}:
+        if acquisition["status"] in {"acquisition_blocked", "acquisition_failed"}:
+            logger.warning("check_preparation_incomplete | status=%s receipts=%s blockers=%s",
+                acquisition["status"], len(acquisition["receipts"]), len(acquisition["blockers"]))
         return {
-            "schema_version": "research_check_preparation.v2",
-            "status": "acquisition_required",
-            "provider_call_performed": False,
-            "acquisition_performed": False,
-            "acquisition_authorized": False,
+            "schema_version": "research_check_preparation.v3",
+            "status": acquisition["status"] if acquisition["status"] in {"acquisition_blocked", "acquisition_failed"} else "acquisition_required",
+            "provider_call_performed": acquisition["provider_call_performed"],
+            "acquisition_performed": acquisition["acquisition_performed"],
+            "acquisition_authorized": acquire_missing,
+            "acquisition": acquisition,
+            "missing_coverage_before": coverage_before,
+            "definition": definition.to_dict(),
+            "planning_request": planning_request.to_dict(),
+            "check_executed": False,
+            "observation_created": False,
             "missing_coverage": [dict(row) for row in plan.missing_coverage],
             "plan": plan.to_dict(),
             "dataset": None,
             "binding": None,
             "evidence_request": None,
             "message": (
-                "Requirement planning found source-bound coverage without durable "
-                "gap evidence. Use an explicitly authorized acquisition primitive "
-                "and repeat preparation."
+                "Preparation is incomplete; inspect acquisition receipts/blockers and missing coverage. "
+                "Acquisition requires explicit acquire_missing=true; no Check was executed. "
+                "Successful acquisitions and recorded failures remain durable; no automatic retry occurs."
             ),
         }
     prepared = prepare_frozen_dataset_from_requirements(
@@ -925,25 +960,18 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
             "planning_plan_hash": plan.plan_hash,
         },
     )
-    if acquire_missing and prepared["unresolved_requirements"]:
-        prepared = {
-            **prepared,
-            "status": "acquisition_required",
-            "acquisition_authorized": False,
-            "message": (
-                "Preparation never infers provider acquisition. Use the existing "
-                "authorized data acquisition primitive for each unresolved requirement, "
-                "then repeat preparation."
-            ),
-        }
     response: dict[str, Any] = {
-        "schema_version": "research_check_preparation.v2",
+        "schema_version": "research_check_preparation.v3",
         "status": prepared["status"],
+        "acquisition_authorized": acquire_missing,
+        "acquisition_performed": acquisition["acquisition_performed"],
+        "acquisition": acquisition,
+        "missing_coverage_before": coverage_before,
         "definition": definition.to_dict(),
         "planning_request": planning_request.to_dict(),
         "plan": plan.to_dict(),
         "preparation": prepared,
-        "provider_call_performed": False,
+        "provider_call_performed": acquisition["provider_call_performed"],
         "check_executed": False,
         "observation_created": False,
     }

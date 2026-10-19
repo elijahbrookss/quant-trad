@@ -64,12 +64,15 @@ class ResearchOperations:
         request: Mapping[str, Any],
         *,
         freeze: bool,
+        acquire_missing: bool = False,
         created_by: str | None = None,
         dataset_name: str | None = None,
     ) -> dict[str, Any]:
         payload = self._payload(request)
         preparation = dict(payload.get("preparation") or {})
         preparation["freeze"] = bool(freeze)
+        # Only explicit operation flags authorize effects, never embedded JSON.
+        preparation["acquire_missing"] = bool(acquire_missing)
         if created_by:
             preparation["created_by"] = str(created_by)
         if dataset_name:

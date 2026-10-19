@@ -60,6 +60,8 @@ code_paths:
   - portal/backend/service/research/forward_risk_evaluator.py
   - portal/backend/service/research/crossing_state_comparison.py
   - portal/backend/service/research/service.py
+  - portal/backend/service/research/preparation_acquisition.py
+  - portal/backend/service/market/feed_service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
   - portal/backend/service/indicators/indicator_service/runtime_validation.py
@@ -174,6 +176,55 @@ objective
 Orchestration chooses and sequences these operations. The Check, Indicator,
 data, Dataset, outcome, Strategy, and Backtest owners define their semantics.
 There is no Campaign resource or second research engine.
+
+## Explicit preparation acquisition
+
+`POST /api/research/checks/prepare`, `qt research check prepare`, and MCP
+`prepare_research_check_evidence` share one preparation operation. With no write
+flags it only inspects source-bound requirements and coverage. `freeze=true`
+freezes available canonical facts and recorded gaps. Explicit
+`acquire_missing=true` first acquires unrecorded native candle ranges using
+`HistoricalCandleIngestor`, re-plans against a fresh watermark, and optionally
+freezes when `freeze=true`. Acquisition without freeze returns inspection
+results for a later freeze. No variant executes a Check or creates a finding.
+
+The native preparation route admits only the instrument's declared PUBLIC
+historical-candle feature and a provider-owned native interval declaration;
+Coinbase currently supplies that declaration through its existing granularity
+map. Unsupported providers/timeframes, credential/external integrations,
+non-candle Facts, source/series mismatches and ambiguous requirements are
+blockers, not permission to derive or substitute inputs. Existing numeric
+acquisition contracts, useful lower-level data operations and Strategy/Bot
+preparation retain their independent authorities and callers. No fake Bot or
+Strategy is constructed for research preparation.
+
+All missing aliases are checked before the first ingestion. Compatible
+alias ranges are merged only over their requested union. Existing shared
+research admission, deadline and cumulative input-row budgets apply before
+writes; acquisition charges nominal native slots as well as subsequent actual
+coverage reads. Checkpoints run between ingestor segments and Coinbase
+transport pages and before publication. A synchronous provider request itself
+is not forcibly interrupted, and the API supplies no latency guarantee.
+Unclosed or off-grid acquisition ranges refuse; no range is silently extended.
+
+The v3 preparation receipt retains initial missing coverage, source-bound
+requirements, individual successful ingestion receipts, current plan and any
+blocker. A provider failure stops the sequence without retry or freeze.
+Successful prior facts and gap evidence remain durable. If the failing action's
+provider/storage effects cannot be established, `provider_call_performed` and
+`acquisition_performed` are null (or true when prior successful receipts prove
+an effect), with `partial_effects_possible=true`; false must not imply a rollback.
+An ingestion receipt never proves coverage: only the fresh plan authorizes the
+next freeze step. Recorded provider gaps stay evidence, and the consumer's
+existing readiness and gap policy decide whether a frozen input is usable.
+A frozen Dataset is not proof that the Check or Indicator is ready.
+
+CLI uses explicit `--acquire-missing` and `--freeze` flags. MCP requires
+`confirm=true` for either write flag. Both adapters override corresponding
+embedded request JSON fields with the explicit operation flags, preventing
+embedded JSON from bypassing inspect-only defaults or confirmation. HTTP flags
+must be literal booleans. The returned `next_request` is input to the separately
+reviewed requirements/admission/Check execution step, never an automatic run.
 
 ## Assurance Levels
 

@@ -525,13 +525,15 @@ class QuantTradMcpServer:
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
         freeze = _optional_bool(arguments, "freeze", False)
-        if freeze:
+        acquire_missing = _optional_bool(arguments, "acquire_missing", False)
+        if freeze or acquire_missing:
             _require_confirm(
-                arguments, "freezing Check evidence creates an immutable Dataset"
+                arguments, "acquiring native inputs or freezing Check evidence writes durable market data"
             )
         return self._research_operations().prepare(
             self._research_request(arguments),
             freeze=freeze,
+            acquire_missing=acquire_missing,
             created_by=_optional_str(arguments, "created_by"),
             dataset_name=_optional_str(arguments, "dataset_name"),
         )
@@ -1319,11 +1321,12 @@ class QuantTradMcpServer:
                 "handler": self._tool_preview_research_check,
             },
             "prepare_research_check_evidence": {
-                "description": "Resolve evidence requirements and optionally freeze known facts and gaps. Freezing requires confirm=true.",
+                "description": "Inspect Check inputs by default. Explicit acquire_missing acquires supported public native candles, verifies coverage, and optionally freezes with freeze=true. Either write flag requires confirm=true. Never executes a Check.",
                 "inputSchema": _object_schema(
                     {
                         "request": _free_object_schema(),
                         "freeze": _boolean_schema(default=False),
+                        "acquire_missing": _boolean_schema(default=False),
                         "created_by": _string_schema(),
                         "dataset_name": _string_schema(),
                         "confirm": _boolean_schema(default=False),

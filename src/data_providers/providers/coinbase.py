@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - handled in __init__
     COINBASE_SDK_AVAILABLE = False
 
 from core.logger import logger
+from core.execution_control import execution_checkpoint
 from data_providers.registry import _REGISTRY
 from data_providers.facts import (
     ProviderFundingRateSnapshot,
@@ -884,6 +885,12 @@ class CoinbaseProvider(BaseDataProvider):
             )
         return granularity
 
+    def native_candle_interval(self, timeframe_seconds: int) -> str:
+        for interval, granularity in self.GRANULARITY_MAP.items():
+            if self.GRANULARITY_SECONDS[granularity] == timeframe_seconds:
+                return interval
+        raise ValueError(f"native_candle_acquisition_unsupported: timeframe_seconds={timeframe_seconds}")
+
     def fetch_from_api(
         self,
         symbol: str,
@@ -911,6 +918,7 @@ class CoinbaseProvider(BaseDataProvider):
 
         window_start = start_ts
         while window_start < end_ts:
+            execution_checkpoint()
             window_end = min(end_ts, window_start + chunk_seconds)
             response = self._ensure_public_client().get_public_candles(
                 product_id=symbol,

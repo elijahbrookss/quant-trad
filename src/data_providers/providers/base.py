@@ -101,6 +101,14 @@ class ProviderInterface(ABC):
 class BaseDataProvider(ProviderInterface):
     """Acquisition-only provider base; persistence belongs to market-data services."""
 
+    def native_candle_interval(self, timeframe_seconds: int) -> str:
+        """Return an explicitly supported native interval; never derive candles.
+
+        Opt-in preparation requires a provider-owned declaration. Existing
+        lower-level acquisition callers retain their original behavior.
+        """
+        raise ValueError("native_candle_acquisition_unsupported: provider has no native interval declaration")
+
     @staticmethod
     def _normalize_metadata(
         *,
