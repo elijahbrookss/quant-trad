@@ -189,6 +189,7 @@ def test_projection_preserves_nulls_and_separates_populated_storage_domains(post
                 reclaimed_bytes=280,
             ),
         ])
+        session.flush()
         first = _manifest(
             sealed_day, ordinal=0, byte_count=80, acknowledged_at=now - timedelta(hours=2)
         )
@@ -387,6 +388,7 @@ def test_exact_rolling_window_edges_are_inclusive_and_keep_domains_separate(post
                 manifest_set_hash=HASH_B, reclaimed_at=before, reclaimed_bytes=13,
             ),
         ])
+        session.flush()
         first = _manifest(days[0], ordinal=0, byte_count=5, acknowledged_at=edge)
         second = _manifest(days[1], ordinal=1, byte_count=7, acknowledged_at=before)
         session.add_all([first, second])
