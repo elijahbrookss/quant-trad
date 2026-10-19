@@ -1,4 +1,4 @@
-"""Disposable raw-v4 history declaration, frozen evidence and correction isolation."""
+"""Disposable current-path history declaration, frozen evidence and correction isolation."""
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import uuid
@@ -9,7 +9,7 @@ from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleF
 from portal.backend.db import InstrumentRecord, db
 from portal.backend.service.research import service
 from portal.backend.service.storage.repos.market_data import market_data_repo
-from portal.backend.service.research.controlled_reversal_evaluator import DETECTOR, OUTCOME_SCHEMA
+from portal.backend.service.research.controlled_reversal_evaluator import DETECTOR, PATH_SCHEMA
 
 pytestmark = pytest.mark.db
 
@@ -52,13 +52,15 @@ def test_controlled_reversal_frozen_roundtrip_with_21_actual_warmup_candles(monk
     payload = {"check_family":"raw_forward_outcome", "scope":{"instrument_id":instrument_id,
         "timeframe":"1m","start":(start+timedelta(minutes=21)).isoformat(),
         "end":(start+timedelta(minutes=90)).isoformat()},"detector":dict(DETECTOR),
-        "outcomes":{"schema_version":OUTCOME_SCHEMA},"gap_policy":"continue_degraded",
+        "outcomes":{"schema_version":PATH_SCHEMA,"interval":"1m",
+            "trend_lookback_bars":5,"volatility_lookback_bars":20,"entry_lag_bars":1,
+            "outcome_horizon_bars":5,"matching_policy":"same_date_hour","comparison_window_days":0},"gap_policy":"continue_degraded",
         "preparation":{"freeze":True,"name":"controlled-reversal-"+token}}
     prepared = service.prepare_research_check_evidence(payload)
     assert prepared["status"] == "frozen",prepared
     evidence = service.run_research_check(prepared["next_request"])
     assert evidence["replayable"] and evidence["evidence"]["input_binding"]["provider_access"] == "disabled"
-    assert evidence["result"]["evaluator_version"] == "4"
+    assert evidence["result"]["evaluator_version"] == "19"
     result = evidence["result"]["result"]
     assert result["complete_sample_count"] == 1 and result["controlled_reversal_comparison"]["decision"] == "unsupported"
     assert result["pairs"][0]["outcomes"]["treated"]["forward_return"] == pytest.approx(117.3/117.8-1)

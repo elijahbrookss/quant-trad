@@ -86,7 +86,7 @@ def test_final_handoff_admitted_first_blocks_publisher_before_hot_parents_and_re
     assert after["relation"] is None and after["hot_rows"] == 0
     assert after["header_rows"] == old["header_rows"]
     assert all(row in _read(storage) for row in before)
-    assert any(row.observation_key == incoming.observation_key for row in _read(storage))
+    assert any(row.fact.observation_key == incoming.observation_key for row in _read(storage))
 
 
 def test_publisher_admitted_first_defers_cleanup_without_changing_verified_partition(
@@ -111,7 +111,7 @@ def test_publisher_admitted_first_defers_cleanup_without_changing_verified_parti
     after = _physical(storage, day)
     for field in ("relation", "hot_rows", "header_rows"):
         assert after[field] == before[field]
-    assert not any(row.observation_key == incoming.observation_key for row in _read(storage))
+    assert not any(row.fact.observation_key == incoming.observation_key for row in _read(storage))
 
 
 @pytest.mark.parametrize("interruption", ["timeout", "cancel"])
@@ -148,7 +148,7 @@ def test_waiting_publication_interruption_rolls_back_entire_transaction(
     with storage.database.session() as session:
         assert session.execute(text("SELECT count(*) FROM market.ingestion_runs")).scalar_one() == runs_before
         assert not session.execute(text("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=:pid AND locktype='advisory')"), identity).scalar_one()
-    assert not any(row.observation_key == incoming.observation_key for row in _read(storage))
+    assert not any(row.fact.observation_key == incoming.observation_key for row in _read(storage))
 
 
 def test_waiting_trade_does_not_block_heartbeat_and_rechecks_expired_lease_after_admission(
