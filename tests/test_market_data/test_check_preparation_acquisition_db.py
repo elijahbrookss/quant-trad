@@ -14,6 +14,16 @@ from portal.backend.service.storage.repos.market_data import market_data_repo
 pytestmark = pytest.mark.db
 
 
+def preparation_request(instrument_id, start):
+    return {"check_family": "raw_forward_outcome", "scope": {"instrument_id": instrument_id,
+        "timeframe": "1m", "start": (start + timedelta(minutes=1)).isoformat(),
+        "end": (start + timedelta(minutes=18)).isoformat()},
+        "detector": {"all": [{"field": "close", "operator": "gt", "value_field": "open"},
+                              {"field": "previous_close", "operator": "gte", "value": 0}]},
+        "outcomes": {"schema_version": OUTCOME_SCHEMA, "forward_bars": [5], "entry_lag_bars": 1,
+                     "min_sample_count": 1}, "gap_policy": "continue_degraded"}
+
+
 def test_explicit_prepare_acquires_native_input_and_freezes_without_execution(monkeypatch):
     token = uuid.uuid4().hex
     instrument_id = f"prep-native-{token[:20]}"
@@ -37,12 +47,7 @@ def test_explicit_prepare_acquires_native_input_and_freezes_without_execution(mo
     monkeypatch.setattr(feed_service, "get_provider_class", lambda *a, **k: Provider)
     monkeypatch.setattr(service, "run_research_check", lambda *a, **k:
         (_ for _ in ()).throw(AssertionError("preparation executed a Check")))
-    payload = {"check_family": "raw_forward_outcome", "scope": {"instrument_id": instrument_id,
-        "timeframe": "1m", "start": (start + timedelta(minutes=1)).isoformat(),
-        "end": (start + timedelta(minutes=18)).isoformat()},
-        "detector": {"all": [{"field": "close", "operator": "gt", "value_field": "open"}]},
-        "outcomes": {"schema_version": OUTCOME_SCHEMA, "forward_bars": [5], "entry_lag_bars": 1,
-                     "min_sample_count": 1}, "gap_policy": "reject"}
+    payload = preparation_request(instrument_id, start)
     inspected = service.prepare_research_check_evidence(payload)
     assert inspected["status"] == "acquisition_required" and not calls
     assert market_data_repo.list_series_metadata(instrument_id=instrument_id) == []

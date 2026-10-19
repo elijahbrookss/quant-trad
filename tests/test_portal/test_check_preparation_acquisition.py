@@ -221,3 +221,19 @@ def test_post_acquisition_coverage_error_retains_receipts_and_does_not_freeze(pr
     assert result["acquisition"]["receipts"] == [{"source_id": 9}]
     assert result["acquisition"]["blockers"][0]["stage"] == "coverage_verification"
     assert result["dataset"] is None and calls == ["plan", "acquire", "plan"]
+
+
+def test_disposable_workflow_request_uses_actual_method_policy_and_declared_warmup():
+    from tests.test_market_data.test_check_preparation_acquisition_db import preparation_request
+    from portal.backend.service.research.registry import normalize_check_preparation_request
+    from portal.backend.service.research.planning import plan_research_check
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    payload = preparation_request("instrument", start)
+    definition, request = normalize_check_preparation_request(payload)
+    plan = plan_research_check(definition, request, inspect_coverage=False, require_durable_sources=True,
+        instrument_loader=lambda value: {"id": value, "datasource": "COINBASE", "exchange": "COINBASE_DIRECT", "symbol": "ETP"},
+        indicator_planner=lambda *a, **k: {"requirements": [], "indicators": [], "warmup_bars": 0})
+    assert plan.gap_policy == "continue_degraded"
+    assert plan.warmup["bars"] == 1
+    assert datetime.fromisoformat(plan.market_data_requirements[0]["required_start"].replace("Z", "+00:00")) == start
+    assert datetime.fromisoformat(plan.market_data_requirements[0]["required_end"].replace("Z", "+00:00")) == datetime(2024, 1, 1, 0, 18, tzinfo=timezone.utc)
