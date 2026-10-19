@@ -107,7 +107,8 @@ failed, cancelled and budget-exceeded entered stage calls. The existing operatio
 adds execution status and error class, including worker-owned controls; nested
 bounded calls share one meter and one outer operation log after scope unwind.
 Admission failures report status/error class with null metrics if no control was
-obtained. A completed build
+obtained. Shutdown uncertainty also omits the snapshot: an interrupt helper may
+still hold its lock, and reporting must not delay propagation. A completed build
 operation does not certify later publication or whole-job success.
 
 Check input binding, input preparation, evaluation and persistence are distinct

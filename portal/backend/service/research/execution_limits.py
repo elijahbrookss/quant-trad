@@ -192,11 +192,15 @@ def bounded_research_execution(function):
         finally:
             try:
                 if outer:
+                    # An uncertain interrupt helper may still own the control lock.
+                    # Reporting must not wait on it and prevent uncertainty propagation.
+                    metrics = (control.snapshot() if control is not None
+                               and not isinstance(error, ExecutionStopUncertainError) else None)
                     logging.getLogger(__name__).info(
                         "research_execution_metrics | operation=%s status=%s error_type=%s metrics=%s",
                         function.__name__, execution_outcome(error),
                         type(error).__name__ if error is not None else None,
-                        json.dumps(control.snapshot() if control is not None else None, sort_keys=True))
+                        json.dumps(metrics, sort_keys=True))
             finally:
                 _METRICS_OPERATION_ACTIVE.reset(token)
     return invoke

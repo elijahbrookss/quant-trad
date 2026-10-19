@@ -109,7 +109,11 @@ def test_outer_observation_includes_scope_entry_and_unwind_failure(monkeypatch, 
     def scope(**kwargs):
         if when == "entry":
             raise error
-        yield ExecutionControl()
+        control = ExecutionControl()
+        def unsafe_snapshot():
+            pytest.fail("uncertain shutdown must not acquire the control snapshot lock")
+        monkeypatch.setattr(control, "snapshot", unsafe_snapshot)
+        yield control
         seen.append("scope_exit")
         raise error
     monkeypatch.setattr(limits, "research_execution_scope", scope)
@@ -127,6 +131,5 @@ def test_outer_observation_includes_scope_entry_and_unwind_failure(monkeypatch, 
     assert "status=failed" in records[0]
     assert "error_type=" + type(error).__name__ in records[0]
     assert "private" not in records[0]
-    if when == "entry":
-        assert "metrics=null" in records[0]
+    assert "metrics=null" in records[0]
     assert not limits._METRICS_OPERATION_ACTIVE.get()
