@@ -23,8 +23,8 @@ LOCK_TIMEOUT_MS = 250
 
 _PROJECTION_SQL = text("""
 WITH clock AS (
-    SELECT clock_timestamp() AS sampled_at,
-           (clock_timestamp() AT TIME ZONE 'UTC')::date AS database_day
+    SELECT CAST(:sampled_at AS timestamptz) AS sampled_at,
+           (CAST(:sampled_at AS timestamptz) AT TIME ZONE 'UTC')::date AS database_day
 ),
 partition_page AS (
     SELECT storage_day,state,created_at,expected_rows,source_bytes,sealed_at,
@@ -37,19 +37,23 @@ partitions AS (
     SELECT * FROM partition_page ORDER BY storage_day LIMIT :partition_limit
 ),
 manifest_page AS (
+    SELECT m.id,m.storage_day,m.row_count,m.byte_count,m.acknowledged_at
+    FROM market.fact_archive_manifests AS m
+    ORDER BY m.acknowledged_at DESC,m.storage_day DESC,m.id DESC
+    LIMIT :manifest_page_limit
+),
+manifest_projection AS (
     SELECT m.storage_day,m.row_count,m.byte_count,m.acknowledged_at,
            verification.verified_at
-    FROM market.fact_archive_manifests AS m
+    FROM manifest_page AS m
     LEFT JOIN LATERAL (
         SELECT max(v.verified_at) AS verified_at
         FROM market.fact_archive_verifications AS v
         WHERE v.manifest_id=m.id
     ) AS verification ON true
-    ORDER BY m.acknowledged_at DESC,m.storage_day DESC
-    LIMIT :manifest_page_limit
 ),
 manifests AS (
-    SELECT * FROM manifest_page
+    SELECT * FROM manifest_projection
     ORDER BY acknowledged_at DESC,storage_day DESC
     LIMIT :manifest_limit
 )
@@ -76,12 +80,18 @@ SELECT
     min(storage_day) FILTER (
         WHERE state<>'reclaimed' AND storage_day < clock.database_day-:recent_days
     ) AS oldest_eligible_day,
-    max(sealed_at) AS last_sealed_at,
-    max(storage_day) FILTER (WHERE sealed_at IS NOT NULL) AS last_sealed_day,
-    max(verified_at) AS last_partition_verified_at,
-    max(storage_day) FILTER (WHERE verified_at IS NOT NULL) AS last_partition_verified_day,
-    max(reclaimed_at) AS last_reclaimed_at,
-    max(storage_day) FILTER (WHERE reclaimed_at IS NOT NULL) AS last_reclaimed_day,
+    (SELECT sealed_at FROM partitions WHERE sealed_at IS NOT NULL
+        ORDER BY sealed_at DESC,storage_day DESC LIMIT 1) AS last_sealed_at,
+    (SELECT storage_day FROM partitions WHERE sealed_at IS NOT NULL
+        ORDER BY sealed_at DESC,storage_day DESC LIMIT 1) AS last_sealed_day,
+    (SELECT verified_at FROM partitions WHERE verified_at IS NOT NULL
+        ORDER BY verified_at DESC,storage_day DESC LIMIT 1) AS last_partition_verified_at,
+    (SELECT storage_day FROM partitions WHERE verified_at IS NOT NULL
+        ORDER BY verified_at DESC,storage_day DESC LIMIT 1) AS last_partition_verified_day,
+    (SELECT reclaimed_at FROM partitions WHERE reclaimed_at IS NOT NULL
+        ORDER BY reclaimed_at DESC,storage_day DESC LIMIT 1) AS last_reclaimed_at,
+    (SELECT storage_day FROM partitions WHERE reclaimed_at IS NOT NULL
+        ORDER BY reclaimed_at DESC,storage_day DESC LIMIT 1) AS last_reclaimed_day,
     coalesce(sum(reclaimed_bytes),0)::bigint AS cumulative_reclaimed_bytes,
     (SELECT coalesce(sum(byte_count),0)::bigint FROM manifests) AS compressed_archive_bytes,
     (SELECT coalesce(sum(row_count),0)::bigint FROM manifests) AS archived_rows,
@@ -118,6 +128,18 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
+def _aware_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None and value.utcoffset() is not None else None
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
+
+
 def _latest_progress(row: dict[str, Any]) -> dict[str, Any] | None:
     candidates = []
     for stage, time_key, day_key in (
@@ -137,24 +159,50 @@ def _latest_progress(row: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _worker_phase(workers: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
-    live = []
+    if len(workers) > 100:
+        return {"state": "unknown", "reason": "maintenance_worker_inventory_limit"}
+    candidates = []
     for worker in workers:
         context = worker.get("context")
         lifecycle = context.get("storage_lifecycle") if isinstance(context, dict) else None
-        if (worker.get("expires_at") is not None and worker["expires_at"] > now
-                and isinstance(lifecycle, dict) and worker.get("state") not in {"stopping", "stopped"}):
-            live.append((worker, lifecycle))
+        if (worker.get("worker_role") in (None, "market_storage_maintenance")
+                and isinstance(lifecycle, dict)):
+            candidates.append((worker, lifecycle))
+    live = []
+    invalid_clock = False
+    for worker, lifecycle in candidates:
+        heartbeat = _aware_time(worker.get("heartbeat_at"))
+        expires = _aware_time(worker.get("expires_at"))
+        if heartbeat is None or expires is None or heartbeat > now:
+            invalid_clock = True
+            continue
+        if expires > now and worker.get("state") not in {"stopping", "stopped"}:
+            live.append((worker, lifecycle, heartbeat))
+    if not live:
+        if invalid_clock:
+            return {"state": "unknown", "reason": "maintenance_clock_invalid"}
+        return {"state": "stale" if candidates else "unknown",
+                "reason": "maintenance_worker_expired" if candidates
+                          else "maintenance_worker_missing"}
     if len(live) != 1:
-        return {"state": "unknown", "reason": "maintenance_worker_missing" if not live
-                else "multiple_maintenance_workers"}
-    worker, lifecycle = live[0]
+        return {"state": "unknown", "reason": "multiple_maintenance_workers"}
+    worker, lifecycle, heartbeat = live[0]
+    if lifecycle.get("state") not in {"running", "degraded"}:
+        return {"state": "unknown", "reason": "maintenance_loop_not_running",
+                "worker_id": worker.get("worker_id"), "heartbeat_at": heartbeat.isoformat()}
     phase = lifecycle.get("current_phase")
     if isinstance(phase, dict):
+        started = _aware_time(phase.get("started_at"))
+        observed = _aware_time(phase.get("observed_at")) if phase.get("observed_at") is not None else None
+        if started is None or started > now or (phase.get("observed_at") is not None
+                                                and (observed is None or observed > now)):
+            return {"state": "unknown", "reason": "maintenance_clock_invalid",
+                    "worker_id": worker.get("worker_id"),
+                    "heartbeat_at": heartbeat.isoformat()}
         return {"state": "running", "worker_id": worker.get("worker_id"),
-                "heartbeat_at": _iso(worker.get("heartbeat_at")), **phase}
+                "heartbeat_at": heartbeat.isoformat(), **phase}
     return {"state": "idle", "worker_id": worker.get("worker_id"),
-            "heartbeat_at": _iso(worker.get("heartbeat_at")),
-            "last_run": lifecycle.get("last_run")}
+            "heartbeat_at": heartbeat.isoformat(), "last_run": lifecycle.get("last_run")}
 
 
 def _recovery_floor(*, policy: StoragePolicy, targets: list[dict[str, Any]],
@@ -197,13 +245,17 @@ class RetentionObservability:
     """Build one bounded projection from durable catalog metadata."""
 
     def snapshot(self, session, *, policy_payload: dict[str, Any], revision: int,
-                 targets: list[dict[str, Any]], workers: list[dict[str, Any]]) -> dict[str, Any]:
+                 targets: list[dict[str, Any]], workers: list[dict[str, Any]],
+                 sampled_at: datetime | None = None) -> dict[str, Any]:
         policy = StoragePolicy.from_dict(policy_payload)
         settings = get_settings()
         canonical = settings.market_data_lifecycle.canonical_retention
         session.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         session.execute(text("SET LOCAL lock_timeout = '250ms'"))
-        values = {"partition_limit": PARTITION_SCAN_LIMIT,
+        sampled_at = sampled_at or session.scalar(text("SELECT clock_timestamp()"))
+        if sampled_at.tzinfo is None:
+            sampled_at = sampled_at.replace(tzinfo=UTC)
+        values = {"sampled_at": sampled_at, "partition_limit": PARTITION_SCAN_LIMIT,
                   "partition_page_limit": PARTITION_SCAN_LIMIT + 1,
                   "manifest_limit": MANIFEST_SCAN_LIMIT,
                   "manifest_page_limit": MANIFEST_SCAN_LIMIT + 1,
@@ -244,7 +296,11 @@ class RetentionObservability:
             "bounds": {"statement_timeout_ms": STATEMENT_TIMEOUT_MS,
                        "lock_timeout_ms": LOCK_TIMEOUT_MS,
                        "partition_rows": PARTITION_SCAN_LIMIT,
+                       "partition_scan_rows": PARTITION_SCAN_LIMIT + 1,
                        "manifest_rows": MANIFEST_SCAN_LIMIT,
+                       "manifest_scan_rows": MANIFEST_SCAN_LIMIT + 1,
+                       "verification_rows_per_manifest": None,
+                       "verification_scan_backstop": "primary_key_scope_plus_statement_timeout",
                        "metadata_only": True},
             "completeness": {"complete": not incomplete, "truncated": truncated,
                 "partition_scan_truncated": bool(row["partitions_truncated"]),

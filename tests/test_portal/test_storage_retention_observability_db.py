@@ -2,6 +2,8 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 import json
+from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -119,13 +121,14 @@ def _manifest(day, *, ordinal, byte_count, acknowledged_at):
     )
 
 
-def _snapshot(session, policy=None):
+def _snapshot(session, policy=None, *, sampled_at=None):
     return module.RetentionObservability().snapshot(
         session,
         policy_payload=policy or _policy(),
         revision=4,
         targets=[],
         workers=[],
+        sampled_at=sampled_at,
     )
 
 
@@ -194,18 +197,28 @@ def test_projection_preserves_nulls_and_separates_populated_storage_domains(post
         )
         session.add_all([first, second])
         session.flush()
-        session.add(MarketFactArchiveVerificationRecord(
-            manifest_id=second.id,
-            verifier_version="fixture.v1",
-            manifest_hash=second.manifest_hash,
-            catalog_hash=HASH_C,
-            verification_hash=HASH_A,
-            verified_at=now - timedelta(minutes=10),
-        ))
+        session.add_all([
+            MarketFactArchiveVerificationRecord(
+                manifest_id=second.id,
+                verifier_version="fixture.v1",
+                manifest_hash=second.manifest_hash,
+                catalog_hash=HASH_C,
+                verification_hash=HASH_A,
+                verified_at=now - timedelta(minutes=20),
+            ),
+            MarketFactArchiveVerificationRecord(
+                manifest_id=second.id,
+                verifier_version="fixture.v2",
+                manifest_hash=second.manifest_hash,
+                catalog_hash=HASH_C,
+                verification_hash=HASH_B,
+                verified_at=now - timedelta(minutes=10),
+            ),
+        ])
 
     with Session(engine) as session, session.begin():
         session.execute(text("SET TRANSACTION READ ONLY"))
-        result = _snapshot(session)
+        result = _snapshot(session, sampled_at=now)
 
     assert result["state"] == "partial"
     assert result["completeness"]["unknowns"] == ["open_partition_source_bytes_unmeasured"]
@@ -234,10 +247,10 @@ def test_projection_preserves_nulls_and_separates_populated_storage_domains(post
 def test_projection_reports_real_query_truncation_with_small_test_bounds(postgres, monkeypatch):
     engine, _ = postgres
     now = datetime.now(UTC)
-    monkeypatch.setattr(module, "PARTITION_SCAN_LIMIT", 1)
-    monkeypatch.setattr(module, "MANIFEST_SCAN_LIMIT", 1)
+    monkeypatch.setattr(module, "PARTITION_SCAN_LIMIT", 2)
+    monkeypatch.setattr(module, "MANIFEST_SCAN_LIMIT", 2)
     with Session(engine) as session, session.begin():
-        for ordinal in range(2):
+        for ordinal in range(3):
             day = (now - timedelta(days=90 - ordinal)).date()
             session.add(MarketFactRetentionPartitionRecord(
                 storage_day=day,
@@ -256,18 +269,19 @@ def test_projection_reports_real_query_truncation_with_small_test_bounds(postgre
 
     with Session(engine) as session, session.begin():
         session.execute(text("SET TRANSACTION READ ONLY"))
-        result = _snapshot(session)
+        result = _snapshot(session, sampled_at=now)
 
     assert result["state"] == "partial"
     assert result["completeness"]["truncated"] is True
     assert result["completeness"]["partition_scan_truncated"] is True
     assert result["completeness"]["manifest_scan_truncated"] is True
-    assert result["bounds"]["partition_rows"] == 1
-    assert result["bounds"]["manifest_rows"] == 1
+    assert result["bounds"]["partition_rows"] == 2
+    assert result["bounds"]["manifest_rows"] == 2
+    assert result["bounds"]["partition_scan_rows"] == 3
+    assert result["bounds"]["manifest_scan_rows"] == 3
 
 
-def test_storage_snapshot_adds_projection_without_changing_status_contract(postgres, monkeypatch):
-    engine, tmp_path = postgres
+def _configured_service(engine, tmp_path, monkeypatch):
     inventory = tmp_path / "inventory.json"
     targets = [
         StorageTarget("ssd", "Fast", "uuid-ssd", "/qt/ssd", "ssd"),
@@ -295,6 +309,12 @@ def test_storage_snapshot_adds_projection_without_changing_status_contract(postg
     service.register("hdd")
     with service.database.session() as session:
         session.add(StoragePolicyRecord(id=1, revision=4, policy=_policy()))
+    return service
+
+
+def test_storage_snapshot_adds_projection_without_changing_status_contract(postgres, monkeypatch):
+    engine, tmp_path = postgres
+    service = _configured_service(engine, tmp_path, monkeypatch)
 
     snapshot = service.snapshot()
     assert snapshot["schema_version"] == "qt.storage_status.v1"
@@ -302,3 +322,154 @@ def test_storage_snapshot_adds_projection_without_changing_status_contract(postg
     assert snapshot["retention"]["schema_version"] == "qt.storage_retention_observability.v1"
     assert snapshot["retention"]["state"] == "ready"
     assert snapshot["retention"]["policy"]["revision"] == 4
+
+
+def test_latest_durable_event_keeps_timestamp_and_day_from_same_row(postgres):
+    engine, _ = postgres
+    sampled_at = datetime(2026, 10, 19, 18, 0, tzinfo=UTC)
+    older_day = (sampled_at - timedelta(days=90)).date()
+    newer_day = (sampled_at - timedelta(days=89)).date()
+    with Session(engine) as session, session.begin():
+        session.add_all([
+            MarketFactRetentionPartitionRecord(
+                storage_day=older_day,
+                state="sealed",
+                expected_rows=1,
+                source_bytes=10,
+                sealed_at=sampled_at - timedelta(minutes=5),
+            ),
+            MarketFactRetentionPartitionRecord(
+                storage_day=newer_day,
+                state="sealed",
+                expected_rows=1,
+                source_bytes=10,
+                sealed_at=sampled_at - timedelta(hours=1),
+            ),
+        ])
+    with Session(engine) as session, session.begin():
+        session.execute(text("SET TRANSACTION READ ONLY"))
+        result = _snapshot(session, sampled_at=sampled_at)
+
+    assert result["lifecycle"]["last_durable_advancement"] == {
+        "stage": "sealed",
+        "storage_day": older_day.isoformat(),
+        "happened_at": (sampled_at - timedelta(minutes=5)).isoformat(),
+        "authority": "durable_catalog",
+    }
+
+
+def test_exact_rolling_window_edges_are_inclusive_and_keep_domains_separate(postgres):
+    engine, _ = postgres
+    sampled_at = datetime(2026, 10, 19, 18, 0, tzinfo=UTC)
+    days = [(sampled_at - timedelta(days=90 - offset)).date() for offset in range(4)]
+    edge = sampled_at - timedelta(hours=6)
+    before = edge - timedelta(microseconds=1)
+    with Session(engine) as session, session.begin():
+        session.add_all([
+            MarketFactRetentionPartitionRecord(
+                storage_day=days[0], state="sealed", expected_rows=1,
+                source_bytes=10, sealed_at=edge,
+            ),
+            MarketFactRetentionPartitionRecord(
+                storage_day=days[1], state="sealed", expected_rows=1,
+                source_bytes=20, sealed_at=before,
+            ),
+            MarketFactRetentionPartitionRecord(
+                storage_day=days[2], state="reclaimed", expected_rows=1,
+                source_bytes=30, sealed_at=sampled_at - timedelta(days=1),
+                verified_at=sampled_at - timedelta(hours=7),
+                manifest_set_hash=HASH_A, reclaimed_at=edge, reclaimed_bytes=11,
+            ),
+            MarketFactRetentionPartitionRecord(
+                storage_day=days[3], state="reclaimed", expected_rows=1,
+                source_bytes=40, sealed_at=sampled_at - timedelta(days=1),
+                verified_at=sampled_at - timedelta(hours=7),
+                manifest_set_hash=HASH_B, reclaimed_at=before, reclaimed_bytes=13,
+            ),
+        ])
+        first = _manifest(days[0], ordinal=0, byte_count=5, acknowledged_at=edge)
+        second = _manifest(days[1], ordinal=1, byte_count=7, acknowledged_at=before)
+        session.add_all([first, second])
+        session.flush()
+        session.add_all([
+            MarketFactArchiveVerificationRecord(
+                manifest_id=first.id, verifier_version="edge", manifest_hash=first.manifest_hash,
+                catalog_hash=HASH_C, verification_hash=HASH_A, verified_at=edge,
+            ),
+            MarketFactArchiveVerificationRecord(
+                manifest_id=second.id, verifier_version="before", manifest_hash=second.manifest_hash,
+                catalog_hash=HASH_C, verification_hash=HASH_B, verified_at=before,
+            ),
+        ])
+
+    with Session(engine) as session, session.begin():
+        session.execute(text("SET TRANSACTION READ ONLY"))
+        result = _snapshot(session, sampled_at=sampled_at)
+
+    six_hours = result["rates"]["windows"][0]
+    assert six_hours["intake"]["estimated_source_bytes"] == 10
+    assert six_hours["archive"]["compressed_bytes"] == 5
+    assert six_hours["verify"]["compressed_bytes"] == 5
+    assert six_hours["reclaim"]["physical_hot_bytes"] == 11
+
+
+def test_projection_lock_timeout_is_unknown_without_poisoning_base_snapshot(postgres, monkeypatch):
+    engine, tmp_path = postgres
+    service = _configured_service(engine, tmp_path, monkeypatch)
+    locker = engine.connect()
+    transaction = locker.begin()
+    try:
+        locker.execute(text(
+            "LOCK TABLE market.fact_retention_partitions IN ACCESS EXCLUSIVE MODE"
+        ))
+        started = monotonic()
+        snapshot = service.snapshot()
+        assert monotonic() - started < 2
+        assert snapshot["health"] == "available"
+        assert snapshot["retention"]["state"] == "unknown"
+        assert snapshot["retention"]["reason"] == "bounded_projection_unavailable"
+    finally:
+        transaction.rollback()
+        locker.close()
+
+    assert service.snapshot()["retention"]["state"] == "ready"
+
+
+def _expanded_grafana_sql(sql):
+    return (sql
+        .replace("$__timeGroupAlias(at,'1h')", "date_trunc('hour',at) AS time")
+        .replace("$__timeFilter(sealed_at)",
+                 "sealed_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
+                 "sealed_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'")
+        .replace("$__timeFilter(acknowledged_at)",
+                 "acknowledged_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
+                 "acknowledged_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'")
+        .replace("$__timeFilter(verified_at)",
+                 "verified_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
+                 "verified_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'")
+        .replace("$__timeFilter(reclaimed_at)",
+                 "reclaimed_at >= TIMESTAMPTZ '2026-10-19 00:00:00+00' AND "
+                 "reclaimed_at < TIMESTAMPTZ '2026-10-20 00:00:00+00'"))
+
+
+def test_added_grafana_sql_executes_with_deadlines_and_missing_policy_is_unavailable(postgres):
+    engine, _ = postgres
+    dashboard = json.loads((Path(__file__).parents[2] /
+        "docker/grafana/provisioning/dashboards/capacity-database-growth.json").read_text())
+    sql_by_id = {
+        panel["id"]: _expanded_grafana_sql(panel["targets"][0]["rawSql"])
+        for panel in dashboard["panels"] if panel.get("id") in {28, 29, 30, 31}
+    }
+    assert set(sql_by_id) == {28, 29, 30, 31}
+
+    with Session(engine) as session, session.begin():
+        session.execute(text("SET TRANSACTION READ ONLY"))
+        results = {
+            panel_id: list(session.execute(text(sql)).mappings())
+            for panel_id, sql in sql_by_id.items()
+        }
+        assert session.scalar(text("SHOW statement_timeout")) == "5s"
+        assert session.scalar(text("SHOW lock_timeout")) == "250ms"
+
+    assert results[28][0]["value"] is None
+    assert results[29][0]["value"] is None

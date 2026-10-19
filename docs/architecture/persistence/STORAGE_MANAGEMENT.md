@@ -197,12 +197,15 @@ checks does not start research or clear an operational hold.
 ## Bounded lifecycle observation
 
 `GET /api/storage` includes `qt.storage_retention_observability.v1`. The
-projection is read-only and metadata-only: it scans at most 2,048 retention
-partition rows and 10,000 archive manifest rows under a five-second statement
-timeout and 250 ms lock timeout. It does not call the retention planner, read
-Fact payloads, open archive objects, hydrate history or acquire lifecycle
-ownership. A failed or timed-out projection becomes `unknown`; storage settings
-remain available.
+projection is read-only and metadata-only: it projects at most 2,048 retention
+partition rows after reading at most 2,049, and projects at most 10,000 archive
+manifest rows after reading at most 10,001. The manifest page is bounded before
+verification expansion. Verification versions for those selected manifests use
+their primary-key scope plus the five-second statement timeout as the backstop;
+they do not have a separate per-manifest row cap. A 250 ms lock timeout also
+applies. The projection does not call the retention planner, read Fact payloads,
+open archive objects, hydrate history or acquire lifecycle ownership. A failed
+or timed-out projection becomes `unknown`; storage settings remain available.
 
 The projection identifies the sampled runtime source, saved policy revision and
 fingerprint, default effective hot window, scan bounds, completeness and any
@@ -231,9 +234,13 @@ manifest and verification timestamps rather than from process-local callbacks.
 
 The Storage room presents this bounded evidence with the explanation beside the
 numbers. The existing Capacity and Database Growth Grafana dashboard adds the
-same pipeline domains and an oldest-days table. Its eligibility views use the
-same saved default window whose runtime adapter clears family overrides. Grafana
-panels are operator visibility and never execution authority.
+same pipeline domains and an oldest-days table. Each added PostgreSQL query uses
+a five-second statement deadline, 250 ms lock timeout and explicit row page.
+Eligibility panels return unavailable when saved policy is absent or their page
+is truncated; lifecycle event panels return unavailable when a domain page is
+truncated. Eligibility uses the same saved default window whose runtime adapter
+clears family overrides. Grafana panels are operator visibility and never
+execution authority.
 
 ## Proposed forward-only transition
 
