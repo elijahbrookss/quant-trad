@@ -16,6 +16,11 @@ def _log_ratio(current, previous):
     return math.log(ratio) if 0 < ratio < math.inf else math.log(current)-math.log(previous)
 
 
+def locked_reference_geometry(entry, low, known_at):
+    """Completion-known reference geometry; caller owns the admitted low window."""
+    return {"E": entry, "L": low, "upper": entry+(entry-low), "known_at": plain(known_at)}
+
+
 class CompletedEventContext:
     def __init__(self, candles, events, *, evaluation_start, evaluation_end, checkpoint=lambda: None):
         by_close = {b.close_time: i for i, b in enumerate(candles)}
@@ -83,8 +88,7 @@ class CompletedEventContext:
         record = {"event_id": event.event_id, "decision_at": plain(event.known_at),
             "block": int((event.known_at-evaluation_start)//timedelta(days=28)),
             "formation_start": plain(event.formation_start), "formation_candles": n,
-            "boundary_geometry": {"E": closes[i], "L": trailing_lows(n)[i],
-                "upper": closes[i]+(closes[i]-trailing_lows(n)[i]), "known_at": plain(event.known_at)},
+            "boundary_geometry": locked_reference_geometry(closes[i], trailing_lows(n)[i], event.known_at),
             "support_start": plain(candles[start_index].open_time), "support_end": plain(event.known_at+12*step),
             "features": geometry(i, n), "timing": timing_view(event),
             "source_reference_ids": [s.event_id for s in event.source_events], "match_status": "unmatched"}

@@ -504,6 +504,8 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                                           'block_count': 1}]},
                             'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}}
 
+_EXAMPLES['event_fact_analysis@15'] = {'check_family': 'event_fact_analysis', 'mode': 'evidence', 'scope': {'instrument_id': 'authorized-instrument-id', 'indicator_id': 'existing-breakout-indicator-id', 'timeframe': '15m', 'start': '2024-01-01T01:00:00Z', 'end': '2024-01-02T00:00:00Z'}, 'detector': {'type': 'indicator_event', 'output_name': 'breakouts', 'event_keys': [{'key': 'breakout_long', 'direction': 'long'}]}, 'outcomes': {'schema_version': 'indicator_event_barriers.v1', 'input_origin': '2024-01-01T00:00:00Z', 'horizon_bars': 12, 'reference': {'operator': 'event_close'}, 'failure': {'operator': 'event_metadata_number', 'path': 'metadata.failure_price'}, 'target': {'operator': 'event_metadata_number', 'path': 'metadata.target_price'}, 'support_lookback_bars': 4}, 'statistics': {'features': [{'name': 'strength', 'operator': 'event_metadata_number', 'path': 'metadata.strength', 'units': 'ratio'}]}, 'gap_policy': 'reject', 'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
+
 _PURPOSES = {'raw_forward_outcome@20': 'Compose all completed reversals,causal context,inclusive recovery duration and '
                            'unchanged12bar first passage;separate full-population label distributions with '
                            'original all-case clock weights;no matching or adjusted inference.',
@@ -544,6 +546,8 @@ _PURPOSES = {'raw_forward_outcome@20': 'Compose all completed reversals,causal c
  'event_fact_analysis@12': 'Filter the original crossing-state pairs by a fixed 5% public ATR-ratio rule '
                            'before outcomes.'}
 
+_PURPOSES['event_fact_analysis@15'] = 'Measure public Indicator events against locked high/low barriers, original-clock weighted feature profiles and strictly-later target observations; no recognition, rematching or trading claim.'
+
 
 def _discovery(family: str, version: str) -> dict[str, Any]:
     result = {"new_requests": True,
@@ -557,6 +561,11 @@ def _discovery(family: str, version: str) -> dict[str, Any]:
 
 
 def _settings_fields(family: str, version: str) -> dict[str, Any]:
+    if family == "event_fact_analysis" and version == "15":
+        return {"scope":"Existing Indicator/instrument IDs,native15m,explicit bounded UTC range.",
+                "detector":"Public long signal output_name/event_keys, no detection algorithm.",
+                "outcomes":"indicator_event_barriers.v1;explicit input_origin,1..12bars;event-close/metadata reference,window-low/metadata failure,risk-multiple/metadata target;optional identity/source/clock paths.",
+                "statistics":"1..32explicit named/unit metadata or window-duration features;at most3declared min/max illustrations;all-population clock weights and fixed descriptive contrasts."}
     from . import checks, event_fact_evaluator as event
     from research_science.check import ASSERTION_OPERATORS
 
@@ -700,6 +709,8 @@ _PAIRED_SUPPORT = {
 
 
 def _analytical_fields(family: str, version: str) -> dict[str, Any]:
+    if family == "event_fact_analysis" and version == "15":
+        return {"cases":"Original public event IDs,geometry,features,weights,first passage and later-target observation.","population_hash":"Prelabel population/dependence digest.","summary":"Four label masses,weighted feature ECDF/quantiles and two descriptive contrasts.","later_target_summary":"Original failure mass and fixed first-failure opportunity/status rows.","dependence":"Direct support and conservative common-origin ancestry;not independent N."}
     fields = {
         "status": {"type": "string", "meaning": "Operation completion; not statistical validity."},
         "sample_count": {"type": "integer", "unit": "method-specific observations", "meaning": "Inspect method population and exclusions; not effective independent sample size."},
@@ -881,7 +892,8 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
             "statistics": "Only statistics accepted by the existing method normalizer.",
             "assertions": "Existing scalar assertions; no trading or execution permission.",
         },
-        "defaults": {"mode": "preview", "gap_rewarm_bars": 0},
+        "defaults": {"mode": "evidence" if definition.definition_id == "event_fact_analysis" and version == "15" else "preview",
+                     "gap_rewarm_bars": 0},
         "constraints": ["Existing request normalizers and requirements/prepare are authoritative.",
                         "Examples are templates, not existing datasets or execution approval."],
     }
@@ -921,7 +933,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         "definition": definition.to_dict(),
         "purpose": _PURPOSES[key],
         "eligibility": {"request_selectable": example is not None,
-                        "modes": ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
+                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version=="15" else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
                         "execution_authority": False, "promotion_authority": False,
                         **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
@@ -938,7 +950,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "populations" if definition.definition_id == "raw_forward_outcome" and version == "20" else "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5", "19"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "summary" if definition.definition_id=="event_fact_analysis" and version=="15" else "populations" if definition.definition_id == "raw_forward_outcome" and version == "20" else "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5", "19"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),
