@@ -129,6 +129,14 @@ code_paths:
   - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/maintenance_runtime.py
+  - portal/backend/service/storage/retention_observability.py
+  - portal/backend/service/market/canonical_retention.py
+  - portal/backend/service/market/market_storage_lifecycle.py
+  - tests/test_portal/test_storage_retention_observability.py
+  - tests/test_market_data/test_canonical_retention_executor.py
+  - tests/test_market_data/test_recovery_supervisor.py
+  - portal/frontend/src/v2/rooms/StorageRoom.test.jsx
+  - docker/grafana/provisioning/dashboards/capacity-database-growth.json
   - portal/backend/service/storage/history_policy.py
   - portal/backend/Dockerfile
   - scripts/provenance/source_tree_hash.py
@@ -184,6 +192,47 @@ including initialization, restart, gap catch-up and warmup beyond that window,
 against their existing latency/resource limits and competing collection I/O.
 Observe-only paper support does not establish live readiness. Passing storage
 checks does not start research or clear an operational hold.
+
+## Bounded lifecycle observation
+
+`GET /api/storage` includes `qt.storage_retention_observability.v1`. The
+projection is read-only and metadata-only: it scans at most 2,048 retention
+partition rows and 10,000 archive manifest rows under a five-second statement
+timeout and 250 ms lock timeout. It does not call the retention planner, read
+Fact payloads, open archive objects, hydrate history or acquire lifecycle
+ownership. A failed or timed-out projection becomes `unknown`; storage settings
+remain available.
+
+The projection identifies the sampled runtime source, saved policy revision and
+fingerprint, default effective hot window, scan bounds, completeness and any
+truncation. The maintenance runtime's saved-policy adapter replaces the base hot
+window and clears base fact-family overrides; the projection reports both that
+effective empty override map and the inactive configured base values. An eligible
+open partition has no sealed source-byte estimate, so its presence makes the
+result `partial`.
+
+Physical hot source bytes, compressed archive bytes, estimated rows and
+cumulative reclaimed bytes are separate measures. The 6-hour, 24-hour and
+7-day windows also keep four event domains separate: source bytes first measured
+at partition sealing (an intake estimate), compressed bytes acknowledged to the
+archive, compressed bytes verified and physical hot bytes reclaimed. A single
+sample cannot establish filesystem deltas or permanent metadata growth. The API
+therefore reports those fields as unavailable, and it does not provide an ETA
+until aligned physical intake and reclaim samples demonstrate positive net
+drain.
+
+The maintenance supervisor reports the current phase, its start and boundary
+progress, plus completed phase durations. Canonical progress is observed only at
+the existing plan/action/result boundaries. Observer failure is caught and
+cannot change retention, recovery, scheduling, admission or retry behavior.
+Last durable advancement in the API is reconstructed from committed partition,
+manifest and verification timestamps rather than from process-local callbacks.
+
+The Storage room presents this bounded evidence with the explanation beside the
+numbers. The existing Capacity and Database Growth Grafana dashboard adds the
+same pipeline domains and an oldest-days table. Its eligibility views use the
+same saved default window whose runtime adapter clears family overrides. Grafana
+panels are operator visibility and never execution authority.
 
 ## Proposed forward-only transition
 

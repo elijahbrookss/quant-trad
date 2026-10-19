@@ -108,7 +108,8 @@ class CanonicalFactRetentionExecutor:
         raise ValueError(f"canonical_retention_action_invalid: action={action}")
 
     def run(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
-            execute: bool = False, after_storage_day: date | None = None, cancelled=None):
+            execute: bool = False, after_storage_day: date | None = None, cancelled=None,
+            progress=None):
         if type(execute) is not bool or (after_storage_day is not None and type(after_storage_day) is not date):
             raise ValueError("canonical_retention_request_invalid")
         witness = None
@@ -124,19 +125,28 @@ class CanonicalFactRetentionExecutor:
             raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
         try:
             return self._run(policy=policy, storage_root=storage_root, after_storage_day=after_storage_day,
-                             cancelled=cancelled, storage_policy_witness=witness)
+                             cancelled=cancelled, storage_policy_witness=witness, progress=progress)
         finally:
             # Committed catalog progress is the only state carried across runs.
             self._archive = None
             self._run_lock.release()
 
-    def _run(self, *, policy, storage_root, after_storage_day, cancelled, storage_policy_witness=None):
+    def _run(self, *, policy, storage_root, after_storage_day, cancelled, storage_policy_witness=None,
+             progress=None):
         started = monotonic()
         deadline = started + policy.max_run_seconds
         cursor = after_storage_day if after_storage_day is not None else self._cursor
         outcomes, initial_plan = [], None
         stop_reason = "step_budget"
         scans = 0
+
+        def observe(**fields):
+            if progress is None:
+                return
+            try:
+                progress({"schema_version": "market.canonical_retention_progress.v1", **fields})
+            except Exception:
+                logger.warning("canonical_retention_progress_observer_failed", exc_info=True)
 
         def check_budget():
             if cancelled is not None and cancelled():
@@ -146,6 +156,8 @@ class CanonicalFactRetentionExecutor:
 
         for _ in range(policy.max_steps_per_run):
             try:
+                observe(stage="planning", completed_steps=len(outcomes), planning_pages=scans,
+                        after_storage_day=cursor.isoformat() if cursor else None)
                 check_budget()
                 plan_policy = replace(policy, max_plan_seconds=min(policy.max_plan_seconds,
                                                                    max(1, int(deadline - monotonic()))))
@@ -174,10 +186,15 @@ class CanonicalFactRetentionExecutor:
             # skip a failed/busy day this cycle so it cannot starve later days.
             cursor = day - timedelta(days=1)
             try:
+                observe(stage="executing", completed_steps=len(outcomes),
+                        storage_day=day.isoformat(), action=item["action"])
                 result = self._execute_step(item=item, policy=policy, storage_root=storage_root,
                                            check_budget=check_budget, remaining_seconds=deadline - monotonic(),
                                            storage_policy_witness=storage_policy_witness)
                 outcomes.append({**result, "action": item["action"], "storage_day": day.isoformat()})
+                observe(stage="step_finished", completed_steps=len(outcomes),
+                        storage_day=day.isoformat(), action=item["action"],
+                        status=result.get("status"))
                 if result["status"] in {"partition_reclaimed", "already_reclaimed"}:
                     cursor = day
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
@@ -227,6 +244,8 @@ class CanonicalFactRetentionExecutor:
                   "resume_authority": "committed_partition_pages_and_verifications"}
         if self.use_saved_history_policy:
             result["storage_policy"] = storage_policy_witness
+        observe(stage="finished", completed_steps=len(outcomes), status=result["status"],
+                next_after_storage_day=result["next_after_storage_day"])
         logger.info("canonical_retention_run_finished | status=%s steps=%s scans=%s failures=%s next_after_storage_day=%s",
                     result["status"], len(outcomes), scans, failures, result["next_after_storage_day"])
         return result
