@@ -21,13 +21,15 @@ def test_type_details_returns_serialized_manifest_shape() -> None:
     assert details["compute_supported"] is False
 
 
-def test_type_details_expose_compute_only_indicator_support() -> None:
-    details = get_type_details("vwap")
+@pytest.mark.parametrize("kind", ["vwap", "pivot_level", "trendline"])
+def test_type_details_reject_unsupported_compute_only_entries(kind):
+    with pytest.raises(KeyError): get_type_details(kind)
 
-    assert details["type"] == "vwap"
-    assert details["color_mode"] == "palette"
-    assert details["runtime_supported"] is False
-    assert details["compute_supported"] is True
+
+def test_reversal_type_exposes_supported_causal_runtime():
+    details=get_type_details("reversal")
+    assert details["runtime_supported"] is True
+    assert {output["type"] for output in details["outputs"]} == {"signal","context","lifecycle"}
 
 
 def test_type_details_expose_color_palettes_when_declared() -> None:

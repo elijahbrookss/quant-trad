@@ -123,7 +123,7 @@ def test_check_binding_pins_canonical_input_result_and_evidence(monkeypatch):
     values = [SimpleNamespace(definition_hash="definition"), SimpleNamespace(request_hash="request"),
               SimpleNamespace(plan_hash="plan"), SimpleNamespace(evidence_hash="evidence", input_hash="input",
               input_binding={"dataset_id": "dataset", "dataset_hash": "frozen"}), SimpleNamespace(result_hash="result")]
-    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _: values)
+    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda _, **kwargs: values)
     item = {"id": "check", "kind": "research_check", "payload": {}}
     binding = images._binding(item, {"result_hash": "result", "evidence_hash": "evidence"}, None)
     assert binding["input_binding"]["dataset_hash"] == "frozen"

@@ -10,7 +10,7 @@ from core.execution_control import execution_checkpoint
 from research_science.recognition import RecognitionCandle, utc
 from research_science.reversal_matched_outcomes import describe_selected_pairs, summarize_matched_outcomes, RULES as PASSAGE_RULES
 from research_science.reversal_matched_progress import describe_progress, summarize_progress, RULES as PROGRESS_RULES
-from research_science.study import stable_hash
+from research_science.hashing import stable_hash
 from . import repository
 from .raw_candle_evaluator import _prepare
 from .saved_selection_binding import context, reference, load_saved_selection, invalid
@@ -39,7 +39,7 @@ REUSABLE_RULES.update(version=REUSABLE_SCHEMA,
     reporting='Whole saved scope and its declared populations;original root weights normalized only within each named reporting view')
 
 
-def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy, schema=SCHEMA):
+def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy, schema=REUSABLE_SCHEMA):
     if (detector != DETECTOR or not isinstance(outcomes, dict)
             or set(outcomes) != {'schema_version', 'selection_reference', 'frozen_context'}
             or outcomes['schema_version'] != schema or statistics or inputs or gap_policy != 'reject'
@@ -57,16 +57,27 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
 
 
 @dataclass(frozen=True)
-class SavedSelectionMeasurementsEvaluator:
+class ReusableSelectionMeasurementsEvaluator:
     evaluator_id: str = 'raw_forward_outcome'
-    version: str = '16'
-    result_schema_version: str = RESULT_SCHEMA
-    configuration_schema: str = SCHEMA
-    admitted_selection_versions: tuple = ('12','14')
-    measurement_rules: ClassVar[dict] = RULES
+    version: str = '18'
+    result_schema_version: str = REUSABLE_RESULT_SCHEMA
+    configuration_schema: str = REUSABLE_SCHEMA
+    admitted_selection_versions: tuple = ('12','14','17')
+    measurement_rules: ClassVar[dict] = REUSABLE_RULES
 
     def additional_measurements(self, selection, passage, progress):
-        return {}
+        views={}
+        for name,population in selection['populations'].items():
+            scope=population['evaluation_range']
+            start,end=utc(scope['start']),utc(scope['end_exclusive'])
+            selected=[row for row in progress['pairs'] if start<=utc(row['decision_at'])<end]
+            first=[row for row in passage['pairs'] if start<=utc(row['decision_at'])<end]
+            views[name]={'evaluation_range':deepcopy(scope),'first_passage':summarize_matched_outcomes(first),
+                'progress':{role:{'all':summarize_progress(selected,role),
+                    'originally_neither':summarize_progress([row for row in selected
+                        if row[role]['original_outcome']['classification']=='neither'],role)}
+                    for role in ('case','control')}}
+        return {'measurements_by_population':views}
 
     def declare_requirements(self, *, definition, request):
         config = normalize_configuration(detector=request.parameters['detector'], outcomes=request.parameters['outcomes'],
@@ -151,28 +162,3 @@ class SavedSelectionMeasurementsEvaluator:
 
 def normalize_reusable_configuration(**kwargs):
     return normalize_configuration(**kwargs, schema=REUSABLE_SCHEMA)
-
-
-@dataclass(frozen=True)
-class ReusableSelectionMeasurementsEvaluator(SavedSelectionMeasurementsEvaluator):
-    """Same measurement composition, explicitly admitting configured populations."""
-    version: str = '18'
-    result_schema_version: str = REUSABLE_RESULT_SCHEMA
-    configuration_schema: str = REUSABLE_SCHEMA
-    admitted_selection_versions: tuple = ('12','14','17')
-    measurement_rules: ClassVar[dict] = REUSABLE_RULES
-
-
-    def additional_measurements(self, selection, passage, progress):
-        views={}
-        for name,population in selection['populations'].items():
-            scope=population['evaluation_range']
-            start,end=utc(scope['start']),utc(scope['end_exclusive'])
-            selected=[row for row in progress['pairs'] if start<=utc(row['decision_at'])<end]
-            first=[row for row in passage['pairs'] if start<=utc(row['decision_at'])<end]
-            views[name]={'evaluation_range':deepcopy(scope),'first_passage':summarize_matched_outcomes(first),
-                'progress':{role:{'all':summarize_progress(selected,role),
-                    'originally_neither':summarize_progress([row for row in selected
-                        if row[role]['original_outcome']['classification']=='neither'],role)}
-                    for role in ('case','control')}}
-        return {'measurements_by_population':views}

@@ -2658,6 +2658,7 @@ class PostgresMarketDataRepository:
         storage_day = None
         from .fact_references import lock_canonical_raw_references
 
+        market_storage_lifecycle_repository.acquire_publication_lock(session)
         session.execute(
             text("SELECT pg_advisory_xact_lock(:series_id)"),
             {"series_id": series_id},

@@ -64,7 +64,7 @@ def _binding(item: Mapping[str, Any], expected: Mapping[str, Any], session: Any)
     publication._assert_access(item, session)
     if item["kind"] == "research_check":
         from .service import _validate_research_check_evidence_payload
-        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(item["payload"])
+        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(item["payload"], item_id=item["id"])
         if set(expected) != {"result_hash", "evidence_hash"} or any(
             expected.get(key) != actual for key, actual in (
                 ("result_hash", result.result_hash), ("evidence_hash", evidence.evidence_hash)

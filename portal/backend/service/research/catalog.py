@@ -18,8 +18,7 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                      'end': '2022-01-02T00:00:00Z'},
                            'detector': {'type': 'indicator_event',
                                         'output_name': 'atr_expansion',
-                                        'event_keys': [{'key': 'atr_expansion_long',
-                                                        'direction': 'long'}]},
+                                        'event_keys': [{'key': 'atr_expansion_long', 'direction': 'long'}]},
                            'outcomes': {'horizons': [1, 3]},
                            'inputs': [{'alias': 'reference_price',
                                        'fact_type': 'market.reference_price',
@@ -44,7 +43,8 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                        'contract_version': 'market.bbo.v1',
                                        'timeframe_seconds': 1,
                                        'max_staleness_seconds': 120,
-                                       'source_policy': {'mode': 'exact', 'source_identity_key': 'source-identity-id'}}],
+                                       'source_policy': {'mode': 'exact',
+                                                         'source_identity_key': 'source-identity-id'}}],
                            'gap_policy': 'reject',
                            'mode': 'preview'},
  'event_fact_analysis@6': {'check_family': 'event_fact_analysis',
@@ -146,8 +146,7 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                       'warmup_bars': 200},
                             'detector': {'type': 'indicator_event',
                                          'output_name': 'atr_expansion',
-                                         'event_keys': [{'key': 'atr_expansion_long',
-                                                         'direction': 'long'}]},
+                                         'event_keys': [{'key': 'atr_expansion_long', 'direction': 'long'}]},
                             'outcomes': {'horizon_kind': 'elapsed_time',
                                          'horizons': [1800, 7200, 21600],
                                          'primary_horizon': 7200,
@@ -169,8 +168,7 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                       'warmup_bars': 200},
                             'detector': {'type': 'indicator_event',
                                          'output_name': 'atr_expansion',
-                                         'event_keys': [{'key': 'atr_expansion_long',
-                                                         'direction': 'long'}]},
+                                         'event_keys': [{'key': 'atr_expansion_long', 'direction': 'long'}]},
                             'outcomes': {'horizon_kind': 'elapsed_time',
                                          'horizons': [1800, 7200, 21600],
                                          'primary_horizon': 7200,
@@ -181,291 +179,381 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
                                                           'outcome_boundary': 'evaluation_end_exclusive',
                                                           'matching_contract': 'crossing_state_matched_pairs.v1'}},
                             'statistics': {}},
- 'raw_forward_outcome@4': {'check_family': 'raw_forward_outcome', 'mode': 'preview',
-     'scope': {'instrument_id': 'instrument-id', 'timeframe': '1m',
-               'start': '2022-01-01T00:00:00Z', 'end': '2022-02-01T00:00:00Z'},
-     'detector': {'type': 'controlled_bullish_reversal'},
-     'outcomes': {'schema_version': 'controlled_reversal_comparison.v1'},
-     'gap_policy': 'continue_degraded'},
- 'raw_forward_outcome@3': {'check_family': 'raw_forward_outcome', 'mode': 'preview',
-     'scope': {'instrument_id': 'instrument-id', 'timeframe': '1m',
-               'start': '2022-01-01T00:00:00Z', 'end': '2022-01-02T00:00:00Z'},
-     'detector': {'type': 'raw_condition', 'field': 'close', 'operator': 'gt', 'value_field': 'previous_close'},
-     'outcomes': {'schema_version': 'raw_candle_forward_outcome.v1', 'forward_bars': [5], 'entry_lag_bars': 1},
-     'gap_policy': 'continue_degraded'},
- 'raw_forward_outcome@2': {'check_family': 'raw_forward_outcome',
+ 'raw_forward_outcome@3': {'check_family': 'raw_forward_outcome',
                            'mode': 'preview',
                            'scope': {'instrument_id': 'instrument-id',
-                                     'indicator_id': 'indicator-id',
-                                     'timeframe': '1h',
+                                     'timeframe': '1m',
                                      'start': '2022-01-01T00:00:00Z',
                                      'end': '2022-01-02T00:00:00Z'},
                            'detector': {'type': 'raw_condition',
                                         'field': 'close',
                                         'operator': 'gt',
                                         'value_field': 'previous_close'},
-                           'outcomes': {'forward_bars': [1, 3]},
-                           'gap_policy': 'reject'},
- 'indicator_forward_outcome@2': {'check_family': 'indicator_forward_outcome',
-                                 'mode': 'preview',
-                                 'scope': {'instrument_id': 'instrument-id',
-                                           'indicator_id': 'indicator-id',
-                                           'timeframe': '1h',
-                                           'start': '2022-01-01T00:00:00Z',
-                                           'end': '2022-01-02T00:00:00Z'},
-                                 'detector': {'type': 'record_match', 'output_name': 'entry'},
-                                 'outcomes': {'forward_bars': [1, 3]},
-                                 'gap_policy': 'reject'},
- 'signal_audit@2': {'check_family': 'signal_audit',
-                    'mode': 'preview',
-                    'scope': {'instrument_id': 'instrument-id',
-                              'indicator_id': 'indicator-id',
-                              'timeframe': '1h',
-                              'start': '2022-01-01T00:00:00Z',
-                              'end': '2022-01-02T00:00:00Z'},
-                    'detector': {'type': 'signal_audit',
-                                 'source_output': 'state',
-                                 'source_field': 'ready',
-                                 'signal_output': 'entry',
-                                 'event_key': 'entry_long',
-                                 'operator': 'eq',
-                                 'value': True},
-                    'outcomes': {'forward_bars': [1, 3]},
-                    'gap_policy': 'reject'},
- 'candidate_lifecycle@2': {'check_family': 'candidate_lifecycle',
+                           'outcomes': {'schema_version': 'raw_candle_forward_outcome.v1',
+                                        'forward_bars': [5],
+                                        'entry_lag_bars': 1},
+                           'gap_policy': 'continue_degraded'},
+ 'event_fact_analysis@12': {'check_family': 'event_fact_analysis',
+                            'mode': 'preview',
+                            'inputs': [],
+                            'gap_policy': 'reset_rewarm',
+                            'scope': {'indicator_id': 'stats-1',
+                                      'instrument_id': 'instrument-1',
+                                      'timeframe': '1m',
+                                      'start': '2022-12-30T00:00:00Z',
+                                      'end': '2023-01-01T00:00:00Z',
+                                      'warmup_bars': 200},
+                            'detector': {'type': 'indicator_event',
+                                         'output_name': 'atr_expansion',
+                                         'event_keys': [{'key': 'atr_expansion_long', 'direction': 'long'}]},
+                            'outcomes': {'horizon_kind': 'elapsed_time',
+                                         'horizons': [1800, 7200, 21600],
+                                         'primary_horizon': 7200,
+                                         'entry_lag_bars': 0,
+                                         'forward_risk': {'schema_version': 'candle_risk_matched_state.v2',
+                                                          'baseline_bars': 120,
+                                                          'readiness_contract': 'candle_stats.public_outputs.v1',
+                                                          'outcome_boundary': 'evaluation_end_exclusive',
+                                                          'matching_contract': 'crossing_state_matched_pairs.v1',
+                                                          'filter_contract': 'crossing_state_atr_ratio_filter.v1'}},
+                            'statistics': {}},
+ 'raw_forward_outcome@19': {'check_family': 'raw_forward_outcome',
+                            'mode': 'preview',
+                            'scope': {'instrument_id': 'instrument-id',
+                                      'timeframe': '15m',
+                                      'start': '2022-01-01T00:00:00Z',
+                                      'end': '2022-02-01T00:00:00Z',
+                                      'warmup_bars': 97},
+                            'detector': {'type': 'controlled_bullish_reversal'},
+                            'outcomes': {'schema_version': 'controlled_reversal_comparison.v3',
+                                         'interval': '15m',
+                                         'trend_lookback_bars': 12,
+                                         'volatility_lookback_bars': 96,
+                                         'entry_lag_bars': 1,
+                                         'outcome_horizon_bars': 12,
+                                         'matching_policy': 'same_utc_close_slot',
+                                         'comparison_window_days': 7},
+                            'gap_policy': 'continue_degraded'},
+ 'event_fact_analysis@13': {'check_family': 'event_fact_analysis',
+                            'mode': 'preview',
+                            'gap_policy': 'continue_degraded',
+                            'scope': {'instrument_id': 'coinbase-btc-usd',
+                                      'timeframe': '1h',
+                                      'warmup_bars': 15,
+                                      'start': '2026-07-25T00:00:00Z',
+                                      'end': '2026-09-23T00:00:00Z'},
+                            'detector': {'type': 'fact_snapshot', 'input_alias': 'long_liquidations'},
+                            'outcomes': {'horizons': [1],
+                                         'entry_lag_bars': 0,
+                                         'retrospective': {'schema_version': 'retrospective_numeric_comparison.v1',
+                                                           'analysis_as_of': '2026-10-13T23:00:00Z',
+                                                           'bucket_time_interpretation': 'bucket_start_unverified'}},
+                            'inputs': [{'alias': 'long_liquidations',
+                                        'instrument_id': 'binance-btc-usdt-perp',
+                                        'fact_type': 'derivatives.liquidation_volume',
+                                        'contract_version': 'derivatives.liquidation_volume.v1',
+                                        'max_staleness_seconds': 3600,
+                                        'alignment': 'exact_interval',
+                                        'dimensions': {'liquidated_side': 'long',
+                                                       'bucket_seconds': 3600,
+                                                       'volume_unit': 'BTC',
+                                                       'exchange': 'Binance',
+                                                       'product': 'BTCUSDT_PERP.A'},
+                                        'source_policy': {'mode': 'exact',
+                                                          'source_identity_key': 'authorized-source'}},
+                                       {'alias': 'short_liquidations',
+                                        'instrument_id': 'binance-btc-usdt-perp',
+                                        'fact_type': 'derivatives.liquidation_volume',
+                                        'contract_version': 'derivatives.liquidation_volume.v1',
+                                        'max_staleness_seconds': 3600,
+                                        'alignment': 'exact_interval',
+                                        'dimensions': {'liquidated_side': 'short',
+                                                       'bucket_seconds': 3600,
+                                                       'volume_unit': 'BTC',
+                                                       'exchange': 'Binance',
+                                                       'product': 'BTCUSDT_PERP.A'},
+                                        'source_policy': {'mode': 'exact',
+                                                          'source_identity_key': 'authorized-source'}}],
+                            'statistics': {'features': {'baseline': [{'name': 'recent_return',
+                                                                      'operator': 'lagged_return',
+                                                                      'lookback_bars': 1},
+                                                                     {'name': 'recent_volatility',
+                                                                      'operator': 'atr_fraction',
+                                                                      'period': 14}],
+                                                        'enriched': [{'name': 'long_liquidations',
+                                                                      'operator': 'latest_value',
+                                                                      'input_alias': 'long_liquidations'},
+                                                                     {'name': 'short_liquidations',
+                                                                      'operator': 'latest_value',
+                                                                      'input_alias': 'short_liquidations'}]},
+                                           'model': {'type': 'standardized_l2_logistic', 'c': 1.0},
+                                           'purge_bars': 1,
+                                           'folds': [{'id': 'fixed-comparison',
+                                                      'train': {'start': '2026-07-25T00:00:00Z',
+                                                                'end': '2026-09-03T00:00:00Z'},
+                                                      'validation': {'start': '2026-09-03T00:00:00Z',
+                                                                     'end': '2026-09-23T00:00:00Z'}}]}},
+ 'raw_forward_outcome@6': {'check_family': 'raw_forward_outcome',
                            'mode': 'preview',
                            'scope': {'instrument_id': 'instrument-id',
-                                     'indicator_id': 'indicator-id',
-                                     'timeframe': '1h',
+                                     'timeframe': '1m',
                                      'start': '2022-01-01T00:00:00Z',
-                                     'end': '2022-01-02T00:00:00Z'},
-                           'detector': {'type': 'candidate_lifecycle'},
-                           'outcomes': {'forward_bars': [1, 3]},
-                           'gap_policy': 'reject'},
- 'run_signal_summary@2': {'check_family': 'run_signal_summary',
-                          'mode': 'preview',
-                          'scope': {'instrument_id': 'instrument-id',
-                                    'indicator_id': 'indicator-id',
-                                    'timeframe': '1h',
-                                    'start': '2022-01-01T00:00:00Z',
-                                    'end': '2022-01-02T00:00:00Z',
-                                    'run_id': 'run-id'},
-                          'detector': {'type': 'run_signal_match', 'output_name': 'entry'},
-                          'outcomes': {'forward_bars': [1, 3]},
-                          'gap_policy': 'reject'},
- 'run_decision_trade_comparison@2': {'check_family': 'run_decision_trade_comparison',
-                                     'mode': 'preview',
-                                     'scope': {'instrument_id': 'instrument-id',
-                                               'indicator_id': 'indicator-id',
-                                               'timeframe': '1h',
-                                               'start': '2022-01-01T00:00:00Z',
-                                               'end': '2022-01-02T00:00:00Z',
-                                               'run_id': 'run-id'},
-                                     'detector': {'type': 'run_decision_match',
-                                                  'decision_state': 'accepted'},
-                                     'outcomes': {'forward_bars': [1, 3]},
-                                     'gap_policy': 'reject'}}
+                                     'end': '2022-01-02T00:00:00Z',
+                                     'warmup_bars': 1},
+                           'detector': {'all': [{'field': 'previous_close',
+                                                 'operator': 'lt',
+                                                 'value_field': 'previous_open'},
+                                                {'field': 'close', 'operator': 'gt', 'value_field': 'open'},
+                                                {'field': 'open',
+                                                 'operator': 'lte',
+                                                 'value_field': 'previous_close'},
+                                                {'field': 'close',
+                                                 'operator': 'gte',
+                                                 'value_field': 'previous_open'},
+                                                {'any': [{'field': 'volume',
+                                                          'operator': 'gt',
+                                                          'value_field': 'previous_volume'},
+                                                         {'field': 'volume',
+                                                          'operator': 'lte',
+                                                          'value_field': 'previous_volume'}]}]},
+                           'outcomes': {'schema_version': 'raw_candle_distribution.v1',
+                                        'forward_bars': [5],
+                                        'entry_lag_bars': 1},
+                           'gap_policy': 'continue_degraded'},
+ 'raw_forward_outcome@7': {'check_family': 'raw_forward_outcome',
+                           'mode': 'preview',
+                           'scope': {'instrument_id': 'instrument-id',
+                                     'timeframe': '1m',
+                                     'start': '2022-01-01T00:00:00Z',
+                                     'end': '2022-01-02T00:00:00Z',
+                                     'warmup_bars': 1},
+                           'detector': {'all': [{'field': 'previous_close',
+                                                 'operator': 'lt',
+                                                 'value_field': 'previous_open'},
+                                                {'field': 'close', 'operator': 'gt', 'value_field': 'open'},
+                                                {'field': 'open',
+                                                 'operator': 'lte',
+                                                 'value_field': 'previous_close'},
+                                                {'field': 'close',
+                                                 'operator': 'gte',
+                                                 'value_field': 'previous_open'},
+                                                {'any': [{'field': 'volume',
+                                                          'operator': 'gt',
+                                                          'value_field': 'previous_volume'},
+                                                         {'field': 'volume',
+                                                          'operator': 'lte',
+                                                          'value_field': 'previous_volume'}]}]},
+                           'outcomes': {'schema_version': 'volume_cohort_matched.v1',
+                                        'forward_bars': [5],
+                                        'entry_lag_bars': 1,
+                                        'comparison': {'cohort': 'volume_gt_previous_vs_lte',
+                                                       'prior_volatility_bars': 20,
+                                                       'matching_policy': 'same_date_hour',
+                                                       'caliper_ratios': {'formation_body_fraction': 1.25,
+                                                                          'formation_range_fraction': 1.25,
+                                                                          'prior_rms_return': 1.25}}},
+                           'gap_policy': 'continue_degraded'},
+ 'raw_forward_outcome@8': {'check_family': 'raw_forward_outcome',
+                           'mode': 'preview',
+                           'scope': {'instrument_id': 'instrument-id',
+                                     'timeframe': '1m',
+                                     'start': '2022-01-01T00:00:00Z',
+                                     'end': '2022-01-02T00:00:00Z',
+                                     'warmup_bars': 1},
+                           'detector': {'all': [{'field': 'previous_close',
+                                                 'operator': 'lt',
+                                                 'value_field': 'previous_open'},
+                                                {'field': 'close', 'operator': 'gt', 'value_field': 'open'},
+                                                {'field': 'open',
+                                                 'operator': 'lte',
+                                                 'value_field': 'previous_close'},
+                                                {'field': 'close',
+                                                 'operator': 'gte',
+                                                 'value_field': 'previous_open'},
+                                                {'any': [{'field': 'volume',
+                                                          'operator': 'gt',
+                                                          'value_field': 'previous_volume'},
+                                                         {'field': 'volume',
+                                                          'operator': 'lte',
+                                                          'value_field': 'previous_volume'}]}]},
+                           'outcomes': {'schema_version': 'volume_cohort_matched.v2',
+                                        'forward_bars': [5],
+                                        'entry_lag_bars': 1,
+                                        'comparison': {'cohort': 'volume_gt_previous_vs_lte',
+                                                       'prior_volatility_bars': 20,
+                                                       'matching_policy': 'same_utc_close_slot',
+                                                       'caliper_ratios': {'formation_body_fraction': 1.25,
+                                                                          'formation_range_fraction': 1.25,
+                                                                          'prior_rms_return': 1.25},
+                                                       'comparison_window_days': 3,
+                                                       'matching_slot_seconds': 3600}},
+                           'gap_policy': 'continue_degraded'},
+ 'event_fact_analysis@14': {'check_family': 'event_fact_analysis',
+                            'mode': 'preview',
+                            'gap_policy': 'continue_degraded',
+                            'scope': {'instrument_id': 'instrument-id',
+                                      'timeframe': '1m',
+                                      'start': '2026-09-22T00:00:00Z',
+                                      'end': '2026-09-22T00:30:00Z'},
+                            'detector': {'type': 'liquidity_episode'},
+                            'outcomes': {'schema_version': 'liquidity_episode.v1',
+                                         'analysis_as_of': '2026-10-14T00:00:00Z'},
+                            'inputs': [{'alias': 'bbo',
+                                        'fact_type': 'market.bbo',
+                                        'contract_version': 'market.bbo.v1',
+                                        'timeframe_seconds': 1,
+                                        'alignment': 'exact_interval',
+                                        'max_staleness_seconds': 1,
+                                        'allow_gaps': True,
+                                        'source_policy': {'mode': 'exact',
+                                                          'source_identity_key': 'source-identity-id'}},
+                                       {'alias': 'depth',
+                                        'fact_type': 'market.depth_observation',
+                                        'contract_version': 'market.depth_band.v1',
+                                        'timeframe_seconds': 1,
+                                        'alignment': 'exact_interval',
+                                        'max_staleness_seconds': 1,
+                                        'allow_gaps': True,
+                                        'source_policy': {'mode': 'exact',
+                                                          'source_identity_key': 'source-identity-id'}},
+                                       {'alias': 'flow',
+                                        'fact_type': 'market.trade_flow',
+                                        'contract_version': 'market.trade_flow.v1',
+                                        'timeframe_seconds': 1,
+                                        'alignment': 'exact_interval',
+                                        'max_staleness_seconds': 1,
+                                        'allow_gaps': True,
+                                        'source_policy': {'mode': 'exact',
+                                                          'source_identity_key': 'source-identity-id'}},
+                                       {'alias': 'trades',
+                                        'fact_type': 'market.trade',
+                                        'contract_version': 'market.trade.v1',
+                                        'alignment': 'latest_known',
+                                        'max_staleness_seconds': 1,
+                                        'allow_gaps': True,
+                                        'source_policy': {'mode': 'exact',
+                                                          'source_identity_key': 'source-identity-id'}}]},
+ 'raw_forward_outcome@17': {'check_family': 'raw_forward_outcome',
+                            'mode': 'evidence',
+                            'gap_policy': 'reject',
+                            'scope': {'instrument_id': 'instrument-1',
+                                      'timeframe': '15m',
+                                      'start': '2025-02-01T00:00:00Z',
+                                      'end': '2025-03-29T00:00:00Z'},
+                            'detector': {'type': 'completed_reversal_candidates',
+                                         'computation_origin': '2025-01-01T00:00:00Z',
+                                         'reference_basis': 'rising_leg_plus_retreat',
+                                         'ownership': 'retain_all_provisional',
+                                         'max_bars': 19104,
+                                         'max_candidates': 10000},
+                            'outcomes': {'schema_version': 'reversal_population_selection.v1',
+                                         'populations': [{'name': 'first_block',
+                                                          'start_block': 0,
+                                                          'block_count': 1},
+                                                         {'name': 'second_block',
+                                                          'start_block': 1,
+                                                          'block_count': 1}]},
+                            'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'},
+ 'raw_forward_outcome@18': {'check_family': 'raw_forward_outcome',
+                            'mode': 'evidence',
+                            'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                            'scope': {'instrument_id': 'instrument-1',
+                                      'timeframe': '15m',
+                                      'start': '2025-02-01T00:00:00Z',
+                                      'end': '2025-03-29T00:00:00Z'},
+                            'detector': {'type': 'saved_reversal_selection'},
+                            'gap_policy': 'reject',
+                            'outcomes': {'schema_version': 'reversal_saved_measurements.v2',
+                                         'selection_reference': {'source_check_id': '11111111-1111-4111-8111-111111111111',
+                                                                 'result_hash': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                                                 'evidence_hash': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                                                                 'selection_manifest_hash': 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'},
+                                         'frozen_context': {'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                                            'dataset_hash': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                                                            'input_binding_hash': 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                                                            'max_commit_seq': 10,
+                                                            'instrument_id': 'instrument-1',
+                                                            'input_start': '2025-01-01T00:00:00Z',
+                                                            'input_end_exclusive': '2025-03-29T00:00:00Z',
+                                                            'decision_start': '2025-02-01T00:00:00Z',
+                                                            'decision_end_exclusive': '2025-03-29T00:00:00Z',
+                                                            'source_identity_key': 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                                                            'input_rows': 8352,
+                                                            'case_count': 2,
+                                                            'pair_count': 2,
+                                                            'completion_clock_count': 1}}},
+ 'raw_forward_outcome@20': {'check_family': 'raw_forward_outcome',
+                            'mode': 'evidence',
+                            'gap_policy': 'reject',
+                            'scope': {'instrument_id': 'instrument-1',
+                                      'timeframe': '15m',
+                                      'start': '2025-02-01T00:00:00Z',
+                                      'end': '2025-03-29T00:00:00Z'},
+                            'detector': {'type': 'completed_reversal_candidates',
+                                         'computation_origin': '2025-01-01T00:00:00Z',
+                                         'reference_basis': 'rising_leg_plus_retreat',
+                                         'ownership': 'retain_all_provisional',
+                                         'max_bars': 19104,
+                                         'max_candidates': 10000},
+                            'outcomes': {'schema_version': 'reversal_completed_recovery.v1',
+                                         'populations': [{'name': 'first_block',
+                                                          'start_block': 0,
+                                                          'block_count': 1},
+                                                         {'name': 'second_block',
+                                                          'start_block': 1,
+                                                          'block_count': 1}]},
+                            'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}}
 
-_EXAMPLES["event_fact_analysis@12"] = deepcopy(_EXAMPLES["event_fact_analysis@11"])
-_EXAMPLES["event_fact_analysis@12"]["outcomes"]["forward_risk"].update(
-    schema_version="candle_risk_matched_state.v2", filter_contract="crossing_state_atr_ratio_filter.v1")
-
-_EXAMPLES["raw_forward_outcome@5"] = deepcopy(_EXAMPLES["raw_forward_outcome@4"])
-_EXAMPLES["raw_forward_outcome@5"]["scope"].update(timeframe="15m", warmup_bars=97)
-_EXAMPLES["raw_forward_outcome@5"]["outcomes"] = {
-    "schema_version": "controlled_reversal_comparison.v2", "interval": "15m",
-    "trend_lookback_bars": 12, "volatility_lookback_bars": 96, "entry_lag_bars": 1,
-    "outcome_horizon_bars": 12, "matching_policy": "same_utc_close_slot", "comparison_window_days": 7}
-_EXAMPLES['raw_forward_outcome@19'] = deepcopy(_EXAMPLES['raw_forward_outcome@5'])
-_EXAMPLES['raw_forward_outcome@19']['outcomes']['schema_version'] = 'controlled_reversal_comparison.v3'
-_EXAMPLES["event_fact_analysis@13"] = {
-    "check_family": "event_fact_analysis", "mode": "preview", "gap_policy": "continue_degraded",
-    "scope": {"instrument_id": "coinbase-btc-usd", "timeframe": "1h", "warmup_bars": 15,
-        "start": "2026-07-25T00:00:00Z", "end": "2026-09-23T00:00:00Z"},
-    "detector": {"type": "fact_snapshot", "input_alias": "long_liquidations"},
-    "outcomes": {"horizons": [1], "entry_lag_bars": 0, "retrospective": {
-        "schema_version": "retrospective_numeric_comparison.v1",
-        "analysis_as_of": "2026-10-13T23:00:00Z", "bucket_time_interpretation": "bucket_start_unverified"}},
-    "inputs": [{"alias": side+"_liquidations", "instrument_id": "binance-btc-usdt-perp",
-        "fact_type": "derivatives.liquidation_volume", "contract_version": "derivatives.liquidation_volume.v1",
-        "max_staleness_seconds": 3600, "alignment": "exact_interval",
-        "dimensions": {"liquidated_side": side, "bucket_seconds": 3600, "volume_unit": "BTC",
-            "exchange": "Binance", "product": "BTCUSDT_PERP.A"},
-        "source_policy": {"mode": "exact", "source_identity_key": "authorized-source"}} for side in ("long", "short")],
-    "statistics": {"features": {"baseline": [
-        {"name": "recent_return", "operator": "lagged_return", "lookback_bars": 1},
-        {"name": "recent_volatility", "operator": "atr_fraction", "period": 14}],
-        "enriched": [{"name": "long_liquidations", "operator": "latest_value",
-            "input_alias": "long_liquidations"},
-            {"name": "short_liquidations", "operator": "latest_value",
-            "input_alias": "short_liquidations"}]},
-        "model": {"type": "standardized_l2_logistic", "c": 1.0}, "purge_bars": 1,
-        "folds": [{"id": "fixed-comparison", "train": {"start": "2026-07-25T00:00:00Z", "end": "2026-09-03T00:00:00Z"},
-            "validation": {"start": "2026-09-03T00:00:00Z", "end": "2026-09-23T00:00:00Z"}}]}}
-
-_EXAMPLES["raw_forward_outcome@6"] = deepcopy(_EXAMPLES["raw_forward_outcome@3"])
-_EXAMPLES["raw_forward_outcome@6"]["scope"]["warmup_bars"] = 1
-_EXAMPLES["raw_forward_outcome@6"]["detector"] = {"all": [
-    {"field": "previous_close", "operator": "lt", "value_field": "previous_open"},
-    {"field": "close", "operator": "gt", "value_field": "open"},
-    {"field": "open", "operator": "lte", "value_field": "previous_close"},
-    {"field": "close", "operator": "gte", "value_field": "previous_open"},
-    {"any": [{"field": "volume", "operator": "gt", "value_field": "previous_volume"},
-             {"field": "volume", "operator": "lte", "value_field": "previous_volume"}]}]}
-_EXAMPLES["raw_forward_outcome@6"]["outcomes"]["schema_version"] = "raw_candle_distribution.v1"
-
-_EXAMPLES["raw_forward_outcome@7"] = deepcopy(_EXAMPLES["raw_forward_outcome@6"])
-_EXAMPLES["raw_forward_outcome@7"]["outcomes"].update(
-    schema_version="volume_cohort_matched.v1", forward_bars=[5], entry_lag_bars=1,
-    comparison={"cohort":"volume_gt_previous_vs_lte", "prior_volatility_bars":20,
-        "matching_policy":"same_date_hour", "caliper_ratios":{
-            "formation_body_fraction":1.25, "formation_range_fraction":1.25, "prior_rms_return":1.25}})
-
-_EXAMPLES["raw_forward_outcome@8"] = deepcopy(_EXAMPLES["raw_forward_outcome@7"])
-_EXAMPLES["raw_forward_outcome@8"]["outcomes"]["schema_version"] = "volume_cohort_matched.v2"
-_EXAMPLES["raw_forward_outcome@8"]["outcomes"]["comparison"].update(
-    matching_policy="same_utc_close_slot", comparison_window_days=3, matching_slot_seconds=3600)
-
-_EXAMPLES["event_fact_analysis@14"] = {
-    "check_family":"event_fact_analysis", "mode":"preview", "gap_policy":"continue_degraded",
-    "scope":{"instrument_id":"instrument-id","timeframe":"1m","start":"2026-09-22T00:00:00Z","end":"2026-09-22T00:30:00Z"},
-    "detector":{"type":"liquidity_episode"},
-    "outcomes":{"schema_version":"liquidity_episode.v1","analysis_as_of":"2026-10-14T00:00:00Z"},
-    "inputs":[{"alias":alias,"fact_type":fact,"contract_version":contract,
-        **({"timeframe_seconds":seconds} if seconds else {}),
-        "alignment":"exact_interval" if seconds else "latest_known","max_staleness_seconds":1,"allow_gaps":True,
-        "source_policy":{"mode":"exact","source_identity_key":"source-identity-id"}}
-        for alias,fact,contract,seconds in [
-            ("bbo","market.bbo","market.bbo.v1",1),
-            ("depth","market.depth_observation","market.depth_band.v1",1),
-            ("flow","market.trade_flow","market.trade_flow.v1",1),
-            ("trades","market.trade","market.trade.v1",None)]]}
-
-_EXAMPLES["raw_forward_outcome@9"] = {
-    "check_family": "raw_forward_outcome", "mode": "preview", "gap_policy": "reject",
-    "scope": {"instrument_id": "instrument-1", "timeframe": "15m",
-        "start": "2022-01-02T00:00:00Z", "end": "2022-01-02T06:00:00Z"},
-    "detector": {"type": "completed_reversal_candidates",
-        "computation_origin": "2022-01-01T00:00:00Z", "reference_basis": "rising_leg_only",
-        "ownership": "retain_all_provisional", "max_bars": 1000, "max_candidates": 1000},
-    "outcomes": {"schema_version": "reversal_recognition.v1"}}
-
-_EXAMPLES["raw_forward_outcome@10"] = deepcopy(_EXAMPLES["raw_forward_outcome@9"])
-_EXAMPLES["raw_forward_outcome@10"]["detector"]["reference_basis"] = "rising_leg_plus_retreat"
-_EXAMPLES["raw_forward_outcome@10"]["outcomes"] = {"schema_version": "reversal_first_passage.v1"}
-
-_EXAMPLES["raw_forward_outcome@11"] = deepcopy(_EXAMPLES["raw_forward_outcome@10"])
-_EXAMPLES["raw_forward_outcome@11"]["scope"].update(start="2025-02-01T00:00:00Z", end="2025-04-26T00:00:00Z")
-_EXAMPLES["raw_forward_outcome@11"]["detector"].update(computation_origin="2025-01-01T00:00:00Z", max_bars=12000, max_candidates=10000)
-_EXAMPLES["raw_forward_outcome@11"]["outcomes"] = {"schema_version": "reversal_selection_only.v1"}
-
-_EXAMPLES["raw_forward_outcome@12"] = deepcopy(_EXAMPLES["raw_forward_outcome@11"])
-_EXAMPLES["raw_forward_outcome@12"]["scope"]["end"] = "2025-07-19T00:00:00Z"
-_EXAMPLES["raw_forward_outcome@12"]["detector"]["max_bars"] = 19104
-_EXAMPLES["raw_forward_outcome@12"]["outcomes"] = {"schema_version": "reversal_selection_only.v2"}
-
-from .reversal_matched_outcomes_evaluator import (OUTCOMES as MATCHED_OUTCOMES,
-    DETECTOR as MATCHED_DETECTOR, DATASET_ID as MATCHED_DATASET_ID, INSTRUMENT_ID as MATCHED_INSTRUMENT_ID)
-_EXAMPLES["raw_forward_outcome@13"] = deepcopy(_EXAMPLES["raw_forward_outcome@12"])
-_EXAMPLES["raw_forward_outcome@13"].update(mode="evidence", dataset_id=MATCHED_DATASET_ID,
-    detector=deepcopy(MATCHED_DETECTOR), outcomes=deepcopy(MATCHED_OUTCOMES))
-_EXAMPLES["raw_forward_outcome@13"]["scope"]["instrument_id"] = MATCHED_INSTRUMENT_ID
-
-_EXAMPLES["raw_forward_outcome@14"] = deepcopy(_EXAMPLES["raw_forward_outcome@12"])
-_EXAMPLES["raw_forward_outcome@14"]["scope"]["end"] = "2025-03-29T00:00:00Z"
-_EXAMPLES["raw_forward_outcome@14"]["outcomes"] = {"schema_version":"reversal_two_block_selection.v1"}
-
-from .reversal_matched_progress_evaluator import OUTCOMES as PROGRESS_OUTCOMES
-_EXAMPLES["raw_forward_outcome@15"] = deepcopy(_EXAMPLES["raw_forward_outcome@13"])
-_EXAMPLES["raw_forward_outcome@15"]["outcomes"] = deepcopy(PROGRESS_OUTCOMES)
-
-# IDs/hashes are shape-valid examples; bind the exact retained selection receipt before use.
-_EXAMPLES["raw_forward_outcome@16"] = {
-    "check_family": "raw_forward_outcome", "mode": "evidence", "dataset_id": "mds_"+"a"*32,
-    "scope": {"instrument_id": "instrument-1", "timeframe": "15m",
-              "start": "2025-02-01T00:00:00Z", "end": "2025-03-29T00:00:00Z"},
-    "detector": {"type": "saved_reversal_selection"}, "gap_policy": "reject",
-    "outcomes": {"schema_version": "reversal_saved_measurements.v1",
-        "selection_reference": {"source_check_id": "11111111-1111-4111-8111-111111111111",
-            "result_hash": "a"*64, "evidence_hash": "b"*64, "selection_manifest_hash": "c"*64},
-        "frozen_context": {"dataset_id": "mds_"+"a"*32, "dataset_hash": "a"*64,
-            "input_binding_hash": "d"*64, "max_commit_seq": 10, "instrument_id": "instrument-1",
-            "input_start": "2025-01-01T00:00:00Z", "input_end_exclusive": "2025-03-29T00:00:00Z",
-            "decision_start": "2025-02-01T00:00:00Z", "decision_end_exclusive": "2025-03-29T00:00:00Z",
-            "source_identity_key": "e"*64, "input_rows": 8352, "case_count": 2,
-            "pair_count": 2, "completion_clock_count": 1}}}
-
-_EXAMPLES["raw_forward_outcome@17"] = deepcopy(_EXAMPLES["raw_forward_outcome@14"])
-_EXAMPLES["raw_forward_outcome@17"].update(mode="evidence", dataset_id="mds_"+"a"*32)
-_EXAMPLES["raw_forward_outcome@17"]["scope"]["instrument_id"] = "instrument-1"
-_EXAMPLES["raw_forward_outcome@17"]["outcomes"] = {"schema_version": "reversal_population_selection.v1",
-    "populations": [{"name":"first_block", "start_block":0, "block_count":1},
-                    {"name":"second_block", "start_block":1, "block_count":1}]}
-
-_EXAMPLES["raw_forward_outcome@18"] = deepcopy(_EXAMPLES["raw_forward_outcome@16"])
-_EXAMPLES["raw_forward_outcome@18"]["outcomes"]["schema_version"] = "reversal_saved_measurements.v2"
-
-_EXAMPLES["raw_forward_outcome@20"] = deepcopy(_EXAMPLES["raw_forward_outcome@17"])
-_EXAMPLES["raw_forward_outcome@20"]["outcomes"]["schema_version"] = "reversal_completed_recovery.v1"
-
-_PURPOSES = {
-    "raw_forward_outcome@20": "Compose all completed reversals,causal context,inclusive recovery duration and unchanged12bar first passage;separate full-population label distributions with original all-case clock weights;no matching or adjusted inference.",
-    "raw_forward_outcome@19": "Retain per-arm fractional MFE/MAE and first-attaining candle timing on the existing configurable controlled-reversal future path; unchanged matching and endpoint-return analysis.",
-    "raw_forward_outcome@18": "Compose existing first-passage and progress measurements on validated fixed or configured saved populations, retaining original input, weights, support and explicit units/censoring; no reselection.",
-    "raw_forward_outcome@17": "Select reversal comparisons with explicit bounded dates, symbol and reporting populations over the existing outcome-blind kernel; fixed scientific matching rules, original weights and nominal support.",
-    "raw_forward_outcome@16": "Validate a saved v12/v14 selection and its exact native frozen input, then compose existing twelve-bar first-passage and progress descriptions; no recognition, rematching or target tuning.",
-    "raw_forward_outcome@15": "Describe maximum original-target progress on the fixed saved BTC pairs; full-window versus pre-failure bounds, censoring, fixed quarter bins and original weights; no target optimization.",
-    "raw_forward_outcome@14": "Assess the first two complete28day blocks from unchangedJan1origin;reuse formation/matching kernel and compare with the savedBTCprefix without gap resets or outcomes.",
-    "raw_forward_outcome@13": "Describe twelve-bar first passages on the999saved BTC B3pairs with exact selected barriers and weights;old/new/combined views,no rematching or independent-trial inference.",
-    "raw_forward_outcome@12": "Assess the fixed six-block reversal comparison extension without outcomes; report old,new,combined coverage and dependence with B2-compatible tie order and lossless compact timing.",
-    "raw_forward_outcome@11": "Assess one fixed smaller-design completed-reversal comparison population without outcomes;equal completion-moment weights,all chains,explicit exclusions and dependence;no numeric coverage pass gates.",
-    "raw_forward_outcome@10": "Describe fixed three-hour continuation/failure first passages after completed retreat-inclusive reversal chains,retaining every chain and outcome-blind overlap components.",
-    "raw_forward_outcome@9": "Recognize provisional completed-reversal candidate chains from a fixed origin;retain ambiguity without outcome calculations or an admitted event population.",
-    "event_fact_analysis@14": "Describe fixed sharp-move and thinning episodes, outcome-blind precontext controls, trade sequences, and actual availability clocks on bounded exposed inputs.",
-    "raw_forward_outcome@8": "Compare raw-event volume cohorts using an explicit nearby-date radius and UTC time slot with unchanged feature calipers, support and both-arm date dependence diagnostics.",
-    "raw_forward_outcome@7": "Compare configured raw-event volume cohorts with outcome-blind body/range/prior-volatility matching, retaining the full original universe and missingness.",
-    "raw_forward_outcome@6": "Retain every raw-candle event and compare volume cohorts with fixed quantiles, tails, day and overlap diagnostics; preserve valid extremes.",
-    "raw_forward_outcome@5": "Compare controlled reversal cohorts with explicit interval, prior windows, entry/outcome horizon and matching-time choices.",
-    "event_fact_analysis@13": "Compare next-hour direction association beyond return/ATR using late-received exact-bucket numeric features; retrospective only. Optional outcomes.retrospective.input_coverage_policy=complete_paired_rows admits recorded partial custody with missing-row exclusions and fixed boundaries.",
-    "raw_forward_outcome@4": "Compare bullish engulfing against matched non-engulfing candles after a fixed prior decline, with outcome-blind pairs and dependence checks.",
-    "raw_forward_outcome@3": "Evaluate canonical raw candle predicates with causal close entry and contiguous bounded outcomes.",
-    "raw_forward_outcome@2": "Preview raw candle conditions and subsequent outcomes.",
-    "indicator_forward_outcome@2": "Preview indicator output conditions and subsequent outcomes.",
-    "signal_audit@2": "Audit emitted signals against declared public output expectations.",
-    "candidate_lifecycle@2": "Describe candidate progression and terminal stages.",
-    "run_signal_summary@2": "Preview signal evidence from an existing run.",
-    "run_decision_trade_comparison@2": "Preview run decisions and linked trade evidence.",
-    "event_fact_analysis@3": "Replay the historical indicator-event/typed-Fact method.",
-    "event_fact_analysis@4": "Analyze indicator events or Fact snapshots with typed Fact inputs.",
-    "event_fact_analysis@5": "Analyze Fact snapshots when required Facts become available.",
-    "event_fact_analysis@6": "Describe indicator events using canonical candle-only snapshots.",
-    "event_fact_analysis@7": "Attribute follow-up outcomes to exact original indicator events.",
-    "event_fact_analysis@8": "Compare original events at a shared classification landmark.",
-    "event_fact_analysis@9": "Compare first return to the original market-profile range.",
-    "event_fact_analysis@10": "Describe fixed Candle Stats ATR-expansion future risk cohorts.",
-    "event_fact_analysis@11": "Compare fixed ATR crossings with matched persistent-high states.",
-    "event_fact_analysis@12": "Filter the original crossing-state pairs by a fixed 5% public ATR-ratio rule before outcomes.",
-}
+_PURPOSES = {'raw_forward_outcome@20': 'Compose all completed reversals,causal context,inclusive recovery duration and '
+                           'unchanged12bar first passage;separate full-population label distributions with '
+                           'original all-case clock weights;no matching or adjusted inference.',
+ 'raw_forward_outcome@19': 'Retain per-arm fractional MFE/MAE and first-attaining candle timing on the '
+                           'existing configurable controlled-reversal future path; unchanged matching and '
+                           'endpoint-return analysis.',
+ 'raw_forward_outcome@18': 'Compose existing first-passage and progress measurements on validated fixed or '
+                           'configured saved populations, retaining original input, weights, support and '
+                           'explicit units/censoring; no reselection.',
+ 'raw_forward_outcome@17': 'Select reversal comparisons with explicit bounded dates, symbol and reporting '
+                           'populations over the existing outcome-blind kernel; fixed scientific matching '
+                           'rules, original weights and nominal support.',
+ 'event_fact_analysis@14': 'Describe fixed sharp-move and thinning episodes, outcome-blind precontext '
+                           'controls, trade sequences, and actual availability clocks on bounded exposed '
+                           'inputs.',
+ 'raw_forward_outcome@8': 'Compare raw-event volume cohorts using an explicit nearby-date radius and UTC '
+                          'time slot with unchanged feature calipers, support and both-arm date dependence '
+                          'diagnostics.',
+ 'raw_forward_outcome@7': 'Compare configured raw-event volume cohorts with outcome-blind '
+                          'body/range/prior-volatility matching, retaining the full original universe and '
+                          'missingness.',
+ 'raw_forward_outcome@6': 'Retain every raw-candle event and compare volume cohorts with fixed quantiles, '
+                          'tails, day and overlap diagnostics; preserve valid extremes.',
+ 'event_fact_analysis@13': 'Compare next-hour direction association beyond return/ATR using late-received '
+                           'exact-bucket numeric features; retrospective only. Optional '
+                           'outcomes.retrospective.input_coverage_policy=complete_paired_rows admits '
+                           'recorded partial custody with missing-row exclusions and fixed boundaries.',
+ 'raw_forward_outcome@3': 'Evaluate canonical raw candle predicates with causal close entry and contiguous '
+                          'bounded outcomes.',
+ 'event_fact_analysis@4': 'Analyze indicator events or Fact snapshots with typed Fact inputs.',
+ 'event_fact_analysis@5': 'Analyze Fact snapshots when required Facts become available.',
+ 'event_fact_analysis@6': 'Describe indicator events using canonical candle-only snapshots.',
+ 'event_fact_analysis@7': 'Attribute follow-up outcomes to exact original indicator events.',
+ 'event_fact_analysis@8': 'Compare original events at a shared classification landmark.',
+ 'event_fact_analysis@9': 'Compare first return to the original market-profile range.',
+ 'event_fact_analysis@10': 'Describe fixed Candle Stats ATR-expansion future risk cohorts.',
+ 'event_fact_analysis@11': 'Compare fixed ATR crossings with matched persistent-high states.',
+ 'event_fact_analysis@12': 'Filter the original crossing-state pairs by a fixed 5% public ATR-ratio rule '
+                           'before outcomes.'}
 
 
-
-# Descriptive field metadata only: these values never validate or execute a Check.
-def _discovery(family, version):
-    if family == 'raw_forward_outcome' and version in {'17','18'}:
-        return {'new_requests': True, 'composition_limit': 'Method17 selection may exceed999pairs; method18 rejects the entire saved population above999pairs;no truncation or rematching.',
-            'meaning': 'Supported profile admission bounds, not universal scientific limits; native15m and whole28day blocks apply to17/18 only.'}
-    if family == 'raw_forward_outcome' and version == '5':
-        return {'new_requests': False, 'preferred_profile': 'raw_forward_outcome@19',
-            'meaning': 'Historical output preserved;19 retains excursions and first-attaining future candle clocks with the same admitted matching choices.'}
-    if family == "raw_forward_outcome" and version in {"11", "12", "14"}:
-        return {"new_requests": False, "preferred_profile": "raw_forward_outcome@17",
-            "meaning": "Fixed historical population profile; exact replay and explicit requests remain supported."}
-    if family == "raw_forward_outcome" and version in {"13", "15", "16"}:
-        return {"new_requests": False, "preferred_profile": "raw_forward_outcome@18",
-            "meaning": "Historical binding/projection contract retained; use the reusable saved-population route for new supported contexts."}
-    if (family == "raw_forward_outcome" and version == "2") or (family == "event_fact_analysis" and version == "3") or family == "indicator_forward_outcome":
-        return {"new_requests": False, "meaning": "Historical compatibility method; select an admitted current recipe whose scientific semantics match the question. Replay remains available."}
-    return {"new_requests": True, "meaning": "Use only the settings and scientific policy admitted by this method; catalog discovery never executes science."}
+def _discovery(family: str, version: str) -> dict[str, Any]:
+    result = {"new_requests": True,
+        "meaning": "Only current registered procedures are executable; recorded historical evidence is read independently."}
+    if family == "raw_forward_outcome" and version in {"17", "18"}:
+        result["composition_limit"] = (
+            "Method17 selection may exceed999pairs; method18 rejects the whole saved population "
+            "above999pairs; no truncation or rematching."
+        )
+    return result
 
 
 def _settings_fields(family: str, version: str) -> dict[str, Any]:
@@ -533,16 +621,13 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             fields["scope"]["constraints"] = "Instrument and Candle Stats IDs are bindable; parameters remain pinned. Fixed 1m, 200-bar initialization, whole-minute UTC boundaries, single calendar year, <=370 days including seed, no outcome tail."
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
         return fields
-    if family == "raw_forward_outcome" and version == "14":
-        fields = _settings_fields(family, "12")
-        fields["scope"]["constraints"] = "Fixed2025-02-01 through2025-03-29 exclusive;first two original28dayblocks;Jan1origin;8352native15mbars;no outcomes."
-        fields["outcomes"] = {"fixed":{"schema_version":"reversal_two_block_selection.v1"},"meaning":"Explicit clean-prefix scope;unchanged formation,calipers,strata,support,reuse,weights and resource namespace."}
-        return fields
     if family == "raw_forward_outcome" and version == "18":
-        fields = _settings_fields(family, "16")
-        fields["outcomes"]["schema_version"] = "reversal_saved_measurements.v2"
-        fields["outcomes"]["meaning"] = "Admits saved12/14/17 populations through the same verified binding and twelve-bar measurement kernels; at most999pairs, whole selection rejected above limit; no truncation/rematching."
-        return fields
+        return {"scope": {"constraints": "Exact saved v12/v14/v17 decision scope and original frozen native15m Dataset; evidence mode only; no tail."},
+            "detector": {"fixed": {"type": "saved_reversal_selection"}},
+            "outcomes": {"schema_version": "reversal_saved_measurements.v2",
+                "selection_reference": "Exact Check/result/evidence/selection-manifest hashes.",
+                "frozen_context": "Declared Dataset/hash/watermark/source/instrument/ranges/counts, verified against typed original saved evidence.",
+                "meaning": "Existing twelve-bar first passage and progress kernels; original pairs/weights. At most999pairs, whole selection rejected above limit; no truncation/rematching."}}
     if family == "raw_forward_outcome" and version == "20":
         return {"scope":{"constraints":"Explicit instrument/native15m frozen input;one through six whole28day decision blocks;origin-to-end<=19104bars;no extra tail."},
             "detector":{"meaning":"Unchanged retreat-inclusive sequential recognition;retain all chains;19104/10000 identity/candidate limits;explicit origin."},
@@ -553,54 +638,13 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             "detector": {"meaning": "Existing retreat-inclusive recognizer; retain all chains; fixed19104bar identity namespace and10000candidate bound; explicit computation_origin."},
             "outcomes": {"schema_version": "reversal_population_selection.v1", "populations": "At most two named block views plus combined; these change reporting only, not pairs or root weights.",
                 "meaning": "Selection only; no outcomes, thresholds, models or inference."}}
-    if family == "raw_forward_outcome" and version == "16":
-        return {"scope": {"constraints": "Exact saved v12/v14 decision scope and original frozen native15m Dataset; evidence mode only; no tail."},
-            "detector": {"fixed": {"type": "saved_reversal_selection"}},
-            "outcomes": {"schema_version": "reversal_saved_measurements.v1",
-                "selection_reference": "Exact Check/result/evidence/selection-manifest hashes.",
-                "frozen_context": "Declared Dataset/hash/watermark/source/instrument/ranges/counts, all verified against typed saved evidence at execution.",
-                "meaning": "Fixed12bar geometry, original pairs/weights and shared kernels; no outcome reference fabricated for in-memory composition."}}
-    if family == "raw_forward_outcome" and version == "15":
-        fields = _settings_fields(family, "13")
-        fields["outcomes"] = {"fixed": deepcopy(PROGRESS_OUTCOMES), "meaning": "Exact saved selection and first-passage references; fixed twelve-bar descriptive progress; no new target or selection."}
-        return fields
-    if family == "raw_forward_outcome" and version == "13":
-        return {"scope": {"constraints": "Exact saved BTC B3 scope and original frozen Dataset; evidence mode only."},
-            "detector": {"fixed": deepcopy(MATCHED_DETECTOR)},
-            "outcomes": {"fixed": deepcopy(MATCHED_OUTCOMES), "meaning": "Consume saved pairs; twelve-bar symmetric first passage; unresolved retained; no rematching or inference."}}
-    if family == "raw_forward_outcome" and version == "12":
-        fields = _settings_fields(family, "11")
-        fields["scope"]["constraints"] = "Fixed2025-02-01 through2025-07-19 exclusive;six28day blocks;15m;origin2025-01-01;no outcome tail."
-        fields["detector"]["constraints"] = "Retreat-inclusive,retain all,no expiry;max_bars=19104,max_candidates=10000. Actual event IDs retained;B2 namespace key preserves same-clock ordering."
-        fields["outcomes"] = {"fixed": {"schema_version": "reversal_selection_only.v2"}, "meaning": "Selection only;old/new/combined summaries;unchanged matching rules and no coverage pass gate."}
-        return fields
-    if family == "raw_forward_outcome" and version == "11":
-        fields = _settings_fields(family, "9")
-        fields["scope"]["constraints"] = "Fixed84evaluation days in three28day blocks;15m;explicit aligned origin;<=12000input bars;no tail read."
-        fields["detector"]["constraints"] = "Fixed retreat-inclusive recognition,retain all chains,no expiry;max_bars<=12000,max_candidates<=10000."
-        fields["outcomes"] = {"fixed": {"schema_version": "reversal_selection_only.v1"}, "meaning": "Selection only;no outcome computation. Fixed smaller matching set,within-pair disjoint histories,equal completion-moment weighting,no coverage pass gate."}
-        return fields
-    if family == "raw_forward_outcome" and version == "10":
-        fields = _settings_fields(family, "9")
-        fields["detector"]["constraints"] = "Fixed retreat-inclusive reference;retain all chains;origin explicit;15m;integer max_bars/max_candidates<=4096. No size/expiry/winner selection."
-        fields["outcomes"] = {"fixed": {"schema_version": "reversal_first_passage.v1"},
-            "meaning": "Fixed12bar first passage from completion-close observational anchor;failure formation low;equal-risk continuation;both-touch unresolved;no tail or inference."}
-        return fields
-    if family == "raw_forward_outcome" and version == "9":
-        return {"scope": {"fields": ["instrument_id", "timeframe", "start", "end", "warmup_bars"],
-            "constraints": "UTC aligned;origin<=start<end;evaluation<=32days;warmup equals origin distance;no Indicator."},
-            "detector": {"fields": list(_EXAMPLES["raw_forward_outcome@9"]["detector"]),
-                "constraints": "Explicit fixed computation_origin,reference_basis rising_leg_only/rising_leg_plus_retreat,ownership retain_all_provisional,integer resource bounds. No minimum size or expiry policy."},
-            "outcomes": {"fixed": {"schema_version": "reversal_recognition.v1"}, "meaning": "Recognition only;no forward outcomes."},
-            "gap_policy": {"fixed": "reject"}, "statistics": {"fixed": {}},
-            "assertions[]": {"fixed": []}, "gap_rewarm_bars": {"fixed": 0}}
-    if family == "raw_forward_outcome" and version in {"5", "19"}:
+    if family == "raw_forward_outcome" and version == "19":
         fields["detector"] = {"fixed":{"type":"controlled_bullish_reversal"}}
         fields["inputs[]"] = {"fixed":[]}
         fields["statistics"] = {"fixed":{}}
         fields["gap_policy"] = {"fixed":"continue_degraded"}
         fields["gap_rewarm_bars"] = {"fixed":0}
-        fields["outcomes"] = {"fields": list(_EXAMPLES["raw_forward_outcome@5"]["outcomes"]),
+        fields["outcomes"] = {"fields": list(_EXAMPLES["raw_forward_outcome@19"]["outcomes"]),
             "constraints": "All choices explicit. Interval 1m/15m/30m/1h equals scope; trend <= volatility; integers 1..10000; lag+horizon <=10000. Same UTC close slot radius 1..31 days or same date/hour radius 0 with room for two disjoint closed paths. UTC aligned evaluation <=32 days; warmup exactly volatility+1."}
     if family == "event_fact_analysis" and version == "13":
         fields["scope"]["constraints"] = "Hourly UTC sample <=60 days; no Indicator. Price outcomes use the next close, including the declared one-hour preparation tail."
@@ -623,39 +667,11 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             "gap_policy":{"fixed":"continue_degraded"}}
     if family == "raw_forward_outcome" and version == "19":
         fields["outcomes"]["schema_version"] = "controlled_reversal_comparison.v3"
-    if family == "raw_forward_outcome" and version == "4":
-        return {"scope": {"fields": ["instrument_id", "symbol", "timeframe", "start", "end", "warmup_bars", "datasource", "exchange"],
-            "constraints": "Fixed 1m, aligned UTC minute boundaries, nonempty range <=32 days; 21 warmup candles when specified. No Indicator or additional Fact inputs."},
-            "method_configuration": {"fixed": "Explicit controlled_reversal_comparison.v1 and controlled_bullish_reversal detector. See settings.fixed for all matching/support rules. No configurable thresholds, horizons, statistics or rewarm."},
-            "gap_policy": {"fixed": "continue_degraded"}, "assertions[]": fields["assertions[]"]}
+        return fields
     operators = sorted(checks._DETECTOR_OPERATORS)
     if family == "raw_forward_outcome":
         fields["detector"] = {"fields": ["type", "field", "operator", "value", "value_field", "all", "any", "not"], "field_choices": sorted(checks._RAW_DETECTOR_FIELDS), "operators": operators,
             "constraints": "raw_condition with scalar value or another declared candle field; all/any lists and not compose conditions."}
-    elif family == "indicator_forward_outcome":
-        fields["detector"] = {"fields": ["type", "output_name", "field", "operator", "value", "value_field", "event_key", "symbol", "direction", "all", "any", "not"],
-            "choices": sorted(checks._INDICATOR_DETECTOR_TYPES), "operators": operators,
-            "constraints": "Output name required except record_match; output-match requires field and value/value_field unless is_true/true; event matches filter public emitted records."}
-    elif family == "signal_audit":
-        fields["detector.expectations[]"] = {"fields": ["name", "expectation_type", "source_output", "source_field", "signal_output", "event_key", "operator", "value", "value_field", "from", "to", "same_group_by", "record_excluded_candidates", "require_contiguous_source_rows"],
-            "operators": operators, "constraints": "type signal_audit; nonempty expectations (or one flattened expectation); condition needs value/value_field except true operators; transition needs from/to. Group fields are string lists; excluded/contiguous flags default true."}
-    elif family == "candidate_lifecycle":
-        fields["detector"] = {"fields": ["type", "funnel_stages", "terminal_stages", "signal_stages", *sorted(checks._CANDIDATE_LIFECYCLE_FILTER_FIELDS)],
-            "constraints": "type candidate_lifecycle; stages are string lists, filter values match recorded lifecycle fields; unknown detector fields rejected."}
-    else:
-        fields["scope.run_id"] = {"type": "string", "meaning": "Accessible existing run; supported run evidence is loaded by the existing adapter."}
-        fields["detector"] = {"choices": sorted(checks._RUN_DETECTOR_TYPES_BY_FAMILY[family]),
-            "fields": ["output_name", "event_key", "symbol", "direction", "decision_state", "reason_code", "linked_trade_count"],
-            "constraints": "Record filters over existing run evidence; no new market calculation or future reconstruction."}
-    if family in {"raw_forward_outcome", "indicator_forward_outcome"}:
-        fields["outcomes"] = {"fields": ["forward_bars", "bars", "entry_lag_bars", "direction", "min_sample_count", "min_edge_pct", "max_examples"],
-            "defaults": {"forward_bars": [1, 3, 5, 10], "entry_lag_bars": 0, "direction": "long", "min_sample_count": 20, "min_edge_pct": 0.0, "max_examples": 250 if family == "raw_forward_outcome" else 100},
-            "constraints": "forward_bars (bars alias) accepts integer/list/comma-separated integers; positive values are deduplicated/sorted, at least one required. Entry lag nonnegative; direction long/short. Sample/edge thresholds are descriptive screening, examples are capped."}
-    elif family in {"signal_audit", "candidate_lifecycle"}:
-        fields["outcomes"] = {"fields": ["max_examples"], "defaults": {"max_examples": 100}, "meaning": "Issue examples only; audit/lifecycle counts are owned by the method, not predictive return settings."}
-    else:
-        fields["outcomes"] = {"fields": ["min_sample_count", "max_examples"] + (["bucket_by", "buckets"] if family == "run_signal_summary" else []),
-            "defaults": {"min_sample_count": 5, "max_examples": 100}, "constraints": "Sample threshold is descriptive; example cap bounds reporting. Signal-summary bucket_by (buckets alias) lists recorded fields, default symbol/output_name/event_key."}
     if family == "raw_forward_outcome" and version == "8":
         fields["outcomes"] = {"fields":list(_EXAMPLES["raw_forward_outcome@8"]["outcomes"]),
             "constraints":"Explicit volume_cohort_matched.v2; v7 raw/cohort/outcome constraints; comparison adds required day radius 1..31 and UTC close slot 60 or 3600 seconds. Same-slot controls within inclusive elapsed radius and requested input only. Prospective choices, no tuning or inferred acquisition."}
@@ -905,18 +921,17 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         "definition": definition.to_dict(),
         "purpose": _PURPOSES[key],
         "eligibility": {"request_selectable": example is not None,
-                        "modes": ["evidence"] if definition.definition_id=="raw_forward_outcome" and version=="20" else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
+                        "modes": ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
                         "execution_authority": False, "promotion_authority": False,
                         **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
                            if (definition.definition_id == "event_fact_analysis" and version in {"13", "14"})
                            or (definition.definition_id == "raw_forward_outcome" and version in {"9", "10", "11", "12"}) else {})},
         "required_inputs": {"declaration": declarations,
-                            "evidence_binding": "Exactly one frozen Dataset or supported immutable run evidence; use existing requirements/prepare.",
+                            "evidence_binding": "Exactly one frozen Dataset; use existing requirements/prepare.",
                             "resource_bindings": {"scope.instrument_id": "Authorized server instrument ID.",
                                                   "scope.indicator_id": "Existing server indicator ID when declared.",
-                                                  "inputs[].source_policy": "Authorized source identity/policy for typed inputs.",
-                                                  "scope.run_id": "Existing accessible run for run-backed previews."}},
+                                                  "inputs[].source_policy": "Authorized source identity/policy for typed inputs."}},
         "settings": settings,
         "result_shape": {"envelope_schema": definition.result_schema_version,
                          "payload_schema": getattr(evaluator, "result_schema_version", {"signal_audit": "signal_audit_result.v1", "candidate_lifecycle": "candidate_lifecycle_result.v1"}.get(definition.definition_id, "research_check_result.v1")),

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
+import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +18,7 @@ from research_science.check import (
     CHECK_PLAN_SCHEMA_VERSION,
     CHECK_REQUEST_SCHEMA_VERSION,
     CHECK_RESULT_SCHEMA_VERSION,
+    CheckDefinition,
     CheckEvidenceBinding,
     CheckRequest,
     CheckResult,
@@ -22,6 +26,7 @@ from research_science.check import (
 )
 
 from portal.backend.service.research import service
+from portal.backend.service.research.planning import plan_research_check
 from portal.backend.service.research.registry import (
     materialize_check_definition,
     pin_check_definition_to_plan,
@@ -48,8 +53,8 @@ def _contracts():
                 "operator": "gt",
                 "value": 1,
             },
-            "outcomes": {"forward_bars": [1]},
-            "gap_policy": "reject",
+            "outcomes": {"schema_version":"raw_candle_forward_outcome.v1","forward_bars": [1]},
+            "gap_policy": "continue_degraded",
         }
     definition = materialize_check_definition(
         operation, mode=CHECK_MODE_EVIDENCE
@@ -75,63 +80,12 @@ def _contracts():
         },
         dataset_id=dataset_id,
     )
-    plan = ResolvedCheckPlan(
-        schema_version=CHECK_PLAN_SCHEMA_VERSION,
-        request_hash=request.request_hash,
-        market_data_requirements=(
-            {
-                "alias": "primary_bars",
-                "consumer_id": "check",
-                "instrument_id": "instrument-1",
-                "fact_type": "candle.ohlcv",
-                "contract_version": "candle.ohlcv.v1",
-                "timeframe_seconds": 3600,
-                "dimensions": {},
-                "alignment": "exact_interval",
-                "max_staleness_seconds": None,
-                "known_at_required": True,
-                "required_fields": ["open", "high", "low", "close", "known_at"],
-                "series_required": True,
-                "frame_missing_policy": "indicator_owned",
-                "source_policy": {"mode": "exact"},
-                "required_start": "2025-12-31T10:00:00.000000Z",
-                "required_end": "2026-01-02T01:00:00.000000Z",
-            },
-        ),
-        indicator_graph=(),
-        evaluation_range={
-            "start": "2026-01-01T00:00:00.000000Z",
-            "end_exclusive": "2026-01-02T00:00:00.000000Z",
-        },
-        materialization_range={
-            "start": "2025-12-31T10:00:00.000000Z",
-            "end_exclusive": "2026-01-02T01:00:00.000000Z",
-            "as_of_commit_seq": 7,
-        },
-        warmup={"bars": 14, "seconds": 50400, "timeframe_seconds": 3600},
-        outcome_tail={
-            "horizons": [1],
-            "required_horizons": [1],
-            "bars": 1,
-            "seconds": 3600,
-            "horizon_kind": "bars",
-            "entry_lag_bars": 0,
-            "invalidation_max_bars": 0,
-        },
-        gap_policy="reject",
-        execution={
-            "input_kind": "market_data",
-            "indicator_ids": [],
-            "warmup_floor_bars": 14,
-            "feature_lookback_bars": 0,
-            "feature_windows_seconds_by_alias": {},
-            "outcome_horizons": [1],
-            "required_outcome_horizons": [1],
-            "horizon_kind": "bars",
-            "entry_lag_bars": 0,
-            "invalidation_max_bars": 0,
-        },
+    plan = plan_research_check(
+        definition, request, inspect_coverage=False,
+        instrument_loader=lambda key:{"id":key,"symbol":"TEST"},
+        indicator_planner=lambda *args,**kwargs:{"indicators":[],"requirements":[],"warmup_bars":0},
     )
+    plan = replace(plan, plan_hash="", materialization_range={**plan.materialization_range,"as_of_commit_seq":7})
     definition, request, plan = pin_check_definition_to_plan(
         definition, request, plan
     )
@@ -149,15 +103,15 @@ def _contracts():
                 "fact_type": "candle.ohlcv",
                 "contract_version": "candle.ohlcv.v1",
                 "timeframe_seconds": 3600,
-                "range_start": "2025-12-31T10:00:00.000000Z",
-                "range_end": "2026-01-02T01:00:00.000000Z",
-                "row_count": 39,
+                "range_start": plan.materialization_range["start"],
+                "range_end": plan.materialization_range["end_exclusive"],
+                "row_count": 24,
                 "max_commit_seq": 7,
                 "material_hash": "material",
                 "provenance_hash": "provenance",
                 "quality_hash": "quality",
                 "source_summary": {
-                    "counts": {"source-a": 39},
+                    "counts": {"source-a": 24},
                     "sources": {"source-a": {"provider": "provider-a"}},
                 },
                 "requirement": requirement,
@@ -206,7 +160,7 @@ def _contracts():
         evaluator_id=definition.evaluator_id,
         evaluator_version=definition.evaluator_version,
         result={
-            "schema_version": "research_check_result.v1",
+            "schema_version": "raw_candle_forward_outcome_result.v1",
             "status": "completed",
             "sample_count": 3,
             "assertions": [],
@@ -304,6 +258,8 @@ def test_unqualified_run_rejects_and_preview_cannot_persist_or_create_observatio
             "operator": "gt",
             "value": 1,
         },
+        "outcomes":{"schema_version":"raw_candle_forward_outcome.v1","forward_bars":[1]},
+        "gap_policy":"continue_degraded",
     }
     with pytest.raises(ValueError, match="check_evidence_mode_required"):
         service.run_research_check(payload)
@@ -330,10 +286,15 @@ def test_generic_research_item_creation_cannot_forge_a_check() -> None:
         )
 
 
-def test_preview_only_legacy_family_cannot_persist_new_v2_evidence(
+def test_retired_definition_cannot_persist_new_v2_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    definition, request, plan, evidence, result = _contracts()
+    frozen=json.loads((Path(__file__).parent/"fixtures/historical_check_v2_synthetic.json").read_text())
+    definition=CheckDefinition.from_dict(frozen["definition"])
+    request=CheckRequest.from_dict(frozen["request"])
+    plan=ResolvedCheckPlan.from_dict(frozen["plan"])
+    evidence=CheckEvidenceBinding.from_dict(frozen["evidence"])
+    result=CheckResult.from_dict(frozen["result"])
     monkeypatch.setattr(
         service.repository,
         "create_item",
@@ -396,9 +357,7 @@ def test_eligible_check_requires_explicit_observation_admission_and_support_link
     created_items: list[dict[str, Any]] = []
     created_links: list[dict[str, Any]] = []
 
-    # Exercise the admission operation with an otherwise valid frozen contract
-    # designated eligible for this focused service-boundary test.
-    monkeypatch.setattr(service, "definition_allows_evidence", lambda _definition: True)
+    # Current raw3 is genuinely admitted; no eligibility override is needed.
     monkeypatch.setattr(service.repository, "get_item", lambda *_args, **_kwargs: check)
 
     def create_item(**kwargs):
@@ -594,7 +553,7 @@ def test_evidence_validator_rejects_rehashed_cross_layer_disagreement(
 
 def test_evidence_validator_rejects_request_rules_rehashed_away_from_definition() -> None:
     definition, request, plan, evidence, result = _contracts()
-    changed_parameters = {**dict(request.parameters), "gap_policy": "continue_degraded"}
+    changed_parameters = {**dict(request.parameters), "gap_policy": "reject"}
     changed_request = CheckRequest(
         schema_version=CHECK_REQUEST_SCHEMA_VERSION,
         mode=request.mode,
@@ -609,7 +568,7 @@ def test_evidence_validator_rejects_request_rules_rehashed_away_from_definition(
         **{
             **plan.to_dict(),
             "request_hash": changed_request.request_hash,
-            "gap_policy": "continue_degraded",
+            "gap_policy": "reject",
             "plan_hash": "",
         }
     )
@@ -734,7 +693,7 @@ def test_evidence_validator_rejects_rehashed_binding_requirement_disagreement() 
     series[0].pop("source_binding_hash", None)
     series[0]["requirement"] = {
         **dict(series[0]["requirement"]),
-        "required_start": "2026-01-01T00:00:00.000000Z",
+        "required_start": "2025-12-31T23:00:00.000000Z",
     }
     binding["series"] = series
     changed_evidence = CheckEvidenceBinding(

@@ -1,4 +1,4 @@
-"""Configuration reuse and outcome-blind parity with fixed historical profiles."""
+"""Configured population output stability and outcome-blind scope invariants."""
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
@@ -8,9 +8,8 @@ from types import SimpleNamespace
 import pytest
 from research_science.recognition import RecognitionContext,RecognitionEvent,RecognitionStage,utc
 from research_science.reversal_population import SelectionPopulation,select_population,RULES
-from research_science.reversal_six_block_selection import select_six_blocks,LEGACY_CHOICES
-from research_science.reversal_two_block_selection import select_two_blocks
-from research_science.study import stable_hash
+from research_science.reversal_selection_timing import LEGACY_CHOICES
+from research_science.hashing import stable_hash
 from tests.test_research_science.test_reversal_selection import fixture
 
 
@@ -32,16 +31,15 @@ def world(pop):
     return bars,SimpleNamespace(candidates=tuple(events),references=())
 
 
-@pytest.mark.parametrize('blocks,views,legacy',[
-    (2,[{'name':'block1','start_block':0,'block_count':1},{'name':'block2','start_block':1,'block_count':1}],select_two_blocks),
-    (6,[{'name':'old','start_block':0,'block_count':3},{'name':'new','start_block':3,'block_count':3}],select_six_blocks),
+@pytest.mark.parametrize('blocks,views,expected_hash',[
+    (2,[{'name':'block1','start_block':0,'block_count':1},{'name':'block2','start_block':1,'block_count':1}],'d538ea98b2792d7c9c0ee6ce17efcf912d3c3bfc9b022941978955189e13cf2f'),
+    (6,[{'name':'old','start_block':0,'block_count':3},{'name':'new','start_block':3,'block_count':3}],'42172767fa1a962622f175f388c93e92ffa856f43bd26b26abcd3d3aeffcb4d4'),
 ])
-def test_configured_scope_exactly_preserves_old_cases_controls_weights_and_dependence(blocks,views,legacy):
+def test_configured_scope_full_result_hash_preserves_cases_controls_weights_and_dependence(blocks,views,expected_hash):
     pop=population(blocks,views=views);bars,snapshot=world(pop)
-    before=legacy(bars,snapshot);result=select_population(bars,snapshot,pop)
+    result=select_population(bars,snapshot,pop)
+    assert stable_hash(result)==expected_hash
     assert result['cases'] and result['pairs']
-    for key in ('cases','pairs','dependence','selection_summary','populations'):
-        assert result[key]==before[key],key
     assert result['outcomes_calculated'] is False
     retained=json.loads(json.dumps(result))
     assert stable_hash({k:retained[k] for k in retained['selection_manifest_fields']})==retained['selection_manifest_hash']
@@ -85,7 +83,7 @@ def test_no_unbounded_scope_partial_blocks_extra_thresholds_or_views(change):
 
 
 def test_existing_resource_and_scientific_limits_stay_fixed():
-    from research_science.reversal_six_block_selection import RULES as old
+    from research_science.reversal_selection_timing import RULES as old
     for key in old.keys()-{'version','evaluation','populations'}:assert RULES[key]==old[key]
     pop=population();bars,snapshot=world(pop)
     with pytest.raises(ValueError,match='complete original clock'):select_population(bars[:-1],snapshot,pop)

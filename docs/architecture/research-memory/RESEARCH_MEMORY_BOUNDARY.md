@@ -474,8 +474,7 @@ their pinned meaning. See [ADR 0075](../decisions/0075-pin-first-return-to-origi
 ## Question-owned interpretation publication
 
 A Research Memory Study may be explicitly adopted as a question using
-`POST /api/research/items/{id}/question` with `question` and `scope`. This is
-separate from the executable `research_science.study.StudyDefinition`. A
+`POST /api/research/items/{id}/question` with `question` and `scope`. No executable StudyDefinition is part of this boundary. A
 hypothesis remains a testable claim; an Observation remains a finding under its
 existing admission classification. Neither adoption nor publication grants
 execution permission, changes scientific accounting, or certifies causality,

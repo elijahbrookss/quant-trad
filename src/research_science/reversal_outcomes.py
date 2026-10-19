@@ -11,7 +11,7 @@ import math
 from typing import Callable
 
 from .recognition import RecognitionCandle, RecognitionEvent, plain
-from .study import stable_hash
+from .hashing import stable_hash
 
 HORIZON_BARS = 12
 CLASSES = ("continuation", "failure", "neither", "unresolved")

@@ -11,7 +11,7 @@ from uuid import UUID
 from research_science.check import CheckDefinition, CheckRequest, ResolvedCheckPlan, CheckResult, CheckEvidenceBinding
 from research_science.recognition import utc, plain
 from research_science.reversal_selection import moment_weights
-from research_science.study import stable_hash
+from research_science.hashing import stable_hash
 
 MANIFEST_FIELDS = ('rules', 'cases', 'pairs', 'dependence', 'populations', 'compatibility')
 SCHEMAS = {'12': 'reversal_selection_only_result.v2', '14': 'reversal_two_block_selection_result.v1',
@@ -111,9 +111,8 @@ class SavedSelection:
 def load_saved_selection(raw_reference, declared_context, *, item_loader, checkpoint=lambda: None,
                          admitted_versions=('12','14')):
     """Validate immutable envelopes/context without ScientificAttempt resolution."""
-    from .registry import reconstruct_pinned_check_definition, CHECK_REGISTRY
-    from research_science.reversal_six_block_selection import RULES as SIX_BLOCK_RULES
-    from research_science.reversal_two_block_selection import RULES as TWO_BLOCK_RULES
+    from .historical_check_custody import historical_base
+    from .service import _validate_research_check_evidence_payload
     from research_science.reversal_population import RULES as POPULATION_RULES, MANIFEST_FIELDS as POPULATION_FIELDS
     from .reversal_population_evaluator import population_for
     ref, expected = reference(raw_reference), context(declared_context)
@@ -125,10 +124,14 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
     # these flags at the top level; repository.get_item does not. If supplied,
     # a projected flag must still agree with the required persisted True.
     if (item['id'] != ref['source_check_id'] or item['kind'] != 'research_check' or item['status'] != 'tested'
-            or any(flag in item and item[flag] is not True
-                   for flag in ('replayable', 'observation_eligible'))
+            or ('observation_eligible' in item and item['observation_eligible'] is not True)
+            or ('replayable' in item and item['replayable'] is not True and not (
+                item.get('stored_evidence_integrity') == 'verified'
+                and item.get('execution_available') is False
+                and str((payload.get('result') or {}).get('evaluator_version')) in {'12','14'}))
             or payload.get('replayable') is not True or payload.get('observation_eligible') is not True):
         invalid('completed replayable eligible frozen Check required')
+    _validate_research_check_evidence_payload(payload, item_id=str(item['id']))
     definition = CheckDefinition.from_dict(payload['definition'])
     request = CheckRequest.from_dict(payload['request'])
     plan = ResolvedCheckPlan.from_dict(payload['plan'])
@@ -144,14 +147,13 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
             or not definition.definition_hash == request.definition_hash == evidence.definition_hash == result.definition_hash
             or not request.request_hash == plan.request_hash == evidence.request_hash == result.request_hash
             or not plan.plan_hash == evidence.plan_hash == result.plan_hash
-            or reconstruct_pinned_check_definition(request, plan).to_dict() != definition.to_dict()):
+):
         invalid('typed definition/request/plan/result/evidence linkage differs')
-    if (plan.indicator_graph or plan.gap_policy != 'reject' or plan.outcome_tail['seconds'] != 0
-            or dict(plan.execution) != dict(CHECK_REGISTRY.resolve_evaluator(definition).declare_requirements(
-                definition=definition, request=request))):
+    if (plan.indicator_graph or plan.gap_policy != 'reject' or plan.outcome_tail['seconds'] != 0):
         invalid('saved selection execution/support contract differs')
     selection, binding = deepcopy(dict(result.result)), deepcopy(dict(evidence.input_binding))
-    source_rules = {'12': SIX_BLOCK_RULES, '14': TWO_BLOCK_RULES, '17': POPULATION_RULES}[version]
+    source_rules = (POPULATION_RULES if version == '17' else
+                    historical_base('raw_forward_outcome', version).material_rules['selection_rules'])
     fields = POPULATION_FIELDS if version == '17' else MANIFEST_FIELDS
     if (selection['schema_version'] != SCHEMAS[version] or selection['outcomes_calculated'] is not False
             or selection['rules'] != source_rules

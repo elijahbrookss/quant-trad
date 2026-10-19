@@ -1,4 +1,4 @@
-"""Synthetic qualification of fixed raw-v4 matching; no market-data acquisition."""
+"""Synthetic qualification of current configured matching; no market-data acquisition."""
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
@@ -23,7 +23,10 @@ def time(i):
 def payload():
     return {"check_family": "raw_forward_outcome", "mode": "evidence", "dataset_id": "mds_"+"a"*32,
         "scope": {"instrument_id": "synthetic", "timeframe": "1m", "start": time(21), "end": time(90)},
-        "detector": dict(cr.DETECTOR), "outcomes": {"schema_version": cr.OUTCOME_SCHEMA},
+        "detector": dict(cr.DETECTOR), "outcomes": {"schema_version": cr.PATH_SCHEMA,
+            "interval":"1m", "trend_lookback_bars":5, "volatility_lookback_bars":20,
+            "entry_lag_bars":1, "outcome_horizon_bars":5, "matching_policy":"same_date_hour",
+            "comparison_window_days":0},
         "gap_policy": "continue_degraded"}
 
 
@@ -47,7 +50,7 @@ def candles():
 def contract(p=None):
     p = p or payload()
     definition,request = normalize_check_request(p)
-    declaration = cr.ControlledReversalEvaluator().declare_requirements(definition=definition,request=request)
+    declaration = cr.ControlledReversalPathEvaluator().declare_requirements(definition=definition,request=request)
     plan = ResolvedCheckPlan(schema_version=CHECK_PLAN_SCHEMA_VERSION,request_hash=request.request_hash,
         market_data_requirements=({"alias": "primary_bars", "instrument_id": "synthetic",
             "timeframe_seconds": 60, "required_fields": declaration["primary_candle_required_fields"]},),
@@ -60,20 +63,20 @@ def contract(p=None):
 
 def run(frame=None,p=None):
     _,request,plan = contract(p)
-    return cr.ControlledReversalEvaluator().evaluate(plan=plan,inputs={**request.parameters,
+    return cr.ControlledReversalPathEvaluator().evaluate(plan=plan,inputs={**request.parameters,
         "candles": candles() if frame is None else frame})
 
 
 def test_explicit_version_preparation_catalog_and_reconstruction():
     definition,request,plan = contract()
-    assert definition.definition_version.startswith("4+") and definition_allows_evidence(definition)
-    declared = cr.ControlledReversalEvaluator().declare_requirements(definition=definition,request=request)
+    assert definition.definition_version.startswith("19+") and definition_allows_evidence(definition)
+    declared = cr.ControlledReversalPathEvaluator().declare_requirements(definition=definition,request=request)
     assert declared["feature_lookback_bars"] == 21 and declared["indicator_ids"] == []
     assert "volume" not in declared["primary_candle_required_fields"]
     definition,request,plan = pin_check_definition_to_plan(definition,request,plan)
     assert reconstruct_pinned_check_definition(request,plan).to_dict() == definition.to_dict()
     normalize_check_preparation_request(payload())
-    description = catalog.get_check_definition("raw_forward_outcome","4")
+    description = catalog.get_check_definition("raw_forward_outcome","19")
     assert description["result_shape"]["analysis_field"] == "controlled_reversal_comparison"
     assert description["settings"]["fixed"]["support"]["complete_pairs"] == 100
 
@@ -245,18 +248,6 @@ def run_paths(frame=None):
         'candles':candles() if frame is None else frame})
 
 
-def test_legacy_v4_v5_exact_result_hashes_and_new_profile_matching_parity():
-    assert semantic_hash(run())=='ce94b9f192684d7a8aa89c4f79094351acf341ccb2c67f24284e461765061616'
-    _,request,plan=contract(path_payload(cr.CONFIGURABLE_SCHEMA))
-    old=cr.ConfigurableControlledReversalEvaluator().evaluate(plan=plan,inputs={**request.parameters,'candles':candles()})
-    assert semantic_hash(old)=='1b5159682f7fb819a141b8c11a8828f35b6dd649bb5411f84f616cc7c43b3937'
-    new=run_paths()
-    for field in ('feature_frozen_hash','unmatched','candidate_comparisons','controlled_reversal_comparison'):
-        assert new[field]==old[field]
-    assert len(new['pairs'])==len(old['pairs'])==1
-    for arm in ('treated','control'):
-        assert new['pairs'][0][arm]==old['pairs'][0][arm]
-        assert {k:new['pairs'][0]['outcomes'][arm][k] for k in old['pairs'][0]['outcomes'][arm]}==old['pairs'][0]['outcomes'][arm]
 
 
 def test_new_profile_saves_both_arm_excursions_and_explicit_contract_round_trip():
@@ -335,8 +326,8 @@ def test_new_profile_registry_reconstruction_catalog_and_zero_tail():
     fields=detail['result_shape']['analytical_fields']
     assert fields['pairs[].outcomes.{treated,control}']['unit']=='fraction'
     assert 'path_observation_contract' in fields
-    assert catalog.get_check_definition('raw_forward_outcome','5')['discovery']['preferred_profile']=='raw_forward_outcome@19'
-    assert catalog.get_check_definition('raw_forward_outcome','4')['discovery']['new_requests'] is True
+    with pytest.raises(KeyError): catalog.get_check_definition('raw_forward_outcome','5')
+    with pytest.raises(KeyError): catalog.get_check_definition('raw_forward_outcome','4')
     # Entry and path choices remain the same v5 envelope; schema is the only new choice.
     for key,value in path_payload()['outcomes'].items():
         if key!='schema_version': assert request.parameters['outcomes'][key]==value

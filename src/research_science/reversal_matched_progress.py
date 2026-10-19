@@ -5,7 +5,7 @@ import math
 
 from .recognition import utc, plain
 from .reversal_outcomes import first_passage_path, HORIZON_BARS
-from .study import stable_hash
+from .hashing import stable_hash
 from .weighted_summaries import first_crossing_quantiles, accurate_prefixes
 
 SCHEMA = 'reversal_matched_progress.v1'

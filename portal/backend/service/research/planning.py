@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.execution_control import execution_checkpoint
+from indicators.config import IndicatorExecutionContext
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 from market_data.contracts import (
@@ -464,12 +465,30 @@ def plan_research_check(
 ) -> ResolvedCheckPlan:
     """Resolve explicit and transitive Check inputs without acquiring providers."""
 
-    scope = dict(request.scope)
-    instrument_loader = instrument_loader or instrument_service.get_instrument_record
     evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
-    declaration = dict(
-        evaluator.declare_requirements(definition=definition, request=request)
+    declaration = dict(evaluator.declare_requirements(definition=definition, request=request))
+    return _plan_research_check_from_declaration(
+        definition, request, declaration=declaration, store=store,
+        indicator_planner=indicator_planner, instrument_loader=instrument_loader,
+        inspect_coverage=inspect_coverage, require_durable_sources=require_durable_sources,
     )
+
+
+def _plan_research_check_from_declaration(
+    definition: CheckDefinition,
+    request: CheckRequest,
+    *,
+    declaration: Mapping[str, Any],
+    store: MarketDataStore = market_data_repo,
+    indicator_planner: Callable[..., Mapping[str, Any]] = plan_runtime_requirements_for_indicators,
+    instrument_loader: Callable[[str], Mapping[str, Any]] | None = None,
+    inspect_coverage: bool = True,
+    require_durable_sources: bool = False,
+) -> ResolvedCheckPlan:
+    """Shared plan arithmetic; caller owns admission of the declaration."""
+    scope = dict(request.scope)
+    declaration = dict(declaration)
+    instrument_loader = instrument_loader or instrument_service.get_instrument_record
     durable_sources = request.mode == CHECK_MODE_EVIDENCE or bool(
         require_durable_sources
     )
@@ -553,6 +572,15 @@ def plan_research_check(
         start=_iso(evaluation_start),
         end=_iso(evaluation_end + timedelta(seconds=outcome_tail_seconds)),
         param_overrides_by_id=override_map,
+        execution_context=IndicatorExecutionContext(
+            instrument_id=instrument_id,
+            symbol=_instrument.get("symbol") or scope.get("symbol"),
+            datasource=_instrument.get("datasource") or scope.get("datasource"),
+            exchange=_instrument.get("exchange") or scope.get("exchange"),
+            start=_iso(evaluation_start),
+            end=_iso(evaluation_end + timedelta(seconds=outcome_tail_seconds)),
+            interval=timeframe,
+        ),
     )
     warmup_bars = max(warmup_bars, int(indicator_plan.get("warmup_bars") or 0))
     materialization_start = evaluation_start - timedelta(
@@ -794,6 +822,7 @@ def rederive_research_check_plan_from_pinned_inputs(
     persisted_plan: ResolvedCheckPlan,
     *,
     subject_snapshots: Mapping[str, Mapping[str, Any]],
+    historical_execution: Mapping[str, Any] | None = None,
 ) -> ResolvedCheckPlan:
     """Rebuild plan semantics without consulting mutable Indicator/instrument rows."""
 
@@ -830,9 +859,12 @@ def rederive_research_check_plan_from_pinned_inputs(
             )
         return dict(snapshot)
 
-    return plan_research_check(
+    planner = plan_research_check if historical_execution is None else _plan_research_check_from_declaration
+    declaration_kwargs = {} if historical_execution is None else {"declaration": historical_execution}
+    return planner(
         definition,
         request,
+        **declaration_kwargs,
         indicator_planner=pinned_indicator_planner,
         instrument_loader=pinned_instrument_loader,
         inspect_coverage=False,

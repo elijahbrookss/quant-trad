@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 from research_science.recognition import RecognitionCandle, utc, plain
 from research_science.reversal_matched_outcomes import describe_selected_pairs
-from research_science.study import stable_hash
+from research_science.hashing import stable_hash
 
 
 def fixture():

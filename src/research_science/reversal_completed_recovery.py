@@ -10,7 +10,7 @@ from .completed_event_context import CompletedEventContext
 from .recognition import plain,utc
 from .reversal_outcomes import CLASSES,first_passage_path
 from .reversal_selection import moment_weights,stage_availability,_components
-from .study import stable_hash
+from .hashing import stable_hash
 from .weighted_summaries import first_crossing_quantiles,sequential_prefixes
 
 SCHEMA='reversal_completed_recovery.v1'

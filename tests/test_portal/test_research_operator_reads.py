@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from portal.backend.controller import research as routes
 from portal.backend.service.research import operator_reads as ops
 from portal.backend.service.research.async_dispatch import research_request_fingerprint, JOB_TYPE_RESEARCH_CHECK_RUN
-from tests.test_portal.test_saved_selection_measurements import synthetic, planned
+from tests.test_portal.test_saved_selection_measurements import synthetic, planned, synthetic_original_receipts
 from portal.backend.db.models import ResearchItemRecord
 
 

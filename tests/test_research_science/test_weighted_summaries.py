@@ -36,7 +36,7 @@ def test_existing_matched_kernel_scientific_material_remains_exact():
     from tests.test_research_science.test_reversal_matched_outcomes import fixture
     from research_science.reversal_matched_outcomes import describe_selected_pairs
     from research_science.reversal_matched_progress import describe_progress
-    from research_science.study import stable_hash
+    from research_science.hashing import stable_hash
     selection,bars,end=fixture();selection['source_identity_key']='source'
     outcomes=describe_selected_pairs(selection,bars,evaluation_end=end)
     progress=describe_progress(selection,outcomes,bars,evaluation_end=end)

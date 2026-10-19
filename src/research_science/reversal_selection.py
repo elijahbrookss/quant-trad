@@ -12,7 +12,7 @@ from typing import Callable
 
 from .recognition import plain
 from .completed_event_context import CompletedEventContext, _log_ratio
-from .study import stable_hash
+from .hashing import stable_hash
 from .weighted_summaries import first_crossing_quantiles, sequential_prefixes
 
 SCHEMA = "reversal_selection_only.v1"

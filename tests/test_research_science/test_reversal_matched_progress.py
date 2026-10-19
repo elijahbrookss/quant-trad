@@ -9,7 +9,7 @@ from research_science.recognition import RecognitionCandle, utc
 from research_science.reversal_outcomes import first_passage_path
 from research_science.reversal_matched_progress import progress_path, describe_progress, distribution
 from research_science.reversal_matched_outcomes import describe_selected_pairs
-from research_science.study import stable_hash
+from research_science.hashing import stable_hash
 from tests.test_research_science.test_reversal_matched_outcomes import fixture
 
 

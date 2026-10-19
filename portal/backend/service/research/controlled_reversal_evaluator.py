@@ -1,4 +1,4 @@
-"""Fixed, outcome-blind candle reversal matching owned by raw Check version 4."""
+"""Current configured candle comparison and its shared matching/path kernels."""
 from __future__ import annotations
 
 from bisect import bisect_left, insort
@@ -49,27 +49,8 @@ FIXED_RULES = {
 }
 
 
-def _validate_scope(scope):
-    if scope.get("timeframe", scope.get("interval")) != "1m":
-        raise ValueError("controlled_reversal_invalid: fixed 1m timeframe required")
-    warmup = scope.get("warmup_bars", LOOKBACK)
-    if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup != LOOKBACK:
-        raise ValueError("controlled_reversal_invalid: warmup must be exactly 21 bars when supplied")
-    start, end = (_clock(scope.get(k), "scope."+k) for k in ("start", "end"))
-    if start != start.floor("min") or end != end.floor("min") or not timedelta(0) < end-start <= timedelta(days=32):
-        raise ValueError("controlled_reversal_invalid: aligned minute range of at most 32 days required")
-    return start, end
 
 
-def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy):
-    if detector != DETECTOR or outcomes != {"schema_version": OUTCOME_SCHEMA}:
-        raise ValueError("controlled_reversal_invalid: exact fixed detector and outcome schema required; no tuning fields")
-    if inputs or statistics or scope.get("indicator_id") or scope.get("indicator_param_overrides"):
-        raise ValueError("controlled_reversal_invalid: no Indicator, additional inputs or statistics settings")
-    if gap_policy != "continue_degraded":
-        raise ValueError("controlled_reversal_invalid: continue_degraded with explicit local exclusions required")
-    _validate_scope(scope)
-    return {"schema_version": OUTCOME_SCHEMA}
 
 
 def prepare_candidates(rows, *, start, end, choices=None):
@@ -291,56 +272,9 @@ def summarize_pairs(pairs, *, eligible_treated, both_arm_days=False, features=FE
         "leave_one_utc_day_out": deletion, "joint_nonoverlap": subset, "decision": decision}
 
 
-@dataclass(frozen=True)
-class ControlledReversalEvaluator:
-    evaluator_id: str = checks.RAW_FORWARD_OUTCOME
-    version: str = "4"
-    result_schema_version: str = RESULT_SCHEMA
-
-    def declare_requirements(self, *, definition, request):
-        del definition
-        _validate_scope(request.scope)
-        return {"input_kind": "market_data", "indicator_ids": [], "warmup_floor_bars": 0,
-            "feature_lookback_bars": LOOKBACK, "feature_windows_seconds_by_alias": {},
-            "outcome_horizons": [HORIZON], "required_outcome_horizons": [HORIZON], "horizon_kind": "bars",
-            "entry_lag_bars": 1, "invalidation_max_bars": 0, "outcome_boundary": "evaluation_end_exclusive",
-            "primary_candle_required_fields": ["open", "high", "low", "close", "known_at"]}
-
-    def evaluate(self, *, plan, inputs: Mapping):
-        primary = next(r for r in plan.market_data_requirements if r["alias"] == "primary_bars")
-        if primary["timeframe_seconds"] != 60:
-            raise ValueError("controlled_reversal_invalid: canonical 1m requirement needed")
-        start,end = _validate_scope({"timeframe": "1m", "start": plan.evaluation_range["start"],
-                                    "end": plan.evaluation_range["end_exclusive"]})
-        _,rows = _prepare(inputs["candles"],step=STEP,volume_required=False)
-        candidates,exclusions,evaluated = prepare_candidates(rows,start=start,end=end)
-        pairs,unmatched,comparisons = prepare_pairs(candidates)
-        # Commit the complete feature map and subset before any entry/path resolution.
-        feature_hash = semantic_hash({"candidates": candidates, "pairs": pairs, "unmatched": unmatched})
-        by_open = {r["open_time"]: r for r in rows}
-        for pair in pairs:
-            execution_checkpoint()
-            pair["outcomes"] = {arm: resolve_candidate(pair[arm],rows=rows,by_open=by_open,end=end)
-                                for arm in ("treated","control")}
-        treated = sum(c["treated"] for c in candidates)
-        analysis = summarize_pairs(pairs,eligible_treated=treated)
-        return {"schema_version": RESULT_SCHEMA, "check_family": checks.RAW_FORWARD_OUTCOME,
-            "status": "completed", "event_ownership": "check", "return_unit": "fraction",
-            "sample_count": len(pairs), "complete_sample_count": analysis["primary"]["complete_pairs"],
-            "eligible_bars": evaluated, "candidate_exclusions": exclusions,
-            "eligible_treated": treated, "eligible_controls": len(candidates)-treated,
-            "candidate_comparisons": comparisons, "feature_frozen_hash": feature_hash,
-            "controlled_reversal_comparison": analysis, "pairs": pairs, "unmatched": unmatched,
-            "known_at_methods": dict(Counter(r["known_at_method"] for r in rows)),
-            "data_quality": dict(inputs.get("data_quality") or {}),
-            "caveats": ["Descriptive matched association, not causality, significance or profitability.",
-                "Day deletion and nonoverlap do not guarantee independence or remove unmeasured confounding.",
-                "Inferred interval-close availability is not measured publication latency.",
-                "Current-body, prior-risk and decline calipers are fixed; no outcome-driven rematching."]}
 
 
-# V4 keeps its constants, material rules and entry point. V5 pins choices in the
-# configured definition; bar counts mean exact elapsed intervals, never row offsets.
+# Shared choice validation; bar counts mean elapsed intervals, never row offsets.
 CONFIGURABLE_SCHEMA = "controlled_reversal_comparison.v2"
 INTERVALS = {"1m": 60, "15m": 900, "30m": 1800, "1h": 3600}
 CONFIGURABLE_RULES = {
@@ -403,12 +337,10 @@ def normalize_configurable_configuration(*, detector, outcomes, statistics, inpu
 
 
 @dataclass(frozen=True)
-class ConfigurableControlledReversalEvaluator:
+class _ControlledReversalKernel:
     evaluator_id: str = checks.RAW_FORWARD_OUTCOME
-    version: str = "5"
     configuration_schema: ClassVar[str] = CONFIGURABLE_SCHEMA
     retain_path_observations: ClassVar[bool] = False
-    result_schema_version: str = "controlled_reversal_comparison_result.v2"
 
     def declare_requirements(self, *, definition, request):
         del definition
@@ -484,7 +416,7 @@ def normalize_path_configuration(**kwargs):
 
 
 @dataclass(frozen=True)
-class ControlledReversalPathEvaluator(ConfigurableControlledReversalEvaluator):
+class ControlledReversalPathEvaluator(_ControlledReversalKernel):
     version: str = '19'
     result_schema_version: str = 'controlled_reversal_comparison_result.v3'
     configuration_schema: ClassVar[str] = PATH_SCHEMA

@@ -23,8 +23,8 @@ BASE = datetime(2022, 1, 1, tzinfo=UTC)
 def iso(t):
     return t.isoformat().replace("+00:00", "Z")
 
-def v5_payload(interval="15m"):
-    p = deepcopy(catalog._EXAMPLES["raw_forward_outcome@5"])
+def comparison_payload(interval="15m"):
+    p = deepcopy(catalog._EXAMPLES["raw_forward_outcome@19"])
     seconds = cr.INTERVALS[interval]
     p["scope"].update(timeframe=interval, warmup_bars=86400//seconds+1)
     p["outcomes"].update(interval=interval, trend_lookback_bars=10800//seconds,
@@ -42,10 +42,10 @@ def plan_for(p, request, requirements=()):
 
 @pytest.mark.parametrize("interval,history,horizon", [("15m",97,12),("30m",49,6),("1h",25,3)])
 def test_configuration_only_intervals_and_exact_replay(interval, history, horizon):
-    p=v5_payload(interval); d,q=normalize_check_request(p)
+    p=comparison_payload(interval); d,q=normalize_check_request(p)
     ev=CHECK_REGISTRY.resolve_evaluator(d)
     decl=ev.declare_requirements(definition=d,request=q)
-    assert ev.version == "5" and decl["feature_lookback_bars"] == history
+    assert ev.version == "19" and decl["feature_lookback_bars"] == history
     assert decl["outcome_horizons"] == [horizon]
     assert cr.INTERVALS[interval]*horizon == 10800
     normalize_check_preparation_request(p)
@@ -57,11 +57,11 @@ def test_configuration_only_intervals_and_exact_replay(interval, history, horizo
     ("entry_lag_bars",True),("comparison_window_days",32),("matching_policy","same_date_hour"),
     ("outcome_horizon_bars",10000)])
 def test_incompatible_choices_rejected_before_planning(key,value):
-    p=v5_payload();p["outcomes"][key]=value
+    p=comparison_payload();p["outcomes"][key]=value
     with pytest.raises(ValueError,match="controlled_reversal_invalid"):
         normalize_check_request(p)
 
-def v5_candles():
+def comparison_candles():
     # Two similar prior histories at identical close slots two days apart.
     rows=[]
     for i in range(-97, 384):
@@ -78,13 +78,13 @@ def v5_candles():
             "high":max(opened,close)+1,"low":min(opened,close)-1})
     return pd.DataFrame(rows)
 
-def run_v5(frame):
-    p=v5_payload();p["scope"].update(end=iso(BASE+timedelta(days=4)))
+def run_comparison(frame):
+    p=comparison_payload();p["scope"].update(end=iso(BASE+timedelta(days=4)))
     d,q=normalize_check_request(p);plan=plan_for(p,q,({"alias":"primary_bars","timeframe_seconds":900},))
     return CHECK_REGISTRY.resolve_evaluator(d).evaluate(plan=plan,inputs={**q.parameters,"candles":frame})
 
-def test_v5_elapsed_features_cross_date_pairs_and_missingness():
-    frame=v5_candles();original=frame.copy(deep=True);result=run_v5(frame)
+def test_current_elapsed_features_cross_date_pairs_and_missingness():
+    frame=comparison_candles();original=frame.copy(deep=True);result=run_comparison(frame)
     assert result["sample_count"] == 1
     pair=result["pairs"][0]
     assert pair["treated"]["day"] != pair["control"]["day"]
@@ -96,11 +96,11 @@ def test_v5_elapsed_features_cross_date_pairs_and_missingness():
     assert pair["treated"]["features"]["log_prior_rms"] == pytest.approx(math.log(rms))
     assert pd.Timestamp(pair["treated"]["target_time"])-pd.Timestamp(pair["treated"]["entry_time"]) == timedelta(hours=3)
     missing=frame[frame.timestamp != iso(event+timedelta(minutes=45))]
-    changed=run_v5(missing)
+    changed=run_comparison(missing)
     assert changed["feature_frozen_hash"] == result["feature_frozen_hash"]
     assert changed["complete_sample_count"] == 0
     late=frame.copy();late.loc[late.timestamp==iso(event-timedelta(minutes=15)),"known_at"]=iso(event+timedelta(hours=1))
-    assert run_v5(late)["eligible_treated"] == 0
+    assert run_comparison(late)["eligible_treated"] == 0
     pd.testing.assert_frame_equal(frame,original)
 
 def test_both_arm_day_deletion_and_treated_support_preserved():
@@ -242,8 +242,8 @@ def test_retrospective_bucket_validation_ambiguity_and_cancellation(monkeypatch)
     with pytest.raises(RuntimeError,match="cancelled"):
         retro.retrospective_snapshots([a],**options)
 
-def test_v5_exact_comparison_radius_slot_and_shared_overlap_controls():
-    c=v5_payload()["outcomes"]
+def test_current_exact_comparison_radius_slot_and_shared_overlap_controls():
+    c=comparison_payload()["outcomes"]
     def candidate(day,treated,slot="00:15:00"):
         event=BASE+timedelta(days=day)
         return {"event_time":iso(event),"event_close_time":iso(event+timedelta(minutes=15)),
@@ -260,7 +260,7 @@ def test_real_planner_keeps_exact_profile_history_and_typed_numeric_inputs():
     def indicator_planner(ids, **kwargs):
         assert ids == []
         return {"indicators":[],"requirements":[],"warmup_bars":0}
-    for p in (v5_payload(),deepcopy(catalog._EXAMPLES["event_fact_analysis@13"])):
+    for p in (comparison_payload(),deepcopy(catalog._EXAMPLES["event_fact_analysis@13"])):
         d,q=normalize_check_request(p)
         plan=plan_research_check(d,q,inspect_coverage=False,instrument_loader=lambda key:{"id":key,"symbol":"SYNTHETIC"},indicator_planner=indicator_planner)
         if d.definition_id=="raw_forward_outcome":
@@ -274,21 +274,11 @@ def test_real_planner_keeps_exact_profile_history_and_typed_numeric_inputs():
         assert reconstruct_pinned_check_definition(q,plan).to_dict()==d.to_dict()
 
 def test_impossible_same_hour_closed_intervals_fail_early():
-    p=v5_payload("30m");p["outcomes"].update(matching_policy="same_date_hour",comparison_window_days=0,outcome_horizon_bars=1)
+    p=comparison_payload("30m");p["outcomes"].update(matching_policy="same_date_hour",comparison_window_days=0,outcome_horizon_bars=1)
     with pytest.raises(ValueError,match="room for two disjoint"):
         normalize_check_request(p)
 
 
-def test_v5_legacy_profile_reuses_identical_feature_frozen_pair_map():
-    from tests.test_portal.test_controlled_reversal_evidence import candles, payload, run, contract
-    p=payload();p["outcomes"]={"schema_version":cr.CONFIGURABLE_SCHEMA,"interval":"1m",
-        "trend_lookback_bars":5,"volatility_lookback_bars":20,"entry_lag_bars":1,"outcome_horizon_bars":5,
-        "matching_policy":"same_date_hour","comparison_window_days":0}
-    d,q=normalize_check_request(p);_,_,plan=contract()
-    result=CHECK_REGISTRY.resolve_evaluator(d).evaluate(plan=plan,inputs={**q.parameters,"candles":candles()})
-    historical=run()
-    assert result["feature_frozen_hash"]==historical["feature_frozen_hash"]
-    assert result["pairs"]==historical["pairs"]
 
 
 def test_complete_paired_policy_plans_only_evaluation_buckets_and_preserves_legacy():

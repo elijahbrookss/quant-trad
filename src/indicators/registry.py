@@ -10,20 +10,16 @@ from indicators.manifest import IndicatorManifest, validate_indicator_manifest
 
 from .candle_stats.definition import CandleStatsIndicator
 from .market_profile.definition import MarketProfileIndicator
-from .pivot_level.definition import PivotLevelIndicatorDefinition
 from .regime.definition import RegimeIndicator
 from .reserve_state.definition import ReserveStateIndicator
-from .trendline.definition import TrendlineIndicatorDefinition
-from .vwap.definition import VWAPIndicatorDefinition
+from .reversal.definition import ReversalIndicator
 
 
 INDICATOR_MAP: dict[str, Any] = {
     "candle_stats": CandleStatsIndicator,
     "regime": RegimeIndicator,
     "reserve_state": ReserveStateIndicator,
-    "vwap": VWAPIndicatorDefinition,
-    "pivot_level": PivotLevelIndicatorDefinition,
-    "trendline": TrendlineIndicatorDefinition,
+    "reversal": ReversalIndicator,
     "market_profile": MarketProfileIndicator,
 }
 

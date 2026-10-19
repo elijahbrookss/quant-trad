@@ -22,9 +22,7 @@ code_paths:
   - src/research_science/reversal_matched_progress.py
   - portal/backend/service/research/saved_selection_binding.py
   - portal/backend/service/research/saved_selection_measurements_evaluator.py
-  - portal/backend/service/research/reversal_matched_progress_evaluator.py
   - src/research_science/reversal_matched_outcomes.py
-  - portal/backend/service/research/reversal_matched_outcomes_evaluator.py
   - src/research_science/completed_event_context.py
   - src/research_science/reversal_completed_recovery.py
   - portal/backend/service/research/reversal_completed_recovery_evaluator.py
@@ -33,13 +31,7 @@ code_paths:
   - src/research_science/weighted_summaries.py
   - portal/backend/service/research/reversal_population_evaluator.py
   - src/research_science/reversal_selection.py
-  - src/research_science/reversal_six_block_selection.py
-  - src/research_science/reversal_two_block_selection.py
-  - portal/backend/service/research/reversal_two_block_selection_evaluator.py
-  - portal/backend/service/research/reversal_six_block_selection_evaluator.py
-  - portal/backend/service/research/reversal_selection_evaluator.py
-  - portal/backend/service/research/reversal_first_passage_evaluator.py
-  - portal/backend/service/research/reversal_recognition_evaluator.py
+  - src/research_science/reversal_selection_timing.py
   - scripts/reporting/reversal_recognition_preview.py
   - src/market_data/frozen.py
   - portal/backend/service/research/registry.py
@@ -77,6 +69,15 @@ code_paths:
   - cli/mcp_server.py
 ---
 # Check Evidence Boundary
+
+## Current execution and historical custody
+
+[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md)
+defines the current Indicator/Check/Study boundary and current-only execution
+catalog. Earlier version-specific descriptions below are historical method
+meaning, not promises that retired factories remain executable. Original
+records remain integrity-checked and readable through data-only custody.
+
 
 ## Bounded input delivery
 

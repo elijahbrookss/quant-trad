@@ -6,7 +6,7 @@ from time import monotonic
 from core.execution_control import execution_checkpoint
 from research_science.recognition import plain,utc
 from research_science.reversal_population import SCHEMA,RULES,SelectionPopulation,select_population
-from .reversal_recognition_evaluator import choices,prepare_recognition,recognition_requirements
+from .recognition_preparation import choices,prepare_recognition,recognition_requirements
 from .saved_selection_binding import native_candle_series
 
 RESULT_SCHEMA='reversal_population_selection_result.v1'

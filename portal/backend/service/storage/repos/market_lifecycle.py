@@ -294,7 +294,17 @@ class PostgresMarketStorageLifecycleRepository:
     @staticmethod
     def acquire_dataset_pin_lock(session) -> None:
         """Block lifecycle expiry while a frozen or explicit pin is committed."""
+        PostgresMarketStorageLifecycleRepository.acquire_publication_lock(session)
 
+    @staticmethod
+    def acquire_publication_lock(session) -> None:
+        """Admit a publication before source/holder reads or lease-row locks.
+
+        Hold the shared transaction fence through commit. Final reclamation
+        takes the exclusive counterpart; incoming writers wait without holding
+        the hot parents it needs. Caller timeouts/cancellation still apply.
+        Lease heartbeats deliberately do not acquire this fence.
+        """
         session.execute(
             text(
                 "SELECT pg_advisory_xact_lock_shared(hashtextextended(:name, 0))"

@@ -9,7 +9,7 @@ from research_science.reversal_completed_recovery import SCHEMA,RULES,measure_co
 from .reversal_population_evaluator import (
     SCHEMA as POPULATION_SCHEMA, normalize_configuration as normalize_population,
     population_for, prepare_population_input)
-from .reversal_recognition_evaluator import recognition_requirements
+from .recognition_preparation import recognition_requirements
 
 RESULT_SCHEMA='reversal_completed_recovery_result.v1'
 

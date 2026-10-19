@@ -6,11 +6,9 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from market_data.frozen import build_frozen_market_data_read_binding
 from research_science.recognition import utc
 from portal.backend.service.research import catalog,execution
-from tests.test_portal.test_reversal_population_evidence import planned
-from tests.test_portal.test_saved_selection_measurements import synthetic,SOURCE
+from tests.test_portal.test_reversal_population_evidence import planned,native_binding,SOURCE
 from tests.test_research_science.test_recognition import candles as pattern
 
 
@@ -50,13 +48,7 @@ def test_new_profile_does_not_relax_native_frozen_scientific_or_identity_contrac
 def test_actual8128_loader_all_completed_four_labels_and_three_fixed_views(monkeypatch):
     definition,request,plan=planned(payload())
     plan=replace(plan,plan_hash='',materialization_range={**plan.materialization_range,'as_of_commit_seq':10})
-    item,*_=synthetic();old=item['payload']['evidence']['input_binding']
-    series=deepcopy(old['series'][0]);series.update(row_count=8128,range_start='2025-04-25T08:00:00Z',range_end='2025-07-19T00:00:00Z',
-        loaded_range={'start':'2025-04-25T08:00:00Z','end_exclusive':'2025-07-19T00:00:00Z'},requirement=dict(plan.market_data_requirements[0]))
-    series['source_binding']['source_summary']['counts']={SOURCE:8128}
-    series.pop('source_binding_hash',None)
-    binding=build_frozen_market_data_read_binding(dataset_id=request.dataset_id,dataset_hash='a'*64,max_commit_seq=10,
-        subjects=old['subjects'],series=[series])
+    binding=native_binding(request,plan,8128)
     opened=pd.date_range('2025-04-25T08:00:00Z',periods=8128,freq='15min')
     prices=[100+i*.001 for i in range(8128)]
     frame=pd.DataFrame({'timestamp':opened,'close_time':opened+timedelta(minutes=15),'known_at':opened+timedelta(minutes=15),

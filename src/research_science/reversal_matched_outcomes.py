@@ -5,7 +5,7 @@ import math
 
 from .recognition import utc, plain
 from .reversal_outcomes import CLASSES, HORIZON_BARS, first_passage_path
-from .study import stable_hash
+from .hashing import stable_hash
 
 SCHEMA='reversal_matched_first_passage.v1'
 RULES={

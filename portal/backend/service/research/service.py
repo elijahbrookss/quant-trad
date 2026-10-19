@@ -10,7 +10,6 @@ import uuid
 from collections import Counter
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
-from time import perf_counter
 from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
@@ -44,6 +43,7 @@ from portal.backend.service.storage.repos import runs as runs_repo
 from market_data.frozen import semantic_hash
 
 from . import repository
+from .historical_check_custody import (historical_identity, validate_historical_definition, validate_historical_receipt, historical_observation_eligible)
 from .checks import (
     CANDIDATE_LIFECYCLE,
     INDICATOR_FORWARD_OUTCOME,
@@ -53,15 +53,7 @@ from .checks import (
     SIGNAL_AUDIT,
     SUPPORTED_CHECK_FAMILY,
     SUPPORTED_CHECK_FAMILIES,
-    blocked_check_result,
-    evaluate_candidate_lifecycle,
-    evaluate_indicator_forward_outcome,
-    evaluate_raw_event_check,
-    evaluate_run_decision_trade_comparison,
-    evaluate_run_signal_summary,
-    evaluate_signal_audit,
     normalize_run_signal_records,
-    validate_check_detector,
 )
 from .metrics import build_leaderboard, extract_numeric_metrics
 from .execution import execute_check_evidence, execute_check_preview
@@ -83,7 +75,6 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_ITEM_KINDS = {"observation", "research_check", "hypothesis", "study"}
 RESEARCH_ITEM_STATUSES = {"draft", "active", "tested", "promoted", "rejected", "archived", "blocked"}
-INDICATOR_CHECK_FAMILIES = {INDICATOR_FORWARD_OUTCOME, SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}
 
 RESEARCH_ACTIVITY_TYPES: dict[str, tuple[str, tuple[str, ...], str]] = {
     "checks_completed": (
@@ -105,52 +96,6 @@ RESEARCH_ACTIVITY_TYPES: dict[str, tuple[str, tuple[str, ...], str]] = {
 _RESEARCH_ACTIVITY_MAX_DAYS = 366
 
 
-class ResearchEvaluationCache:
-    """Per-request cache for repeated research check evaluation."""
-
-    def __init__(self) -> None:
-        self.coverage_by_scope: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-        self.candles_by_scope: dict[tuple[str, str, str, str], Any] = {}
-        self.source_frames_by_request: dict[tuple[str, ...], Any] = {}
-        self.stats: Counter[str] = Counter()
-
-    def coverage(self, scope: Mapping[str, Any]) -> dict[str, Any]:
-        key = _scope_cache_key(scope)
-        if key in self.coverage_by_scope:
-            self.stats["coverage_hits"] += 1
-            return self.coverage_by_scope[key]
-        self.stats["coverage_misses"] += 1
-        coverage = candle_service.preflight_candle_coverage_by_instrument(
-            scope["instrument_id"],
-            scope["start"],
-            scope["end"],
-            scope["timeframe"],
-        )
-        self.coverage_by_scope[key] = dict(coverage)
-        return dict(coverage)
-
-    def candles(self, scope: Mapping[str, Any]) -> Any:
-        key = _scope_cache_key(scope)
-        if key in self.candles_by_scope:
-            self.stats["candle_hits"] += 1
-            return self.candles_by_scope[key]
-        self.stats["candle_misses"] += 1
-        frame = candle_service.fetch_ohlcv_by_instrument(
-            scope["instrument_id"],
-            scope["start"],
-            scope["end"],
-            scope["timeframe"],
-        )
-        self.candles_by_scope[key] = frame
-        return frame
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "coverage_entries": len(self.coverage_by_scope),
-            "candle_entries": len(self.candles_by_scope),
-            "source_frame_entries": len(self.source_frames_by_request),
-            "stats": dict(sorted(self.stats.items())),
-        }
 
 
 def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -218,6 +163,7 @@ def list_research_items(
 
 def _validate_research_check_evidence_payload(
     payload: Mapping[str, Any],
+    *, item_id: str | None = None,
 ) -> tuple[
     CheckDefinition,
     CheckRequest,
@@ -277,38 +223,46 @@ def _validate_research_check_evidence_payload(
         or result.evaluator_version != definition.evaluator_version
     ):
         raise ValueError("check_evidence_payload_invalid: evidence/result disagreement")
-    registered = definition.material_rules.get("registered_definition")
-    if isinstance(registered, Mapping):
-        base = CHECK_REGISTRY.resolve_definition(
-            str(registered.get("definition_id") or ""),
-            str(registered.get("definition_version") or ""),
-        )
-        if (
-            base.definition_id != definition.definition_id
-            or base.definition_hash != str(registered.get("definition_hash") or "")
-            or base.evaluator_id != definition.evaluator_id
-            or base.evaluator_version != definition.evaluator_version
-        ):
-            raise ValueError(
-                "check_evidence_payload_invalid: registered definition lineage disagrees"
-            )
+    historical = historical_identity(definition)
+    if historical:
+        # Only exact inventoried original envelopes can use recorded declarations.
+        # This does not install an executor or admit new historical requests.
+        validate_historical_receipt(definition, evidence, result, item_id=item_id)
+        validate_historical_definition(definition, request, plan)
+        declared_execution = dict(plan.execution)
     else:
-        base = CHECK_REGISTRY.resolve_definition(
-            definition.definition_id, definition.definition_version
-        )
-        if base.definition_hash != definition.definition_hash:
-            raise ValueError(
-                "check_evidence_payload_invalid: definition is not registered"
+        registered = definition.material_rules.get("registered_definition")
+        if isinstance(registered, Mapping):
+            base = CHECK_REGISTRY.resolve_definition(
+                str(registered.get("definition_id") or ""),
+                str(registered.get("definition_version") or ""),
             )
-    evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
-    declared_execution = dict(
-        evaluator.declare_requirements(definition=definition, request=request)
-    )
-    if dict(plan.execution) != declared_execution:
-        raise ValueError(
-            "check_evidence_payload_invalid: evaluator execution declaration disagrees "
-            "with plan"
+            if (
+                base.definition_id != definition.definition_id
+                or base.definition_hash != str(registered.get("definition_hash") or "")
+                or base.evaluator_id != definition.evaluator_id
+                or base.evaluator_version != definition.evaluator_version
+            ):
+                raise ValueError(
+                    "check_evidence_payload_invalid: registered definition lineage disagrees"
+                )
+        else:
+            base = CHECK_REGISTRY.resolve_definition(
+                definition.definition_id, definition.definition_version
+            )
+            if base.definition_hash != definition.definition_hash:
+                raise ValueError(
+                    "check_evidence_payload_invalid: definition is not registered"
+                )
+        evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
+        declared_execution = dict(
+            evaluator.declare_requirements(definition=definition, request=request)
         )
+        if dict(plan.execution) != declared_execution:
+            raise ValueError(
+                "check_evidence_payload_invalid: evaluator execution declaration disagrees "
+                "with plan"
+            )
     input_kind = str(declared_execution.get("input_kind") or "").strip()
     expected_evidence_kind = {
         "market_data": "frozen_market_data",
@@ -319,11 +273,12 @@ def _validate_research_check_evidence_payload(
             "check_evidence_payload_invalid: evaluator input kind disagrees with "
             f"evidence binding input_kind={input_kind or '<missing>'}"
         )
-    reconstructed_definition = reconstruct_pinned_check_definition(request, plan)
-    if reconstructed_definition.to_dict() != definition.to_dict():
-        raise ValueError(
-            "check_evidence_payload_invalid: definition is not the canonical request/graph definition"
-        )
+    if not historical:
+        reconstructed_definition = reconstruct_pinned_check_definition(request, plan)
+        if reconstructed_definition.to_dict() != definition.to_dict():
+            raise ValueError(
+                "check_evidence_payload_invalid: definition is not the canonical request/graph definition"
+            )
     expected_graph_hash = semantic_hash(
         {"indicators": [dict(row) for row in plan.indicator_graph]}
     )
@@ -361,6 +316,7 @@ def _validate_research_check_evidence_payload(
             request,
             plan,
             subject_snapshots=subject_snapshots,
+            historical_execution=declared_execution if historical else None,
         )
         for field in (
             "market_data_requirements",
@@ -409,6 +365,7 @@ def _validate_research_check_evidence_payload(
             request,
             plan,
             subject_snapshots={},
+            historical_execution=declared_execution if historical else None,
         )
         for field in (
             "market_data_requirements",
@@ -495,6 +452,8 @@ def _validate_plan_binding_alignment(
 
 
 def _definition_evidence_classification(definition: CheckDefinition) -> str:
+    if historical_identity(definition):
+        return "historical_frozen_verified"
     if not definition_allows_evidence(definition):
         return "frozen_replayable_unqualified"
     if definition.definition_id in {SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}:
@@ -562,7 +521,7 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
             return projected
         try:
             definition, _request, _plan, _evidence, result = (
-                _validate_research_check_evidence_payload(payload)
+                _validate_research_check_evidence_payload(payload, item_id=str(projected["id"]))
             )
         except (KeyError, TypeError, ValueError) as exc:
             projected["evidence_classification"] = "invalid_v2"
@@ -570,13 +529,16 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
             projected["observation_eligible"] = False
             projected["evidence_integrity_error"] = str(exc)
         else:
+            historical = historical_identity(definition)
             projected["evidence_classification"] = (
-                _definition_evidence_classification(definition)
+                "historical_frozen_verified" if historical else _definition_evidence_classification(definition)
             )
-            projected["replayable"] = True
+            projected["stored_evidence_integrity"] = "verified"
+            projected["execution_available"] = not historical
+            projected["replayable"] = not historical
             projected["observation_eligible"] = (
                 str(result.result.get("status") or "") == "completed"
-                and definition_allows_evidence(definition)
+                and (historical_observation_eligible(str(projected["id"])) if historical else definition_allows_evidence(definition))
             )
     else:
         projected["evidence_classification"] = "legacy_unpinned"
@@ -851,39 +813,6 @@ def compare_research_check_records(left: Mapping[str, Any], right: Mapping[str, 
     }
 
 
-def _evaluate_legacy_research_check(
-    payload: Mapping[str, Any],
-    *,
-    cache: ResearchEvaluationCache | None = None,
-) -> dict[str, Any]:
-    request = dict(payload or {})
-    check_family = str(request.get("check_family") or SUPPORTED_CHECK_FAMILY).strip()
-    if check_family not in SUPPORTED_CHECK_FAMILIES:
-        raise ValueError(f"unsupported research check family: {check_family}")
-    title = str(request.get("title") or "").strip()
-    if not title:
-        raise ValueError("title is required")
-    scope = _mapping(request.get("scope"), "scope")
-    detector = _mapping(request.get("detector"), "detector")
-    outcomes = _mapping_or_empty(request.get("outcomes"))
-    validate_check_detector(check_family=check_family, detector=detector)
-    normalized_scope, result = _evaluate_research_check_request(
-        title=title,
-        check_family=check_family,
-        scope=scope,
-        detector=detector,
-        outcomes=outcomes,
-        cache=cache,
-    )
-    return {
-        "schema_version": "research_check_evaluation.v1",
-        "status": result.get("status"),
-        "check_family": check_family,
-        "scope": normalized_scope,
-        "detector": detector,
-        "outcomes": outcomes,
-        "result": result,
-    }
 
 
 @bounded_research_execution
@@ -1061,12 +990,9 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
 @bounded_research_execution
 def evaluate_research_check(
     payload: Mapping[str, Any],
-    *,
-    cache: ResearchEvaluationCache | None = None,
 ) -> dict[str, Any]:
     """Run a watermark-pinned ephemeral preview; never persist evidence."""
 
-    _ = cache
     request_payload, run_evidence = _prepare_check_request_payload(
         {**dict(payload or {}), "mode": CHECK_MODE_PREVIEW},
         mode=CHECK_MODE_PREVIEW,
@@ -1164,93 +1090,6 @@ def persist_built_research_check_evidence(
     )
 
 
-def persist_research_check(
-    payload: Mapping[str, Any],
-    *,
-    evaluation: Mapping[str, Any],
-    session: Session | None = None,
-) -> dict[str, Any]:
-    """Persist a precomputed check, optionally inside an owned job transaction."""
-
-    request = dict(payload or {})
-    existing_observation = _existing_observation(request, session=session)
-    check_family = evaluation["check_family"]
-    title = str(request.get("title") or "").strip()
-    detector = dict(evaluation["detector"])
-    outcomes = dict(evaluation["outcomes"])
-    normalized_scope = dict(evaluation["scope"])
-    result = dict(evaluation["result"])
-
-    observation = existing_observation or _create_auto_observation(
-        request,
-        scope=normalized_scope,
-        title=title,
-        session=session,
-    )
-
-    check_id = str(uuid.uuid4())
-    normalized_request = {
-        "schema_version": "research_check_request.v1",
-        "check_family": check_family,
-        "title": title,
-        "body": request.get("body"),
-        "observation_id": observation["id"],
-        "scope": normalized_scope,
-        "detector": detector,
-        "outcomes": outcomes,
-    }
-    status = "tested" if result.get("status") == "completed" else "blocked"
-    check_item = repository.create_item(
-        item_id=check_id,
-        kind="research_check",
-        status=status,
-        title=title,
-        body=_optional(request.get("body")),
-        instrument_id=normalized_scope.get("instrument_id"),
-        symbol=normalized_scope.get("symbol"),
-        timeframe=normalized_scope.get("timeframe"),
-        datasource=normalized_scope.get("datasource"),
-        exchange=normalized_scope.get("exchange"),
-        window_start=normalized_scope.get("start"),
-        window_end=normalized_scope.get("end"),
-        tags=sorted(set(["research-check", *_tags(request.get("tags"))])),
-        payload={
-            "schema_version": "research_check_payload.v1",
-            "request": normalized_request,
-            "result": {**result, "check_id": check_id},
-        },
-        source_revision=_source_revision(),
-        **({"session": session} if session is not None else {}),
-    )
-    links = [
-        repository.create_link(
-            source_item_id=check_item["id"],
-            target_type="research_item",
-            target_id=observation["id"],
-            relation="tests",
-            metadata={"target_kind": observation.get("kind")},
-            **({"session": session} if session is not None else {}),
-        )
-    ]
-    if normalized_scope.get("run_id"):
-        links.append(
-            repository.create_link(
-                source_item_id=check_item["id"],
-                target_type="run",
-                target_id=str(normalized_scope["run_id"]),
-                relation="analyzes",
-                metadata={"check_family": check_family},
-                **({"session": session} if session is not None else {}),
-            )
-        )
-    return {
-        "schema_version": "research_check_run.v1",
-        "status": result.get("status"),
-        "observation": observation,
-        "check": check_item,
-        "links": links,
-        "result": {**result, "check_id": check_id},
-    }
 
 
 def persist_research_check_evidence(
@@ -1374,13 +1213,17 @@ def create_observation_from_check_evidence(
     )
     if check.get("kind") != "research_check":
         raise ValueError("observation_evidence_invalid: item is not a Check")
-    if not check.get("replayable") or not check.get("observation_eligible"):
+    verified_historical = (
+        check.get("stored_evidence_integrity") == "verified"
+        and check.get("execution_available") is False
+    )
+    if not check.get("observation_eligible") or not (check.get("replayable") or verified_historical):
         raise ValueError(
             "observation_evidence_invalid: Check is not durable replayable evidence"
         )
     check_payload = dict(check.get("payload") or {})
     _definition, request, _plan, evidence_contract, result = (
-        _validate_research_check_evidence_payload(check_payload)
+        _validate_research_check_evidence_payload(check_payload, item_id=str(check["id"]))
     )
     evidence = evidence_contract.to_dict()
     observation_title = str(
@@ -1453,11 +1296,13 @@ def replay_research_check(check_id: str) -> dict[str, Any]:
             "evidence_classification": item.get("evidence_classification"),
             "matches": False,
             "provider_call_performed": False,
-            "reasons": ["legacy Check has no immutable input binding"],
+            "reasons": (["historical method retired; stored integrity does not provide current execution or exact-source replay"]
+                        if item.get("stored_evidence_integrity") == "verified" and item.get("execution_available") is False
+                        else ["legacy Check has no immutable input binding"]),
         }
     payload = dict(item.get("payload") or {})
     definition, request, original_plan, original_evidence_contract, original_result = (
-        _validate_research_check_evidence_payload(payload)
+        _validate_research_check_evidence_payload(payload, item_id=str(item["id"]))
     )
     original_evidence = original_evidence_contract.to_dict()
     try:
@@ -1508,521 +1353,41 @@ def replay_research_check(check_id: str) -> dict[str, Any]:
     }
 
 
-def _immutable_run_binding(dataset: Mapping[str, Any]) -> dict[str, Any]:
-    metadata = dict(dataset.get("metadata") or {})
-    readiness = dict(dataset.get("readiness") or {})
-    semantic_fingerprint = str(
-        metadata.get("report_semantic_fingerprint") or ""
-    ).strip()
-    if not semantic_fingerprint:
-        # Historical test fixtures and older terminal reports can lack the
-        # explicit field. Their complete canonical projection is still pinned
-        # for this request; current production reports always expose it.
-        semantic_fingerprint = semantic_hash(
-            {
-                key: value
-                for key, value in dict(dataset).items()
-                if key not in {"narrative_summary", "performance"}
-            }
-        )
-    run_id = str(metadata.get("run_id") or "").strip()
-    if not run_id:
-        raise ValueError("check_run_evidence_invalid: metadata.run_id is required")
-    return {
-        "schema_version": "immutable_run_research_binding.v1",
-        "run_id": run_id,
-        "report_schema_version": str(dataset.get("schema_version") or ""),
-        "report_semantic_fingerprint": semantic_fingerprint,
-        "dataset_id": metadata.get("dataset_id"),
-        "dataset_hash": metadata.get("dataset_hash"),
-        "strategy_id": metadata.get("strategy_id"),
-        "strategy_hash": metadata.get("strategy_hash"),
-        "readiness": {
-            "dataset_status": readiness.get("dataset_status"),
-            "results_status": readiness.get("results_status"),
-            "safe_to_compare": bool(readiness.get("safe_to_compare", False)),
-        },
-        "provider_access": False,
-    }
 
 
-def _prepare_check_request_payload(
-    payload: Mapping[str, Any], *, mode: str
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _prepare_check_request_payload(payload: Mapping[str, Any], *, mode: str):
     request = dict(payload or {})
-    family = str(
-        request.get("check_family") or SUPPORTED_CHECK_FAMILY
-    ).strip()
-    if family not in {RUN_SIGNAL_SUMMARY, RUN_DECISION_TRADE_COMPARISON}:
-        return request, None
-    validate_check_detector(
-        check_family=family,
-        detector=_mapping(request.get("detector"), "detector"),
-    )
-    if request.get("dataset_id") not in (None, ""):
-        raise ValueError(
-            "check_run_evidence_invalid: run-backed Checks do not accept a market Dataset"
-        )
     if request.get("immutable_run_evidence") not in (None, ""):
-        raise ValueError(
-            "check_run_evidence_invalid: immutable run evidence is resolved by QT"
-        )
-    scope = _normalize_report_scope(
-        _mapping(request.get("scope"), "scope")
-    )
-    dataset = dict(
-        reports_contract.get_run_research_dataset(scope["run_id"])
-    )
-    scope = _merge_scope_context(scope, _report_scope_context(dataset))
-    binding = _immutable_run_binding(dataset)
-    return (
-        {
-            **request,
-            "mode": str(mode or CHECK_MODE_PREVIEW).strip().lower(),
-            "scope": scope,
-            "immutable_run_evidence": binding,
-        },
-        dataset,
-    )
+        raise ValueError("check_definition_retired: run-backed Check execution is unavailable")
+    return request, None
 
 
 @bounded_research_execution
 def sweep_research_checks(payload: Mapping[str, Any]) -> dict[str, Any]:
-    request = dict(payload or {})
-    check_family = str(request.get("check_family") or "").strip()
-    if check_family not in INDICATOR_CHECK_FAMILIES:
-        raise ValueError(
-            "research check sweep supports indicator-backed check families: "
-            f"{', '.join(sorted(INDICATOR_CHECK_FAMILIES))}"
-        )
-    detector = _mapping(request.get("detector"), "detector")
-    outcomes = _mapping_or_empty(request.get("outcomes"))
-    validate_check_detector(check_family=check_family, detector=detector)
-    scopes = _normalize_sweep_scopes(request)
-    variants = _normalize_sweep_variants(request.get("variants"))
-    ranking = _mapping(request.get("ranking"), "ranking")
-    rank_by = _required_text(ranking.get("rank_by"), "ranking.rank_by")
-    rank_direction = _required_text(ranking.get("direction"), "ranking.direction")
-    display_metrics = _string_list(ranking.get("display_metrics") or [])
-    title = str(request.get("title") or "Research check sweep").strip()
-    cache = ResearchEvaluationCache()
-    evaluations: list[dict[str, Any]] = []
-    progress: list[dict[str, Any]] = []
-
-    for scope in scopes:
-        scope_id = str(scope["id"])
-        evaluation_scope = {key: value for key, value in scope.items() if key != "id"}
-        for variant in variants:
-            variant_scope = dict(evaluation_scope)
-            if variant["param_overrides"]:
-                variant_scope["indicator_param_overrides"] = dict(variant["param_overrides"])
-            started_at = perf_counter()
-            evaluation = _evaluate_legacy_research_check(
-                {
-                    "title": f"{title}: {variant['id']} @ {scope_id}",
-                    "check_family": check_family,
-                    "scope": variant_scope,
-                    "detector": detector,
-                    "outcomes": outcomes,
-                },
-                cache=cache,
-            )
-            duration_ms = round((perf_counter() - started_at) * 1000.0, 3)
-            result = dict(evaluation["result"])
-            normalized_scope = {**dict(evaluation["scope"]), "id": scope_id}
-            normalized_variant = dict(variant)
-            row = {
-                "schema_version": "research_check_sweep_evaluation.v1",
-                "variant": normalized_variant,
-                "scope": normalized_scope,
-                "status": result.get("status"),
-                "result": result,
-                "metrics": extract_numeric_metrics(result),
-                "duration_ms": duration_ms,
-            }
-            evaluations.append(row)
-            progress.append(
-                {
-                    "variant_id": variant["id"],
-                    "scope_id": scope_id,
-                    "status": result.get("status"),
-                    "sample_count": result.get("sample_count"),
-                    "duration_ms": duration_ms,
-                }
-            )
-
-    leaderboard = build_leaderboard(
-        evaluations,
-        rank_by=rank_by,
-        rank_direction=rank_direction,
-        display_metrics=display_metrics,
-    )
-    return {
-        "schema_version": "research_check_sweep.v1",
-        "check_family": check_family,
-        "scope_count": len(scopes),
-        "variant_count": len(variants),
-        "evaluation_count": len(evaluations),
-        "ranking": {
-            "rank_by": rank_by,
-            "direction": rank_direction,
-            "display_metrics": display_metrics,
-        },
-        "leaderboard": leaderboard,
-        "evaluations": evaluations,
-        "progress": progress,
-        "cache": cache.snapshot(),
-    }
+    """Retired legacy sweep: current Checks require explicit admitted requests."""
+    raise ValueError("check_definition_retired: legacy indicator sweeps are unavailable; use the current Check catalog and requirements")
 
 
-def _evaluate_research_check_request(
-    *,
-    title: str,
-    check_family: str,
-    scope: Mapping[str, Any],
-    detector: Mapping[str, Any],
-    outcomes: Mapping[str, Any],
-    cache: ResearchEvaluationCache | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if check_family == RAW_FORWARD_OUTCOME:
-        normalized_scope = _normalize_scope(scope)
-        coverage = _coverage_for_scope(normalized_scope, cache)
-        data_quality = _data_quality_from_coverage(coverage)
-        if data_quality["status"] == "blocked":
-            result = blocked_check_result(
-                reason=str(coverage.get("message") or "candle coverage is blocked"),
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-                check_family=check_family,
-            )
-        else:
-            try:
-                candles = _candles_for_scope(normalized_scope, cache)
-            except Exception as exc:  # noqa: BLE001 - source data unavailability is analytical evidence.
-                logger.warning(
-                    "research_check_candle_fetch_blocked | title=%s instrument_id=%s timeframe=%s start=%s end=%s error=%s",
-                    title,
-                    normalized_scope["instrument_id"],
-                    normalized_scope["timeframe"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    exc,
-                )
-                result = blocked_check_result(
-                    reason=f"research check evaluation failed: {exc}",
-                    detector=detector,
-                    outcomes=outcomes,
-                    data_quality={**data_quality, "status": "blocked"},
-                    check_family=check_family,
-                )
-            else:
-                if candles is None or candles.empty:
-                    result = blocked_check_result(
-                        reason="no candles returned for research check window",
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality={**data_quality, "status": "blocked"},
-                        check_family=check_family,
-                    )
-                else:
-                    result = evaluate_raw_event_check(
-                        candles,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-        return normalized_scope, result
-
-    if check_family in INDICATOR_CHECK_FAMILIES:
-        normalized_scope = _normalize_indicator_scope(scope)
-        coverage = _coverage_for_scope(normalized_scope, cache)
-        data_quality = _data_quality_from_coverage(coverage)
-        if data_quality["status"] == "blocked":
-            result = blocked_check_result(
-                reason=str(coverage.get("message") or "indicator check source candle coverage is blocked"),
-                detector=detector,
-                outcomes=outcomes,
-                data_quality=data_quality,
-                check_family=check_family,
-            )
-        else:
-            try:
-                evidence = collect_runtime_output_evidence_for_instance(
-                    normalized_scope["indicator_id"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    normalized_scope["timeframe"],
-                    symbol=normalized_scope.get("symbol"),
-                    datasource=normalized_scope.get("datasource"),
-                    exchange=normalized_scope.get("exchange"),
-                    instrument_id=normalized_scope.get("instrument_id"),
-                    indicator_param_overrides=normalized_scope.get("indicator_param_overrides"),
-                    candle_frame=_candles_for_scope(normalized_scope, cache) if cache is not None else None,
-                    source_frame_cache=cache.source_frames_by_request if cache is not None else None,
-                    source_frame_cache_stats=cache.stats if cache is not None else None,
-                )
-            except LookupError as exc:
-                logger.warning(
-                    "research_check_indicator_evidence_blocked | title=%s indicator_id=%s instrument_id=%s timeframe=%s start=%s end=%s error=%s",
-                    title,
-                    normalized_scope["indicator_id"],
-                    normalized_scope["instrument_id"],
-                    normalized_scope["timeframe"],
-                    normalized_scope["start"],
-                    normalized_scope["end"],
-                    exc,
-                )
-                result = blocked_check_result(
-                    reason=f"indicator check evidence failed: {exc}",
-                    detector=detector,
-                    outcomes=outcomes,
-                    data_quality={**data_quality, "status": "blocked"},
-                    check_family=check_family,
-                )
-            else:
-                if check_family == INDICATOR_FORWARD_OUTCOME:
-                    result = evaluate_indicator_forward_outcome(
-                        evidence,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-                elif check_family == SIGNAL_AUDIT:
-                    result = evaluate_signal_audit(
-                        evidence,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-                else:
-                    result = evaluate_candidate_lifecycle(
-                        evidence,
-                        detector=detector,
-                        outcomes=outcomes,
-                        data_quality=data_quality,
-                    )
-        return normalized_scope, result
-
-    normalized_scope = _normalize_report_scope(scope)
-    dataset = reports_contract.get_run_research_dataset(normalized_scope["run_id"])
-    normalized_scope = _merge_scope_context(normalized_scope, _report_scope_context(dataset))
-    data_quality = _data_quality_from_report_dataset(dataset)
-    if data_quality["status"] == "blocked":
-        logger.warning(
-            "research_check_report_data_blocked | title=%s run_id=%s check_family=%s readiness_status=%s",
-            title,
-            normalized_scope["run_id"],
-            check_family,
-            data_quality.get("readiness_status"),
-        )
-        result = blocked_check_result(
-            reason=str(data_quality.get("readiness_status") or "run research dataset is not analyzable"),
-            detector=detector,
-            outcomes=outcomes,
-            data_quality=data_quality,
-            check_family=check_family,
-        )
-    elif check_family == RUN_SIGNAL_SUMMARY:
-        result = evaluate_run_signal_summary(
-            dataset,
-            detector=detector,
-            outcomes=outcomes,
-            data_quality=data_quality,
-        )
-    elif check_family == RUN_DECISION_TRADE_COMPARISON:
-        result = evaluate_run_decision_trade_comparison(
-            dataset,
-            detector=detector,
-            outcomes=outcomes,
-            data_quality=data_quality,
-        )
-    else:
-        raise ValueError(f"unsupported research check family: {check_family}")
-    return normalized_scope, result
 
 
-def _existing_observation(
-    request: Mapping[str, Any],
-    *,
-    session: Session | None = None,
-) -> dict[str, Any] | None:
-    observation_id = str(request.get("observation_id") or "").strip()
-    if observation_id:
-        observation = repository.get_item(
-            observation_id,
-            **({"session": session} if session is not None else {}),
-        )
-        if observation.get("kind") != "observation":
-            raise ValueError("observation_id must reference an observation item")
-        return observation
-    return None
 
 
-def _create_auto_observation(
-    request: Mapping[str, Any],
-    *,
-    scope: Mapping[str, Any],
-    title: str,
-    session: Session | None = None,
-) -> dict[str, Any]:
-    raw_observation = request.get("observation")
-    observation_payload = _mapping_or_empty(raw_observation)
-    observation_title = str(observation_payload.get("title") or f"Ad hoc observation: {title}").strip()
-    return repository.create_item(
-        kind="observation",
-        status="active",
-        title=observation_title,
-        body=_optional(observation_payload.get("body") or request.get("body")),
-        instrument_id=_optional(scope.get("instrument_id")),
-        symbol=_optional(scope.get("symbol")),
-        timeframe=_optional(scope.get("timeframe")),
-        datasource=_optional(scope.get("datasource")),
-        exchange=_optional(scope.get("exchange")),
-        window_start=scope.get("start"),
-        window_end=scope.get("end"),
-        tags=sorted(set(["auto-observation", *_tags(observation_payload.get("tags") or request.get("tags"))])),
-        payload={
-            "schema_version": "research_observation_payload.v1",
-            "created_from": "research_check",
-            "scope": dict(scope),
-        },
-        source_revision=_source_revision(),
-        **({"session": session} if session is not None else {}),
-    )
 
 
-def _normalize_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
-    timeframe = str(scope.get("timeframe") or scope.get("interval") or "").strip()
-    start = str(scope.get("start") or "").strip()
-    end = str(scope.get("end") or "").strip()
-    if not timeframe:
-        raise ValueError("scope.timeframe is required")
-    if not start or not end:
-        raise ValueError("scope.start and scope.end are required")
-    instrument_id = str(scope.get("instrument_id") or "").strip()
-    symbol = _optional(scope.get("symbol"))
-    datasource = _optional(scope.get("datasource"))
-    exchange = _optional(scope.get("exchange"))
-    if not instrument_id:
-        if not symbol:
-            raise ValueError("scope.instrument_id or scope.symbol is required")
-        instrument_id = instrument_service.require_instrument_id(datasource, exchange, symbol)
-    instrument = instrument_service.get_instrument_record(instrument_id)
-    return {
-        "instrument_id": instrument_id,
-        "symbol": symbol or instrument.get("symbol"),
-        "datasource": datasource or instrument.get("datasource"),
-        "exchange": exchange or instrument.get("exchange"),
-        "timeframe": timeframe,
-        "start": start,
-        "end": end,
-    }
 
 
-def _normalize_indicator_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
-    indicator_id = str(scope.get("indicator_id") or "").strip()
-    if not indicator_id:
-        raise ValueError("scope.indicator_id is required for indicator research checks")
-    normalized = _normalize_scope(scope)
-    normalized["indicator_id"] = indicator_id
-    if "indicator_param_overrides" in scope:
-        normalized["indicator_param_overrides"] = _mapping(
-            scope.get("indicator_param_overrides"),
-            "scope.indicator_param_overrides",
-        )
-    return normalized
 
 
-def _normalize_sweep_scopes(request: Mapping[str, Any]) -> list[dict[str, Any]]:
-    has_scopes = request.get("scopes") not in (None, "")
-    has_scope = request.get("scope") not in (None, "")
-    if has_scopes and has_scope:
-        raise ValueError("research check sweep accepts scope or scopes, not both")
-    if has_scopes:
-        raw_scopes = request.get("scopes")
-        if not isinstance(raw_scopes, list) or not raw_scopes:
-            raise ValueError("scopes must be a non-empty list")
-        scopes = [_mapping(raw, "scopes item") for raw in raw_scopes]
-        if any(not str(scope.get("id") or "").strip() for scope in scopes):
-            raise ValueError("each sweep scope requires id")
-        return [{**dict(scope), "id": str(scope["id"]).strip()} for scope in scopes]
-    if not has_scope:
-        raise ValueError("research check sweep requires scope or scopes")
-    scope = dict(_mapping(request.get("scope"), "scope"))
-    scope["id"] = str(scope.get("id") or "scope").strip()
-    return [scope]
 
 
-def _normalize_sweep_variants(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not value:
-        raise ValueError("research check sweep requires non-empty variants")
-    allowed = {"id", "label", "description", "param_overrides"}
-    variants: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw in value:
-        variant = dict(_mapping(raw, "variants item"))
-        unsupported = sorted(str(key) for key in variant if str(key) not in allowed)
-        if unsupported:
-            raise ValueError(f"unsupported sweep variant fields: {', '.join(unsupported)}")
-        variant_id = _required_text(variant.get("id"), "variant.id")
-        if variant_id in seen:
-            raise ValueError(f"duplicate sweep variant id: {variant_id}")
-        seen.add(variant_id)
-        param_overrides = _mapping_or_empty(variant.get("param_overrides"))
-        variants.append(
-            {
-                "id": variant_id,
-                "label": _optional(variant.get("label")) or variant_id,
-                "description": _optional(variant.get("description")),
-                "param_overrides": param_overrides,
-            }
-        )
-    return variants
 
 
-def _scope_cache_key(scope: Mapping[str, Any]) -> tuple[str, str, str, str]:
-    return (
-        str(scope.get("instrument_id") or ""),
-        str(scope.get("start") or ""),
-        str(scope.get("end") or ""),
-        str(scope.get("timeframe") or ""),
-    )
 
 
-def _coverage_for_scope(scope: Mapping[str, Any], cache: ResearchEvaluationCache | None) -> dict[str, Any]:
-    if cache is not None:
-        return cache.coverage(scope)
-    return candle_service.preflight_candle_coverage_by_instrument(
-        scope["instrument_id"],
-        scope["start"],
-        scope["end"],
-        scope["timeframe"],
-    )
 
 
-def _candles_for_scope(scope: Mapping[str, Any], cache: ResearchEvaluationCache | None) -> Any:
-    if cache is not None:
-        return cache.candles(scope)
-    return candle_service.fetch_ohlcv_by_instrument(
-        scope["instrument_id"],
-        scope["start"],
-        scope["end"],
-        scope["timeframe"],
-    )
 
 
-def _normalize_report_scope(scope: Mapping[str, Any]) -> dict[str, Any]:
-    run_id = str(scope.get("run_id") or "").strip()
-    if not run_id:
-        raise ValueError("scope.run_id is required for report-backed research checks")
-    return {
-        "run_id": run_id,
-        "symbol": _optional(scope.get("symbol")),
-        "timeframe": _optional(scope.get("timeframe")),
-        "start": scope.get("start"),
-        "end": scope.get("end"),
-    }
 
 
 def _merge_scope_context(scope: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
@@ -2126,18 +1491,7 @@ def _run_evidence_summary(run_id: str, *, include_dataset_context: bool = False)
             "states": dict(sorted(decision_states.items())),
             "reason_codes": dict(sorted(reason_codes.items())),
         },
-        "supported_checks": [
-            {
-                "command": "qt research check signal",
-                "check_family": RUN_SIGNAL_SUMMARY,
-                "requires": ["run_id", "output_name or event_key"],
-            },
-            {
-                "command": "qt research check decision",
-                "check_family": RUN_DECISION_TRADE_COMPARISON,
-                "requires": ["run_id", "state or reason_code"],
-            },
-        ],
+        "supported_checks": [],
     }
     if include_dataset_context:
         payload["data_quality"] = _data_quality_from_report_dataset(dataset)

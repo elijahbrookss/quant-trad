@@ -12,7 +12,7 @@ from typing import Callable, Mapping, Any
 
 from .recognition import (RecognitionCandle, RecognitionContext, RecognitionEvent,
                           RecognitionLevel, RecognitionStage, link_source_event)
-from .study import stable_hash
+from .hashing import stable_hash
 
 DEFINITION_ID = "completed_reversal_candidates"
 DEFINITION_VERSION = "provisional.1"

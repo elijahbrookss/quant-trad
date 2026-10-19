@@ -7,14 +7,14 @@ import re
 
 from .recognition import plain, utc
 from .reversal_selection import _select_comparisons
-from .reversal_six_block_selection import (
-    RULES as SIX_RULES, compatibility_order_keys, compact_stage_availability)
-from .study import stable_hash
+from .reversal_selection_timing import (
+    RULES as SELECTION_RULES, compatibility_order_keys, compact_stage_availability)
+from .hashing import stable_hash
 
 SCHEMA = 'reversal_population_selection.v1'
 STEP = timedelta(minutes=15)
 BLOCK = timedelta(days=28)
-RULES = deepcopy(SIX_RULES)
+RULES = deepcopy(SELECTION_RULES)
 RULES.update(version=SCHEMA,
     evaluation='Explicit fixed origin and one through six complete28day decision blocks;no reset',
     populations='Declared block views plus combined;summaries normalize within each view;root pairs retain original combined weights')

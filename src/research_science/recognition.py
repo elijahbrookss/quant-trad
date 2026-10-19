@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Mapping
 
-from .study import stable_hash
+from .hashing import stable_hash
 
 
 def utc(value: datetime | str) -> datetime:

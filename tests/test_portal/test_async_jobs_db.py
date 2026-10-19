@@ -423,35 +423,8 @@ def test_research_artifacts_rollback_with_owned_job_completion(
     claim = claim_next_job(worker_id="worker-1", job_types=[job_type])
     assert claim is not None
     title = f"Transactional research check {uuid.uuid4()}"
-    request = {
-        "title": title,
-        "check_family": "indicator_forward_outcome",
-    }
-    evaluation = {
-        "schema_version": "research_check_evaluation.v1",
-        "status": "completed",
-        "check_family": "indicator_forward_outcome",
-        "scope": {
-            "instrument_id": "instrument-test",
-            "symbol": "TEST/USD",
-            "timeframe": "1h",
-            "datasource": "test",
-            "exchange": "test",
-            "start": "2026-01-01T00:00:00Z",
-            "end": "2026-01-02T00:00:00Z",
-        },
-        "detector": {
-            "type": "record_match",
-            "output_name": "entry",
-        },
-        "outcomes": {},
-        "result": {
-            "schema_version": "research_check_result.v1",
-            "check_family": "indicator_forward_outcome",
-            "status": "completed",
-            "sample_count": 1,
-        },
-    }
+    from tests.test_portal.test_research_evidence_service import _contracts
+    definition,request,plan,evidence,result = _contracts()
     with db.session() as session:
         research_counts_before = (
             session.execute(
@@ -473,10 +446,9 @@ def test_research_artifacts_rollback_with_owned_job_completion(
         ):
             complete_job_with_owned_effect(
                 claim,
-                lambda session: research_service.persist_research_check(
-                    request,
-                    evaluation=evaluation,
-                    session=session,
+                lambda session: research_service.persist_research_check_evidence(
+                    {"title":title}, definition=definition, request=request, plan=plan,
+                    evidence=evidence.to_dict(), result=result.to_dict(), session=session,
                 ),
             )
 

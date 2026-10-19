@@ -1,0 +1,3554 @@
+{
+  "event_fact_analysis@10": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "10",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "9",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "check_candle_snapshot",
+        "input_policy": "candle_only_indicator.v1",
+        "operator_model": "candle_risk_comparison.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "inference": "descriptive_only"
+      },
+      "definition_hash": "72134799b7e472dbe3ef81917ea262dd91f5ac43c347314e66cf36302b631758"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reset_rewarm",
+          "scope": {
+            "indicator_id": "stats-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1m",
+            "start": "2022-12-30T00:00:00Z",
+            "end": "2023-01-01T00:00:00Z",
+            "warmup_bars": 200
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "atr_expansion",
+            "event_keys": [
+              {
+                "key": "atr_expansion_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizon_kind": "elapsed_time",
+            "horizons": [
+              1800,
+              7200,
+              21600
+            ],
+            "primary_horizon": 7200,
+            "entry_lag_bars": 0,
+            "forward_risk": {
+              "schema_version": "candle_risk_comparison.v1",
+              "baseline_bars": 120,
+              "readiness_contract": "candle_stats.public_outputs.v1",
+              "outcome_boundary": "evaluation_end_exclusive"
+            }
+          },
+          "statistics": {}
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "10+2f6ddbfb7f8ef397",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "9",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "check_candle_snapshot",
+            "input_policy": "candle_only_indicator.v1",
+            "operator_model": "candle_risk_comparison.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "inference": "descriptive_only",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "10",
+              "definition_hash": "72134799b7e472dbe3ef81917ea262dd91f5ac43c347314e66cf36302b631758"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "stats-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "atr_expansion",
+              "event_keys": [
+                {
+                  "key": "atr_expansion_long",
+                  "direction": "long",
+                  "alias": "atr_expansion_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                1800,
+                7200,
+                21600
+              ],
+              "required_horizons": [
+                1800,
+                7200,
+                21600
+              ],
+              "horizon_kind": "elapsed_time",
+              "primary_horizon": 7200,
+              "entry_lag_bars": 0,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1",
+              "forward_risk": {
+                "schema_version": "candle_risk_comparison.v1",
+                "baseline_bars": 120,
+                "readiness_contract": "candle_stats.public_outputs.v1",
+                "outcome_boundary": "evaluation_end_exclusive"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 0,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reset_rewarm",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "b7c6db7da0feedf4276c1929d9e7b347b0f5ad427f6d0437eef53aa059a9e2b1"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@11": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "11",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "10",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "check_candle_snapshot",
+        "input_policy": "candle_only_indicator.v1",
+        "operator_model": "crossing_state_matched_pairs.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "inference": "descriptive_only"
+      },
+      "definition_hash": "a54a2b4e74d3c8e8e877e84614f95be9df3538b7dae9e60c494b6e18db85931f"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reset_rewarm",
+          "scope": {
+            "indicator_id": "stats-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1m",
+            "start": "2022-12-30T00:00:00Z",
+            "end": "2023-01-01T00:00:00Z",
+            "warmup_bars": 200
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "atr_expansion",
+            "event_keys": [
+              {
+                "key": "atr_expansion_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizon_kind": "elapsed_time",
+            "horizons": [
+              1800,
+              7200,
+              21600
+            ],
+            "primary_horizon": 7200,
+            "entry_lag_bars": 0,
+            "forward_risk": {
+              "schema_version": "candle_risk_matched_state.v1",
+              "baseline_bars": 120,
+              "readiness_contract": "candle_stats.public_outputs.v1",
+              "outcome_boundary": "evaluation_end_exclusive",
+              "matching_contract": "crossing_state_matched_pairs.v1"
+            }
+          },
+          "statistics": {}
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "11+5c75fa0277f528f6",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "10",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "check_candle_snapshot",
+            "input_policy": "candle_only_indicator.v1",
+            "operator_model": "crossing_state_matched_pairs.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "inference": "descriptive_only",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "11",
+              "definition_hash": "a54a2b4e74d3c8e8e877e84614f95be9df3538b7dae9e60c494b6e18db85931f"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "stats-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "atr_expansion",
+              "event_keys": [
+                {
+                  "key": "atr_expansion_long",
+                  "direction": "long",
+                  "alias": "atr_expansion_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                1800,
+                7200,
+                21600
+              ],
+              "required_horizons": [
+                1800,
+                7200,
+                21600
+              ],
+              "horizon_kind": "elapsed_time",
+              "primary_horizon": 7200,
+              "entry_lag_bars": 0,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1",
+              "forward_risk": {
+                "schema_version": "candle_risk_matched_state.v1",
+                "baseline_bars": 120,
+                "readiness_contract": "candle_stats.public_outputs.v1",
+                "outcome_boundary": "evaluation_end_exclusive",
+                "matching_contract": "crossing_state_matched_pairs.v1"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 0,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reset_rewarm",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "4657bbe1c4710d602e7a5d9b3346ad7844e54024ba885007820d71c5b07d233e"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@12": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "12",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "11",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "check_candle_snapshot",
+        "input_policy": "candle_only_indicator.v1",
+        "operator_model": "crossing_state_matched_pairs.v2",
+        "filter_contract": "crossing_state_atr_ratio_filter.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "inference": "descriptive_only"
+      },
+      "definition_hash": "8a0bc8c619f63778b0cafca7ffdd5d78fb5d98edee95c6e5a0fccb6c29eb11ec"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reset_rewarm",
+          "scope": {
+            "indicator_id": "stats-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1m",
+            "start": "2022-12-30T00:00:00Z",
+            "end": "2023-01-01T00:00:00Z",
+            "warmup_bars": 200
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "atr_expansion",
+            "event_keys": [
+              {
+                "key": "atr_expansion_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizon_kind": "elapsed_time",
+            "horizons": [
+              1800,
+              7200,
+              21600
+            ],
+            "primary_horizon": 7200,
+            "entry_lag_bars": 0,
+            "forward_risk": {
+              "schema_version": "candle_risk_matched_state.v2",
+              "baseline_bars": 120,
+              "readiness_contract": "candle_stats.public_outputs.v1",
+              "outcome_boundary": "evaluation_end_exclusive",
+              "matching_contract": "crossing_state_matched_pairs.v1",
+              "filter_contract": "crossing_state_atr_ratio_filter.v1"
+            }
+          },
+          "statistics": {}
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "12+a4c05b1e514b5b81",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "11",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "check_candle_snapshot",
+            "input_policy": "candle_only_indicator.v1",
+            "operator_model": "crossing_state_matched_pairs.v2",
+            "filter_contract": "crossing_state_atr_ratio_filter.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "inference": "descriptive_only",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "12",
+              "definition_hash": "8a0bc8c619f63778b0cafca7ffdd5d78fb5d98edee95c6e5a0fccb6c29eb11ec"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "stats-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "atr_expansion",
+              "event_keys": [
+                {
+                  "key": "atr_expansion_long",
+                  "direction": "long",
+                  "alias": "atr_expansion_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                1800,
+                7200,
+                21600
+              ],
+              "required_horizons": [
+                1800,
+                7200,
+                21600
+              ],
+              "horizon_kind": "elapsed_time",
+              "primary_horizon": 7200,
+              "entry_lag_bars": 0,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1",
+              "forward_risk": {
+                "schema_version": "candle_risk_matched_state.v2",
+                "baseline_bars": 120,
+                "readiness_contract": "candle_stats.public_outputs.v1",
+                "outcome_boundary": "evaluation_end_exclusive",
+                "matching_contract": "crossing_state_matched_pairs.v1",
+                "filter_contract": "crossing_state_atr_ratio_filter.v1"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 0,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reset_rewarm",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "cf7db692293f59f27447e60d8af5496975e10b40b1d05816d2a1481f3a59d630"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@13": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "13",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "13",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "check",
+        "input_policy": "retrospective_numeric_comparison.v1",
+        "operator_model": "registered_event_fact_operators.v4",
+        "inference": "retrospective_conditional_association",
+        "point_in_time_predictive": false,
+        "scientific_certification_eligible": false,
+        "backtest_certified": false,
+        "limits": {
+          "evaluation_days": 60,
+          "frozen_revisions_per_alias": 10000
+        }
+      },
+      "definition_hash": "b33e896a2bd141af7ec785c3456911d6cf1300346bad36ed4c6a9d8789b18c3d"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "gap_policy": "continue_degraded",
+          "scope": {
+            "instrument_id": "coinbase-btc-usd",
+            "timeframe": "1h",
+            "warmup_bars": 15,
+            "start": "2026-07-25T00:00:00Z",
+            "end": "2026-09-23T00:00:00Z"
+          },
+          "detector": {
+            "type": "fact_snapshot",
+            "input_alias": "long_liquidations"
+          },
+          "outcomes": {
+            "horizons": [
+              1
+            ],
+            "entry_lag_bars": 0,
+            "retrospective": {
+              "schema_version": "retrospective_numeric_comparison.v1",
+              "analysis_as_of": "2026-10-13T23:00:00Z",
+              "bucket_time_interpretation": "bucket_start_unverified"
+            }
+          },
+          "inputs": [
+            {
+              "alias": "long_liquidations",
+              "instrument_id": "binance-btc-usdt-perp",
+              "fact_type": "derivatives.liquidation_volume",
+              "contract_version": "derivatives.liquidation_volume.v1",
+              "max_staleness_seconds": 3600,
+              "alignment": "exact_interval",
+              "dimensions": {
+                "liquidated_side": "long",
+                "bucket_seconds": 3600,
+                "volume_unit": "BTC",
+                "exchange": "Binance",
+                "product": "BTCUSDT_PERP.A"
+              },
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "authorized-source"
+              }
+            },
+            {
+              "alias": "short_liquidations",
+              "instrument_id": "binance-btc-usdt-perp",
+              "fact_type": "derivatives.liquidation_volume",
+              "contract_version": "derivatives.liquidation_volume.v1",
+              "max_staleness_seconds": 3600,
+              "alignment": "exact_interval",
+              "dimensions": {
+                "liquidated_side": "short",
+                "bucket_seconds": 3600,
+                "volume_unit": "BTC",
+                "exchange": "Binance",
+                "product": "BTCUSDT_PERP.A"
+              },
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "authorized-source"
+              }
+            }
+          ],
+          "statistics": {
+            "features": {
+              "baseline": [
+                {
+                  "name": "recent_return",
+                  "operator": "lagged_return",
+                  "lookback_bars": 1
+                },
+                {
+                  "name": "recent_volatility",
+                  "operator": "atr_fraction",
+                  "period": 14
+                }
+              ],
+              "enriched": [
+                {
+                  "name": "long_liquidations",
+                  "operator": "latest_value",
+                  "input_alias": "long_liquidations"
+                },
+                {
+                  "name": "short_liquidations",
+                  "operator": "latest_value",
+                  "input_alias": "short_liquidations"
+                }
+              ]
+            },
+            "model": {
+              "type": "standardized_l2_logistic",
+              "c": 1.0
+            },
+            "purge_bars": 1,
+            "folds": [
+              {
+                "id": "fixed-comparison",
+                "train": {
+                  "start": "2026-07-25T00:00:00Z",
+                  "end": "2026-09-03T00:00:00Z"
+                },
+                "validation": {
+                  "start": "2026-09-03T00:00:00Z",
+                  "end": "2026-09-23T00:00:00Z"
+                }
+              }
+            ]
+          }
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "13+4199227870468ee9",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "13",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "check",
+            "input_policy": "retrospective_numeric_comparison.v1",
+            "operator_model": "registered_event_fact_operators.v4",
+            "inference": "retrospective_conditional_association",
+            "point_in_time_predictive": false,
+            "scientific_certification_eligible": false,
+            "backtest_certified": false,
+            "limits": {
+              "evaluation_days": 60,
+              "frozen_revisions_per_alias": 10000
+            },
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "13",
+              "definition_hash": "b33e896a2bd141af7ec785c3456911d6cf1300346bad36ed4c6a9d8789b18c3d"
+            },
+            "inputs": [
+              {
+                "alias": "long_liquidations",
+                "instrument_id": "binance-btc-usdt-perp",
+                "fact_type": "derivatives.liquidation_volume",
+                "contract_version": "derivatives.liquidation_volume.v1",
+                "max_staleness_seconds": 3600,
+                "alignment": "exact_interval",
+                "dimensions": {
+                  "liquidated_side": "long",
+                  "bucket_seconds": 3600,
+                  "volume_unit": "BTC",
+                  "exchange": "Binance",
+                  "product": "BTCUSDT_PERP.A"
+                },
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "authorized-source"
+                }
+              },
+              {
+                "alias": "short_liquidations",
+                "instrument_id": "binance-btc-usdt-perp",
+                "fact_type": "derivatives.liquidation_volume",
+                "contract_version": "derivatives.liquidation_volume.v1",
+                "max_staleness_seconds": 3600,
+                "alignment": "exact_interval",
+                "dimensions": {
+                  "liquidated_side": "short",
+                  "bucket_seconds": 3600,
+                  "volume_unit": "BTC",
+                  "exchange": "Binance",
+                  "product": "BTCUSDT_PERP.A"
+                },
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "authorized-source"
+                }
+              }
+            ],
+            "indicator": {},
+            "detector": {
+              "type": "fact_snapshot",
+              "input_alias": "long_liquidations",
+              "sampling": "primary_bar_close",
+              "where": {}
+            },
+            "outcomes": {
+              "horizons": [
+                1
+              ],
+              "required_horizons": [
+                1
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 1,
+              "entry_lag_bars": 0,
+              "positive_rule": "raw_forward_return_gt_zero.v1",
+              "retrospective": {
+                "schema_version": "retrospective_numeric_comparison.v1",
+                "analysis_as_of": "2026-10-13T23:00:00.000000Z",
+                "bucket_time_interpretation": "bucket_start_unverified"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [
+                  {
+                    "name": "recent_return",
+                    "operator": "lagged_return",
+                    "lookback_bars": 1
+                  },
+                  {
+                    "name": "recent_volatility",
+                    "operator": "atr_fraction",
+                    "period": 14
+                  }
+                ],
+                "enriched": [
+                  {
+                    "name": "long_liquidations",
+                    "operator": "latest_value",
+                    "input_alias": "long_liquidations"
+                  },
+                  {
+                    "name": "short_liquidations",
+                    "operator": "latest_value",
+                    "input_alias": "short_liquidations"
+                  }
+                ]
+              },
+              "folds": [
+                {
+                  "id": "fixed-comparison",
+                  "train": {
+                    "start": "2026-07-25T00:00:00.000000Z",
+                    "end": "2026-09-03T00:00:00.000000Z"
+                  },
+                  "validation": {
+                    "start": "2026-09-03T00:00:00.000000Z",
+                    "end": "2026-09-23T00:00:00.000000Z"
+                  }
+                }
+              ],
+              "purge_bars": 1,
+              "embargo_bars": 0,
+              "model": {
+                "type": "standardized_l2_logistic",
+                "implementation": "qt_scipy_lbfgsb.v1",
+                "c": 1.0,
+                "fit_intercept": true,
+                "tolerance": 1e-09,
+                "max_iterations": 1000,
+                "seed": 0,
+                "standardization": "train_fold_mean_population_std.v1"
+              },
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 0,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "f4cfd65e0729dbb76b834db97114cbafbc6adddce07a359863b0639d1273dd6c"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@14": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "14",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "14",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "check",
+        "input_policy": "liquidity_episode.v1",
+        "episode_rules": {
+          "move_horizon_seconds": 60,
+          "sharp_log_return_bps": 10.0,
+          "depth_band_bps": 5,
+          "thinning_fraction": 0.5,
+          "pre_seconds": 120,
+          "post_seconds": 120,
+          "refractory_seconds": 300,
+          "max_episodes_per_origin": 10,
+          "max_scope_seconds": 1800,
+          "max_records_per_alias": 50000,
+          "matching": "earlier_same_hour_no_replacement.v1",
+          "match_calipers": {
+            "spread_ratio": 2.0,
+            "depth_ratio": 2.0,
+            "volatility_ratio": 2.0
+          },
+          "resolution_seconds": 1,
+          "revision_selection": "latest_at_declared_analysis_cutoff.v1",
+          "control_admission": "precontext_only_before_future_support.v1",
+          "dependence": "unique_anchor_closed_window_components.v1",
+          "missing_second_policy": "exclude_without_fill",
+          "inference": "retrospective_descriptive_only"
+        },
+        "inference": "retrospective_descriptive_only"
+      },
+      "definition_hash": "13e7de77231001111e602fa0f8c4616c423576b827d404076bbc3648085f4b63"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "gap_policy": "continue_degraded",
+          "scope": {
+            "instrument_id": "instrument-id",
+            "timeframe": "1m",
+            "start": "2026-09-22T00:00:00Z",
+            "end": "2026-09-22T00:30:00Z"
+          },
+          "detector": {
+            "type": "liquidity_episode"
+          },
+          "outcomes": {
+            "schema_version": "liquidity_episode.v1",
+            "analysis_as_of": "2026-10-14T00:00:00Z"
+          },
+          "inputs": [
+            {
+              "alias": "bbo",
+              "fact_type": "market.bbo",
+              "contract_version": "market.bbo.v1",
+              "timeframe_seconds": 1,
+              "alignment": "exact_interval",
+              "max_staleness_seconds": 1,
+              "allow_gaps": true,
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-identity-id"
+              }
+            },
+            {
+              "alias": "depth",
+              "fact_type": "market.depth_observation",
+              "contract_version": "market.depth_band.v1",
+              "timeframe_seconds": 1,
+              "alignment": "exact_interval",
+              "max_staleness_seconds": 1,
+              "allow_gaps": true,
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-identity-id"
+              }
+            },
+            {
+              "alias": "flow",
+              "fact_type": "market.trade_flow",
+              "contract_version": "market.trade_flow.v1",
+              "timeframe_seconds": 1,
+              "alignment": "exact_interval",
+              "max_staleness_seconds": 1,
+              "allow_gaps": true,
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-identity-id"
+              }
+            },
+            {
+              "alias": "trades",
+              "fact_type": "market.trade",
+              "contract_version": "market.trade.v1",
+              "alignment": "latest_known",
+              "max_staleness_seconds": 1,
+              "allow_gaps": true,
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-identity-id"
+              }
+            }
+          ]
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "14+4a0b384d7b338b2e",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "14",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "check",
+            "input_policy": "liquidity_episode.v1",
+            "episode_rules": {
+              "move_horizon_seconds": 60,
+              "sharp_log_return_bps": 10.0,
+              "depth_band_bps": 5,
+              "thinning_fraction": 0.5,
+              "pre_seconds": 120,
+              "post_seconds": 120,
+              "refractory_seconds": 300,
+              "max_episodes_per_origin": 10,
+              "max_scope_seconds": 1800,
+              "max_records_per_alias": 50000,
+              "matching": "earlier_same_hour_no_replacement.v1",
+              "match_calipers": {
+                "spread_ratio": 2.0,
+                "depth_ratio": 2.0,
+                "volatility_ratio": 2.0
+              },
+              "resolution_seconds": 1,
+              "revision_selection": "latest_at_declared_analysis_cutoff.v1",
+              "control_admission": "precontext_only_before_future_support.v1",
+              "dependence": "unique_anchor_closed_window_components.v1",
+              "missing_second_policy": "exclude_without_fill",
+              "inference": "retrospective_descriptive_only"
+            },
+            "inference": "retrospective_descriptive_only",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "14",
+              "definition_hash": "13e7de77231001111e602fa0f8c4616c423576b827d404076bbc3648085f4b63"
+            },
+            "inputs": [
+              {
+                "alias": "bbo",
+                "fact_type": "market.bbo",
+                "contract_version": "market.bbo.v1",
+                "timeframe_seconds": 1,
+                "alignment": "exact_interval",
+                "max_staleness_seconds": 1,
+                "allow_gaps": true,
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "source-identity-id"
+                }
+              },
+              {
+                "alias": "depth",
+                "fact_type": "market.depth_observation",
+                "contract_version": "market.depth_band.v1",
+                "timeframe_seconds": 1,
+                "alignment": "exact_interval",
+                "max_staleness_seconds": 1,
+                "allow_gaps": true,
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "source-identity-id"
+                }
+              },
+              {
+                "alias": "flow",
+                "fact_type": "market.trade_flow",
+                "contract_version": "market.trade_flow.v1",
+                "timeframe_seconds": 1,
+                "alignment": "exact_interval",
+                "max_staleness_seconds": 1,
+                "allow_gaps": true,
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "source-identity-id"
+                }
+              },
+              {
+                "alias": "trades",
+                "fact_type": "market.trade",
+                "contract_version": "market.trade.v1",
+                "alignment": "latest_known",
+                "max_staleness_seconds": 1,
+                "allow_gaps": true,
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "source-identity-id"
+                }
+              }
+            ],
+            "indicator": {},
+            "detector": {
+              "type": "liquidity_episode"
+            },
+            "outcomes": {
+              "schema_version": "liquidity_episode.v1",
+              "analysis_as_of": "2026-10-14T00:00:00.000000Z"
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "50818c9c7752752adf34a1c752facc330faf6b52bc4c8273136756c4e375bdfe"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@4": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "4",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "3",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "indicator_or_check",
+        "operator_model": "registered_event_fact_operators.v3"
+      },
+      "definition_hash": "90197d865af1405cc50557cec47d90bb30902f4d577d83fe8dcded593ef7ccf4"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "scope": {
+            "indicator_id": "indicator-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-01-02T00:00:00Z"
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "atr_expansion",
+            "event_keys": [
+              {
+                "key": "atr_expansion_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizons": [
+              1,
+              3
+            ]
+          },
+          "inputs": [
+            {
+              "alias": "reference_price",
+              "fact_type": "market.reference_price",
+              "contract_version": "market.reference_price.v1",
+              "dimensions": {
+                "quote_currency": "USD"
+              },
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-a"
+              }
+            }
+          ],
+          "gap_policy": "reject",
+          "mode": "preview"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "4+a61f67869cb0f98f",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "3",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "indicator_or_check",
+            "operator_model": "registered_event_fact_operators.v3",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "4",
+              "definition_hash": "90197d865af1405cc50557cec47d90bb30902f4d577d83fe8dcded593ef7ccf4"
+            },
+            "inputs": [
+              {
+                "alias": "reference_price",
+                "fact_type": "market.reference_price",
+                "contract_version": "market.reference_price.v1",
+                "dimensions": {
+                  "quote_currency": "USD"
+                },
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "source-a"
+                }
+              }
+            ],
+            "indicator": {
+              "indicator_id": "indicator-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "atr_expansion",
+              "event_keys": [
+                {
+                  "key": "atr_expansion_long",
+                  "direction": "long",
+                  "alias": "atr_expansion_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                1,
+                3
+              ],
+              "required_horizons": [
+                1,
+                3
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 1,
+              "entry_lag_bars": 0,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1"
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 0,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "30a5642a56710a9ba284cff4d799d5ab06b5daa3de73c306a573eab14c039606"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@5": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "5",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "4",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "indicator_or_check",
+        "operator_model": "registered_event_fact_operators.v4"
+      },
+      "definition_hash": "f5748f05c7b7133363d9a4831dcd9056d450d36cc8784f7d17252afa4fb00796"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "scope": {
+            "indicator_id": "indicator-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-01-02T00:00:00Z"
+          },
+          "detector": {
+            "type": "fact_snapshot",
+            "input_alias": "bbo",
+            "evaluation_trigger": "required_facts_available"
+          },
+          "outcomes": {
+            "horizons": [
+              1,
+              3
+            ]
+          },
+          "inputs": [
+            {
+              "alias": "bbo",
+              "fact_type": "market.bbo",
+              "contract_version": "market.bbo.v1",
+              "timeframe_seconds": 1,
+              "max_staleness_seconds": 120,
+              "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-identity-id"
+              }
+            }
+          ],
+          "gap_policy": "reject",
+          "mode": "preview"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "5+26a24407c60f88a2",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "4",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "indicator_or_check",
+            "operator_model": "registered_event_fact_operators.v4",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "5",
+              "definition_hash": "f5748f05c7b7133363d9a4831dcd9056d450d36cc8784f7d17252afa4fb00796"
+            },
+            "inputs": [
+              {
+                "alias": "bbo",
+                "fact_type": "market.bbo",
+                "contract_version": "market.bbo.v1",
+                "timeframe_seconds": 1,
+                "max_staleness_seconds": 120,
+                "source_policy": {
+                  "mode": "exact",
+                  "source_identity_key": "source-identity-id"
+                }
+              }
+            ],
+            "indicator": {
+              "indicator_id": "indicator-1"
+            },
+            "detector": {
+              "type": "fact_snapshot",
+              "input_alias": "bbo",
+              "sampling": "primary_bar_close",
+              "where": {},
+              "evaluation_trigger": "required_facts_available"
+            },
+            "outcomes": {
+              "horizons": [
+                1,
+                3
+              ],
+              "required_horizons": [
+                1,
+                3
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 1,
+              "entry_lag_bars": 0,
+              "positive_rule": "raw_forward_return_gt_zero.v1"
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 0,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "77887e99a298db28ab7c75bd64787ef1a6c4792753e5e9e19fc20b0602e0b1c7"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@6": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "6",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "5",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "indicator",
+        "operator_model": "registered_event_fact_operators.v5",
+        "input_policy": "candle_only_indicator.v1",
+        "outcome_summary": "eligible_population_descriptive.v1"
+      },
+      "definition_hash": "338f7ddd50babbc906785b1b5f824fe4c0d63ff6c8f06f8b07839e5dabf53e35"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reject",
+          "scope": {
+            "indicator_id": "profile-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2022-01-01T00:00:00+00:00",
+            "end": "2022-01-01T06:00:00+00:00"
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "raw",
+            "event_keys": [
+              {
+                "key": "raw_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizons": [
+              1,
+              2
+            ],
+            "primary_horizon": 2,
+            "entry_lag_bars": 1
+          },
+          "statistics": {
+            "eligibility": {
+              "min_samples": 1
+            }
+          }
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "6+09342593b29ce473",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "5",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "indicator",
+            "operator_model": "registered_event_fact_operators.v5",
+            "input_policy": "candle_only_indicator.v1",
+            "outcome_summary": "eligible_population_descriptive.v1",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "6",
+              "definition_hash": "338f7ddd50babbc906785b1b5f824fe4c0d63ff6c8f06f8b07839e5dabf53e35"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "profile-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "raw",
+              "event_keys": [
+                {
+                  "key": "raw_long",
+                  "direction": "long",
+                  "alias": "raw_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                1,
+                2
+              ],
+              "required_horizons": [
+                1,
+                2
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 2,
+              "entry_lag_bars": 1,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1"
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 1,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "b24a0abc6b1b56577f5c275e263c0773c4fd088db7474f4d620ecbdbc4ba769e"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@7": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "7",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "6",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "indicator",
+        "input_policy": "candle_only_indicator.v1",
+        "operator_model": "matched_origin_attribution.v1",
+        "followup_scope": "same_evaluation_window.v1",
+        "outcome_summary": "eligible_population_descriptive.v1"
+      },
+      "definition_hash": "75011c2a659141b7a60cb4dbade8fe85625e16c228b7211acd021ca20145ff64"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reject",
+          "scope": {
+            "indicator_id": "profile-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2022-01-01T00:00:00+00:00",
+            "end": "2022-01-01T06:00:00+00:00"
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "raw",
+            "event_keys": [
+              {
+                "key": "raw_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizons": [
+              1,
+              2
+            ],
+            "primary_horizon": 2,
+            "entry_lag_bars": 1,
+            "matched_origin": {
+              "detector": {
+                "type": "indicator_event",
+                "output_name": "confirmed",
+                "event_keys": [
+                  {
+                    "key": "confirmed_long",
+                    "direction": "long"
+                  }
+                ]
+              },
+              "origin_time_path": "metadata.breakout_time",
+              "origin_event_key_path": "metadata.breakout_event_key",
+              "reference_path": "metadata.reference"
+            }
+          },
+          "statistics": {
+            "eligibility": {
+              "min_samples": 1
+            }
+          }
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "7+5105a3204d7ec1f4",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "6",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "indicator",
+            "input_policy": "candle_only_indicator.v1",
+            "operator_model": "matched_origin_attribution.v1",
+            "followup_scope": "same_evaluation_window.v1",
+            "outcome_summary": "eligible_population_descriptive.v1",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "7",
+              "definition_hash": "75011c2a659141b7a60cb4dbade8fe85625e16c228b7211acd021ca20145ff64"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "profile-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "raw",
+              "event_keys": [
+                {
+                  "key": "raw_long",
+                  "direction": "long",
+                  "alias": "raw_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                1,
+                2
+              ],
+              "required_horizons": [
+                1,
+                2
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 2,
+              "entry_lag_bars": 1,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1",
+              "matched_origin": {
+                "detector": {
+                  "type": "indicator_event",
+                  "output_name": "confirmed",
+                  "event_keys": [
+                    {
+                      "key": "confirmed_long",
+                      "direction": "long",
+                      "alias": "confirmed_long"
+                    }
+                  ]
+                },
+                "origin_time_path": "metadata.breakout_time",
+                "origin_event_key_path": "metadata.breakout_event_key",
+                "reference_path": "metadata.reference"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 1,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "2f15fc831654dd14db4eeb406a6614aac4d738c12098af5c3a29666999cb9c23"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@8": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "8",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "7",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "indicator",
+        "input_policy": "candle_only_indicator.v1",
+        "operator_model": "shared_landmark_comparison.v1",
+        "followup_scope": "same_evaluation_window.v1",
+        "outcome_summary": "eligible_population_descriptive.v1"
+      },
+      "definition_hash": "19db6baee62c054a79890abe99a12f904d47ec4a4f12e57be8cce65dc96c3b6d"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reject",
+          "scope": {
+            "indicator_id": "profile-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2022-01-01T00:00:00+00:00",
+            "end": "2022-01-01T06:00:00+00:00"
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "raw",
+            "event_keys": [
+              {
+                "key": "raw_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizons": [
+              2,
+              3
+            ],
+            "primary_horizon": 2,
+            "entry_lag_bars": 1,
+            "matched_origin": {
+              "detector": {
+                "type": "indicator_event",
+                "output_name": "confirmed",
+                "event_keys": [
+                  {
+                    "key": "confirmed_long",
+                    "direction": "long"
+                  }
+                ]
+              },
+              "origin_time_path": "metadata.breakout_time",
+              "origin_event_key_path": "metadata.breakout_event_key",
+              "reference_path": "metadata.reference"
+            },
+            "required_horizons": [
+              2,
+              3
+            ],
+            "shared_landmark": {
+              "classification_lag_bars": 1,
+              "sample_lag_bars": 2,
+              "readiness_contract": "market_profile.value_location.v1",
+              "dependence": "leave_one_original_profile_out.v1"
+            }
+          },
+          "statistics": {
+            "eligibility": {
+              "min_samples": 1
+            }
+          }
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "8+ad3ea255edf4c591",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "7",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "indicator",
+            "input_policy": "candle_only_indicator.v1",
+            "operator_model": "shared_landmark_comparison.v1",
+            "followup_scope": "same_evaluation_window.v1",
+            "outcome_summary": "eligible_population_descriptive.v1",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "8",
+              "definition_hash": "19db6baee62c054a79890abe99a12f904d47ec4a4f12e57be8cce65dc96c3b6d"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "profile-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "raw",
+              "event_keys": [
+                {
+                  "key": "raw_long",
+                  "direction": "long",
+                  "alias": "raw_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                2,
+                3
+              ],
+              "required_horizons": [
+                2,
+                3
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 2,
+              "entry_lag_bars": 1,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1",
+              "matched_origin": {
+                "detector": {
+                  "type": "indicator_event",
+                  "output_name": "confirmed",
+                  "event_keys": [
+                    {
+                      "key": "confirmed_long",
+                      "direction": "long",
+                      "alias": "confirmed_long"
+                    }
+                  ]
+                },
+                "origin_time_path": "metadata.breakout_time",
+                "origin_event_key_path": "metadata.breakout_event_key",
+                "reference_path": "metadata.reference"
+              },
+              "shared_landmark": {
+                "classification_lag_bars": 1,
+                "sample_lag_bars": 2,
+                "readiness_contract": "market_profile.value_location.v1",
+                "dependence": "leave_one_original_profile_out.v1"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 1,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "9a312b2796244f51ad5e25f56dcdbc34e77826782babcaf890e950b89d51dd61"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "event_fact_analysis@9": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "event_fact_analysis",
+      "definition_version": "9",
+      "evaluator_id": "event_fact_analysis",
+      "evaluator_version": "8",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "event_fact_analysis",
+        "event_ownership": "indicator",
+        "input_policy": "candle_only_indicator.v1",
+        "operator_model": "first_return_comparison.v1",
+        "outcome_summary": "eligible_population_descriptive.v1"
+      },
+      "definition_hash": "a548832ff032fbfb0f2bca38ee882d062775a2f707b121b1eb4fb44ca018202a"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "event_fact_analysis",
+          "mode": "preview",
+          "inputs": [],
+          "gap_policy": "reject",
+          "scope": {
+            "indicator_id": "profile-1",
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2022-01-01T00:00:00+00:00",
+            "end": "2022-01-01T06:00:00+00:00"
+          },
+          "detector": {
+            "type": "indicator_event",
+            "output_name": "balance_breakout",
+            "event_keys": [
+              {
+                "key": "balance_breakout_long",
+                "direction": "long"
+              }
+            ]
+          },
+          "outcomes": {
+            "horizons": [
+              2,
+              3
+            ],
+            "primary_horizon": 2,
+            "entry_lag_bars": 1,
+            "required_horizons": [
+              2
+            ],
+            "first_return": {
+              "classification_lag_bars": 1,
+              "sample_lag_bars": 2,
+              "readiness_contract": "market_profile.first_return_state.v2",
+              "dependence": "leave_one_original_profile_out.v1"
+            }
+          },
+          "statistics": {
+            "eligibility": {
+              "min_samples": 1
+            }
+          }
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "event_fact_analysis",
+          "definition_version": "9+3ec57c4340b762e2",
+          "evaluator_id": "event_fact_analysis",
+          "evaluator_version": "8",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "event_fact_analysis",
+            "event_ownership": "indicator",
+            "input_policy": "candle_only_indicator.v1",
+            "operator_model": "first_return_comparison.v1",
+            "outcome_summary": "eligible_population_descriptive.v1",
+            "registered_definition": {
+              "definition_id": "event_fact_analysis",
+              "definition_version": "9",
+              "definition_hash": "a548832ff032fbfb0f2bca38ee882d062775a2f707b121b1eb4fb44ca018202a"
+            },
+            "inputs": [],
+            "indicator": {
+              "indicator_id": "profile-1"
+            },
+            "detector": {
+              "type": "indicator_event",
+              "output_name": "balance_breakout",
+              "event_keys": [
+                {
+                  "key": "balance_breakout_long",
+                  "direction": "long",
+                  "alias": "balance_breakout_long"
+                }
+              ]
+            },
+            "outcomes": {
+              "horizons": [
+                2,
+                3
+              ],
+              "required_horizons": [
+                2
+              ],
+              "horizon_kind": "bars",
+              "primary_horizon": 2,
+              "entry_lag_bars": 1,
+              "positive_rule": "direction_signed_forward_return_gt_zero.v1",
+              "first_return": {
+                "classification_lag_bars": 1,
+                "sample_lag_bars": 2,
+                "readiness_contract": "market_profile.first_return_state.v2",
+                "dependence": "leave_one_original_profile_out.v1"
+              }
+            },
+            "statistics": {
+              "features": {
+                "baseline": [],
+                "enriched": []
+              },
+              "folds": [],
+              "purge_bars": 0,
+              "embargo_bars": 0,
+              "model": {},
+              "bootstrap": {},
+              "direct_tests": {},
+              "feature_bins": {},
+              "eligibility": {
+                "min_samples": 1,
+                "min_class_count": 0,
+                "min_distinct_utc_days": 0,
+                "min_validation_samples_per_fold": 0,
+                "min_valid_folds": 0
+              }
+            },
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "3201cce4ff98f450257a7119057c6f9c2e9fb3d09932c0821d6ef4cb66642077"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@17": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "17",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "17",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "reversal_population_selection.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "selection_rules": {
+          "version": "reversal_population_selection.v1",
+          "formation": "unchanged retreat-inclusive;retain all chains;no expiry or deduplication",
+          "decision": "completion parent known_at;not an executed fill",
+          "controls": "no completion at this clock;prior/pending/later formations allowed",
+          "control_low": "own minimum of n trailing candles;case n includes whole formation",
+          "features": [
+            "prior96return RMS sigma",
+            "fractional barrier distance r",
+            "strictly prior12bar z"
+          ],
+          "sigma": "RMS96 returns ending before decision candle;97 preceding closes",
+          "z_pre12": "log(C[t-1]/C[t-13])/(sigma*sqrt(12))",
+          "calipers": {
+            "sigma_ratio": 1.25,
+            "r_ratio": 1.1,
+            "z_pre12_abs": 0.25
+          },
+          "distance": "sum squared log-ratio/caliper for sigma,r and delta_z/.25",
+          "strata": "same28day block,UTC6h slot,prior12bar distinct completion count0/1/2+",
+          "radius_days": 14,
+          "order": "case clock,B2 namespace compatibility order key;distance,absolute calendar distance,control clock,source identity",
+          "reuse": "one control per chain;no control timestamp reuse across n or blocks",
+          "support": "within-pair disjoint closed direct-history to nominal+12bar-end intervals",
+          "dependence": "cross-pair overlaps and pair links;shared ancestry conservatively starts at recognition origin",
+          "weighting": "equal case completion moments;split each matched moment across its matched chains",
+          "diagnostics_only": [
+            "q=r/(sigma*sqrt(12))",
+            "prior96bar z",
+            "decision body/range",
+            "duration"
+          ],
+          "numeric_coverage_pass_gates": null,
+          "threshold_justification": "fixed design constants;no demonstrated feasibility or power",
+          "outcomes": "NOT CALCULATED;nominal support is metadata,never a first-touch scan",
+          "limits": {
+            "candles": 19104,
+            "candidate_comparisons": 20000000,
+            "wall_seconds": 120,
+            "input_bytes": 268435456,
+            "result_bytes": 16777216
+          },
+          "evaluation": "Explicit fixed origin and one through six complete28day decision blocks;no reset",
+          "timing_representation": "reversal_stage_availability.v3;lossless shared parent clock and inferred duplicate availability fields",
+          "populations": "Declared block views plus combined;summaries normalize within each view;root pairs retain original combined weights"
+        }
+      },
+      "definition_hash": "0d03d00f763e6262293e096460a99e2d03313237f4f0cdd1297798a5c81c2af5"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "evidence",
+          "gap_policy": "reject",
+          "scope": {
+            "instrument_id": "instrument-1",
+            "timeframe": "15m",
+            "start": "2025-02-01T00:00:00Z",
+            "end": "2025-03-29T00:00:00Z"
+          },
+          "detector": {
+            "type": "completed_reversal_candidates",
+            "computation_origin": "2025-01-01T00:00:00Z",
+            "reference_basis": "rising_leg_plus_retreat",
+            "ownership": "retain_all_provisional",
+            "max_bars": 19104,
+            "max_candidates": 10000
+          },
+          "outcomes": {
+            "schema_version": "reversal_population_selection.v1",
+            "populations": [
+              {
+                "name": "first_block",
+                "start_block": 0,
+                "block_count": 1
+              },
+              {
+                "name": "second_block",
+                "start_block": 1,
+                "block_count": 1
+              }
+            ]
+          },
+          "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "17+e330f6faf7567258",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "17",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "reversal_population_selection.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "selection_rules": {
+              "version": "reversal_population_selection.v1",
+              "formation": "unchanged retreat-inclusive;retain all chains;no expiry or deduplication",
+              "decision": "completion parent known_at;not an executed fill",
+              "controls": "no completion at this clock;prior/pending/later formations allowed",
+              "control_low": "own minimum of n trailing candles;case n includes whole formation",
+              "features": [
+                "prior96return RMS sigma",
+                "fractional barrier distance r",
+                "strictly prior12bar z"
+              ],
+              "sigma": "RMS96 returns ending before decision candle;97 preceding closes",
+              "z_pre12": "log(C[t-1]/C[t-13])/(sigma*sqrt(12))",
+              "calipers": {
+                "sigma_ratio": 1.25,
+                "r_ratio": 1.1,
+                "z_pre12_abs": 0.25
+              },
+              "distance": "sum squared log-ratio/caliper for sigma,r and delta_z/.25",
+              "strata": "same28day block,UTC6h slot,prior12bar distinct completion count0/1/2+",
+              "radius_days": 14,
+              "order": "case clock,B2 namespace compatibility order key;distance,absolute calendar distance,control clock,source identity",
+              "reuse": "one control per chain;no control timestamp reuse across n or blocks",
+              "support": "within-pair disjoint closed direct-history to nominal+12bar-end intervals",
+              "dependence": "cross-pair overlaps and pair links;shared ancestry conservatively starts at recognition origin",
+              "weighting": "equal case completion moments;split each matched moment across its matched chains",
+              "diagnostics_only": [
+                "q=r/(sigma*sqrt(12))",
+                "prior96bar z",
+                "decision body/range",
+                "duration"
+              ],
+              "numeric_coverage_pass_gates": null,
+              "threshold_justification": "fixed design constants;no demonstrated feasibility or power",
+              "outcomes": "NOT CALCULATED;nominal support is metadata,never a first-touch scan",
+              "limits": {
+                "candles": 19104,
+                "candidate_comparisons": 20000000,
+                "wall_seconds": 120,
+                "input_bytes": 268435456,
+                "result_bytes": 16777216
+              },
+              "evaluation": "Explicit fixed origin and one through six complete28day decision blocks;no reset",
+              "timing_representation": "reversal_stage_availability.v3;lossless shared parent clock and inferred duplicate availability fields",
+              "populations": "Declared block views plus combined;summaries normalize within each view;root pairs retain original combined weights"
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "17",
+              "definition_hash": "0d03d00f763e6262293e096460a99e2d03313237f4f0cdd1297798a5c81c2af5"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "type": "completed_reversal_candidates",
+              "computation_origin": "2025-01-01T00:00:00Z",
+              "reference_basis": "rising_leg_plus_retreat",
+              "ownership": "retain_all_provisional",
+              "max_bars": 19104,
+              "max_candidates": 10000
+            },
+            "outcomes": {
+              "schema_version": "reversal_population_selection.v1",
+              "populations": [
+                {
+                  "name": "first_block",
+                  "start_block": 0,
+                  "block_count": 1
+                },
+                {
+                  "name": "second_block",
+                  "start_block": 1,
+                  "block_count": 1
+                }
+              ]
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "312a416fb16ff97d930351898bde47fba935e1685846af75d4646eb5d4911ee9"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@18": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "18",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "18",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "saved_check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "reversal_saved_measurements.v2",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "measurement_rules": {
+          "version": "reversal_saved_measurements.v2",
+          "selection_contracts": [
+            "raw_forward_outcome@12",
+            "raw_forward_outcome@14",
+            "raw_forward_outcome@17"
+          ],
+          "population": "Exact validated saved pairs, weights, barriers, support and ancestry; no recognition/rematching",
+          "first_passage": {
+            "version": "reversal_matched_first_passage.v1",
+            "population": "Exactly the saved selection pairs; no recognition or rematching",
+            "anchor": "Saved completion/control close E; observational, not an executed fill",
+            "failure": "Saved whole-formation low for cases; own trailing-n low for controls",
+            "continuation": "E+(E-L); inclusive touches; next candle through12bars",
+            "horizon_bars": 12,
+            "both_first_touched_same_bar": "unresolved:intrabar_order_unknown",
+            "missing_or_boundary": "unresolved unless first passage already known; never drop",
+            "weighting": "Saved equal completion-moment pair weights; renormalize within reporting view",
+            "contrast": "Weighted case minus control fractions for each of all four classes",
+            "dependence": "Retain saved support/ancestry components; no independent-trial inference",
+            "limits": {
+              "candles": 19104,
+              "pairs": 10000,
+              "wall_seconds": 120,
+              "input_bytes": 268435456,
+              "result_bytes": 16777216
+            }
+          },
+          "progress": {
+            "version": "reversal_matched_progress.v1",
+            "horizon_bars": 12,
+            "progress_percent": "100*max(0,max(next12 high)-E)/(U-E); U=E+(E-L); uncapped",
+            "full_window": "Includes after failure; never reclassifies original first passage",
+            "pre_failure_bounds": "Lower: strictly earlier candle highs; upper: also first failure candle high; include zero anchor",
+            "intrabar_order": "Unknown; bounds rather than invented high/low ordering",
+            "censoring": "Partial path observed maximum is a lower bound, excluded from complete-window distribution with count and original mass retained",
+            "quantiles": [
+              0.1,
+              0.25,
+              0.5,
+              0.75,
+              0.9
+            ],
+            "quantile_definition": "Smallest value whose cumulative original weight reaches p times group mass; no interpolation",
+            "bins_percent": [
+              "[0,25)",
+              "[25,50)",
+              "[50,75)",
+              "[75,100)",
+              "[100,infinity)"
+            ],
+            "weights": "Original pair weights, normalized only in explicitly named reporting group",
+            "interpretation": "Post-outcome descriptive only; no prediction, inference, optimized target or beyond-three-hour claim",
+            "limits": {
+              "candles": 19104,
+              "pairs": 999,
+              "wall_seconds": 120,
+              "input_bytes": 268435456,
+              "result_bytes": 16777216
+            }
+          },
+          "outcome_provenance": "Computed in this Check and passed directly to the unchanged progress kernel",
+          "reporting": "Whole saved scope and its declared populations;original root weights normalized only within each named reporting view",
+          "limits": {
+            "candles": 19104,
+            "cases": 10000,
+            "pairs": 999,
+            "wall_seconds": 120,
+            "input_bytes": 268435456,
+            "result_bytes": 16777216
+          }
+        }
+      },
+      "definition_hash": "f5ad007f46ce747aacc540090953e0fa1b9e9154d48be852c0ec6016a4914709"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "evidence",
+          "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scope": {
+            "instrument_id": "instrument-1",
+            "timeframe": "15m",
+            "start": "2025-02-01T00:00:00Z",
+            "end": "2025-03-29T00:00:00Z"
+          },
+          "detector": {
+            "type": "saved_reversal_selection"
+          },
+          "gap_policy": "reject",
+          "outcomes": {
+            "schema_version": "reversal_saved_measurements.v2",
+            "selection_reference": {
+              "source_check_id": "11111111-1111-4111-8111-111111111111",
+              "result_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "evidence_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "selection_manifest_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "frozen_context": {
+              "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "dataset_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "input_binding_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "max_commit_seq": 10,
+              "instrument_id": "instrument-1",
+              "input_start": "2025-01-01T00:00:00Z",
+              "input_end_exclusive": "2025-03-29T00:00:00Z",
+              "decision_start": "2025-02-01T00:00:00Z",
+              "decision_end_exclusive": "2025-03-29T00:00:00Z",
+              "source_identity_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "input_rows": 8352,
+              "case_count": 2,
+              "pair_count": 2,
+              "completion_clock_count": 1
+            }
+          }
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "18+57aa3c6939fec98b",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "18",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "saved_check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "reversal_saved_measurements.v2",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "measurement_rules": {
+              "version": "reversal_saved_measurements.v2",
+              "selection_contracts": [
+                "raw_forward_outcome@12",
+                "raw_forward_outcome@14",
+                "raw_forward_outcome@17"
+              ],
+              "population": "Exact validated saved pairs, weights, barriers, support and ancestry; no recognition/rematching",
+              "first_passage": {
+                "version": "reversal_matched_first_passage.v1",
+                "population": "Exactly the saved selection pairs; no recognition or rematching",
+                "anchor": "Saved completion/control close E; observational, not an executed fill",
+                "failure": "Saved whole-formation low for cases; own trailing-n low for controls",
+                "continuation": "E+(E-L); inclusive touches; next candle through12bars",
+                "horizon_bars": 12,
+                "both_first_touched_same_bar": "unresolved:intrabar_order_unknown",
+                "missing_or_boundary": "unresolved unless first passage already known; never drop",
+                "weighting": "Saved equal completion-moment pair weights; renormalize within reporting view",
+                "contrast": "Weighted case minus control fractions for each of all four classes",
+                "dependence": "Retain saved support/ancestry components; no independent-trial inference",
+                "limits": {
+                  "candles": 19104,
+                  "pairs": 10000,
+                  "wall_seconds": 120,
+                  "input_bytes": 268435456,
+                  "result_bytes": 16777216
+                }
+              },
+              "progress": {
+                "version": "reversal_matched_progress.v1",
+                "horizon_bars": 12,
+                "progress_percent": "100*max(0,max(next12 high)-E)/(U-E); U=E+(E-L); uncapped",
+                "full_window": "Includes after failure; never reclassifies original first passage",
+                "pre_failure_bounds": "Lower: strictly earlier candle highs; upper: also first failure candle high; include zero anchor",
+                "intrabar_order": "Unknown; bounds rather than invented high/low ordering",
+                "censoring": "Partial path observed maximum is a lower bound, excluded from complete-window distribution with count and original mass retained",
+                "quantiles": [
+                  0.1,
+                  0.25,
+                  0.5,
+                  0.75,
+                  0.9
+                ],
+                "quantile_definition": "Smallest value whose cumulative original weight reaches p times group mass; no interpolation",
+                "bins_percent": [
+                  "[0,25)",
+                  "[25,50)",
+                  "[50,75)",
+                  "[75,100)",
+                  "[100,infinity)"
+                ],
+                "weights": "Original pair weights, normalized only in explicitly named reporting group",
+                "interpretation": "Post-outcome descriptive only; no prediction, inference, optimized target or beyond-three-hour claim",
+                "limits": {
+                  "candles": 19104,
+                  "pairs": 999,
+                  "wall_seconds": 120,
+                  "input_bytes": 268435456,
+                  "result_bytes": 16777216
+                }
+              },
+              "outcome_provenance": "Computed in this Check and passed directly to the unchanged progress kernel",
+              "reporting": "Whole saved scope and its declared populations;original root weights normalized only within each named reporting view",
+              "limits": {
+                "candles": 19104,
+                "cases": 10000,
+                "pairs": 999,
+                "wall_seconds": 120,
+                "input_bytes": 268435456,
+                "result_bytes": 16777216
+              }
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "18",
+              "definition_hash": "f5ad007f46ce747aacc540090953e0fa1b9e9154d48be852c0ec6016a4914709"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "type": "saved_reversal_selection"
+            },
+            "outcomes": {
+              "schema_version": "reversal_saved_measurements.v2",
+              "selection_reference": {
+                "source_check_id": "11111111-1111-4111-8111-111111111111",
+                "result_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "evidence_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "selection_manifest_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              },
+              "frozen_context": {
+                "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "dataset_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "input_binding_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "max_commit_seq": 10,
+                "instrument_id": "instrument-1",
+                "input_start": "2025-01-01T00:00:00Z",
+                "input_end_exclusive": "2025-03-29T00:00:00Z",
+                "decision_start": "2025-02-01T00:00:00Z",
+                "decision_end_exclusive": "2025-03-29T00:00:00Z",
+                "source_identity_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "input_rows": 8352,
+                "case_count": 2,
+                "pair_count": 2,
+                "completion_clock_count": 1
+              }
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "e2140967b4cff00feb70809c7965c21b07e0014f6199d4f61f8f8692523450f3"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@19": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "19",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "19",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "controlled_reversal_comparison.v3",
+        "treatment": "inclusive bullish body engulfing; control is its complement",
+        "features": [
+          "log_body_size",
+          "log_prior_rms",
+          "decline_intensity"
+        ],
+        "calipers": [
+          0.22314355131420976,
+          0.22314355131420976,
+          0.5
+        ],
+        "matching": "chronological treated, minimum squared normalized distance, no control reuse",
+        "tie_break": "absolute time distance then earlier control",
+        "intervals": "closed entry-to-target intervals, shared endpoints overlap",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "return_unit": "fraction",
+        "support": {
+          "complete_pairs": 100,
+          "utc_days": 10,
+          "matching_fraction": 0.5,
+          "outcome_completeness": 0.95,
+          "absolute_smd_max": 0.1
+        },
+        "nonoverlap_support": {
+          "complete_pairs": 30,
+          "utc_days": 6
+        },
+        "limits": {
+          "evaluation_days": 32,
+          "candles": 100000,
+          "candidate_comparisons": 3000000
+        },
+        "inference": "descriptive_only",
+        "choices_contract": "controlled_reversal_comparison.v3",
+        "candidate": "bullish after bearish with configured prior close decline",
+        "dependence": "delete whole pair on either arm close date; frozen joint nonoverlap; no rematching",
+        "support_day_count": "treated candle-close dates; both-arm coverage reported separately",
+        "time_windows": "exact contiguous interval paths; no gap compression",
+        "path_observation": {
+          "unit": "fraction",
+          "direction": "long",
+          "anchor": "entry candle close",
+          "path": "Offsets1throughdeclared horizon after entry candle;entry excluded;no new tail",
+          "sign": "MFE=maximum future high/entry-1;MAE=minimum future low/entry-1;neither clamped to zero",
+          "ties": "First chronological candle attaining the extreme",
+          "timing": "One-based candle offset and candle open/close/known-at;not intrabar time,ordering or executable fill",
+          "availability": "Extreme candle known-at is its own availability;outcome_known_at includes the full admitted path",
+          "unresolved": "Original entry/horizon failure reason retained;excursions and extrema null;no partial estimate"
+        }
+      },
+      "definition_hash": "7a7b7e9192c2df4a07bb810c1b499c6c601fb7fa9f2b366ea1187f3c59bd7873"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "preview",
+          "scope": {
+            "instrument_id": "instrument-id",
+            "timeframe": "15m",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-02-01T00:00:00Z",
+            "warmup_bars": 97
+          },
+          "detector": {
+            "type": "controlled_bullish_reversal"
+          },
+          "outcomes": {
+            "schema_version": "controlled_reversal_comparison.v3",
+            "interval": "15m",
+            "trend_lookback_bars": 12,
+            "volatility_lookback_bars": 96,
+            "entry_lag_bars": 1,
+            "outcome_horizon_bars": 12,
+            "matching_policy": "same_utc_close_slot",
+            "comparison_window_days": 7
+          },
+          "gap_policy": "continue_degraded"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "19+ce71b29e3edc6d4a",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "19",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "controlled_reversal_comparison.v3",
+            "treatment": "inclusive bullish body engulfing; control is its complement",
+            "features": [
+              "log_body_size",
+              "log_prior_rms",
+              "decline_intensity"
+            ],
+            "calipers": [
+              0.22314355131420976,
+              0.22314355131420976,
+              0.5
+            ],
+            "matching": "chronological treated, minimum squared normalized distance, no control reuse",
+            "tie_break": "absolute time distance then earlier control",
+            "intervals": "closed entry-to-target intervals, shared endpoints overlap",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "return_unit": "fraction",
+            "support": {
+              "complete_pairs": 100,
+              "utc_days": 10,
+              "matching_fraction": 0.5,
+              "outcome_completeness": 0.95,
+              "absolute_smd_max": 0.1
+            },
+            "nonoverlap_support": {
+              "complete_pairs": 30,
+              "utc_days": 6
+            },
+            "limits": {
+              "evaluation_days": 32,
+              "candles": 100000,
+              "candidate_comparisons": 3000000
+            },
+            "inference": "descriptive_only",
+            "choices_contract": "controlled_reversal_comparison.v3",
+            "candidate": "bullish after bearish with configured prior close decline",
+            "dependence": "delete whole pair on either arm close date; frozen joint nonoverlap; no rematching",
+            "support_day_count": "treated candle-close dates; both-arm coverage reported separately",
+            "time_windows": "exact contiguous interval paths; no gap compression",
+            "path_observation": {
+              "unit": "fraction",
+              "direction": "long",
+              "anchor": "entry candle close",
+              "path": "Offsets1throughdeclared horizon after entry candle;entry excluded;no new tail",
+              "sign": "MFE=maximum future high/entry-1;MAE=minimum future low/entry-1;neither clamped to zero",
+              "ties": "First chronological candle attaining the extreme",
+              "timing": "One-based candle offset and candle open/close/known-at;not intrabar time,ordering or executable fill",
+              "availability": "Extreme candle known-at is its own availability;outcome_known_at includes the full admitted path",
+              "unresolved": "Original entry/horizon failure reason retained;excursions and extrema null;no partial estimate"
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "19",
+              "definition_hash": "7a7b7e9192c2df4a07bb810c1b499c6c601fb7fa9f2b366ea1187f3c59bd7873"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "type": "controlled_bullish_reversal"
+            },
+            "outcomes": {
+              "schema_version": "controlled_reversal_comparison.v3",
+              "interval": "15m",
+              "trend_lookback_bars": 12,
+              "volatility_lookback_bars": 96,
+              "entry_lag_bars": 1,
+              "outcome_horizon_bars": 12,
+              "matching_policy": "same_utc_close_slot",
+              "comparison_window_days": 7
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "a29e6aee9e8c12669b3038c1932cc7a371b0f7ada8af336bef4ec101b3700980"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@20": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "20",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "20",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "reversal_completed_recovery.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "composition_rules": {
+          "version": "reversal_completed_recovery.v1",
+          "population": "All completed retreat-inclusive reversal chains;retain simultaneous chains and missing context",
+          "recovery": "N=1+(completion close-final strict-lower-low lowest_push observed_at)/900;inclusive integer>=1;equal lows keep first",
+          "context": "Existing strictly prior sigma96,r,z_pre12 and diagnostic geometry;no context eligibility filtering",
+          "outcome": "Unchanged first_passage_path;E completion close,L whole formation low,E+(E-L),next12bars,inclusive touch;both first bar unresolved;no tail",
+          "weights": "Per reporting view,1/(ALL completion clocks*ALL chains at that clock);never reweight a label subset",
+          "summary": "Four separate labels;original full-population label mass,observed/missing N mass,count,mean,first weighted-CDF crossing quantiles",
+          "views": "Declared block views plus combined;all rows retained;weights normalize over all completions within each view",
+          "dependence": "Prior97/context and whole-formation start to nominal+12bar-end support;common-origin ancestry;no independent-N",
+          "comparison": "None;no pairs,calipers,strata,adjusted contrast,classifier,inference or trading claim",
+          "limits": {
+            "candles": 19104,
+            "wall_seconds": 120,
+            "input_bytes": 268435456,
+            "result_bytes": 16777216
+          }
+        }
+      },
+      "definition_hash": "5562b7b934ebf733c6c2df971fe7bab75fcba4fa50770d5ad8addc73cdc4e0df"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "evidence",
+          "gap_policy": "reject",
+          "scope": {
+            "instrument_id": "instrument-1",
+            "timeframe": "15m",
+            "start": "2025-02-01T00:00:00Z",
+            "end": "2025-03-29T00:00:00Z"
+          },
+          "detector": {
+            "type": "completed_reversal_candidates",
+            "computation_origin": "2025-01-01T00:00:00Z",
+            "reference_basis": "rising_leg_plus_retreat",
+            "ownership": "retain_all_provisional",
+            "max_bars": 19104,
+            "max_candidates": 10000
+          },
+          "outcomes": {
+            "schema_version": "reversal_completed_recovery.v1",
+            "populations": [
+              {
+                "name": "first_block",
+                "start_block": 0,
+                "block_count": 1
+              },
+              {
+                "name": "second_block",
+                "start_block": 1,
+                "block_count": 1
+              }
+            ]
+          },
+          "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "20+ffc1896ab7d49079",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "20",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "reversal_completed_recovery.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "composition_rules": {
+              "version": "reversal_completed_recovery.v1",
+              "population": "All completed retreat-inclusive reversal chains;retain simultaneous chains and missing context",
+              "recovery": "N=1+(completion close-final strict-lower-low lowest_push observed_at)/900;inclusive integer>=1;equal lows keep first",
+              "context": "Existing strictly prior sigma96,r,z_pre12 and diagnostic geometry;no context eligibility filtering",
+              "outcome": "Unchanged first_passage_path;E completion close,L whole formation low,E+(E-L),next12bars,inclusive touch;both first bar unresolved;no tail",
+              "weights": "Per reporting view,1/(ALL completion clocks*ALL chains at that clock);never reweight a label subset",
+              "summary": "Four separate labels;original full-population label mass,observed/missing N mass,count,mean,first weighted-CDF crossing quantiles",
+              "views": "Declared block views plus combined;all rows retained;weights normalize over all completions within each view",
+              "dependence": "Prior97/context and whole-formation start to nominal+12bar-end support;common-origin ancestry;no independent-N",
+              "comparison": "None;no pairs,calipers,strata,adjusted contrast,classifier,inference or trading claim",
+              "limits": {
+                "candles": 19104,
+                "wall_seconds": 120,
+                "input_bytes": 268435456,
+                "result_bytes": 16777216
+              }
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "20",
+              "definition_hash": "5562b7b934ebf733c6c2df971fe7bab75fcba4fa50770d5ad8addc73cdc4e0df"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "type": "completed_reversal_candidates",
+              "computation_origin": "2025-01-01T00:00:00Z",
+              "reference_basis": "rising_leg_plus_retreat",
+              "ownership": "retain_all_provisional",
+              "max_bars": 19104,
+              "max_candidates": 10000
+            },
+            "outcomes": {
+              "schema_version": "reversal_completed_recovery.v1",
+              "populations": [
+                {
+                  "name": "first_block",
+                  "start_block": 0,
+                  "block_count": 1
+                },
+                {
+                  "name": "second_block",
+                  "start_block": 1,
+                  "block_count": 1
+                }
+              ]
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "reject",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "defc55aa81b1a30a3d2c21bd1746b655d4a7eacd867f78c6f91b897c61f9fd56"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@3": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "3",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "3",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "outcome_schema": "raw_candle_forward_outcome.v1",
+        "inference": "descriptive_only",
+        "return_unit": "fraction",
+        "limits": {
+          "candles": 100000,
+          "horizons": 20,
+          "lag_plus_horizon_bars": 10000,
+          "examples": 1000,
+          "predicate_depth": 32,
+          "predicate_nodes": 500
+        }
+      },
+      "definition_hash": "d87c152d7d1de2727068a0e75e85f55538d163bdfabb25579804e3c3beb358aa"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "preview",
+          "scope": {
+            "instrument_id": "instrument-id",
+            "timeframe": "1m",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-01-02T00:00:00Z"
+          },
+          "detector": {
+            "type": "raw_condition",
+            "field": "close",
+            "operator": "gt",
+            "value_field": "previous_close"
+          },
+          "outcomes": {
+            "schema_version": "raw_candle_forward_outcome.v1",
+            "forward_bars": [
+              5
+            ],
+            "entry_lag_bars": 1
+          },
+          "gap_policy": "continue_degraded"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "3+fafc58a5cdefab6d",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "3",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "outcome_schema": "raw_candle_forward_outcome.v1",
+            "inference": "descriptive_only",
+            "return_unit": "fraction",
+            "limits": {
+              "candles": 100000,
+              "horizons": 20,
+              "lag_plus_horizon_bars": 10000,
+              "examples": 1000,
+              "predicate_depth": 32,
+              "predicate_nodes": 500
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "3",
+              "definition_hash": "d87c152d7d1de2727068a0e75e85f55538d163bdfabb25579804e3c3beb358aa"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "type": "raw_condition",
+              "field": "close",
+              "operator": "gt",
+              "value_field": "previous_close"
+            },
+            "outcomes": {
+              "schema_version": "raw_candle_forward_outcome.v1",
+              "forward_bars": [
+                5
+              ],
+              "entry_lag_bars": 1,
+              "direction": "long",
+              "min_sample_count": 20,
+              "min_edge_pct": 0.0,
+              "max_examples": 250,
+              "outcome_boundary": "evaluation_end_exclusive"
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "856fa12bef3fb6fa2de0b2d9db94e550f7c5f04e4edb19bbc7a9436aadcb1113"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@6": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "6",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "6",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "raw_candle_distribution.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "distribution_rules": {
+          "cohorts": "volume_gt_previous_vs_lte.v1",
+          "prior_volatility_bars": 20,
+          "quantiles": [
+            0.01,
+            0.05,
+            0.25,
+            0.5,
+            0.75,
+            0.95,
+            0.99
+          ],
+          "quantile_method": "linear",
+          "tail_fractions": [
+            0.01,
+            0.05
+          ],
+          "tail_membership": "ceil_n_fraction_rank_then_event_id.v1",
+          "dependence": "closed_formation_to_target_overlap_components.v1",
+          "inference": "descriptive_only",
+          "complete_event_limit": 10000
+        }
+      },
+      "definition_hash": "79831f458789011db929ea5bcccb2214a59b8e02c1b29a2203daebccf60835a6"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "preview",
+          "scope": {
+            "instrument_id": "instrument-id",
+            "timeframe": "1m",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-01-02T00:00:00Z",
+            "warmup_bars": 1
+          },
+          "detector": {
+            "all": [
+              {
+                "field": "previous_close",
+                "operator": "lt",
+                "value_field": "previous_open"
+              },
+              {
+                "field": "close",
+                "operator": "gt",
+                "value_field": "open"
+              },
+              {
+                "field": "open",
+                "operator": "lte",
+                "value_field": "previous_close"
+              },
+              {
+                "field": "close",
+                "operator": "gte",
+                "value_field": "previous_open"
+              },
+              {
+                "any": [
+                  {
+                    "field": "volume",
+                    "operator": "gt",
+                    "value_field": "previous_volume"
+                  },
+                  {
+                    "field": "volume",
+                    "operator": "lte",
+                    "value_field": "previous_volume"
+                  }
+                ]
+              }
+            ]
+          },
+          "outcomes": {
+            "schema_version": "raw_candle_distribution.v1",
+            "forward_bars": [
+              5
+            ],
+            "entry_lag_bars": 1
+          },
+          "gap_policy": "continue_degraded"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "6+cb82158ebd37c01a",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "6",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "raw_candle_distribution.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "distribution_rules": {
+              "cohorts": "volume_gt_previous_vs_lte.v1",
+              "prior_volatility_bars": 20,
+              "quantiles": [
+                0.01,
+                0.05,
+                0.25,
+                0.5,
+                0.75,
+                0.95,
+                0.99
+              ],
+              "quantile_method": "linear",
+              "tail_fractions": [
+                0.01,
+                0.05
+              ],
+              "tail_membership": "ceil_n_fraction_rank_then_event_id.v1",
+              "dependence": "closed_formation_to_target_overlap_components.v1",
+              "inference": "descriptive_only",
+              "complete_event_limit": 10000
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "6",
+              "definition_hash": "79831f458789011db929ea5bcccb2214a59b8e02c1b29a2203daebccf60835a6"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "all": [
+                {
+                  "field": "previous_close",
+                  "operator": "lt",
+                  "value_field": "previous_open"
+                },
+                {
+                  "field": "close",
+                  "operator": "gt",
+                  "value_field": "open"
+                },
+                {
+                  "field": "open",
+                  "operator": "lte",
+                  "value_field": "previous_close"
+                },
+                {
+                  "field": "close",
+                  "operator": "gte",
+                  "value_field": "previous_open"
+                },
+                {
+                  "any": [
+                    {
+                      "field": "volume",
+                      "operator": "gt",
+                      "value_field": "previous_volume"
+                    },
+                    {
+                      "field": "volume",
+                      "operator": "lte",
+                      "value_field": "previous_volume"
+                    }
+                  ]
+                }
+              ]
+            },
+            "outcomes": {
+              "schema_version": "raw_candle_distribution.v1",
+              "forward_bars": [
+                5
+              ],
+              "entry_lag_bars": 1,
+              "direction": "long",
+              "min_sample_count": 20,
+              "min_edge_pct": 0.0,
+              "max_examples": 250,
+              "outcome_boundary": "evaluation_end_exclusive"
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "de78a340fa0802dd178a8d97122a6bfd434a41ee43de16c8ffa3c9dd160bbecc"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@7": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "7",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "7",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "volume_cohort_matched.v1",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "volume_cohort_rules": {
+          "cohort_choices": [
+            "volume_gt_previous_vs_lte"
+          ],
+          "matching_policy_choices": [
+            "same_date_hour"
+          ],
+          "features": [
+            "formation_body_fraction",
+            "formation_range_fraction",
+            "prior_rms_return"
+          ],
+          "feature_transform": "log positive absolute body, range and prior RMS",
+          "prior_rms": "N prior completed candles, N-1 contiguous close returns; no imputation",
+          "selection": "chronological increasing-volume; minimum normalized squared feature distance; no control reuse",
+          "tie_break": "absolute event-time distance then earlier control",
+          "pair_intervals": "closed nominal entry-to-target must be disjoint; no future availability selection",
+          "joint_nonoverlap": "closed prior-feature-start to target across both arms, chosen before outcomes",
+          "support": {
+            "complete_pairs": 100,
+            "utc_days": 10,
+            "matching_fraction": 0.5,
+            "outcome_completeness": 0.95,
+            "absolute_smd_max": 0.1
+          },
+          "nonoverlap_support": {
+            "complete_pairs": 30,
+            "utc_days": 6
+          },
+          "inference": "descriptive_only",
+          "event_limit": 10000,
+          "limits": {
+            "evaluation_days": 32,
+            "candles": 100000,
+            "candidate_comparisons": 3000000
+          }
+        }
+      },
+      "definition_hash": "4e5a535db7f9c4bfdb68206462947ad919ba057a9247992bd3460a57641bc5b6"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "preview",
+          "scope": {
+            "instrument_id": "instrument-id",
+            "timeframe": "1m",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-01-02T00:00:00Z",
+            "warmup_bars": 1
+          },
+          "detector": {
+            "all": [
+              {
+                "field": "previous_close",
+                "operator": "lt",
+                "value_field": "previous_open"
+              },
+              {
+                "field": "close",
+                "operator": "gt",
+                "value_field": "open"
+              },
+              {
+                "field": "open",
+                "operator": "lte",
+                "value_field": "previous_close"
+              },
+              {
+                "field": "close",
+                "operator": "gte",
+                "value_field": "previous_open"
+              },
+              {
+                "any": [
+                  {
+                    "field": "volume",
+                    "operator": "gt",
+                    "value_field": "previous_volume"
+                  },
+                  {
+                    "field": "volume",
+                    "operator": "lte",
+                    "value_field": "previous_volume"
+                  }
+                ]
+              }
+            ]
+          },
+          "outcomes": {
+            "schema_version": "volume_cohort_matched.v1",
+            "forward_bars": [
+              5
+            ],
+            "entry_lag_bars": 1,
+            "comparison": {
+              "cohort": "volume_gt_previous_vs_lte",
+              "prior_volatility_bars": 20,
+              "matching_policy": "same_date_hour",
+              "caliper_ratios": {
+                "formation_body_fraction": 1.25,
+                "formation_range_fraction": 1.25,
+                "prior_rms_return": 1.25
+              }
+            }
+          },
+          "gap_policy": "continue_degraded"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "7+a47cc5a99f1e39c4",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "7",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "volume_cohort_matched.v1",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "volume_cohort_rules": {
+              "cohort_choices": [
+                "volume_gt_previous_vs_lte"
+              ],
+              "matching_policy_choices": [
+                "same_date_hour"
+              ],
+              "features": [
+                "formation_body_fraction",
+                "formation_range_fraction",
+                "prior_rms_return"
+              ],
+              "feature_transform": "log positive absolute body, range and prior RMS",
+              "prior_rms": "N prior completed candles, N-1 contiguous close returns; no imputation",
+              "selection": "chronological increasing-volume; minimum normalized squared feature distance; no control reuse",
+              "tie_break": "absolute event-time distance then earlier control",
+              "pair_intervals": "closed nominal entry-to-target must be disjoint; no future availability selection",
+              "joint_nonoverlap": "closed prior-feature-start to target across both arms, chosen before outcomes",
+              "support": {
+                "complete_pairs": 100,
+                "utc_days": 10,
+                "matching_fraction": 0.5,
+                "outcome_completeness": 0.95,
+                "absolute_smd_max": 0.1
+              },
+              "nonoverlap_support": {
+                "complete_pairs": 30,
+                "utc_days": 6
+              },
+              "inference": "descriptive_only",
+              "event_limit": 10000,
+              "limits": {
+                "evaluation_days": 32,
+                "candles": 100000,
+                "candidate_comparisons": 3000000
+              }
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "7",
+              "definition_hash": "4e5a535db7f9c4bfdb68206462947ad919ba057a9247992bd3460a57641bc5b6"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "all": [
+                {
+                  "field": "previous_close",
+                  "operator": "lt",
+                  "value_field": "previous_open"
+                },
+                {
+                  "field": "close",
+                  "operator": "gt",
+                  "value_field": "open"
+                },
+                {
+                  "field": "open",
+                  "operator": "lte",
+                  "value_field": "previous_close"
+                },
+                {
+                  "field": "close",
+                  "operator": "gte",
+                  "value_field": "previous_open"
+                },
+                {
+                  "any": [
+                    {
+                      "field": "volume",
+                      "operator": "gt",
+                      "value_field": "previous_volume"
+                    },
+                    {
+                      "field": "volume",
+                      "operator": "lte",
+                      "value_field": "previous_volume"
+                    }
+                  ]
+                }
+              ]
+            },
+            "outcomes": {
+              "schema_version": "volume_cohort_matched.v1",
+              "forward_bars": [
+                5
+              ],
+              "entry_lag_bars": 1,
+              "direction": "long",
+              "min_sample_count": 20,
+              "min_edge_pct": 0.0,
+              "max_examples": 250,
+              "outcome_boundary": "evaluation_end_exclusive",
+              "comparison": {
+                "cohort": "volume_gt_previous_vs_lte",
+                "prior_volatility_bars": 20,
+                "matching_policy": "same_date_hour",
+                "caliper_ratios": {
+                  "formation_body_fraction": 1.25,
+                  "formation_range_fraction": 1.25,
+                  "prior_rms_return": 1.25
+                }
+              }
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "d17a5dbe9ae3c9d53078a86ed3a1e69b6e1da3257839e1caee7957048636ae65"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  },
+  "raw_forward_outcome@8": {
+    "definition": {
+      "schema_version": "research.check_definition.v1",
+      "definition_id": "raw_forward_outcome",
+      "definition_version": "8",
+      "evaluator_id": "raw_forward_outcome",
+      "evaluator_version": "8",
+      "request_schema_version": "research.check_request.v2",
+      "result_schema_version": "research.check_result.v2",
+      "material_rules": {
+        "family": "raw_forward_outcome",
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": "volume_cohort_matched.v2",
+        "outcome_boundary": "evaluation_end_exclusive",
+        "volume_cohort_rules": {
+          "cohort_choices": [
+            "volume_gt_previous_vs_lte"
+          ],
+          "matching_policy_choices": [
+            "same_utc_close_slot"
+          ],
+          "features": [
+            "formation_body_fraction",
+            "formation_range_fraction",
+            "prior_rms_return"
+          ],
+          "feature_transform": "log positive absolute body, range and prior RMS",
+          "prior_rms": "N prior completed candles, N-1 contiguous close returns; no imputation",
+          "selection": "chronological increasing-volume; minimum normalized squared feature distance; no control reuse",
+          "tie_break": "absolute event-time distance then earlier control",
+          "pair_intervals": "closed nominal entry-to-target must be disjoint; no future availability selection",
+          "joint_nonoverlap": "closed prior-feature-start to target across both arms, chosen before outcomes",
+          "support": {
+            "complete_pairs": 100,
+            "utc_days": 10,
+            "matching_fraction": 0.5,
+            "outcome_completeness": 0.95,
+            "absolute_smd_max": 0.1
+          },
+          "nonoverlap_support": {
+            "complete_pairs": 30,
+            "utc_days": 6
+          },
+          "inference": "descriptive_only",
+          "event_limit": 10000,
+          "limits": {
+            "evaluation_days": 32,
+            "candles": 100000,
+            "candidate_comparisons": 3000000
+          },
+          "matching_slot_seconds_choices": [
+            60,
+            3600
+          ],
+          "comparison_window_days_bounds": [
+            1,
+            31
+          ],
+          "matching_window": "inclusive absolute elapsed day radius, UTC close slot; no observations outside request",
+          "dependence": "delete whole pair on either arm date; report relative control dates; no rematching",
+          "comparability": "cross-date descriptive association; time slot does not control regime or common shocks"
+        }
+      },
+      "definition_hash": "d3bf053b6408a370d9ec9b79a4ee8247a96eb1d2d9c0b7252a3db26f2c0091fb"
+    },
+    "examples": [
+      {
+        "request": {
+          "check_family": "raw_forward_outcome",
+          "mode": "preview",
+          "scope": {
+            "instrument_id": "instrument-id",
+            "timeframe": "1m",
+            "start": "2022-01-01T00:00:00Z",
+            "end": "2022-01-02T00:00:00Z",
+            "warmup_bars": 1
+          },
+          "detector": {
+            "all": [
+              {
+                "field": "previous_close",
+                "operator": "lt",
+                "value_field": "previous_open"
+              },
+              {
+                "field": "close",
+                "operator": "gt",
+                "value_field": "open"
+              },
+              {
+                "field": "open",
+                "operator": "lte",
+                "value_field": "previous_close"
+              },
+              {
+                "field": "close",
+                "operator": "gte",
+                "value_field": "previous_open"
+              },
+              {
+                "any": [
+                  {
+                    "field": "volume",
+                    "operator": "gt",
+                    "value_field": "previous_volume"
+                  },
+                  {
+                    "field": "volume",
+                    "operator": "lte",
+                    "value_field": "previous_volume"
+                  }
+                ]
+              }
+            ]
+          },
+          "outcomes": {
+            "schema_version": "volume_cohort_matched.v2",
+            "forward_bars": [
+              5
+            ],
+            "entry_lag_bars": 1,
+            "comparison": {
+              "cohort": "volume_gt_previous_vs_lte",
+              "prior_volatility_bars": 20,
+              "matching_policy": "same_utc_close_slot",
+              "caliper_ratios": {
+                "formation_body_fraction": 1.25,
+                "formation_range_fraction": 1.25,
+                "prior_rms_return": 1.25
+              },
+              "comparison_window_days": 3,
+              "matching_slot_seconds": 3600
+            }
+          },
+          "gap_policy": "continue_degraded"
+        },
+        "configured_definition": {
+          "schema_version": "research.check_definition.v1",
+          "definition_id": "raw_forward_outcome",
+          "definition_version": "8+89353a263c341eb2",
+          "evaluator_id": "raw_forward_outcome",
+          "evaluator_version": "8",
+          "request_schema_version": "research.check_request.v2",
+          "result_schema_version": "research.check_result.v2",
+          "material_rules": {
+            "family": "raw_forward_outcome",
+            "event_ownership": "check",
+            "input_policy": "canonical_candle_clock_path.v1",
+            "outcome_schema": "volume_cohort_matched.v2",
+            "outcome_boundary": "evaluation_end_exclusive",
+            "volume_cohort_rules": {
+              "cohort_choices": [
+                "volume_gt_previous_vs_lte"
+              ],
+              "matching_policy_choices": [
+                "same_utc_close_slot"
+              ],
+              "features": [
+                "formation_body_fraction",
+                "formation_range_fraction",
+                "prior_rms_return"
+              ],
+              "feature_transform": "log positive absolute body, range and prior RMS",
+              "prior_rms": "N prior completed candles, N-1 contiguous close returns; no imputation",
+              "selection": "chronological increasing-volume; minimum normalized squared feature distance; no control reuse",
+              "tie_break": "absolute event-time distance then earlier control",
+              "pair_intervals": "closed nominal entry-to-target must be disjoint; no future availability selection",
+              "joint_nonoverlap": "closed prior-feature-start to target across both arms, chosen before outcomes",
+              "support": {
+                "complete_pairs": 100,
+                "utc_days": 10,
+                "matching_fraction": 0.5,
+                "outcome_completeness": 0.95,
+                "absolute_smd_max": 0.1
+              },
+              "nonoverlap_support": {
+                "complete_pairs": 30,
+                "utc_days": 6
+              },
+              "inference": "descriptive_only",
+              "event_limit": 10000,
+              "limits": {
+                "evaluation_days": 32,
+                "candles": 100000,
+                "candidate_comparisons": 3000000
+              },
+              "matching_slot_seconds_choices": [
+                60,
+                3600
+              ],
+              "comparison_window_days_bounds": [
+                1,
+                31
+              ],
+              "matching_window": "inclusive absolute elapsed day radius, UTC close slot; no observations outside request",
+              "dependence": "delete whole pair on either arm date; report relative control dates; no rematching",
+              "comparability": "cross-date descriptive association; time slot does not control regime or common shocks"
+            },
+            "registered_definition": {
+              "definition_id": "raw_forward_outcome",
+              "definition_version": "8",
+              "definition_hash": "d3bf053b6408a370d9ec9b79a4ee8247a96eb1d2d9c0b7252a3db26f2c0091fb"
+            },
+            "inputs": [],
+            "indicator": {},
+            "detector": {
+              "all": [
+                {
+                  "field": "previous_close",
+                  "operator": "lt",
+                  "value_field": "previous_open"
+                },
+                {
+                  "field": "close",
+                  "operator": "gt",
+                  "value_field": "open"
+                },
+                {
+                  "field": "open",
+                  "operator": "lte",
+                  "value_field": "previous_close"
+                },
+                {
+                  "field": "close",
+                  "operator": "gte",
+                  "value_field": "previous_open"
+                },
+                {
+                  "any": [
+                    {
+                      "field": "volume",
+                      "operator": "gt",
+                      "value_field": "previous_volume"
+                    },
+                    {
+                      "field": "volume",
+                      "operator": "lte",
+                      "value_field": "previous_volume"
+                    }
+                  ]
+                }
+              ]
+            },
+            "outcomes": {
+              "schema_version": "volume_cohort_matched.v2",
+              "forward_bars": [
+                5
+              ],
+              "entry_lag_bars": 1,
+              "direction": "long",
+              "min_sample_count": 20,
+              "min_edge_pct": 0.0,
+              "max_examples": 250,
+              "outcome_boundary": "evaluation_end_exclusive",
+              "comparison": {
+                "cohort": "volume_gt_previous_vs_lte",
+                "prior_volatility_bars": 20,
+                "matching_policy": "same_utc_close_slot",
+                "caliper_ratios": {
+                  "formation_body_fraction": 1.25,
+                  "formation_range_fraction": 1.25,
+                  "prior_rms_return": 1.25
+                },
+                "comparison_window_days": 3,
+                "matching_slot_seconds": 3600
+              }
+            },
+            "statistics": {},
+            "assertions": [],
+            "gap_policy": "continue_degraded",
+            "gap_rewarm_bars": 0
+          },
+          "definition_hash": "3cbc6ac88eea22cef4804d3598b45013a4a627386e20f020d83b951b2178e899"
+        },
+        "instructions": "Bind resource IDs, then send this request to requirements/prepare. Evidence runs use the returned next_request and Dataset ID."
+      }
+    ]
+  }
+}

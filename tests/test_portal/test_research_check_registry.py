@@ -12,7 +12,6 @@ from portal.backend.service.research.event_fact_evaluator import (
 )
 from portal.backend.service.research.registry import (
     CHECK_REGISTRY,
-    LEGACY_CHECK_FAMILIES,
     materialize_check_definition,
     normalize_check_request,
 )
@@ -107,12 +106,13 @@ def _l2_payload() -> dict:
     }
 
 
-def test_all_existing_check_families_are_exact_version_registered() -> None:
-    for family in LEGACY_CHECK_FAMILIES:
-        definition, evaluator = CHECK_REGISTRY.resolve(family, "2")
-        assert definition.definition_id == family
-        assert evaluator.evaluator_id == family
-        assert evaluator.version == "2"
+def test_only_current_check_definitions_are_executable():
+    expected = {("raw_forward_outcome", str(v)) for v in (3,6,7,8,17,18,19,20)} | {
+        (EVENT_FACT_ANALYSIS,str(v)) for v in range(4,15)}
+    assert {(d.definition_id,d.definition_version) for d in CHECK_REGISTRY.definitions()} == expected
+    for family in ("indicator_forward_outcome","signal_audit","candidate_lifecycle","run_signal_summary","run_decision_trade_comparison"):
+        with pytest.raises(ValueError): CHECK_REGISTRY.resolve(family,"2")
+
 
 
 def test_material_definition_hash_covers_configuration_and_assertions() -> None:
@@ -196,22 +196,13 @@ def test_same_semantic_fact_can_use_distinct_exact_aliases() -> None:
     )
 
 
-def test_event_fact_definition_uses_current_operation_versions() -> None:
-    legacy_definition, legacy_evaluator = CHECK_REGISTRY.resolve(
-        EVENT_FACT_ANALYSIS, "3"
-    )
-    definition, evaluator = CHECK_REGISTRY.resolve(EVENT_FACT_ANALYSIS, "4")
-
-    assert legacy_evaluator.version == LEGACY_EVENT_FACT_EVALUATOR_VERSION == "2"
-    assert legacy_evaluator.result_schema_version == LEGACY_EVENT_FACT_RESULT_VERSION
-    assert legacy_definition.evaluator_version == "2"
-    assert legacy_definition.definition_hash == (
-        "dc408552a837090a783c905f0e39670bed21dcdf59c5652d157f0b6c5b72602b"
-    )
+def test_event_fact_definition_uses_current_operation_versions():
+    with pytest.raises(ValueError): CHECK_REGISTRY.resolve(EVENT_FACT_ANALYSIS,"3")
+    definition,evaluator = CHECK_REGISTRY.resolve(EVENT_FACT_ANALYSIS,"4")
     assert evaluator.version == EVENT_FACT_EVALUATOR_VERSION == "3"
     assert evaluator.result_schema_version == EVENT_FACT_RESULT_VERSION
     assert definition.evaluator_version == "3"
-    assert EVENT_FACT_RESULT_VERSION == "event_fact_analysis_result.v3"
+
 
 
 def test_event_fact_rejects_misnested_or_unknown_statistics_fields() -> None:
@@ -324,7 +315,7 @@ def test_candle_only_indicator_check_has_exact_version_and_no_dummy_fact():
     assert definition.evaluator_version == "5"
     assert request.parameters["inputs"] == []
     assert materialize_check_definition(payload, mode="evidence", base_version="6") == definition
-    for version in ("3", "4", "5"):
+    for version in ("4", "5"):
         with pytest.raises(ValueError, match="at least one typed fact input"):
             materialize_check_definition(payload, mode="evidence", base_version=version)
 
@@ -340,3 +331,15 @@ def test_candle_only_definition_rejects_fact_sampling_and_unbound_features():
                 {"name": "missing", "operator": "latest_value", "input_alias": "missing"}
             ]}},
         }, mode="evidence")
+
+
+def test_evidence_admission_requires_current_registered_evaluator_pair():
+    from dataclasses import replace
+    from portal.backend.service.research.registry import definition_allows_evidence
+    from portal.backend.service.research.historical_check_custody import _custody, historical_base
+    for definition in CHECK_REGISTRY.definitions():
+        assert definition_allows_evidence(definition)
+        assert not definition_allows_evidence(replace(definition,evaluator_version="unregistered",definition_hash=""))
+    for key in _custody():
+        family,version=key.split("@")
+        assert not definition_allows_evidence(historical_base(family,version)),key

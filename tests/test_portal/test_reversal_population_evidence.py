@@ -9,7 +9,8 @@ import pytest
 from portal.backend.service.research import catalog,execution
 from portal.backend.service.research.registry import normalize_check_request,definition_allows_evidence
 from portal.backend.service.research.planning import plan_research_check
-from tests.test_portal.test_saved_selection_measurements import synthetic,SOURCE
+from market_data.frozen import build_frozen_market_data_read_binding, frozen_subject_snapshot_hash
+SOURCE='e'*64
 
 
 def payload():
@@ -22,6 +23,25 @@ def planned(p):
         instrument_loader=lambda key:{'id':key,'symbol':'SYNTHETIC'},
         indicator_planner=lambda *a,**k:{'indicators':[],'requirements':[],'warmup_bars':0})
     return definition,request,plan
+
+
+
+def native_binding(request,plan,rows):
+    """Actual active input contract fixture, independent of retired executors."""
+    primary=dict(plan.market_data_requirements[0])
+    subject={'id':primary['instrument_id'],'symbol':'SYNTHETIC'}
+    source={'mode':'exact','series_id':1,'resolved_source_identity_keys':[SOURCE],
+        'sources':{SOURCE:{'source_kind':'historical_api','adapter_version':'SyntheticProvider:candle.ohlcv.v1'}},
+        'source_summary':{'counts':{SOURCE:rows}}}
+    left=plan.materialization_range['start'];right=plan.materialization_range['end_exclusive']
+    return build_frozen_market_data_read_binding(dataset_id=request.dataset_id,dataset_hash='a'*64,max_commit_seq=10,
+        subjects=[{'instrument_id':primary['instrument_id'],'snapshot':subject,
+            'snapshot_hash':frozen_subject_snapshot_hash(subject)}],
+        series=[{'alias':'primary_bars','series_id':1,'instrument_id':primary['instrument_id'],
+            'fact_type':'candle.ohlcv','contract_version':'candle.ohlcv.v1','timeframe_seconds':900,
+            'range_start':left,'range_end':right,'row_count':rows,'max_commit_seq':10,
+            'material_hash':'material','provenance_hash':'provenance','quality_hash':'quality',
+            'source_binding':source,'loaded_range':{'start':left,'end_exclusive':right},'requirement':primary}])
 
 
 def test_same_public_recipe_admits_other_symbols_and_dates_with_no_outcome_support():
@@ -47,11 +67,11 @@ def test_no_scientific_threshold_namespace_or_outcome_gate_tuning(change):
     with pytest.raises(ValueError):planned(p)
 
 
-def test_loader_matches_fixed_profile_and_fails_missing_native_binding(monkeypatch):
+def test_loader_preserves_configured_population_and_fails_missing_native_binding(monkeypatch):
     from tests.test_research_science.test_recognition import candles as pattern
     p=payload();definition,request,plan=planned(p)
     plan=replace(plan,plan_hash='',materialization_range={**plan.materialization_range,'as_of_commit_seq':10})
-    item,_,_,_=synthetic();binding=item['payload']['evidence']['input_binding']
+    binding=native_binding(request,plan,8352)
     opened=pd.date_range('2025-01-01',periods=8352,freq='15min',tz='UTC');prices=[100+i*.001 for i in range(8352)]
     frame=pd.DataFrame({'timestamp':opened,'close_time':opened+timedelta(minutes=15),'known_at':opened+timedelta(minutes=15),
         'source_identity_key':SOURCE,'known_at_method':'interval_close_inferred','open':prices,'close':prices,
@@ -64,10 +84,6 @@ def test_loader_matches_fixed_profile_and_fails_missing_native_binding(monkeypat
     loaded=execution._load_market_inputs(definition,request,plan,resolver=SimpleNamespace(dataset_binding=binding))
     loaded['frozen_input_binding']=binding
     result=execution._evaluate(definition,request,plan,loaded)
-    fixed=deepcopy(p);fixed['outcomes']={'schema_version':'reversal_two_block_selection.v1'}
-    old_definition,old_request,old_plan=planned(fixed)
-    old=execution._evaluate(old_definition,old_request,old_plan,{**loaded,'outcomes':fixed['outcomes']})
-    for key in ('cases','pairs','dependence','selection_summary'):assert result[key]==old[key]
     assert result['candidate_count']>0 and result['outcomes_calculated'] is False
     pd.testing.assert_frame_equal(before,frame)
     with pytest.raises(ValueError,match='actual frozen input binding'):

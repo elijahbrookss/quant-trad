@@ -78,23 +78,13 @@ def test_explicit_version_dynamic_volume_and_pinned_reconstruction():
     normalize_check_preparation_request(payload())
 
 
-def test_legacy_v2_preview_and_historical_unknown_settings_remain_unchanged():
-    p=payload();p["mode"]="preview";p["outcomes"].pop("schema_version")
-    definition,request=normalize_check_request(p)
-    assert definition.definition_version.startswith("2+") and definition.evaluator_version=="2"
-    assert not definition_allows_evidence(definition)
-    assert service._definition_evidence_classification(definition)=="frozen_replayable_unqualified"
-    assert catalog.get_check_definition("raw_forward_outcome","2")["eligibility"]["modes"]==["preview"]
-    p["mode"]="evidence"
-    with pytest.raises(ValueError,match="preview_only"):
+def test_retired_v2_refuses_without_reinterpreting_unknown_settings():
+    p=payload();p['outcomes'].pop('schema_version')
+    with pytest.raises(ValueError,match='check_definition_retired'):
         normalize_check_request(p)
-    with pytest.raises(ValueError,match="preview_only"):
-        normalize_check_preparation_request(p)
-    request=CheckRequest.from_dict({**request.to_dict(),"request_hash":"","mode":"evidence"})
-    with pytest.raises(ValueError,match="preview_only"):
-        service.persist_research_check_evidence({},definition=definition,request=request,plan=None,evidence={},result={})
-    historical=materialize_check_definition(payload(),mode="preview",base_version="2")
-    assert historical.evaluator_version=="2" and not definition_allows_evidence(historical)
+    p['outcomes']['unknown_setting']=True
+    with pytest.raises(ValueError,match='check_definition_retired'):
+        normalize_check_request(p)
 
 
 def test_exact_five_bar_return_close_clocks_and_unchanged_inputs():
