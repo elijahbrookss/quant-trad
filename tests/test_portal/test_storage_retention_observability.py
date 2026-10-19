@@ -71,13 +71,15 @@ def test_projection_is_bounded_read_only_and_keeps_rate_domains_separate(monkeyp
     monkeypatch.setattr(module, "source_revision", lambda: "a" * 40)
     session = _Session(_row())
     policy = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",), backups=("hdd",))
-    worker = {"worker_id": "maintenance", "state": "idle", "heartbeat_at": NOW,
+    worker = {"worker_id": "maintenance", "worker_role": "market_storage_maintenance",
+              "state": "idle", "heartbeat_at": NOW,
               "expires_at": NOW + timedelta(seconds=30), "context": {"storage_lifecycle": {
+                  "state": "running",
                   "current_phase": {"name": "canonical_retention", "state": "running",
                                     "started_at": (NOW - timedelta(seconds=4)).isoformat(),
                                     "progress": {"stage": "executing", "storage_day": "2026-09-02"}}}}}
     result = module.RetentionObservability().snapshot(session, policy_payload=policy.to_dict(),
-        revision=3, targets=[], workers=[worker])
+        revision=3, targets=[], workers=[worker], sampled_at=NOW)
 
     assert result["state"] == "ready"
     assert result["policy"]["fingerprint"] == policy.fingerprint
@@ -101,7 +103,7 @@ def test_projection_marks_truncation_and_reports_saved_policy_override_authority
     session = _Session(_row(partitions_truncated=True, eligible_open_partitions=1))
     policy = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",), backups=("hdd",))
     result = module.RetentionObservability().snapshot(session, policy_payload=policy.to_dict(),
-        revision=1, targets=[], workers=[])
+        revision=1, targets=[], workers=[], sampled_at=NOW)
     assert result["state"] == "partial"
     assert result["completeness"]["truncated"] is True
     assert "open_partition_source_bytes_unmeasured" in result["completeness"]["unknowns"]
@@ -109,3 +111,45 @@ def test_projection_marks_truncation_and_reports_saved_policy_override_authority
     assert result["policy"]["configured_base_fact_type_hot_days"] == {"trade.tick": 30}
     assert result["policy"]["eligibility_basis"].endswith("family_overrides_cleared")
     assert result["lifecycle"]["current"]["state"] == "unknown"
+
+
+def _worker(**changes):
+    value = {
+        "worker_id": "maintenance",
+        "worker_role": "market_storage_maintenance",
+        "state": "idle",
+        "heartbeat_at": NOW,
+        "expires_at": NOW + timedelta(seconds=30),
+        "context": {"storage_lifecycle": {
+            "state": "running",
+            "current_phase": {
+                "name": "canonical_retention",
+                "state": "running",
+                "started_at": (NOW - timedelta(seconds=4)).isoformat(),
+            },
+        }},
+    }
+    value.update(changes)
+    return value
+
+
+def test_worker_phase_rejects_future_clocks_and_truncated_inventory():
+    future_heartbeat = module._worker_phase([
+        _worker(heartbeat_at=NOW + timedelta(seconds=1))
+    ], now=NOW)
+    assert future_heartbeat == {
+        "state": "unknown", "reason": "maintenance_clock_invalid"
+    }
+
+    future_phase = _worker()
+    future_phase["context"]["storage_lifecycle"]["current_phase"]["started_at"] = (
+        NOW + timedelta(seconds=1)
+    ).isoformat()
+    result = module._worker_phase([future_phase], now=NOW)
+    assert result["state"] == "unknown"
+    assert result["reason"] == "maintenance_clock_invalid"
+
+    result = module._worker_phase([_worker() for _ in range(101)], now=NOW)
+    assert result == {
+        "state": "unknown", "reason": "maintenance_worker_inventory_limit"
+    }

@@ -108,7 +108,8 @@ class StorageManagementService:
             if policy and (policy.get("movement_enabled") or policy.get("backup_enabled")):
                 model = MarketCollectorWorkerStateRecord
                 workers = session.execute(select(
-                    model.worker_id, model.state, model.heartbeat_at, model.expires_at, model.context
+                    model.worker_id, model.worker_role, model.state,
+                    model.heartbeat_at, model.expires_at, model.context
                 ).where(model.worker_role.in_(("scheduled_market_fact_collector",
                                               "market_storage_maintenance")),
                          model.expires_at > text("now() - interval '24 hours'"))
@@ -121,8 +122,13 @@ class StorageManagementService:
                              "state": "unconfigured", "sampled_at": observed_at.isoformat()}
             else:
                 try:
-                    retention = self.observability.snapshot(session, policy_payload=policy,
-                        revision=config.revision, targets=rows, workers=[dict(row) for row in workers])
+                    # PostgreSQL statement/lock timeout errors abort their current
+                    # transaction scope. A savepoint lets the optional projection
+                    # fail closed without poisoning the base settings snapshot.
+                    with session.begin_nested():
+                        retention = self.observability.snapshot(session, policy_payload=policy,
+                            revision=config.revision, targets=rows,
+                            workers=[dict(row) for row in workers], sampled_at=observed_at)
                 except Exception as exc:  # observation must not take storage settings offline
                     logger.exception("storage_retention_observability_failed")
                     retention = {"schema_version": "qt.storage_retention_observability.v1",
