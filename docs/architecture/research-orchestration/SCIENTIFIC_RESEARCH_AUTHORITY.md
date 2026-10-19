@@ -57,13 +57,13 @@ the assigned window. Resolution reads frozen storage and performs no provider
 fetch.
 
 Studies using derived trade flow additionally require the
-[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md). Each
+[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md).
 The admitted Check definition declares raw trades, aggregate trade flow, and every
 contextual fact through `FactRequirement`; no orchestrator inserts OI or
 funding implicitly. The immutable protocol pins train, validation, and private
-holdout datasets. `ResearchRun` separately pins availability evidence and
-exact implementation bundles. Canonical `known_at` remains unchanged; the
-replay clock is admitted only after exact raw/aggregate/coverage reconciliation.
+holdout datasets. Saved Check evidence retains its exact definition, plan and
+frozen input binding. Canonical `known_at` remains unchanged; the replay clock
+is admitted only after exact raw/aggregate/coverage reconciliation.
 
 The research agent receives the public protocol. For a sealed historical
 holdout, its dataset ID, hash, and window are redacted. Trial registration

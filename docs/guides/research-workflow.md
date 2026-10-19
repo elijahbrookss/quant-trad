@@ -45,9 +45,9 @@ Reopening requires new evidence or a justified alternative.
 At a Study ending, use the existing summaries and linked evidence to explain the
 question, evidence, tested conditions, limitations, decision, and reopening
 criteria. This is reasoning guidance, not a new entity, schema, required metadata,
-or knowledge subsystem. A research-memory Study and the scientific
-`StudyDefinition` composition have distinct existing contracts; this guidance
-does not change either.
+or knowledge subsystem. A research-memory Study owns the question and its
+interpretation; admitted Checks and scientific authority keep their existing
+contracts.
 
 Reviewed 2026-10-12: general agent research guidance; no research outcome or
 operational authority is implied.
@@ -613,7 +613,8 @@ Keep enough identity to reproduce the reasoning:
 
 Keep one Research Memory Study for a durable question and scope. Connect testable
 hypotheses, admitted findings and exact Checks to it rather than creating a Study
-for every stage. The executable `StudyDefinition` is a different composition.
+for every stage. A Study owns interpretation; a CheckDefinition pins an admitted
+procedure and its settings.
 
 Create a draft Study through the existing item operation, then explicitly adopt
 its question with `qt research question adopt <study-id> --request-json <file>`.

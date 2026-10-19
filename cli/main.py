@@ -4385,7 +4385,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("image_id")
             command.add_argument("--output", required=True, help="New destination file; existing files are preserved.")
         command.set_defaults(func=_cmd_research_images)
-    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history; distinct from executable StudyDefinition.")
+    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history.")
     research_question_sub = research_question.add_subparsers(dest="question_action", required=True)
     for action in ("adopt", "publish", "history"):
         command = research_question_sub.add_parser(action)
