@@ -233,14 +233,13 @@ Last durable advancement in the API is reconstructed from committed partition,
 manifest and verification timestamps rather than from process-local callbacks.
 
 The Storage room presents this bounded evidence with the explanation beside the
-numbers. The existing Capacity and Database Growth Grafana dashboard adds the
-same pipeline domains and an oldest-days table. Each added PostgreSQL query uses
-a five-second statement deadline, 250 ms lock timeout and explicit row page.
-Eligibility panels return unavailable when saved policy is absent or their page
-is truncated; lifecycle event panels return unavailable when a domain page is
-truncated. Eligibility uses the same saved default window whose runtime adapter
-clears family overrides. Grafana panels are operator visibility and never
-execution authority.
+numbers. The Capacity and Database Growth Grafana dashboard retains four named
+panels as explicit unavailable placeholders. Its PostgreSQL datasource cannot
+establish the required statement and lock deadlines before a metadata statement,
+so those panels do not query the retention catalog. Operators use the bounded
+Storage API/UI projection for the pipeline domains, oldest days and saved default
+eligibility window whose runtime adapter clears family overrides. Neither surface
+grants execution authority.
 
 ## Proposed forward-only transition
 

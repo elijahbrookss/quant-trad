@@ -462,6 +462,9 @@ def test_grafana_metadata_panels_refuse_unbounded_queries_even_when_tables_are_l
     assert set(panels_by_id) == {28, 29, 30, 31}
     assert all("bounded Storage API/UI projection" in panel["description"]
                for panel in panels_by_id.values())
+    assert all(panel["fieldConfig"]["defaults"]["noValue"] ==
+               "Unavailable: Grafana pre-query deadline unavailable"
+               for panel in (panels_by_id[28], panels_by_id[29], panels_by_id[30]))
     sql_by_id = {
         panel_id: panel["targets"][0]["rawSql"]
         for panel_id, panel in panels_by_id.items()

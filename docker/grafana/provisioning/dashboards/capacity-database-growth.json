@@ -1233,7 +1233,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "Unavailable: policy missing or page bound exceeded"
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
         },
         "overrides": []
       },
@@ -1278,7 +1278,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "Unavailable: policy missing or page bound exceeded"
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
         },
         "overrides": []
       },
@@ -1330,7 +1330,7 @@
             "fillOpacity": 8,
             "showPoints": "never"
           },
-          "noValue": "Unavailable: deadline or page bound"
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
         },
         "overrides": []
       },
