@@ -58,11 +58,11 @@ def test_explicit_prepare_acquires_native_input_and_freezes_without_execution(mo
     assert prepared["check_executed"] is prepared["observation_created"] is False
     receipt = prepared["acquisition"]["receipts"][0]
     assert receipt["outcome"]["inserted_count"] == 18
-    dataset_id = prepared["dataset"]["dataset_id"]
+    dataset_id = prepared["preparation"]["dataset"]["dataset_id"]
     records = market_data_repo.read_dataset_series(dataset_id=dataset_id, series_id=receipt["series_id"])
     assert len(records) == 18 and all(row.revision == 1 for row in records)
     assert {row.source_identity_key for row in records} == {receipt["source_identity_key"]}
     assert all(row.source.source_kind == "historical_api" for row in records)
     assert all(row.fact.known_at == row.fact.close_time for row in records)
-    assert prepared["binding"]["provider_access"] == "disabled"
+    assert prepared["preparation"]["binding"]["provider_access"] == "disabled"
     assert prepared["next_request"]["dataset_id"] == dataset_id

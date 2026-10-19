@@ -237,3 +237,23 @@ def test_disposable_workflow_request_uses_actual_method_policy_and_declared_warm
     assert plan.warmup["bars"] == 1
     assert datetime.fromisoformat(plan.market_data_requirements[0]["required_start"].replace("Z", "+00:00")) == start
     assert datetime.fromisoformat(plan.market_data_requirements[0]["required_end"].replace("Z", "+00:00")) == datetime(2024, 1, 1, 0, 18, tzinfo=timezone.utc)
+
+
+def test_frozen_prepare_public_receipt_keeps_existing_nested_dataset_contract(preparation, monkeypatch):
+    request, calls, plans = preparation
+    plans.append(_plan())  # Existing evidence-plan construction after a freeze.
+    def freeze(**kwargs):
+        assert kwargs["freeze"] is True
+        calls.append("freeze")
+        return {"status": "frozen", "dataset": {"dataset_id": "mds_public_contract"},
+                "binding": {"provider_access": "disabled"}, "unresolved_requirements": []}
+    monkeypatch.setattr(service, "prepare_frozen_dataset_from_requirements", freeze)
+    request["preparation"] = {"acquire_missing": True, "freeze": True}
+    response = client().post("/api/research/checks/prepare", json=request)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "frozen"
+    assert result["preparation"]["dataset"]["dataset_id"] == result["next_request"]["dataset_id"]
+    assert result["preparation"]["binding"]["provider_access"] == "disabled"
+    assert result["check_executed"] is result["observation_created"] is False
+    assert calls == ["plan", "acquire", "plan", "freeze", "plan"]
