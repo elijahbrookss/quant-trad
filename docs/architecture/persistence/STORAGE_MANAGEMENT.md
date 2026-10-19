@@ -133,6 +133,7 @@ code_paths:
   - portal/backend/service/market/canonical_retention.py
   - portal/backend/service/market/market_storage_lifecycle.py
   - tests/test_portal/test_storage_retention_observability.py
+  - tests/test_portal/test_storage_retention_observability_db.py
   - tests/test_market_data/test_canonical_retention_executor.py
   - tests/test_market_data/test_recovery_supervisor.py
   - portal/frontend/src/v2/rooms/StorageRoom.test.jsx
