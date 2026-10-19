@@ -747,6 +747,21 @@ changing interval: the three-hour decline/outcome and 24-hour RMS choice uses
 That expresses supported variations without implementing another method. It
 does not authorize new studies or choose a timeframe from favorable results.
 
+Use `qt research check definition event_fact_analysis --version 15` when an
+existing Indicator already emits the completed public event and the question is
+about explicit reference/target/failure barriers plus completion-known features.
+The request must name a complete native 15m frozen Dataset, the exact Indicator,
+an explicit computation origin, a one-to-12-bar horizon and public metadata
+paths. It is evidence-only. Preparation and dispatch continue through the normal
+Check admission path.
+
+The result keeps the original continuation/failure/neither/unresolved label and
+includes strictly-later original-target evidence for failure rows in the same
+Check. A same-bar first target/failure touch is unresolved; a later target does
+not relabel failure or extend the deadline. Inspect original clock weights,
+feature missing mass, support components and the pre-label population hash.
+These are descriptive profiles, not trading or predictive evidence.
+
 Use `qt research check definition event_fact_analysis --version 13` for explicit
 retrospective numeric association. Declare the real analysis cutoff; preserve
 late receipts. The July 25–September 23 exclusive hourly example has 1,440

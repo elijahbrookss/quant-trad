@@ -19,6 +19,8 @@ code_paths:
   - src/research_science/recognition.py
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
+  - src/research_science/event_barriers.py
+  - portal/backend/service/research/event_barrier_check.py
   - src/research_science/reversal_matched_progress.py
   - portal/backend/service/research/saved_selection_binding.py
   - portal/backend/service/research/saved_selection_measurements_evaluator.py
@@ -946,6 +948,38 @@ historical-availability, predictive, causal or certification claim.
 
 
 ## Complete distributions and bounded liquidity episodes
+
+### Indicator-owned barrier profiles
+
+`event_fact_analysis` v15 selects `indicator_event_barriers.v1`. It consumes
+public long signal events from one existing typed Indicator instance; it does
+not recognize patterns or branch on a Reversal event type. The request projects
+an event-close or public numeric reference, a whole-window or public numeric
+failure level, a risk multiple or public numeric target, and one to 32 public
+numeric or reference-window-duration features. A non-Reversal breakout fixture
+exercises the same registered evaluator and proves this ownership boundary.
+
+The method requires evidence mode, one complete exact native historical 15m
+frozen series, an explicit computation origin, reject-on-gap behavior and at
+most 19,104 input bars, 10,000 events, 32 features and 12 outcome bars. It
+retains all event IDs and simultaneous completion clocks. Root weights are
+computed once across every completed event clock and split across events at the
+same clock. Every continuation, failure, neither and unresolved event retains
+its original mass; missing feature mass remains visible. Conditional means and
+first-CDF-crossing quantiles normalize only by observed feature mass.
+
+Inclusive high/low first touches preserve the original four-label outcome.
+When target and failure first touch in the same bar, ordering is unresolved.
+The same Check also records whether an original failure later reaches its
+original target on a strictly later bar before the unchanged original deadline.
+That observation never changes the failure label, extends the horizon, or
+creates a second attempt. Complete negatives, censored unknowns and the
+last-bar structural no-opportunity case remain distinct.
+
+The pre-label population hash projects an explicit field list plus direct
+support/common-origin dependence. Results include descriptive target-minus-
+failure and target-minus-neither feature profiles only. They provide no
+independent-sample, predictive, causal, trading or deployment authority.
 
 `raw_forward_outcome` v6 explicitly selects `raw_candle_distribution.v1`.
 It reuses v3 preparation/predicate/close-outcome arithmetic through an internal
