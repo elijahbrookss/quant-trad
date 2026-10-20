@@ -160,8 +160,10 @@ class PostgresCanonicalFactReclamationRepository:
 
     def _pinned_ranges_timeout_ms(self, *, remaining_seconds=None):
         self.archive._check_budget()
-        candidates = [self.limits.statement_timeout_ms,
-                      self.limits.pinned_ranges_statement_timeout_ms]
+        # The pin audit has its own policy timeout. The executor already
+        # caps it by the general execution policy; the ordinary reclaimer's
+        # one-second query bound must not silently override that setting.
+        candidates = [self.limits.pinned_ranges_statement_timeout_ms]
         for clock in (self.remaining_run_seconds, remaining_seconds):
             if clock is None:
                 continue

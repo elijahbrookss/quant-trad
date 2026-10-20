@@ -251,22 +251,46 @@ def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_boun
     assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 4321
 
 
-def test_pinned_range_timeout_never_exceeds_execution_or_remaining_run_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize("execution,pinned,remaining,expected", [
+    (5000, 4321, 10, 4321),
+    (3000, 5000, 10, 3000),
+    (5000, 5000, 2, 2000),
+])
+def test_pinned_range_timeout_composes_separate_query_execution_and_run_bounds(
+    tmp_path, monkeypatch, execution, pinned, remaining, expected,
+):
     executor, _ = _executor([])
     executor.repository.database = object()
-    seen = []
+    actual_reclaimer = module.PostgresCanonicalFactReclamationRepository
+    seen = {}
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+
+    class Archive(SimpleNamespace):
+        def _check_budget(self):
+            self.check_budget()
+
     monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
-                        lambda **kwargs: SimpleNamespace(**kwargs))
-    monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository",
-                        lambda **kwargs: seen.append(kwargs) or SimpleNamespace(
-                            reclaim_partition=lambda *_args, **_kwargs: {"status": "partition_reclaimed"}))
-    policy = CanonicalFactRetentionPolicy(execution_statement_timeout_ms=3000,
-                                          pinned_ranges_statement_timeout_ms=5000)
+                        lambda **kwargs: Archive(**kwargs))
+
+    class Reclaimer:
+        def __init__(self, **kwargs):
+            self.inner = actual_reclaimer(**kwargs)
+            seen["limits"] = kwargs["limits"]
+
+        def reclaim_partition(self, *_args, **_kwargs):
+            seen["effective"] = self.inner._pinned_ranges_timeout_ms()
+            return {"status": "partition_reclaimed"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository", Reclaimer)
+    policy = CanonicalFactRetentionPolicy(
+        execution_statement_timeout_ms=execution,
+        pinned_ranges_statement_timeout_ms=pinned,
+    )
     executor._execute_step(item=_item("reclaim_partition"), policy=policy,
-        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=2)
-    assert seen[0]["limits"].statement_timeout_ms == 1000
-    assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 2000
+        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=remaining)
+    assert seen["limits"].statement_timeout_ms == 1000
+    assert seen["limits"].pinned_ranges_statement_timeout_ms == expected
+    assert seen["effective"] == expected
 
 
 def test_progress_observer_reports_existing_boundaries_without_owning_execution(tmp_path, monkeypatch):
