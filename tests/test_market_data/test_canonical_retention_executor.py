@@ -130,11 +130,11 @@ def test_worker_stop_request_preserves_resume_cursor_and_starts_no_more_work(tmp
     assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
 
 
-def test_stage_page_commits_bounded_prerequisites_then_publishes_before_replanning(tmp_path, monkeypatch):
-    executor, plans = _executor([_plan([_item()])])
+def test_stage_page_commits_bounded_prerequisites_then_publishes_and_replans(tmp_path, monkeypatch):
+    executor, plans = _executor([_plan([_item()]), _plan([_item("verify_page")])])
     executor.repository.database = object()
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
-    calls = []
+    calls, verification_calls = [], []
 
     class Archive:
         def __init__(self, **kwargs):
@@ -150,10 +150,14 @@ def test_stage_page_commits_bounded_prerequisites_then_publishes_before_replanni
                 return {"status": "page_acknowledged", "storage_day": day.isoformat(), "page_ordinal": 7}
             pytest.fail("the same-page loop must stop at publication")
 
+        def verify_next_page(self, day):
+            verification_calls.append(day)
+            return {"status": "page_verified", "storage_day": day.isoformat(), "page_ordinal": 7}
+
     monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
-    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
                           storage_root=tmp_path, execute=True)
-    assert len(plans) == 1 and calls == [DAY, DAY, DAY]
+    assert len(plans) == 2 and calls == [DAY, DAY, DAY] and verification_calls == [DAY]
     assert result["prerequisite_commit_count"] == 2
     assert result["outcomes"] == [{
         "status": "page_acknowledged", "storage_day": DAY.isoformat(), "page_ordinal": 7,
@@ -163,6 +167,9 @@ def test_stage_page_commits_bounded_prerequisites_then_publishes_before_replanni
             {"status": "book_prefix_verified", "chunk_id": "prefix-2"},
         ],
         "action": "stage_page",
+    }, {
+        "status": "page_verified", "storage_day": DAY.isoformat(), "page_ordinal": 7,
+        "action": "verify_page",
     }]
 
 
@@ -191,6 +198,55 @@ def test_stage_page_prerequisite_allowance_is_hard_bounded(tmp_path, monkeypatch
     assert result["outcomes"][0]["status"] == "page_prerequisite_budget"
     assert result["outcomes"][0]["reason"] == "canonical_archive_page_prerequisite_budget"
     assert len(result["outcomes"][0]["prerequisite_commits"]) == 3
+
+
+@pytest.mark.parametrize(
+    "cause,expected_status,expected_stop_reason,expected_calls",
+    [
+        ("cancel", "deferred", "stop_requested", 1),
+        ("deadline", "deferred", "time_budget", 1),
+        ("refusal", "failed", "step_budget", 2),
+    ],
+)
+def test_stage_page_retains_committed_prerequisites_when_later_inner_call_stops(
+    tmp_path, monkeypatch, cause, expected_status, expected_stop_reason, expected_calls,
+):
+    executor, _ = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    clock, stopped, calls = [0.0], [False], []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            calls.append(day)
+            if len(calls) == 1:
+                if cause == "cancel":
+                    stopped[0] = True
+                elif cause == "deadline":
+                    clock[0] = 2.0
+                return {"status": "book_prefix_verified", "storage_day": day.isoformat(),
+                        "chunk_id": "committed-prefix"}
+            raise RuntimeError("current admission refusal")
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1, max_run_seconds=1),
+        storage_root=tmp_path, execute=True, cancelled=lambda: stopped[0],
+    )
+    outcome = result["outcomes"][0]
+    assert len(calls) == expected_calls
+    assert outcome["status"] == expected_status and result["stop_reason"] == expected_stop_reason
+    assert outcome["prerequisite_commit_count"] == 1
+    assert outcome["prerequisite_commits"] == [
+        {"status": "book_prefix_verified", "chunk_id": "committed-prefix"}
+    ]
+    assert result["prerequisite_commit_count"] == 1
+    if cause == "refusal":
+        assert outcome["error"] == "current admission refusal"
 
 
 def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monkeypatch):

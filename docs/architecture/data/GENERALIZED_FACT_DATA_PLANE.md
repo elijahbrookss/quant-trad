@@ -1938,16 +1938,22 @@ matches durable state.
 
 The loop stops immediately when the page is acknowledged or source is exhausted,
 and it does not begin another page without a fresh global plan. Cancellation,
-statement timeout, run deadline, admission refusal and failure retain their
-existing stop behavior. Exhausting the 64-interval allowance returns bounded
-progress; the next attempt resumes from committed prefix receipts.
+statement timeout, run deadline, admission refusal and failure retain their existing
+stop behavior and report any prerequisite commits completed earlier in that action.
+Exhausting the 64-interval allowance returns bounded progress; a fresh global plan
+may select the same unfinished page again and resumes from committed prefix receipts.
 
 The global `max_steps_per_run` continues to bound planner-selected lifecycle
 actions. Prefix intervals inside one `stage_page` action use this separate hard
 allowance plus the unchanged run, statement, row, byte, mapping and object
-limits. This prevents prefix progress from consuming every global step while
-preserving independently committed resume evidence; it is not permission for
-an unbounded loop or a throughput claim.
+limits. The allowance is per selected action, not a lifetime or per-run page cap;
+with the configured 16 global steps, at most 1,024 same-page calls can be
+attempted in one run, further constrained by the 600-second deadline. Fewer
+calls may commit prerequisites because a page can publish or stop earlier. This
+does not guarantee another page a turn within that run. It prevents individual
+prefix commits from each consuming a global step while preserving independently
+committed resume evidence; it is not permission for an unbounded loop or a
+throughput claim.
 
 ### Historical book replay and disposable current state
 

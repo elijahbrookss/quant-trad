@@ -56,7 +56,7 @@ class CanonicalFactRetentionExecutor:
             raise RuntimeError(f"canonical_retention_archive_admission_failed: action={action} blockers={blockers}")
 
     def _execute_step(self, *, item, policy, storage_root, check_budget, remaining_seconds,
-                      storage_policy_witness=None):
+                      storage_policy_witness=None, prerequisite_commits=None):
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         self._require_archive(policy=policy, storage_root=storage_root, action=action)
@@ -105,7 +105,7 @@ class CanonicalFactRetentionExecutor:
         if action == "seal_partition":
             return {**archive.seal_partition(day), "status": "partition_sealed"}
         if action == "stage_page":
-            prerequisites = []
+            prerequisites = prerequisite_commits if prerequisite_commits is not None else []
             for _ in range(_MAX_PAGE_PREREQUISITE_COMMITS):
                 check_budget()
                 archive.statement_timeout_ms = min(
@@ -227,12 +227,21 @@ class CanonicalFactRetentionExecutor:
             # Revisit this day's durable progress on success/budget suspension;
             # skip a failed/busy day this cycle so it cannot starve later days.
             cursor = day - timedelta(days=1)
+            prerequisite_commits = []
+
+            def retain_prerequisite_progress(outcome):
+                if prerequisite_commits:
+                    outcome["prerequisite_commit_count"] = len(prerequisite_commits)
+                    outcome["prerequisite_commits"] = list(prerequisite_commits)
+                return outcome
+
             try:
                 observe(stage="executing", completed_steps=len(outcomes),
                         storage_day=day.isoformat(), action=item["action"])
                 result = self._execute_step(item=item, policy=policy, storage_root=storage_root,
                                            check_budget=check_budget, remaining_seconds=remaining_run_seconds,
-                                           storage_policy_witness=storage_policy_witness)
+                                           storage_policy_witness=storage_policy_witness,
+                                           prerequisite_commits=prerequisite_commits)
                 outcomes.append({**result, "action": item["action"], "storage_day": day.isoformat()})
                 observe(stage="step_finished", completed_steps=len(outcomes),
                         storage_day=day.isoformat(), action=item["action"],
@@ -242,13 +251,17 @@ class CanonicalFactRetentionExecutor:
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
                             day, item["action"], result["status"])
             except CanonicalRetentionBudgetExceeded as exc:
-                outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
-                                 "status": "deferred", "reason": str(exc)})
+                outcomes.append(retain_prerequisite_progress(
+                    {"action": item["action"], "storage_day": day.isoformat(),
+                     "status": "deferred", "reason": str(exc)}
+                ))
                 stop_reason = exc.stop_reason
                 break
             except MarketStorageLifecycleBusyError as exc:
-                outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
-                                 "status": "deferred", "reason": str(exc)})
+                outcomes.append(retain_prerequisite_progress(
+                    {"action": item["action"], "storage_day": day.isoformat(),
+                     "status": "deferred", "reason": str(exc)}
+                ))
                 logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s", day, item["action"], exc)
                 cursor = day
             except Exception as exc:
@@ -261,19 +274,25 @@ class CanonicalFactRetentionExecutor:
                     try:
                         check_budget()
                     except CanonicalRetentionBudgetExceeded as budget:
-                        outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
-                                         "status": "deferred", "reason": str(budget)})
+                        outcomes.append(retain_prerequisite_progress(
+                            {"action": item["action"], "storage_day": day.isoformat(),
+                             "status": "deferred", "reason": str(budget)}
+                        ))
                         stop_reason = budget.stop_reason
                         logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s sqlstate=57014",
                                     day, item["action"], stop_reason)
                         break
                 if sqlstate == "55P03":
-                    outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
-                                     "status": "deferred", "reason": "canonical_retention_relation_busy"})
+                    outcomes.append(retain_prerequisite_progress(
+                        {"action": item["action"], "storage_day": day.isoformat(),
+                         "status": "deferred", "reason": "canonical_retention_relation_busy"}
+                    ))
                     logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=relation_busy", day, item["action"])
                 else:
-                    outcomes.append({"action": item["action"], "storage_day": day.isoformat(),
-                                     "status": "failed", "error": str(exc)})
+                    outcomes.append(retain_prerequisite_progress(
+                        {"action": item["action"], "storage_day": day.isoformat(),
+                         "status": "failed", "error": str(exc)}
+                    ))
                     logger.exception("canonical_retention_step_failed | storage_day=%s action=%s", day, item["action"])
                 cursor = day
         self._cursor = cursor
