@@ -48,6 +48,32 @@ _CATALOG_WRITE_BATCH_ROWS = 128
 _EXPIRATION_QUERY_BATCH_ROWS = 128
 
 
+def _record_verification_phase(*, timings, phase, day, page, seconds, outcome):
+    timings[phase] = timings.get(phase, 0.0) + seconds
+    logger.info(
+        "canonical_archive_verification_phase | storage_day=%s page_ordinal=%s "
+        "manifest_id=%s phase=%s outcome=%s seconds=%.6f",
+        day, page["page_ordinal"], page["id"], phase, outcome, seconds,
+    )
+
+
+def _timed_verification_call(*, timings, phase, day, page, operation):
+    started = perf_counter()
+    try:
+        result = operation()
+    except Exception:
+        _record_verification_phase(
+            timings=timings, phase=phase, day=day, page=page,
+            seconds=perf_counter() - started, outcome="failed",
+        )
+        raise
+    _record_verification_phase(
+        timings=timings, phase=phase, day=day, page=page,
+        seconds=perf_counter() - started, outcome="completed",
+    )
+    return result
+
+
 def _series_catalog(manifest):
     return [{key: value for key, value in asdict(bounds).items()
              if key not in {"source_ids", "payload_contracts"}} for bounds in manifest.series]
@@ -568,6 +594,7 @@ class PostgresCanonicalFactArchiveRepository:
         Older pages can first advance one book_prefix_verified interval using
         their existing dependency bindings, without republishing their bytes.
         """
+        transaction_started = perf_counter()
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
@@ -584,34 +611,70 @@ class PostgresCanonicalFactArchiveRepository:
             manifest = _catalog_manifest(page)
             if manifest.row_count > self.limits.max_rows:
                 raise RuntimeError(f"canonical_archive_page_row_budget_exceeded: manifest_id={manifest.manifest_id}")
-            ensure_payload_contracts(session, [contract for bounds in manifest.series for contract in bounds.payload_contracts])
-            rows = read_canonical_fact_archive(
-                self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+            timings = {}
+            _timed_verification_call(
+                timings=timings, phase="payload_contracts", day=day, page=page,
+                operation=lambda: ensure_payload_contracts(
+                    session, [contract for bounds in manifest.series for contract in bounds.payload_contracts]
+                ),
             )
-            envelopes = session.execute(text(f"""
-                SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
-                WHERE versions.storage_day=:day
-                  AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
-                  AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
-                ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
-            """), {"day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
-                   "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1],
-                   "limit": self.limits.max_rows + 1}).mappings().all()
-            if len(envelopes) != len(rows):
-                raise RuntimeError(f"canonical_archive_page_source_coverage_mismatch: manifest_id={manifest.manifest_id}")
-            for envelope, archived in zip(envelopes, rows):
-                self._check_budget()
-                verify_archived_envelope(envelope, archived)
+            rows = _timed_verification_call(
+                timings=timings, phase="archive_read", day=day, page=page,
+                operation=lambda: read_canonical_fact_archive(
+                    self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+                ),
+            )
+            envelopes = _timed_verification_call(
+                timings=timings, phase="source_envelopes", day=day, page=page,
+                operation=lambda: session.execute(text(f"""
+                    SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
+                    WHERE versions.storage_day=:day
+                      AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
+                      AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
+                    ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
+                """), {"day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
+                       "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1],
+                       "limit": self.limits.max_rows + 1}).mappings().all(),
+            )
+
+            def validate_envelopes():
+                if len(envelopes) != len(rows):
+                    raise RuntimeError(
+                        f"canonical_archive_page_source_coverage_mismatch: manifest_id={manifest.manifest_id}"
+                    )
+                for envelope, archived in zip(envelopes, rows):
+                    self._check_budget()
+                    verify_archived_envelope(envelope, archived)
+            _timed_verification_call(
+                timings=timings, phase="envelope_validation", day=day, page=page,
+                operation=validate_envelopes,
+            )
             aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
-            catalogs = self._page_catalogs(session, manifest.manifest_id)
+            catalogs = _timed_verification_call(
+                timings=timings, phase="catalog_read", day=day, page=page,
+                operation=lambda: self._page_catalogs(session, manifest.manifest_id),
+            )
             bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
-            source_rows = self._source_revisions(session, rows)
-            progress = self._prepare_book_prefix(session, (*rows, *source_rows), day, bound_manifest_ids=bound_ids)
+            source_rows = _timed_verification_call(
+                timings=timings, phase="causal_source_resolution", day=day, page=page,
+                operation=lambda: self._source_revisions(session, rows),
+            )
+            progress = _timed_verification_call(
+                timings=timings, phase="book_prefix", day=day, page=page,
+                operation=lambda: self._prepare_book_prefix(
+                    session, (*rows, *source_rows), day, bound_manifest_ids=bound_ids
+                ),
+            )
             if progress is not None:
                 return progress
             bound_checkpoints = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "book_checkpoint"]
-            dependencies, source_rows = self._dependencies(session, rows, bound_manifest_ids=bound_ids,
-                source_rows=source_rows, bound_checkpoint_ids=bound_checkpoints or None)
+            dependencies, source_rows = _timed_verification_call(
+                timings=timings, phase="dependency_proof", day=day, page=page,
+                operation=lambda: self._dependencies(
+                    session, rows, bound_manifest_ids=bound_ids, source_rows=source_rows,
+                    bound_checkpoint_ids=bound_checkpoints or None,
+                ),
+            )
             expected = {
                 "series": _series_catalog(manifest),
                 "aliases": sorted(aliases, key=lambda item: (item["fact_version_id"], item["evidence_key"])),
@@ -644,10 +707,15 @@ class PostgresCanonicalFactArchiveRepository:
             receipt = _receipt(page, archive_evidence_hash(catalogs))
             self._check_budget()
             session.add(MarketFactArchiveVerificationRecord(**receipt))
+        _record_verification_phase(
+            timings=timings, phase="transaction_total", day=day, page=page,
+            seconds=perf_counter() - transaction_started, outcome="completed",
+        )
         logger.info("canonical_archive_page_verified | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s verification_hash=%s",
                     day, page["page_ordinal"], manifest.manifest_id, manifest.row_count, receipt["verification_hash"])
         return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
-                "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"]}
+                "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"],
+                "phase_seconds": {name: round(seconds, 6) for name, seconds in timings.items()}}
 
     @staticmethod
     def _assert_dependencies_unexpired(session, dependencies, *, check_budget=None):

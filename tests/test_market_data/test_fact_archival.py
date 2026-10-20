@@ -1,12 +1,14 @@
 from copy import deepcopy
+from datetime import date
 from types import SimpleNamespace
 import hashlib
+import logging
 
 import pytest
 
 from market_data.canonical_storage import legacy_material_alias
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
-from portal.backend.service.storage.repos import market_data
+from portal.backend.service.storage.repos import fact_archival, market_data
 from tests.test_market_data.test_canonical_fact_archive import _row
 
 
@@ -124,3 +126,23 @@ def test_publication_batches_expiry_checks_and_stops_before_reading_bytes(tmp_pa
         assert not byte_reads
         if mode in {"stop", "deadline"}:
             assert len(queries) == 1 and len(queries[0]) < len(refs)
+
+
+def test_verification_phase_records_completed_and_failed_durations(monkeypatch, caplog):
+    clock = iter((10.0, 10.25, 20.0, 20.5))
+    monkeypatch.setattr(fact_archival, "perf_counter", lambda: next(clock))
+    page = {"id": "manifest", "page_ordinal": 7}
+    timings = {}
+    with caplog.at_level(logging.INFO):
+        assert fact_archival._timed_verification_call(
+            timings=timings, phase="archive_read", day=date(2026, 8, 29), page=page,
+            operation=lambda: "result",
+        ) == "result"
+        with pytest.raises(RuntimeError, match="injected"):
+            fact_archival._timed_verification_call(
+                timings=timings, phase="dependency_proof", day=date(2026, 8, 29), page=page,
+                operation=lambda: (_ for _ in ()).throw(RuntimeError("injected")),
+            )
+    assert timings == {"archive_read": 0.25, "dependency_proof": 0.5}
+    assert "phase=archive_read outcome=completed seconds=0.250000" in caplog.text
+    assert "phase=dependency_proof outcome=failed seconds=0.500000" in caplog.text

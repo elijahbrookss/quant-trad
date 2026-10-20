@@ -122,7 +122,7 @@ def test_window_batches_and_edge_limit_include_repeated_sources(monkeypatch):
     # ranges must not. The shared SQL and post-hydration check agree.
     requests = [dict(root_id=str(index), instrument_id="instrument", fact_type="market.trade", series_id=None, source_id=None,
         root_commit=2, known_at=BASE + timedelta(seconds=2), range_start=BASE, range_end=row["observation_time"], include_end=True)
-        for index in range(129)]
+        for index in range(fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS + 1)]
     batches = []
     def execute(statement, params):
         batch = json.loads(params["requests"])
@@ -130,10 +130,14 @@ def test_window_batches_and_edge_limit_include_repeated_sources(monkeypatch):
         return SimpleNamespace(all=lambda: [(item["root_id"], row["id"]) for item in batch])
     monkeypatch.setattr(fact_dependencies, "read_canonical_dependency_rows", lambda *args, **kwargs: {row["id"]: row})
     found, selections = fact_dependencies.resolve_causal_window_revisions(SimpleNamespace(execute=execute), requests=requests,
-        reader=None, max_rows=129, max_logical_bytes=1024**2)
-    assert batches == [128, 1] and found == {row["id"]: row} and len(selections) == 129
+        reader=None, max_rows=len(requests), max_logical_bytes=1024**2)
+    assert batches == [fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS, 1]
+    assert found == {row["id"]: row} and len(selections) == len(requests)
     with pytest.raises(RuntimeError, match="request_budget"):
-        fact_dependencies.resolve_causal_window_revisions(None, requests=requests, reader=None, max_rows=128, max_logical_bytes=1024**2)
+        fact_dependencies.resolve_causal_window_revisions(
+            None, requests=requests, reader=None,
+            max_rows=fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS, max_logical_bytes=1024**2,
+        )
 
 
 @pytest.mark.parametrize("conflict", [False, True])

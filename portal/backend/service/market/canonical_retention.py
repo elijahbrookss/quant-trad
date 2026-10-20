@@ -12,7 +12,7 @@ from math import isfinite
 import logging
 from pathlib import Path
 from threading import Lock
-from time import monotonic
+from time import monotonic, perf_counter
 
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 from market_data.archive import FilesystemRawArchiveObjectStore
@@ -177,6 +177,7 @@ class CanonicalFactRetentionExecutor:
         outcomes, initial_plan = [], None
         stop_reason = "step_budget"
         scans = 0
+        planning_seconds = 0.0
 
         def observe(**fields):
             if progress is None:
@@ -197,6 +198,8 @@ class CanonicalFactRetentionExecutor:
             return deadline - monotonic()
 
         for _ in range(policy.max_steps_per_run):
+            planning_started = perf_counter()
+            planning_outcome = "failed"
             try:
                 observe(stage="planning", completed_steps=len(outcomes), planning_pages=scans,
                         after_storage_day=cursor.isoformat() if cursor else None)
@@ -207,9 +210,18 @@ class CanonicalFactRetentionExecutor:
                 scans += 1
                 initial_plan = initial_plan or plan
                 check_budget()
+                planning_outcome = "completed"
             except CanonicalRetentionBudgetExceeded as exc:
                 stop_reason = exc.stop_reason
                 break
+            finally:
+                planning_elapsed = perf_counter() - planning_started
+                planning_seconds += planning_elapsed
+                logger.info(
+                    "canonical_retention_phase | phase=planning outcome=%s seconds=%.6f scan=%s "
+                    "after_storage_day=%s",
+                    planning_outcome, planning_elapsed, scans, cursor,
+                )
             candidates = [item for item in plan["actions"] if item["eligible"]]
             if not candidates:
                 next_day = plan["next_after_storage_day"]
@@ -301,7 +313,8 @@ class CanonicalFactRetentionExecutor:
         result = {"schema_version": "market.canonical_retention_run.v1",
                   "status": "degraded" if failures else "bounded" if stop_reason.endswith("budget") else stop_reason,
                   "stop_reason": stop_reason, "plan": initial_plan, "outcomes": outcomes, "failure_count": failures,
-                  "planning_pages": scans, "elapsed_seconds": monotonic() - started,
+                  "planning_pages": scans, "planning_seconds": planning_seconds,
+                  "elapsed_seconds": monotonic() - started,
                   "next_after_storage_day": cursor.isoformat() if cursor else None,
                   "resume_authority": "committed_partition_pages_and_verifications",
                   "prerequisite_commit_count": prerequisite_commits}

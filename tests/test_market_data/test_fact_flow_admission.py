@@ -183,7 +183,7 @@ def test_bounded_source_query_preserves_the_complete_causal_window(monkeypatch, 
     by_id = {row["id"]: row for row in rows}
     def execute(statement, params):
         sql = str(statement)
-        assert len(json.loads(params["requests"])) <= 128
+        assert len(json.loads(params["requests"])) <= fact_dependencies._CAUSAL_WINDOW_REQUEST_BATCH_ROWS
         assert "source.market_commit_seq<=requested.root_commit" in sql
         assert "source.known_at<=requested.known_at" in sql
         assert json.loads(params["requests"])[0]["known_at"] == root.fact.known_at.isoformat()

@@ -15,6 +15,9 @@ SELF_CONTAINED_FACT_TYPES = frozenset({
     "candle.ohlcv", "derivatives.funding_rate", "derivatives.open_interest",
     "market.reference_price", "market.reserve_balance", "asset.reserve_state",
 })
+# Reduce repeated causal-window round trips without changing source
+# admission, result, byte, statement-time, or page budgets.
+_CAUSAL_WINDOW_REQUEST_BATCH_ROWS = 512
 
 
 class CanonicalSourceByteBudgetExceeded(RuntimeError):
@@ -49,11 +52,11 @@ def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_
             raise RuntimeError(f"canonical_window_request_invalid: fact_version_id={item['root_id']}")
     selections = defaultdict(list)
     count = 0
-    for offset in range(0, len(requests), 128):
+    for offset in range(0, len(requests), _CAUSAL_WINDOW_REQUEST_BATCH_ROWS):
         if check_budget is not None:
             check_budget()
         batch = [{**item, **{name: item[name].isoformat() for name in ("known_at", "range_start", "range_end")}}
-                 for item in requests[offset:offset + 128]]
+                 for item in requests[offset:offset + _CAUSAL_WINDOW_REQUEST_BATCH_ROWS]]
         found = session.execute(text("""
             SELECT requested.root_id,source.id
             FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
