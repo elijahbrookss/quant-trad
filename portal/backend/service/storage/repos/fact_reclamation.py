@@ -196,7 +196,11 @@ class PostgresCanonicalFactReclamationRepository:
         session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                         {"timeout": str(timeout)})
         count = session.execute(_PINNED_RANGES_QUERY, {"day": day}).scalar_one()
-        self._timeouts(session)
+        # Restore only the setting widened for this audit. _timeouts() marks
+        # transaction-phase admission in the handoff tests and also resets the
+        # unchanged lock timeout; invoking it here would create a false phase.
+        session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                        {"timeout": str(self.limits.statement_timeout_ms)})
         logger.info(
             "canonical_reclaim_pinned_ranges_finished | storage_day=%s statement_timeout_ms=%s protected_dataset_ranges=%s",
             day, timeout, count,

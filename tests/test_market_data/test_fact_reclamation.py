@@ -137,6 +137,7 @@ def test_shared_pin_audit_recomputes_run_budget_and_exposes_effective_timeout():
     checked = []
     session = _PinnedSession()
     reclaimer = _pin_reclaimer(run_remaining=remaining, checked=checked)
+    reclaimer._timeouts = lambda _session: pytest.fail("pin audit reset must not create a handoff phase")
     assert reclaimer._pinned_ranges(session, date(2026, 1, 1)) == (3, 250)
     assert checked == ["checked"]
     assert [params["timeout"] for sql, params in session.calls if "set_config" in sql] == ["250", "5000"]
