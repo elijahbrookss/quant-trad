@@ -28,6 +28,9 @@ from ..storage.history_policy import saved_canonical_policy, require_saved_histo
 
 logger = logging.getLogger(__name__)
 
+_PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_verified"})
+_MAX_PAGE_PREREQUISITE_COMMITS = 64
+
 
 class CanonicalRetentionBudgetExceeded(RuntimeError):
     stop_reason = "time_budget"
@@ -102,7 +105,28 @@ class CanonicalFactRetentionExecutor:
         if action == "seal_partition":
             return {**archive.seal_partition(day), "status": "partition_sealed"}
         if action == "stage_page":
-            return archive.stage_next_page(day)
+            prerequisites = []
+            for _ in range(_MAX_PAGE_PREREQUISITE_COMMITS):
+                check_budget()
+                archive.statement_timeout_ms = min(
+                    policy.execution_statement_timeout_ms,
+                    max(1, int(current_remaining_seconds() * 1000)),
+                )
+                result = archive.stage_next_page(day)
+                if result.get("status") not in _PAGE_PREREQUISITE_STATUSES:
+                    return {
+                        **result,
+                        "prerequisite_commit_count": len(prerequisites),
+                        "prerequisite_commits": prerequisites,
+                    }
+                prerequisites.append({key: value for key, value in result.items() if key != "storage_day"})
+            return {
+                "storage_day": day,
+                "status": "page_prerequisite_budget",
+                "reason": "canonical_archive_page_prerequisite_budget",
+                "prerequisite_commit_count": len(prerequisites),
+                "prerequisite_commits": prerequisites,
+            }
         if action == "verify_page":
             return archive.verify_next_page(day)
         if action == "verify_partition":
@@ -254,16 +278,19 @@ class CanonicalFactRetentionExecutor:
                 cursor = day
         self._cursor = cursor
         failures = sum(item["status"] == "failed" for item in outcomes)
+        prerequisite_commits = sum(item.get("prerequisite_commit_count", 0) for item in outcomes)
         result = {"schema_version": "market.canonical_retention_run.v1",
                   "status": "degraded" if failures else "bounded" if stop_reason.endswith("budget") else stop_reason,
                   "stop_reason": stop_reason, "plan": initial_plan, "outcomes": outcomes, "failure_count": failures,
                   "planning_pages": scans, "elapsed_seconds": monotonic() - started,
                   "next_after_storage_day": cursor.isoformat() if cursor else None,
-                  "resume_authority": "committed_partition_pages_and_verifications"}
+                  "resume_authority": "committed_partition_pages_and_verifications",
+                  "prerequisite_commit_count": prerequisite_commits}
         if self.use_saved_history_policy:
             result["storage_policy"] = storage_policy_witness
         observe(stage="finished", completed_steps=len(outcomes), status=result["status"],
                 next_after_storage_day=result["next_after_storage_day"])
-        logger.info("canonical_retention_run_finished | status=%s steps=%s scans=%s failures=%s next_after_storage_day=%s",
-                    result["status"], len(outcomes), scans, failures, result["next_after_storage_day"])
+        logger.info("canonical_retention_run_finished | status=%s steps=%s scans=%s prerequisite_commits=%s failures=%s next_after_storage_day=%s",
+                    result["status"], len(outcomes), scans, prerequisite_commits, failures,
+                    result["next_after_storage_day"])
         return result

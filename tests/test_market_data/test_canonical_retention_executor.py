@@ -130,10 +130,74 @@ def test_worker_stop_request_preserves_resume_cursor_and_starts_no_more_work(tmp
     assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
 
 
+def test_stage_page_commits_bounded_prerequisites_then_publishes_before_replanning(tmp_path, monkeypatch):
+    executor, plans = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    calls = []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            self.check_budget()
+            calls.append(day)
+            if len(calls) <= 2:
+                return {"status": "book_prefix_verified", "storage_day": day.isoformat(),
+                        "chunk_id": f"prefix-{len(calls)}"}
+            if len(calls) == 3:
+                return {"status": "page_acknowledged", "storage_day": day.isoformat(), "page_ordinal": 7}
+            pytest.fail("the same-page loop must stop at publication")
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True)
+    assert len(plans) == 1 and calls == [DAY, DAY, DAY]
+    assert result["prerequisite_commit_count"] == 2
+    assert result["outcomes"] == [{
+        "status": "page_acknowledged", "storage_day": DAY.isoformat(), "page_ordinal": 7,
+        "prerequisite_commit_count": 2,
+        "prerequisite_commits": [
+            {"status": "book_prefix_verified", "chunk_id": "prefix-1"},
+            {"status": "book_prefix_verified", "chunk_id": "prefix-2"},
+        ],
+        "action": "stage_page",
+    }]
+
+
+def test_stage_page_prerequisite_allowance_is_hard_bounded(tmp_path, monkeypatch):
+    executor, plans = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "_MAX_PAGE_PREREQUISITE_COMMITS", 3)
+    calls = []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            self.check_budget()
+            calls.append(day)
+            return {"status": "trade_prefix_verified", "storage_day": day.isoformat(),
+                    "chunk_id": f"prefix-{len(calls)}"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True)
+    assert len(plans) == 1 and calls == [DAY, DAY, DAY]
+    assert result["prerequisite_commit_count"] == 3
+    assert result["outcomes"][0]["status"] == "page_prerequisite_budget"
+    assert result["outcomes"][0]["reason"] == "canonical_archive_page_prerequisite_budget"
+    assert len(result["outcomes"][0]["prerequisite_commits"]) == 3
+
+
 def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monkeypatch):
     executor, _ = _executor([_plan([_item()])])
     executor.repository.database = object()
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "_MAX_PAGE_PREREQUISITE_COMMITS", 2)
     instances, calls = [], []
 
     class Archive:
@@ -147,10 +211,12 @@ def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monk
             return {"status": "book_prefix_verified", "storage_day": day.isoformat()}
 
     monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
-    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1)
     for _ in range(2):
         result = executor.run(policy=policy, storage_root=tmp_path, execute=True)
-        assert result["stop_reason"] == "step_budget" and len(result["outcomes"]) == 2
+        assert result["stop_reason"] == "step_budget" and len(result["outcomes"]) == 1
+        assert result["outcomes"][0]["status"] == "page_prerequisite_budget"
+        assert result["outcomes"][0]["prerequisite_commit_count"] == 2
         assert executor._archive is None
     assert len(instances) == 2
     assert calls == [instances[0], instances[0], instances[1], instances[1]]

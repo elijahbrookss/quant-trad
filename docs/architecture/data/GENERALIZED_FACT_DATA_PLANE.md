@@ -1926,6 +1926,29 @@ movement switch and assigned archive filesystem. Policy changes require replanni
 they do not change Fact identity, causal selection or frozen Dataset binding.
 Unconfigured/manual canonical retention retains its existing explicit policy.
 
+### Bounded same-page prerequisite scheduling
+
+A planner-selected `stage_page` action may commit at most 64 missing book or
+trade prefix intervals for that same prepared page before returning to the
+global planner. Each interval remains an independent `stage_next_page`
+transaction and repeats the current partition lock, saved-policy witness,
+hot-window, archive admission, durable cursor, source/dependency and budget
+checks. Prepared source rows are reused only while their existing page key still
+matches durable state.
+
+The loop stops immediately when the page is acknowledged or source is exhausted,
+and it does not begin another page without a fresh global plan. Cancellation,
+statement timeout, run deadline, admission refusal and failure retain their
+existing stop behavior. Exhausting the 64-interval allowance returns bounded
+progress; the next attempt resumes from committed prefix receipts.
+
+The global `max_steps_per_run` continues to bound planner-selected lifecycle
+actions. Prefix intervals inside one `stage_page` action use this separate hard
+allowance plus the unchanged run, statement, row, byte, mapping and object
+limits. This prevents prefix progress from consuming every global step while
+preserving independently committed resume evidence; it is not permission for
+an unbounded loop or a throughput claim.
+
 ### Historical book replay and disposable current state
 
 Book replay reconciliation reads retained canonical snapshot/update identities
