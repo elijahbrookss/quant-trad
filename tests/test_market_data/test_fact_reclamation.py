@@ -9,7 +9,8 @@ from portal.backend.service.storage.repos.fact_reclamation import (
 
 
 @pytest.mark.parametrize("value", [0, -1, True, "1", 1.5])
-@pytest.mark.parametrize("field", ["statement_timeout_ms", "max_handoff_seconds"])
+@pytest.mark.parametrize("field", ["statement_timeout_ms", "pinned_ranges_statement_timeout_ms",
+                                   "max_handoff_seconds"])
 def test_reclamation_limits_require_positive_integers(field, value):
     with pytest.raises(ValueError, match="canonical_reclaim_limit_invalid"):
         FactReclamationLimits(**{field: value})
@@ -92,8 +93,75 @@ def test_reclamation_mount_admission_requires_writability_on_every_recheck(monke
     assert len(events) == 3
 
 
-def test_final_handoff_default_and_upper_bound():
+def test_reclamation_timeout_defaults_and_upper_bounds():
+    assert FactReclamationLimits().statement_timeout_ms == 1000
+    assert FactReclamationLimits().pinned_ranges_statement_timeout_ms == 1000
+    assert FactReclamationLimits(statement_timeout_ms=60000,
+                                 pinned_ranges_statement_timeout_ms=60000).statement_timeout_ms == 60000
+    for field in ("statement_timeout_ms", "pinned_ranges_statement_timeout_ms"):
+        with pytest.raises(ValueError, match=f"field={field}"):
+            FactReclamationLimits(**{field: 60001})
     assert FactReclamationLimits().max_handoff_seconds == 10
     assert FactReclamationLimits(max_handoff_seconds=60).max_handoff_seconds == 60
     with pytest.raises(ValueError, match="field=max_handoff_seconds"):
         FactReclamationLimits(max_handoff_seconds=61)
+
+
+
+class _PinnedSession:
+    def __init__(self, count=3):
+        self.count = count
+        self.calls = []
+
+    def execute(self, statement, parameters=None):
+        sql = str(statement)
+        self.calls.append((sql, parameters or {}))
+        if "canonical_reclaim_pinned_ranges" in sql:
+            return SimpleNamespace(scalar_one=lambda: self.count)
+        return SimpleNamespace()
+
+
+def _pin_reclaimer(*, run_remaining, checked=None):
+    checked = checked if checked is not None else []
+    archive = SimpleNamespace(_check_budget=lambda: checked.append("checked"))
+    limits = FactReclamationLimits(statement_timeout_ms=5000,
+                                   pinned_ranges_statement_timeout_ms=1000)
+    return PostgresCanonicalFactReclamationRepository(
+        archive_repository=archive, limits=limits,
+        remaining_run_seconds=lambda: run_remaining[0],
+    )
+
+
+def test_shared_pin_audit_recomputes_run_budget_and_exposes_effective_timeout():
+    remaining = [0.25]
+    checked = []
+    session = _PinnedSession()
+    reclaimer = _pin_reclaimer(run_remaining=remaining, checked=checked)
+    assert reclaimer._pinned_ranges(session, date(2026, 1, 1)) == (3, 250)
+    assert checked == ["checked"]
+    assert [params["timeout"] for sql, params in session.calls if "set_config" in sql] == ["250", "5000"]
+
+    remaining[0] = 0
+    expired = _PinnedSession()
+    with pytest.raises(RuntimeError, match="pinned_ranges_budget_exhausted"):
+        reclaimer._pinned_ranges(expired, date(2026, 1, 1))
+    assert expired.calls == []
+
+
+def test_handoff_pin_audit_recomputes_run_and_handoff_budgets_before_query():
+    run_remaining = [0.25]
+    handoff_remaining = [0.125]
+    session = _PinnedSession(count=4)
+    reclaimer = _pin_reclaimer(run_remaining=run_remaining)
+    assert reclaimer._pinned_ranges(
+        session, date(2026, 1, 1), remaining_seconds=lambda: handoff_remaining[0]
+    ) == (4, 125)
+    assert [params["timeout"] for sql, params in session.calls if "set_config" in sql] == ["125", "5000"]
+
+    handoff_remaining[0] = 0
+    expired = _PinnedSession()
+    with pytest.raises(RuntimeError, match="pinned_ranges_budget_exhausted"):
+        reclaimer._pinned_ranges(
+            expired, date(2026, 1, 1), remaining_seconds=lambda: handoff_remaining[0]
+        )
+    assert expired.calls == []

@@ -12,7 +12,9 @@ from market_data.fact_archive import FactArchiveLimits
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from portal.backend.service.storage.repos import market_data, fact_reclamation
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
-from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+from portal.backend.service.storage.repos.fact_reclamation import (
+    FactReclamationLimits, PostgresCanonicalFactReclamationRepository,
+)
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement, _ingest, _read
 
@@ -167,7 +169,32 @@ def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_coun
                   AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq)
         """), {"day": day}).scalar_one()
         assert expected == 4
-        assert PostgresCanonicalFactReclamationRepository._pinned_ranges(session, day) == expected
+        reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive)
+        assert reclaimer._pinned_ranges(session, day) == (expected, 1000)
+
+
+def test_pinned_range_timeout_is_enforced_by_postgres_without_mutation(storage, tmp_path, monkeypatch):
+    day, archive, _ = _prepare(storage, tmp_path, monkeypatch)
+    reclaimer = PostgresCanonicalFactReclamationRepository(
+        archive_repository=archive,
+        limits=FactReclamationLimits(statement_timeout_ms=5000,
+                                     pinned_ranges_statement_timeout_ms=10),
+    )
+
+    def delay_pinned_query(_conn, _cursor, statement, parameters, context, executemany):
+        if "canonical_reclaim_pinned_ranges" in statement:
+            return "SELECT pg_sleep(0.1)", parameters
+        return statement, parameters
+
+    event.listen(storage.database._engine, "before_cursor_execute", delay_pinned_query, retval=True)
+    try:
+        with storage.database.session() as session:
+            with pytest.raises(DBAPIError, match="statement timeout"):
+                reclaimer._pinned_ranges(session, day)
+    finally:
+        event.remove(storage.database._engine, "before_cursor_execute", delay_pinned_query)
+    assert archive.inspect_partition(day)["state"] == "verified"
+    assert _physical(storage, day)["hot_rows"] == 3
 
 
 def test_reclamation_failures_leave_hot_partition_and_progress_intact(storage, tmp_path, monkeypatch):

@@ -46,6 +46,7 @@ def _plan(rows, *, policy=None, filesystem=None):
     ("max_handoff_seconds", True), ("max_handoff_seconds", 1.5),
     ("max_handoff_seconds", "60"), ("max_handoff_seconds", None),
     ("max_steps_per_run", True), ("max_steps_per_run", 129), ("max_run_seconds", 0),
+    ("pinned_ranges_statement_timeout_ms", 60001), ("pinned_ranges_statement_timeout_ms", True),
     ("execution_statement_timeout_ms", 60001), ("max_page_rows", 0),
     ("max_page_logical_bytes", 0), ("max_verification_bytes", False),
     ("max_verification_objects", 0), ("max_verification_pages", 100001),
@@ -61,6 +62,7 @@ def test_canonical_policy_is_immutable_and_round_trips():
     overrides = {"market.trade": 7}
     policy = CanonicalFactRetentionPolicy(hot_days_by_fact_type=overrides)
     overrides["market.trade"] = 1
+    assert policy.pinned_ranges_statement_timeout_ms == 1000
     assert policy.hot_window_days(["market.trade"]) == 7
     assert policy.hot_window_days(["market.trade", "derivatives.funding_rate"]) == 30
     assert CanonicalFactRetentionPolicy.from_mapping(policy.to_dict()) == policy

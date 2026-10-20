@@ -111,7 +111,8 @@ def test_research_budget_environment_reaches_execution_without_expanding_pinned_
 def test_canonical_executor_environment_bindings(monkeypatch, request):
     request.addfinalizer(settings_module.clear_settings_cache)
     values = {"EXECUTION_ENABLED": True, "MAX_STEPS_PER_RUN": 3, "MAX_RUN_SECONDS": 120,
-              "EXECUTION_STATEMENT_TIMEOUT_MS": 4321, "MAX_PAGE_ROWS": 17,
+              "EXECUTION_STATEMENT_TIMEOUT_MS": 4321,
+              "PINNED_RANGES_STATEMENT_TIMEOUT_MS": 2468, "MAX_PAGE_ROWS": 17,
               "MAX_PAGE_LOGICAL_BYTES": 100000, "MAX_VERIFICATION_BYTES": 900000,
               "MAX_VERIFICATION_OBJECTS": 80, "MAX_VERIFICATION_PAGES": 99}
     for name, value in values.items():

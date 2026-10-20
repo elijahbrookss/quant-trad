@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from math import isfinite
 import logging
 from time import monotonic, perf_counter
 
@@ -39,14 +40,58 @@ def unproven_reclamation_fact_types(fact_types):
                   if not family.startswith("market.normalized."))
 
 
+_PINNED_RANGES_QUERY = text("""
+    /* canonical_reclaim_pinned_ranges */
+    WITH candidates AS MATERIALIZED (
+        SELECT pins.dataset_id, pins.series_id, pins.range_start, pins.range_end,
+               pins.max_commit_seq,
+               GREATEST(pins.range_start, min(bounds.first_observation_at)) AS first_observation_at,
+               max(bounds.last_observation_at) AS last_observation_at
+        FROM market.dataset_series AS pins
+        JOIN market.fact_archive_series AS bounds ON bounds.series_id=pins.series_id
+        JOIN market.fact_archive_manifests AS pages ON pages.id=bounds.manifest_id
+        WHERE pages.storage_day=:day AND bounds.first_observation_at<pins.range_end
+          AND bounds.last_observation_at>=pins.range_start
+        GROUP BY pins.dataset_id, pins.series_id, pins.range_start, pins.range_end, pins.max_commit_seq
+    ), candidate_series AS MATERIALIZED (
+        SELECT series_id, min(first_observation_at) AS first_observation_at,
+               max(last_observation_at) AS last_observation_at,
+               max(max_commit_seq) AS max_commit_seq
+        FROM candidates GROUP BY series_id
+    ), day_versions AS MATERIALIZED (
+        SELECT versions.series_id, versions.observation_time, versions.market_commit_seq
+        FROM candidate_series AS scope
+        JOIN market.fact_versions AS versions ON versions.series_id=scope.series_id
+          AND versions.storage_day=:day
+          AND versions.observation_time>=scope.first_observation_at
+          AND versions.observation_time<=scope.last_observation_at
+          AND versions.market_commit_seq<=scope.max_commit_seq
+    ), matched AS (
+        SELECT DISTINCT pins.dataset_id, pins.series_id, pins.range_start, pins.range_end
+        FROM candidates AS pins
+        JOIN day_versions AS versions ON versions.series_id=pins.series_id
+          AND versions.observation_time>=pins.first_observation_at
+          AND versions.observation_time<=pins.last_observation_at
+          AND versions.observation_time<pins.range_end
+          AND versions.market_commit_seq<=pins.max_commit_seq
+    )
+    SELECT count(*) FROM matched
+""")
+
+
 @dataclass(frozen=True)
 class FactReclamationLimits:
     statement_timeout_ms: int = 1000
+    pinned_ranges_statement_timeout_ms: int = 1000
     max_handoff_seconds: int = 10
 
     def __post_init__(self):
-        for field in ("statement_timeout_ms", "max_handoff_seconds"):
+        for field in ("statement_timeout_ms", "pinned_ranges_statement_timeout_ms",
+                      "max_handoff_seconds"):
             if type(getattr(self, field)) is not int or getattr(self, field) <= 0:
+                raise ValueError(f"canonical_reclaim_limit_invalid: field={field}")
+        for field in ("statement_timeout_ms", "pinned_ranges_statement_timeout_ms"):
+            if getattr(self, field) > 60000:
                 raise ValueError(f"canonical_reclaim_limit_invalid: field={field}")
         if self.max_handoff_seconds > 60:
             raise ValueError("canonical_reclaim_limit_invalid: field=max_handoff_seconds")
@@ -54,12 +99,16 @@ class FactReclamationLimits:
 
 class PostgresCanonicalFactReclamationRepository:
     def __init__(self, *, archive_repository, enabled: bool = False,
-                 limits: FactReclamationLimits = FactReclamationLimits()):
+                 limits: FactReclamationLimits = FactReclamationLimits(),
+                 remaining_run_seconds=None):
         if type(enabled) is not bool:
             raise ValueError("canonical_reclaim_enabled_must_be_boolean")
+        if remaining_run_seconds is not None and not callable(remaining_run_seconds):
+            raise ValueError("canonical_reclaim_remaining_run_seconds_invalid")
         self.archive = archive_repository
         self.enabled = enabled
         self.limits = limits
+        self.remaining_run_seconds = remaining_run_seconds
 
     def _timeouts(self, session):
         session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
@@ -109,39 +158,48 @@ class PostgresCanonicalFactReclamationRepository:
             raise RuntimeError(f"canonical_reclaim_relation_scope_invalid: storage_day={day}")
         return row["oid"]
 
-    @staticmethod
-    def _pinned_ranges(session, day):
+    def _pinned_ranges_timeout_ms(self, *, remaining_seconds=None):
+        self.archive._check_budget()
+        candidates = [self.limits.statement_timeout_ms,
+                      self.limits.pinned_ranges_statement_timeout_ms]
+        for clock in (self.remaining_run_seconds, remaining_seconds):
+            if clock is None:
+                continue
+            seconds = clock()
+            if type(seconds) not in {int, float} or not isfinite(seconds) or seconds <= 0:
+                raise RuntimeError("canonical_reclaim_pinned_ranges_budget_exhausted")
+            milliseconds = int(seconds * 1000)
+            if milliseconds <= 0:
+                raise RuntimeError("canonical_reclaim_pinned_ranges_budget_insufficient")
+            candidates.append(milliseconds)
+        return min(candidates)
+
+    def _pinned_ranges(self, session, day, *, remaining_seconds=None):
         # A pin prevents evidence expiry, not verified tier movement. All
         # headers and their complete cold payloads survive, so no pinned range
         # is subtracted from the source. Count overlapping bindings for audit.
         # Both callers have just checked complete partition/catalog evidence.
-        # Materialize one conservative envelope per binding from overlapping
-        # verified pages. Clamp the indexed header seek to that envelope, not
-        # the Dataset's potentially much longer window. Keep dataset_id in the
-        # grouping: equal windows in different frozen Datasets are separate pins.
+        # Materialize the exact binding envelopes, then read each relevant
+        # series/day header scope once. The final distinct join retains the
+        # Dataset binding primary key and reapplies every exact range/commit
+        # predicate; it only removes the former per-binding header rescans.
         # Bounds can contain gaps; the header, placement day, exclusive range
         # end and frozen commit checks remain exact. The page's last clock is
         # inclusive and is not a substitute for the binding's exclusive end.
-        return session.execute(text("""
-            WITH candidates AS MATERIALIZED (
-                SELECT pins.dataset_id, pins.series_id, pins.range_end, pins.max_commit_seq,
-                       GREATEST(pins.range_start, min(bounds.first_observation_at)) AS first_observation_at,
-                       max(bounds.last_observation_at) AS last_observation_at
-                FROM market.dataset_series AS pins
-                JOIN market.fact_archive_series AS bounds ON bounds.series_id=pins.series_id
-                JOIN market.fact_archive_manifests AS pages ON pages.id=bounds.manifest_id
-                WHERE pages.storage_day=:day AND bounds.first_observation_at<pins.range_end
-                  AND bounds.last_observation_at>=pins.range_start
-                GROUP BY pins.dataset_id, pins.series_id, pins.range_start, pins.range_end, pins.max_commit_seq
-            )
-            SELECT count(*) FROM candidates AS pins CROSS JOIN LATERAL (
-                SELECT 1 FROM market.fact_versions AS versions WHERE versions.storage_day=:day
-                  AND versions.series_id=pins.series_id AND versions.observation_time>=pins.first_observation_at
-                  AND versions.observation_time<=pins.last_observation_at
-                  AND versions.observation_time<pins.range_end AND versions.market_commit_seq<=pins.max_commit_seq
-                LIMIT 1
-            ) AS matched
-        """), {"day": day}).scalar_one()
+        timeout = self._pinned_ranges_timeout_ms(remaining_seconds=remaining_seconds)
+        logger.info(
+            "canonical_reclaim_pinned_ranges_started | storage_day=%s statement_timeout_ms=%s",
+            day, timeout,
+        )
+        session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                        {"timeout": str(timeout)})
+        count = session.execute(_PINNED_RANGES_QUERY, {"day": day}).scalar_one()
+        self._timeouts(session)
+        logger.info(
+            "canonical_reclaim_pinned_ranges_finished | storage_day=%s statement_timeout_ms=%s protected_dataset_ranges=%s",
+            day, timeout, count,
+        )
+        return count, timeout
 
     def reclaim_partition(self, day: date, *, eligible_before: date, execute: bool = False,
                           verification_limits: ArchiveVerificationLimits = ArchiveVerificationLimits()):
@@ -192,7 +250,8 @@ class PostgresCanonicalFactReclamationRepository:
                 logger.info("canonical_reclaim_handoff_prepared | storage_day=%s source_rows=%s seconds=%s witness_bytes=%s",
                             day, sum(item.count for item in handoff.source_headers),
                             perf_counter() - prepared, handoff.retained_bytes)
-            evidence["protected_dataset_ranges"] = self._pinned_ranges(session, day)
+            evidence["protected_dataset_ranges"], evidence["pinned_ranges_statement_timeout_ms"] = (
+                self._pinned_ranges(session, day))
             if already_reclaimed:
                 return {**evidence, "status": "already_reclaimed", "reclaimed_bytes": partition["reclaimed_bytes"]}
             if not execute:
@@ -206,6 +265,10 @@ class PostgresCanonicalFactReclamationRepository:
             self.archive._check_budget()
             if monotonic() - started >= self.limits.max_handoff_seconds:
                 raise RuntimeError(f"canonical_reclaim_handoff_budget_exceeded: storage_day={day}")
+
+        def remaining_handoff_seconds():
+            check_budget()
+            return self.limits.max_handoff_seconds - (monotonic() - started)
 
         with self.archive.database.session() as session:
             self._timeouts(session)
@@ -229,7 +292,9 @@ class PostgresCanonicalFactReclamationRepository:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             if current["source_placement_hash"] != evidence["source_placement_hash"]:
                 raise RuntimeError(f"canonical_reclaim_source_placement_changed: storage_day={day}; retry to verify current files")
-            current["protected_dataset_ranges"] = self._pinned_ranges(session, day)
+            current["protected_dataset_ranges"], current["pinned_ranges_statement_timeout_ms"] = (
+                self._pinned_ranges(session, day,
+                                    remaining_seconds=remaining_handoff_seconds))
             self._assert_archive_admission(objects)
             check_budget()
             # Never wait behind a query/collector holding the parent. This

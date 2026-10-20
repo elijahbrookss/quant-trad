@@ -241,12 +241,32 @@ def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_boun
             return {"status": "partition_reclaimed"}
 
     monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository", Reclaimer)
-    policy = CanonicalFactRetentionPolicy(max_handoff_seconds=seconds)
+    policy = CanonicalFactRetentionPolicy(max_handoff_seconds=seconds,
+                                          pinned_ranges_statement_timeout_ms=4321)
     executor._execute_step(item=_item("reclaim_partition"), policy=policy,
         storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=600)
     assert seen[0]["enabled"] is True
     assert seen[0]["limits"].max_handoff_seconds == seconds
     assert seen[0]["limits"].statement_timeout_ms == 1000
+    assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 4321
+
+
+def test_pinned_range_timeout_never_exceeds_execution_or_remaining_run_budget(tmp_path, monkeypatch):
+    executor, _ = _executor([])
+    executor.repository.database = object()
+    seen = []
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
+                        lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository",
+                        lambda **kwargs: seen.append(kwargs) or SimpleNamespace(
+                            reclaim_partition=lambda *_args, **_kwargs: {"status": "partition_reclaimed"}))
+    policy = CanonicalFactRetentionPolicy(execution_statement_timeout_ms=3000,
+                                          pinned_ranges_statement_timeout_ms=5000)
+    executor._execute_step(item=_item("reclaim_partition"), policy=policy,
+        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=2)
+    assert seen[0]["limits"].statement_timeout_ms == 1000
+    assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 2000
 
 
 def test_progress_observer_reports_existing_boundaries_without_owning_execution(tmp_path, monkeypatch):

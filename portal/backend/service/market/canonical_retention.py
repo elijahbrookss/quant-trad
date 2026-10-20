@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, timedelta
+from math import isfinite
 import logging
 from pathlib import Path
 from threading import Lock
@@ -68,8 +69,17 @@ class CanonicalFactRetentionExecutor:
 
         # Reuse only the current run's staging repository. Its one-page buffer
         # avoids repeating hot hydration for each committed prefix interval.
+        def current_remaining_seconds():
+            value = remaining_seconds() if callable(remaining_seconds) else remaining_seconds
+            if type(value) not in {int, float} or not isfinite(value) or value <= 0:
+                raise CanonicalRetentionBudgetExceeded(
+                    "canonical_retention_run_budget_exceeded: resume committed progress next run"
+                )
+            return value
+
         archive = self._archive if action == "stage_page" else None
-        timeout = min(policy.execution_statement_timeout_ms, max(1, int(remaining_seconds * 1000)))
+        timeout = min(policy.execution_statement_timeout_ms,
+                      max(1, int(current_remaining_seconds() * 1000)))
         if archive is None:
             archive = PostgresCanonicalFactArchiveRepository(
                 database=self.repository.database,
@@ -101,8 +111,12 @@ class CanonicalFactRetentionExecutor:
             return archive.restart_partition_verification(day)
         if action == "reclaim_partition":
             reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True,
-                limits=FactReclamationLimits(statement_timeout_ms=min(1000, policy.execution_statement_timeout_ms),
-                                             max_handoff_seconds=policy.max_handoff_seconds))
+                limits=FactReclamationLimits(
+                    statement_timeout_ms=min(1000, timeout),
+                    pinned_ranges_statement_timeout_ms=min(
+                        policy.pinned_ranges_statement_timeout_ms, timeout),
+                    max_handoff_seconds=policy.max_handoff_seconds,
+                ), remaining_run_seconds=current_remaining_seconds)
             return reclaimer.reclaim_partition(day, eligible_before=date.fromisoformat(item["eligible_before"]),
                                                 execute=True, verification_limits=verification)
         raise ValueError(f"canonical_retention_action_invalid: action={action}")
@@ -154,6 +168,10 @@ class CanonicalFactRetentionExecutor:
             if monotonic() >= deadline:
                 raise CanonicalRetentionBudgetExceeded("canonical_retention_run_budget_exceeded: resume committed progress next run")
 
+        def remaining_run_seconds():
+            check_budget()
+            return deadline - monotonic()
+
         for _ in range(policy.max_steps_per_run):
             try:
                 observe(stage="planning", completed_steps=len(outcomes), planning_pages=scans,
@@ -189,7 +207,7 @@ class CanonicalFactRetentionExecutor:
                 observe(stage="executing", completed_steps=len(outcomes),
                         storage_day=day.isoformat(), action=item["action"])
                 result = self._execute_step(item=item, policy=policy, storage_root=storage_root,
-                                           check_budget=check_budget, remaining_seconds=deadline - monotonic(),
+                                           check_budget=check_budget, remaining_seconds=remaining_run_seconds,
                                            storage_policy_witness=storage_policy_witness)
                 outcomes.append({**result, "action": item["action"], "storage_day": day.isoformat()})
                 observe(stage="step_finished", completed_steps=len(outcomes),

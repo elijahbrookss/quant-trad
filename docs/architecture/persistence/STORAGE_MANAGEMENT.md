@@ -1293,6 +1293,17 @@ old plan; it does not authorize a step under stale settings. The reclaimer repea
 this guard at its final exclusive handoff. Committed archive pages remain the
 existing resume authority.
 
+The frozen-Dataset pin audit has its own bounded PostgreSQL statement timeout,
+`pinned_ranges_statement_timeout_ms`, expressed in milliseconds. Its default is
+1,000 ms and the environment override is
+`QT_MARKET_DATA_LIFECYCLE_CANONICAL_PINNED_RANGES_STATEMENT_TIMEOUT_MS`. The
+effective value is the minimum of that setting, the general canonical execution
+statement timeout and the remaining maintenance-run budget. Plans expose the
+configured policy value; reclamation results and structured start/finish logs
+expose the effective value. The audit materializes each relevant series/day
+header scope once and then reapplies every exact Dataset range and commit bound.
+Changing this timeout does not weaken pin checks or expand the handoff/run budget.
+
 The disposable real-process scenario changes the saved recent window, pauses
 movement, resumes payload archival and header movement, and reads the same frozen
 results. A separate injected pause after planning must prevent sealing. These
