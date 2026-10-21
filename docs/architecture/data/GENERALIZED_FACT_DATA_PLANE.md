@@ -667,6 +667,15 @@ page size, file format, identity, duplicate and foreign-key checks are unchanged
 This reduces successful-statement overhead without weakening atomic publication;
 sustained HDD throughput still requires matched-workload measurement.
 
+Material aliases are ordered by `(fact_version_id, evidence_key)` and each
+bounded batch is sent as parallel typed arrays through one
+`INSERT ... SELECT FROM unnest(...)` statement. PostgreSQL ordinality preserves
+the validated row association across those arrays. The page acknowledgement
+records the exact alias-row and alias-statement counts. This changes statement
+construction and index insertion order only: the 128-row ceiling, constraints,
+transaction, failure behavior, statement deadline and cancellation checks stay
+the same.
+
 Stage logs record the complete call and transaction commit plus the source
 selection, payload validation, causal resolution, prefix preparation, dependency
 proof, encoding/compression, staging fsync/hash, staging readback, object publish,

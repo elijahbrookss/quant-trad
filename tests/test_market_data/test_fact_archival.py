@@ -195,3 +195,63 @@ def test_only_canonical_dependency_catalog_uses_the_larger_stage_batch(tmp_path)
           "material_hash": "b" * 64} for index in range(257)),
     )
     assert aliases.flush_sizes == [128, 128, 1]
+
+
+def test_alias_catalog_writer_sorts_identity_and_keeps_bounded_statements(tmp_path):
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return SimpleNamespace(rowcount=len(params["fact_version_ids"]))
+
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path,
+    )
+    session = Session()
+    aliases = ({
+        "fact_version_id": f"mfv_{index:04d}",
+        "series_id": index % 3 + 1,
+        "evidence_key": "legacy",
+        "material_hash": f"{index:064x}",
+    } for index in reversed(range(257)))
+
+    result = archive._stage_alias_catalog_rows(session, "manifest", aliases)
+
+    assert result == {"row_count": 257, "batch_count": 3}
+    assert [len(params["fact_version_ids"]) for _, params in session.calls] == [128, 128, 1]
+    assert all(statement.startswith("INSERT INTO market.fact_archive_material_aliases")
+               for statement, _ in session.calls)
+    assert all(params["manifest_id"] == "manifest" for _, params in session.calls)
+    inserted = [identity for _, params in session.calls for identity in params["fact_version_ids"]]
+    assert inserted == sorted(inserted)
+    inserted_rows = [
+        row
+        for _, params in session.calls
+        for row in zip(
+            params["fact_version_ids"], params["evidence_keys"],
+            params["series_ids"], params["material_hashes"], strict=True,
+        )
+    ]
+    assert inserted_rows == [
+        (f"mfv_{index:04d}", "legacy", index % 3 + 1, f"{index:064x}")
+        for index in range(257)
+    ]
+
+
+def test_alias_catalog_writer_rejects_incomplete_insert_count(tmp_path):
+    class Session:
+        @staticmethod
+        def execute(_statement, _params):
+            return SimpleNamespace(rowcount=0)
+
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match=(
+            "canonical_archive_alias_insert_count_mismatch: manifest_id=manifest expected=1 actual=0")):
+        archive._stage_alias_catalog_rows(Session(), "manifest", [{
+            "fact_version_id": "mfv_1", "series_id": 1,
+            "evidence_key": "legacy", "material_hash": "b" * 64,
+        }])

@@ -47,6 +47,17 @@ _CATALOG_WRITE_BATCH_ROWS = 128
 _CANONICAL_DEPENDENCY_WRITE_BATCH_ROWS = 256
 # Bound expiration-key SQL independently of the number of archive dependencies.
 _EXPIRATION_QUERY_BATCH_ROWS = 128
+_ALIAS_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_material_aliases
+    (manifest_id, fact_version_id, evidence_key, series_id, material_hash)
+SELECT :manifest_id, input.fact_version_id, input.evidence_key,
+       input.series_id, input.material_hash
+FROM unnest(
+    CAST(:fact_version_ids AS text[]), CAST(:evidence_keys AS text[]),
+    CAST(:series_ids AS bigint[]), CAST(:material_hashes AS text[])
+) WITH ORDINALITY AS input(
+    fact_version_id, evidence_key, series_id, material_hash, position
+)
+ORDER BY input.position""")
 
 
 def _record_verification_phase(*, timings, phase, day, page, seconds, outcome):
@@ -465,6 +476,60 @@ class PostgresCanonicalFactArchiveRepository:
             session.flush()
         self._check_budget()
 
+    def _stage_alias_catalog_batches(self, session, manifest_id, aliases):
+        """Insert already ordered aliases through bounded controlled statements."""
+        row_count = 0
+        batch_count = 0
+        batch = []
+        for values in aliases:
+            self._check_budget()
+            batch.append(values)
+            if len(batch) != _CATALOG_WRITE_BATCH_ROWS:
+                continue
+            result = session.execute(_ALIAS_CATALOG_INSERT, {
+                "manifest_id": manifest_id,
+                "fact_version_ids": [item["fact_version_id"] for item in batch],
+                "evidence_keys": [item["evidence_key"] for item in batch],
+                "series_ids": [item["series_id"] for item in batch],
+                "material_hashes": [item["material_hash"] for item in batch],
+            })
+            if result.rowcount != len(batch):
+                raise RuntimeError(
+                    f"canonical_archive_alias_insert_count_mismatch: manifest_id={manifest_id} "
+                    f"expected={len(batch)} actual={result.rowcount}"
+                )
+            row_count += len(batch)
+            batch_count += 1
+            batch = []
+            self._check_budget()
+        if batch:
+            result = session.execute(_ALIAS_CATALOG_INSERT, {
+                "manifest_id": manifest_id,
+                "fact_version_ids": [item["fact_version_id"] for item in batch],
+                "evidence_keys": [item["evidence_key"] for item in batch],
+                "series_ids": [item["series_id"] for item in batch],
+                "material_hashes": [item["material_hash"] for item in batch],
+            })
+            if result.rowcount != len(batch):
+                raise RuntimeError(
+                    f"canonical_archive_alias_insert_count_mismatch: manifest_id={manifest_id} "
+                    f"expected={len(batch)} actual={result.rowcount}"
+                )
+            row_count += len(batch)
+            batch_count += 1
+        self._check_budget()
+        return {"row_count": row_count, "batch_count": batch_count}
+
+    def _stage_alias_catalog_rows(self, session, manifest_id, rows):
+        """Derive one deterministic order for both alias identity indexes."""
+        aliases = []
+        for values in rows:
+            self._check_budget()
+            aliases.append(values)
+        aliases.sort(key=lambda item: (item["fact_version_id"], item["evidence_key"]))
+        self._check_budget()
+        return self._stage_alias_catalog_batches(session, manifest_id, aliases)
+
     def _stage_next_page(self, day: date) -> dict:
         with self.database.session() as session:
             admission_started = perf_counter()
@@ -648,10 +713,10 @@ class PostgresCanonicalFactArchiveRepository:
                     manifest.manifest_id, _series_catalog(manifest),
                 ),
             )
-            _timed_stage_call(
+            alias_catalog = _timed_stage_call(
                 phase="alias_catalog_insert", day=day, page_ordinal=ordinal,
-                operation=lambda: self._stage_catalog_rows(
-                    session, MarketFactArchiveMaterialAliasRecord, manifest.manifest_id,
+                operation=lambda: self._stage_alias_catalog_rows(
+                    session, manifest.manifest_id,
                     (alias for row in rows if (alias := legacy_material_alias(row)) is not None),
                 ),
             )
@@ -670,8 +735,10 @@ class PostgresCanonicalFactArchiveRepository:
                      for row in source_rows),
                 ),
             )
-        logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s bytes=%s dependencies=%s",
-                    day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies))
+        logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
+                    "rows=%s bytes=%s dependencies=%s aliases=%s alias_batches=%s",
+                    day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies),
+                    alias_catalog["row_count"], alias_catalog["batch_count"])
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
                 "manifest_id": manifest.manifest_id, "row_count": manifest.row_count}
 
