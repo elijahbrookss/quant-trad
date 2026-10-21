@@ -6,7 +6,7 @@ always comes from the existing fenced reclaimer's fresh evidence checks.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from math import isfinite
 import logging
@@ -32,6 +32,16 @@ _PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_v
 _MAX_PAGE_PREREQUISITE_COMMITS = 64
 
 
+@dataclass
+class _RetryState:
+    storage_day: date
+    first_failure_at: float
+    last_failure_at: float
+    next_eligible_at: float
+    attempt_count: int
+    reason: str
+
+
 class CanonicalRetentionBudgetExceeded(RuntimeError):
     stop_reason = "time_budget"
 
@@ -45,8 +55,56 @@ class CanonicalFactRetentionExecutor:
         self.repository = repository
         self.use_saved_history_policy = use_saved_history_policy
         self._cursor = None
+        self._retry_states = {}
         self._run_lock = Lock()
         self._archive = None
+
+    def _retry_schedule(self, now):
+        return [{
+            "storage_day": state.storage_day.isoformat(),
+            "attempt_count": state.attempt_count,
+            "reason": state.reason,
+            "age_seconds": max(0.0, now - state.first_failure_at),
+            "next_eligible_in_seconds": max(0.0, state.next_eligible_at - now),
+        } for state in sorted(self._retry_states.values(), key=lambda item: item.storage_day)]
+
+    def _schedule_retry(self, *, day, reason, policy, now, count_attempt=True):
+        state = self._retry_states.get(day)
+        if state is None:
+            limit = max(1, policy.max_candidate_partitions)
+            if len(self._retry_states) >= limit:
+                newest = max(self._retry_states)
+                if day >= newest:
+                    logger.warning(
+                        "canonical_retention_retry_queue_full | storage_day=%s limit=%s oldest_storage_day=%s",
+                        day, limit, min(self._retry_states),
+                    )
+                    return
+                del self._retry_states[newest]
+            state = _RetryState(
+                storage_day=day, first_failure_at=now, last_failure_at=now,
+                next_eligible_at=now + policy.max_run_seconds,
+                attempt_count=1 if count_attempt else 0, reason=reason,
+            )
+            self._retry_states[day] = state
+        else:
+            state.last_failure_at = now
+            state.next_eligible_at = now + policy.max_run_seconds
+            state.attempt_count += int(count_attempt)
+            state.reason = reason
+        logger.info(
+            "canonical_retention_retry_scheduled | storage_day=%s attempt_count=%s "
+            "retry_after_seconds=%s reason=%s",
+            day, state.attempt_count, policy.max_run_seconds, reason,
+        )
+
+    def _clear_retry(self, day):
+        state = self._retry_states.pop(day, None)
+        if state is not None:
+            logger.info(
+                "canonical_retention_retry_cleared | storage_day=%s attempt_count=%s",
+                day, state.attempt_count,
+            )
 
     def _require_archive(self, *, policy, storage_root, action):
         filesystem = self.repository._filesystem(storage_root)
@@ -174,6 +232,19 @@ class CanonicalFactRetentionExecutor:
         started = monotonic()
         deadline = started + policy.max_run_seconds
         cursor = after_storage_day if after_storage_day is not None else self._cursor
+        explicit_cursor = after_storage_day is not None
+        retry_day = None
+        retry_attempted = False
+        if not explicit_cursor and self._retry_states:
+            due = [state for state in self._retry_states.values()
+                   if state.next_eligible_at <= started]
+            if due:
+                retry_day = min(due, key=lambda item: item.storage_day).storage_day
+                cursor = retry_day - timedelta(days=1)
+            elif cursor is None:
+                # Skip cooling failures while still allowing later work. The
+                # oldest due retry overrides this hint on a later natural run.
+                cursor = min(self._retry_states)
         outcomes, initial_plan = [], None
         stop_reason = "step_budget"
         scans = 0
@@ -223,6 +294,33 @@ class CanonicalFactRetentionExecutor:
                     planning_outcome, planning_elapsed, scans, cursor,
                 )
             candidates = [item for item in plan["actions"] if item["eligible"]]
+            item = None
+            if retry_day is not None and not retry_attempted:
+                retry_plan_item = next((candidate for candidate in plan["actions"]
+                                        if date.fromisoformat(candidate["storage_day"]) == retry_day), None)
+                item = retry_plan_item if retry_plan_item is not None and retry_plan_item["eligible"] else None
+                if item is not None:
+                    retry_attempted = True
+                    logger.info(
+                        "canonical_retention_retry_selected | storage_day=%s attempt_count=%s",
+                        retry_day, self._retry_states[retry_day].attempt_count,
+                    )
+                elif retry_plan_item is None:
+                    # Another committed owner may already have completed and
+                    # removed the target. A fresh exact scan is authoritative.
+                    retry_attempted = True
+                    self._clear_retry(retry_day)
+                else:
+                    # A changed fresh plan cannot be bypassed. Delay another
+                    # attempt and continue unrelated eligible work this run.
+                    retry_attempted = True
+                    self._schedule_retry(
+                        day=retry_day, reason="fresh_plan_not_eligible", policy=policy,
+                        now=monotonic(), count_attempt=False,
+                    )
+            if item is None and not explicit_cursor:
+                candidates = [candidate for candidate in candidates
+                              if date.fromisoformat(candidate["storage_day"]) not in self._retry_states]
             if not candidates:
                 next_day = plan["next_after_storage_day"]
                 cursor = date.fromisoformat(next_day) if next_day else None
@@ -234,7 +332,7 @@ class CanonicalFactRetentionExecutor:
                                                                for row in plan["actions"]) else "blocked")
                     break
                 continue
-            item = candidates[0]
+            item = item or candidates[0]
             day = date.fromisoformat(item["storage_day"])
             # Revisit this day's durable progress on success/budget suspension;
             # skip a failed/busy day this cycle so it cannot starve later days.
@@ -260,6 +358,7 @@ class CanonicalFactRetentionExecutor:
                         status=result.get("status"))
                 if result["status"] in {"partition_reclaimed", "already_reclaimed"}:
                     cursor = day
+                self._clear_retry(day)
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
                             day, item["action"], result["status"])
             except CanonicalRetentionBudgetExceeded as exc:
@@ -267,6 +366,11 @@ class CanonicalFactRetentionExecutor:
                     {"action": item["action"], "storage_day": day.isoformat(),
                      "status": "deferred", "reason": str(exc)}
                 ))
+                if day in self._retry_states:
+                    self._schedule_retry(
+                        day=day, reason=exc.stop_reason, policy=policy,
+                        now=monotonic(), count_attempt=False,
+                    )
                 stop_reason = exc.stop_reason
                 break
             except MarketStorageLifecycleBusyError as exc:
@@ -274,6 +378,9 @@ class CanonicalFactRetentionExecutor:
                     {"action": item["action"], "storage_day": day.isoformat(),
                      "status": "deferred", "reason": str(exc)}
                 ))
+                self._schedule_retry(
+                    day=day, reason="lifecycle_busy", policy=policy, now=monotonic(),
+                )
                 logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s", day, item["action"], exc)
                 cursor = day
             except Exception as exc:
@@ -290,6 +397,11 @@ class CanonicalFactRetentionExecutor:
                             {"action": item["action"], "storage_day": day.isoformat(),
                              "status": "deferred", "reason": str(budget)}
                         ))
+                        if day in self._retry_states:
+                            self._schedule_retry(
+                                day=day, reason=budget.stop_reason, policy=policy,
+                                now=monotonic(), count_attempt=False,
+                            )
                         stop_reason = budget.stop_reason
                         logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s sqlstate=57014",
                                     day, item["action"], stop_reason)
@@ -299,25 +411,34 @@ class CanonicalFactRetentionExecutor:
                         {"action": item["action"], "storage_day": day.isoformat(),
                          "status": "deferred", "reason": "canonical_retention_relation_busy"}
                     ))
+                    self._schedule_retry(
+                        day=day, reason="relation_busy", policy=policy, now=monotonic(),
+                    )
                     logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=relation_busy", day, item["action"])
                 else:
                     outcomes.append(retain_prerequisite_progress(
                         {"action": item["action"], "storage_day": day.isoformat(),
                          "status": "failed", "error": str(exc)}
                     ))
+                    self._schedule_retry(
+                        day=day, reason=f"{type(exc).__name__}:{sqlstate or 'none'}", policy=policy,
+                        now=monotonic(),
+                    )
                     logger.exception("canonical_retention_step_failed | storage_day=%s action=%s", day, item["action"])
                 cursor = day
         self._cursor = cursor
         failures = sum(item["status"] == "failed" for item in outcomes)
         prerequisite_commits = sum(item.get("prerequisite_commit_count", 0) for item in outcomes)
+        finished = monotonic()
         result = {"schema_version": "market.canonical_retention_run.v1",
                   "status": "degraded" if failures else "bounded" if stop_reason.endswith("budget") else stop_reason,
                   "stop_reason": stop_reason, "plan": initial_plan, "outcomes": outcomes, "failure_count": failures,
                   "planning_pages": scans, "planning_seconds": planning_seconds,
-                  "elapsed_seconds": monotonic() - started,
+                  "elapsed_seconds": finished - started,
                   "next_after_storage_day": cursor.isoformat() if cursor else None,
                   "resume_authority": "committed_partition_pages_and_verifications",
-                  "prerequisite_commit_count": prerequisite_commits}
+                  "prerequisite_commit_count": prerequisite_commits,
+                  "retry_schedule": self._retry_schedule(finished)}
         if self.use_saved_history_policy:
             result["storage_policy"] = storage_policy_witness
         observe(stage="finished", completed_steps=len(outcomes), status=result["status"],

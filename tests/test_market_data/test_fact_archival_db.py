@@ -545,6 +545,57 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
     assert fixture.read() == fixture.before
 
 
+def test_canonical_dependency_writes_finish_under_per_statement_limit_with_slow_rows(
+        storage, tmp_path, monkeypatch):
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=320)
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE FUNCTION market.test_slow_canonical_dependency_insert() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.01); RETURN NEW; END $$
+        """))
+        session.execute(text("""
+            CREATE TRIGGER test_slow_canonical_dependency_insert BEFORE INSERT
+            ON market.fact_archive_canonical_dependencies FOR EACH ROW
+            EXECUTE FUNCTION market.test_slow_canonical_dependency_insert()
+        """))
+    stage_dependencies = fixture.archive._stage_canonical_dependency_catalog_rows
+
+    def stage_with_dependency_deadline(session, manifest_id, rows):
+        previous_timeout = session.execute(text("SHOW statement_timeout")).scalar_one()
+        session.execute(text("SELECT set_config('statement_timeout', '2000', true)"))
+        result = stage_dependencies(session, manifest_id, rows)
+        session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                        {"timeout": previous_timeout})
+        return result
+
+    monkeypatch.setattr(
+        fixture.archive, "_stage_canonical_dependency_catalog_rows",
+        stage_with_dependency_deadline,
+    )
+    # One coarse typed-array statement is the exact control. It must time out
+    # and roll the whole page back; the bounded statements then commit it once.
+    with monkeypatch.context() as coarse:
+        coarse.setattr(fact_archival, "_CATALOG_WRITE_BATCH_ROWS", 1000)
+        with pytest.raises(DBAPIError) as failed:
+            _acknowledge_alias_page(fixture)
+    assert failed.value.orig.pgcode == "57014"
+    assert failed.value.statement.startswith(
+        "INSERT INTO market.fact_archive_canonical_dependencies"
+    )
+    assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
+
+    result = _acknowledge_alias_page(fixture)
+    assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
+    assert result["canonical_dependency_count"] == fixture.count
+    assert result["canonical_dependency_batch_count"] == 3
+    with storage.database.session() as session:
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_canonical_dependencies "
+            "WHERE manifest_id=:id"
+        ), {"id": result["manifest_id"]}).scalar_one() == fixture.count
+    assert fixture.read() == fixture.before
+
+
 @pytest.mark.parametrize("stop", ["cancel", "budget"])
 def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
         storage, tmp_path, monkeypatch, stop):

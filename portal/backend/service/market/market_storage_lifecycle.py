@@ -942,7 +942,8 @@ class MarketStorageLifecycleSupervisor:
                     "summary": result["plan"]["summary"],
                     "failure_count": result["failure_count"],
                     "canonical_retention": {name: result.get("canonical_retention", {}).get(name)
-                        for name in ("status", "stop_reason", "next_after_storage_day", "failure_count")},
+                        for name in ("status", "stop_reason", "next_after_storage_day", "failure_count",
+                                     "retry_schedule")},
                     "finished_at": datetime.now(UTC).isoformat(),
                     "phase_durations_seconds": phase_durations,
                     **phase_results,

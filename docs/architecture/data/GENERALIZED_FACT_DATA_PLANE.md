@@ -587,14 +587,24 @@ connection checkout, kernel I/O, codec calls and commit/fsync are not hard
 wall-clock interrupt guarantees. An interrupted unacknowledged publication is
 reused safely on retry; acknowledged pages/receipts survive worker restarts.
 
-The worker retains only an in-process **scan hint**, never an executable plan.
-It revisits a partially processed day, advances beyond a failed/busy day or
-fully blocked candidate page so later days are not starved, and wraps at scan
-completion. A process restart may repeat the bounded inventory scan, but resumes
-archive work from committed partition/page/verification records. Manual callers
-can supply `lifecycle-run --canonical-after-storage-day YYYY-MM-DD`; returned
-`next_after_storage_day` and supervisor snapshots expose this hint. Losing it
-does not lose storage progress or weaken admission.
+The worker retains only in-process **scheduling hints**, never an executable
+plan. It revisits a partially processed day and advances beyond a failed/busy
+day or fully blocked candidate page so later days are not starved. A failed or
+busy day enters a queue bounded by `max_candidate_partitions`; the oldest due
+entry gets at most one priority retry in a natural run after the existing
+`max_run_seconds` interval. Cooling entries are excluded from ordinary selection
+without excluding unrelated days. Every retry starts from a fresh plan, and a
+changed blocker delays rather than bypasses admission. Successful committed
+progress clears that day's hint. The run result and supervisor snapshot expose
+retry age, attempt count, reason and next-eligibility delay.
+
+A process restart loses these hints deliberately and restarts the bounded scan
+from its oldest committed PostgreSQL progress, so it cannot lose durable work or
+leave an old failure hidden. Manual callers can still supply `lifecycle-run
+--canonical-after-storage-day YYYY-MM-DD`; that explicit cursor is not replaced
+by the automatic priority hint. Returned `next_after_storage_day` remains a scan
+hint, while partition/page/verification records remain the sole resume and
+deletion authority.
 
 Run outcomes distinguish step/time bounds, stop requests, deferred conflicts,
 blocked scans and failures. After a step's SQL cancellation (`57014`) rolls back,
@@ -656,16 +666,20 @@ Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit
 leaves no acknowledged progress; retry reuses identical immutable bytes.
 
-Catalog publication flushes series, alias and raw-dependency rows in batches of
-at most 128 inside that same transaction. Canonical-dependency rows use batches
-of at most 256; these fixed-width, page-owned identities were the measured
-high-statement-count catalog and do not share the alias write path. The existing
-statement deadline applies to every batch, and the run-budget/cancellation check
-runs between batches and after the final flush. A stop, constraint failure or
-failed batch rolls back the manifest and every catalog row together. Archive
-page size, file format, identity, duplicate and foreign-key checks are unchanged.
-This reduces successful-statement overhead without weakening atomic publication;
-sustained HDD throughput still requires matched-workload measurement.
+Catalog publication writes series, alias, raw-dependency and canonical-dependency
+rows in batches of at most 128 inside that same transaction. Canonical dependency
+identities and row hashes use parallel typed arrays through one `INSERT ...
+SELECT FROM unnest(...)` per batch. PostgreSQL ordinality preserves association;
+there is no conflict suppression or constraint bypass. The existing statement
+deadline applies to every batch, and the run-budget/cancellation check runs
+between batches and after the final statement. A stop, duplicate, foreign-key
+failure or failed batch rolls back the manifest and every catalog row together.
+Archive page size, file format and identity checks are unchanged.
+
+Stage evidence records canonical-dependency row/batch totals, the slowest
+successful batch, and the attempted row count and duration of a failed batch.
+These measurements diagnose statement tails; they are not a new deadline or a
+throughput claim.
 
 Material aliases are ordered by `(fact_version_id, evidence_key)` and each
 bounded batch is sent as parallel typed arrays through one

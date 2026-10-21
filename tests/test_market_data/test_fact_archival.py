@@ -165,7 +165,7 @@ def test_stage_phase_records_completed_and_failed_durations(monkeypatch, caplog)
     assert "phase=canonical_dependency_catalog_insert outcome=failed seconds=0.500000" in caplog.text
 
 
-def test_only_canonical_dependency_catalog_uses_the_larger_stage_batch(tmp_path):
+def test_generic_catalog_writer_keeps_128_row_batches(tmp_path):
     class Session:
         def __init__(self):
             self.pending = []
@@ -181,13 +181,6 @@ def test_only_canonical_dependency_catalog_uses_the_larger_stage_batch(tmp_path)
     archive = PostgresCanonicalFactArchiveRepository(
         database=None, object_store=None, temporary_directory=tmp_path,
     )
-    canonical = Session()
-    archive._stage_catalog_rows(
-        canonical, fact_archival.MarketFactArchiveCanonicalDependencyRecord, "manifest",
-        ({"fact_version_id": str(index), "row_hash": "a" * 64} for index in range(1025)),
-    )
-    assert canonical.flush_sizes == [256, 256, 256, 256, 1]
-
     aliases = Session()
     archive._stage_catalog_rows(
         aliases, fact_archival.MarketFactArchiveMaterialAliasRecord, "manifest",
@@ -195,6 +188,56 @@ def test_only_canonical_dependency_catalog_uses_the_larger_stage_batch(tmp_path)
           "material_hash": "b" * 64} for index in range(257)),
     )
     assert aliases.flush_sizes == [128, 128, 1]
+
+
+def test_canonical_dependency_writer_keeps_typed_128_row_batches(tmp_path, monkeypatch, caplog):
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return SimpleNamespace(rowcount=len(params["fact_version_ids"]))
+
+    clock = iter((1.0, 1.1, 2.0, 2.2, 3.0, 3.3))
+    monkeypatch.setattr(fact_archival, "perf_counter", lambda: next(clock))
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path,
+    )
+    session = Session()
+    with caplog.at_level(logging.INFO):
+        result = archive._stage_canonical_dependency_catalog_rows(
+            session, "manifest",
+            ({"fact_version_id": f"mfv_{index:04d}", "row_hash": f"{index:064x}"}
+             for index in range(257)),
+        )
+
+    assert result["row_count"] == 257 and result["batch_count"] == 3
+    assert result["max_batch_seconds"] == pytest.approx(0.3)
+    assert [len(params["fact_version_ids"]) for _, params in session.calls] == [128, 128, 1]
+    assert all(statement.startswith("INSERT INTO market.fact_archive_canonical_dependencies")
+               for statement, _ in session.calls)
+    assert [identity for _, params in session.calls for identity in params["fact_version_ids"]] == [
+        f"mfv_{index:04d}" for index in range(257)
+    ]
+    assert "catalog=canonical_dependency manifest_id=manifest outcome=completed rows=257 batches=3" in caplog.text
+
+
+def test_canonical_dependency_writer_rejects_incomplete_insert_count(tmp_path):
+    class Session:
+        @staticmethod
+        def execute(_statement, _params):
+            return SimpleNamespace(rowcount=0)
+
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match=(
+            "canonical_archive_dependency_insert_count_mismatch: "
+            "manifest_id=manifest expected=1 actual=0")):
+        archive._stage_canonical_dependency_catalog_rows(Session(), "manifest", [{
+            "fact_version_id": "mfv_1", "row_hash": "a" * 64,
+        }])
 
 
 def test_alias_catalog_writer_sorts_identity_and_keeps_bounded_statements(tmp_path):

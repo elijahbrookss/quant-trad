@@ -87,6 +87,80 @@ def test_step_failure_is_visible_and_does_not_starve_next_day(tmp_path, monkeypa
     assert "canonical_retention_step_failed" in caplog.text
 
 
+def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_days(
+        tmp_path, monkeypatch, caplog):
+    executor, calls = _executor([
+        _plan([_item()]),
+        _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item(day=DAY + timedelta(days=2))]),
+        _plan([_item()]),
+    ])
+    clock = [0.0]
+    attempts = []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    def step(**kwargs):
+        day = date.fromisoformat(kwargs["item"]["storage_day"])
+        attempts.append(day)
+        if day == DAY and attempts.count(DAY) == 1:
+            raise RuntimeError("dependency batch timeout")
+        return {"status": "page_acknowledged"}
+
+    monkeypatch.setattr(executor, "_execute_step", step)
+    policy = CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=2, max_run_seconds=10,
+    )
+    with caplog.at_level("INFO"):
+        failed = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+        clock[0] = 5.0
+        cooling = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+        clock[0] = 10.0
+        retried = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+
+    assert failed["retry_schedule"] == [{
+        "storage_day": DAY.isoformat(), "attempt_count": 1,
+        "reason": "RuntimeError:none",
+        "age_seconds": 0.0, "next_eligible_in_seconds": 10.0,
+    }]
+    assert cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=2)).isoformat()
+    assert retried["outcomes"][0]["storage_day"] == DAY.isoformat()
+    assert retried["retry_schedule"] == []
+    assert attempts == [DAY, DAY + timedelta(days=1), DAY + timedelta(days=2), DAY]
+    assert calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
+    assert caplog.text.count("canonical_retention_retry_selected") == 1
+    assert "canonical_retention_retry_cleared" in caplog.text
+
+
+def test_worker_restart_discards_retry_hint_and_resumes_from_committed_oldest_progress(
+        tmp_path, monkeypatch):
+    failed_executor, _ = _executor([_plan([_item()])])
+    monkeypatch.setattr(
+        failed_executor, "_execute_step",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("dependency batch timeout")),
+    )
+    failed = failed_executor.run(
+        policy=CanonicalFactRetentionPolicy(
+            execution_enabled=True, max_steps_per_run=1, max_run_seconds=10,
+        ),
+        storage_root=tmp_path, execute=True,
+    )
+    assert failed["retry_schedule"][0]["storage_day"] == DAY.isoformat()
+
+    restarted, calls = _executor([_plan([_item()])])
+    monkeypatch.setattr(restarted, "_execute_step", lambda **_: {"status": "page_acknowledged"})
+    result = restarted.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+        storage_root=tmp_path, execute=True,
+    )
+    assert calls[0]["after_storage_day"] is None
+    assert result["outcomes"][0]["status"] == "page_acknowledged"
+    assert result["retry_schedule"] == []
+
+
 def test_time_budget_after_planning_prevents_starting_a_mutation(tmp_path, monkeypatch):
     executor, _ = _executor([_plan([_item()])])
     clock = iter([0, 0, 0, 2, 2])

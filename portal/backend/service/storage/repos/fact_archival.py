@@ -26,7 +26,6 @@ from portal.backend.db import (
     MarketFactArchiveManifestRecord, MarketFactArchiveSeriesRecord,
     MarketFactArchiveDependencyRecord, MarketFactArchiveMaterialAliasRecord,
     MarketFactArchiveVerificationRecord,
-    MarketFactArchiveCanonicalDependencyRecord,
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
 
@@ -44,7 +43,6 @@ FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
 # Keep cold catalog/FK work below the per-statement ceiling without shrinking
 # immutable archive pages or committing partial page metadata.
 _CATALOG_WRITE_BATCH_ROWS = 128
-_CANONICAL_DEPENDENCY_WRITE_BATCH_ROWS = 256
 # Bound expiration-key SQL independently of the number of archive dependencies.
 _EXPIRATION_QUERY_BATCH_ROWS = 128
 _ALIAS_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_material_aliases
@@ -57,6 +55,13 @@ FROM unnest(
 ) WITH ORDINALITY AS input(
     fact_version_id, evidence_key, series_id, material_hash, position
 )
+ORDER BY input.position""")
+_CANONICAL_DEPENDENCY_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_canonical_dependencies
+    (manifest_id, fact_version_id, row_hash)
+SELECT :manifest_id, input.fact_version_id, input.row_hash
+FROM unnest(
+    CAST(:fact_version_ids AS text[]), CAST(:row_hashes AS text[])
+) WITH ORDINALITY AS input(fact_version_id, row_hash, position)
 ORDER BY input.position""")
 
 
@@ -459,14 +464,11 @@ class PostgresCanonicalFactArchiveRepository:
 
     def _stage_catalog_rows(self, session, record_type, manifest_id, rows):
         """Bound each write and observe cancellation within the page transaction."""
-        batch_rows = (_CANONICAL_DEPENDENCY_WRITE_BATCH_ROWS
-                      if record_type is MarketFactArchiveCanonicalDependencyRecord
-                      else _CATALOG_WRITE_BATCH_ROWS)
         batch = []
         for values in rows:
             self._check_budget()
             batch.append(record_type(manifest_id=manifest_id, **values))
-            if len(batch) == batch_rows:
+            if len(batch) == _CATALOG_WRITE_BATCH_ROWS:
                 session.add_all(batch)
                 session.flush()
                 self._check_budget()
@@ -475,6 +477,64 @@ class PostgresCanonicalFactArchiveRepository:
             session.add_all(batch)
             session.flush()
         self._check_budget()
+
+    def _stage_canonical_dependency_catalog_rows(self, session, manifest_id, rows):
+        """Insert fixed-width source identities in bounded typed-array statements."""
+        row_count = 0
+        batch_count = 0
+        max_batch_seconds = 0.0
+        batch = []
+
+        def insert(values):
+            nonlocal row_count, batch_count, max_batch_seconds
+            started = perf_counter()
+            try:
+                result = session.execute(_CANONICAL_DEPENDENCY_CATALOG_INSERT, {
+                    "manifest_id": manifest_id,
+                    "fact_version_ids": [item["fact_version_id"] for item in values],
+                    "row_hashes": [item["row_hash"] for item in values],
+                })
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                if result.rowcount != len(values):
+                    raise RuntimeError(
+                        "canonical_archive_dependency_insert_count_mismatch: "
+                        f"manifest_id={manifest_id} expected={len(values)} actual={result.rowcount}"
+                    )
+            except BaseException:
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                logger.info(
+                    "canonical_archive_catalog_batches | catalog=canonical_dependency "
+                    "manifest_id=%s outcome=failed rows=%s completed_batches=%s "
+                    "attempted_batch_rows=%s failed_batch_seconds=%.6f max_batch_seconds=%.6f",
+                    manifest_id, row_count, batch_count, len(values), elapsed, max_batch_seconds,
+                )
+                raise
+            row_count += len(values)
+            batch_count += 1
+
+        for values in rows:
+            self._check_budget()
+            batch.append(values)
+            if len(batch) != _CATALOG_WRITE_BATCH_ROWS:
+                continue
+            insert(batch)
+            batch = []
+            self._check_budget()
+        if batch:
+            insert(batch)
+        self._check_budget()
+        logger.info(
+            "canonical_archive_catalog_batches | catalog=canonical_dependency "
+            "manifest_id=%s outcome=completed rows=%s batches=%s max_batch_seconds=%.6f",
+            manifest_id, row_count, batch_count, max_batch_seconds,
+        )
+        return {
+            "row_count": row_count,
+            "batch_count": batch_count,
+            "max_batch_seconds": max_batch_seconds,
+        }
 
     def _stage_alias_catalog_batches(self, session, manifest_id, aliases):
         """Insert already ordered aliases through bounded controlled statements."""
@@ -727,20 +787,27 @@ class PostgresCanonicalFactArchiveRepository:
                     manifest.manifest_id, dependencies,
                 ),
             )
-            _timed_stage_call(
+            canonical_dependency_catalog = _timed_stage_call(
                 phase="canonical_dependency_catalog_insert", day=day, page_ordinal=ordinal,
-                operation=lambda: self._stage_catalog_rows(
-                    session, MarketFactArchiveCanonicalDependencyRecord, manifest.manifest_id,
+                operation=lambda: self._stage_canonical_dependency_catalog_rows(
+                    session, manifest.manifest_id,
                     ({"fact_version_id": row["id"], "row_hash": row["row_hash"]}
                      for row in source_rows),
                 ),
             )
         logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
-                    "rows=%s bytes=%s dependencies=%s aliases=%s alias_batches=%s",
+                    "rows=%s bytes=%s dependencies=%s aliases=%s alias_batches=%s "
+                    "canonical_dependencies=%s canonical_dependency_batches=%s "
+                    "canonical_dependency_max_batch_seconds=%.6f",
                     day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies),
-                    alias_catalog["row_count"], alias_catalog["batch_count"])
+                    alias_catalog["row_count"], alias_catalog["batch_count"],
+                    canonical_dependency_catalog["row_count"],
+                    canonical_dependency_catalog["batch_count"],
+                    canonical_dependency_catalog["max_batch_seconds"])
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
-                "manifest_id": manifest.manifest_id, "row_count": manifest.row_count}
+                "manifest_id": manifest.manifest_id, "row_count": manifest.row_count,
+                "canonical_dependency_count": canonical_dependency_catalog["row_count"],
+                "canonical_dependency_batch_count": canonical_dependency_catalog["batch_count"]}
 
     def _page_catalogs(self, session, manifest_id, *, handoff=None):
         catalogs = {}
