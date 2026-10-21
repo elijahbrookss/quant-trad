@@ -186,7 +186,7 @@ def test_only_canonical_dependency_catalog_uses_the_larger_stage_batch(tmp_path)
         canonical, fact_archival.MarketFactArchiveCanonicalDependencyRecord, "manifest",
         ({"fact_version_id": str(index), "row_hash": "a" * 64} for index in range(1025)),
     )
-    assert canonical.flush_sizes == [512, 512, 1]
+    assert canonical.flush_sizes == [256, 256, 256, 256, 1]
 
     aliases = Session()
     archive._stage_catalog_rows(

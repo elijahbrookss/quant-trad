@@ -658,7 +658,7 @@ leaves no acknowledged progress; retry reuses identical immutable bytes.
 
 Catalog publication flushes series, alias and raw-dependency rows in batches of
 at most 128 inside that same transaction. Canonical-dependency rows use batches
-of at most 512; these fixed-width, page-owned identities were the measured
+of at most 256; these fixed-width, page-owned identities were the measured
 high-statement-count catalog and do not share the alias write path. The existing
 statement deadline applies to every batch, and the run-budget/cancellation check
 runs between batches and after the final flush. A stop, constraint failure or

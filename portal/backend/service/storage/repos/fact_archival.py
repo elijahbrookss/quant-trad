@@ -44,7 +44,7 @@ FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
 # Keep cold catalog/FK work below the per-statement ceiling without shrinking
 # immutable archive pages or committing partial page metadata.
 _CATALOG_WRITE_BATCH_ROWS = 128
-_CANONICAL_DEPENDENCY_WRITE_BATCH_ROWS = 512
+_CANONICAL_DEPENDENCY_WRITE_BATCH_ROWS = 256
 # Bound expiration-key SQL independently of the number of archive dependencies.
 _EXPIRATION_QUERY_BATCH_ROWS = 128
 
