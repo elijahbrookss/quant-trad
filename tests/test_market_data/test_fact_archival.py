@@ -146,3 +146,52 @@ def test_verification_phase_records_completed_and_failed_durations(monkeypatch, 
     assert timings == {"archive_read": 0.25, "dependency_proof": 0.5}
     assert "phase=archive_read outcome=completed seconds=0.250000" in caplog.text
     assert "phase=dependency_proof outcome=failed seconds=0.500000" in caplog.text
+
+def test_stage_phase_records_completed_and_failed_durations(monkeypatch, caplog):
+    clock = iter((10.0, 10.25, 20.0, 20.5))
+    monkeypatch.setattr(fact_archival, "perf_counter", lambda: next(clock))
+    with caplog.at_level(logging.INFO):
+        assert fact_archival._timed_stage_call(
+            phase="source_select", day=date(2026, 8, 29), page_ordinal=3,
+            operation=lambda: "result",
+        ) == "result"
+        with pytest.raises(RuntimeError, match="injected"):
+            fact_archival._timed_stage_call(
+                phase="canonical_dependency_catalog_insert", day=date(2026, 8, 29),
+                page_ordinal=3,
+                operation=lambda: (_ for _ in ()).throw(RuntimeError("injected")),
+            )
+    assert "phase=source_select outcome=completed seconds=0.250000" in caplog.text
+    assert "phase=canonical_dependency_catalog_insert outcome=failed seconds=0.500000" in caplog.text
+
+
+def test_only_canonical_dependency_catalog_uses_the_larger_stage_batch(tmp_path):
+    class Session:
+        def __init__(self):
+            self.pending = []
+            self.flush_sizes = []
+
+        def add_all(self, rows):
+            self.pending.extend(rows)
+
+        def flush(self):
+            self.flush_sizes.append(len(self.pending))
+            self.pending.clear()
+
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path,
+    )
+    canonical = Session()
+    archive._stage_catalog_rows(
+        canonical, fact_archival.MarketFactArchiveCanonicalDependencyRecord, "manifest",
+        ({"fact_version_id": str(index), "row_hash": "a" * 64} for index in range(1025)),
+    )
+    assert canonical.flush_sizes == [512, 512, 1]
+
+    aliases = Session()
+    archive._stage_catalog_rows(
+        aliases, fact_archival.MarketFactArchiveMaterialAliasRecord, "manifest",
+        ({"fact_version_id": str(index), "series_id": 1, "evidence_key": "legacy",
+          "material_hash": "b" * 64} for index in range(257)),
+    )
+    assert aliases.flush_sizes == [128, 128, 1]

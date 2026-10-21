@@ -57,20 +57,83 @@ def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_
             check_budget()
         batch = [{**item, **{name: item[name].isoformat() for name in ("known_at", "range_start", "range_end")}}
                  for item in requests[offset:offset + _CAUSAL_WINDOW_REQUEST_BATCH_ROWS]]
-        found = session.execute(text("""
-            SELECT requested.root_id,source.id
-            FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
-                root_id text,instrument_id text,fact_type text,series_id bigint,source_id bigint,
-                root_commit bigint,known_at timestamptz,range_start timestamptz,range_end timestamptz,include_end boolean)
-            JOIN market.series AS series ON series.instrument_id=requested.instrument_id AND series.fact_type=requested.fact_type
-              AND (requested.series_id IS NULL OR series.id=requested.series_id)
-            JOIN market.fact_versions AS source ON source.series_id=series.id AND source.fact_type=requested.fact_type
-              AND (requested.source_id IS NULL OR source.source_id=requested.source_id)
-              AND source.market_commit_seq<=requested.root_commit AND source.known_at<=requested.known_at
-              AND source.observation_time>=requested.range_start
-              AND (source.observation_time<requested.range_end OR (requested.include_end AND source.observation_time=requested.range_end))
-            ORDER BY requested.root_id,source.series_id,source.observation_key,source.revision LIMIT :limit
-        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1}).all()
+        # Resolve optional series expansion once, then share an exact routed
+        # observation range across roots with the same immutable scope. The
+        # code-owned reader derives physical storage days from conservative
+        # observation bounds, retains the sealed legacy relation, and refuses
+        # a directory horizon above 4,096 days. Adding one microsecond is exact
+        # for PostgreSQL timestamptz and preserves the resolver's inclusive end,
+        # including a zero-width inclusive request, without treating event or
+        # known-at dates as physical placement.
+        #
+        # The metadata sentinel bounds optional series expansion before any
+        # routed header read. Directory lookup and header selection remain in
+        # this one statement, so both use the same READ COMMITTED snapshot.
+        routed = session.execute(text("""
+            WITH requested AS (
+                SELECT * FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS item(
+                    root_id text,instrument_id text,fact_type text,series_id bigint,source_id bigint,
+                    root_commit bigint,known_at timestamptz,range_start timestamptz,range_end timestamptz,
+                    include_end boolean)
+            ), resolved AS MATERIALIZED (
+                SELECT requested.*,series.id AS resolved_series_id
+                FROM requested JOIN market.series AS series
+                  ON series.instrument_id=requested.instrument_id
+                 AND series.fact_type=requested.fact_type
+                 AND (requested.series_id IS NULL OR series.id=requested.series_id)
+                ORDER BY requested.root_id,series.id LIMIT :routing_limit
+            ), routing AS MATERIALIZED (
+                SELECT count(*)::bigint AS resolved_count FROM resolved
+            ), scopes AS MATERIALIZED (
+                SELECT resolved_series_id,fact_type,source_id,range_start,range_end,include_end,
+                       max(root_commit) AS max_root_commit,max(known_at) AS max_known_at
+                FROM resolved CROSS JOIN routing
+                WHERE routing.resolved_count<=:max_routing
+                  AND (range_start<range_end OR include_end)
+                GROUP BY resolved_series_id,fact_type,source_id,range_start,range_end,include_end
+            ), routed_sources AS MATERIALIZED (
+                SELECT scopes.resolved_series_id,scopes.fact_type,
+                       scopes.source_id AS scope_source_id,scopes.range_start,scopes.range_end,
+                       scopes.include_end,source.id,source.source_id,source.market_commit_seq,
+                       source.known_at,source.observation_time,source.observation_key,source.revision
+                FROM scopes CROSS JOIN LATERAL market.read_fact_headers_in_range(
+                    scopes.resolved_series_id,scopes.range_start,
+                    scopes.range_end + CASE WHEN scopes.include_end THEN interval '1 microsecond'
+                                             ELSE interval '0 microseconds' END
+                ) AS source
+                WHERE source.fact_type=scopes.fact_type
+                  AND (scopes.source_id IS NULL OR source.source_id=scopes.source_id)
+                  AND source.market_commit_seq<=scopes.max_root_commit
+                  AND source.known_at<=scopes.max_known_at
+            ), candidates AS MATERIALIZED (
+                SELECT resolved.root_id,source.id,source.resolved_series_id,
+                       source.observation_key,source.revision
+                FROM resolved JOIN routed_sources AS source
+                  ON source.resolved_series_id=resolved.resolved_series_id
+                 AND source.fact_type=resolved.fact_type
+                 AND source.scope_source_id IS NOT DISTINCT FROM resolved.source_id
+                 AND source.range_start=resolved.range_start AND source.range_end=resolved.range_end
+                 AND source.include_end=resolved.include_end
+                 AND source.market_commit_seq<=resolved.root_commit
+                 AND source.known_at<=resolved.known_at
+                ORDER BY resolved.root_id,source.resolved_series_id,
+                         source.observation_key,source.revision LIMIT :limit
+            )
+            SELECT candidates.root_id,candidates.id,false AS metadata,routing.resolved_count,
+                   candidates.resolved_series_id,candidates.observation_key,candidates.revision
+            FROM candidates CROSS JOIN routing
+            UNION ALL
+            SELECT NULL::text,NULL::text,true AS metadata,routing.resolved_count,
+                   NULL::bigint,NULL::text,NULL::bigint FROM routing
+            ORDER BY metadata,root_id,resolved_series_id,observation_key,revision
+        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1,
+                 "routing_limit": max_rows + 1, "max_routing": max_rows}).all()
+        metadata = [row for row in routed if row[2] is True]
+        if len(metadata) != 1:
+            raise RuntimeError("canonical_window_routing_metadata_invalid")
+        if metadata[0][3] > max_rows:
+            raise RuntimeError("canonical_window_routing_budget_exceeded: reduce archive page size")
+        found = [(row[0], row[1]) for row in routed if not row[2]]
         count += len(found)
         if count > max_rows:
             raise RuntimeError("canonical_window_source_budget_exceeded: reduce archive page size")

@@ -79,6 +79,34 @@ def test_every_revision_round_trips_with_exact_clocks_payloads_and_lineage(tmp_p
     assert pq.ParquetFile(encoded.path).metadata.row_group(0).column(0).compression == "ZSTD"
 
 
+
+def test_archive_phase_observer_reports_nested_io_boundaries_and_failures(tmp_path, history):
+    events = []
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    manifest = publish_canonical_fact_archive(
+        history, object_store=store, temporary_directory=tmp_path / "staging",
+        phase_observer=lambda phase, seconds, outcome: events.append((phase, seconds, outcome)),
+    )
+    assert read_canonical_fact_archive(store.local_path(manifest.object_key), expected=manifest) == tuple(history)
+    assert [event[0] for event in events] == [
+        "archive_encode_compress", "archive_staging_fsync_hash", "archive_staging_readback",
+        "archive_object_publish", "archive_publish_readback",
+    ]
+    assert all(seconds >= 0 and outcome == "completed" for _, seconds, outcome in events)
+
+    class FailingStore:
+        def put_verified(self, **_kwargs):
+            raise RuntimeError("injected publish failure")
+
+    events.clear()
+    with pytest.raises(RuntimeError, match="injected publish failure"):
+        publish_canonical_fact_archive(
+            history, object_store=FailingStore(), temporary_directory=tmp_path / "failed",
+            phase_observer=lambda phase, seconds, outcome: events.append((phase, seconds, outcome)),
+        )
+    assert events[-1][0] == "archive_object_publish" and events[-1][2] == "failed"
+    assert not (tmp_path / "failed").exists() or not any((tmp_path / "failed").iterdir())
+
 def test_source_page_verification_requires_every_exact_revision(tmp_path, history):
     encoded = encode_canonical_fact_archive(history, temporary_directory=tmp_path)
     verify_canonical_fact_archive_rows(iter(history), expected=encoded.manifest)

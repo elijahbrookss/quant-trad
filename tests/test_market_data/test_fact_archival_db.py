@@ -592,6 +592,45 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
     assert fixture.read() == fixture.before
 
 
+def test_canonical_dependency_batch_stop_rolls_back_every_page_catalog(
+        storage, tmp_path, monkeypatch):
+    from portal.backend.service.market.canonical_retention import CanonicalRetentionStopRequested
+
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=513)
+    wrote_canonical = False
+
+    def inserted(_conn, _cursor, statement, *_):
+        nonlocal wrote_canonical
+        if statement.startswith("INSERT INTO market.fact_archive_canonical_dependencies"):
+            wrote_canonical = True
+
+    def check_budget():
+        if wrote_canonical:
+            raise CanonicalRetentionStopRequested("injected stop after canonical dependency batch")
+
+    fixture.archive.check_budget = check_budget
+    event.listen(storage.database._engine, "after_cursor_execute", inserted)
+    try:
+        with pytest.raises(CanonicalRetentionStopRequested, match="injected stop"):
+            _acknowledge_alias_page(fixture)
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", inserted)
+        fixture.archive.check_budget = None
+    assert wrote_canonical
+    assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
+    with storage.database.session() as session:
+        for table in (
+            "fact_archive_manifests", "fact_archive_series", "fact_archive_material_aliases",
+            "fact_archive_dependencies", "fact_archive_canonical_dependencies",
+        ):
+            assert session.execute(text(f"SELECT count(*) FROM market.{table}")).scalar_one() == 0
+    objects = set(fixture.store.root.rglob("*.parquet"))
+    result = _acknowledge_alias_page(fixture)
+    assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
+    assert set(fixture.store.root.rglob("*.parquet")) == objects
+    assert fixture.read() == fixture.before
+
+
 @pytest.mark.parametrize("path", ["final_verification", "publication"])
 def test_expiration_query_batches_preserve_exact_keys_tail_and_cancellation(storage, tmp_path, monkeypatch, path):
     from portal.backend.service.storage.repos import market_lifecycle

@@ -629,14 +629,25 @@ limit; fuller pages do not enlarge the existing reader's budget or change the
 archive format. Acknowledged pages keep their bytes and cursor boundaries when
 the packing estimate changes, and subsequent publication resumes after them.
 Exact canonical hashes are checked before dependency resolution. The publisher
-also fits the complete causal source set before writing a new page. A typed
-source-byte preflight refusal halves the leading root-record prefix and retries
-under the same deadline and cancellation checks. It never trims a root's source
-revisions or advances past an unacknowledged root. A single root whose complete
-sources exceed the limit fails explicitly. SQL, corruption, scope and other
-admission errors propagate without a sizing retry. This changes only new page
-boundaries: existing objects, row/read ceilings, verification rules and schema
-remain unchanged. At most one prepared page survives between prefix steps.
+also fits the complete causal source set before writing a new page. Causal window
+selection expands optional series identities under the existing source-row bound,
+then asks the code-owned physical-day directory for observation-range overlaps in
+the same SQL statement as header selection. Inclusive endpoints, including a
+zero-width inclusive range, are adapted to the directory reader's half-open
+contract at PostgreSQL timestamp precision. The directory retains its sealed
+legacy-day fallback and refuses excessive horizons; absent, incomplete or
+incompatible directory infrastructure fails admission rather than reverting to
+an unbounded header scan. Event time and known-at time never stand in for physical
+placement. Every selected header is still rechecked against the individual root's
+series, source, fact family, commit and known-at clocks before bounded hydration.
+
+A typed source-byte preflight refusal halves the leading root-record prefix and
+retries under the same deadline and cancellation checks. It never trims a root's
+source revisions or advances past an unacknowledged root. A single root whose
+complete sources exceed the limit fails explicitly. SQL, corruption, scope and
+other admission errors propagate without a sizing retry. This changes only new
+page boundaries: existing objects, row/read ceilings, verification rules and
+schema remain unchanged. At most one prepared page survives between prefix steps.
 Smaller pages can increase catalogue size and final-verification cost; the
 existing page, object and byte ceilings still refuse excessive final work rather
 than increasing automatically. Object count and cumulative bytes bound raw
@@ -645,13 +656,25 @@ Publication, complete object read-back, and exact source-page verification
 precede an atomic catalog commit. A crash after publication but before commit
 leaves no acknowledged progress; retry reuses identical immutable bytes.
 
-Catalog publication flushes series, alias, raw-dependency and canonical-dependency
-rows in batches of at most 128 inside that same transaction. The existing
-statement deadline applies to each batch, and the run-budget/cancellation check
-runs between batches and after the final flush. A stop or failed batch rolls back
-the manifest and every catalog row together. Archive page size, file format,
-identity and foreign-key checks are unchanged. This bounds SQL work and improves
-cancellation opportunities; sustained HDD throughput still requires measurement.
+Catalog publication flushes series, alias and raw-dependency rows in batches of
+at most 128 inside that same transaction. Canonical-dependency rows use batches
+of at most 512; these fixed-width, page-owned identities were the measured
+high-statement-count catalog and do not share the alias write path. The existing
+statement deadline applies to every batch, and the run-budget/cancellation check
+runs between batches and after the final flush. A stop, constraint failure or
+failed batch rolls back the manifest and every catalog row together. Archive
+page size, file format, identity, duplicate and foreign-key checks are unchanged.
+This reduces successful-statement overhead without weakening atomic publication;
+sustained HDD throughput still requires matched-workload measurement.
+
+Stage logs record the complete call and transaction commit plus the source
+selection, payload validation, causal resolution, prefix preparation, dependency
+proof, encoding/compression, staging fsync/hash, staging readback, object publish,
+published-object readback, source-row verification, manifest and each catalog
+write. Nested totals are identified by phase name and must not be summed as
+independent wall time. Completed and failed phase outcomes use the same page/day
+identity. These timings are observation only: they do not change deadlines,
+cancellation, page admission, durable evidence or retry behavior.
 
 `fact_archive_material_aliases` indexes legacy typed material hashes retained in
 canonical provenance. Aliases are derived from verified page rows, not invented
@@ -1934,7 +1957,10 @@ global planner. Each interval remains an independent `stage_next_page`
 transaction and repeats the current partition lock, saved-policy witness,
 hot-window, archive admission, durable cursor, source/dependency and budget
 checks. Prepared source rows are reused only while their existing page key still
-matches durable state.
+matches durable state. Multiple prefix advances are not grouped into one
+transaction: existing counts do not establish commit time, while grouping would
+hold locks longer and needs separate cumulative interval, mapping, object, byte,
+elapsed-time, rollback and cancellation evidence before adoption.
 
 The loop stops immediately when the page is acknowledged or source is exhausted,
 and it does not begin another page without a fresh global plan. Cancellation,
