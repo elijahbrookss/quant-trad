@@ -551,7 +551,7 @@ def test_canonical_dependency_writes_finish_under_per_statement_limit_with_slow_
     acknowledged = _acknowledge_alias_page(fixture)
     manifest_id = acknowledged["manifest_id"]
     rows = [
-        {"fact_version_id": row["id"], "row_hash": "a" * 64}
+        {"fact_version_id": row.fact_version_id, "row_hash": "a" * 64}
         for row in fixture.before
     ]
     with storage.database.session() as session:
