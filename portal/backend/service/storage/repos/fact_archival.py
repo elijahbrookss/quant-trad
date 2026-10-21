@@ -26,6 +26,7 @@ from portal.backend.db import (
     MarketFactArchiveManifestRecord, MarketFactArchiveSeriesRecord,
     MarketFactArchiveDependencyRecord, MarketFactArchiveMaterialAliasRecord,
     MarketFactArchiveVerificationRecord,
+    MarketFactArchiveCanonicalDependencyRecord,
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
 
