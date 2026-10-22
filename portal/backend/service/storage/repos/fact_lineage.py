@@ -163,13 +163,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         ("manifests.definition_id = ANY(:position_definitions) "
          "AND manifests.session_id = ANY(:position_sessions) "
          "AND manifests.first_receive_ordinal<=:last_position "
-         "AND manifests.last_receive_ordinal>=:first_position "
-         "AND EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
-         "AS positions(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
-         "WHERE positions.definition_id=manifests.definition_id AND positions.session_id=mappings.session_id "
-         "AND positions.session_id=manifests.session_id AND positions.connection_epoch=manifests.connection_epoch "
-         "AND manifests.first_receive_ordinal<=positions.receive_ordinal AND manifests.last_receive_ordinal>=positions.receive_ordinal "
-         "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
+         "AND manifests.last_receive_ordinal>=:first_position",
          {"positions": json.dumps(positions),
           "position_definitions": sorted({item["definition_id"] for item in positions}),
           "position_sessions": sorted({item["session_id"] for item in positions}),
@@ -253,7 +247,32 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         bound_params = {} if query_bound_ids is None else {"bound_ids": sorted(query_bound_ids)}
         manifest_table = "market.raw_archive_manifests"
         manifest_cte = ""
-        if "requested_definitions" in params:
+        position_join = ""
+        if "positions" in params:
+            # Parse a large exact-position set once and let PostgreSQL hash-join
+            # it to the candidate mappings. A correlated recordset subquery was
+            # re-parsed beneath the mapping scan and could exceed the bounded
+            # statement timeout even though the same complete proof fits easily.
+            # DISTINCT is defensive; wanted already collapses identical witness
+            # keys, and one requested position must never multiply a placement.
+            manifest_cte = f"""WITH requested_positions AS MATERIALIZED (
+                SELECT DISTINCT * FROM jsonb_to_recordset(CAST(:positions AS jsonb))
+                    AS requested(definition_id text, session_id text,
+                                 connection_epoch bigint, receive_ordinal bigint)
+            ), candidate_manifests AS MATERIALIZED (
+                SELECT manifests.* FROM market.raw_archive_manifests AS manifests
+                WHERE {predicate} {bound_predicate}
+            )"""
+            manifest_table = "candidate_manifests"
+            position_join = """JOIN requested_positions AS positions
+                ON positions.definition_id=manifests.definition_id
+               AND positions.session_id=manifests.session_id
+               AND positions.session_id=mappings.session_id
+               AND positions.connection_epoch=manifests.connection_epoch
+               AND positions.connection_epoch=mappings.connection_epoch
+               AND positions.receive_ordinal=mappings.receive_ordinal"""
+            predicate = "TRUE"
+        elif "requested_definitions" in params:
             # Fence sparse manifest pruning before mappings are visited. Without
             # materialization PostgreSQL can apply the paired-scope predicate
             # after reading every mapping inside the much wider ordinal envelope.
@@ -269,6 +288,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                    mappings.raw_frame_sha256 AS mapped_frame_sha256
             FROM market.raw_archive_record_mappings AS mappings
             JOIN {manifest_table} AS manifests ON manifests.id=mappings.manifest_id
+            {position_join}
             WHERE {predicate} {bound_predicate} AND NOT EXISTS (
                 SELECT 1 FROM market.storage_lifecycle_events AS expired
                 WHERE expired.action='archive_expire' AND expired.event_type='completed'

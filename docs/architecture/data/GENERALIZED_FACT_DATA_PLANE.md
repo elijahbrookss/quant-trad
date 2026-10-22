@@ -1085,9 +1085,13 @@ The exact-position lookup supplies constant definition/session sets and the
 requested ordinal envelope to locate candidate manifests before their mappings.
 The full per-position definition, session, epoch and ordinal predicate still
 decides membership; range overlap cannot fill a missing raw row. Bound object
-selection, expiry exclusion and physical verification remain unchanged. This
-uses the existing manifest and mapping indexes without a schema change. An
-October 9 read-only plan probe reproduced a whole-mapping scan for one position;
+selection, expiry exclusion and physical verification remain unchanged. The bounded requested-position recordset is materialized once and joined
+directly to those candidate mappings. It is not a correlated subquery beneath
+the mapping scan, so a large exact page does not repeatedly evaluate the same
+position set. Requested positions are distinct, preserving one placement row
+per mapping. This uses the existing manifest and mapping indexes without a
+schema change. An October 9 read-only plan probe reproduced a whole-mapping scan
+for one position;
 the scope prefilter avoided it and returned its one match in 1.49 seconds under
 a two-second limit. That observation does not establish full-page throughput or
 a sustained cold-storage speedup.

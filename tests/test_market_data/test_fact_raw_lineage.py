@@ -133,9 +133,14 @@ def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_pa
         witness_manifest_ids={book["id"]: {"raw-manifest"}}, max_mapping_rows=2)
     assert set(refs) == {"raw-manifest"}
     record_params = next(params for _, params in session.calls if "ids" in params)
-    position_params = next(params for _, params in session.calls if "positions" in params)
+    position_sql, position_params = next(
+        (sql, params) for sql, params in session.calls if "positions" in params
+    )
     assert "bound_ids" not in record_params, "the trade witness must remain unrestricted"
     assert position_params["bound_ids"] == ["raw-manifest"]
+    assert "WITH requested_positions AS MATERIALIZED" in position_sql
+    assert "JOIN requested_positions AS positions" in position_sql
+    assert "EXISTS (SELECT 1 FROM jsonb_to_recordset" not in position_sql
 
 
 @pytest.mark.parametrize("ids", [["one"], ["one", 'quote"\\newline\n', "\u03b1\U0001f680"]])
