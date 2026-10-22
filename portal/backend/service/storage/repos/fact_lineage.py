@@ -247,8 +247,29 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         bound_params = {} if query_bound_ids is None else {"bound_ids": sorted(query_bound_ids)}
         manifest_table = "market.raw_archive_manifests"
         manifest_cte = ""
+        record_join = ""
         position_join = ""
-        if "positions" in params:
+        if "ids" in params:
+            # Treat the bounded witness identities as a relation instead of a
+            # very large scalar-array predicate. PostgreSQL can then join the
+            # primary mapping key directly, while an authoritative page binding
+            # restricts manifests before their mappings are visited. DISTINCT
+            # preserves ANY(array) set semantics; wanted retains every duplicate
+            # evidence witness for the later per-witness checks.
+            manifest_cte = """WITH requested_records AS MATERIALIZED (
+                SELECT DISTINCT requested.raw_record_id
+                FROM unnest(CAST(:ids AS text[])) AS requested(raw_record_id)
+            )"""
+            if query_bound_ids is not None:
+                manifest_cte += f""", candidate_manifests AS MATERIALIZED (
+                    SELECT manifests.* FROM market.raw_archive_manifests AS manifests
+                    WHERE TRUE {bound_predicate}
+                )"""
+                manifest_table = "candidate_manifests"
+            record_join = """JOIN requested_records AS records
+                ON records.raw_record_id=mappings.raw_record_id"""
+            predicate = "TRUE"
+        elif "positions" in params:
             # Parse a large exact-position set once and let PostgreSQL hash-join
             # it to the candidate mappings. A correlated recordset subquery was
             # re-parsed beneath the mapping scan and could exceed the bounded
@@ -290,6 +311,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                    mappings.raw_frame_sha256 AS mapped_frame_sha256
             FROM market.raw_archive_record_mappings AS mappings
             JOIN {manifest_table} AS manifests ON manifests.id=mappings.manifest_id
+            {record_join}
             {position_join}
             WHERE {predicate} {bound_predicate} AND NOT EXISTS (
                 SELECT 1 FROM market.storage_lifecycle_events AS expired

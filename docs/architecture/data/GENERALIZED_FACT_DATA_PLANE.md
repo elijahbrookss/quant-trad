@@ -1096,6 +1096,15 @@ the scope prefilter avoided it and returned its one match in 1.49 seconds under
 a two-second limit. That observation does not establish full-page throughput or
 a sustained cold-storage speedup.
 
+Exact record-ID lookup uses the same bounded-relational shape: requested IDs
+are materialized once, and an authoritative page binding narrows candidate
+manifests before their mappings are joined. This preserves exact primary-key
+membership, page bindings, expiry exclusion, mapping limits and physical byte
+verification. The change does not add an index or widen any timeout. It was
+introduced after one 50,000-row verification page exceeded the existing
+five-second statement limit; correctness tests and a complete natural cycle
+remain the release evidence, not the isolated timeout alone.
+
 RCA: the initial staging implementation reused a latest-by-material-hash lookup.
 Trade material hashes intentionally exclude delivery details. Two immutable
 revisions could therefore have identical trade values but different raw IDs;
