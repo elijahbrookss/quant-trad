@@ -270,6 +270,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                AND positions.session_id=mappings.session_id
                AND positions.connection_epoch=manifests.connection_epoch
                AND positions.connection_epoch=mappings.connection_epoch
+               AND manifests.first_receive_ordinal<=positions.receive_ordinal
+               AND manifests.last_receive_ordinal>=positions.receive_ordinal
                AND positions.receive_ordinal=mappings.receive_ordinal"""
             predicate = "TRUE"
         elif "requested_definitions" in params:

@@ -140,6 +140,8 @@ def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_pa
     assert position_params["bound_ids"] == ["raw-manifest"]
     assert "WITH requested_positions AS MATERIALIZED" in position_sql
     assert "JOIN requested_positions AS positions" in position_sql
+    assert "manifests.first_receive_ordinal<=positions.receive_ordinal" in position_sql
+    assert "manifests.last_receive_ordinal>=positions.receive_ordinal" in position_sql
     assert "EXISTS (SELECT 1 FROM jsonb_to_recordset" not in position_sql
 
 
