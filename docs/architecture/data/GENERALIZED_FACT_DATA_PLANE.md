@@ -596,8 +596,10 @@ interval. A successful nonterminal retry keeps a follow-through hint for that
 partition and cools for another `max_run_seconds` interval before its next
 priority run. Unrelated eligible days continue during every cooling interval,
 while the recovered partition cannot disappear behind a later cursor after a
-single page. The hint clears only when a fresh exact plan shows the partition
-has gone or the partition reaches `partition_reclaimed`/`already_reclaimed`.
+single page. The automatic follow-through hint clears only when a fresh exact
+plan shows the partition has gone or the partition reaches
+`partition_reclaimed`/`already_reclaimed`; an explicit manual-cursor run keeps
+its prior semantics and can clear the hint after successful nonterminal work.
 Every retry starts from a fresh plan, and a changed blocker delays rather than
 bypasses admission. The run result and supervisor snapshot expose retry age,
 failure-attempt count, reason and next-eligibility delay.

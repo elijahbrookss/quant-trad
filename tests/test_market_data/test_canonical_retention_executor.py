@@ -155,7 +155,6 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
     assert "canonical_retention_retry_cleared" in caplog.text
 
 
-
 def test_due_retry_keeps_partition_for_one_bounded_run_before_cooling(tmp_path, monkeypatch):
     executor, _ = _executor([
         _plan([_item()]),
