@@ -94,6 +94,8 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
         _plan([_item(day=DAY + timedelta(days=1))]),
         _plan([_item(day=DAY + timedelta(days=2))]),
         _plan([_item()]),
+        _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item("reclaim_partition")]),
     ])
     clock = [0.0]
     attempts = []
@@ -104,6 +106,8 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
         attempts.append(day)
         if day == DAY and attempts.count(DAY) == 1:
             raise RuntimeError("dependency batch timeout")
+        if day == DAY and attempts.count(DAY) == 3:
+            return {"status": "partition_reclaimed", "reclaimed_bytes": 4096}
         return {"status": "page_acknowledged"}
 
     monkeypatch.setattr(executor, "_execute_step", step)
@@ -120,6 +124,14 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
         retried = executor.run(
             policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
         )
+        clock[0] = 15.0
+        followthrough_cooling = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+        clock[0] = 20.0
+        completed = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
 
     assert failed["retry_schedule"] == [{
         "storage_day": DAY.isoformat(), "attempt_count": 1,
@@ -128,11 +140,55 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
     }]
     assert cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=2)).isoformat()
     assert retried["outcomes"][0]["storage_day"] == DAY.isoformat()
-    assert retried["retry_schedule"] == []
-    assert attempts == [DAY, DAY + timedelta(days=1), DAY + timedelta(days=2), DAY]
+    assert retried["retry_schedule"] == [{
+        "storage_day": DAY.isoformat(), "attempt_count": 1,
+        "reason": "partition_followthrough",
+        "age_seconds": 10.0, "next_eligible_in_seconds": 10.0,
+    }]
+    assert followthrough_cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=1)).isoformat()
+    assert completed["outcomes"][0]["status"] == "partition_reclaimed"
+    assert completed["retry_schedule"] == []
+    assert attempts == [DAY, DAY + timedelta(days=1), DAY + timedelta(days=2), DAY,
+                        DAY + timedelta(days=1), DAY]
     assert calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
-    assert caplog.text.count("canonical_retention_retry_selected") == 1
+    assert caplog.text.count("canonical_retention_retry_selected") == 2
     assert "canonical_retention_retry_cleared" in caplog.text
+
+
+
+def test_due_retry_keeps_partition_for_one_bounded_run_before_cooling(tmp_path, monkeypatch):
+    executor, _ = _executor([
+        _plan([_item()]),
+        _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item()]),
+        _plan([_item()]),
+    ])
+    clock = [0.0]
+    attempts = []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    def step(**kwargs):
+        day = date.fromisoformat(kwargs["item"]["storage_day"])
+        attempts.append(day)
+        if attempts == [DAY]:
+            raise RuntimeError("dependency batch timeout")
+        return {"status": "page_acknowledged"}
+
+    monkeypatch.setattr(executor, "_execute_step", step)
+    policy = CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=2, max_run_seconds=10,
+    )
+    executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    clock[0] = 10.0
+    retried = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+
+    assert [item["storage_day"] for item in retried["outcomes"]] == [DAY.isoformat()] * 2
+    assert retried["retry_schedule"] == [{
+        "storage_day": DAY.isoformat(), "attempt_count": 1,
+        "reason": "partition_followthrough",
+        "age_seconds": 10.0, "next_eligible_in_seconds": 10.0,
+    }]
+    assert attempts == [DAY, DAY + timedelta(days=1), DAY, DAY]
 
 
 def test_worker_restart_discards_retry_hint_and_resumes_from_committed_oldest_progress(

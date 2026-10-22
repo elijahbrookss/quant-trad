@@ -591,12 +591,16 @@ The worker retains only in-process **scheduling hints**, never an executable
 plan. It revisits a partially processed day and advances beyond a failed/busy
 day or fully blocked candidate page so later days are not starved. A failed or
 busy day enters a queue bounded by `max_candidate_partitions`; the oldest due
-entry gets at most one priority retry in a natural run after the existing
-`max_run_seconds` interval. Cooling entries are excluded from ordinary selection
-without excluding unrelated days. Every retry starts from a fresh plan, and a
-changed blocker delays rather than bypasses admission. Successful committed
-progress clears that day's hint. The run result and supervisor snapshot expose
-retry age, attempt count, reason and next-eligibility delay.
+entry gets one priority bounded run after the existing `max_run_seconds`
+interval. A successful nonterminal retry keeps a follow-through hint for that
+partition and cools for another `max_run_seconds` interval before its next
+priority run. Unrelated eligible days continue during every cooling interval,
+while the recovered partition cannot disappear behind a later cursor after a
+single page. The hint clears only when a fresh exact plan shows the partition
+has gone or the partition reaches `partition_reclaimed`/`already_reclaimed`.
+Every retry starts from a fresh plan, and a changed blocker delays rather than
+bypasses admission. The run result and supervisor snapshot expose retry age,
+failure-attempt count, reason and next-eligibility delay.
 
 A process restart loses these hints deliberately and restarts the bounded scan
 from its oldest committed PostgreSQL progress, so it cannot lose durable work or

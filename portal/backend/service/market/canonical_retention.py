@@ -235,6 +235,7 @@ class CanonicalFactRetentionExecutor:
         explicit_cursor = after_storage_day is not None
         retry_day = None
         retry_attempted = False
+        retry_followthrough = False
         if not explicit_cursor and self._retry_states:
             due = [state for state in self._retry_states.values()
                    if state.next_eligible_at <= started]
@@ -319,8 +320,11 @@ class CanonicalFactRetentionExecutor:
                         now=monotonic(), count_attempt=False,
                     )
             if item is None and not explicit_cursor:
-                candidates = [candidate for candidate in candidates
-                              if date.fromisoformat(candidate["storage_day"]) not in self._retry_states]
+                candidates = [
+                    candidate for candidate in candidates
+                    if date.fromisoformat(candidate["storage_day"]) not in self._retry_states
+                    or date.fromisoformat(candidate["storage_day"]) == retry_day
+                ]
             if not candidates:
                 next_day = plan["next_after_storage_day"]
                 cursor = date.fromisoformat(next_day) if next_day else None
@@ -358,7 +362,13 @@ class CanonicalFactRetentionExecutor:
                         status=result.get("status"))
                 if result["status"] in {"partition_reclaimed", "already_reclaimed"}:
                     cursor = day
-                self._clear_retry(day)
+                    self._clear_retry(day)
+                    if day == retry_day:
+                        retry_followthrough = False
+                elif day == retry_day and day in self._retry_states:
+                    retry_followthrough = True
+                else:
+                    self._clear_retry(day)
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
                             day, item["action"], result["status"])
             except CanonicalRetentionBudgetExceeded as exc:
@@ -371,6 +381,8 @@ class CanonicalFactRetentionExecutor:
                         day=day, reason=exc.stop_reason, policy=policy,
                         now=monotonic(), count_attempt=False,
                     )
+                    if day == retry_day:
+                        retry_followthrough = False
                 stop_reason = exc.stop_reason
                 break
             except MarketStorageLifecycleBusyError as exc:
@@ -381,6 +393,8 @@ class CanonicalFactRetentionExecutor:
                 self._schedule_retry(
                     day=day, reason="lifecycle_busy", policy=policy, now=monotonic(),
                 )
+                if day == retry_day:
+                    retry_followthrough = False
                 logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s", day, item["action"], exc)
                 cursor = day
             except Exception as exc:
@@ -402,6 +416,8 @@ class CanonicalFactRetentionExecutor:
                                 day=day, reason=budget.stop_reason, policy=policy,
                                 now=monotonic(), count_attempt=False,
                             )
+                            if day == retry_day:
+                                retry_followthrough = False
                         stop_reason = budget.stop_reason
                         logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s sqlstate=57014",
                                     day, item["action"], stop_reason)
@@ -414,6 +430,8 @@ class CanonicalFactRetentionExecutor:
                     self._schedule_retry(
                         day=day, reason="relation_busy", policy=policy, now=monotonic(),
                     )
+                    if day == retry_day:
+                        retry_followthrough = False
                     logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=relation_busy", day, item["action"])
                 else:
                     outcomes.append(retain_prerequisite_progress(
@@ -424,8 +442,15 @@ class CanonicalFactRetentionExecutor:
                         day=day, reason=f"{type(exc).__name__}:{sqlstate or 'none'}", policy=policy,
                         now=monotonic(),
                     )
+                    if day == retry_day:
+                        retry_followthrough = False
                     logger.exception("canonical_retention_step_failed | storage_day=%s action=%s", day, item["action"])
                 cursor = day
+        if retry_followthrough and retry_day in self._retry_states:
+            self._schedule_retry(
+                day=retry_day, reason="partition_followthrough", policy=policy,
+                now=monotonic(), count_attempt=False,
+            )
         self._cursor = cursor
         failures = sum(item["status"] == "failed" for item in outcomes)
         prerequisite_commits = sum(item.get("prerequisite_commit_count", 0) for item in outcomes)
