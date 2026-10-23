@@ -1339,9 +1339,11 @@ The frozen-Dataset pin audit has its own bounded PostgreSQL statement timeout,
 effective value is the minimum of that setting, the general canonical execution
 statement timeout and the remaining maintenance-run budget. Plans expose the
 configured policy value; reclamation results and structured start/finish logs
-expose the effective value. The audit materializes each relevant series/day
-header scope once and then reapplies every exact Dataset range and commit bound.
-Changing this timeout does not weaken pin checks or expand the handoff/run budget.
+expose the effective value. The audit materializes exact Dataset binding envelopes,
+deduplicates equal search envelopes, and stops each indexed series/time seek at
+the first header satisfying the original range and frozen-commit bounds. The
+final count still preserves every distinct Dataset binding. Changing this timeout
+does not weaken pin checks or expand the handoff/run budget.
 
 The disposable real-process scenario changes the saved recent window, pauses
 movement, resumes payload archival and header movement, and reads the same frozen

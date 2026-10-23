@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from portal.backend.service.storage.repos.fact_reclamation import (
-    FactReclamationLimits, PostgresCanonicalFactReclamationRepository, unproven_reclamation_fact_types,
+    _PINNED_RANGES_QUERY, FactReclamationLimits,
+    PostgresCanonicalFactReclamationRepository, unproven_reclamation_fact_types,
 )
 
 
@@ -105,6 +106,18 @@ def test_reclamation_timeout_defaults_and_upper_bounds():
     assert FactReclamationLimits(max_handoff_seconds=60).max_handoff_seconds == 60
     with pytest.raises(ValueError, match="field=max_handoff_seconds"):
         FactReclamationLimits(max_handoff_seconds=61)
+
+
+def test_pin_audit_uses_one_exact_seek_per_unique_binding_envelope():
+    sql = " ".join(str(_PINNED_RANGES_QUERY).split())
+    assert "search_ranges AS MATERIALIZED" in sql
+    assert "GROUP BY series_id, first_observation_at, last_observation_at, range_end, max_commit_seq" in sql
+    assert "CROSS JOIN LATERAL" in sql
+    assert "versions.storage_day=:day" in sql
+    assert "versions.observation_time<ranges.range_end" in sql
+    assert "versions.market_commit_seq<=ranges.max_commit_seq" in sql
+    assert "LIMIT 1" in sql
+    assert "day_versions AS MATERIALIZED" not in sql
 
 
 

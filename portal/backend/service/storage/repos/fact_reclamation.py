@@ -53,29 +53,37 @@ _PINNED_RANGES_QUERY = text("""
         WHERE pages.storage_day=:day AND bounds.first_observation_at<pins.range_end
           AND bounds.last_observation_at>=pins.range_start
         GROUP BY pins.dataset_id, pins.series_id, pins.range_start, pins.range_end, pins.max_commit_seq
-    ), candidate_series AS MATERIALIZED (
-        SELECT series_id, min(first_observation_at) AS first_observation_at,
-               max(last_observation_at) AS last_observation_at,
-               max(max_commit_seq) AS max_commit_seq
-        FROM candidates GROUP BY series_id
-    ), day_versions AS MATERIALIZED (
-        SELECT versions.series_id, versions.observation_time, versions.market_commit_seq
-        FROM candidate_series AS scope
-        JOIN market.fact_versions AS versions ON versions.series_id=scope.series_id
-          AND versions.storage_day=:day
-          AND versions.observation_time>=scope.first_observation_at
-          AND versions.observation_time<=scope.last_observation_at
-          AND versions.market_commit_seq<=scope.max_commit_seq
-    ), matched AS (
-        SELECT DISTINCT pins.dataset_id, pins.series_id, pins.range_start, pins.range_end
-        FROM candidates AS pins
-        JOIN day_versions AS versions ON versions.series_id=pins.series_id
-          AND versions.observation_time>=pins.first_observation_at
-          AND versions.observation_time<=pins.last_observation_at
-          AND versions.observation_time<pins.range_end
-          AND versions.market_commit_seq<=pins.max_commit_seq
+    ), search_ranges AS MATERIALIZED (
+        SELECT series_id, first_observation_at, last_observation_at,
+               range_end, max_commit_seq
+        FROM candidates
+        GROUP BY series_id, first_observation_at, last_observation_at,
+                 range_end, max_commit_seq
+    ), matched_ranges AS MATERIALIZED (
+        SELECT ranges.series_id, ranges.first_observation_at,
+               ranges.last_observation_at, ranges.range_end,
+               ranges.max_commit_seq
+        FROM search_ranges AS ranges
+        CROSS JOIN LATERAL (
+            SELECT 1
+            FROM market.fact_versions AS versions
+            WHERE versions.storage_day=:day
+              AND versions.series_id=ranges.series_id
+              AND versions.observation_time>=ranges.first_observation_at
+              AND versions.observation_time<=ranges.last_observation_at
+              AND versions.observation_time<ranges.range_end
+              AND versions.market_commit_seq<=ranges.max_commit_seq
+            LIMIT 1
+        ) AS matched
     )
-    SELECT count(*) FROM matched
+    SELECT count(*)
+    FROM candidates AS pins
+    JOIN matched_ranges AS matched
+      ON matched.series_id=pins.series_id
+     AND matched.first_observation_at=pins.first_observation_at
+     AND matched.last_observation_at=pins.last_observation_at
+     AND matched.range_end=pins.range_end
+     AND matched.max_commit_seq=pins.max_commit_seq
 """)
 
 _RECLAIM_ELIGIBILITY_FAMILIES_QUERY = text(
@@ -188,10 +196,10 @@ class PostgresCanonicalFactReclamationRepository:
         # headers and their complete cold payloads survive, so no pinned range
         # is subtracted from the source. Count overlapping bindings for audit.
         # Both callers have just checked complete partition/catalog evidence.
-        # Materialize the exact binding envelopes, then read each relevant
-        # series/day header scope once. The final distinct join retains the
-        # Dataset binding primary key and reapplies every exact range/commit
-        # predicate; it only removes the former per-binding header rescans.
+        # Materialize exact binding envelopes, deduplicate identical search
+        # envelopes, then stop each indexed series/time seek at its first exact
+        # eligible header. The final join counts every distinct Dataset binding
+        # while avoiding a full materialized scan of each candidate series/day.
         # Bounds can contain gaps; the header, placement day, exclusive range
         # end and frozen commit checks remain exact. The page's last clock is
         # inclusive and is not a substitute for the binding's exclusive end.
