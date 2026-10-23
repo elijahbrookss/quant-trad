@@ -3,7 +3,7 @@ component: adr-frozen-candle-derivation
 subsystem: data
 layer: decision
 doc_type: adr
-status: accepted
+status: historical
 tags:
   - candles
   - provenance
@@ -18,6 +18,16 @@ code_paths:
   - cli/main.py
 ---
 # ADR 0074: Derive coarser candles from explicit frozen source snapshots
+
+## Source policy amendment 2026 10 17
+
+This decision is historical compatibility for retained derived evidence. The
+user-selected policy for new candle inputs is provider-native candles at the
+requested timeframe, frozen directly. Do not aggregate, split/upsample or
+synthesize candles for new research. Preserve the original transformation,
+lineage, limits and results below for historical inspection/reproduction; do
+not relabel old derived data as native. No converter behavior is changed by
+this documentation amendment.
 
 ## Context
 

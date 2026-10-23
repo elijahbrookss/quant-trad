@@ -92,6 +92,8 @@ respect.
 | [0064](0064-use-one-code-owned-collector-operations-contract.md) | Use one code-owned Collector Operations contract | Accepted |
 | [0065](0065-use-explicit-frozen-check-admission-for-new-research-observations.md) | Use explicit frozen-Check admission for new Research Observations | Accepted |
 | [0066](0066-scale-validation-to-consequence-and-trust-boundaries.md) | Scale validation to consequence and trust boundaries | Accepted |
-| [0074](0074-derive-candles-from-frozen-source-snapshots.md) | Derive coarser candles from explicit frozen source snapshots | Accepted |
+| [0074](0074-derive-candles-from-frozen-source-snapshots.md) | Derive coarser candles from explicit frozen source snapshots | Historical compatibility |
 | [0077](0077-retain-legacy-headers-during-forward-cutover.md) | Retain legacy headers during a forward cutover | Draft; implementation and production qualification pending |
 | [0078](0078-evolve-research-within-existing-data-boundaries.md) | Bound migrations and preserve compatible research | Accepted direction; implementation and qualification in progress |
+
+| [0080](0080-use-ephemeral-fresh-row-handoff-witnesses.md) | Use ephemeral fresh-row handoff witnesses | Draft; qualification pending |

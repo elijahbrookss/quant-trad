@@ -34,6 +34,17 @@ Typed output categories include `context`, `metric`, and `signal`.
 - Use `ready=False` when an output is not usable yet.
 - Fail loudly when required state or dependencies are invalid.
 
+## Shared observability
+
+Use the engine's common guard timings, size warnings and controlled-execution
+meter; do not implement a separate timer or payload-size tracker for each
+Indicator. Component-specific inspection belongs in `runtime_diagnostics`,
+source diagnostics or typed `RuntimeDetail`, alongside the common observations.
+Report only known structural counts without scanning/serializing payloads for
+metrics. Wall time is not CPU attribution, and process RSS is not Indicator
+memory. See [the shared execution rule](../architecture/decisions/0082-separate-historical-custody-from-active-research.md#shared-execution-observability)
+for phase scopes, failure reporting and unavailable sizes.
+
 ## Testing Expectations
 
 Add focused tests for:

@@ -7,15 +7,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.execution_control import execution_checkpoint
+from indicators.config import IndicatorExecutionContext
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
     MarketDataRequirement,
+    record_effective_time as canonical_record_effective_time,
 )
 from market_data.acquisition_coverage import (
-    missing_complete_coverage,
+    missing_recorded_coverage,
     normalize_acquisition_coverage,
 )
 from market_data.fact_registry import get_fact_contract
@@ -41,6 +43,7 @@ from portal.backend.service.market.frozen_dataset_service import (
     candle_selection_times,
     matching_source_identity_keys,
     matching_source_keys,
+    read_requirement_records,
 )
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
@@ -167,6 +170,11 @@ def _record_time(record: Any) -> datetime:
         or getattr(fact, "observation_time", None)
         or getattr(fact, "effective_at", None)
     )
+    if value is None:
+        try:
+            value = canonical_record_effective_time(record)
+        except TypeError as exc:
+            raise ValueError("check_requirement_plan_invalid: record.time is required") from exc
     return _utc(value, field="record.time")
 
 
@@ -284,7 +292,7 @@ def _coverage_for_requirement(
             as_of_commit_seq=as_of_commit_seq, source_identity_keys=requested_source_keys,
         )
         candle_selection = inspect_candles(**selection_args) if callable(inspect_candles) else None
-        records = [] if candle_selection is not None else list(store.read_series_records(**selection_args))
+        records = [] if candle_selection is not None else read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
         if policy_mode == "current":
             selected_source_keys: tuple[str, ...] = ()
         elif policy_mode == "exact" and requested_source_keys:
@@ -300,7 +308,7 @@ def _coverage_for_requirement(
                 if candle_selection is not None:
                     candle_selection = inspect_candles(**selection_args)
                 else:
-                    records = list(store.read_series_records(**selection_args))
+                    records = read_requirement_records(store, fact_type=str(requirement["fact_type"]), **selection_args)
             records_by_series[int(candidate["series_id"])] = records
             if candle_selection is not None:
                 candle_selections[int(candidate["series_id"])] = candle_selection
@@ -377,11 +385,12 @@ def _coverage_for_requirement(
                     end=_utc(requirement["required_end"], field="required_end"),
                 )
             )
-            uncovered_ranges = missing_complete_coverage(
+            uncovered_ranges = missing_recorded_coverage(
                 start=requirement["required_start"],
                 end=requirement["required_end"],
                 source_identity_keys=tuple(sorted(resolved_source_keys)),
                 coverage=coverage,
+                allow_partial=requirement.get("coverage_policy") == "recorded_partial",
             )
             acquisition_coverage_proves_range = bool(resolved_source_keys) and not (
                 uncovered_ranges
@@ -456,12 +465,30 @@ def plan_research_check(
 ) -> ResolvedCheckPlan:
     """Resolve explicit and transitive Check inputs without acquiring providers."""
 
-    scope = dict(request.scope)
-    instrument_loader = instrument_loader or instrument_service.get_instrument_record
     evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
-    declaration = dict(
-        evaluator.declare_requirements(definition=definition, request=request)
+    declaration = dict(evaluator.declare_requirements(definition=definition, request=request))
+    return _plan_research_check_from_declaration(
+        definition, request, declaration=declaration, store=store,
+        indicator_planner=indicator_planner, instrument_loader=instrument_loader,
+        inspect_coverage=inspect_coverage, require_durable_sources=require_durable_sources,
     )
+
+
+def _plan_research_check_from_declaration(
+    definition: CheckDefinition,
+    request: CheckRequest,
+    *,
+    declaration: Mapping[str, Any],
+    store: MarketDataStore = market_data_repo,
+    indicator_planner: Callable[..., Mapping[str, Any]] = plan_runtime_requirements_for_indicators,
+    instrument_loader: Callable[[str], Mapping[str, Any]] | None = None,
+    inspect_coverage: bool = True,
+    require_durable_sources: bool = False,
+) -> ResolvedCheckPlan:
+    """Shared plan arithmetic; caller owns admission of the declaration."""
+    scope = dict(request.scope)
+    declaration = dict(declaration)
+    instrument_loader = instrument_loader or instrument_service.get_instrument_record
     durable_sources = request.mode == CHECK_MODE_EVIDENCE or bool(
         require_durable_sources
     )
@@ -545,6 +572,15 @@ def plan_research_check(
         start=_iso(evaluation_start),
         end=_iso(evaluation_end + timedelta(seconds=outcome_tail_seconds)),
         param_overrides_by_id=override_map,
+        execution_context=IndicatorExecutionContext(
+            instrument_id=instrument_id,
+            symbol=_instrument.get("symbol") or scope.get("symbol"),
+            datasource=_instrument.get("datasource") or scope.get("datasource"),
+            exchange=_instrument.get("exchange") or scope.get("exchange"),
+            start=_iso(evaluation_start),
+            end=_iso(evaluation_end + timedelta(seconds=outcome_tail_seconds)),
+            interval=timeframe,
+        ),
     )
     warmup_bars = max(warmup_bars, int(indicator_plan.get("warmup_bars") or 0))
     materialization_start = evaluation_start - timedelta(
@@ -564,7 +600,8 @@ def plan_research_check(
             "alignment": "exact_interval",
             "max_staleness_seconds": None,
             "known_at_required": True,
-            "required_fields": ["open", "high", "low", "close", "known_at"],
+            "required_fields": list(declaration.get("primary_candle_required_fields") or
+                ["open", "high", "low", "close", "known_at"]),
             "series_required": True,
             "frame_missing_policy": "indicator_owned",
             "source_policy": {
@@ -641,10 +678,21 @@ def plan_research_check(
         )
         if requirement.key in feature_predecessor_aliases:
             lookback_seconds += max(lookback_seconds, timeframe_seconds)
+        complete_paired = declaration.get("input_coverage_policy") == "complete_paired_rows"
+        bounded_history = declaration.get("fact_history_boundary") == "evaluation_range"
+        if bounded_history and (requirement.lookback_seconds or requirement.lookback_bars
+                or feature_window_seconds or requirement.key in feature_predecessor_aliases):
+            raise ValueError("check_requirement_plan_invalid: evaluation-bounded Fact history cannot request external lookback")
+        if complete_paired or bounded_history:
+            # Owned in-scope histories do not sample a predecessor outside the window.
+            # Completed-bucket snapshots at each primary close need the matching
+            # evaluation bucket, never a staleness-based predecessor interval.
+            lookback_seconds = 0
         requirements.append(
             {
                 **resolved_series.to_dict(),
                 "alias": requirement.key,
+                **({"coverage_policy": "recorded_partial"} if complete_paired else {}),
                 "consumer_id": "check",
                 "instrument_id": resolved_series.instrument_id,
                 "series_required": bool(raw.get("series_required", True)),
@@ -774,6 +822,7 @@ def rederive_research_check_plan_from_pinned_inputs(
     persisted_plan: ResolvedCheckPlan,
     *,
     subject_snapshots: Mapping[str, Mapping[str, Any]],
+    historical_execution: Mapping[str, Any] | None = None,
 ) -> ResolvedCheckPlan:
     """Rebuild plan semantics without consulting mutable Indicator/instrument rows."""
 
@@ -810,9 +859,12 @@ def rederive_research_check_plan_from_pinned_inputs(
             )
         return dict(snapshot)
 
-    return plan_research_check(
+    planner = plan_research_check if historical_execution is None else _plan_research_check_from_declaration
+    declaration_kwargs = {} if historical_execution is None else {"declaration": historical_execution}
+    return planner(
         definition,
         request,
+        **declaration_kwargs,
         indicator_planner=pinned_indicator_planner,
         instrument_loader=pinned_instrument_loader,
         inspect_coverage=False,

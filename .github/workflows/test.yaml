@@ -1,6 +1,15 @@
 name: Tests with Coverage
 
+permissions:
+  contents: read
+
 on:
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: 'Run complete qualification (work branches included)'
+        type: boolean
+        default: true
   push:
     branches: [develop, main, 'feature/**', 'hotfix/**']
   pull_request:
@@ -9,10 +18,63 @@ on:
 # Keep the final integrated work-branch run; preserve develop/main run behavior.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/') }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/hotfix/') || (github.event_name == 'pull_request' && (startsWith(github.head_ref, 'feature/') || startsWith(github.head_ref, 'hotfix/'))) }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      plan: ${{ steps.select.outputs.plan }}
+      docs: ${{ steps.select.outputs.docs }}
+      pr-suite: ${{ steps.select.outputs.pr-suite }}
+      frontend: ${{ steps.select.outputs.frontend }}
+      deployment-contract: ${{ steps.select.outputs.deployment-contract }}
+      deployment-rehearsal: ${{ steps.select.outputs.deployment-rehearsal }}
+      clean-database-bootstrap: ${{ steps.select.outputs.clean-database-bootstrap }}
+      committed-recovery: ${{ steps.select.outputs.committed-recovery }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: select
+        env:
+          QT_CI_INTEGRATION_REF: origin/develop
+        run: python3 scripts/ci/ci_impact.py
+
+  docs:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --no-deps -r requirements.lock
+      - run: |
+          python scripts/docs/build_architecture_index.py --check
+          QT_OMIT_DB_TESTS=1 python -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_documentation_integrity.py tests/contract/test_platform_glossary.py
+
+  ci-required:
+    if: ${{ always() }}
+    needs: [changes, docs, pr-suite, frontend, deployment-contract, deployment-rehearsal, clean-database-bootstrap, committed-recovery]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Enforce computed required checks
+        env:
+          QT_CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/ci_impact.py --gate
+
   committed-recovery:
+    needs: changes
+    if: ${{ needs.changes.outputs['committed-recovery'] == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -24,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -131,11 +194,15 @@ jobs:
           retention-days: 7
 
   pr-suite:
+    needs: changes
+    if: ${{ needs.changes.outputs['pr-suite'] == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -154,11 +221,15 @@ jobs:
         run: ./scripts/ci/run_test_suite.sh pr
 
   frontend:
+    needs: changes
+    if: ${{ needs.changes.outputs['frontend'] == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -173,21 +244,25 @@ jobs:
       - name: Test and build production frontend
         run: make frontend-check
 
-  deployment-contract:
+  deployment-proof-build:
+    needs: changes
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
     runs-on: ubuntu-latest
-    # Online proofs take ~33 minutes; retain room for the separately bounded
-    # 40-minute operator rehearsal, image builds and runtime checks.
-    timeout-minutes: 90
-
+    timeout-minutes: 20
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Generate disposable operator environment
         env:
-          QT_SINGLE_NODE_ENV_FILE: ${{ github.workspace }}/secrets.env
-        run: bash scripts/automation/server_deploy.sh init-env
-
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
       - name: Validate shell and Compose contracts
         run: |
           bash -n scripts/automation/server_deploy.sh
@@ -201,16 +276,14 @@ jobs:
           export QT_RELEASE_REVISION="$revision"
           export QT_SOURCE_TREE_HASH="$tree_hash"
           docker compose \
-            --env-file secrets.env \
+            --env-file "$QT_SINGLE_NODE_ENV_FILE" \
             --file docker/docker-compose.server.yml \
             config --quiet
-
-      - name: Prove Grafana email notification path
-        run: bash scripts/ci/test_grafana_email_alerting.sh
-
-      - name: Prove physical storage alert queries and thresholds
-        run: python3 scripts/ci/test_storage_alerts.py
-
+          docker compose \
+            --env-file "$QT_SINGLE_NODE_ENV_FILE" \
+            --file docker/docker-compose.server.yml \
+            --file docker/docker-compose.clock-health.yml \
+            config --quiet
       - name: Build production images with source attestation
         run: |
           revision="$(git rev-parse HEAD)"
@@ -222,102 +295,317 @@ jobs:
           export QT_RELEASE_REVISION="$revision"
           export QT_SOURCE_TREE_HASH="$tree_hash"
           docker compose \
-            --env-file secrets.env \
+            --env-file "$QT_SINGLE_NODE_ENV_FILE" \
             --file docker/docker-compose.server.yml \
             build tsdb backend frontend frontend-v2
-
-      - name: Prove production worker encrypted pairing and dependency retirement
+      - name: Build shared attested proof runtimes
         run: |
           revision="$(git rev-parse HEAD)"
-          tree_hash="$(python3 scripts/provenance/source_tree_hash.py --root . --git-revision "$revision")"
-          docker build --file portal/backend/Dockerfile --target production \
-            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
-            --tag qt-terminal-runtime-proof .
-          docker run --rm --network none --read-only --user 70:70 --cpus 1 --memory 512m --pids-limit 64 \
-            --cap-drop ALL --security-opt no-new-privileges --env QT_DISABLE_DOTENV=1 \
-            --entrypoint python qt-terminal-runtime-proof -c \
-            "from scripts.automation.storage_online_terminal import worker_main; from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK; print('production terminal imports available')"
-          docker build --file portal/backend/Dockerfile --target storage-test \
-            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
-            --tag qt-incremental-runtime-proof .
-          docker run --rm --network none --user postgres --cpus 2 --memory 512m --pids-limit 64 \
-            --cap-drop ALL --security-opt no-new-privileges \
-            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
-            qt-incremental-runtime-proof \
-            python -m pytest -q tests/test_market_data/test_incremental_recovery.py \
-            -o cache_dir=/tmp/qt-incremental-output-pytest-cache
-          docker run --rm --network none --user postgres --cpus 2 --memory 2g --pids-limit 128 \
-            --cap-drop ALL --security-opt no-new-privileges \
-            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
-            qt-incremental-runtime-proof \
-            python /app/scripts/ci/rehearse_incremental_runtime.py \
-            --pg-bin /usr/lib/postgresql/15/bin --pgbackrest /usr/local/bin/pgbackrest \
-            --restic /usr/local/bin/restic
-
-      - name: Prove online worker reads legacy archives without changing ownership
-        run: python3 scripts/ci/rehearse_online_worker.py --image qt-incremental-runtime-proof
-      - name: Prove confined online worker launch and refusal
-        run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
-
-      - name: Prove retired key inspection handoff and bounded preparation recovery
+          tree_hash="$(python3 scripts/provenance/source_tree_hash.py --git-revision "$revision")"
+          for target in production storage-test; do
+            tag=qt-terminal-runtime-proof
+            if [[ "$target" == storage-test ]]; then tag=qt-incremental-runtime-proof; fi
+            docker build --file portal/backend/Dockerfile --target "$target" \
+              --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" --tag "$tag" .
+          done
+          docker pull timescale/timescaledb:2.14.2-pg15
+          python3 scripts/ci/deployment_proofs.py pack --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Preserve source-bound proof images and exact node plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+  deployment-proof-alerts:
+    needs:
+      - changes
+      - deployment-proof-build
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Generate disposable operator environment
         env:
-          QT_DISABLE_DOTENV: "1"
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
         run: |
-          mkdir -p "$RUNNER_TEMP/qt-forward-keys"
-          history_root="$(mktemp -d "$RUNNER_TEMP/qt-forward-keys-history.XXXXXX")"
-          # Separate disposable filesystem; the tiny fixture must exercise placement.
-          # This is a ceiling, not a reservation or a production capacity claim.
-          sudo mount -t tmpfs -o "size=6G,nosuid,nodev,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$history_root"
-          trap 'sudo umount "$history_root"' EXIT
-          python3 -m venv "$RUNNER_TEMP/qt-storage-operator-python"
-          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip install --no-deps -r requirements.lock
-          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" -m pip check
-          "$RUNNER_TEMP/qt-storage-operator-python/bin/python" scripts/ci/rehearse_online_prepared.py \
-            --image qt-incremental-runtime-proof \
-            --database-image quanttrad-postgres:2.14.2-pg15 \
-            --output-root "$RUNNER_TEMP/qt-forward-keys" \
-            --history-parent "$history_root" --require-distinct-devices \
-            --prepare-source --worker-phases --initial-capture \
-            --terminal-cancellation --terminal-image qt-terminal-runtime-proof \
-            --forward-package-image qt-terminal-runtime-proof \
-            --forward-keys --forward-worker --forward-retirement --forward-operation --forward-retirement-recovery
-
-      - name: Prove interrupted initial storage preparation and source resumption
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images
+      - name: Verify and load exact proof image IDs
+        run: python3 scripts/ci/deployment_proofs.py load --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Run complete isolated proof group
         env:
-          QT_STORAGE_TEST_CLIENT_IMAGE: qt-incremental-runtime-proof
-        run: python3 scripts/ci/test_storage_database_preparation.py --online-source
-
-      - name: Prove encrypted restore through actual QT current and frozen readers
-        run: ./scripts/ci/run_test_suite.sh incremental-recovery
-
-      - name: Prove packaged retained raw placement through encrypted restore
-        run: ./scripts/ci/run_test_suite.sh incremental-recovery tests/test_market_data/test_incremental_raw_placement_db.py -s -o cache_dir=/tmp/qt-incremental-raw-pytest-cache
-
-      - name: Prove bounded online copy and protected exact switch with concurrent intake
-        run: ./scripts/ci/run_test_suite.sh storage-demo tests/test_market_data/test_storage_end_to_end_db.py tests/test_market_data/test_fact_header_copy_placement_db.py tests/test_market_data/test_raw_mapping_copy_db.py tests/test_market_data/test_fact_header_forward_adoption_db.py tests/test_market_data/test_fact_header_online_prepare_db.py tests/test_market_data/test_fact_header_online_db.py tests/test_market_data/test_fact_header_online_proof_db.py tests/test_market_data/test_archive_online_copy_db.py tests/test_market_data/test_fact_header_online_references_db.py tests/test_market_data/test_fact_header_cancel_db.py tests/test_market_data/test_storage_online_controller_db.py tests/test_market_data/test_storage_online_collector_drain_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_worker_initialization_owns_clock_and_atomic_commit tests/test_market_data/test_fact_header_forward_handoff_db.py tests/test_market_data/test_archive_forward_copy_db.py::test_forward_archives_preserve_canceled_work_and_fence_final_switch[retain_raw] tests/test_market_data/test_raw_mapping_history_placement_db.py
-
-      - name: Recreate actual QT core on disposable storage without provider egress
-        run: python3 scripts/ci/test_server_core_recreation.py
-
-      - name: Prove fixed SSD/HDD runtime and held preserving cutover
+          QT_PROOF_GROUP: alerts
+        run: python3 scripts/ci/deployment_proofs.py run --root "$RUNNER_TEMP/deployment-proof-images" --group "$QT_PROOF_GROUP"
+          --evidence "$RUNNER_TEMP/proof-evidence/$QT_PROOF_GROUP"
+      - name: Preserve complete or partial proof diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-proof-result-alerts-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+  deployment-proof-lifecycle:
+    needs:
+      - changes
+      - deployment-proof-build
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Generate disposable operator environment
+        env:
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
         run: |
-          python3 scripts/ci/test_server_core_recreation.py --storage-layout
-          docker pull python:3.12.3-slim
-          revision="$(git rev-parse HEAD)"
-          python3 scripts/ci/test_storage_database_preparation.py \
-            --runtime-images qt-incremental-runtime-proof \
-            "quanttrad-frontend:$revision" "quanttrad-frontend-v2:$revision"
-
-  deployment-rehearsal:
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images
+      - name: Verify and load exact proof image IDs
+        run: python3 scripts/ci/deployment_proofs.py load --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Run complete isolated proof group
+        env:
+          QT_PROOF_GROUP: lifecycle
+        run: python3 scripts/ci/deployment_proofs.py run --root "$RUNNER_TEMP/deployment-proof-images" --group "$QT_PROOF_GROUP"
+          --evidence "$RUNNER_TEMP/proof-evidence/$QT_PROOF_GROUP"
+      - name: Preserve complete or partial proof diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-proof-result-lifecycle-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+  deployment-proof-restore:
+    needs:
+      - changes
+      - deployment-proof-build
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Generate disposable operator environment
+        env:
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images
+      - name: Verify and load exact proof image IDs
+        run: python3 scripts/ci/deployment_proofs.py load --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Run complete isolated proof group
+        env:
+          QT_PROOF_GROUP: restore
+        run: python3 scripts/ci/deployment_proofs.py run --root "$RUNNER_TEMP/deployment-proof-images" --group "$QT_PROOF_GROUP"
+          --evidence "$RUNNER_TEMP/proof-evidence/$QT_PROOF_GROUP"
+      - name: Preserve complete or partial proof diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-proof-result-restore-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+  deployment-proof-core:
+    needs:
+      - changes
+      - deployment-proof-build
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Generate disposable operator environment
+        env:
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images
+      - name: Verify and load exact proof image IDs
+        run: python3 scripts/ci/deployment_proofs.py load --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Run complete isolated proof group
+        env:
+          QT_PROOF_GROUP: core
+        run: python3 scripts/ci/deployment_proofs.py run --root "$RUNNER_TEMP/deployment-proof-images" --group "$QT_PROOF_GROUP"
+          --evidence "$RUNNER_TEMP/proof-evidence/$QT_PROOF_GROUP"
+      - name: Preserve complete or partial proof diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-proof-result-core-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+  deployment-proof-online:
+    needs:
+      - changes
+      - deployment-proof-build
+    if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Generate disposable operator environment
+        env:
+          QT_SINGLE_NODE_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          QT_SERVER_ENV_FILE: ${{ runner.temp }}/qt-disposable-operator/qt-disposable.env
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          printf 'QT_SINGLE_NODE_ENV_FILE=%s\nQT_SERVER_ENV_FILE=%s\nTMPDIR=%s\n' \
+            "$QT_SINGLE_NODE_ENV_FILE" "$QT_SERVER_ENV_FILE" "$TMPDIR" >> "$GITHUB_ENV"
+          install -d -m 0700 "$RUNNER_TEMP/qt-disposable-operator"
+          bash scripts/automation/server_deploy.sh init-env
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images
+      - name: Verify and load exact proof image IDs
+        run: python3 scripts/ci/deployment_proofs.py load --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Run complete isolated proof group
+        env:
+          QT_PROOF_GROUP: online-${{ matrix.shard }}
+        run: python3 scripts/ci/deployment_proofs.py run --root "$RUNNER_TEMP/deployment-proof-images" --group "$QT_PROOF_GROUP"
+          --evidence "$RUNNER_TEMP/proof-evidence/$QT_PROOF_GROUP"
+      - name: Preserve complete or partial proof diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-proof-result-online-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard:
+          - 0
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+  deployment-contract:
+    needs:
+      - changes
+      - deployment-proof-build
+      - deployment-proof-alerts
+      - deployment-proof-lifecycle
+      - deployment-proof-restore
+      - deployment-proof-core
+      - deployment-proof-online
+    if: ${{ always() && needs.changes.outputs['deployment-contract'] == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require every independent proof job
+        env:
+          QT_PROOF_NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ['QT_PROOF_NEEDS'])
+          if not needs or any(row.get('result') != 'success' for row in needs.values()):
+              raise SystemExit('incomplete deployment proof jobs')
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: deployment-proof-images-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-proof-images
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deployment-proof-result-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-receipts/
+      - name: Verify and load exact proof image IDs
+        run: python3 scripts/ci/deployment_proofs.py load --root "$RUNNER_TEMP/deployment-proof-images"
+      - name: Attest complete deployment proof coverage
+        run: python3 scripts/ci/deployment_proofs.py aggregate --root "$RUNNER_TEMP/deployment-proof-images" --evidence
+          "$RUNNER_TEMP/proof-receipts"
+      - name: Export qualified routine images
+        run: python3 scripts/automation/release_package.py export --root "$RUNNER_TEMP/deployment-proof-images/release-package"
+      - name: Preserve qualified routine images
+        uses: actions/upload-artifact@v4
+        with:
+          name: routine-release-package
+          path: ${{ runner.temp }}/deployment-proof-images/release-package/*
+          retention-days: 7
+          compression-level: 0
+
+  deployment-rehearsal:
+    needs: changes
+    if: ${{ needs.changes.outputs['deployment-rehearsal'] == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set private disposable temporary root
+        run: printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Rehearse promotion and failed rollout recovery
         run: python3 scripts/ci/test_server_promotion.py
+      - name: Rehearse actual routine package promotion and recovery
+        run: python3 scripts/ci/test_server_promotion.py --routine --evidence-root "$RUNNER_TEMP/qt-routine-evidence"
+      - name: Preserve disposable routine qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: routine-controller-rehearsal
+          path: ${{ runner.temp }}/qt-routine-evidence/qualification.json
+          retention-days: 7
+
 
   clean-database-bootstrap:
+    needs: changes
+    if: ${{ needs.changes.outputs['clean-database-bootstrap'] == 'true' }}
     runs-on: ubuntu-latest
 
     services:
@@ -338,6 +626,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5

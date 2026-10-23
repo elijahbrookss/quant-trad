@@ -2140,3 +2140,9 @@
     display: none;
   }
 }
+/* Static research images keep explanatory prose next to the chart. */
+.qt2-evidence-image { display: grid; grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); gap: 1.25rem; margin: 1.5rem 0; }
+.qt2-evidence-image img { display: block; max-width: 100%; height: auto; border-radius: .5rem; }
+.qt2-evidence-image figcaption { min-width: 0; }
+.qt2-evidence-image pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 800px) { .qt2-evidence-image { grid-template-columns: minmax(0, 1fr); } }

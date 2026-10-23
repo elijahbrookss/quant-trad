@@ -173,3 +173,30 @@ def test_committed_receipt_requires_confirmed_initial_policy_before_recovery(tra
     with pytest.raises(RuntimeError, match="commit_receipt_invalid"):
         run()
     assert state["actions"] == [] and (path/final.STATE).read_bytes() == before
+
+
+@pytest.mark.parametrize("backends,prepared", [(1, 0), (0, 1), (19, 2)])
+def test_quiescence_refusal_preserves_counts_and_bounded_identity(monkeypatch, capsys, backends, prepared):
+    observed = dict(backends=backends, prepared=prepared,
+        backend_sample=[dict(pid=42, backend_type="client backend", state="idle",
+                             application_name="qt-fixture")][:min(backends, 1)],
+        backend_sample_truncated=backends > 16)
+    calls = []
+    def query(identity, sql):
+        calls.append((identity, sql))
+        return json.dumps(observed)
+    monkeypatch.setattr(host, "maintenance_query", query)
+    with pytest.raises(RuntimeError, match="^storage_online_recovery_database_not_quiescent$"):
+        recovery._require_database_quiescent("owned-database")
+    assert len(calls) == 1
+    assert "WHERE datname=:'target'" in calls[0][1]
+    assert "LIMIT 16" in calls[0][1] and "left(application_name, 64)" in calls[0][1]
+    assert "query," not in calls[0][1] and "gid" not in calls[0][1]
+    assert json.loads(capsys.readouterr().err.split("=", 1)[1]) == observed
+
+
+def test_quiescence_zero_counts_remain_silent(monkeypatch, capsys):
+    monkeypatch.setattr(host, "maintenance_query", lambda *a: json.dumps(
+        dict(backends=0, prepared=0, backend_sample=[], backend_sample_truncated=False)))
+    recovery._require_database_quiescent("owned-database")
+    assert capsys.readouterr().err == ""

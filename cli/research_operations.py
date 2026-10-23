@@ -30,6 +30,21 @@ class ResearchOperations:
             "GET", f"/api/research/checks/definitions/{quote(definition_id, safe='')}/{quote(version, safe='')}"
         )
 
+    def prepare_saved_selection_measurement_request(self, source_check_id: str, *,
+            measurement_profile: str = "18", expected_hashes: Mapping[str, str] | None = None) -> dict[str, Any]:
+        return self._client.request_json("POST", "/api/research/checks/saved-selection/request",
+            payload={"source_check_id": source_check_id, "measurement_profile": measurement_profile,
+                     "expected_hashes": dict(expected_hashes or {})})
+
+    def execution_snapshot(self, *, request: Mapping[str, Any] | None = None,
+            job_id: str | None = None, limit: int = 25) -> dict[str, Any]:
+        payload: dict[str, Any] = {"limit": limit}
+        if request is not None:
+            payload["request"] = {**self._payload(request), "mode": "evidence"}
+        if job_id is not None:
+            payload["job_id"] = job_id
+        return self._client.request_json("POST", "/api/research/jobs/snapshot", payload=payload)
+
     def requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return self._client.request_json(
             "POST",
@@ -49,12 +64,15 @@ class ResearchOperations:
         request: Mapping[str, Any],
         *,
         freeze: bool,
+        acquire_missing: bool = False,
         created_by: str | None = None,
         dataset_name: str | None = None,
     ) -> dict[str, Any]:
         payload = self._payload(request)
         preparation = dict(payload.get("preparation") or {})
         preparation["freeze"] = bool(freeze)
+        # Only explicit operation flags authorize effects, never embedded JSON.
+        preparation["acquire_missing"] = bool(acquire_missing)
         if created_by:
             preparation["created_by"] = str(created_by)
         if dataset_name:

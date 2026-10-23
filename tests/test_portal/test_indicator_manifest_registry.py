@@ -44,5 +44,5 @@ def test_manifests_expose_indicator_config_only() -> None:
 def test_indicator_definitions_expose_explicit_compute_or_runtime_support() -> None:
     assert definition_supports_runtime(INDICATOR_MAP["market_profile"]) is True
     assert definition_supports_runtime(INDICATOR_MAP["candle_stats"]) is True
-    assert definition_supports_compute(INDICATOR_MAP["vwap"]) is True
-    assert definition_supports_compute(INDICATOR_MAP["trendline"]) is True
+    assert all(definition_supports_runtime(value) for value in INDICATOR_MAP.values())
+    assert not {"vwap", "trendline", "pivot_level"}.intersection(INDICATOR_MAP)

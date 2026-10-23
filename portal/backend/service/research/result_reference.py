@@ -170,7 +170,7 @@ def _check_reference(reference: Mapping[str, Any]) -> dict[str, Any]:
             "canonical_result_reference_invalid: Check has no evidence payload"
         )
     definition, request, plan, evidence, result = (
-        research_service._validate_research_check_evidence_payload(payload)
+        research_service._validate_research_check_evidence_payload(payload, item_id=item_id)
     )
     classified = research_service._project_evidence_classification(item)
     if (

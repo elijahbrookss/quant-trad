@@ -537,3 +537,61 @@ def _candle() -> CandleFact:
         known_at=close_time,
         known_at_method="interval_close_inferred",
     )
+
+
+def test_liquidation_payload_preserves_frozen_revision_and_dimensions(monkeypatch):
+    """New schema uses the existing canonical writer, decoder and frozen selector."""
+    from market_data.requirements import causal_numeric_fact_records
+    from portal.backend.service.market.numeric_fact_acquisition import NumericFactAcquisitionService
+    from tests.test_data_providers.test_coinalyze_provider import (
+        START, END, STAMP, OBSERVED, Transport, acquire, binding,
+    )
+    token = uuid.uuid4().hex[:20]
+    instrument_id = f"coinalyze-btc-{token}"
+    with db.session() as session:
+        session.add(InstrumentRecord(
+            id=instrument_id, datasource="COINALYZE", exchange="TEST_EXCHANGE",
+            symbol=f"BTC-TEST-{token}", instrument_type="future", can_short=True,
+            short_requires_borrow=False, has_funding=True,
+            extra_metadata={"fixture": "synthetic-coinalyze"},
+        ))
+    bound = replace(binding(), instrument_id=instrument_id)
+    source = SourceIdentity(**bound.source)
+    source_id = market_data_repo.register_source(source, lineage={"fixture": "synthetic"})
+    def series(dimensions):
+        return market_data_repo.register_series(
+            instrument_id=instrument_id, fact_type=bound.fact_type,
+            contract_version=bound.contract_version, timeframe_seconds=None,
+            dimensions=dimensions,
+        )
+    long_series = series(bound.dimensions)
+    short_series = series({**bound.dimensions, "liquidated_side": "short"})
+    longer_series = series({**bound.dimensions, "bucket_seconds": "300"})
+    assert len({long_series, short_series, longer_series}) == 3
+    batch = acquire(Transport(rows=[dict(t=STAMP, l=123, s=0)]), bound=bound)
+    accepted = OBSERVED + timedelta(seconds=1)
+    first = NumericFactAcquisitionService._to_fact(bound, batch.observations[0], accepted_at=accepted)
+    def ingest(fact):
+        return market_data_repo.ingest_numeric_facts(
+            series_id=long_series, source_id=source_id, facts=[fact],
+            source_revision="synthetic-coinalyze-v1", allow_corrections=True,
+        )
+    assert ingest(first).inserted_count == 1
+    assert ingest(first).noop_count == 1
+    listed = {row["id"]: row for row in market_data_repo.list_series(instrument_id=instrument_id)}
+    assert listed[long_series]["numeric_fact_count"] == 1
+    assert listed[short_series]["numeric_fact_count"] == 0
+    frozen = market_data_repo.freeze_dataset([DatasetSeriesRequest(long_series, START, END)], purpose="backtest")
+    corrected = replace(first, value=Decimal(124), raw_value="124",
+        accepted_at=accepted + timedelta(minutes=1), known_at=accepted + timedelta(minutes=1),
+        known_at_method="reconciliation_observed_at", source_event_material_hash="b" * 64)
+    assert ingest(corrected).corrected_count == 1
+    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **k: pytest.fail("network on read"))
+    old = market_data_repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=long_series)
+    latest = market_data_repo.read_numeric_facts(series_id=long_series, start=START, end=END)
+    assert len(old) == 1 and old[0].revision == 1 and old[0].fact.value == Decimal(123)
+    assert latest[0].revision == 2 and latest[0].fact.value == Decimal(124)
+    assert old[0].fact.received_at == OBSERVED and old[0].fact.known_at == accepted
+    assert old[0].fact.dimensions == bound.dimensions
+    assert causal_numeric_fact_records(old, evaluation_time=END) == ()
+    assert [row.fact.value for row in causal_numeric_fact_records(old, evaluation_time=accepted)] == [Decimal(123)]

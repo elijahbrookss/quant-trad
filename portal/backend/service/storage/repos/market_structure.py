@@ -2251,6 +2251,9 @@ class PostgresMarketStructureRepository:
             )
 
         with db.session() as session:
+            # Admission precedes both source-holder reads and the lease lock.
+            from .market_lifecycle import market_storage_lifecycle_repository
+            market_storage_lifecycle_repository.acquire_publication_lock(session)
             self._require_fence(session, claim, raw_mapping_access=require_archive_mapping)
             for fact in rows:
                 if fact.provider_product_id != claim.provider_product_id:
@@ -2381,6 +2384,7 @@ class PostgresMarketStructureRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[MarketTradeRecord]:
         records = [
             decode_market_trade_record(record)
@@ -2390,6 +2394,7 @@ class PostgresMarketStructureRepository:
                 end=_utc(end),
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
         ]
         return sorted(
@@ -2516,6 +2521,7 @@ class PostgresMarketStructureRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[TradeFlowAggregateRecord]:
         records = [
             decode_trade_flow_record(record)
@@ -2525,6 +2531,7 @@ class PostgresMarketStructureRepository:
                 end=_utc(end),
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
         ]
         invalid = [
@@ -2612,6 +2619,8 @@ class PostgresMarketStructureRepository:
         inserted_validity = 0
         max_commit_seq = 0
         with db.session() as session:
+            from .market_lifecycle import market_storage_lifecycle_repository
+            market_storage_lifecycle_repository.acquire_publication_lock(session)
             self._require_fence(session, claim, raw_mapping_access=True)
             for fact in (*snapshot_rows, *batch_rows):
                 if fact.series_id != claim.series_id:
@@ -4316,6 +4325,8 @@ class PostgresMarketStructureRepository:
         max_commit_seq = 0
 
         with db.session() as session:
+            from .market_lifecycle import market_storage_lifecycle_repository
+            market_storage_lifecycle_repository.acquire_publication_lock(session)
             bbo_rows = typed_families[0][1]
             depth_rows = typed_families[1][1]
             flow_rows = typed_families[2][1]

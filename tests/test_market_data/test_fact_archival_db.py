@@ -14,6 +14,21 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage, _placemen
 pytestmark = pytest.mark.db
 
 
+def test_stage_database_snapshot_reads_postgresql_counters(storage):
+    with storage.database.session() as session:
+        snapshot = fact_archival._stage_database_snapshot(session)
+
+    assert snapshot is not None
+    assert snapshot["backend_pid"] > 0
+    assert snapshot["server_version_num"] >= 150000
+    assert isinstance(snapshot["track_io_timing"], bool)
+    assert snapshot["wal_stats_reset"] is not None
+    assert snapshot["writer_stats_reset"] is not None
+    for name in fact_archival._ARCHIVE_STAGE_DATABASE_COUNTERS:
+        assert snapshot[name] is not None
+        assert snapshot[name] >= 0
+
+
 @pytest.mark.parametrize("text_value", ["ascii-" * 60, "\u007f\u00e9\u20ac\U0001f680\\\"\n" * 16],
                          ids=["ascii", "escaped-unicode"])
 def test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping(
@@ -515,23 +530,21 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
         """))
     # Apply the artificial deadline only to the writes under test. Source
     # selection retains the repository's normal timeout on slower CI hosts.
-    stage_rows = fixture.archive._stage_catalog_rows
-    def stage_with_alias_deadline(session, record_type, manifest_id, rows):
-        is_alias = record_type is fact_archival.MarketFactArchiveMaterialAliasRecord
-        if is_alias:
-            previous_timeout = session.execute(text("SHOW statement_timeout")).scalar_one()
-            session.execute(text("SELECT set_config('statement_timeout', '2000', true)"))
-        stage_rows(session, record_type, manifest_id, rows)
-        if is_alias:
-            session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
-                            {"timeout": previous_timeout})
+    stage_aliases = fixture.archive._stage_alias_catalog_rows
+    def stage_with_alias_deadline(session, manifest_id, rows):
+        previous_timeout = session.execute(text("SHOW statement_timeout")).scalar_one()
+        session.execute(text("SELECT set_config('statement_timeout', '2000', true)"))
+        result = stage_aliases(session, manifest_id, rows)
+        session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                        {"timeout": previous_timeout})
         # A failed INSERT aborts and rolls back the transaction, including its
         # local timeout. Do not mask that failure with a reset in finally.
-    monkeypatch.setattr(fixture.archive, "_stage_catalog_rows", stage_with_alias_deadline)
+        return result
+    monkeypatch.setattr(fixture.archive, "_stage_alias_catalog_rows", stage_with_alias_deadline)
     # A coarse batch is the control under the same row cost and deadline. It
     # must fail at the actual alias INSERT, leaving the entire page uncommitted.
     with monkeypatch.context() as coarse:
-        coarse.setattr(fact_archival, "_CATALOG_WRITE_BATCH_ROWS", 1000)
+        coarse.setattr(fact_archival, "_ALIAS_CATALOG_WRITE_BATCH_ROWS", 1000)
         with pytest.raises(DBAPIError) as failed:
             _acknowledge_alias_page(fixture)
     assert failed.value.orig.pgcode == "57014"
@@ -546,6 +559,73 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
     assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
     assert fixture.read() == fixture.before
 
+
+def test_canonical_dependency_writes_finish_under_per_statement_limit_with_slow_rows(
+        storage, tmp_path, monkeypatch):
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=320)
+    acknowledged = _acknowledge_alias_page(fixture)
+    manifest_id = acknowledged["manifest_id"]
+    rows = [
+        {"fact_version_id": row.fact_version_id, "row_hash": "a" * 64}
+        for row in fixture.before
+    ]
+    with storage.database.session() as session:
+        initial_count = session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_canonical_dependencies "
+            "WHERE manifest_id=:id"
+        ), {"id": manifest_id}).scalar_one()
+        existing_ids = set(session.execute(text(
+            "SELECT fact_version_id FROM market.fact_archive_canonical_dependencies "
+            "WHERE manifest_id=:id"
+        ), {"id": manifest_id}).scalars())
+        session.execute(text("""
+            CREATE FUNCTION market.test_slow_canonical_dependency_insert() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.01); RETURN NEW; END $$
+        """))
+        session.execute(text("""
+            CREATE TRIGGER test_slow_canonical_dependency_insert BEFORE INSERT
+            ON market.fact_archive_canonical_dependencies FOR EACH ROW
+            EXECUTE FUNCTION market.test_slow_canonical_dependency_insert()
+        """))
+    rows = [row for row in rows if row["fact_version_id"] not in existing_ids]
+    assert len(rows) >= 300
+    stage_dependencies = fixture.archive._stage_canonical_dependency_catalog_rows
+
+    def write_with_dependency_deadline(batch_rows):
+        with monkeypatch.context() as batch:
+            batch.setattr(fact_archival, "_CATALOG_WRITE_BATCH_ROWS", batch_rows)
+            with storage.database.session() as session:
+                previous_timeout = session.execute(text("SHOW statement_timeout")).scalar_one()
+                session.execute(text("SELECT set_config('statement_timeout', '2000', true)"))
+                result = stage_dependencies(session, manifest_id, rows)
+                session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                                {"timeout": previous_timeout})
+                return result
+
+    # The exact coarse typed-array control exceeds the fixed statement timeout.
+    # Its aborted transaction must leave the existing committed page untouched.
+    with pytest.raises(DBAPIError) as failed:
+        write_with_dependency_deadline(1000)
+    assert failed.value.orig.pgcode == "57014"
+    assert failed.value.statement.startswith(
+        "INSERT INTO market.fact_archive_canonical_dependencies"
+    )
+    with storage.database.session() as session:
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_canonical_dependencies "
+            "WHERE manifest_id=:id"
+        ), {"id": manifest_id}).scalar_one() == initial_count
+
+    bounded = write_with_dependency_deadline(128)
+    assert bounded["row_count"] == len(rows)
+    assert bounded["batch_count"] == (len(rows) + 127) // 128
+    with storage.database.session() as session:
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_canonical_dependencies "
+            "WHERE manifest_id=:id"
+        ), {"id": manifest_id}).scalar_one() == initial_count + len(rows)
+    assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 1
+    assert fixture.read() == fixture.before
 
 @pytest.mark.parametrize("stop", ["cancel", "budget"])
 def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
@@ -589,6 +669,45 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
     assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
     assert set(fixture.store.root.rglob("*.parquet")) == objects
     assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
+    assert fixture.read() == fixture.before
+
+
+def test_canonical_dependency_batch_stop_rolls_back_every_page_catalog(
+        storage, tmp_path, monkeypatch):
+    from portal.backend.service.market.canonical_retention import CanonicalRetentionStopRequested
+
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=513)
+    wrote_canonical = False
+
+    def inserted(_conn, _cursor, statement, *_):
+        nonlocal wrote_canonical
+        if statement.startswith("INSERT INTO market.fact_archive_canonical_dependencies"):
+            wrote_canonical = True
+
+    def check_budget():
+        if wrote_canonical:
+            raise CanonicalRetentionStopRequested("injected stop after canonical dependency batch")
+
+    fixture.archive.check_budget = check_budget
+    event.listen(storage.database._engine, "after_cursor_execute", inserted)
+    try:
+        with pytest.raises(CanonicalRetentionStopRequested, match="injected stop"):
+            _acknowledge_alias_page(fixture)
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", inserted)
+        fixture.archive.check_budget = None
+    assert wrote_canonical
+    assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
+    with storage.database.session() as session:
+        for table in (
+            "fact_archive_manifests", "fact_archive_series", "fact_archive_material_aliases",
+            "fact_archive_dependencies", "fact_archive_canonical_dependencies",
+        ):
+            assert session.execute(text(f"SELECT count(*) FROM market.{table}")).scalar_one() == 0
+    objects = set(fixture.store.root.rglob("*.parquet"))
+    result = _acknowledge_alias_page(fixture)
+    assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
+    assert set(fixture.store.root.rglob("*.parquet")) == objects
     assert fixture.read() == fixture.before
 
 

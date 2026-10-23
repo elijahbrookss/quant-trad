@@ -108,6 +108,12 @@ Visual and debug surfaces leave through separate projection payloads:
 payload warnings, and source-fact diagnostics can explain expensive or invalid
 projection/output behavior, but they do not become strategy inputs.
 
+Common timings, structural sizes and execution outcomes are owned by the engine
+and existing execution-control harness, not each Indicator implementation.
+Use `runtime_diagnostics` and typed details for component-specific inspection.
+[ADR0082](../decisions/0082-separate-historical-custody-from-active-research.md#shared-execution-observability)
+defines inclusive wall-time scopes, unknown sizes and process-attribution limits.
+
 Indicators that load independent source candles publish the existing
 `indicator_source_candle_continuity.v1` diagnostic. Bot runtime composition
 collects it immediately after graph construction, adds canonical

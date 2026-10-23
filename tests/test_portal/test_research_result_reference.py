@@ -55,7 +55,7 @@ def _completed_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         result_reference.research_service,
         "_validate_research_check_evidence_payload",
-        lambda _payload: (definition, request, plan, evidence, result),
+        lambda _payload, **kwargs: (definition, request, plan, evidence, result),
     )
     monkeypatch.setattr(
         result_reference.research_service,

@@ -87,6 +87,135 @@ def test_step_failure_is_visible_and_does_not_starve_next_day(tmp_path, monkeypa
     assert "canonical_retention_step_failed" in caplog.text
 
 
+def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_days(
+        tmp_path, monkeypatch, caplog):
+    executor, calls = _executor([
+        _plan([_item()]),
+        _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item(day=DAY + timedelta(days=2))]),
+        _plan([_item()]),
+        _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item("reclaim_partition")]),
+    ])
+    clock = [0.0]
+    attempts = []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    def step(**kwargs):
+        day = date.fromisoformat(kwargs["item"]["storage_day"])
+        attempts.append(day)
+        if day == DAY and attempts.count(DAY) == 1:
+            raise RuntimeError("dependency batch timeout")
+        if day == DAY and attempts.count(DAY) == 3:
+            return {"status": "partition_reclaimed", "reclaimed_bytes": 4096}
+        return {"status": "page_acknowledged"}
+
+    monkeypatch.setattr(executor, "_execute_step", step)
+    policy = CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=2, max_run_seconds=10,
+    )
+    with caplog.at_level("INFO"):
+        failed = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+        clock[0] = 5.0
+        cooling = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+        clock[0] = 10.0
+        retried = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+        clock[0] = 15.0
+        followthrough_cooling = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+        clock[0] = 20.0
+        completed = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+
+    assert failed["retry_schedule"] == [{
+        "storage_day": DAY.isoformat(), "attempt_count": 1,
+        "reason": "RuntimeError:none",
+        "age_seconds": 0.0, "next_eligible_in_seconds": 10.0,
+    }]
+    assert cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=2)).isoformat()
+    assert retried["outcomes"][0]["storage_day"] == DAY.isoformat()
+    assert retried["retry_schedule"] == [{
+        "storage_day": DAY.isoformat(), "attempt_count": 1,
+        "reason": "partition_followthrough",
+        "age_seconds": 10.0, "next_eligible_in_seconds": 10.0,
+    }]
+    assert followthrough_cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=1)).isoformat()
+    assert completed["outcomes"][0]["status"] == "partition_reclaimed"
+    assert completed["retry_schedule"] == []
+    assert attempts == [DAY, DAY + timedelta(days=1), DAY + timedelta(days=2), DAY,
+                        DAY + timedelta(days=1), DAY]
+    assert calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
+    assert caplog.text.count("canonical_retention_retry_selected") == 2
+    assert "canonical_retention_retry_cleared" in caplog.text
+
+
+def test_due_retry_keeps_partition_for_one_bounded_run_before_cooling(tmp_path, monkeypatch):
+    executor, _ = _executor([
+        _plan([_item()]),
+        _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item()]),
+        _plan([_item()]),
+    ])
+    clock = [0.0]
+    attempts = []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    def step(**kwargs):
+        day = date.fromisoformat(kwargs["item"]["storage_day"])
+        attempts.append(day)
+        if attempts == [DAY]:
+            raise RuntimeError("dependency batch timeout")
+        return {"status": "page_acknowledged"}
+
+    monkeypatch.setattr(executor, "_execute_step", step)
+    policy = CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=2, max_run_seconds=10,
+    )
+    executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    clock[0] = 10.0
+    retried = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+
+    assert [item["storage_day"] for item in retried["outcomes"]] == [DAY.isoformat()] * 2
+    assert retried["retry_schedule"] == [{
+        "storage_day": DAY.isoformat(), "attempt_count": 1,
+        "reason": "partition_followthrough",
+        "age_seconds": 10.0, "next_eligible_in_seconds": 10.0,
+    }]
+    assert attempts == [DAY, DAY + timedelta(days=1), DAY, DAY]
+
+
+def test_worker_restart_discards_retry_hint_and_resumes_from_committed_oldest_progress(
+        tmp_path, monkeypatch):
+    failed_executor, _ = _executor([_plan([_item()])])
+    monkeypatch.setattr(
+        failed_executor, "_execute_step",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("dependency batch timeout")),
+    )
+    failed = failed_executor.run(
+        policy=CanonicalFactRetentionPolicy(
+            execution_enabled=True, max_steps_per_run=1, max_run_seconds=10,
+        ),
+        storage_root=tmp_path, execute=True,
+    )
+    assert failed["retry_schedule"][0]["storage_day"] == DAY.isoformat()
+
+    restarted, calls = _executor([_plan([_item()])])
+    monkeypatch.setattr(restarted, "_execute_step", lambda **_: {"status": "page_acknowledged"})
+    result = restarted.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+        storage_root=tmp_path, execute=True,
+    )
+    assert calls[0]["after_storage_day"] is None
+    assert result["outcomes"][0]["status"] == "page_acknowledged"
+    assert result["retry_schedule"] == []
+
+
 def test_time_budget_after_planning_prevents_starting_a_mutation(tmp_path, monkeypatch):
     executor, _ = _executor([_plan([_item()])])
     clock = iter([0, 0, 0, 2, 2])
@@ -130,10 +259,130 @@ def test_worker_stop_request_preserves_resume_cursor_and_starts_no_more_work(tmp
     assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
 
 
+def test_stage_page_commits_bounded_prerequisites_then_publishes_and_replans(tmp_path, monkeypatch):
+    executor, plans = _executor([_plan([_item()]), _plan([_item("verify_page")])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    calls, verification_calls = [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            self.check_budget()
+            calls.append(day)
+            if len(calls) <= 2:
+                return {"status": "book_prefix_verified", "storage_day": day.isoformat(),
+                        "chunk_id": f"prefix-{len(calls)}"}
+            if len(calls) == 3:
+                return {"status": "page_acknowledged", "storage_day": day.isoformat(), "page_ordinal": 7}
+            pytest.fail("the same-page loop must stop at publication")
+
+        def verify_next_page(self, day):
+            verification_calls.append(day)
+            return {"status": "page_verified", "storage_day": day.isoformat(), "page_ordinal": 7}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
+                          storage_root=tmp_path, execute=True)
+    assert len(plans) == 2 and calls == [DAY, DAY, DAY] and verification_calls == [DAY]
+    assert result["prerequisite_commit_count"] == 2
+    assert result["outcomes"] == [{
+        "status": "page_acknowledged", "storage_day": DAY.isoformat(), "page_ordinal": 7,
+        "prerequisite_commit_count": 2,
+        "prerequisite_commits": [
+            {"status": "book_prefix_verified", "chunk_id": "prefix-1"},
+            {"status": "book_prefix_verified", "chunk_id": "prefix-2"},
+        ],
+        "action": "stage_page",
+    }, {
+        "status": "page_verified", "storage_day": DAY.isoformat(), "page_ordinal": 7,
+        "action": "verify_page",
+    }]
+
+
+def test_stage_page_prerequisite_allowance_is_hard_bounded(tmp_path, monkeypatch):
+    executor, plans = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "_MAX_PAGE_PREREQUISITE_COMMITS", 3)
+    calls = []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            self.check_budget()
+            calls.append(day)
+            return {"status": "trade_prefix_verified", "storage_day": day.isoformat(),
+                    "chunk_id": f"prefix-{len(calls)}"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True)
+    assert len(plans) == 1 and calls == [DAY, DAY, DAY]
+    assert result["prerequisite_commit_count"] == 3
+    assert result["outcomes"][0]["status"] == "page_prerequisite_budget"
+    assert result["outcomes"][0]["reason"] == "canonical_archive_page_prerequisite_budget"
+    assert len(result["outcomes"][0]["prerequisite_commits"]) == 3
+
+
+@pytest.mark.parametrize(
+    "cause,expected_status,expected_stop_reason,expected_calls",
+    [
+        ("cancel", "deferred", "stop_requested", 1),
+        ("deadline", "deferred", "time_budget", 1),
+        ("refusal", "failed", "step_budget", 2),
+    ],
+)
+def test_stage_page_retains_committed_prerequisites_when_later_inner_call_stops(
+    tmp_path, monkeypatch, cause, expected_status, expected_stop_reason, expected_calls,
+):
+    executor, _ = _executor([_plan([_item()])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    clock, stopped, calls = [0.0], [False], []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            calls.append(day)
+            if len(calls) == 1:
+                if cause == "cancel":
+                    stopped[0] = True
+                elif cause == "deadline":
+                    clock[0] = 2.0
+                return {"status": "book_prefix_verified", "storage_day": day.isoformat(),
+                        "chunk_id": "committed-prefix"}
+            raise RuntimeError("current admission refusal")
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1, max_run_seconds=1),
+        storage_root=tmp_path, execute=True, cancelled=lambda: stopped[0],
+    )
+    outcome = result["outcomes"][0]
+    assert len(calls) == expected_calls
+    assert outcome["status"] == expected_status and result["stop_reason"] == expected_stop_reason
+    assert outcome["prerequisite_commit_count"] == 1
+    assert outcome["prerequisite_commits"] == [
+        {"status": "book_prefix_verified", "chunk_id": "committed-prefix"}
+    ]
+    assert result["prerequisite_commit_count"] == 1
+    if cause == "refusal":
+        assert outcome["error"] == "current admission refusal"
+
+
 def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monkeypatch):
     executor, _ = _executor([_plan([_item()])])
     executor.repository.database = object()
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "_MAX_PAGE_PREREQUISITE_COMMITS", 2)
     instances, calls = [], []
 
     class Archive:
@@ -147,10 +396,12 @@ def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monk
             return {"status": "book_prefix_verified", "storage_day": day.isoformat()}
 
     monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
-    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1)
     for _ in range(2):
         result = executor.run(policy=policy, storage_root=tmp_path, execute=True)
-        assert result["stop_reason"] == "step_budget" and len(result["outcomes"]) == 2
+        assert result["stop_reason"] == "step_budget" and len(result["outcomes"]) == 1
+        assert result["outcomes"][0]["status"] == "page_prerequisite_budget"
+        assert result["outcomes"][0]["prerequisite_commit_count"] == 2
         assert executor._archive is None
     assert len(instances) == 2
     assert calls == [instances[0], instances[0], instances[1], instances[1]]
@@ -221,3 +472,97 @@ def test_sql_or_data_failure_is_not_hidden_by_run_budget(tmp_path, monkeypatch, 
     assert "actual query or data failure" in result["outcomes"][0]["error"]
     assert result["next_after_storage_day"] == DAY.isoformat()
     assert "canonical_retention_step_failed" in caplog.text
+
+
+@pytest.mark.parametrize("seconds", [1, 10, 60])
+def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_bound(tmp_path, monkeypatch, seconds):
+    executor, _ = _executor([])
+    executor.repository.database = object()
+    seen = []
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
+                        lambda **kwargs: SimpleNamespace(**kwargs))
+
+    class Reclaimer:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+        def reclaim_partition(self, day, **kwargs):
+            assert day == DAY and kwargs["execute"] is True
+            return {"status": "partition_reclaimed"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository", Reclaimer)
+    policy = CanonicalFactRetentionPolicy(max_handoff_seconds=seconds,
+                                          pinned_ranges_statement_timeout_ms=4321)
+    executor._execute_step(item=_item("reclaim_partition"), policy=policy,
+        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=600)
+    assert seen[0]["enabled"] is True
+    assert seen[0]["limits"].max_handoff_seconds == seconds
+    assert seen[0]["limits"].statement_timeout_ms == 1000
+    assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 4321
+
+
+@pytest.mark.parametrize("execution,pinned,remaining,expected", [
+    (5000, 4321, 10, 4321),
+    (3000, 5000, 10, 3000),
+    (5000, 5000, 2, 2000),
+])
+def test_pinned_range_timeout_composes_separate_query_execution_and_run_bounds(
+    tmp_path, monkeypatch, execution, pinned, remaining, expected,
+):
+    executor, _ = _executor([])
+    executor.repository.database = object()
+    actual_reclaimer = module.PostgresCanonicalFactReclamationRepository
+    seen = {}
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+
+    class Archive(SimpleNamespace):
+        def _check_budget(self):
+            self.check_budget()
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
+                        lambda **kwargs: Archive(**kwargs))
+
+    class Reclaimer:
+        def __init__(self, **kwargs):
+            self.inner = actual_reclaimer(**kwargs)
+            seen["limits"] = kwargs["limits"]
+
+        def reclaim_partition(self, *_args, **_kwargs):
+            seen["effective"] = self.inner._pinned_ranges_timeout_ms()
+            return {"status": "partition_reclaimed"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactReclamationRepository", Reclaimer)
+    policy = CanonicalFactRetentionPolicy(
+        execution_statement_timeout_ms=execution,
+        pinned_ranges_statement_timeout_ms=pinned,
+    )
+    executor._execute_step(item=_item("reclaim_partition"), policy=policy,
+        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=remaining)
+    assert seen["limits"].statement_timeout_ms == 1000
+    assert seen["limits"].pinned_ranges_statement_timeout_ms == expected
+    assert seen["effective"] == expected
+
+
+def test_progress_observer_reports_existing_boundaries_without_owning_execution(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item("reclaim_partition")])])
+    monkeypatch.setattr(executor, "_execute_step",
+                        lambda **_: {"status": "partition_reclaimed", "reclaimed_bytes": 7})
+    reports = []
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True, progress=reports.append)
+    assert result["outcomes"][0]["reclaimed_bytes"] == 7
+    assert [item["stage"] for item in reports] == ["planning", "executing", "step_finished", "finished"]
+    assert reports[1]["storage_day"] == DAY.isoformat()
+    assert reports[2]["status"] == "partition_reclaimed"
+    assert reports[-1]["completed_steps"] == 1
+
+
+def test_progress_observer_failure_cannot_change_retention_semantics(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item()])])
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: {"status": "page_acknowledged"})
+    result = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+                          storage_root=tmp_path, execute=True,
+                          progress=lambda _: (_ for _ in ()).throw(RuntimeError("observer failed")))
+    assert result["failure_count"] == 0
+    assert result["outcomes"][0]["status"] == "page_acknowledged"

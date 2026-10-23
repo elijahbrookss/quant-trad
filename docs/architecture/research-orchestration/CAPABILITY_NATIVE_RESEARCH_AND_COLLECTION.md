@@ -11,8 +11,8 @@ tags:
   - collectors
   - safety
 code_paths:
-  - src/research_science/study.py
   - src/research_science/temporal.py
+  - src/research_science/hashing.py
   - src/research_science/replay_availability.py
   - src/market_data/stream_enrollment.py
   - portal/backend/service/market/collector_safety.py
@@ -21,14 +21,23 @@ code_paths:
 ---
 # Capability-Native Research and Collection
 
+## Current execution and historical custody
+
+[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md)
+defines the current Indicator/Check/Study boundary and current-only execution
+catalog. Earlier version-specific descriptions below are historical method
+meaning, not promises that retired factories remain executable. Original
+records remain integrity-checked and readable through data-only custody.
+
+
 ## Canonical nouns
 
 | Capability | Canonical contract | Owns |
 |---|---|---|
-| Requested research | `ResearchBrief` | Objective, economic claim, immutable claim intent, requester |
-| Executable study | `StudyDefinition` | Instruments, declared facts/transforms/joins, exact implementation bundles, benchmarks |
+| Research question/findings | Research Memory Study | Question, interpretation revisions and evidence relationships |
+| Reusable causal recognition | Indicator | Typed causal runtime, stages, references, duration and context |
+| Analytical procedure/execution | CheckDefinition / saved Check | Admitted Python method, pinned settings and immutable execution evidence |
 | Scientific authority | `ScientificProtocol` | Frozen role assignments, budgets, leakage controls, metrics, holdout rules |
-| One execution | `ResearchRun` | Exact study, protocol, code, datasets, availability evidence, and bundle versions |
 | Search lineage | `ResearchFamily`, `Trial` | Attempt accounting, failures, validation feedback, lineage |
 | Selection evidence | `Candidate`, `Certificate` | Frozen candidate and independent scientific assessment |
 | Provider product meaning | `ProductContract` | Quantity/contract translation and exact canonical product version |
@@ -40,28 +49,19 @@ not become schema versions, foreign keys, API nouns, or runtime modes.
 
 ## Research composition
 
-```text
-ResearchBrief + ScientificProtocol
-  -> StudyDefinition
-       facts: FactRequirement[]
-       clocks: AvailabilityTransform[]
-       joins: TemporalJoinSpec[]
-       code: exact registered bundles
-  -> provider-free preflight against frozen train/validation/holdout roles
-  -> immutable ResearchRun
-  -> budgeted family/trials/candidate/certificate
-```
+A Study links current Check executions and findings. Check requirements and
+preparation resolve explicit typed inputs and frozen bindings. Reusable causal
+recognition comes from Indicators/shared kernels; the admitted Check owns
+selection, future-path labels and summaries. Causal Indicator outputs/candidate signals may be developed before Checks;
+Checks test usefulness rather than authorize Indicator creation. Signal is
+already a typed Indicator output, and Strategy owns actions/risk.
+No executable StudyDefinition or
+implementation-bundle registry is part of this route.
 
-OI, funding, raw trades, trade flow, volume, price, and book state are peers.
-No generic orchestrator presumes which facts must be joined. The study declares
-them and the registry resolves exact implementations. Temporal joins require
-event, sample, and known-at clocks no later than the decision time. Missing
-facts follow the declared reject, exclude, or null policy. Prefix-invariance
-tests prove later facts cannot change an earlier frame.
-
-The trade-flow replay transform is one registered availability implementation.
-It preserves canonical `known_at` while deriving a separate receipt-backed
-research clock from exact frozen raw, aggregate, and coverage evidence.
+OI, funding, trades, volume, price and book facts remain peers. Each admitted
+procedure declares its actual requirements and causal clocks. The pure temporal
+join and availability helpers remain available; they do not imply a runnable
+generic study framework.
 
 ## Collection composition
 

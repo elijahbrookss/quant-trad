@@ -11,8 +11,9 @@ from dataclasses import asdict
 from datetime import date
 import logging
 from pathlib import Path
+from time import perf_counter
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from market_data.archive import RawArchiveObjectStore, RawArchiveReadLimits
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
@@ -43,8 +44,272 @@ FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
 # Keep cold catalog/FK work below the per-statement ceiling without shrinking
 # immutable archive pages or committing partial page metadata.
 _CATALOG_WRITE_BATCH_ROWS = 128
+# Alias rows maintain more identities than the fixed-width dependency catalog.
+# Keep their cold-storage statements below the shared statement timeout while
+# preserving the all-or-nothing page transaction.
+_ALIAS_CATALOG_WRITE_BATCH_ROWS = 64
 # Bound expiration-key SQL independently of the number of archive dependencies.
 _EXPIRATION_QUERY_BATCH_ROWS = 128
+_ALIAS_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_material_aliases
+    (manifest_id, fact_version_id, evidence_key, series_id, material_hash)
+SELECT :manifest_id, input.fact_version_id, input.evidence_key,
+       input.series_id, input.material_hash
+FROM unnest(
+    CAST(:fact_version_ids AS text[]), CAST(:evidence_keys AS text[]),
+    CAST(:series_ids AS bigint[]), CAST(:material_hashes AS text[])
+) WITH ORDINALITY AS input(
+    fact_version_id, evidence_key, series_id, material_hash, position
+)
+ORDER BY input.position""")
+_CANONICAL_DEPENDENCY_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_canonical_dependencies
+    (manifest_id, fact_version_id, row_hash)
+SELECT :manifest_id, input.fact_version_id, input.row_hash
+FROM unnest(
+    CAST(:fact_version_ids AS text[]), CAST(:row_hashes AS text[])
+) WITH ORDINALITY AS input(fact_version_id, row_hash, position)
+ORDER BY input.position""")
+
+# PostgreSQL 15 exposes these counters only at cluster scope. The paired
+# snapshots help correlate a page with overlapping WAL/checkpoint pressure; they
+# are never presented as page-exclusive bytes or device attribution.
+_ARCHIVE_STAGE_DATABASE_SNAPSHOT = text("""
+    SELECT pg_backend_pid() AS backend_pid,
+           current_setting('server_version_num')::integer AS server_version_num,
+           current_setting('track_io_timing')::boolean AS track_io_timing,
+           wal.stats_reset AS wal_stats_reset,
+           wal.wal_records::bigint AS wal_records,
+           wal.wal_fpi::bigint AS wal_fpi,
+           wal.wal_bytes::bigint AS wal_bytes,
+           wal.wal_buffers_full::bigint AS wal_buffers_full,
+           writer.stats_reset AS writer_stats_reset,
+           writer.checkpoints_timed::bigint AS checkpoints_timed,
+           writer.checkpoints_req::bigint AS checkpoints_req,
+           writer.checkpoint_write_time::double precision AS checkpoint_write_time_ms,
+           writer.checkpoint_sync_time::double precision AS checkpoint_sync_time_ms,
+           writer.buffers_checkpoint::bigint AS buffers_checkpoint,
+           writer.buffers_clean::bigint AS buffers_clean,
+           writer.buffers_backend::bigint AS buffers_backend,
+           writer.buffers_backend_fsync::bigint AS buffers_backend_fsync
+    FROM pg_stat_wal AS wal CROSS JOIN pg_stat_bgwriter AS writer
+""")
+_ARCHIVE_STAGE_DATABASE_COUNTERS = (
+    "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full",
+    "checkpoints_timed", "checkpoints_req", "checkpoint_write_time_ms",
+    "checkpoint_sync_time_ms", "buffers_checkpoint", "buffers_clean",
+    "buffers_backend", "buffers_backend_fsync",
+)
+
+_ARCHIVE_LAST_MANIFEST_QUERY = text("""
+    SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day
+    ORDER BY page_ordinal DESC LIMIT 1
+""")
+
+_ARCHIVE_SOURCE_PAGE_QUERY = text(f"""
+    WITH candidates AS MATERIALIZED (
+        SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
+        WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
+        ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
+    ), documents AS MATERIALIZED (
+        SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
+        FROM candidates
+    ), budget AS (
+        SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
+            char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
+            OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
+    )
+    SELECT candidates.* FROM candidates JOIN budget USING(id)
+    WHERE budget.cumulative_bytes <= :max_bytes
+    ORDER BY candidates.market_commit_seq,candidates.id
+""")
+
+_ARCHIVE_UNVERIFIED_PAGE_QUERY = text("""
+    SELECT pages.* FROM market.fact_archive_manifests AS pages
+    LEFT JOIN market.fact_archive_verifications AS proof
+      ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+    WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
+    ORDER BY pages.page_ordinal LIMIT 1
+""")
+
+_ARCHIVE_SOURCE_ENVELOPES_QUERY = text(f"""
+    SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
+    WHERE versions.storage_day=:day
+      AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
+      AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
+    ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
+""")
+
+_ARCHIVE_EXPIRED_DEPENDENCY_QUERY = text("""
+    SELECT requested.target_id
+    FROM unnest(CAST(:kinds AS text[]), CAST(:ids AS text[]))
+        WITH ORDINALITY AS requested(target_kind, target_id, ordinal)
+    WHERE EXISTS (
+        SELECT 1 FROM market.storage_lifecycle_events AS lifecycle
+        WHERE lifecycle.action='archive_expire' AND lifecycle.event_type='completed'
+          AND lifecycle.target_kind=requested.target_kind
+          AND lifecycle.target_id=requested.target_id)
+    ORDER BY requested.ordinal LIMIT 1
+""")
+
+ARCHIVE_PAGE_CATALOG_SPECS = (
+    ("series", "fact_archive_series",
+     "series_id, row_count, first_observation_at, last_observation_at, first_known_at, "
+     "last_known_at, first_accepted_at, last_accepted_at", "series_id"),
+    ("aliases", "fact_archive_material_aliases",
+     "fact_version_id, series_id, evidence_key, material_hash", "fact_version_id, evidence_key"),
+    ("dependencies", "fact_archive_dependencies",
+     "target_kind, target_id, object_key, object_sha256", "target_kind, target_id"),
+    ("canonical_dependencies", "fact_archive_canonical_dependencies",
+     "fact_version_id, row_hash", "fact_version_id"),
+)
+
+
+def archive_page_catalog_statement(*, table: str, columns: str, order: str,
+                                   handoff: bool = False):
+    """Return the exact bounded catalog statement used by verification."""
+    permitted = {(item[1], item[2], item[3]) for item in ARCHIVE_PAGE_CATALOG_SPECS}
+    if (table, columns, order) not in permitted:
+        raise ValueError("canonical_archive_catalog_statement_invalid")
+    physical = ",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff else ""
+    return text(
+        f"SELECT {columns}{physical} FROM market.{table} "
+        f"WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+    )
+
+
+def _record_verification_phase(*, timings, phase, day, page, seconds, outcome):
+    timings[phase] = timings.get(phase, 0.0) + seconds
+    logger.info(
+        "canonical_archive_verification_phase | storage_day=%s page_ordinal=%s "
+        "manifest_id=%s phase=%s outcome=%s seconds=%.6f",
+        day, page["page_ordinal"], page["id"], phase, outcome, seconds,
+    )
+
+
+def _timed_verification_call(*, timings, phase, day, page, operation):
+    started = perf_counter()
+    try:
+        result = operation()
+    except Exception:
+        _record_verification_phase(
+            timings=timings, phase=phase, day=day, page=page,
+            seconds=perf_counter() - started, outcome="failed",
+        )
+        raise
+    _record_verification_phase(
+        timings=timings, phase=phase, day=day, page=page,
+        seconds=perf_counter() - started, outcome="completed",
+    )
+    return result
+
+
+def _record_stage_phase(*, phase, day, page_ordinal, seconds, outcome):
+    logger.info(
+        "canonical_archive_stage_phase | storage_day=%s page_ordinal=%s "
+        "phase=%s outcome=%s seconds=%.6f",
+        day, page_ordinal, phase, outcome, seconds,
+    )
+
+
+def _stage_database_snapshot(session):
+    """Best-effort small PostgreSQL snapshot isolated by a SQL savepoint."""
+    connection = session.connection()
+    connection.exec_driver_sql("SAVEPOINT qt_archive_stage_observation")
+    try:
+        snapshot = dict(connection.execute(_ARCHIVE_STAGE_DATABASE_SNAPSHOT).mappings().one())
+        connection.exec_driver_sql("RELEASE SAVEPOINT qt_archive_stage_observation")
+        return snapshot
+    except Exception as exc:
+        connection.exec_driver_sql("ROLLBACK TO SAVEPOINT qt_archive_stage_observation")
+        connection.exec_driver_sql("RELEASE SAVEPOINT qt_archive_stage_observation")
+        logger.warning(
+            "canonical_archive_stage_database | outcome=observation_unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
+def _record_stage_database_observation(*, day, page_ordinal, before, after, outcome):
+    if before is None:
+        logger.info(
+            "canonical_archive_stage_database | storage_day=%s page_ordinal=%s outcome=%s "
+            "scope=cluster_overlap backend_pid=unavailable server_version_num=unavailable "
+            "track_io_timing=unavailable device_attribution=unsupported deltas=unavailable",
+            day, page_ordinal, outcome,
+        )
+        return
+    wal_reset = after is not None and before["wal_stats_reset"] == after["wal_stats_reset"]
+    writer_reset = after is not None and before["writer_stats_reset"] == after["writer_stats_reset"]
+    deltas = {}
+    for name in _ARCHIVE_STAGE_DATABASE_COUNTERS:
+        comparable = wal_reset if name.startswith("wal_") else writer_reset
+        deltas[name] = after[name] - before[name] if comparable else None
+    logger.info(
+        "canonical_archive_stage_database | storage_day=%s page_ordinal=%s outcome=%s "
+        "scope=cluster_overlap backend_pid=%s server_version_num=%s track_io_timing=%s "
+        "device_attribution=unsupported wal_records=%s wal_fpi=%s wal_bytes=%s "
+        "wal_buffers_full=%s checkpoints_timed=%s checkpoints_req=%s "
+        "checkpoint_write_time_ms=%s checkpoint_sync_time_ms=%s "
+        "buffers_checkpoint=%s buffers_clean=%s buffers_backend=%s "
+        "buffers_backend_fsync=%s",
+        day, page_ordinal, outcome, before["backend_pid"], before["server_version_num"],
+        before["track_io_timing"], *(deltas[name] for name in _ARCHIVE_STAGE_DATABASE_COUNTERS),
+    )
+
+
+def _timed_stage_call(*, phase, day, page_ordinal, operation):
+    started = perf_counter()
+    try:
+        result = operation()
+    except BaseException:
+        _record_stage_phase(
+            phase=phase, day=day, page_ordinal=page_ordinal,
+            seconds=perf_counter() - started, outcome="failed",
+        )
+        raise
+    _record_stage_phase(
+        phase=phase, day=day, page_ordinal=page_ordinal,
+        seconds=perf_counter() - started, outcome="completed",
+    )
+    return result
+
+
+def _observe_stage_commit(session, *, day, page_ordinal, database_before):
+    state = {"started": None, "recorded": False, "database_recorded": False}
+
+    def before_commit(_session):
+        state["started"] = perf_counter()
+        state["database_after"] = _stage_database_snapshot(_session)
+
+    def after_commit(_session):
+        if state["started"] is not None:
+            _record_stage_phase(
+                phase="transaction_commit", day=day, page_ordinal=page_ordinal,
+                seconds=perf_counter() - state["started"], outcome="completed",
+            )
+            _record_stage_database_observation(
+                day=day, page_ordinal=page_ordinal, before=database_before,
+                after=state["database_after"], outcome="committed",
+            )
+            state["database_recorded"] = True
+            state["recorded"] = True
+
+    def after_rollback(_session):
+        if not state["database_recorded"]:
+            _record_stage_database_observation(
+                day=day, page_ordinal=page_ordinal, before=database_before,
+                after=None, outcome="rolled_back_delta_unavailable",
+            )
+            state["database_recorded"] = True
+        if state["started"] is not None and not state["recorded"]:
+            _record_stage_phase(
+                phase="transaction_commit", day=day, page_ordinal=page_ordinal,
+                seconds=perf_counter() - state["started"], outcome="failed",
+            )
+            state["recorded"] = True
+
+    event.listen(session, "before_commit", before_commit)
+    event.listen(session, "after_commit", after_commit)
+    event.listen(session, "after_rollback", after_rollback)
 
 
 def _series_catalog(manifest):
@@ -94,6 +359,7 @@ class PostgresCanonicalFactArchiveRepository:
         self.partition_guard = partition_guard
         self.check_budget = check_budget
         self._prepared_page = None
+        self._current_stage_page_ordinal = None
 
     def _check_budget(self):
         if self.check_budget is not None:
@@ -345,12 +611,25 @@ class PostgresCanonicalFactArchiveRepository:
         Retrying reads the same source cursor and safely reuses identical bytes;
         progress advances only in the catalog transaction.
         """
+        started = perf_counter()
+        self._current_stage_page_ordinal = None
         try:
-            return self._stage_next_page(day)
+            result = self._stage_next_page(day)
         except BaseException:
+            _record_stage_phase(
+                phase="stage_call_total", day=day,
+                page_ordinal=self._current_stage_page_ordinal,
+                seconds=perf_counter() - started, outcome="failed",
+            )
             # A failed transaction or cancellation cannot retain prepared input.
             self._prepared_page = None
             raise
+        _record_stage_phase(
+            phase="stage_call_total", day=day,
+            page_ordinal=self._current_stage_page_ordinal,
+            seconds=perf_counter() - started, outcome="completed",
+        )
+        return result
 
     def _stage_catalog_rows(self, session, record_type, manifest_id, rows):
         """Bound each write and observe cancellation within the page transaction."""
@@ -368,17 +647,163 @@ class PostgresCanonicalFactArchiveRepository:
             session.flush()
         self._check_budget()
 
+    def _stage_canonical_dependency_catalog_rows(self, session, manifest_id, rows):
+        """Insert fixed-width source identities in bounded typed-array statements."""
+        row_count = 0
+        batch_count = 0
+        max_batch_seconds = 0.0
+        batch = []
+
+        def insert(values):
+            nonlocal row_count, batch_count, max_batch_seconds
+            started = perf_counter()
+            try:
+                result = session.execute(_CANONICAL_DEPENDENCY_CATALOG_INSERT, {
+                    "manifest_id": manifest_id,
+                    "fact_version_ids": [item["fact_version_id"] for item in values],
+                    "row_hashes": [item["row_hash"] for item in values],
+                })
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                if result.rowcount != len(values):
+                    raise RuntimeError(
+                        "canonical_archive_dependency_insert_count_mismatch: "
+                        f"manifest_id={manifest_id} expected={len(values)} actual={result.rowcount}"
+                    )
+            except BaseException:
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                logger.info(
+                    "canonical_archive_catalog_batches | catalog=canonical_dependency "
+                    "manifest_id=%s outcome=failed rows=%s completed_batches=%s "
+                    "attempted_batch_rows=%s failed_batch_seconds=%.6f max_batch_seconds=%.6f",
+                    manifest_id, row_count, batch_count, len(values), elapsed, max_batch_seconds,
+                )
+                raise
+            row_count += len(values)
+            batch_count += 1
+
+        for values in rows:
+            self._check_budget()
+            batch.append(values)
+            if len(batch) != _CATALOG_WRITE_BATCH_ROWS:
+                continue
+            insert(batch)
+            batch = []
+            self._check_budget()
+        if batch:
+            insert(batch)
+        self._check_budget()
+        logger.info(
+            "canonical_archive_catalog_batches | catalog=canonical_dependency "
+            "manifest_id=%s outcome=completed rows=%s batches=%s max_batch_seconds=%.6f",
+            manifest_id, row_count, batch_count, max_batch_seconds,
+        )
+        return {
+            "row_count": row_count,
+            "batch_count": batch_count,
+            "max_batch_seconds": max_batch_seconds,
+        }
+
+    def _stage_alias_catalog_batches(self, session, manifest_id, aliases):
+        """Insert already ordered aliases through bounded controlled statements."""
+        row_count = 0
+        batch_count = 0
+        max_batch_seconds = 0.0
+        batch = []
+
+        def insert(values):
+            nonlocal row_count, batch_count, max_batch_seconds
+            started = perf_counter()
+            try:
+                result = session.execute(_ALIAS_CATALOG_INSERT, {
+                    "manifest_id": manifest_id,
+                    "fact_version_ids": [item["fact_version_id"] for item in values],
+                    "evidence_keys": [item["evidence_key"] for item in values],
+                    "series_ids": [item["series_id"] for item in values],
+                    "material_hashes": [item["material_hash"] for item in values],
+                })
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                if result.rowcount != len(values):
+                    raise RuntimeError(
+                        f"canonical_archive_alias_insert_count_mismatch: manifest_id={manifest_id} "
+                        f"expected={len(values)} actual={result.rowcount}"
+                    )
+            except BaseException:
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                logger.info(
+                    "canonical_archive_catalog_batches | catalog=material_alias "
+                    "manifest_id=%s outcome=failed rows=%s completed_batches=%s "
+                    "attempted_batch_rows=%s failed_batch_seconds=%.6f max_batch_seconds=%.6f",
+                    manifest_id, row_count, batch_count, len(values), elapsed, max_batch_seconds,
+                )
+                raise
+            row_count += len(values)
+            batch_count += 1
+
+        for values in aliases:
+            self._check_budget()
+            batch.append(values)
+            if len(batch) != _ALIAS_CATALOG_WRITE_BATCH_ROWS:
+                continue
+            insert(batch)
+            batch = []
+            self._check_budget()
+        if batch:
+            insert(batch)
+        self._check_budget()
+        logger.info(
+            "canonical_archive_catalog_batches | catalog=material_alias "
+            "manifest_id=%s outcome=completed rows=%s batches=%s max_batch_seconds=%.6f",
+            manifest_id, row_count, batch_count, max_batch_seconds,
+        )
+        return {
+            "row_count": row_count,
+            "batch_count": batch_count,
+            "max_batch_seconds": max_batch_seconds,
+        }
+
+    def _stage_alias_catalog_rows(self, session, manifest_id, rows):
+        """Derive one deterministic order for both alias identity indexes."""
+        aliases = []
+        for values in rows:
+            self._check_budget()
+            aliases.append(values)
+        aliases.sort(key=lambda item: (item["fact_version_id"], item["evidence_key"]))
+        self._check_budget()
+        return self._stage_alias_catalog_batches(session, manifest_id, aliases)
+
     def _stage_next_page(self, day: date) -> dict:
         with self.database.session() as session:
+            admission_started = perf_counter()
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            previous = session.execute(text("""
-                SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day
-                ORDER BY page_ordinal DESC LIMIT 1
-            """), {"day": day}).mappings().one_or_none()
+            previous = session.execute(
+                _ARCHIVE_LAST_MANIFEST_QUERY, {"day": day}
+            ).mappings().one_or_none()
             cursor = _catalog_manifest(previous).last_cursor if previous else (0, "")
             ordinal = previous["page_ordinal"] + 1 if previous else 0
+            self._current_stage_page_ordinal = ordinal
+            database_before = _stage_database_snapshot(session)
+            _record_stage_phase(
+                phase="partition_admission_cursor", day=day, page_ordinal=ordinal,
+                seconds=perf_counter() - admission_started, outcome="completed",
+            )
+            logger.info(
+                "canonical_archive_stage_backend | storage_day=%s page_ordinal=%s backend_pid=%s "
+                "server_version_num=%s track_io_timing=%s wait_sampling=external_pid "
+                "device_attribution=unsupported",
+                day, ordinal,
+                database_before["backend_pid"] if database_before is not None else "unavailable",
+                database_before["server_version_num"] if database_before is not None else "unavailable",
+                database_before["track_io_timing"] if database_before is not None else "unavailable",
+            )
+            _observe_stage_commit(
+                session, day=day, page_ordinal=ordinal, database_before=database_before,
+            )
             # Source rows are immutable and the sealed day rejects new inserts.
             # Every call still locks/rechecks the partition, policy and committed
             # page cursor. Raw/checkpoint dependencies are resolved afresh below.
@@ -398,125 +823,201 @@ class PostgresCanonicalFactArchiveRepository:
                 # surrogate pair); reserve 11 beyond its existing UTF-8 bytes.
                 # Five typed timestamps may each gain seven microsecond characters.
                 # The C collation keeps the printable range independent of locale.
-                source = session.execute(text(f"""
-                    WITH candidates AS MATERIALIZED (
-                        SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
-                        WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
-                        ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
-                    ), documents AS MATERIALIZED (
-                        SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
-                        FROM candidates
-                    ), budget AS (
-                        SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
-                            char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
-                            OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
-                    )
-                    SELECT candidates.* FROM candidates JOIN budget USING(id)
-                    WHERE budget.cumulative_bytes <= :max_bytes
-                    ORDER BY candidates.market_commit_seq,candidates.id
-                """), params).mappings().all()
+                source = _timed_stage_call(
+                    phase="source_select", day=day, page_ordinal=ordinal,
+                    operation=lambda: session.execute(
+                        _ARCHIVE_SOURCE_PAGE_QUERY, params
+                    ).mappings().all(),
+                )
                 if not source:
-                    # PostgreSQL sizes a conservative ASCII-escape allowance before
-                    # transferring JSON to Python. Oversized first rows cannot be
-                    # mistaken for an exhausted source or skipped behind a cursor.
-                    remaining = session.execute(text(
-                        "SELECT EXISTS (SELECT 1 FROM market.fact_versions WHERE storage_day=:day "
-                        "AND (market_commit_seq,id) > (:seq,:id))"
-                    ), params).scalar_one()
-                    if remaining:
-                        raise RuntimeError(f"canonical_archive_source_row_budget_exceeded: storage_day={day}; raise the explicit logical-byte budget")
-                    count = session.execute(text(
-                        "SELECT coalesce(sum(row_count),0) FROM market.fact_archive_manifests WHERE storage_day=:day"
-                    ), {"day": day}).scalar_one()
-                    if count != partition["expected_rows"]:
-                        raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day}")
+                    def prove_source_exhausted():
+                        remaining = session.execute(text(
+                            "SELECT EXISTS (SELECT 1 FROM market.fact_versions WHERE storage_day=:day "
+                            "AND (market_commit_seq,id) > (:seq,:id))"
+                        ), params).scalar_one()
+                        if remaining:
+                            raise RuntimeError(
+                                f"canonical_archive_source_row_budget_exceeded: storage_day={day}; "
+                                "raise the explicit logical-byte budget"
+                            )
+                        count = session.execute(text(
+                            "SELECT coalesce(sum(row_count),0) FROM market.fact_archive_manifests "
+                            "WHERE storage_day=:day"
+                        ), {"day": day}).scalar_one()
+                        if count != partition["expected_rows"]:
+                            raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day}")
+                        return count
+                    count = _timed_stage_call(
+                        phase="source_exhaustion_proof", day=day, page_ordinal=ordinal,
+                        operation=prove_source_exhausted,
+                    )
                     return {"storage_day": day, "status": "source_exhausted", "archived_rows": count}
                 rows = [{key: value for key, value in row.items() if key != "storage_day"} for row in source]
-                ensure_payload_contracts(session, [(row["payload_schema_id"], row["payload_contract_hash"]) for row in rows])
-                # Validate canonical payload/provenance hashes before following any
-                # claimed source reference or publishing bytes.
-                for row in rows:
-                    self._check_budget()
-                    record_from_storage_row(row)
-                # The roots can fit while their complete causal sources do not.
-                # Reduce only this new ordered page; never lower read limits or
-                # trim an individual root's correction/provenance closure. The
-                # unchanged run deadline/cancellation guard bounds every retry.
-                while True:
-                    self._check_budget()
-                    try:
-                        source_rows = self._source_revisions(session, rows)
-                        break
-                    except CanonicalSourceByteBudgetExceeded as exc:
-                        if len(rows) == 1:
-                            exc.add_note(f"storage_day={day} fact_version_id={rows[0]['id']}; "
-                                         "one root cannot fit; source cursor unchanged")
-                            raise
-                        next_count = max(1, len(rows) // 2)
-                        logger.warning(
-                            "canonical_archive_page_source_budget_reduced | storage_day=%s page_ordinal=%s "
-                            "rows_before=%s rows_after=%s logical_bytes=%s max_logical_bytes=%s",
-                            day, ordinal, len(rows), next_count, exc.logical_bytes, exc.max_logical_bytes)
-                        rows = rows[:next_count]
+
+                def validate_payloads():
+                    ensure_payload_contracts(
+                        session, [(row["payload_schema_id"], row["payload_contract_hash"]) for row in rows]
+                    )
+                    # Validate canonical payload/provenance hashes before following
+                    # any claimed source reference or publishing bytes.
+                    for row in rows:
+                        self._check_budget()
+                        record_from_storage_row(row)
+                _timed_stage_call(
+                    phase="payload_contract_and_row_validation", day=day, page_ordinal=ordinal,
+                    operation=validate_payloads,
+                )
+
+                def resolve_source_rows():
+                    nonlocal rows
+                    # The roots can fit while their complete causal sources do not.
+                    # Reduce only this new ordered page; never lower read limits or
+                    # trim an individual root's correction/provenance closure.
+                    while True:
+                        self._check_budget()
+                        try:
+                            return self._source_revisions(session, rows)
+                        except CanonicalSourceByteBudgetExceeded as exc:
+                            if len(rows) == 1:
+                                exc.add_note(f"storage_day={day} fact_version_id={rows[0]['id']}; "
+                                             "one root cannot fit; source cursor unchanged")
+                                raise
+                            next_count = max(1, len(rows) // 2)
+                            logger.warning(
+                                "canonical_archive_page_source_budget_reduced | storage_day=%s page_ordinal=%s "
+                                "rows_before=%s rows_after=%s logical_bytes=%s max_logical_bytes=%s",
+                                day, ordinal, len(rows), next_count, exc.logical_bytes, exc.max_logical_bytes)
+                            rows = rows[:next_count]
+                source_rows = _timed_stage_call(
+                    phase="causal_source_resolution", day=day, page_ordinal=ordinal,
+                    operation=resolve_source_rows,
+                )
                 self._prepared_page = (key, rows, source_rows)
-            progress = self._prepare_book_prefix(session, (*rows, *source_rows), day)
+
+            progress = _timed_stage_call(
+                phase="prefix_preparation", day=day, page_ordinal=ordinal,
+                operation=lambda: self._prepare_book_prefix(session, (*rows, *source_rows), day),
+            )
             if progress is not None:
                 return progress
             # Publication/verification never retain a second prepared page.
             self._prepared_page = None
-            dependencies, source_rows = self._dependencies(session, rows, source_rows=source_rows)
-            manifest = publish_canonical_fact_archive(
-                rows, object_store=self.object_store, temporary_directory=self.temporary_directory, limits=self.limits,
+            dependencies, source_rows = _timed_stage_call(
+                phase="dependency_proof", day=day, page_ordinal=ordinal,
+                operation=lambda: self._dependencies(session, rows, source_rows=source_rows),
             )
-            read_canonical_fact_archive(self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits)
-            verify_canonical_fact_archive_rows(rows, expected=manifest, limits=self.limits)
+            observer = lambda phase, seconds, outcome: _record_stage_phase(
+                phase=phase, day=day, page_ordinal=ordinal,
+                seconds=seconds, outcome=outcome,
+            )
+            manifest = _timed_stage_call(
+                phase="archive_publish_total", day=day, page_ordinal=ordinal,
+                operation=lambda: publish_canonical_fact_archive(
+                    rows, object_store=self.object_store,
+                    temporary_directory=self.temporary_directory, limits=self.limits,
+                    phase_observer=observer,
+                ),
+            )
+            _timed_stage_call(
+                phase="archive_page_readback", day=day, page_ordinal=ordinal,
+                operation=lambda: read_canonical_fact_archive(
+                    self.object_store.local_path(manifest.object_key),
+                    expected=manifest, limits=self.limits,
+                ),
+            )
+            _timed_stage_call(
+                phase="source_row_verification", day=day, page_ordinal=ordinal,
+                operation=lambda: verify_canonical_fact_archive_rows(
+                    rows, expected=manifest, limits=self.limits,
+                ),
+            )
             self._check_budget()
-            session.add(MarketFactArchiveManifestRecord(
-                id=manifest.manifest_id, storage_day=day, page_ordinal=ordinal,
-                object_key=manifest.object_key, object_sha256=manifest.object_sha256,
-                manifest_hash=manifest.manifest_hash, row_count=manifest.row_count, byte_count=manifest.byte_count,
-                first_commit_seq=manifest.first_cursor[0], first_id=manifest.first_cursor[1],
-                last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1], descriptor=manifest.to_dict(),
-            ))
-            session.flush()
-            self._stage_catalog_rows(session, MarketFactArchiveSeriesRecord,
-                                     manifest.manifest_id, _series_catalog(manifest))
-            self._stage_catalog_rows(session, MarketFactArchiveMaterialAliasRecord,
-                                     manifest.manifest_id,
-                                     (alias for row in rows if (alias := legacy_material_alias(row)) is not None))
-            self._stage_catalog_rows(session, MarketFactArchiveDependencyRecord,
-                                     manifest.manifest_id, dependencies)
-            self._stage_catalog_rows(session, MarketFactArchiveCanonicalDependencyRecord,
-                                     manifest.manifest_id,
-                                     ({"fact_version_id": row["id"], "row_hash": row["row_hash"]}
-                                      for row in source_rows))
-        logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s bytes=%s dependencies=%s",
-                    day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies))
-        return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
-                "manifest_id": manifest.manifest_id, "row_count": manifest.row_count}
 
-    def _page_catalogs(self, session, manifest_id):
+            def insert_manifest():
+                session.add(MarketFactArchiveManifestRecord(
+                    id=manifest.manifest_id, storage_day=day, page_ordinal=ordinal,
+                    object_key=manifest.object_key, object_sha256=manifest.object_sha256,
+                    manifest_hash=manifest.manifest_hash, row_count=manifest.row_count,
+                    byte_count=manifest.byte_count,
+                    first_commit_seq=manifest.first_cursor[0], first_id=manifest.first_cursor[1],
+                    last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1],
+                    descriptor=manifest.to_dict(),
+                ))
+                session.flush()
+            _timed_stage_call(
+                phase="manifest_insert", day=day, page_ordinal=ordinal,
+                operation=insert_manifest,
+            )
+            _timed_stage_call(
+                phase="series_catalog_insert", day=day, page_ordinal=ordinal,
+                operation=lambda: self._stage_catalog_rows(
+                    session, MarketFactArchiveSeriesRecord,
+                    manifest.manifest_id, _series_catalog(manifest),
+                ),
+            )
+            alias_catalog = _timed_stage_call(
+                phase="alias_catalog_insert", day=day, page_ordinal=ordinal,
+                operation=lambda: self._stage_alias_catalog_rows(
+                    session, manifest.manifest_id,
+                    (alias for row in rows if (alias := legacy_material_alias(row)) is not None),
+                ),
+            )
+            _timed_stage_call(
+                phase="dependency_catalog_insert", day=day, page_ordinal=ordinal,
+                operation=lambda: self._stage_catalog_rows(
+                    session, MarketFactArchiveDependencyRecord,
+                    manifest.manifest_id, dependencies,
+                ),
+            )
+            canonical_dependency_catalog = _timed_stage_call(
+                phase="canonical_dependency_catalog_insert", day=day, page_ordinal=ordinal,
+                operation=lambda: self._stage_canonical_dependency_catalog_rows(
+                    session, manifest.manifest_id,
+                    ({"fact_version_id": row["id"], "row_hash": row["row_hash"]}
+                     for row in source_rows),
+                ),
+            )
+        logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
+                    "rows=%s bytes=%s dependencies=%s aliases=%s alias_batches=%s "
+                    "alias_max_batch_seconds=%.6f "
+                    "canonical_dependencies=%s canonical_dependency_batches=%s "
+                    "canonical_dependency_max_batch_seconds=%.6f",
+                    day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies),
+                    alias_catalog["row_count"], alias_catalog["batch_count"],
+                    alias_catalog["max_batch_seconds"],
+                    canonical_dependency_catalog["row_count"],
+                    canonical_dependency_catalog["batch_count"],
+                    canonical_dependency_catalog["max_batch_seconds"])
+        return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
+                "manifest_id": manifest.manifest_id, "row_count": manifest.row_count,
+                "canonical_dependency_count": canonical_dependency_catalog["row_count"],
+                "canonical_dependency_batch_count": canonical_dependency_catalog["batch_count"]}
+
+    def _page_catalogs(self, session, manifest_id, *, handoff=None):
         catalogs = {}
+        physical = {}
         # Explicit projections define the versioned proof. Fetch one extra row
         # to reject excess metadata without transferring an unbounded catalog.
-        for name, table, columns, order, limit in (
-            ("series", "fact_archive_series",
-             "series_id, row_count, first_observation_at, last_observation_at, first_known_at, "
-             "last_known_at, first_accepted_at, last_accepted_at", "series_id", self.limits.max_rows),
-            ("aliases", "fact_archive_material_aliases",
-             "fact_version_id, series_id, evidence_key, material_hash", "fact_version_id, evidence_key", self.limits.max_rows),
-            ("dependencies", "fact_archive_dependencies",
-             "target_kind, target_id, object_key, object_sha256", "target_kind, target_id", self.max_dependency_objects),
-            ("canonical_dependencies", "fact_archive_canonical_dependencies",
-             "fact_version_id, row_hash", "fact_version_id", self.max_raw_mapping_rows),
-        ):
-            rows = session.execute(text(
-                f"SELECT {columns} FROM market.{table} WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+        limits = {
+            "series": self.limits.max_rows,
+            "aliases": self.limits.max_rows,
+            "dependencies": self.max_dependency_objects,
+            "canonical_dependencies": self.max_raw_mapping_rows,
+        }
+        for name, table, columns, order in ARCHIVE_PAGE_CATALOG_SPECS:
+            limit = limits[name]
+            rows = session.execute(archive_page_catalog_statement(
+                table=table, columns=columns, order=order, handoff=handoff is not None,
             ), {"id": manifest_id, "limit": limit + 1}).mappings().all()
             if len(rows) > limit:
                 raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
-            catalogs[name] = [dict(row) for row in rows]
-        return catalogs
+            if handoff is not None:
+                physical[name] = handoff.catalog_rows(session, name, manifest_id, rows)
+                catalogs[name] = [{key: value for key, value in row.items()
+                                   if key not in {"_handoff_tid", "_handoff_oid"}} for row in rows]
+            else:
+                catalogs[name] = [dict(row) for row in rows]
+        return (catalogs, physical) if handoff is not None else catalogs
 
     def restart_partition_verification(self, day: date) -> dict:
         """Withdraw an older verifier's admission, without deleting any evidence.
@@ -560,50 +1061,78 @@ class PostgresCanonicalFactArchiveRepository:
         Older pages can first advance one book_prefix_verified interval using
         their existing dependency bindings, without republishing their bytes.
         """
+        transaction_started = perf_counter()
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            page = session.execute(text("""
-                SELECT pages.* FROM market.fact_archive_manifests AS pages
-                LEFT JOIN market.fact_archive_verifications AS proof
-                  ON proof.manifest_id=pages.id AND proof.verifier_version=:version
-                WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
-                ORDER BY pages.page_ordinal LIMIT 1
-            """), {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+            page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
+                "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
+            }).mappings().one_or_none()
             if page is None:
                 return {"storage_day": day, "status": "no_unverified_pages"}
             manifest = _catalog_manifest(page)
             if manifest.row_count > self.limits.max_rows:
                 raise RuntimeError(f"canonical_archive_page_row_budget_exceeded: manifest_id={manifest.manifest_id}")
-            ensure_payload_contracts(session, [contract for bounds in manifest.series for contract in bounds.payload_contracts])
-            rows = read_canonical_fact_archive(
-                self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+            timings = {}
+            _timed_verification_call(
+                timings=timings, phase="payload_contracts", day=day, page=page,
+                operation=lambda: ensure_payload_contracts(
+                    session, [contract for bounds in manifest.series for contract in bounds.payload_contracts]
+                ),
             )
-            envelopes = session.execute(text(f"""
-                SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
-                WHERE versions.storage_day=:day
-                  AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
-                  AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
-                ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
-            """), {"day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
-                   "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1],
-                   "limit": self.limits.max_rows + 1}).mappings().all()
-            if len(envelopes) != len(rows):
-                raise RuntimeError(f"canonical_archive_page_source_coverage_mismatch: manifest_id={manifest.manifest_id}")
-            for envelope, archived in zip(envelopes, rows):
-                self._check_budget()
-                verify_archived_envelope(envelope, archived)
+            rows = _timed_verification_call(
+                timings=timings, phase="archive_read", day=day, page=page,
+                operation=lambda: read_canonical_fact_archive(
+                    self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+                ),
+            )
+            envelopes = _timed_verification_call(
+                timings=timings, phase="source_envelopes", day=day, page=page,
+                operation=lambda: session.execute(_ARCHIVE_SOURCE_ENVELOPES_QUERY, {
+                       "day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
+                       "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1],
+                       "limit": self.limits.max_rows + 1}).mappings().all(),
+            )
+
+            def validate_envelopes():
+                if len(envelopes) != len(rows):
+                    raise RuntimeError(
+                        f"canonical_archive_page_source_coverage_mismatch: manifest_id={manifest.manifest_id}"
+                    )
+                for envelope, archived in zip(envelopes, rows):
+                    self._check_budget()
+                    verify_archived_envelope(envelope, archived)
+            _timed_verification_call(
+                timings=timings, phase="envelope_validation", day=day, page=page,
+                operation=validate_envelopes,
+            )
             aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
-            catalogs = self._page_catalogs(session, manifest.manifest_id)
+            catalogs = _timed_verification_call(
+                timings=timings, phase="catalog_read", day=day, page=page,
+                operation=lambda: self._page_catalogs(session, manifest.manifest_id),
+            )
             bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
-            source_rows = self._source_revisions(session, rows)
-            progress = self._prepare_book_prefix(session, (*rows, *source_rows), day, bound_manifest_ids=bound_ids)
+            source_rows = _timed_verification_call(
+                timings=timings, phase="causal_source_resolution", day=day, page=page,
+                operation=lambda: self._source_revisions(session, rows),
+            )
+            progress = _timed_verification_call(
+                timings=timings, phase="book_prefix", day=day, page=page,
+                operation=lambda: self._prepare_book_prefix(
+                    session, (*rows, *source_rows), day, bound_manifest_ids=bound_ids
+                ),
+            )
             if progress is not None:
                 return progress
             bound_checkpoints = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "book_checkpoint"]
-            dependencies, source_rows = self._dependencies(session, rows, bound_manifest_ids=bound_ids,
-                source_rows=source_rows, bound_checkpoint_ids=bound_checkpoints or None)
+            dependencies, source_rows = _timed_verification_call(
+                timings=timings, phase="dependency_proof", day=day, page=page,
+                operation=lambda: self._dependencies(
+                    session, rows, bound_manifest_ids=bound_ids, source_rows=source_rows,
+                    bound_checkpoint_ids=bound_checkpoints or None,
+                ),
+            )
             expected = {
                 "series": _series_catalog(manifest),
                 "aliases": sorted(aliases, key=lambda item: (item["fact_version_id"], item["evidence_key"])),
@@ -636,10 +1165,15 @@ class PostgresCanonicalFactArchiveRepository:
             receipt = _receipt(page, archive_evidence_hash(catalogs))
             self._check_budget()
             session.add(MarketFactArchiveVerificationRecord(**receipt))
+        _record_verification_phase(
+            timings=timings, phase="transaction_total", day=day, page=page,
+            seconds=perf_counter() - transaction_started, outcome="completed",
+        )
         logger.info("canonical_archive_page_verified | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s verification_hash=%s",
                     day, page["page_ordinal"], manifest.manifest_id, manifest.row_count, receipt["verification_hash"])
         return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
-                "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"]}
+                "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"],
+                "phase_seconds": {name: round(seconds, 6) for name, seconds in timings.items()}}
 
     @staticmethod
     def _assert_dependencies_unexpired(session, dependencies, *, check_budget=None):
@@ -649,22 +1183,13 @@ class PostgresCanonicalFactArchiveRepository:
             if check_budget is not None:
                 check_budget()
             batch = dependencies[offset:offset + _EXPIRATION_QUERY_BATCH_ROWS]
-            expired = session.execute(text("""
-                SELECT requested.target_id
-                FROM unnest(CAST(:kinds AS text[]), CAST(:ids AS text[]))
-                    WITH ORDINALITY AS requested(target_kind, target_id, ordinal)
-                WHERE EXISTS (
-                    SELECT 1 FROM market.storage_lifecycle_events AS lifecycle
-                    WHERE lifecycle.action='archive_expire' AND lifecycle.event_type='completed'
-                      AND lifecycle.target_kind=requested.target_kind
-                      AND lifecycle.target_id=requested.target_id)
-                ORDER BY requested.ordinal LIMIT 1
-            """), {"kinds": [row["target_kind"] for row in batch],
+            expired = session.execute(_ARCHIVE_EXPIRED_DEPENDENCY_QUERY, {
+                   "kinds": [row["target_kind"] for row in batch],
                    "ids": [row["target_id"] for row in batch]}).scalar_one_or_none()
             if expired is not None:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
 
-    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None):
+    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None, handoff=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
         Supplying a byte verifier additionally checks every current cold object.
@@ -673,6 +1198,16 @@ class PostgresCanonicalFactArchiveRepository:
         """
         day = partition["storage_day"]
         check_budget = check_budget or self.check_budget
+        final_handoff = handoff is not None and objects is None
+        if final_handoff:
+            final_started = perf_counter()
+            handoff.admit(session, partition, limits, check_budget=check_budget)
+            logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=admitted seconds=%s",
+                        day, perf_counter() - final_started)
+            handoff.verify_headers(session, check_budget)
+            logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=headers_current seconds=%s",
+                        day, perf_counter() - final_started)
+            check_budget()
         last_cursor = (0, "")
         ordinal = 0
         total_rows = 0
@@ -690,6 +1225,22 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"day": day, "ordinal": ordinal, "limit": min(100, limits.max_pages - ordinal + 1)}).mappings().all()
             if not pages:
                 break
+            if final_handoff:
+                # Same bounded metadata page, same final transaction. Read
+                # receipts once per batch rather than once per manifest.
+                receipts = session.execute(text("""
+                    SELECT manifest_id, verifier_version, manifest_hash, catalog_hash, verification_hash
+                    FROM market.fact_archive_verifications
+                    WHERE manifest_id=ANY(CAST(:ids AS text[])) AND verifier_version=:version
+                """), {"ids": [page["id"] for page in pages],
+                        "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().all()
+                receipt_by_id = {row["manifest_id"]: row for row in receipts}
+                if len(receipts) != len(pages) or set(receipt_by_id) != {page["id"] for page in pages}:
+                    raise RuntimeError("canonical_archive_verification_missing_or_stale: handoff receipt scope")
+                handoff.verify_catalog_batch(session,
+                    [(page, receipt_by_id[page["id"]]) for page in pages], check_budget)
+                logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=catalogs_current first_page=%s pages=%s seconds=%s",
+                            day, ordinal, len(pages), perf_counter() - final_started)
             for page in pages:
                 if check_budget is not None:
                     check_budget()
@@ -698,28 +1249,52 @@ class PostgresCanonicalFactArchiveRepository:
                 manifest = _catalog_manifest(page)
                 if page["page_ordinal"] != ordinal or manifest.first_cursor <= last_cursor:
                     raise RuntimeError(f"canonical_archive_partition_page_order_invalid: storage_day={day} page_ordinal={page['page_ordinal']}")
-                catalogs = self._page_catalogs(session, manifest.manifest_id)
-                receipt = session.execute(text("""
+                if final_handoff:
+                    catalogs = None
+                elif handoff is not None:
+                    catalogs, physical = self._page_catalogs(session, manifest.manifest_id, handoff=handoff)
+                else:
+                    catalogs = self._page_catalogs(session, manifest.manifest_id)
+                receipt = (receipt_by_id[manifest.manifest_id] if final_handoff else session.execute(text("""
                     SELECT manifest_id, verifier_version, manifest_hash, catalog_hash, verification_hash
                     FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version
-                """), {"id": manifest.manifest_id, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
-                if receipt is None or dict(receipt) != _receipt(page, archive_evidence_hash(catalogs)):
-                    raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
-                if objects is not None:
-                    objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
-                source_placements.append(verify_canonical_source_placements(
-                    session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget))
-                self._assert_dependencies_unexpired(
-                    session, catalogs["dependencies"], check_budget=check_budget)
-                for dependency in catalogs["dependencies"]:
-                    if check_budget is not None:
-                        check_budget()
+                """), {"id": manifest.manifest_id, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none())
+                if final_handoff:
+                    handoff.verify_sources(session, manifest.manifest_id, check_budget)
+                    source_placements.append(handoff.source_hash(manifest.manifest_id))
+                else:
+                    if receipt is None or dict(receipt) != _receipt(page, archive_evidence_hash(catalogs)):
+                        raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
+                    if handoff is not None:
+                        handoff.capture_page(page, receipt, catalogs, physical)
                     if objects is not None:
-                        objects.verify(dependency["object_key"], dependency["object_sha256"])
+                        objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
+                    placement_hash = verify_canonical_source_placements(
+                        session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget,
+                        handoff=handoff, manifest_id=manifest.manifest_id)
+                    source_placements.append(placement_hash)
+                    if handoff is not None:
+                        handoff.record_source_hash(manifest.manifest_id, placement_hash)
+                    self._assert_dependencies_unexpired(
+                        session, catalogs["dependencies"], check_budget=check_budget)
+                    for dependency in catalogs["dependencies"]:
+                        if check_budget is not None:
+                            check_budget()
+                        if objects is not None:
+                            objects.verify(dependency["object_key"], dependency["object_sha256"])
                 proofs.append(receipt["verification_hash"])
                 total_rows += manifest.row_count
                 last_cursor = manifest.last_cursor
                 ordinal += 1
+        if final_handoff:
+            # All catalog contents were freshly matched above. Check each exact
+            # target once, now, under the exclusive lifecycle fence; no expiry
+            # result survives this transaction or comes from the first pass.
+            self._assert_dependencies_unexpired(session,
+                [{"target_kind": kind, "target_id": identity} for kind, identity in sorted(handoff.targets)],
+                check_budget=check_budget)
+            if ordinal != len(handoff.pages):
+                raise RuntimeError("canonical_handoff_page_scope_changed")
         if check_budget is not None:
             check_budget()
         count = session.execute(text(
@@ -730,6 +1305,9 @@ class PostgresCanonicalFactArchiveRepository:
         # pages, before the first, or after the last page.
         if count != partition["expected_rows"] or total_rows != count:
             raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day} source_rows={count} archived_rows={total_rows}")
+        if final_handoff:
+            logger.info("canonical_reclaim_handoff_progress | storage_day=%s stage=evidence_current pages=%s seconds=%s",
+                        day, ordinal, perf_counter() - final_started)
         return {"storage_day": day, "page_count": ordinal, "row_count": total_rows,
                 "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs),
                 "source_placement_hash": archive_evidence_hash({"pages": source_placements})}
@@ -746,8 +1324,8 @@ class PostgresCanonicalFactArchiveRepository:
             if partition["state"] not in {"sealed", "verified"}:
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
             objects = ArchiveVerificationBatch(self.object_store, limits=limits, check_budget=self.check_budget)
-            evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
-            objects.assert_unchanged()
+            with objects.distinct_references():
+                evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
             if partition["state"] == "verified":
                 if partition["manifest_set_hash"] != evidence["manifest_set_hash"]:
                     raise RuntimeError(f"canonical_archive_partition_verification_changed: storage_day={day}")

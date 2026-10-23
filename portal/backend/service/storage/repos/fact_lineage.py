@@ -9,6 +9,8 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import replace
 import json
+import logging
+from time import perf_counter
 
 from sqlalchemy import text
 
@@ -19,8 +21,86 @@ from market_data.archive import (
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
 
+logger = logging.getLogger(__name__)
 EXACT_RAW_FACT_TYPES = frozenset({"market.trade", "market.l2_book", "market.bbo", "market.depth_observation"})
 BOOK_SCOPE_FIELDS = ("definition_id", "session_id", "connection_epoch", "provider_product_id")
+
+
+def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
+                                         predicate: str = "TRUE",
+                                         prefix_manifest_predicate: str | None = None):
+    """Build the production raw-lineage catalog lookup without reading objects.
+
+    The operator diagnostic imports this boundary so its plans cannot drift
+    from the record-ID and exact-position statements used by archival. Values
+    remain bound by the caller. Prefix SQL retains its existing, separately
+    bounded VALUES relation because its arity is part of the admitted request.
+    """
+    if mode not in {"record", "position", "prefix"}:
+        raise ValueError("canonical_raw_lineage_lookup_mode_invalid")
+    bound_predicate = "AND manifests.id = ANY(:bound_ids)" if bound else ""
+    manifest_table = "market.raw_archive_manifests"
+    manifest_cte = ""
+    record_join = ""
+    position_join = ""
+    if mode == "record":
+        manifest_cte = """WITH requested_records AS MATERIALIZED (
+            SELECT DISTINCT requested.raw_record_id
+            FROM unnest(CAST(:ids AS text[])) AS requested(raw_record_id)
+        )"""
+        if bound:
+            manifest_cte += f""", candidate_manifests AS MATERIALIZED (
+                SELECT manifests.* FROM market.raw_archive_manifests AS manifests
+                WHERE TRUE {bound_predicate}
+            )"""
+            manifest_table = "candidate_manifests"
+        record_join = """JOIN requested_records AS records
+            ON records.raw_record_id=mappings.raw_record_id"""
+        predicate = "TRUE"
+    elif mode == "position":
+        manifest_cte = f"""WITH requested_positions AS MATERIALIZED (
+            SELECT DISTINCT * FROM jsonb_to_recordset(CAST(:positions AS jsonb))
+                AS requested(definition_id text, session_id text,
+                             connection_epoch bigint, receive_ordinal bigint)
+        ), candidate_manifests AS MATERIALIZED (
+            SELECT manifests.* FROM market.raw_archive_manifests AS manifests
+            WHERE {predicate} {bound_predicate}
+        )"""
+        manifest_table = "candidate_manifests"
+        position_join = """JOIN requested_positions AS positions
+            ON positions.definition_id=manifests.definition_id
+           AND positions.session_id=manifests.session_id
+           AND positions.session_id=mappings.session_id
+           AND positions.connection_epoch=manifests.connection_epoch
+           AND positions.connection_epoch=mappings.connection_epoch
+           AND manifests.first_receive_ordinal<=positions.receive_ordinal
+           AND manifests.last_receive_ordinal>=positions.receive_ordinal
+           AND positions.receive_ordinal=mappings.receive_ordinal"""
+        predicate = "TRUE"
+    else:
+        if not prefix_manifest_predicate:
+            raise ValueError("canonical_raw_lineage_prefix_predicate_required")
+        manifest_cte = f"""WITH candidate_manifests AS MATERIALIZED (
+            SELECT manifests.* FROM market.raw_archive_manifests AS manifests
+            WHERE {prefix_manifest_predicate} {bound_predicate}
+        )"""
+        manifest_table = "candidate_manifests"
+    return text(f"""{manifest_cte}
+        SELECT manifests.*, mappings.raw_record_id, mappings.object_row_index, mappings.object_row_group,
+               mappings.spool_segment_id AS mapped_segment_id, mappings.session_id AS mapped_session_id,
+               mappings.connection_epoch AS mapped_epoch, mappings.receive_ordinal AS mapped_ordinal,
+               mappings.raw_frame_sha256 AS mapped_frame_sha256
+        FROM market.raw_archive_record_mappings AS mappings
+        JOIN {manifest_table} AS manifests ON manifests.id=mappings.manifest_id
+        {record_join}
+        {position_join}
+        WHERE {predicate} {bound_predicate} AND NOT EXISTS (
+            SELECT 1 FROM market.storage_lifecycle_events AS expired
+            WHERE expired.action='archive_expire' AND expired.event_type='completed'
+              AND expired.target_kind='raw_manifest' AND expired.target_id=manifests.id)
+        ORDER BY mappings.raw_record_id, manifests.byte_count, manifests.id
+        LIMIT :limit
+    """)
 
 
 def _witness(row):
@@ -154,6 +234,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     matches = []
     # Both predicates address the exact record mapping, never a manifest's
     # min/max ordinal range (which can contain holes or another reconnect).
+    prefix_manifest_predicate = None
     queries = [
         ("mappings.raw_record_id = ANY(:ids)", {"ids": record_ids}),
         # Constant scope/range bounds let PostgreSQL find candidate manifests
@@ -162,13 +243,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         ("manifests.definition_id = ANY(:position_definitions) "
          "AND manifests.session_id = ANY(:position_sessions) "
          "AND manifests.first_receive_ordinal<=:last_position "
-         "AND manifests.last_receive_ordinal>=:first_position "
-         "AND EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
-         "AS positions(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
-         "WHERE positions.definition_id=manifests.definition_id AND positions.session_id=mappings.session_id "
-         "AND positions.session_id=manifests.session_id AND positions.connection_epoch=manifests.connection_epoch "
-         "AND manifests.first_receive_ordinal<=positions.receive_ordinal AND manifests.last_receive_ordinal>=positions.receive_ordinal "
-         "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
+         "AND manifests.last_receive_ordinal>=:first_position",
          {"positions": json.dumps(positions),
           "position_definitions": sorted({item["definition_id"] for item in positions}),
           "position_sessions": sorted({item["session_id"] for item in positions}),
@@ -214,11 +289,12 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         # each paired manifest scope before touching its mappings, independently
         # of the mapping-correlated proof. Both EXISTS clauses preserve one row
         # per placement when requested scopes overlap.
-        queries.append(("manifests.definition_id = ANY(:requested_definitions) "
+        prefix_manifest_predicate = ("manifests.definition_id = ANY(:requested_definitions) "
             "AND manifests.session_id = ANY(:requested_sessions) "
             "AND manifests.first_receive_ordinal<=:last_requested_ordinal "
             "AND manifests.last_receive_ordinal>=:first_requested_ordinal "
-            f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope}) "
+            f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope})")
+        queries.append((prefix_manifest_predicate + " " +
             f"AND EXISTS (SELECT 1 FROM {prefix_relation} WHERE {manifest_scope} "
             "AND prefixes.session_id=mappings.session_id "
             "AND prefixes.connection_epoch=mappings.connection_epoch "
@@ -240,29 +316,63 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         # disable known book placements in a separate exact-position query.
         # Partial bindings within this query still cannot restrict its unbound
         # witnesses; the per-witness checks below remain authoritative.
+        query_keys = tuple(dict.fromkeys(query_keys))
         witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
-                       for key in dict.fromkeys(query_keys) for row, evidence in wanted[key]}
+                       for key in query_keys for row, evidence in wanted[key]}
         query_bound_ids = page_bound_ids
         if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
             eligible = {identity for witness_id in witness_ids
                         for identity in witness_manifest_ids[witness_id]}
             query_bound_ids = eligible if page_bound_ids is None else eligible.intersection(page_bound_ids)
-        bound_predicate = "" if query_bound_ids is None else "AND manifests.id = ANY(:bound_ids)"
         bound_params = {} if query_bound_ids is None else {"bound_ids": sorted(query_bound_ids)}
-        found = session.execute(text(f"""
-            SELECT manifests.*, mappings.raw_record_id, mappings.object_row_index, mappings.object_row_group,
-                   mappings.spool_segment_id AS mapped_segment_id, mappings.session_id AS mapped_session_id,
-                   mappings.connection_epoch AS mapped_epoch, mappings.receive_ordinal AS mapped_ordinal,
-                   mappings.raw_frame_sha256 AS mapped_frame_sha256
-            FROM market.raw_archive_record_mappings AS mappings
-            JOIN market.raw_archive_manifests AS manifests ON manifests.id=mappings.manifest_id
-            WHERE {predicate} {bound_predicate} AND NOT EXISTS (
-                SELECT 1 FROM market.storage_lifecycle_events AS expired
-                WHERE expired.action='archive_expire' AND expired.event_type='completed'
-                  AND expired.target_kind='raw_manifest' AND expired.target_id=manifests.id)
-            ORDER BY mappings.raw_record_id, manifests.byte_count, manifests.id
-            LIMIT :limit
-        """), {**params, **bound_params, "limit": max_mapping_rows - len(matches) + 1}).mappings().all()
+        if "ids" in params:
+            # Treat the bounded witness identities as a relation instead of a
+            # very large scalar-array predicate. PostgreSQL can then join the
+            # primary mapping key directly, while an authoritative page binding
+            # restricts manifests before their mappings are visited. DISTINCT
+            # preserves ANY(array) set semantics; wanted retains every duplicate
+            # evidence witness for the later per-witness checks.
+            mode = "record"
+        elif "positions" in params:
+            # Parse a large exact-position set once and let PostgreSQL hash-join
+            # it to the candidate mappings. A correlated recordset subquery was
+            # re-parsed beneath the mapping scan and could exceed the bounded
+            # statement timeout even though the same complete proof fits easily.
+            # DISTINCT is defensive; wanted already collapses identical witness
+            # keys, and one requested position must never multiply a placement.
+            mode = "position"
+        elif "requested_definitions" in params:
+            # Fence sparse manifest pruning before mappings are visited. Without
+            # materialization PostgreSQL can apply the paired-scope predicate
+            # after reading every mapping inside the much wider ordinal envelope.
+            mode = "prefix"
+        statement = raw_archive_mapping_lookup_statement(
+            mode=mode, bound=query_bound_ids is not None, predicate=predicate,
+            prefix_manifest_predicate=prefix_manifest_predicate,
+        )
+        query_limit = max_mapping_rows - len(matches) + 1
+        started = perf_counter()
+        try:
+            found = session.execute(statement, {
+                **params, **bound_params, "limit": query_limit,
+            }).mappings().all()
+        except Exception:
+            logger.info(
+                "canonical_raw_lineage_lookup | mode=%s outcome=failed requested_keys=%s "
+                "witnesses=%s bound_manifests=%s prior_matches=%s limit=%s seconds=%.6f",
+                mode, len(query_keys), len(witness_ids),
+                None if query_bound_ids is None else len(query_bound_ids),
+                len(matches), query_limit, perf_counter() - started,
+            )
+            raise
+        logger.info(
+            "canonical_raw_lineage_lookup | mode=%s outcome=completed requested_keys=%s "
+            "witnesses=%s bound_manifests=%s prior_matches=%s returned_rows=%s "
+            "limit=%s seconds=%.6f",
+            mode, len(query_keys), len(witness_ids),
+            None if query_bound_ids is None else len(query_bound_ids),
+            len(matches), len(found), query_limit, perf_counter() - started,
+        )
         matches.extend(dict(item) for item in found)
         if len(matches) > max_mapping_rows:
             raise RuntimeError("canonical_raw_lineage_mapping_budget_exceeded: reduce canonical page size")
@@ -348,4 +458,9 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             raise RuntimeError(f"canonical_raw_lineage_content_fingerprint_mismatch: manifest_id={identity}")
         references[identity] = {name: manifest[name] for name in ("object_key", "object_uri", "object_sha256", "content_fingerprint")}
     byte_verifier.assert_unchanged()
+    logger.info(
+        "canonical_raw_lineage_resolution | outcome=completed requested_keys=%s "
+        "mapping_rows=%s selected_manifests=%s decoded_rows=%s decoded_logical_bytes=%s",
+        len(wanted), len(matches), len(selected), decoded_count, decoded_bytes,
+    )
     return references

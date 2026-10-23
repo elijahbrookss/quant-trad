@@ -193,6 +193,32 @@ MCP does not normalize a second request language, calculate features or hashes,
 or interpret a verdict. Dataset freeze, durable Check execution, and Observation
 creation require confirmation. Preview and requirements remain read-only.
 
+### Evidence Dispatch Parity
+
+`dispatch_research_check_evidence` accepts `request`, optional `dataset_id`,
+`single_attempt` (a boolean, default false), and `confirm` (required true to
+execute). It calls the existing `ResearchOperations.dispatch_evidence` method,
+as does `qt research check run --dispatch`. With `single_attempt=true`, both
+use `/api/research/jobs/checks/run-once`; otherwise they use
+`/api/research/jobs/checks/run`. There is no fallback from the run-once route
+and no automatic resubmission. The policy is not added to the scientific
+request fingerprint.
+
+The tool returns the unchanged `research_job_dispatch.v1` receipt: job ID/type,
+actual status, `reused`, `attempts`, persisted `max_attempts`,
+`request_fingerprint`, `status_url`, and `result_url`. CLI callers can retain the
+same complete object with `qt research check run --dispatch --format json`.
+CLI default dispatch output remains text; synchronous execution remains JSON.
+
+For this dispatch tool, an upstream `ApiError` keeps its available HTTP `status`
+and raw response `body` in JSON-RPC error `data`, with the original error
+message. The body may contain a reconciliation job ID even when receipt
+readback failed after enqueue/reuse. A policy mismatch or uncertain receipt is
+not permission to redispatch or change policy. Timeout does not prove server
+cancellation; status/result and explicit cancellation retain their existing
+contracts. This adapter change adds no admission, budget, retry or cancellation
+semantics and does not change other tools' error handling.
+
 For wider scout-window planning, `qt instruments coverage-matrix` calls the
 backend instrument coverage matrix and combines instrument readiness with candle
 coverage for a filtered instrument set.
@@ -276,3 +302,55 @@ rebuild reports or inspect runtime internals.
 - Detached experiment orchestration is deferred. Check evidence can dispatch to
   the shared research-job store and is inspected through the same job
   status/result contract as the CLI.
+
+
+## Check catalog parity
+
+`list_research_check_definitions` and `get_research_check_definition` call the
+existing `ResearchOperations.definitions`/`definition` GET operations. They expose
+the same versioned settings, outputs, examples and compatibility guidance as the
+API and `qt research check definitions`/`definition`. They require no mutation
+confirmation and perform no prepare, freeze, dispatch or replay action. Existing
+write tools and their confirmation/admission behavior are unchanged.
+
+
+## Saved-selection request preparation and execution snapshot
+
+`prepare_saved_selection_measurement_request` accepts `source_check_id`,
+`measurement_profile` (currently `"18"`) and optional `expected_hashes` containing
+result/evidence/selection manifest hashes. It returns the validated exact saved
+reference/context and a request for the existing requirements/dispatch tools.
+Only saved selection 12/14/17 contracts are admitted. It shares the backend binding
+validator and never loads candles, calls providers, calculates outcomes, freezes
+inputs, allocates attempts or writes records. Persisted eligibility flags belong
+in the saved Check payload; optional API-projected copies are not required when
+reading the raw repository record, and contradictory supplied copies still fail.
+
+`get_research_execution_snapshot` accepts an optional existing request, optional
+`job_id` and integer `limit` 1..100 (default 25). It uses the existing dispatch
+fingerprint and actual PostgreSQL research-lock identity. It reports server
+`observed_at`, global nonterminal jobs, owner-held state, matching jobs across all
+statuses, the existing requested-job status schema and explicit truncation flags.
+It does not return arbitrary SQL, reserve a slot, allocate a budget, authorize a
+retry or alter a ledger. Requested-job status can be observed slightly later.
+Both tools use `ResearchOperations`; neither requires mutation confirmation.
+
+Existing JSON dispatch receipts, job status/result and item list/get should be
+used for reconciliation and ledger readback. If QT MCP is not configured/exposed
+in the task, use the matching `qt research check from-selection` and
+`qt research jobs snapshot` CLI commands rather than internal planner imports or
+manual database queries. This adds no parallel admission or accounting authority.
+
+## Native input preparation
+
+Use existing `prepare_research_check_evidence` for the whole preparation step.
+Its default is inspect-only. Explicit `acquire_missing=true` requests supported
+public provider-native candle inputs; `freeze=true` freezes the verified input.
+Either effect requires `confirm=true`, and embedded request fields cannot enable
+an effect independently. Coinbase currently declares native intervals; other
+providers without declarations or credential-backed integrations refuse here.
+The backend reuses canonical ingestion, rechecks source-bound coverage and
+returns Dataset/binding/next_request plus complete acquisition receipts or
+partial-failure blockers. It never dispatches a Check. See
+[Check Evidence Boundary](CHECK_EVIDENCE_BOUNDARY.md#explicit-preparation-acquisition)
+for limits, durable partial effects and separately owned execution admission.

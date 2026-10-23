@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
+import logging
 
 import pytest
 
@@ -111,12 +112,20 @@ def test_repeated_prefix_locators_preserve_each_witness_and_requested_budget(tmp
     assert bindings["root-0"] == {"raw-manifest"}
 
 
-def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path):
+def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path, caplog):
     store, _, mappings, rows = _fixture(tmp_path)
-    refs, verified = _resolve(store, mappings, rows)
+    with caplog.at_level(logging.INFO):
+        refs, verified = _resolve(store, mappings, rows)
     assert list(refs) == ["raw-manifest"]
     assert verified.byte_count == mappings[0]["byte_count"]
     assert len(verified.objects) == 1
+    assert ("canonical_raw_lineage_lookup | mode=record outcome=completed "
+            "requested_keys=2 witnesses=2 bound_manifests=None prior_matches=0 "
+            "returned_rows=2") in caplog.text
+    assert ("canonical_raw_lineage_resolution | outcome=completed requested_keys=2 "
+            "mapping_rows=2 selected_manifests=1 decoded_rows=2") in caplog.text
+    assert rows[0]["id"] not in caplog.text
+    assert mappings[0]["raw_record_id"] not in caplog.text
 
 
 def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_path):
@@ -132,10 +141,37 @@ def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_pa
         byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
         witness_manifest_ids={book["id"]: {"raw-manifest"}}, max_mapping_rows=2)
     assert set(refs) == {"raw-manifest"}
-    record_params = next(params for _, params in session.calls if "ids" in params)
-    position_params = next(params for _, params in session.calls if "positions" in params)
+    record_sql, record_params = next((sql, params) for sql, params in session.calls if "ids" in params)
+    position_sql, position_params = next(
+        (sql, params) for sql, params in session.calls if "positions" in params
+    )
     assert "bound_ids" not in record_params, "the trade witness must remain unrestricted"
+    assert "WITH requested_records AS MATERIALIZED" in record_sql
+    assert "JOIN requested_records AS records" in record_sql
+    assert "mappings.raw_record_id = ANY" not in record_sql
     assert position_params["bound_ids"] == ["raw-manifest"]
+    assert "WITH requested_positions AS MATERIALIZED" in position_sql
+    assert "JOIN requested_positions AS positions" in position_sql
+    assert "manifests.first_receive_ordinal<=positions.receive_ordinal" in position_sql
+    assert "manifests.last_receive_ordinal>=positions.receive_ordinal" in position_sql
+    assert "EXISTS (SELECT 1 FROM jsonb_to_recordset" not in position_sql
+
+
+def test_bound_record_witnesses_prune_manifests_before_mapping_lookup(tmp_path):
+    store, _, mappings, rows = _fixture(tmp_path)
+    session = _Session(mappings)
+    refs = resolve_canonical_raw_archive_refs(session, rows=rows, object_store=store,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+        bound_manifest_ids={"raw-manifest"})
+    assert set(refs) == {"raw-manifest"}
+    record_sql, params = next((sql, params) for sql, params in session.calls if "ids" in params)
+    assert params["bound_ids"] == ["raw-manifest"]
+    assert "WITH requested_records AS MATERIALIZED" in record_sql
+    assert "candidate_manifests AS MATERIALIZED" in record_sql
+    assert "JOIN requested_records AS records" in record_sql
+    assert "JOIN candidate_manifests AS manifests" in record_sql
+    assert "records.raw_record_id=mappings.raw_record_id" in record_sql
+    assert "mappings.raw_record_id = ANY" not in record_sql
 
 
 @pytest.mark.parametrize("ids", [["one"], ["one", 'quote"\\newline\n', "\u03b1\U0001f680"]])

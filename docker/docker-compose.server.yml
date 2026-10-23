@@ -492,6 +492,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ./grafana/server-alerting/clock-disabled.yml
+        target: /etc/grafana/provisioning/alerting/clock-safety.yml
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - quanttrad
     logging: *service-logging
