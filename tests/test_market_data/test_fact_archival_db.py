@@ -529,7 +529,7 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
     # A coarse batch is the control under the same row cost and deadline. It
     # must fail at the actual alias INSERT, leaving the entire page uncommitted.
     with monkeypatch.context() as coarse:
-        coarse.setattr(fact_archival, "_CATALOG_WRITE_BATCH_ROWS", 1000)
+        coarse.setattr(fact_archival, "_ALIAS_CATALOG_WRITE_BATCH_ROWS", 1000)
         with pytest.raises(DBAPIError) as failed:
             _acknowledge_alias_page(fixture)
     assert failed.value.orig.pgcode == "57014"

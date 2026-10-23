@@ -262,8 +262,10 @@ def test_alias_catalog_writer_sorts_identity_and_keeps_bounded_statements(tmp_pa
 
     result = archive._stage_alias_catalog_rows(session, "manifest", aliases)
 
-    assert result == {"row_count": 257, "batch_count": 3}
-    assert [len(params["fact_version_ids"]) for _, params in session.calls] == [128, 128, 1]
+    assert result["row_count"] == 257
+    assert result["batch_count"] == 5
+    assert result["max_batch_seconds"] >= 0.0
+    assert [len(params["fact_version_ids"]) for _, params in session.calls] == [64, 64, 64, 64, 1]
     assert all(statement.startswith("INSERT INTO market.fact_archive_material_aliases")
                for statement, _ in session.calls)
     assert all(params["manifest_id"] == "manifest" for _, params in session.calls)

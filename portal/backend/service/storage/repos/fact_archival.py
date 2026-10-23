@@ -44,6 +44,10 @@ FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
 # Keep cold catalog/FK work below the per-statement ceiling without shrinking
 # immutable archive pages or committing partial page metadata.
 _CATALOG_WRITE_BATCH_ROWS = 128
+# Alias rows maintain more identities than the fixed-width dependency catalog.
+# Keep their cold-storage statements below the shared statement timeout while
+# preserving the all-or-nothing page transaction.
+_ALIAS_CATALOG_WRITE_BATCH_ROWS = 64
 # Bound expiration-key SQL independently of the number of archive dependencies.
 _EXPIRATION_QUERY_BATCH_ROWS = 128
 _ALIAS_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_material_aliases
@@ -617,45 +621,61 @@ class PostgresCanonicalFactArchiveRepository:
         """Insert already ordered aliases through bounded controlled statements."""
         row_count = 0
         batch_count = 0
+        max_batch_seconds = 0.0
         batch = []
+
+        def insert(values):
+            nonlocal row_count, batch_count, max_batch_seconds
+            started = perf_counter()
+            try:
+                result = session.execute(_ALIAS_CATALOG_INSERT, {
+                    "manifest_id": manifest_id,
+                    "fact_version_ids": [item["fact_version_id"] for item in values],
+                    "evidence_keys": [item["evidence_key"] for item in values],
+                    "series_ids": [item["series_id"] for item in values],
+                    "material_hashes": [item["material_hash"] for item in values],
+                })
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                if result.rowcount != len(values):
+                    raise RuntimeError(
+                        f"canonical_archive_alias_insert_count_mismatch: manifest_id={manifest_id} "
+                        f"expected={len(values)} actual={result.rowcount}"
+                    )
+            except BaseException:
+                elapsed = perf_counter() - started
+                max_batch_seconds = max(max_batch_seconds, elapsed)
+                logger.info(
+                    "canonical_archive_catalog_batches | catalog=material_alias "
+                    "manifest_id=%s outcome=failed rows=%s completed_batches=%s "
+                    "attempted_batch_rows=%s failed_batch_seconds=%.6f max_batch_seconds=%.6f",
+                    manifest_id, row_count, batch_count, len(values), elapsed, max_batch_seconds,
+                )
+                raise
+            row_count += len(values)
+            batch_count += 1
+
         for values in aliases:
             self._check_budget()
             batch.append(values)
-            if len(batch) != _CATALOG_WRITE_BATCH_ROWS:
+            if len(batch) != _ALIAS_CATALOG_WRITE_BATCH_ROWS:
                 continue
-            result = session.execute(_ALIAS_CATALOG_INSERT, {
-                "manifest_id": manifest_id,
-                "fact_version_ids": [item["fact_version_id"] for item in batch],
-                "evidence_keys": [item["evidence_key"] for item in batch],
-                "series_ids": [item["series_id"] for item in batch],
-                "material_hashes": [item["material_hash"] for item in batch],
-            })
-            if result.rowcount != len(batch):
-                raise RuntimeError(
-                    f"canonical_archive_alias_insert_count_mismatch: manifest_id={manifest_id} "
-                    f"expected={len(batch)} actual={result.rowcount}"
-                )
-            row_count += len(batch)
-            batch_count += 1
+            insert(batch)
             batch = []
             self._check_budget()
         if batch:
-            result = session.execute(_ALIAS_CATALOG_INSERT, {
-                "manifest_id": manifest_id,
-                "fact_version_ids": [item["fact_version_id"] for item in batch],
-                "evidence_keys": [item["evidence_key"] for item in batch],
-                "series_ids": [item["series_id"] for item in batch],
-                "material_hashes": [item["material_hash"] for item in batch],
-            })
-            if result.rowcount != len(batch):
-                raise RuntimeError(
-                    f"canonical_archive_alias_insert_count_mismatch: manifest_id={manifest_id} "
-                    f"expected={len(batch)} actual={result.rowcount}"
-                )
-            row_count += len(batch)
-            batch_count += 1
+            insert(batch)
         self._check_budget()
-        return {"row_count": row_count, "batch_count": batch_count}
+        logger.info(
+            "canonical_archive_catalog_batches | catalog=material_alias "
+            "manifest_id=%s outcome=completed rows=%s batches=%s max_batch_seconds=%.6f",
+            manifest_id, row_count, batch_count, max_batch_seconds,
+        )
+        return {
+            "row_count": row_count,
+            "batch_count": batch_count,
+            "max_batch_seconds": max_batch_seconds,
+        }
 
     def _stage_alias_catalog_rows(self, session, manifest_id, rows):
         """Derive one deterministic order for both alias identity indexes."""
@@ -859,10 +879,12 @@ class PostgresCanonicalFactArchiveRepository:
             )
         logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
                     "rows=%s bytes=%s dependencies=%s aliases=%s alias_batches=%s "
+                    "alias_max_batch_seconds=%.6f "
                     "canonical_dependencies=%s canonical_dependency_batches=%s "
                     "canonical_dependency_max_batch_seconds=%.6f",
                     day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies),
                     alias_catalog["row_count"], alias_catalog["batch_count"],
+                    alias_catalog["max_batch_seconds"],
                     canonical_dependency_catalog["row_count"],
                     canonical_dependency_catalog["batch_count"],
                     canonical_dependency_catalog["max_batch_seconds"])
