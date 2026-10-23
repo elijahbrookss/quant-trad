@@ -9,6 +9,8 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import replace
 import json
+import logging
+from time import perf_counter
 
 from sqlalchemy import text
 
@@ -19,6 +21,7 @@ from market_data.archive import (
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
 
+logger = logging.getLogger(__name__)
 EXACT_RAW_FACT_TYPES = frozenset({"market.trade", "market.l2_book", "market.bbo", "market.depth_observation"})
 BOOK_SCOPE_FIELDS = ("definition_id", "session_id", "connection_epoch", "provider_product_id")
 
@@ -313,8 +316,9 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         # disable known book placements in a separate exact-position query.
         # Partial bindings within this query still cannot restrict its unbound
         # witnesses; the per-witness checks below remain authoritative.
+        query_keys = tuple(dict.fromkeys(query_keys))
         witness_ids = {row["id"] if row is not None else evidence["root_fact_version_id"]
-                       for key in dict.fromkeys(query_keys) for row, evidence in wanted[key]}
+                       for key in query_keys for row, evidence in wanted[key]}
         query_bound_ids = page_bound_ids
         if witness_manifest_ids is not None and witness_ids <= witness_manifest_ids.keys():
             eligible = {identity for witness_id in witness_ids
@@ -346,9 +350,29 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             mode=mode, bound=query_bound_ids is not None, predicate=predicate,
             prefix_manifest_predicate=prefix_manifest_predicate,
         )
-        found = session.execute(statement, {
-            **params, **bound_params, "limit": max_mapping_rows - len(matches) + 1,
-        }).mappings().all()
+        query_limit = max_mapping_rows - len(matches) + 1
+        started = perf_counter()
+        try:
+            found = session.execute(statement, {
+                **params, **bound_params, "limit": query_limit,
+            }).mappings().all()
+        except Exception:
+            logger.info(
+                "canonical_raw_lineage_lookup | mode=%s outcome=failed requested_keys=%s "
+                "witnesses=%s bound_manifests=%s prior_matches=%s limit=%s seconds=%.6f",
+                mode, len(query_keys), len(witness_ids),
+                None if query_bound_ids is None else len(query_bound_ids),
+                len(matches), query_limit, perf_counter() - started,
+            )
+            raise
+        logger.info(
+            "canonical_raw_lineage_lookup | mode=%s outcome=completed requested_keys=%s "
+            "witnesses=%s bound_manifests=%s prior_matches=%s returned_rows=%s "
+            "limit=%s seconds=%.6f",
+            mode, len(query_keys), len(witness_ids),
+            None if query_bound_ids is None else len(query_bound_ids),
+            len(matches), len(found), query_limit, perf_counter() - started,
+        )
         matches.extend(dict(item) for item in found)
         if len(matches) > max_mapping_rows:
             raise RuntimeError("canonical_raw_lineage_mapping_budget_exceeded: reduce canonical page size")
@@ -434,4 +458,9 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             raise RuntimeError(f"canonical_raw_lineage_content_fingerprint_mismatch: manifest_id={identity}")
         references[identity] = {name: manifest[name] for name in ("object_key", "object_uri", "object_sha256", "content_fingerprint")}
     byte_verifier.assert_unchanged()
+    logger.info(
+        "canonical_raw_lineage_resolution | outcome=completed requested_keys=%s "
+        "mapping_rows=%s selected_manifests=%s decoded_rows=%s decoded_logical_bytes=%s",
+        len(wanted), len(matches), len(selected), decoded_count, decoded_bytes,
+    )
     return references

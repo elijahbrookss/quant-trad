@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
+import logging
 
 import pytest
 
@@ -111,12 +112,20 @@ def test_repeated_prefix_locators_preserve_each_witness_and_requested_budget(tmp
     assert bindings["root-0"] == {"raw-manifest"}
 
 
-def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path):
+def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path, caplog):
     store, _, mappings, rows = _fixture(tmp_path)
-    refs, verified = _resolve(store, mappings, rows)
+    with caplog.at_level(logging.INFO):
+        refs, verified = _resolve(store, mappings, rows)
     assert list(refs) == ["raw-manifest"]
     assert verified.byte_count == mappings[0]["byte_count"]
     assert len(verified.objects) == 1
+    assert ("canonical_raw_lineage_lookup | mode=record outcome=completed "
+            "requested_keys=2 witnesses=2 bound_manifests=None prior_matches=0 "
+            "returned_rows=2") in caplog.text
+    assert ("canonical_raw_lineage_resolution | outcome=completed requested_keys=2 "
+            "mapping_rows=2 selected_manifests=1 decoded_rows=2") in caplog.text
+    assert rows[0]["id"] not in caplog.text
+    assert mappings[0]["raw_record_id"] not in caplog.text
 
 
 def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_path):

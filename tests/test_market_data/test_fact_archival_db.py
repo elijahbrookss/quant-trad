@@ -14,6 +14,21 @@ from tests.test_market_data.test_fact_storage_tiers_db import storage, _placemen
 pytestmark = pytest.mark.db
 
 
+def test_stage_database_snapshot_reads_postgresql_counters(storage):
+    with storage.database.session() as session:
+        snapshot = fact_archival._stage_database_snapshot(session)
+
+    assert snapshot is not None
+    assert snapshot["backend_pid"] > 0
+    assert snapshot["server_version_num"] >= 150000
+    assert isinstance(snapshot["track_io_timing"], bool)
+    assert snapshot["wal_stats_reset"] is not None
+    assert snapshot["writer_stats_reset"] is not None
+    for name in fact_archival._ARCHIVE_STAGE_DATABASE_COUNTERS:
+        assert snapshot[name] is not None
+        assert snapshot[name] >= 0
+
+
 @pytest.mark.parametrize("text_value", ["ascii-" * 60, "\u007f\u00e9\u20ac\U0001f680\\\"\n" * 16],
                          ids=["ascii", "escaped-unicode"])
 def test_page_packing_keeps_codec_byte_bound_and_resumes_without_skipping(

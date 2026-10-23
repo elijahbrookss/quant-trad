@@ -165,6 +165,91 @@ def test_stage_phase_records_completed_and_failed_durations(monkeypatch, caplog)
     assert "phase=canonical_dependency_catalog_insert outcome=failed seconds=0.500000" in caplog.text
 
 
+def _database_observation_fixture(**overrides):
+    values = {
+        "backend_pid": 1234,
+        "server_version_num": 150014,
+        "track_io_timing": False,
+        "wal_stats_reset": "wal-reset",
+        "wal_records": 100,
+        "wal_fpi": 10,
+        "wal_bytes": 1000,
+        "wal_buffers_full": 1,
+        "writer_stats_reset": "writer-reset",
+        "checkpoints_timed": 20,
+        "checkpoints_req": 3,
+        "checkpoint_write_time_ms": 200.0,
+        "checkpoint_sync_time_ms": 30.0,
+        "buffers_checkpoint": 40,
+        "buffers_clean": 50,
+        "buffers_backend": 60,
+        "buffers_backend_fsync": 2,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_stage_database_snapshot_failure_rolls_back_only_its_savepoint(caplog):
+    class Connection:
+        def __init__(self):
+            self.commands = []
+
+        def exec_driver_sql(self, sql):
+            self.commands.append(sql)
+
+        @staticmethod
+        def execute(_statement):
+            raise RuntimeError("injected observation failure")
+
+    connection = Connection()
+    session = SimpleNamespace(connection=lambda: connection)
+    with caplog.at_level(logging.WARNING):
+        assert fact_archival._stage_database_snapshot(session) is None
+    assert connection.commands == [
+        "SAVEPOINT qt_archive_stage_observation",
+        "ROLLBACK TO SAVEPOINT qt_archive_stage_observation",
+        "RELEASE SAVEPOINT qt_archive_stage_observation",
+    ]
+    assert "outcome=observation_unavailable error_type=RuntimeError" in caplog.text
+    assert "injected observation failure" not in caplog.text
+
+
+def test_stage_database_observation_labels_cluster_deltas_without_device_claim(caplog):
+    before = _database_observation_fixture()
+    after = _database_observation_fixture(
+        wal_records=125, wal_fpi=12, wal_bytes=1500, wal_buffers_full=2,
+        checkpoints_timed=21, checkpoints_req=5, checkpoint_write_time_ms=240.0,
+        checkpoint_sync_time_ms=32.0, buffers_checkpoint=47, buffers_clean=59,
+        buffers_backend=71, buffers_backend_fsync=3,
+    )
+    with caplog.at_level(logging.INFO):
+        fact_archival._record_stage_database_observation(
+            day=date(2026, 8, 29), page_ordinal=4,
+            before=before, after=after, outcome="committed",
+        )
+    assert "scope=cluster_overlap backend_pid=1234" in caplog.text
+    assert "device_attribution=unsupported wal_records=25 wal_fpi=2 wal_bytes=500" in caplog.text
+    assert "checkpoints_timed=1 checkpoints_req=2 checkpoint_write_time_ms=40.0" in caplog.text
+    assert "buffers_checkpoint=7 buffers_clean=9 buffers_backend=11 buffers_backend_fsync=1" in caplog.text
+
+
+def test_stage_database_observation_never_invents_rollback_or_reset_deltas(caplog):
+    before = _database_observation_fixture()
+    reset = _database_observation_fixture(wal_stats_reset="later", writer_stats_reset="later")
+    with caplog.at_level(logging.INFO):
+        fact_archival._record_stage_database_observation(
+            day=date(2026, 8, 29), page_ordinal=5,
+            before=before, after=reset, outcome="committed",
+        )
+        fact_archival._record_stage_database_observation(
+            day=date(2026, 8, 29), page_ordinal=6,
+            before=before, after=None, outcome="rolled_back_delta_unavailable",
+        )
+    assert caplog.text.count("wal_records=None") == 2
+    assert caplog.text.count("buffers_checkpoint=None") == 2
+    assert "outcome=rolled_back_delta_unavailable" in caplog.text
+
+
 def test_generic_catalog_writer_keeps_128_row_batches(tmp_path):
     class Session:
         def __init__(self):

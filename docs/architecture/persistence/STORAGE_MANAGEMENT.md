@@ -243,6 +243,28 @@ Storage API/UI projection for the pipeline domains, oldest days and saved defaul
 eligibility window whose runtime adapter clears family overrides. Neither surface
 grants execution authority.
 
+## Canonical archive stage attribution
+
+Each canonical archive stage records its existing phase duration and catalog
+batch counts. Raw-lineage lookups additionally record the lookup mode, exact
+number of distinct requested keys, witness count, optional bound-manifest
+cardinality, result cardinality, elapsed time and outcome. They never log record
+identities, bound values, payloads or object paths.
+
+One small PostgreSQL statistics snapshot is read after page admission and a
+second immediately before commit. The paired receipt names the archive
+backend PID and PostgreSQL version so an operator can correlate a separately
+bounded `pg_stat_activity` wait sample. It reports changes in PostgreSQL 15's
+cluster-wide WAL and background-writer counters as `scope=cluster_overlap`.
+Those changes include other concurrent database activity and are not
+page-exclusive WAL, statement cost or device attribution. A statistics reset or
+rolled-back page reports the delta as unavailable. `track_io_timing` is recorded,
+but PostgreSQL 15 does not expose `pg_stat_io`; this instrumentation therefore
+does not claim a relation, index or physical device caused a wait. The two
+catalog-view reads run inside a SQL savepoint, do not scan application rows and
+fail open as unavailable observations; they cannot alter archive admission,
+timeouts, atomicity or recovery behavior.
+
 ## Canonical query diagnostic
 
 `scripts/reporting/canonical_storage_query_diagnostic.py` is an inert,

@@ -69,6 +69,36 @@ FROM unnest(
 ) WITH ORDINALITY AS input(fact_version_id, row_hash, position)
 ORDER BY input.position""")
 
+# PostgreSQL 15 exposes these counters only at cluster scope. The paired
+# snapshots help correlate a page with overlapping WAL/checkpoint pressure; they
+# are never presented as page-exclusive bytes or device attribution.
+_ARCHIVE_STAGE_DATABASE_SNAPSHOT = text("""
+    SELECT pg_backend_pid() AS backend_pid,
+           current_setting('server_version_num')::integer AS server_version_num,
+           current_setting('track_io_timing')::boolean AS track_io_timing,
+           wal.stats_reset AS wal_stats_reset,
+           wal.wal_records::bigint AS wal_records,
+           wal.wal_fpi::bigint AS wal_fpi,
+           wal.wal_bytes::bigint AS wal_bytes,
+           wal.wal_buffers_full::bigint AS wal_buffers_full,
+           writer.stats_reset AS writer_stats_reset,
+           writer.checkpoints_timed::bigint AS checkpoints_timed,
+           writer.checkpoints_req::bigint AS checkpoints_req,
+           writer.checkpoint_write_time::double precision AS checkpoint_write_time_ms,
+           writer.checkpoint_sync_time::double precision AS checkpoint_sync_time_ms,
+           writer.buffers_checkpoint::bigint AS buffers_checkpoint,
+           writer.buffers_clean::bigint AS buffers_clean,
+           writer.buffers_backend::bigint AS buffers_backend,
+           writer.buffers_backend_fsync::bigint AS buffers_backend_fsync
+    FROM pg_stat_wal AS wal CROSS JOIN pg_stat_bgwriter AS writer
+""")
+_ARCHIVE_STAGE_DATABASE_COUNTERS = (
+    "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full",
+    "checkpoints_timed", "checkpoints_req", "checkpoint_write_time_ms",
+    "checkpoint_sync_time_ms", "buffers_checkpoint", "buffers_clean",
+    "buffers_backend", "buffers_backend_fsync",
+)
+
 _ARCHIVE_LAST_MANIFEST_QUERY = text("""
     SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day
     ORDER BY page_ordinal DESC LIMIT 1
@@ -180,6 +210,52 @@ def _record_stage_phase(*, phase, day, page_ordinal, seconds, outcome):
     )
 
 
+def _stage_database_snapshot(session):
+    """Best-effort small PostgreSQL snapshot isolated by a SQL savepoint."""
+    connection = session.connection()
+    connection.exec_driver_sql("SAVEPOINT qt_archive_stage_observation")
+    try:
+        snapshot = dict(connection.execute(_ARCHIVE_STAGE_DATABASE_SNAPSHOT).mappings().one())
+        connection.exec_driver_sql("RELEASE SAVEPOINT qt_archive_stage_observation")
+        return snapshot
+    except Exception as exc:
+        connection.exec_driver_sql("ROLLBACK TO SAVEPOINT qt_archive_stage_observation")
+        connection.exec_driver_sql("RELEASE SAVEPOINT qt_archive_stage_observation")
+        logger.warning(
+            "canonical_archive_stage_database | outcome=observation_unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
+def _record_stage_database_observation(*, day, page_ordinal, before, after, outcome):
+    if before is None:
+        logger.info(
+            "canonical_archive_stage_database | storage_day=%s page_ordinal=%s outcome=%s "
+            "scope=cluster_overlap backend_pid=unavailable server_version_num=unavailable "
+            "track_io_timing=unavailable device_attribution=unsupported deltas=unavailable",
+            day, page_ordinal, outcome,
+        )
+        return
+    wal_reset = after is not None and before["wal_stats_reset"] == after["wal_stats_reset"]
+    writer_reset = after is not None and before["writer_stats_reset"] == after["writer_stats_reset"]
+    deltas = {}
+    for name in _ARCHIVE_STAGE_DATABASE_COUNTERS:
+        comparable = wal_reset if name.startswith("wal_") else writer_reset
+        deltas[name] = after[name] - before[name] if comparable else None
+    logger.info(
+        "canonical_archive_stage_database | storage_day=%s page_ordinal=%s outcome=%s "
+        "scope=cluster_overlap backend_pid=%s server_version_num=%s track_io_timing=%s "
+        "device_attribution=unsupported wal_records=%s wal_fpi=%s wal_bytes=%s "
+        "wal_buffers_full=%s checkpoints_timed=%s checkpoints_req=%s "
+        "checkpoint_write_time_ms=%s checkpoint_sync_time_ms=%s "
+        "buffers_checkpoint=%s buffers_clean=%s buffers_backend=%s "
+        "buffers_backend_fsync=%s",
+        day, page_ordinal, outcome, before["backend_pid"], before["server_version_num"],
+        before["track_io_timing"], *(deltas[name] for name in _ARCHIVE_STAGE_DATABASE_COUNTERS),
+    )
+
+
 def _timed_stage_call(*, phase, day, page_ordinal, operation):
     started = perf_counter()
     try:
@@ -197,11 +273,12 @@ def _timed_stage_call(*, phase, day, page_ordinal, operation):
     return result
 
 
-def _observe_stage_commit(session, *, day, page_ordinal):
-    state = {"started": None, "recorded": False}
+def _observe_stage_commit(session, *, day, page_ordinal, database_before):
+    state = {"started": None, "recorded": False, "database_recorded": False}
 
     def before_commit(_session):
         state["started"] = perf_counter()
+        state["database_after"] = _stage_database_snapshot(_session)
 
     def after_commit(_session):
         if state["started"] is not None:
@@ -209,9 +286,20 @@ def _observe_stage_commit(session, *, day, page_ordinal):
                 phase="transaction_commit", day=day, page_ordinal=page_ordinal,
                 seconds=perf_counter() - state["started"], outcome="completed",
             )
+            _record_stage_database_observation(
+                day=day, page_ordinal=page_ordinal, before=database_before,
+                after=state["database_after"], outcome="committed",
+            )
+            state["database_recorded"] = True
             state["recorded"] = True
 
     def after_rollback(_session):
+        if not state["database_recorded"]:
+            _record_stage_database_observation(
+                day=day, page_ordinal=page_ordinal, before=database_before,
+                after=None, outcome="rolled_back_delta_unavailable",
+            )
+            state["database_recorded"] = True
         if state["started"] is not None and not state["recorded"]:
             _record_stage_phase(
                 phase="transaction_commit", day=day, page_ordinal=page_ordinal,
@@ -699,11 +787,23 @@ class PostgresCanonicalFactArchiveRepository:
             cursor = _catalog_manifest(previous).last_cursor if previous else (0, "")
             ordinal = previous["page_ordinal"] + 1 if previous else 0
             self._current_stage_page_ordinal = ordinal
+            database_before = _stage_database_snapshot(session)
             _record_stage_phase(
                 phase="partition_admission_cursor", day=day, page_ordinal=ordinal,
                 seconds=perf_counter() - admission_started, outcome="completed",
             )
-            _observe_stage_commit(session, day=day, page_ordinal=ordinal)
+            logger.info(
+                "canonical_archive_stage_backend | storage_day=%s page_ordinal=%s backend_pid=%s "
+                "server_version_num=%s track_io_timing=%s wait_sampling=external_pid "
+                "device_attribution=unsupported",
+                day, ordinal,
+                database_before["backend_pid"] if database_before is not None else "unavailable",
+                database_before["server_version_num"] if database_before is not None else "unavailable",
+                database_before["track_io_timing"] if database_before is not None else "unavailable",
+            )
+            _observe_stage_commit(
+                session, day=day, page_ordinal=ordinal, database_before=database_before,
+            )
             # Source rows are immutable and the sealed day rejects new inserts.
             # Every call still locks/rechecks the partition, policy and committed
             # page cursor. Raw/checkpoint dependencies are resolved afresh below.
