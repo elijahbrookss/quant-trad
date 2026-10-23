@@ -57,12 +57,14 @@ code_paths:
   - portal/backend/service/storage/repos/fact_references.py
   - portal/backend/service/storage/repos/fact_reclamation.py
   - portal/backend/service/storage/repos/fact_retention.py
+  - portal/backend/service/storage/repos/query_diagnostic.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/controller/market_data.py
   - cli/main.py
   - cli/mcp_server.py
   - scripts/db
+  - scripts/reporting/canonical_storage_query_diagnostic.py
   - tests/test_market_data
 ---
 # Generalized Fact Data Plane

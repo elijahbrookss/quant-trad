@@ -78,6 +78,17 @@ _PINNED_RANGES_QUERY = text("""
     SELECT count(*) FROM matched
 """)
 
+_RECLAIM_ELIGIBILITY_FAMILIES_QUERY = text(
+    "SELECT DISTINCT fact_type FROM market.fact_versions WHERE storage_day=:day LIMIT 65"
+)
+_RECLAIM_RELATION_QUERY = text("""
+    SELECT relation.oid, relation.relkind, relation.relispartition,
+           pg_get_expr(relation.relpartbound, relation.oid) AS bounds,
+           ARRAY(SELECT inhparent::regclass::text FROM pg_inherits WHERE inhrelid=relation.oid) AS parents
+    FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid=relation.relnamespace
+    WHERE namespace.nspname='market' AND relation.relname=:name
+""")
+
 
 @dataclass(frozen=True)
 class FactReclamationLimits:
@@ -131,9 +142,9 @@ class PostgresCanonicalFactReclamationRepository:
             raise RuntimeError(f"canonical_reclaim_outside_cutoff: storage_day={day} eligible_before={eligible_before} database_day={today}")
         if partition["state"] not in {"verified", "reclaimed"}:
             raise RuntimeError(f"canonical_reclaim_not_verified: storage_day={day} state={partition['state']}")
-        families = session.execute(text(
-            "SELECT DISTINCT fact_type FROM market.fact_versions WHERE storage_day=:day LIMIT 65"
-        ), {"day": day}).scalars().all()
+        families = session.execute(
+            _RECLAIM_ELIGIBILITY_FAMILIES_QUERY, {"day": day}
+        ).scalars().all()
         unsupported = unproven_reclamation_fact_types(families)
         if unsupported:
             raise RuntimeError(f"canonical_reclaim_dependency_proof_required: storage_day={day} fact_types={sorted(unsupported)}")
@@ -141,13 +152,9 @@ class PostgresCanonicalFactReclamationRepository:
     @staticmethod
     def _relation(session, day, *, reclaimed=False):
         name = fact_partition_name(day)
-        row = session.execute(text("""
-            SELECT relation.oid, relation.relkind, relation.relispartition,
-                   pg_get_expr(relation.relpartbound, relation.oid) AS bounds,
-                   ARRAY(SELECT inhparent::regclass::text FROM pg_inherits WHERE inhrelid=relation.oid) AS parents
-            FROM pg_class AS relation JOIN pg_namespace AS namespace ON namespace.oid=relation.relnamespace
-            WHERE namespace.nspname='market' AND relation.relname=:name
-        """), {"name": name}).mappings().one_or_none()
+        row = session.execute(
+            _RECLAIM_RELATION_QUERY, {"name": name}
+        ).mappings().one_or_none()
         if reclaimed:
             if row is not None:
                 raise RuntimeError(f"canonical_reclaim_relation_reappeared: storage_day={day}")

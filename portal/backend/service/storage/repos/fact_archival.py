@@ -65,6 +65,82 @@ FROM unnest(
 ) WITH ORDINALITY AS input(fact_version_id, row_hash, position)
 ORDER BY input.position""")
 
+_ARCHIVE_LAST_MANIFEST_QUERY = text("""
+    SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day
+    ORDER BY page_ordinal DESC LIMIT 1
+""")
+
+_ARCHIVE_SOURCE_PAGE_QUERY = text(f"""
+    WITH candidates AS MATERIALIZED (
+        SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
+        WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
+        ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
+    ), documents AS MATERIALIZED (
+        SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
+        FROM candidates
+    ), budget AS (
+        SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
+            char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
+            OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
+    )
+    SELECT candidates.* FROM candidates JOIN budget USING(id)
+    WHERE budget.cumulative_bytes <= :max_bytes
+    ORDER BY candidates.market_commit_seq,candidates.id
+""")
+
+_ARCHIVE_UNVERIFIED_PAGE_QUERY = text("""
+    SELECT pages.* FROM market.fact_archive_manifests AS pages
+    LEFT JOIN market.fact_archive_verifications AS proof
+      ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+    WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
+    ORDER BY pages.page_ordinal LIMIT 1
+""")
+
+_ARCHIVE_SOURCE_ENVELOPES_QUERY = text(f"""
+    SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
+    WHERE versions.storage_day=:day
+      AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
+      AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
+    ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
+""")
+
+_ARCHIVE_EXPIRED_DEPENDENCY_QUERY = text("""
+    SELECT requested.target_id
+    FROM unnest(CAST(:kinds AS text[]), CAST(:ids AS text[]))
+        WITH ORDINALITY AS requested(target_kind, target_id, ordinal)
+    WHERE EXISTS (
+        SELECT 1 FROM market.storage_lifecycle_events AS lifecycle
+        WHERE lifecycle.action='archive_expire' AND lifecycle.event_type='completed'
+          AND lifecycle.target_kind=requested.target_kind
+          AND lifecycle.target_id=requested.target_id)
+    ORDER BY requested.ordinal LIMIT 1
+""")
+
+ARCHIVE_PAGE_CATALOG_SPECS = (
+    ("series", "fact_archive_series",
+     "series_id, row_count, first_observation_at, last_observation_at, first_known_at, "
+     "last_known_at, first_accepted_at, last_accepted_at", "series_id"),
+    ("aliases", "fact_archive_material_aliases",
+     "fact_version_id, series_id, evidence_key, material_hash", "fact_version_id, evidence_key"),
+    ("dependencies", "fact_archive_dependencies",
+     "target_kind, target_id, object_key, object_sha256", "target_kind, target_id"),
+    ("canonical_dependencies", "fact_archive_canonical_dependencies",
+     "fact_version_id, row_hash", "fact_version_id"),
+)
+
+
+def archive_page_catalog_statement(*, table: str, columns: str, order: str,
+                                   handoff: bool = False):
+    """Return the exact bounded catalog statement used by verification."""
+    permitted = {(item[1], item[2], item[3]) for item in ARCHIVE_PAGE_CATALOG_SPECS}
+    if (table, columns, order) not in permitted:
+        raise ValueError("canonical_archive_catalog_statement_invalid")
+    physical = ",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff else ""
+    return text(
+        f"SELECT {columns}{physical} FROM market.{table} "
+        f"WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+    )
+
 
 def _record_verification_phase(*, timings, phase, day, page, seconds, outcome):
     timings[phase] = timings.get(phase, 0.0) + seconds
@@ -597,10 +673,9 @@ class PostgresCanonicalFactArchiveRepository:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            previous = session.execute(text("""
-                SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day
-                ORDER BY page_ordinal DESC LIMIT 1
-            """), {"day": day}).mappings().one_or_none()
+            previous = session.execute(
+                _ARCHIVE_LAST_MANIFEST_QUERY, {"day": day}
+            ).mappings().one_or_none()
             cursor = _catalog_manifest(previous).last_cursor if previous else (0, "")
             ordinal = previous["page_ordinal"] + 1 if previous else 0
             self._current_stage_page_ordinal = ordinal
@@ -630,23 +705,9 @@ class PostgresCanonicalFactArchiveRepository:
                 # The C collation keeps the printable range independent of locale.
                 source = _timed_stage_call(
                     phase="source_select", day=day, page_ordinal=ordinal,
-                    operation=lambda: session.execute(text(f"""
-                        WITH candidates AS MATERIALIZED (
-                            SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
-                            WHERE versions.storage_day=:day AND (versions.market_commit_seq,versions.id) > (:seq,:id)
-                            ORDER BY versions.market_commit_seq,versions.id LIMIT :limit
-                        ), documents AS MATERIALIZED (
-                            SELECT id, market_commit_seq, to_jsonb(candidates)::text AS document
-                            FROM candidates
-                        ), budget AS (
-                            SELECT id, sum(octet_length(document)::bigint + 35 + 11::bigint *
-                                char_length(regexp_replace(document COLLATE "C", '[ -~]+', '', 'g')))
-                                OVER (ORDER BY market_commit_seq,id) AS cumulative_bytes FROM documents
-                        )
-                        SELECT candidates.* FROM candidates JOIN budget USING(id)
-                        WHERE budget.cumulative_bytes <= :max_bytes
-                        ORDER BY candidates.market_commit_seq,candidates.id
-                    """), params).mappings().all(),
+                    operation=lambda: session.execute(
+                        _ARCHIVE_SOURCE_PAGE_QUERY, params
+                    ).mappings().all(),
                 )
                 if not source:
                     def prove_source_exhausted():
@@ -815,20 +876,16 @@ class PostgresCanonicalFactArchiveRepository:
         physical = {}
         # Explicit projections define the versioned proof. Fetch one extra row
         # to reject excess metadata without transferring an unbounded catalog.
-        for name, table, columns, order, limit in (
-            ("series", "fact_archive_series",
-             "series_id, row_count, first_observation_at, last_observation_at, first_known_at, "
-             "last_known_at, first_accepted_at, last_accepted_at", "series_id", self.limits.max_rows),
-            ("aliases", "fact_archive_material_aliases",
-             "fact_version_id, series_id, evidence_key, material_hash", "fact_version_id, evidence_key", self.limits.max_rows),
-            ("dependencies", "fact_archive_dependencies",
-             "target_kind, target_id, object_key, object_sha256", "target_kind, target_id", self.max_dependency_objects),
-            ("canonical_dependencies", "fact_archive_canonical_dependencies",
-             "fact_version_id, row_hash", "fact_version_id", self.max_raw_mapping_rows),
-        ):
-            rows = session.execute(text(
-                f"SELECT {columns}" + (",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff is not None else "")
-                + f" FROM market.{table} WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+        limits = {
+            "series": self.limits.max_rows,
+            "aliases": self.limits.max_rows,
+            "dependencies": self.max_dependency_objects,
+            "canonical_dependencies": self.max_raw_mapping_rows,
+        }
+        for name, table, columns, order in ARCHIVE_PAGE_CATALOG_SPECS:
+            limit = limits[name]
+            rows = session.execute(archive_page_catalog_statement(
+                table=table, columns=columns, order=order, handoff=handoff is not None,
             ), {"id": manifest_id, "limit": limit + 1}).mappings().all()
             if len(rows) > limit:
                 raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
@@ -887,13 +944,9 @@ class PostgresCanonicalFactArchiveRepository:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            page = session.execute(text("""
-                SELECT pages.* FROM market.fact_archive_manifests AS pages
-                LEFT JOIN market.fact_archive_verifications AS proof
-                  ON proof.manifest_id=pages.id AND proof.verifier_version=:version
-                WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
-                ORDER BY pages.page_ordinal LIMIT 1
-            """), {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+            page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
+                "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
+            }).mappings().one_or_none()
             if page is None:
                 return {"storage_day": day, "status": "no_unverified_pages"}
             manifest = _catalog_manifest(page)
@@ -914,13 +967,8 @@ class PostgresCanonicalFactArchiveRepository:
             )
             envelopes = _timed_verification_call(
                 timings=timings, phase="source_envelopes", day=day, page=page,
-                operation=lambda: session.execute(text(f"""
-                    SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
-                    WHERE versions.storage_day=:day
-                      AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
-                      AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
-                    ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
-                """), {"day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
+                operation=lambda: session.execute(_ARCHIVE_SOURCE_ENVELOPES_QUERY, {
+                       "day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
                        "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1],
                        "limit": self.limits.max_rows + 1}).mappings().all(),
             )
@@ -1013,17 +1061,8 @@ class PostgresCanonicalFactArchiveRepository:
             if check_budget is not None:
                 check_budget()
             batch = dependencies[offset:offset + _EXPIRATION_QUERY_BATCH_ROWS]
-            expired = session.execute(text("""
-                SELECT requested.target_id
-                FROM unnest(CAST(:kinds AS text[]), CAST(:ids AS text[]))
-                    WITH ORDINALITY AS requested(target_kind, target_id, ordinal)
-                WHERE EXISTS (
-                    SELECT 1 FROM market.storage_lifecycle_events AS lifecycle
-                    WHERE lifecycle.action='archive_expire' AND lifecycle.event_type='completed'
-                      AND lifecycle.target_kind=requested.target_kind
-                      AND lifecycle.target_id=requested.target_id)
-                ORDER BY requested.ordinal LIMIT 1
-            """), {"kinds": [row["target_kind"] for row in batch],
+            expired = session.execute(_ARCHIVE_EXPIRED_DEPENDENCY_QUERY, {
+                   "kinds": [row["target_kind"] for row in batch],
                    "ids": [row["target_id"] for row in batch]}).scalar_one_or_none()
             if expired is not None:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")

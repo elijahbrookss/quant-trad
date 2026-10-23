@@ -130,6 +130,7 @@ code_paths:
   - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/maintenance_runtime.py
   - portal/backend/service/storage/retention_observability.py
+  - portal/backend/service/storage/repos/query_diagnostic.py
   - portal/backend/service/market/canonical_retention.py
   - portal/backend/service/market/market_storage_lifecycle.py
   - tests/test_portal/test_storage_retention_observability.py
@@ -154,6 +155,7 @@ code_paths:
   - scripts/automation/storage_device_audit.py
   - scripts/automation/storage_host_prepare.py
   - scripts/ci/test_storage_runtime_directories.py
+  - scripts/reporting/canonical_storage_query_diagnostic.py
 ---
 # Storage Management
 
@@ -240,6 +242,43 @@ so those panels do not query the retention catalog. Operators use the bounded
 Storage API/UI projection for the pipeline domains, oldest days and saved default
 eligibility window whose runtime adapter clears family overrides. Neither surface
 grants execution authority.
+
+## Canonical query diagnostic
+
+`scripts/reporting/canonical_storage_query_diagnostic.py` is an inert,
+server-only operator command for a closed inventory of canonical retention SQL
+builders. It is not an API, MCP tool, scheduler task or maintenance trigger. A
+run names one already verified UTC storage day and writes one private JSON
+receipt:
+
+```bash
+python scripts/reporting/canonical_storage_query_diagnostic.py \
+  --storage-day 2026-09-02 \
+  --receipt /private/operator-evidence/canonical-query-diagnostic.json
+```
+
+The command refuses an active lifecycle owner, a non-verified partition, a
+missing committed page, over-limit evidence or an unattested image.
+It opens an isolated connection whose server-side default is read-only before
+the first statement, so it never enters the application's schema-bootstrap
+session path. Every transaction is repeatable-read and read-only. Statement and
+lock bounds remain 5 seconds and 250 milliseconds. The admitted work budget is
+60 seconds, including scope selection: connection and pool waits are clamped to
+one second, cases retain cleanup time, and an elapsed overrun can never produce
+a passing receipt.
+Representative read-only cases may use `EXPLAIN ANALYZE`; maximum supported
+shapes are plan-only unless explicitly admitted. The receipt contains SQL
+fingerprints and summarized plan, buffer, WAL and sampled wait evidence without
+retaining bound record values or arbitrary query text.
+
+Coverage is explicit. The inventory includes retention admission, archive page
+selection, exact record-ID and receive-position lineage, bounded verification
+catalogs, dependency expiry, relation identity/size and frozen-Dataset pin
+admission. Production catalog writes, file decoding, the exclusive handoff and
+the partition drop are reported as untested or unsupported in live mode. Their
+write, duplicate/FK, timeout, cancellation and full-rollback contracts remain
+in the ordinary disposable PostgreSQL CI suite. A diagnostic success is neither
+maintenance authority nor a worst-case cache guarantee.
 
 ## Proposed forward-only transition
 
