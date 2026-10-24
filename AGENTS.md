@@ -69,6 +69,22 @@ documented product contract.
 
 For research work, read the [research purpose and stopping decisions](docs/guides/research-workflow.md#research-purpose-and-stopping-decisions) before choosing the next experiment.
 
+## Public Repository And Private Research
+
+Follow the [public infrastructure/private research contract](docs/contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+Keep reusable infrastructure, Indicators, generic methods, and recommended
+research process public. Keep actual research records and proprietary research
+or Strategy details in QT's private record stores.
+
+Before staging or publishing, inspect documentation, fixtures, examples,
+screenshots, exports, generated files, commit/PR text, and CI artifacts for
+private record contents. Use synthetic material unless the specific content has
+explicit approval for public release. Do not copy private research into new
+repository files or Git history to preserve evidence; QT owns record custody.
+Existing Git history does not authorize new disclosure. Describing a schema or
+API, or publishing an interpretation inside QT, does not approve its contents
+for the public repository.
+
 ## Canonical Context (Required Reading)
 
 Agents MUST understand these documents before making architectural or behavioral changes:

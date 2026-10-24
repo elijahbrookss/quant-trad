@@ -41,6 +41,13 @@ Durable Check behavior is defined by
 Research memory persists and links that evidence; it does not calculate a
 parallel result.
 
+Actual research-memory records are private QT-held content under the
+[public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+This document describes reusable schemas, interfaces, and procedures; it does
+not authorize copying record contents into the public repository. Interpretation
+publication and saved-record export retain their existing QT meanings and do
+not grant public-release permission.
+
 ## Boundary Contract
 
 Research memory may:

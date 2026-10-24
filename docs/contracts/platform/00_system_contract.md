@@ -4,6 +4,31 @@
 
 Define non-negotiable platform behavior shared by QuantLab, Strategy preview, Bot runtime, and Playback.
 
+## Public Infrastructure And Private Research
+
+QT's infrastructure is public; actual research is private. The public repository
+may document and implement reusable infrastructure, Indicators, generic research
+procedures, and recommended process for conducting research.
+
+Actual research records, hypotheses, Research Observations, experiment and run
+configurations, selections, results, and proprietary Strategy or research details
+belong in QT's private research custody. QT retains them through its research
+items and the owning Check, experiment, run, report, and strategy stores; source
+documentation and repository history are not destinations for new private
+research records.
+
+Documenting record schemas, APIs, or generic methods does not authorize disclosure
+of record contents. Examples, fixtures, screenshots, or exported bundles included
+in the public repository or released publicly must be synthetic or explicitly
+approved for public release. A reproducibility requirement or an existing
+historical example does not grant that approval.
+
+Research interpretation "publication" within QT means retaining a revision in
+QT's research memory, not releasing it to the public. API visibility, an export,
+or a saved publication likewise does not authorize public disclosure. References
+to public typed outputs describe component interfaces, not permission to publish
+private values or the research conducted with them.
+
 ## Core Invariants
 
 1. Live-equivalent evaluation: behavior is valid under sequential candle arrival.
