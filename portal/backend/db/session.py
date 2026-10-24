@@ -1093,6 +1093,13 @@ class Database:
                     """
                 )
             )
+            if table_name == "fact_archive_verification_generations":
+                # The explicit generation migration installs this receipt guard
+                # as ALWAYS. Clean bootstrap must create the same contract so
+                # replica-role sessions cannot bypass generation-bound evidence.
+                conn.execute(text(
+                    f"ALTER TABLE market.{table_name} ENABLE ALWAYS TRIGGER {trigger_name}"
+                ))
 
     def _create_missing_tables(
         self,
