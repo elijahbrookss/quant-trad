@@ -14,7 +14,7 @@ Use the surfaces by role:
 | `qt setup` | Canonical local readiness and provider-onboarding surface. Use it for env setup, setup doctor checks, and provider onboarding flows. |
 | `qt` CLI | Primary agent/tool workflow and operation entrypoint. Use it for bot runs, experiments, provider checks, report summaries, report exports, and comparisons. |
 | `qt mcp serve` | MCP protocol adapter for agent hosts. Use it when the host expects MCP resources/tools instead of direct shell commands. |
-| UI | Human visualization and inspection surface. Use it to inspect charts, BotLens, fleets, strategies, reports, and playback. Do not treat UI state as workflow truth. |
+| UI | Human visualization and inspection surface. Approved collector actions and Storage settings invoke their owning backend contracts; browser state is never lifecycle or workflow truth. |
 | Makefile | Local development and forensic support index. Use it for Docker, DB, validation, tests, logs, git helpers, and direct local diagnostics. |
 
 Start with `make deps` for local Python dependencies and `qt setup` for

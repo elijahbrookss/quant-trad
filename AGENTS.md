@@ -17,7 +17,8 @@ contract disagree about product behavior, the platform contract wins.
 - QuantLab = research only
 - Strategy = decision logic only
 - Bot = execution + realism only
-- UI = human visualization and inspection only
+- UI = human visualization and inspection; separately admitted operator actions
+  invoke their owning backend contracts
 - `qt` CLI = agent/tool workflow and operation entrypoint
 - `qt mcp serve` = MCP adapter over `qt`/backend contracts, not new truth
 - Make = local stack, DB, tests, and forensic helpers
