@@ -39,402 +39,95 @@ code_paths:
 ---
 # ADR 0068: Rehearse Explicit Server Promotion
 
-## Status
-
-Accepted on 2026-09-07 for manually initiated, compatible single-node updates.
-
-## Context
-
-The deployment helper already builds exact-commit application images and checks
-health, initialization, and image identity. Previously a failed update could
-leave partially replaced services, and overlapping helper invocations could
-change the same checkout. Local passing tests and PR review alone do not qualify
-the actual merged commit or establish that restoring old code remains safe.
-
-## Decision
-
-Keep one operator deployment helper. Add an explicit `promote` action requiring
-a full candidate SHA, exact successful develop push CI, and an operator's
-compatibility acknowledgement naming the currently deployed SHA. Check every
-required job in the same latest run attempt, including disposable rehearsal.
-Serialize helper mutations using one host lock.
-
-Before replacement, retain the running image identities under private recovery
-tags and save the rendered Compose configuration. Recover compatible failures
-with those local artifacts without rebuilding, fetching, or pulling. Never
-roll back database contents automatically. Failed promotion remains a failed
-operation even when recovery succeeds. An interrupted or failed recovery keeps
-its marker and blocks new deployments until explicit `recover` succeeds.
-
-Use two evidence layers: synthetic Docker services to inject deployment
-failures into the real controller, and actual QT core images on isolated storage
-to exercise bootstrap, clean collector stop/restart, health, and retained data.
-No provider enrollment, real credentials, runtime egress, production volumes,
-or remote host is admitted by these rehearsals.
-
-## Consequences
-
-An operator or agent still chooses when to deploy. No automatic merge trigger,
-new always-running environment, or GitHub-to-host credential is required.
-Compatibility is a release-specific decision, not inferred from tests or a
-migration filename scan. Initial installation and incompatible schema/storage
-cutovers remain explicit operator procedures. The existing `deploy` action is
-an intentional manual escape hatch, not proof of CI qualification.
-
-Retained images consume disk until deliberately retired; private snapshots may
-contain resolved secrets and must not be published. Host loss, disk failure,
-active provider reconnect, broker/observability behavior, and arbitrary schema
-compatibility are outside the disposable promotion evidence. The first host
-cutover still requires actual-state admission and post-deploy acquisition checks.
-
-See [server deployment](../../engineering/server-deployment.md) for commands,
-rehearsal scope, and first-cutover requirements.
-
-## Preserving storage handoff interlock
-
-The incompatible storage switch must not enter compatible promotion recovery.
-The internal fixed-layout `paused_storage_clients` boundary shares the existing
-host deployment lock and durably writes `storage-handoff.json` before stopping
-any clients. It pauses backend/initializer/collector, both frontends, Grafana and
-pgAdmin; PostgreSQL and passive telemetry remain running. It inventories both
-the Compose project and its network, refuses unexpected peers (including bot
-runtimes), unsafe restart policies, forced kills, identity changes and unhealthy
-process state. It never stops an unrecognized container. Container exit is not
-proof of application spool durability or a successful database handoff.
-
-The lock spans the caller's procedure. The private hold survives process death,
-exceptions and successful pause; re-entry requires the same recorded release
-and container/image identities. Ordinary helper mutations, including direct
-`deploy`, `recover`, `rollback`, `qt` and environment initialization, refuse any
-hold presence, even a partial file or broken symlink. Read-only release status
-reports it. No automatic restart, old-image fallback, or hold-clear operation is
-provided. Direct Docker/SQL, a different state directory or an older checkout
-remain privileged bypasses; the complete cutover must exclude them.
-
-This is an internal, locally rehearsed boundary, not a public cutover command.
-The owning procedure still needs to compose publisher pause, exact database
-outcome reconciliation, two-root/policy/runtime activation and recovery before
-it can safely retire the hold and resume collection. The database's handoff
-certificate remains the sole authority for database commit outcome; the host
-hold cannot substitute for it. Synthetic Docker rehearsal qualifies process
-stop/lost-reply retry and the interlock, not the real database, actual server,
-application drain, disk performance or the one-day migration budget.
-
-
-## Fixed storage runtime wiring
-
-The opt-in `docker-compose.storage-server.yml` overlay is the prepared first
-SSD/HDD layout. It keeps the existing PostgreSQL volume/path and the absolute
-SSD spool path, adds the prepared HDD at the same `/qt-history` path for database
-and application services, and points archive readers/writers at its `archives`
-subdirectory. Inventory and operating limits are explicit read-only files;
-missing host paths never become implicit directories. The host archive path used
-by bot readers must name that same HDD archive subtree. Host admission must prove
-these relationships and distinct filesystem UUIDs before activation.
-
-Backend, initializer and collector use the pinned database UID/GID 70 so private
-archive files have compatible ownership. The collector shares PostgreSQL's PID
-namespace for real file/resource verification. Backend retains its existing
-Docker socket through an explicitly supplied supplemental group; neither other
-writer receives socket authority. Compose-injected environment values are the
-configuration source, with dotenv loading disabled for these non-root services.
-Application scratch/report directories in the image are owned by UID 70; source
-code and host data are not recursively chowned by the image or overlay.
-
-The exact preserving-operator Python modules are packaged in the backend image
-and included in its existing source-tree attestation. Unrelated manual SQL is not
-bundled and no migration runs at startup. The existing actual-core rehearsal has
-a fixed-storage mode that uses owned disposable PostgreSQL/working and history
-volumes, synthetic UUID metadata/configuration and no provider egress. It checks
-real application startup, cross-service private archive reads, preserved legacy
-spool bytes, PostgreSQL namespace/resource observation, collector shutdown and
-container recreation. It does not qualify physical disks, live file permissions,
-real Docker socket access or a full migration/backup workload.
-
-After the preserving cutover records `storage_layout=ssd-hdd-v1` in the existing
-private release state, the ordinary helper retains that layout across releases
-and selects the matching checkout's storage overlay. A checkout missing the
-overlay is refused before replacing services. Alert preview/restore also retain
-the recorded layout. Operator environment values cannot deselect it. Initial
-activation remains owned by the complete preserving procedure; there is no new
-layout toggle or automatic migration in the deployment helper.
-
-Compatible promotion records the layout and SHA-256 of its fully rendered,
-image-pinned recovery snapshot in the existing promotion state. Recovery requires
-the same recorded layout and unchanged snapshot before changing the checkout.
-It uses the frozen snapshot alone, without merging current storage or alert
-settings. Legacy non-storage promotion records remain recoverable; fixed-layout
-records must include the fingerprint. This checksum binds local evidence, not
-arbitrary schema compatibility or the contents of bind-mounted configuration.
-
-The preserving cutover must still compose host admission, pause, database/policy
-result, matching runtime activation and recovery before recording the layout and
-releasing the persistent host hold. Adding a file, setting a state field manually
-or rendering Compose is not authority to activate it directly. Older helpers or
-manual edits remain privileged bypasses and must be excluded by the cutover.
-
-
-## Preparing PostgreSQL access to the HDD
-
-A host-mounted HDD is not sufficient: the existing PostgreSQL container also
-needs the fixed `/qt-history` mount before it can use historical tablespaces.
-Preparation must preserve the original PostgreSQL data volume, image and cluster
-identity. Include database container preparation in the planned pause and measured
-migration duration; do not assume a zero-downtime mount change.
-
-The fixed actual-core disposable rehearsal now starts PostgreSQL without the
-history mount, writes an SSD record, stops it cleanly and creates the same-image
-replacement with the history mount and unchanged PGDATA. It kills the preparation
-controller before restart, reconciles the created replacement without recreating
-it again, then checks cluster identity and source records. It also resolves real
-historical table and index files beneath the HDD path and verifies their records
-after the full application recreation. Synthetic filesystems and an empty owned
-cluster limit this evidence; it does not authorize a live database replacement.
-
-The preserving host procedure must still bind the intended replacement durably
-under its existing hold and reconcile an interrupted container transition. The
-current pause boundary admits only its original container identities. Do not
-clear that hold or bypass its checks to use the rehearsal sequence on a server.
-
-
-The PostgreSQL readiness probe uses loopback TCP, matching application transport.
-The pinned image starts a socket-only temporary server during first initialization;
-that server must not admit application startup or database preparation as healthy.
-This correction does not weaken the requirement for a clean database stop.
-
-
-## Fixed database replacement under the host hold
-
-The existing `paused_storage_clients` boundary can explicitly prepare PostgreSQL
-using one private `storage-database.compose.json` file in its state directory.
-The file describes only `tsdb`, the existing external database volume/network,
-and the approved existing history bind. Build/pull, dependencies, extra services,
-fallback bind creation and unrelated mounts are refused. The recipe must preserve
-the original image, database environment and command; preparation also requires
-the corrected TCP readiness probe. Filesystem UUID admission reuses the existing
-kernel/udev check. The recipe may contain resolved secrets and must remain private.
-
-Before stopping PostgreSQL, the same durable hold records the recipe fingerprint,
-original container/image/data-volume/configuration/network binding and cluster
-identifier. Admission verifies the actual database directory is inside the
-retained volume and refuses existing external tablespaces. It records a verified
-clean source stop before explicitly removing only the old container (not its
-volume) and creating the replacement,
-then binds the admitted replacement ID before starting it. Created-container
-settings and mounts must match; Docker-generated bookkeeping labels and inactive
-endpoint IDs do not substitute for the separately checked external network.
-Application clients stay stopped with exactly their original identities throughout.
-
-Re-entry recognizes the original stopped database, the absent service during
-creation, or the expected new created/running database. It does not force another
-recreation after a replacement is observed. A single persisted ten-minute deadline
-bounds preparation mutations across retries; read-only reconciliation can still
-confirm an already-running replacement. Changed recipes, volume/image/settings,
-cluster identity, unexpected clients and unverified replacement IDs retain the
-hold and fail. Success records `database_prepared`; it does not resume applications,
-run schema migration or release the host hold.
-
-This remains an internal step for the complete preserving procedure. The native
-rehearsal uses real PostgreSQL with synthetic clients and UUID evidence, kills the
-owning preparation process after container creation, and resumes from the durable
-hold. This does not qualify physical disks, real host permission/socket access,
-the full migration/recovery procedure or its one-day elapsed budget.
-
-
-The backend image declares revision and source-hash build arguments immediately
-before source attestation. Changing the reviewed revision therefore invalidates
-attestation without reinstalling unchanged system/Python dependencies. Attestation
-still checks the copied source hash and embeds the exact supplied revision; the
-storage-test stage continues to derive from that verified runtime.
-
-
-## Invoking the preserving database process under the hold
-
-The existing host pause module now connects its prepared PostgreSQL replacement
-to the packaged database handoff process. It pins the candidate image by digest
-and checks its embedded source revision/hash against the reviewed request. The
-process shares only the prepared database's PID/network/data mounts, the existing
-SSD working bind, and read-only inventory, request and filesystem metadata. It
-runs as UID 70 without a Docker socket, provider settings or added capabilities.
-PG_DSN is derived from the admitted existing database/collector connection and
-passed privately through the process environment; it is not stored in the
-operator receipt or command arguments.
-
-A private intent records the request, image, database/container, mount, inventory
-and environment fingerprints before creation. Re-entry admits only that exact
-operator; all other unrecognized clients remain a refusal. Lost creation/start/
-completion replies reconcile the same container. The original execution deadline
-survives retries, and a timed-out operator is stopped with the host hold retained.
-The database's existing receipt/policy inspection still determines whether work
-has committed; container exit alone is insufficient. Success requires its bound
-result, unchanged paused clients and the retained host hold. It does not activate
-application services, record the new release or retire the hold.
-
-The native combined fixture uses disposable daemon-visible source/control
-volumes and an owned history directory on the existing shared-memory filesystem. Its host controller alone has Docker authority; the migration
-process uses the same restricted invocation as the host implementation. Docker
-Desktop's raw daemon socket is required by this local fixture so its nested bind
-paths refer to the owned volumes rather than translated host paths. This is a
-fixture requirement, not an additional production deployment arrangement.
-
-
-Docker's generated full or short container-ID alias is excluded from network
-comparison using that exact inspected container identity. Configured aliases,
-including unrelated hexadecimal names, remain part of the binding. The native
-rehearsal exposed the short-ID variant across database replacement.
-
-Docker requires slave/shared propagation for bind sources inside its own data
-root. The fixture therefore keeps its owned history directory outside that root,
-on the daemon's existing shared-memory filesystem. Only the disposable controller
-and its directory preparation/cleanup share host IPC to reach that filesystem;
-the migration process retains its fixed restricted invocation. No host filesystem
-is mounted/formatted by the fixture, and the production private-bind requirement
-is unchanged.
-
-The held worker contract accounts for two observed Docker lifecycle details:
-configured tmpfs entries may be absent from the reported mount list, and a
-container sharing the database network inherits that database's hostname only
-at startup. Admission permits only those exact configured tmpfs targets and the
-worker's own default or recorded database hostname; other configuration changes
-remain a refusal. The database network comparison ignores only its own generated
-full/short container-ID aliases, retaining every configured alias.
-
-The existing host preparation helper also provides a separate internal legacy
-working-tree ownership step. The old collector's root-owned private files cannot
-be read by the fixed UID 70 runtime. Under an externally held publisher pause,
-the helper preflights the complete bounded tree, refuses links, foreign owners,
-foreign mounts, special files and set-ID permissions, then changes only ownership
-to UID 70 while preserving groups, modes, inodes, bytes and timestamps other than
-ctime. It uses descriptor-relative traversal and exact root device/inode binding.
-Partial changes are idempotent and every failure requires the caller to retain
-the deployment hold. The same pinned held worker now runs this step before database work, using only
-CHOWN, DAC_OVERRIDE, SETGID and SETUID capabilities. It binds the exact working
-root read/write for ownership metadata, with the root device/inode included in
-the private environment fingerprint. After preparation it permanently sets real,
-effective and saved UID/GID to 70, clears supplementary groups, and only then
-opens the migration request and database entry point. The native process proof
-confirms no effective capabilities remain. Re-entry repeats the idempotent step
-within the original host deadline; no separate ownership job or public setting
-is introduced. Packaging and source attestation include this explicit entry
-point; it never runs during ordinary application startup. The complete runtime
-activation and verified retirement of the host hold remain separate blockers.
-
-The combined disposable held-worker rehearsal passed with the packaged legacy
-ownership phase on `4e9947c2`: original private file bytes/identities and frozen
-historical reads survive controller interruption and retry, with the recent/history
-placement preserved. Successful database handoff still does not authorize resuming
-application clients or removing the durable hold. The complete activation/recovery
-path and representative physical performance/capacity remain release blockers.
-
-
-The same mutation boundary now also refuses durable online intent recorded by
-storage-online-preparation.json, storage-online-request.json or storage-online-worker.json, even after the
-controller's deployment flock has been released. Presence alone blocks ordinary
-deployment, rollback, recovery and other mutating commands; corrupt/partial state
-and dangling links fail closed. The read-only release command reports this state
-without exposing private contents. SQL cancellation or attempt expiry cannot
-clear it: retained source data may already require the HDD recipe. No automatic
-marker removal or old-runtime restart is provided. The qualified terminal host
-reconciliation and initial pre-mutation intent ordering remain pending; see
-[ADR 0073](0073-prepare-storage-migrations-with-live-collection.md).
-
-
-### Canonical deployment resource bindings
-
-The fixed storage overlay requires explicit `QT_STORAGE_POSTGRES_VOLUME`,
-`QT_STORAGE_RECOVERY_SOCKET_VOLUME` and `QT_STORAGE_NETWORK` names. They identify
-already prepared external resources; Compose must not silently create replacements
-under its project-name defaults. Backend bot launches use that same explicit
-network. These names must agree with the admitted migration/runtime configuration,
-which is a prerequisite for releasing the retained migration hold.
-
-Ordinary deployment with the recorded storage layout refuses any remaining
-`QT_STORAGE_SOURCE_FENCE_ROOT`, including an empty value, in the process or private
-environment file. That setting belongs to the co-located source layout. Compose
-null/reset overrides can resolve it again from the env file, so they are not an
-acceptable way to retire it. The preserving completion transition must prepare the
-correct private environment while retaining its original evidence. Source-layout
-deployment behavior is unchanged. Explicit names and an absent source-only setting
-alone do not authorize release, restart, or deletion of any migration journal.
-
-The storage layout additionally binds `QT_STORAGE_DATABASE_IMAGE` to the already
-qualified local immutable image ID. Application deployment must not build or pull
-a replacement database. Its Compose overlay removes the inherited database build;
-`QT_REBUILD_DATABASE_IMAGE=1` is refused in this layout. Maintenance uses the same
-locally built backend image, so its image is not fetched as an unrelated service.
-The source-layout database build behavior remains unchanged.
-
-
-## Qualified routine capability, trigger activation deferred
-
-The existing controller may mechanically admit only documentation/exact reviewed frontend
-presentation changes while all backend write/read, schema, registry, serialized
-result, dependency, configuration and storage source remains unchanged. This
-narrow path uses the exact application image IDs exported after successful
-runtime proofs in the exact develop-push attempt. The package manifest and
-GitHub artifact bytes bind source, run/attempt and image identities; candidate
-activation pins infrastructure to current running IDs and never rebuilds/pulls.
-
-Admission also consumes a private operator-qualified backup/restore record,
-checks its source/expiry and evidence fingerprints, and verifies the actual
-read-only schema/cluster fingerprint before and after promotion. The routine identity and hashed baseline are persisted before activation;
-activated recovery must independently re-probe current schema even after probe
-failure or controller interruption, without requiring a healthy candidate app.
-Existing host locks, persistent holds, health gates, retained recovery snapshots, failed-operation
-semantics and interruption markers remain authoritative. Unknown compatibility,
-backend changes, migrations, storage cutovers and credentials/security changes
-remain explicitly reviewed procedures. CI iteration eligibility is broader than
-routine deployment eligibility and cannot confer promotion authority.
-
-This component adds the capability, not an unattended production trigger. The
-operator still initiates it; activation of a future trigger and GitHub required
-checks requires an exact separate approval after real disposable qualification
-and the existing release installation. No new credential or deployment platform
-is introduced. The recovery record references actual approved backup/restore
-evidence; a checksum alone never certifies a restore.
-
-
-The existing disposable rehearsal also owns a hosted-only routine mode. It invokes
-the real routine controller and package/schema/recovery boundaries against tiny
-synthetic apps and real isolated PostgreSQL, with local synthetic CI metadata.
-It qualifies controller behavior, not production schema, provider availability,
-actual backup custody or a release. Its tiny actual restore precedes the fixture
-recovery record; private environment and snapshots never enter its uploaded
-receipt. Source-bound hosted execution and separate real artifact verification
-remain required before activation.
-
-## Routine configuration admission
-
-Source-only eligibility cannot authorize live configuration edits. Successful
-new-controller deployments record private fingerprints of the effective Compose
-model, operator environment, mounted configuration and actual runtime inventory.
-Routine admission requires that baseline, checks it before recovery capture and
-immediately before activation, and permits only derived qualified-source/image
-identity changes. Recovery retains the settings guard even when candidate
-containers are partly replaced. Missing legacy baselines and private-file,
-caller-setting, mounted-file permission/ownership or runtime drift refuse before
-replacement; reviewed manual reconciliation remains required. Fingerprints never
-publish resolved credentials or Docker configuration. This extends the existing
-locked controller and does not enable a production trigger.
-
-
-Routine configuration admission refuses nonempty Compose `configs` or `secrets`
-at either model or service level, including custom `QT_SINGLE_NODE_COMPOSE_FILE`
-models. Referenced payloads are not covered by the existing bind-file fingerprint;
-rendered declarations alone cannot establish their identity. Refusal precedes
-private binding reads and Docker observations, including interrupted recovery's
-configuration-only check. Supporting these mechanisms needs explicit review and
-payload identity evidence; the default production model does not use them.
-
-## Isolated proof scheduling
-
-The full deployment proof is an aggregate of source/run/attempt-bound independent
-runner groups and six node-level online shards, with at most four online shards
-active together. Image transport is provisional until every mandatory group and
-collected case is verified; qualified-package export follows aggregation. The
-exact-source admission helper requires each expanded child job, both existing
-recovery variants and the aggregate attestation. No real recovery wait, database
-isolation, source-image binding or refusal guard is removed. See the
-[CI topology](../../engineering/testing/ci-test-topology.md) for coverage, retained
-diagnostics and the limits of timing projections. This changes scheduling only,
-not deployment eligibility or production concurrency.
+Accepted September 7, 2026 for manually initiated compatible single-node updates.
+This decision defines deployment ownership and evidence; it does not activate an
+unattended production trigger. [Server deployment](../../engineering/server-deployment.md)
+owns supported commands and the current release procedure.
+
+## Qualify the source that will actually run
+
+Local tests and PR review do not qualify the merged release. Explicit promotion
+requires the candidate commit and the exact successful develop-push workflow
+attempt, including every required expanded proof job. One green wrapper or an
+iteration-only CI selection is insufficient.
+
+Serialize mutations with the host deployment lock. Before replacement, retain
+the running immutable image identities and private rendered recovery
+configuration. Compatible failure recovery uses those artifacts without
+rebuilding or pulling substitutes. Failure remains failure even when recovery
+succeeds; database contents are never automatically rolled back.
+
+An interrupted or failed recovery retains its durable marker and blocks new
+deployment until the owning explicit recovery completes. Compatibility remains
+a release-specific decision, not an inference from a filename scan or a healthy
+process.
+
+## Rehearsal has bounded authority
+
+Use synthetic services to inject rollout failures into the actual controller,
+and actual QT core images on isolated storage to exercise bootstrap, clean
+shutdown, health and retained data. Synthetic metadata can test admission
+behavior; it cannot become a real release receipt.
+
+Proof runners bind source, run/attempt, image IDs, transported archive checksum,
+collected cases and coverage. Image transport is provisional until all required
+groups and recovery variants pass aggregation. Parallel scheduling changes where
+proofs run, not their coverage, isolation or production concurrency.
+
+A disposable rehearsal does not establish physical disk capacity, real provider
+availability, actual backup custody or arbitrary schema compatibility.
+[CI topology](../../engineering/testing/ci-test-topology.md) describes the
+supported test boundary and retained diagnostics.
+
+## Storage transitions retain their own owner
+
+An incompatible storage switch must not enter compatible promotion recovery.
+The storage host procedure records durable intent before pausing publishers,
+admits actual containers, mounts, images, networks and filesystem identities,
+and retains its hold through authoritative database outcome and runtime recovery.
+
+Hold presence, including corrupt or partial state, blocks ordinary deployment,
+rollback and relaunch. Process death and loss of the host lock cannot erase that
+refusal. Manual Docker/SQL or an older helper remain privileged bypasses that
+operator admission must exclude.
+
+Preparing a PostgreSQL history mount preserves PGDATA, image and cluster identity
+through a clean stop and explicitly reconciled replacement. The storage recipe
+cannot pull/build another database, create fallback bind directories or select
+unowned resources. Uncertain creation, start or COMMIT replies resolve from the
+same durable identity; they do not justify repeating mutations.
+
+Source-compatible file ownership preparation is an explicit bounded phase under
+publisher exclusion. It preserves bytes and file identity, refuses links/foreign
+mounts/owners, then permanently drops privilege before database work. It never
+runs as an ordinary startup repair.
+
+Only the complete owning transition may record the applied storage layout,
+activate the matching runtime and recovery, and finish its hold. Readiness,
+mounts or a successful SQL handoff alone cannot grant those authorities.
+
+## Routine promotion is deliberately narrower than CI iteration
+
+The routine path admits only documentation and exact reviewed presentation
+changes while backend read/write, schemas, registries, serialized results,
+dependencies, configuration and storage source remain unchanged. It consumes
+qualified image IDs exported by the exact develop attempt, pins current
+infrastructure and never rebuilds or pulls during activation/recovery.
+
+Admission also needs an operator-qualified backup/restore record and fresh
+read-only schema/cluster checks. A checksum proves identity, not restoration.
+Private configuration fingerprints bind effective Compose, operator environment,
+mounted files and actual runtime inventory before recovery capture and again
+before activation. Missing baselines or configuration drift refuse.
+
+Compose configs/secrets without covered payload identity remain unsupported.
+A storage-layout deployment retains its external resource bindings, immutable
+database image and recorded layout; environment overrides cannot silently revert
+them or retain a source-only interlock setting.
+
+The tradeoff is retained image/configuration storage and explicit refusal when
+compatibility or outcome is uncertain. This is preferable to a convenient
+rollback that could restart an incompatible reader or lose durable state.
+
+See [online storage preparation](0073-prepare-storage-migrations-with-live-collection.md)
+and [encrypted paired recovery](0072-use-encrypted-incremental-recovery-sets.md).

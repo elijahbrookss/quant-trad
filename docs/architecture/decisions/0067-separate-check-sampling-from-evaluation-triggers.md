@@ -33,12 +33,9 @@ book feature arriving one microsecond later was excluded. The causal gate was
 correct for that question, but the evaluator could not express a later decision
 using the same market sample.
 
-A read-only trace of one BIP update on 2026-08-23 identified QT receipt at
-00:00:59.793226, the last receipt in its approximately 60-second archive segment
-at 00:01:06.613079, archive acknowledgement at 00:01:06.702190, and canonical
-acceptance at 00:01:07.207636. Most of that event's delay was attributable to
-waiting for segment finalization/archive publication. This does not establish
-that every collector delay has the same cause. Collector settings are unchanged.
+Archive segment finalization can make a received observation usable later than
+its market sample time. That operational delay motivates an explicit evaluation
+trigger; it does not justify a grace period or an invented earlier fill.
 
 The shared runtime candle converter also discarded `known_at`, even though the
 Candle model had that field. Context reads used the market interval start.

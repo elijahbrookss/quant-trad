@@ -32,429 +32,90 @@ code_paths:
   - scripts/db/manual_enable_market_storage_lifecycle_v1.sql
   - docs/architecture/data/MARKET_STRUCTURE_DATA_PLANE.md
 ---
-# ADR 0053: Use A Tiered Market-Structure Archive And Replay Boundary
+# ADR 0053: Use a Tiered Market-Structure Archive and Replay Boundary
 
-## Status
+Accepted for implementation August 2, 2026. This records the durable storage and
+replay choice. Later canonical storage uses the generalized Fact representation;
+the original family-table topology is historical. Current retention and operator
+admission belong to [the Fact data plane](../data/GENERALIZED_FACT_DATA_PLANE.md)
+and [storage management](../persistence/STORAGE_MANAGEMENT.md).
 
-Accepted for implementation on 2026-08-02 after public and existing-CDP
-one-hour BIP/BTC proofs plus bounded ETP/ETH and SLP/SOL access/unit spot checks.
-No production collector is authorized by this status. The operator deferred the
-24-hour implemented-path capacity measurement and explicit budget approval
-until after Phase 4; both remain mandatory before production enrollment.
+## Keep receipt evidence separate from query facts
 
-## Context
+High-volume provider frames, typed query facts and frozen execution inputs have
+different responsibilities. Storing every frame forever in PostgreSQL would
+burden the transactional boundary; keeping only derived rows would make parser
+and reconstruction errors unauditable.
 
-Quant-Trad's current canonical market store is append-only, typed, causal, and
-dataset-bound. Its polling collectors already provide ownership fencing,
-retries, pacing, provenance, known-at timing, gap evidence, and one shared fact
-commit order. Paper streaming is bot-owned and candle-specific: it parses
-heartbeat/ticker/candle messages but does not durably preserve exact raw frames.
+Use a bounded, fsynced local spool for recoverable in-flight frames and immutable
+checksum-verified archive objects for retained raw evidence. Assign stable raw
+record and segment identities before parsing. Canonical Facts reference that
+identity, not a future upload manifest. Append verified manifest mappings rather
+than rewriting accepted Facts when upload or compaction completes.
 
-Event trades and L2 are different from minute polls. Raw frames are
-high-volume, irreplaceable evidence; L2 requires stateful reconstruction and
-explicit invalid intervals; derived BBO, depth, flow, and normalized features
-are reproducible; backtests require immutable, provider-free inputs. Keeping all
-raw frames forever in PostgreSQL would make the transactional store the wrong
-storage tier. Keeping only derived rows would make parser, reconstruction, and
-feature errors unauditable.
-
-The design must also distinguish object storage from block storage. Local disks
-can buffer and recover in-flight bytes but are not a durable archive. Object
-storage can retain immutable evidence but cannot own leases or hot causal
-queries.
-
-Canonical facts may be published once their exact source record is safely
-fsynced, while object upload and manifest acknowledgement lag. Therefore a
-manifest identifier cannot be the canonical fact's immutable raw identity.
-Trade aggregation also needs an absence-proof contract separate from book
-validity: a quiet bucket is not equivalent to a healthy, ordered, fully
-archived and canonicalized stream interval with zero trades.
-
-## Decision
-
-Market-structure ingestion will use four explicit layers:
-
-1. **Local durable spool on block storage.** A fenced WebSocket session assigns
-   stable `spool_segment_id` and `raw_record_id` values plus receive ordinals,
-   then fsyncs exact frames before canonical publication. The spool is bounded,
-   recoverable staging, not long-term truth.
-2. **Immutable raw archive in object storage.** Sealed Parquet/ZSTD objects
-   preserve exact frame bytes and ordered content fingerprints. PostgreSQL
-   manifests and append-only manifest-to-record mappings are inserted only
-   after upload checksum verification. Canonical facts retain `raw_record_id`;
-   they are never mutated later to attach a manifest identifier.
-3. **Typed hot canonical/derived facts in PostgreSQL/Timescale.** Trades, L2
-   snapshots/mutations, book validity, trade stream coverage, BBO, depth,
-   aggregates, relationships, quality, and feature revisions use typed tables,
-   append-only revisions, the shared fact clock, provenance, and known-at
-   semantics. Mutable book state is a disposable projection.
-4. **Immutable frozen datasets.** A dataset binds exact fact revisions,
-   normalization specifications, quality, material/provenance fingerprints, and
-   any pinned archive/checkpoint objects. Canonical backtests read only this
-   layer.
+Typed PostgreSQL Facts own causal queries and the shared commit order.
+Reconstructed book state is a disposable projection. Frozen Datasets bind exact
+revisions, schemas, quality, normalization and required archive/checkpoint objects.
+Consumers replay admitted local evidence without provider access.
 
 Delivery between durable boundaries is at-least-once with deterministic
-idempotency. The architecture does not claim distributed exactly-once delivery.
-Raw object bytes are authoritative evidence of receipt; typed PostgreSQL rows
-are authoritative query facts; parser/reconstruction/spec versions are
-authoritative transformations; frozen dataset manifests are authoritative
-execution inputs.
+idempotency. This design does not promise distributed exactly-once delivery.
 
-Raw and derived retention are independent and bounded. L2 raw evidence has a
-shorter default retention than low-volume manifests and frozen datasets.
-Dataset freeze copies or pins only the objects needed for its declared replay
-contract. Ordinary compaction or retention cannot change a frozen dataset.
+## Publication and reconstruction need explicit evidence
 
-## Invariants
+Local durability is the minimum before canonical publication. The implemented
+stream path uses the stricter archive-first sequence: verified object
+acknowledgement and committed raw mappings precede Fact publication.
 
-- Exact frames are locally durable before their canonical facts are published.
-- Stable raw record and spool segment identities are assigned before parsing;
-  immutable canonical facts reference `raw_record_id`, not a future manifest.
-- A raw archive manifest never points to an unverified or partial object.
-- A source record is archive-complete and dataset-eligible only after an
-  acknowledged manifest-to-record mapping covers it. Later upload or compaction
-  appends mappings and never mutates the canonical fact.
-- Local block storage is never treated as archive authority.
-- Object storage is never used for leases, mutable coordination, or hot query
-  truth.
-- PostgreSQL remains the only relational persistence boundary and uses
-  `PG_DSN`; object-store configuration is not another DSN.
-- Canonical query surfaces are typed. Raw provider frames may remain native,
-  but one generic JSON table cannot replace trade, L2, validity, or feature
-  contracts.
-- Parser, reconstruction, normalization, and archive schema versions are
-  fingerprint inputs.
-- Book-derived facts are emitted only from an explicitly valid interval and
-  name the source state hash.
-- A complete trade aggregate, including an explicit zero-trade bucket, requires
-  a typed trade stream coverage interval proving the exact product/channel
-  scope, trusted ordering assurance, no intersecting gaps, archive-complete raw
-  evidence through the closing position, and a canonicalization watermark past
-  that position. Connection health or heartbeat evidence alone is insufficient.
-- A disconnect, sequence gap, invalid state, or backlog termination remains
-  visible quality evidence and cannot be represented as complete data.
-- Compaction preserves ordered content fingerprints. Replacement/deletion is
-  manifest-driven and cannot invalidate a dataset pin.
-- Frozen backtests use no provider, raw live stream, mutable book projection, or
-  operational feature table.
-- Credentials stay at the provider boundary. Stream definitions declare auth
-  mode but contain neither secrets nor credential references.
+A healthy connection or heartbeat does not prove a complete quiet interval.
+Zero-trade aggregates require typed coverage, trusted ordering, no intersecting
+gaps, archive-complete closing evidence and sufficient canonicalization progress.
+Book-derived Facts require explicitly valid state, exact source identity and
+reconstruction provenance. Disconnects, sequence gaps and invalid intervals
+remain quality evidence.
 
-## Implementation Status
+Replay must verify bytes, versions, checkpoints and ordered source material.
+The early implementation exposed archive files inside a replaceable container;
+lost objects remain unavailable rather than becoming valid because their
+database manifests survived. A persistent local archive fixes that lifecycle
+error but does not imply cloud or off-host durability.
 
-Phase 1 implemented layers 1–4 for bounded Coinbase BIP/BTC trades on
-2026-08-02. The implementation uses stable pre-parse raw identities, fsynced
-definition-scoped spool segments, verified immutable Parquet/ZSTD objects,
-transactional manifests and record mappings, typed trade/coverage/flow
-revisions, and archive-pinned provider-free datasets.
+## Retention preserves dependency closure
 
-The final live proof reconciled every replayed raw frame and unique provider
-trade ID for both BIP and BTC, returned both definition-scoped spools to zero,
-and froze complete one-second flow ranges with both source objects pinned. See
-[Market Structure Phase 1 Trades](../data/MARKET_STRUCTURE_PHASE_1_TRADES.md).
+Raw and canonical retention are independent. A frozen reference or canonical
+dependency can retain raw evidence beyond its ordinary age window.
+Compaction publishes verified replacement lineage before readers may select it;
+expiration must not invalidate retained Datasets or canonical sources.
 
-This implementation chose the stricter permitted publication sequence:
-canonical facts wait for verified object acknowledgement and committed raw
-record mappings. They still reference only stable `raw_record_id` values; no
-fact is mutated to attach a manifest.
+Current hot-to-cold archival preserves every output revision and the complete
+required causal input closure. Where historical formulas omitted exact input
+identities or processing bounds, retain the validated conservative candidate
+set rather than inventing a smaller original selection. Preserve historical
+values, fingerprints, corrections, invalidations and quality flags without
+claiming to recalculate or recertify the old conclusion.
 
-Phase 2 implemented this same boundary for bounded BIP/BTC Level 2 on
-2026-08-02. Typed snapshots, absolute mutations, validity revisions,
-deterministic checkpoints, full/checkpoint replay, quality linkage, immutable
-compaction lineage, and append-only explicit retention pins now exist. Replay
-selects a compacted replacement only after its manifest, mappings, and lineage
-commit atomically; source objects are not deleted by compaction. See
-[Market Structure Phase 2 Level 2](../data/MARKET_STRUCTURE_PHASE_2_LEVEL2.md).
+Versioned verification receipts bind the proof they actually performed.
+A stronger lineage rule requires explicit additive reverification; an old
+receipt cannot silently become stronger deletion permission. Final destructive
+admission still requires fresh bytes, placement, expiry, pins and source proof
+under its owning fences. Unknown families remain unadmitted.
 
-Phase 3 implemented typed one-second BBO/spread/depth/imbalance, one-second and
-one-minute flow/CVD projections, futures/spot basis, OI/funding derivative
-state, and direction-specific response facts. All are append-only, use the
-shared commit clock, and name exact typed source material. Session replay now
-replays the persisted transport-quality timeline at its original source
-position, so a heartbeat/sequence invalidation and post-invalid feature
-suppression reproduce exactly. Cross-stream materialization fixes an input-only
-commit watermark; its own outputs cannot advance its source identity. See
-[Market Structure Phase 3 State Features](../data/MARKET_STRUCTURE_PHASE_3_STATE_FEATURES.md).
+The consequence is additional metadata, archive reads and sometimes a larger
+retained causal superset. Report that cost and refuse bounded work that cannot
+complete; do not release dependencies to conceal pressure.
 
-Phase 4 implemented immutable normalization specifications, append-only causal
-normalized revisions, one typed fact registry for planning/freezing/runtime,
-transitive source/archive/spec dataset references, physical archive checksum
-verification, and provider-free frozen delivery. The one-hour BIP proof froze
-the exact source and aggressive-flow normalization twice to the same dataset
-identity. See [Market Structure Phase 4 Normalization And Frozen Datasets](../data/MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md).
+## Operational tradeoffs
 
-The Phase 3 scrub also proved that the original filesystem archive path was
-inside the replaceable backend container. Pre-correction objects were lost on
-recreation and remain loudly unreplayable; their database manifests are not
-treated as sufficient evidence or dataset-eligible bytes. The local stack now
-mounts a dedicated named volume at `/app/logs/market-structure` in both backend
-and collector services. A new BIP archive replayed with an identical fingerprint
-after backend replacement. This is durable local object storage for the current
-deployment boundary, not a claim of cloud object-store durability.
+This design adds spool budgeting, upload acknowledgement, manifests, pins,
+replay versions, recovery and dependency-safe expiry. It keeps those concerns
+with their owners instead of making consumers interpret provider transport.
 
-The generic supervisor and continuous Coinbase trade adapter now rotate and
-finalize archive segments without closing acquisition, reconnect by explicit
-epoch, and recover orphaned WAL segments under fresh fencing before a new
-session. Recovery closes prior coverage at the last proven event and never
-bridges downtime. The later single-node admission registered Level 2 through
-the same supervisor/runtime boundary; its projection adapter owns checkpoint
-restore, delta replay, exact-state reconciliation, and post-gap invalidation.
+Disposable tests establish their exercised reconstruction, correction, frozen
+identity, corruption and interruption behavior. Production enrollment and
+destructive retention require exact-source results, measured capacity and
+explicit operator admission. Fixture success and nominal deadlines do not
+establish physical workload throughput or a particular installation's readiness.
 
-On 2026-08-05 the generic storage-lifecycle implementation added scheduled,
-lease-independent raw archive compaction; checksum-verified, pin-safe object
-expiration; Timescale chunk compression and controlled expiration; immutable
-lifecycle evidence; and dry-run-first API/`qt` controls. Frozen dataset creation
-and explicit archive pinning share the lifecycle fence, and replay reports an
-expired object explicitly instead of treating a retained manifest as retained
-bytes. Terminal reconnect epochs now retire their projection state after final
-canonicalization, bounding in-process state by active/finalizing epochs.
-
-Destructive lifecycle execution remains configuration-gated and defaults off.
-Timescale compression activation is an explicit maintenance operation through
-`scripts/db/manual_enable_market_storage_lifecycle_v1.sql`; the script refuses
-to run while a stream lease is active. Quant-Trad intentionally installs no
-native Timescale retention policy because that path cannot enforce frozen
-dataset pins.
-
-The current cold tier covers exact raw provider frames and book checkpoints.
-It does not yet archive typed derived rows to Parquet. Derived-table hot expiry
-therefore must remain disabled or use a retention window that matches the
-deployment's rehydration requirements until a typed cold archive contract is
-implemented.
-
-No definition is production-admitted by this implementation status. Phase 4 is
-complete; the 24-hour canonical implemented-path evidence and authoritative
-physical/cloud resource budget remain production-readiness gates. That proof is
-not a 24-hour process lifetime: admitted production has no duration cap.
-
-## Consequences
-
-### Canonical Tier Retention Addendum
-
-The generalized canonical tier keeps immutable revision headers in PostgreSQL,
-verified immutable Parquet payloads on the configured archive filesystem, and
-explicit daily hot-payload progress. The current implementation and rollout
-gates are defined in
-[Generalized Fact Data Plane](../data/GENERALIZED_FACT_DATA_PLANE.md#canonical-retention-planning);
-the historical family-table compression script above is not its cutover.
-
-Raw retention windows do not override canonical source lifetime. Hot backlog
-protects source objects until cold publication creates permanent dependency
-holds. Expiration takes an object-specific manifest row lock through final
-admission/unlink/completion; canonical writers take a conflicting shared row
-lock and recheck expiry before committing new references. This closes the
-check-versus-publication race without serializing all ingestion behind a global
-archive fence. New reference writes use READ COMMITTED, and identical existing
-canonical rows remain no-ops. Current stream publication remains archive-first;
-this does not introduce a spool-first publication lane.
-
-This safety choice can retain raw evidence beyond an ordinary age window, and
-the permanent canonical index still grows on NVMe. Budget pressure must report
-that cost rather than expire unarchived evidence or silently disable collection.
-The canonical bounded executor is now wired through the existing lifecycle
-service, outside its raw exclusive fence, with a separate default-off execution
-gate and durable page/verification resume state. Complete dependency closure and
-representative production validation remain activation requirements; the
-existence of backlog protection or orchestration alone does not complete them.
-
-Deep verification receipts are versioned safety evidence, not permanent deletion
-permission. Strengthening raw-lineage checks requires a new receipt version.
-Previously verified hot partitions withdraw their old admission and resume
-bounded current-version verification while retaining all data and old receipts;
-the executor must not silently promote an old receipt to the stronger proof.
-
-Book raw-source admission retains a complete connection prefix, including
-control frames without canonical mutations. A last-frame mapping alone cannot
-prove a reconstructed book's source lifetime. Existing hot session holders
-protect live publication without repeated full-history scans. A committed
-immutable prefix also retains the complete definition/session after its hot
-payloads leave: trailing control frames and later checkpoints are needed by
-session replay even when no earlier page names them. Checkpoint ownership comes
-from its immutable raw-source manifests. This conservative lifetime anchor is
-not a new row's byte/reconstruction proof, but allows cold-only writers to avoid
-rescanning old history. Late imports without either holder must fence and check
-the complete prefix. This may keep an entire long-running book session beyond
-its ordinary age window; pressure reporting must expose the cost rather than
-silently release the hold. Long prefixes now
-advance through immutable, shared interval receipts with permanent raw holds.
-Each bounded transaction extends one interval; interruption rolls back that
-interval, and restarting resumes committed progress. This adds metadata to the
-existing PostgreSQL authority, not a second store or a new source of Fact truth.
-Final admission validates the contiguous receipt chain and current object bytes,
-and exact roots bind to their own certified interval. Later archive aliases
-cannot rewrite that proof. This deliberately trades some retained objects and
-receipt metadata for safe restart and avoids repeatedly decoding an entire
-connection history. It does not remove per-object/final verification budgets or
-establish checkpoint/replay equivalence by itself.
-
-Trade coverage reuses this bounded raw-prefix mechanism, with a distinct verifier
-version whose scope/hash cannot be confused with the L2 verifier. Historical
-book table names and descriptors stay unchanged. Exact opening/closing witnesses
-bind to their own certified chunks; they do not borrow a later archive alias or
-mistake an L2 frame for a trade-channel frame. This reuse avoids a second progress
-store and an unbounded full-session scan. A prefix alone is still not a complete
-trade-flow input proof or authorization to reclaim that family.
-
-Flow archival now combines the exact immutable coverage revision and complete
-raw-prefix proof with all causal canonical trade candidates in the bucket's
-instrument/source window. This conservative closure is necessary because v1
-flow evidence does not name canonical input IDs: bounded captures may aggregate
-a live delivery deduplicated against an older snapshot or another session's
-canonical trade. Requiring a fabricated delivery revision, or reconstructing it
-with a guessed canonical acceptance time, would alter historical evidence.
-Candidate edges therefore preserve all matching revisions and invalidations;
-each retains its own raw source, while the coverage prefix retains redeliveries
-and controls that never produced canonical rows. This can cost additional cold
-storage and metadata, but avoids guessing a minimal input subset. It preserves
-historical completeness/quality flags rather than recertifying them. Uncovered
-roots still need owner-based input reconciliation. The v9 archive receipt binds
-this stronger closure. Trade/flow freezes also bind every canonical revision,
-keeping original partial-quality flags while checking current physical evidence.
-Read-only freeze can reuse existing prefix certificates and verify a bounded
-missing tail without writing retention progress. Physical flow-removal tests
-cover frozen, typed-latest and known-at equivalence, including old-receipt
-reverification; flow now shares the existing default-disabled reclamation gate.
-Flow features extend this closure under the v10 verifier: exact causal aggregate
-hash matches retain every matching revision and its bounded trade/raw evidence.
-Immutable series scope and the original feature derivation owner must reconcile
-the payload and combined input fingerprint. Conservative candidate retention
-preserves deduplicated snapshot/update material without inventing delivery IDs;
-arbitrary correction subsets are not searched. Total derivation input visits
-are bounded as well as source edges. Feature freezes preserve all revisions,
-and v9 receipts require explicit additive reverification before reclamation.
-Normalized admission is described below; production activation still requires
-its reviewed rollout.
-
-The v11 response archive proof first preserves named canonical flow/book/trade
-witnesses and full causal windows. It reuses book position lookup without
-fabricating BBO Facts and retains the broader response-time trade evidence,
-including instrument-bound source candidates where v1 omitted a trade-series ID.
-This intentionally spends additional bounded archive/edge work to preserve
-evidence rather than guess an original source selection. Response
-freezes now preserve all canonical revisions and the same causal raw windows.
-Read-only book/trade prefix reuse validates whole certificates but excludes
-wholly later objects from the returned frozen scope, so certifying a larger
-prefix cannot silently change an earlier Dataset's identity. No certificate
-contents, permanent holds or source clocks are rewritten by this read path.
-
-Response reclamation is admitted on lossless output and complete evidence
-preservation, not recalculation of a historical result. The initial plan to
-require full response-owner recalculation at this storage boundary is superseded:
-v1 does not record its original processing-chunk bounds, so reconstructing an
-assumed subset would invent evidence. Keeping every causal candidate preserves
-research capability without certifying that any historic conclusion was correct.
-Every canonical output revision, original fingerprint, correction/invalidation
-and named source witness survives unchanged; the existing source placement,
-raw/checkpoint, immutable metadata, pin and complete-archive checks still gate
-the DROP. Physical disposable tests compare actual hot versus cold research
-reads and Dataset identity, reject corrupt cold inputs, and prove idempotent
-reclamation and explicit additive upgrade of older compatible proof receipts.
-This does not change ingestion policy, recompute Facts or introduce an alternate
-book engine. Reviewed activation remains separate.
-
-The v12 proof extends lossless preservation to normalized outputs. Up to three
-diagnostic hashes cannot represent a complete normalization window: retain every
-causal canonical revision in the recorded source window, verify the named
-witnesses and full immutable spec, and recursively preserve nested normalized
-inputs plus their derived/raw dependencies. Strictly decreasing commit bounds,
-batched lookups, cumulative edge budgets and byte/deadline limits bound this work.
-Preserve original values, invalidations, statuses and fingerprints without
-guessing unrecorded materialization bounds or rerunning formulas at archival time.
-Specs/catalogs remain durable PostgreSQL evidence, while source payloads can move
-to verified cold pages. All-revision normalized freezes use this same closure and
-still require covering source series in the Dataset; older latest-only freezes
-must be re-frozen. This can retain a larger causal superset and incur repeated
-window hydration, an explicit bounded cost rather than invented source identity.
-
-Book reclamation additionally binds exact canonical source revisions for derived
-BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
-bytes and restored state through the existing reconstruction owner. These edges
-survive source movement between hot and cold storage. The final destructive
-handoff freshly verifies cold source pages and rejects a placement change between
-preflight and commit, without encoding mutable placement in immutable receipts.
-This requires an explicit empty-metadata-table upgrade, not a data backfill or
-implicit startup migration. Futures/spot basis extends these same edges through
-both declared BBO inputs: every causally eligible material revision is retained,
-with immutable role-mapping scope and owner-derived pair validation. A new
-verifier version prevents older receipts from bypassing that stronger closure.
-Derivative state uses these edges for explicit OI/funding commits and the exact
-previous OI commit bound by its existing input fingerprint. It reuses the original
-derivation owner and legacy numeric semantics, not today's latest source values.
-Missing predecessors remain absent when the original gap/window selection omitted
-them. Older pages may gain newly required material aliases and canonical edges
-only through explicit current-version verification without changing historical
-bytes or receipts. Typed v1 reading accepts the serializer's exact retained
-28-digit OI log change as well as the 38-digit in-memory calculation; this repairs
-a reader/serializer mismatch without rehashing or upgrading historical evidence.
-Unknown families remain behind the whole-day admission gate. Admitting current
-families does not authorize deployment or retention activation.
-
-### Operational Consequences
-
-The platform gains deterministic forensic replay and can correct parser or
-feature implementations without pretending the corrected result was known
-earlier. High-volume raw retention does not force PostgreSQL to become an
-unbounded blob store. Dataset consumers remain independent from providers and
-operational retention.
-
-The design adds operational complexity: local spool capacity, upload
-acknowledgement, object manifests, compaction, pins, replay versions, worker
-supervision, restart recovery, and two independent retention policies. The
-Phase 0 one-hour measurements provide a
-provisional implementation envelope because L2 cost and throughput cannot be
-safely inferred from candle/OI rates. A 24-hour measurement on the implemented
-path remains mandatory before production enrollment, and Docker Desktop/WSL
-guest capacity cannot substitute for physical backing-volume evidence.
-
-Raw replay after default retention is possible only for ranges pinned/copied by
-a dataset or explicit retention hold. Manifests remain, but they must report an
-expired object as unreplayable rather than silently falling back to derived
-facts.
-
-## Rejected Alternatives
-
-- Store every raw frame indefinitely in PostgreSQL/Timescale.
-- Store only BBO/features and discard source frames or L2 mutations.
-- Use local block storage as the long-term archive.
-- Let each paper/live bot own its own market-structure connection and book.
-- Publish canonical facts before the raw frame is durably spooled.
-- Make canonical fact identity depend on a manifest that does not exist at
-  publication time, or mutate facts later to attach that manifest.
-- Infer zero trades from an open connection or heartbeat without typed trade
-  coverage, archive-completeness, and canonicalization evidence.
-- Claim exactly-once delivery instead of at-least-once plus deterministic
-  idempotency.
-- Materialize every proposed research normalization continuously.
-- Let backtests read hot operational features or reconstruct from providers.
-- Use direct CDE FIX/UDP as a hidden recovery or enrichment source.
-
-## Evidence Required Before Production Enrollment
-
-- BIP/BTC Advanced Trade `market_trades` and `level2` proof captures establish
-  product/auth/schema/sequence/reconnect/unit behavior. This evidence passed.
-- bounded ETP/ETH and SLP/SOL spot checks establish access, futures units,
-  reconnect snapshots, and deterministic replay. This evidence passed.
-- after Phase 4, a 24-hour implemented-path capture measures rates,
-  compression, index amplification, spool backlog, object upload, checkpoint
-  size, and replay speed, followed by explicit operator budget approval.
-- duplicate, crash, partial upload, stale-fence, reconnect, checkpoint/full
-  replay, gap propagation, and truncation-invariance tests pass.
-- canonical publication before upload preserves stable raw identity; later
-  upload and compaction append verified mappings without updating source facts.
-- trade coverage tests distinguish proven zero activity from message loss,
-  unhealthy connection, pending archive upload, and canonicalization lag.
-- object content fingerprints survive idempotent upload and compaction.
-- a frozen dataset executes provider-free and produces the same results after
-  eligible hot/archive retention and compaction.
-- unsupported public CDE history is either admitted through a stable verified
-  unauthenticated file contract or remains outside the data plane.
-
-## References
-
-- [Market Structure Data Plane](../data/MARKET_STRUCTURE_DATA_PLANE.md)
-- [Data Boundary](../data/DATA_BOUNDARY.md)
-- [Persistence Boundary](../persistence/PERSISTENCE_BOUNDARY.md)
-- [ADR 0050: Canonical Market Store](0050-use-one-canonical-append-only-market-data-store.md)
-- [ADR 0051: Frozen Datasets](0051-require-frozen-datasets-for-canonical-backtests.md)
-- [ADR 0052: Typed Collectors And Instrument Roles](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)
-- [ADR 0044: Known-At Prefix Invariance](0044-enforce-known-at-prefix-invariance.md)
+Related decisions: [canonical Facts](0063-use-schema-registered-canonical-facts.md),
+[frozen backtests](0051-require-frozen-datasets-for-canonical-backtests.md),
+[replay-certified execution tapes](0058-use-replay-certified-execution-book-tapes.md).

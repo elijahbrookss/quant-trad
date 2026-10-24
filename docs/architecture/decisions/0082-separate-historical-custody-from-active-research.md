@@ -28,121 +28,79 @@ code_paths:
 ---
 # ADR 0082: Separate Historical Custody From Active Research
 
-## Status
+Draft, October 18, 2026. This records the approved separation of reusable runtime
+capabilities from historical evidence reading. Exact integrated qualification
+and release remain separate. This document does not attest custody of any
+specific private record or authorize a production data migration.
 
-Draft, 2026-10-18. Implements the approved clean replacement. Exact integrated
-qualification and release remain separate. No production data migration is
-performed or inferred by this decision.
+## Reusable execution and historical reading have different lifetimes
 
-## Context
+Keeping fixed experiment wrappers executable solely to inspect old evidence
+creates a growing execution catalog. Conversely, removing an executor must not
+silently reinterpret its old evidence as a different current procedure.
 
-Keeping every fixed symbol/date research adapter runnable solely to read old
-evidence caused a growing execution catalog. An unused executable
-StudyDefinition/implementation registry also described a second orchestration
-architecture without a production consumer. Several listed Indicators had
-compute helpers but no supported typed runtime.
+Indicator owns reusable causal recognition and state through
+`initialize -> apply_bar -> snapshot`. CheckDefinition pins an admitted
+analytical procedure; its evaluator owns selection, comparisons and outcomes.
+Saved Checks retain immutable execution evidence. Studies own questions,
+interpretation revisions and evidence relationships. These are responsibilities,
+not a compulsory linear development sequence.
 
-## Decision
+Signals remain typed Indicator outputs with causal identity and known-at time.
+A candidate signal can exist before validation; its existence establishes
+neither usefulness nor profitability. Strategy owns decisions and Bot owns
+execution.
 
-Use existing nouns and boundaries:
+## Retirement must preserve interpretation without claiming replay
 
-- Indicator owns reusable causal recognition/state, references, stages,
-  completion-known duration and context through initialize/apply/snapshot.
-- CheckDefinition pins one admitted procedure/settings; its Python evaluator
-  owns selection/comparison, future paths and analytical summaries.
-- A saved Check holds the immutable execution evidence. A Study owns the
-  question, findings, interpretation revisions and evidence relationships.
+Remove unused executable composition registries and unsupported catalog entries
+through explicit changes. Keep versioned Indicator contracts separate and admit
+reusable recognizers through the existing runtime, rather than a parallel Signal
+framework. Discovery must reflect supported preview/evidence capabilities.
 
-Signal remains the existing typed Indicator output `{"events": [...]}` with
-causal event identity/known-at and optional metadata/reference. A candidate
-signal rule may be developed before a Check; Checks assess usefulness. No
-Indicator requires a prior Check, and no new Signal framework is introduced.
-Strategy still owns decisions, actions and risk, while Bot owns execution.
+Historical reading validates retained definitions, request/plan/input/result
+links and original hash conventions. It must not register a retired evaluator
+merely to make inspection succeed or substitute a current calculation for an old
+one.
 
-These are development choices, not a compulsory linear runtime pipeline.
-Indicators can be implemented directly once causal rules are defined. An
-exploratory Check may reveal reusable calculations worth extracting into an
-Indicator. Checks test and help develop candidate signals; a signal can exist
-before validation and does not imply proven profitability.
+The implementation at this documentation baseline uses a code-owned exact
+receipt allowlist for retired Check acceptance. Acceptance requires the original
+record identity and matching definition, evidence and result hashes through
+`historical_check_custody.py`; unknown or changed records refuse. Removing or
+broadening that allowlist is a separate implementation change, not behavior
+granted by this ADR.
 
-Remove the unused executable StudyDefinition/bundle registry and unsupported
-Pivot Level, Trendline and VWAP entries. Keep Market Profile v1 and v2 as
-distinct pinned contracts, Candle Stats, Regime and Reserve State. Register
-the reusable Reversal typed runtime on the existing shared recognizer. It
-emits only currently known completion/lifecycle/context deltas; no labels,
-future-path calculation, prediction or trading authority. Origin-aware
-planning is explicit opt-in and leaves existing Indicator warmups unchanged.
+A successful historical validation may describe integrity within that admitted
+boundary, with execution unavailable and replay unavailable. It is not
+deterministic recomputation. Scientific authority that requires supported replay
+cannot substitute historical inspection for that requirement.
 
-The active Check catalog contains 19 base definitions: raw_forward_outcome
-3/6/7/8/17/18/19/20 and event_fact_analysis 4–14. Preserve their exact base and
-configured-example identities. Retire the other 17 factories, fixed recipe
-wrappers and legacy sweep executor. Do not translate a different historical
-procedure into a current one. Shared scientific kernels remain reusable.
-Methods 17, 18 and 20 require frozen evidence; discovery must not advertise
-preview where the evaluator rejects it.
-
-Historical reading is independent of current execution. A data-only archive
-pins retired base metadata and eight original server Check receipts. It
-requires the original item ID and exact definition/result/evidence hashes,
-then verifies typed request/plan/evidence/result links and recorded planning
-declarations through the shared planner. Unknown or changed history refuses;
-no fallback trusts caller-supplied hashes. Publication, image binding, export
-and saved-selection inputs propagate the actual record ID. Saved v12/v14
-selection decoding retains original weights, scopes and hash conventions.
-
-Verified retired evidence is classified historical_frozen_verified with
-execution_available=false and replayable=false. Original Observation
-eligibility is retained only when anchored by its receipt. Historical
-integrity is not deterministic recomputation. ScientificAttempt result
-references still require actual supported deterministic replay; custody does
-not substitute for that authority. Active replay guards remain unchanged.
+Actual research records remain in private QT custody. The repository documents
+schemas and reusable behavior; this decision neither publishes record contents
+nor claims that a custody transfer or verification has occurred.
 
 ## Shared execution observability
 
-Common operational timing, sizing and execution outcomes belong to the shared
-harness, not each Indicator or Check evaluator. Reuse `ExecutionControl`, its
-stage wrappers and existing worker execution snapshots. With an active control,
-`stage_seconds` records inclusive wall time and `stage_outcomes` counts completed,
-failed, cancelled and budget-exceeded entered stage calls. The existing operation log
-adds execution status and error class, including worker-owned controls; nested
-bounded calls share one meter and one outer operation log after scope unwind.
-Admission failures report status/error class with null metrics if no control was
-obtained. Shutdown uncertainty also omits the snapshot: an interrupt helper may
-still hold its lock, and reporting must not delay propagation. Diagnostic logs
-use a nonblocking snapshot and also emit null metrics when a reused worker
-control is busy; authoritative worker result snapshots remain unchanged. A completed build
-operation does not certify later publication or whole-job success.
+Common timing, structural sizes and outcomes belong to the shared execution
+harness. Reuse ExecutionControl and worker snapshots rather than adding timers to
+every evaluator. Stage durations are inclusive wall measurements and may overlap;
+they are not additive CPU accounting. Queue residence belongs to the async-job
+repository.
 
-Check input binding, input preparation, evaluation and persistence are distinct
-stages. Input preparation may include Indicator engine execution; evaluation may
-include lazy input reads and scalar assertions. These are overlapping wall
-measurements, not additive or exclusive CPU measurements. Elapsed time starts
-with the execution-local control, excluding queue residence. Queue timestamps
-and terminal status remain the existing async-job repository's responsibility.
-
-`observed_sizes` holds latest known structural counts, not cumulative totals or
-heap sizes. Unavailable/lazy counts are null. Output counts clear when a new
-frame starts; rejection before entry leaves prior observations unchanged, so
-execution/job status remains authoritative for attempt completion. Read/evidence/result byte counters
-remain existing I/O and budget accounting. Do not traverse lazy inputs or add
-payload serialization solely for metrics. Keep stage/count names stable; use
-structured log/report correlation for IDs, ranges and hashes, not metric labels.
-
-Indicator frames retain shared guard timings and overlay size/warning fields,
-including outside a controlled operation. Component-specific inspection uses
-existing `runtime_diagnostics`, source diagnostics and `RuntimeDetail`; declared
-Check result diagnostics retain their own schema. These are not replacements
-for common timers, and operational observations do not enter scientific result
-or definition hashes. Existing opt-in backtest profiling reports process CPU and
-process-peak RSS; it does not establish per-Indicator/Check CPU or memory use.
-No new tracker, profiling store, telemetry platform or resource limit is added.
+Structural observations are latest known counts, not heap measurements.
+Unavailable or lazy counts remain null; do not traverse or serialize inputs
+solely to populate metrics. Operational diagnostics must not enter scientific
+definition or result hashes. Cancellation and shutdown uncertainty take
+precedence over waiting for a diagnostic snapshot.
 
 ## Consequences
 
-No original evidence payload, hash, image, Study publication or scientific
-result is rewritten. Current runtime no longer carries retired executors to
-read those records. Newly discovered unanchored historical dependencies need
-explicit custody review; they do not cause automatic re-registration or data
-migration. Producing-source archives may permit separate future forensic
-reproduction, but current QT does not claim that it can execute retired code.
-New analytical semantics require a new admitted version, not a generic DSL.
+The active catalog follows supported reusable capabilities while historical
+reading retains a distinct, explicit admission boundary. New unanchored history
+requires custody review; it cannot cause automatic re-registration or migration.
+Producing-source archives may support separate forensic reproduction, but current
+code cannot claim it executes a removed evaluator.
+
+This avoids turning private experiment inventories into public runtime policy.
+New semantics need an admitted version and focused validation, not a generic DSL
+or an implied upgrade of old evidence.

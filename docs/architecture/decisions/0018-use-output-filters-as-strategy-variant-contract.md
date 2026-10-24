@@ -91,14 +91,14 @@ The target mental model is:
   used at run start.
 
 An output filter is a declarative condition over an attached indicator output.
-For example:
+For a synthetic example:
 
 ```json
 {
   "scope": {
     "intent": ["enter_long", "enter_short"]
   },
-  "indicator_id": "ba2a253d-00ed-41ba-8846-10e38210dc79",
+  "indicator_id": "00000000-0000-4000-8000-000000000001",
   "output_name": "market_regime",
   "field": "expansion_state",
   "operator": "equals",

@@ -39,6 +39,12 @@ code_paths:
 
 Accepted on 2026-08-01.
 
+The initial specialized tables and capability limits below are dated context.
+[ADR 0063](0063-use-schema-registered-canonical-facts.md) supersedes their storage
+representation; [ADR 0064](0064-use-one-code-owned-collector-operations-contract.md)
+owns unified operations. Current capabilities are discovered from deployed
+contracts rather than inferred from this original implementation slice.
+
 ## Context
 
 Candles have bounded historical endpoints and an existing paper stream, but

@@ -114,14 +114,6 @@ We did not:
 
 This was a compute optimization pass, not a semantic rewrite.
 
-## Remaining Work
-
-The next worthwhile optimizations are:
-
-1. Reuse the source-frame candle set when chart timeframe and source timeframe are identical.
-2. Add focused perf logging around session histogram build totals so large regressions are obvious.
-3. Consider optional compaction of stored per-profile artifacts if `tpo_histogram` remains unused downstream.
-
 ## Outcome
 
 The system stays aligned with the platform contract:

@@ -41,7 +41,7 @@ code_paths:
 
 ## Status
 
-Accepted on 2026-08-04 after the full-year BIP replay exposed incomplete
+Accepted on 2026-08-04 after the long-window replay exposed incomplete
 inspection counts and unbounded browser-memory risk.
 
 ## Context

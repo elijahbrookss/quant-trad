@@ -8,7 +8,11 @@ Use subsystem folders when helpful, for example:
 - `storage/`
 - `providers/`
 
-These docs are historical records, not normative contracts.
+These docs preserve engineering failure mechanisms, consequential evidence and
+lessons. They are historical records, not current operating procedures or
+outstanding-work inventories. Follow linked contracts and component boundaries
+for present behavior. Private research identities, configurations and results
+belong in QT records; they are not needed to teach the public incident mechanism.
 
 ## Runtime Incidents
 

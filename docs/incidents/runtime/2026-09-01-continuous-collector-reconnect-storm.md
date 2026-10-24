@@ -113,13 +113,11 @@ code was introduced. This change then implements the bounded correction:
 4. Append-before-parse, file and directory `fsync`, database acknowledgement,
    and acknowledged-only deletion remain unchanged.
 
-Implementation and automated verification are merge gates. Operational closure
-still requires a deployment and sustained production observation showing fresh
-valid data, no epoch mismatches, collector CPU returning to its normal range,
-and every stream remaining below the reconnect-storm threshold. The first gate
-is one L2 stream for at least 90 minutes; the fleet gate is all four streams for
-6–24 hours. The reconnect-storm alert must resolve naturally after the signal
-falls below threshold. A short green snapshot is insufficient evidence.
+The correction required sustained post-deployment observation of fresh valid
+data, absence of epoch mismatches, stable resource use and naturally resolving
+churn alerts. A short healthy snapshot was insufficient. These were incident
+acceptance criteria, not a current fleet-status inventory. The owning runtime
+and observability docs define present operating behavior.
 
 ## Permanent Lessons
 

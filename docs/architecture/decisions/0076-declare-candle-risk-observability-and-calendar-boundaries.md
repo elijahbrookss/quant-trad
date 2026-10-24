@@ -116,12 +116,10 @@ All primary pairs remain visible, with cross-arm overlap and calendar/episode
 concentration. Day/week deletion removes a pair if either arm belongs to the
 removed period. Joint nonoverlap traverses the already frozen complete pairs
 and keeps a pair only when neither arm overlaps any arm of an earlier retained
-pair. It never rematches. Its descriptive investment gate requires 50 pairs
-across six months. Positive primary, at least nine positive months, all positive
-week deletions and a positive supported joint sensitivity are per-asset
-investment criteria, not significance or automatic promotion. Both fixed assets
-must be assessed before proposing further validation. No effective independent
-sample size or causal claim is emitted.
+pair. It never rematches. The versioned method owns its fixed support and interpretation rules;
+passing descriptive support is not a significance result, causal claim or
+automatic promotion. Actual asset selections, findings and investment decisions
+belong to private research records rather than this engineering decision.
 
 Candidate matching is bounded to twenty million comparisons, evaluated in
 batches with cancellation/ownership checkpoints. Exceeding the cap fails rather

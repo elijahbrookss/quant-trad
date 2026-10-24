@@ -31,6 +31,10 @@ code_paths:
 
 Accepted on 2026-07-26.
 
+The family-table storage topology and capability exclusions below describe that
+cutover. [ADR 0063](0063-use-schema-registered-canonical-facts.md) supersedes the
+storage representation; current supported inputs belong to the data boundary.
+
 **Retroactive cleanup ADR:** this records the candle-feed hard cutover implemented
 while establishing the market-data baseline. It extends ADRs 0003, 0044, and
 0046; it does not replace their continuity, known-at, or runtime snapshot
