@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from portal.backend.db.fact_storage_schema import _view_signature
 from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, inspect_capture, inspect_identity_capture
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
 
 logger = logging.getLogger(__name__)
 MAX_CATALOG_ROWS = 8192
@@ -267,13 +268,7 @@ def _incoming_references(conn):
            for row in children):
         raise RuntimeError("fact_header_source_payload_partition_changed")
     _assert_payload_guards(conn,children)
-    parent_owners={
-        "market.fact_hot_payloads":"id",
-        "market.fact_archive_material_aliases":"fact_version_id",
-        "market.fact_archive_canonical_dependencies":"fact_version_id",
-        "market.fact_archive_prepared_material_aliases":"fact_version_id",
-        "market.fact_archive_prepared_canonical_dependencies":"fact_version_id",
-    }
+    parent_owners = SOURCE_REFERENCE_COLUMNS
     child_owners={row["relation"]:"id" for row in children}
     rows=_rows(conn,"""
         SELECT con.oid::bigint AS oid,con.conparentid::bigint AS parent_oid,
