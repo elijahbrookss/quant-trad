@@ -16,14 +16,13 @@ from market_data.fact_archive import FactArchiveLimits
 from market_data.market_state import derive_basis_features
 
 from .fact_dependencies import read_canonical_dependency_rows
-from .fact_archive_generation import material_alias_projection
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
 DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state", "market.trade_flow", "market.trade_flow_feature", "market.market_response"})
 
 
-_LEGACY_MATERIAL_CANDIDATES = f"""
+_LEGACY_MATERIAL_CANDIDATES = """
                 UNION
                 SELECT requested.root_id,requested.role,source.id
                 FROM requested JOIN market.fact_hot_payloads AS hot
@@ -41,14 +40,36 @@ _LEGACY_MATERIAL_CANDIDATES = f"""
                   AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
                 WHERE hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
                 UNION
+                -- Keep requested lookup predicates inside both authority branches.
+                -- The shared union projection made PostgreSQL scan the full alias
+                -- catalog before applying this request's selective lookup.
                 SELECT requested.root_id,requested.role,source.id
-                FROM requested JOIN {material_alias_projection("aliases")}
+                FROM requested JOIN market.fact_archive_material_aliases AS aliases
                   ON aliases.series_id=requested.series_id AND aliases.evidence_key=requested.evidence_key
                   AND aliases.material_hash=requested.material_hash
+                LEFT JOIN market.fact_archive_active_generations AS legacy_authority
+                  ON legacy_authority.manifest_id=aliases.manifest_id
                 JOIN market.fact_versions AS source ON source.id=aliases.fact_version_id
                   AND source.series_id=requested.series_id AND source.fact_type=requested.fact_type
                   AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
                 JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
+                  AND manifest.storage_day=source.storage_day
+                JOIN market.fact_retention_partitions AS partition ON partition.storage_day=source.storage_day
+                  AND partition.state IN ('verified','reclaimed')
+                WHERE legacy_authority.manifest_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                    WHERE hot.storage_day=source.storage_day AND hot.id=source.id)
+                UNION
+                SELECT requested.root_id,requested.role,source.id
+                FROM requested JOIN market.fact_archive_prepared_material_aliases AS prepared
+                  ON prepared.series_id=requested.series_id AND prepared.evidence_key=requested.evidence_key
+                  AND prepared.material_hash=requested.material_hash
+                JOIN market.fact_archive_active_generations AS prepared_authority
+                  ON prepared_authority.preparation_id=prepared.preparation_id
+                JOIN market.fact_versions AS source ON source.id=prepared.fact_version_id
+                  AND source.series_id=requested.series_id AND source.fact_type=requested.fact_type
+                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
+                JOIN market.fact_archive_manifests AS manifest ON manifest.id=prepared_authority.manifest_id
                   AND manifest.storage_day=source.storage_day
                 JOIN market.fact_retention_partitions AS partition ON partition.storage_day=source.storage_day
                   AND partition.state IN ('verified','reclaimed')

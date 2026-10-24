@@ -57,8 +57,18 @@ def test_material_sources_revalidate_every_candidate_and_causal_clock(monkeypatc
         second["observation_key"] = "other"
     def execute(statement, params):
         sql = str(statement)
-        assert sql.count("source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at") == 3
-        assert "fact_archive_material_aliases" in sql and "DISTINCT ON" not in sql
+        assert sql.count("source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at") == 4
+        assert "DISTINCT ON" not in sql
+        assert "JOIN market.fact_archive_material_aliases AS aliases" in sql
+        assert "JOIN market.fact_archive_prepared_material_aliases AS prepared" in sql
+        assert sql.count("series_id=requested.series_id") >= 4
+        assert sql.count("evidence_key=requested.evidence_key") == 2
+        assert sql.count("material_hash=requested.material_hash") >= 3
+        assert "LEFT JOIN market.fact_archive_active_generations AS legacy_authority" in sql
+        assert "legacy_authority.manifest_id IS NULL" in sql
+        assert "JOIN market.fact_archive_active_generations AS prepared_authority" in sql
+        assert "prepared_authority.preparation_id=prepared.preparation_id" in sql
+        assert "manifest.id=prepared_authority.manifest_id" in sql
         parsed = json.loads(params["requests"])
         assert parsed[0]["evidence_key"] == "_qt_bbo_evidence"
         return SimpleNamespace(all=lambda: [] if mode == "missing" else [("root", "futures", identity) for identity in rows])
@@ -166,6 +176,13 @@ def test_material_selection_omits_only_impossible_legacy_joins(monkeypatch, fami
         assert ("fact_archive_material_aliases" in sql) is ("legacy" in names)
         assert "source.material_hash=requested.material_hash" in sql
         assert "SELECT DISTINCT root_id,role,id" in sql
+        if "legacy" in names:
+            assert "legacy_authority.manifest_id IS NULL" in sql
+            assert "prepared_authority.preparation_id=prepared.preparation_id" in sql
+            assert sql.count("evidence_key=requested.evidence_key") == 2
+        else:
+            assert "fact_archive_active_generations" not in sql
+            assert "fact_archive_prepared_material_aliases" not in sql
         assert params["limit"] == 11 - matched
         matched += len(names)
         assert [json.loads(value) for value in params["legacy_witnesses"]] == (
