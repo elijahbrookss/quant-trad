@@ -34,15 +34,12 @@ def _squash(text: str) -> str:
 
 
 def test_selected_accepted_adrs_are_indexed_and_linked() -> None:
-    index = _read("docs/architecture/decisions/README.md")
-    rows = {
-        adr_id: (target, status.strip())
-        for adr_id, target, status in re.findall(
-            r"^\| \[(\d{4})\]\(([^)]+)\) \| .*? \| ([^|]+) \|$",
-            index,
-            flags=re.MULTILINE,
-        )
-    }
+    from scripts.docs import build_architecture_index as architecture_index
+
+    navigation = _read("docs/architecture/decisions/README.md")
+    assert "ARCHITECTURE_COMPONENT_INDEX.md" in navigation
+    catalog = architecture_index.build_catalog(ROOT)
+    indexed = {entry.repo_path: entry for entry in catalog.components}
 
     expected = {
         "0048": "0048-gate-agent-mutation-and-research-promotion.md",
@@ -51,8 +48,8 @@ def test_selected_accepted_adrs_are_indexed_and_linked() -> None:
         "0066": "0066-scale-validation-to-consequence-and-trust-boundaries.md",
     }
     for adr_id, target in expected.items():
-        assert rows[adr_id] == (target, "Accepted")
         repo_path = f"docs/architecture/decisions/{target}"
+        assert repo_path in indexed
         assert (ROOT / repo_path).is_file()
         assert _frontmatter(repo_path)["status"] == "accepted"
 
@@ -81,16 +78,11 @@ def test_architecture_navigation_and_asset_lineage_are_current() -> None:
         assert (ROOT / repo_path).is_file()
         assert _frontmatter(repo_path)["status"] == "active"
 
-    asset_path = ROOT / "docs/assets/quant-trad-platform-flow.svg"
-    asset_lineage = _squash(_read("docs/assets/README.md"))
-    assert asset_path.is_file()
-    assert "quant-trad-platform-flow.svg" in asset_lineage
-    assert "source, generator, and reviewed lineage are unknown" in asset_lineage
-    assert "retained, unreferenced as architecture evidence, and unverified" in asset_lineage
-    assert (
-        "does not establish that it is generated, current, canonical, or authoritative"
-        in asset_lineage
-    )
+    # Unknown, unused exports are removed rather than maintained as architecture.
+    assert not (ROOT / "docs/assets/quant-trad-platform-flow.svg").exists()
+    architecture_root = ROOT / "docs/architecture"
+    for svg in architecture_root.rglob("*.svg"):
+        assert svg.with_suffix(".mmd").is_file(), f"orphan diagram export: {svg}"
 
 
 def test_ci_topology_matches_workflow_jobs() -> None:
@@ -260,3 +252,43 @@ def test_observability_docs_match_supported_shippers_and_dashboard_operations() 
         normalized = _squash(_read(repo_path))
         missing = [fact for fact in required_facts if fact not in normalized]
         assert not missing, f"{repo_path} is missing required documented facts: {missing}"
+
+
+def test_repository_documentation_links_and_anchors_resolve() -> None:
+    from urllib.parse import unquote, urlsplit
+
+    pages = list((ROOT / "docs").rglob("*.md")) + [
+        ROOT / "README.md", ROOT / "AGENTS.md",
+        ROOT / "portal/frontend/README.md",
+        ROOT / "docker/grafana/provisioning/dashboards/README.md",
+        *sorted((ROOT / "src/indicators").rglob("*.md")),
+    ]
+    errors = []
+    for page in pages:
+        text = re.sub(r"```.*?```|~~~.*?~~~", "", page.read_text(encoding="utf-8"), flags=re.DOTALL)
+        targets = re.findall(r"\[[^]\n]+\]\(([^)\n]+)\)", text)
+        targets += re.findall(r'^\s*\[[^]]+\]:\s*(\S+)', text, flags=re.MULTILINE)
+        for target in targets:
+            target = target.split(' "', 1)[0].strip("<>")
+            parsed = urlsplit(target)
+            if parsed.scheme or target.startswith("//"):
+                continue
+            resolved = (page.parent / unquote(parsed.path)).resolve() if parsed.path else page
+            context = f"{page.relative_to(ROOT)}: {target}"
+            if not resolved.exists():
+                errors.append(context + " (missing target)")
+                continue
+            if not parsed.fragment or resolved.suffix != ".md":
+                continue
+            body = re.sub(r"```.*?```|~~~.*?~~~", "", resolved.read_text(encoding="utf-8"), flags=re.DOTALL)
+            anchors = set(re.findall(r'<a\s+(?:id|name)=["\']([^"\']+)', body))
+            counts = {}
+            for heading in re.findall(r"^#{1,6} (.+?)\s*#*\s*$", body, flags=re.MULTILINE):
+                heading = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", heading)
+                slug = re.sub(r"[^\w\- ]", "", heading.lower()).replace(" ", "-")
+                number = counts.get(slug, 0)
+                counts[slug] = number + 1
+                anchors.add(f"{slug}-{number}" if number else slug)
+            if unquote(parsed.fragment) not in anchors:
+                errors.append(context + " (missing anchor)")
+    assert not errors, "\n".join(errors)

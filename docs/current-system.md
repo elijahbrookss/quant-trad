@@ -111,8 +111,8 @@ QT protects six high-consequence outcomes:
    rewritten.
 2. **Frozen research authority.** Durable research identifies the exact market
    evidence it used. Current methods support provider-free replay; retired
-   evidence retains verified custody with execution/replay availability stated
-   separately. Exploratory previews do not silently become durable evidence.
+   evidence remains readable with its integrity and execution/replay availability
+   reported separately. Exploratory previews do not silently become durable evidence.
 3. **Decision and execution authority.** Indicators and Strategies can explain
    a decision, while the runtime alone owns execution and accounting truth.
 4. **Capital, order, and accounting integrity.** Order history, settlement,
@@ -151,17 +151,18 @@ every environment.
 
 Stronger verification is reserved for a real trust boundary—for example, an
 external release consumer, security review, legal requirement, recovery
-commitment, or capital authorization. Exact-build provenance and formal
-evidence publication are not part of ordinary QT development today.
+commitment, or capital authorization. Release qualification uses exact-source CI and recovery evidence where the
+deployment contract requires it. This is separate from scientific certification
+or public release of research records.
 
 ## Honest Current Limits
 
 - External order submission is deliberately closed. Paper operation is bounded
   and does not authorize live venue trading.
-- Destructive recovery has static guards, but a complete disposable
-  source-to-restore rehearsal may be unavailable until the required isolated
-  environment exists. QT reports that honestly rather than treating a
-  configuration check as a restore result.
+- Destructive recovery requires disposable source-to-restore rehearsals and
+  source-bound evidence. The repository defines these checks; a particular
+  release or host is qualified only by its actual receipts. A configuration
+  check alone is not a restore result.
 - Some broad properties have representative rather than universal test
   coverage. The [testing strategy](engineering/testing/testing-strategy.md)
   describes the supported validation boundary.

@@ -51,8 +51,8 @@ Generated architecture SVGs are written beside the `.mmd` files in each local
 `diagrams/` folder. The `.mmd` files remain the diagram sources of record; the
 SVGs are the quick-reference files to open while reading nearby docs.
 
-Repository-wide asset lineage, including retained files with unknown sources,
-is recorded in [documentation asset lineage](../assets/README.md).
+Rendered diagrams must be regenerated when their Mermaid source changes; an
+unverified export is not evidence of the current architecture.
 
 ## Boundary Map
 
@@ -115,7 +115,7 @@ For adding extension points:
 - Follow the
   [component documentation standard](../engineering/documentation/component-documentation-standard.md)
   for required frontmatter and readable boundary documentation.
-- The generated component index is a navigation aid. Shared `code_paths` are
+- The generated component index is the complete component and ADR catalog. Shared `code_paths` are
   coverage links, not exclusive file ownership.
 - Boundary docs should prefer supported current behavior over future language.
 - Diagrams should be budgeted. Add one only when it makes the intent easier to
@@ -139,10 +139,3 @@ Then run:
 ```bash
 make sync-docs
 ```
-
-## Retained Documentation History
-
-[Architecture documentation model](ARCHITECTURE_DOCS_MODEL.md) preserves the
-earlier boundary-first modernization record. It is useful when investigating
-why files were consolidated, but it is not required reading for understanding
-the current system.

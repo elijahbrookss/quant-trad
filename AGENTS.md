@@ -49,8 +49,9 @@ Start with the product before opening deep architecture:
    affect and links to the contracts and decisions that define them.
 
 For an ordinary change, this path is enough to find current meaning and normal
-checks. Use historical plans, incident records, and research evidence only when
-the change needs their context; they do not override current contracts.
+checks. Use dated engineering decisions and incident records when the change needs
+their context; they do not override current contracts. Actual research records
+remain private and must not become repository documentation.
 
 Before changing behavior:
 

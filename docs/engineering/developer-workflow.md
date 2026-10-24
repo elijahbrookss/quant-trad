@@ -271,8 +271,8 @@ docs, refresh the index, and run `make sync-docs`.
 Keep bulky image exports outside the checkout on a deliberately selected
 volume. Before exporting, check that volume's free space and the host drive
 backing WSL; Linux's virtual free-space figure does not establish Windows
-headroom. On the current workstation, release packages use
-`D:\QuantTradReleaseStaging`; repositories remain on the internal SSD.
+headroom. Select an explicit staging path outside the checkout; do not encode one
+workstation's drive layout as a platform requirement.
 
 Retain the deployed package, a compatible rollback package, the active
 candidate, and any explicitly pinned recovery image. Superseded test/build
@@ -341,8 +341,7 @@ For a coordinated release:
 4. Validate the final integrated tree. The normal CI suite runs on pushes to
    `feature/**` and `hotfix/**`, including integration merges. Superseded work
    branch runs may be cancelled; the latest aggregate still needs its result.
-5. Raise the final integration PR to `develop` only when authorized. For the
-   current storage/research consolidation the user will raise that PR.
+5. Raise the final integration PR to `develop` only when authorized. Respect any release-specific ownership reserved by the user.
    Deployment approval and PR approval are separate decisions.
 
 One coordinated deployment can still require ordered preparation, a bounded
@@ -376,42 +375,14 @@ Review before cleanup:
 - Keep audit helpers in existing locations such as `scripts/reporting/` and
   `docs/engineering/`; do not add root-level prompt or workflow files.
 
-### Explicit Market Profile first-return research
+## Reusable research methods
 
-Create a separate `market_profile` instance through `qt indicators create
---payload-json <file> --apply --confirm` with top-level `"version": "v2"`.
-`qt indicators validate-config --payload-json <file>` validates the same request.
-Omitting version retains v1. Do not edit a historical instance to change versions.
-
-An event-fact request with `outcomes.first_return` pins definition 9 / evaluator
-8. Declare `classification_lag_bars`, `sample_lag_bars`,
-`readiness_contract: "market_profile.first_return_state.v2"` and
-`dependence: "leave_one_original_profile_out.v1"`. Use the public
-`balance_breakout` detector, bar horizons, no Fact inputs and `gap_policy: reject`.
-The sample must follow classification and precede every original endpoint.
-Keep classification within the Indicator's declared origin lifetime. Outcomes
-are descriptive distance-to-original-POC changes, not trading returns.
-
-### Fixed current-state risk comparison
-
-An explicit `outcomes.forward_risk.schema_version: candle_risk_matched_state.v1`
-and `matching_contract: crossing_state_matched_pairs.v1` select definition 11 /
-evaluator 10. Retain the fixed baseline, readiness, no-tail and horizon fields
-from the existing candle-risk configuration. Old definitions reject this mode.
-Use an existing compatible frozen Dataset; no new acquisition or freeze is
-needed merely to change the analytical question. Qualification must prove
-original-Dataset reuse, public-state eligibility, outcome-blind matching,
-whole-pair missingness/deletions, cross-arm nonoverlap, bounded cancellation,
-Observation admission and provider-free replay before empirical admission.
-
-
-Definition 12 / evaluator 11 adds the fixed ATR-ratio filter using
-`candle_risk_matched_state.v2` and `filter_contract: crossing_state_atr_ratio_filter.v1`,
-while retaining the original v1 matching contract. Use the catalog's exact
-request template. The [Check evidence boundary](../architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md#fixed-atr-ratio-pair-filter)
-owns the fixed rule, separate support denominators and compatibility behavior.
-This analytical extension requires no schema migration or new Dataset.
-
+Use the current Check catalog and its request templates to discover supported
+definitions. The [Check evidence boundary](../architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md)
+owns evidence admission, frozen inputs, compatibility, and replay semantics.
+Indicator behavior belongs in the owning reusable component reference.
+Keep actual hypotheses, experiment configurations, selections, runs, and results
+in private QT research stores rather than contributor instructions.
 
 ## Change-impact iteration and routine promotion
 

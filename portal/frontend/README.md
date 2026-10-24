@@ -12,9 +12,12 @@ Operator Console v2 starts at `v2.html` through `src/main-v2.jsx`. Its two
 primary rooms are:
 
 - **Overview** for bounded attention and activity read models;
-- **Operations** for run, market, collector, and research evidence discovery.
+- **Studies** for saved research questions, interpretations, and evidence.
 
-Those primary rooms are GET/read-only. Routed lenses may expose an approved
+Those primary rooms are GET/read-only. Bot runs and Collectors are secondary
+views; existing Operations deep links remain compatibility routes. Storage
+settings use the separately owned storage-management review/action contract.
+Routed collector lenses may expose an approved
 action without taking ownership of the underlying subsystem. In particular,
 collector actions use only the canonical
 `/api/market-data/operations/collectors/.../actions/...` boundary backed by
@@ -22,14 +25,10 @@ collector actions use only the canonical
 translate that contract into provider-specific lifecycle calls, or treat a
 requested action as evidence that the action succeeded.
 
-The exact V2-owned source roots covered by the read-only-surface contract test
-are:
-
-- `src/v2`;
-- `src/features/overview`;
-- `src/features/operations`;
-- `src/features/collectors`;
-- `src/features/bots/botlens`.
+The [V2 surface contract test](tests/v2ReadOnlySurface.test.js) owns the
+source-root scan and bounded assertions for read paths, approved collector
+actions, navigation, and forbidden bot mutation imports. Consult that test
+instead of maintaining a second source-root inventory here.
 
 See
 [`OPERATOR_CONSOLE_V2.md`](../../docs/architecture/frontend/OPERATOR_CONSOLE_V2.md)
@@ -55,16 +54,15 @@ The frontend intentionally has two test runners:
 
 ```bash
 npm run test:node  # Node-native model, adapter, and source-contract suites
-npm run test:jsx   # the two tracked React component suites in jsdom
+npm run test:jsx   # React component suites in jsdom
 npm test           # both test groups
 npm run build      # Vite production compilation for both HTML entries
 ```
 
-`test:node` is the shell-free `node --test` path. `test:jsx` is a pinned
-Vitest/jsdom profile that discovers exactly:
-
-- `src/components/__tests__/DeleteIndicatorModal.test.jsx`;
-- `src/components/__tests__/IndicatorCard.test.jsx`.
+`test:node` is the shell-free `node --test` path. `test:jsx` uses the pinned
+Vitest/jsdom profile in [vitest.config.js](vitest.config.js), discovering
+`src/**/*.test.jsx`. Test discovery belongs in configuration rather than a
+manually maintained list of component suites.
 
 From the repository root, `make frontend-check` runs both test groups and then
 the production build. `npm run lint` remains a separate diagnostic command and

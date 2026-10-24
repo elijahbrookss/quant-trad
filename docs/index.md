@@ -27,6 +27,23 @@ For a first visit, use this order:
 3. [Current system](current-system.md) — what is implemented now, what remains
    bounded, and what QT deliberately does not claim.
 
+### I am reviewing the repository
+
+1. [Current system](current-system.md) — implemented scope and explicit limits.
+2. [System model](architecture/system/SYSTEM_MODEL.md) — truth flow, frozen
+   research inputs, ownership, and projections.
+3. [Platform contracts](contracts/README.md) — read the rule affected by your
+   review; use the [glossary](contracts/platform/04_glossary.md) for exact terms.
+4. [Component index](architecture/ARCHITECTURE_COMPONENT_INDEX.md) — find the
+   owning boundary and implementation paths, then follow its relevant ADRs.
+5. [Testing strategy](engineering/testing/testing-strategy.md) — understand what
+   validation establishes and which prerequisites or proof remain separate.
+
+Stop at the depth needed for the change. Provider setup, recovery runbooks,
+component details, and dated incidents are references, not prerequisite reading
+for every reviewer. The generated catalog lists ADRs; their status and context
+matter more than their sequence number.
+
 ### I have a trading idea to test
 
 1. [Core research workflow](guides/research-workflow.md) — idea, definition,
@@ -116,6 +133,10 @@ Read these after the main workflow when a result is surprising:
 - [Developer workflow](engineering/developer-workflow.md)
 
 ## Documentation Rule
+
+Public documentation describes infrastructure, reusable components, and generic
+methods. Actual research records and proprietary experiments belong in private
+QT stores. See the [public/private boundary](contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
 
 Start with intent, then follow links to the exact source. Contracts remain the
 source of truth. Architecture explains boundaries. Tests and implementation

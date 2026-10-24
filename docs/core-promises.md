@@ -33,13 +33,15 @@ release, customer, or capital boundary.
 
 ## 2. Frozen research authority
 
-**What QT promises:** durable research evidence is frozen, replayable, and
-explicitly admitted.
+**What QT promises:** durable research identifies its frozen inputs and
+admission state; execution and replay availability remain explicit.
 
 A durable backtest or Research Check must identify the exact frozen data it
 used. Preview remains exploratory. Creating durable research memory is a
 separate, explicit act, and a Check result cannot silently acquire authority it
-was not given.
+was not given. Supported definitions can be replayed under their retained
+contracts. A saved record from a retired method remains readable; its existence
+does not establish that its implementation is available or freshly verified.
 
 If this promise fails, QT can preserve conclusions that cannot be reproduced or
 confuse an exploratory result with accepted evidence.
