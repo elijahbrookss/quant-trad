@@ -118,53 +118,19 @@ printf '%s\n' '{"COINBASE_API_KEY":"...","COINBASE_API_SECRET":"..."}' \
 Avoid inline secret arguments. Audit logs redact them, but shell history may
 still capture the original command before Quant-Trad sees it.
 
-## Post-Quantum Risk Points
+## Cryptographic maintenance
 
-NIST released FIPS 203, FIPS 204, and FIPS 205 for ML-KEM, ML-DSA, and
-SLH-DSA. NIST also recommends beginning migration planning now, including
-finding where quantum-vulnerable public-key cryptography is used.
+Credential encryption, TLS, SSH and provider signing depend on maintained
+cryptographic libraries and operator-managed keys. Keep dependencies current
+and inventory those dependencies before changing algorithms or deployment trust.
+Use supported ecosystem migration paths rather than implementing cryptography
+inside QT. The external references below explain post-quantum migration;
+they are guidance, not a claim that QT has completed a cryptographic inventory.
 
-Quant-Trad risk points:
-
-- TLS connections to provider APIs, backend endpoints, GitHub, package indexes,
-  Docker registries, and future VPS/home-server endpoints depend on ecosystem
-  TLS stacks and certificates. Classical public-key key exchange and signatures
-  are the main post-quantum exposure.
-- Provider authentication may rely on provider-specific signatures, JWTs, RSA,
-  ECDSA, or HMAC. The exact post-quantum exposure is provider-specific and must
-  be inventoried per provider.
-- SSH keys for VPS/home-server access, Git remotes, deployment automation, and
-  image signing can become migration blockers if they remain RSA/ECDSA-only.
-- Stored encrypted credential blobs are primarily symmetric-crypto protected.
-  Symmetric encryption is not the main Shor-algorithm failure mode, but
-  long-lived encrypted secrets should still plan for stronger symmetric margins,
-  key rotation, and envelope encryption.
-- Store-now-decrypt-later matters for long-lived traffic captures: any provider
-  API keys, JWTs, or session tokens sent over non-PQ TLS could be exposed later
-  if the transport is captured and broken.
-
-## PQ Migration Posture
-
-- Build and maintain a cryptographic inventory for TLS, SSH, provider auth,
-  package signing, Docker image signing, credential encryption, and database
-  connections.
-- Prefer ecosystem-provided hybrid/PQ TLS, SSH, and signing support when it is
-  stable. Do not hand-roll PQ cryptography inside Quant-Trad.
-- Keep Python, OpenSSL, provider SDKs, Docker, and OS packages current so PQ
-  support can arrive through maintained stacks.
-- Rotate provider API keys after any transport or host compromise, and again
-  after future PQ migration milestones when providers support safer auth.
-- For hosted deployments, prioritize auth, TLS, network policy, scoped runner
-  permissions, and an external secret manager before adding more runners.
-
-## High-Value Hardening Backlog
-
-1. Backend auth and operator identity for local-to-remote deployments.
-2. Per-run scoped credential leases so runners cannot decrypt unrelated refs.
-3. Envelope encryption using KMS/Vault/SOPS-age instead of one env-held Fernet key.
-4. Provider permission checks and docs for least-privilege API-key scopes.
-5. Secret rotation command and revoked-ref audit reporting.
-6. Crypto inventory with PQ readiness status per dependency and provider.
+Immediate hosted-deployment work remains authenticated operator identity, TLS
+and network policy, scoped runner credentials, and managed key rotation. Those
+controls must be qualified against the actual deployment rather than inferred
+from encryption at rest.
 
 ## References
 

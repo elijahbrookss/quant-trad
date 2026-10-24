@@ -1,33 +1,15 @@
 flowchart TD
-    request["Audited CLI / API<br/>explicit acquisition request"]
-    registry["Provider registry<br/>provider + venue capability"]
-    adapter["Acquisition-only adapter<br/>external anti-corruption"]
-    credentials["Credential references"]
-    api["External provider API"]
-    normalize["Typed fact intake<br/>normalize + validate known-at"]
-    stream["Paper closed-candle stream"]
-    scheduler["Durable collector schedule<br/>lease + retry + pacing"]
-    store["Canonical market store<br/>append-only revisions + gaps"]
-    feed["Provider-free causal feed<br/>window + commit watermark"]
-    dataset["Frozen dataset manifest<br/>material + provenance + quality"]
-    consumers["Research / indicators /<br/>backtest / paper / reports"]
-
-    request --> registry
-    registry --> adapter
-    credentials --> adapter
-    adapter <--> api
-    adapter --> normalize
-    stream --> normalize
-    scheduler --> adapter
-    normalize --> store
-    store --> feed
-    store --> dataset
-    feed --> consumers
-    dataset --> consumers
-
-    classDef boundary fill:#13251d,stroke:#34d399,color:#dcfce7
-    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
-    classDef external fill:#1f2937,stroke:#94a3b8,color:#f8fafc
-    class request,registry,adapter,credentials,normalize,feed,scheduler boundary
-    class stream,store,dataset,consumers truth
-    class api external
+    request["Explicit acquisition request<br/>audited CLI/API"]
+    registry["Provider registry + reviewed manifest"]
+    adapter["Acquisition adapter<br/>external I/O and normalization"]
+    provider["External provider"]
+    store["Canonical Facts<br/>schema + provenance + quality + revisions"]
+    dataset["Frozen Dataset<br/>ranges + per-series committed watermark"]
+    binding["Frozen read binding<br/>verified payloads + required archives"]
+    research["Durable Check / backtest admission"]
+    reads["Causal current-store reads<br/>preview / operational inspection"]
+    request --> registry --> adapter
+    adapter <--> provider
+    adapter --> store
+    store --> dataset --> binding --> research
+    store --> reads

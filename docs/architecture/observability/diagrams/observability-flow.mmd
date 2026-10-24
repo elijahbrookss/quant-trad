@@ -1,19 +1,14 @@
 flowchart LR
     emitters["Runtime / projectors / storage / transport"]
-    sink["In-memory observability sink"]
-    exporter["Observability exporter"]
-    metrics["observability_metrics.*"]
-    events["observability_events.*"]
-    dashboards["Grafana / Loki / operator inspection"]
-
-    emitters --> sink
-    sink --> exporter
-    exporter --> metrics
-    exporter --> events
-    metrics --> dashboards
-    events --> dashboards
-
-    classDef hot fill:#191b28,stroke:#fb7185,color:#ffe4e6
-    classDef durable fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
-    class emitters,sink hot
-    class exporter,metrics,events,dashboards durable
+    sink["In-memory metrics and diagnostic events"]
+    exporter["Bounded exporter"]
+    database["PostgreSQL observability rollups/events"]
+    stdout["Structured stdout/stderr"]
+    docker["Docker log storage"]
+    shipper["One shipper per topology<br/>local Promtail OR server Alloy"]
+    loki["Loki"]
+    grafana["Grafana / operator inspection"]
+    emitters --> sink --> exporter --> database
+    emitters --> stdout --> docker --> shipper --> loki
+    database --> grafana
+    loki --> grafana

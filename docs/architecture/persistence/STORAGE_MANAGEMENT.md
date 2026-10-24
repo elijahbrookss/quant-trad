@@ -10,106 +10,56 @@ tags:
   - recovery
 code_paths:
   - scripts/db/manual_retire_promoted_identity_proof_v1.sql
-  - tests/test_storage_repository_continuation.py
   - scripts/db/raw_mapping_v2_placement.py
   - cli/storage_placement.py
-  - tests/test_cli/test_storage_placement.py
-  - tests/test_market_data/test_raw_mapping_history_placement_db.py
-  - tests/test_market_data/test_incremental_raw_placement_db.py
   - scripts/automation/storage_online_keys.py
-  - tests/test_storage_online_keys.py
   - scripts/automation/storage_online_forward_worker.py
   - scripts/automation/storage_online_reschedule.py
-  - tests/test_storage_forward_reschedule.py
-  - tests/test_storage_online_forward_worker.py
   - scripts/automation/storage_online_forward.py
-  - tests/test_storage_online_forward.py
-  - tests/test_storage_forward_observation.py
-  - tests/test_storage_forward_launch.py
-  - tests/test_storage_forward_retirement.py
-  - tests/test_storage_forward_successor.py
-  - tests/test_storage_forward_operation.py
-  - tests/test_market_data/test_archive_forward_copy_db.py
   - scripts/db/fact_header_forward_keys.py
   - scripts/db/fact_header_forward_adoption.py
   - scripts/db/fact_header_forward_placement.py
   - scripts/db/fact_header_v2_references.py
-  - tests/test_market_data/test_fact_header_forward_keys_db.py
-  - tests/test_market_data/test_fact_header_forward_adoption_db.py
-  - tests/test_market_data/test_fact_header_forward_handoff_db.py
   - scripts/automation/storage_online_terminal.py
-  - tests/test_storage_online_terminal.py
-  - tests/test_terminal_placement.py
   - portal/backend/db/fact_header_legacy_schema.py
-  - tests/test_market_data/test_fact_header_legacy_db.py
   - scripts/automation/storage_online_deadline.py
   - scripts/db/fact_header_v2_deadline.py
-  - tests/test_storage_online_deadline.py
-  - tests/test_market_data/test_fact_header_deadline_amendment_db.py
   - scripts/automation/storage_online_release.py
-  - tests/test_storage_online_release.py
   - scripts/automation/storage_online_operation.py
-  - tests/test_storage_online_operation.py
   - scripts/ci/online_operation_fixture.py
-  - tests/test_storage_online_capture.py
-  - tests/test_storage_host_channel.py
-  - tests/test_storage_online_runtime.py
   - scripts/automation/storage_online_runtime.py
-  - tests/test_storage_online_repositories.py
   - scripts/automation/storage_recovery_prepare.py
   - scripts/automation/storage_online_repositories.py
   - scripts/ci/online_guarded_source_fixture.py
   - src/core/storage_writer_fence.py
   - portal/backend/run_backend.py
   - portal/backend/workers/single_node_initializer.py
-  - tests/test_market_data/test_storage_writer_fence.py
   - docker/docker-compose.storage-server.yml
   - portal/backend/workers/market_data_collector_health.py
   - portal/backend/service/bots/runner.py
-  - tests/test_server_storage_config.py
-  - tests/test_portal/test_bot_archive_mounts.py
   - scripts/ci/test_server_core_recreation.py
   - portal/backend/workers/storage_maintenance.py
   - portal/backend/workers/market_data_collector.py
   - portal/backend/service/market/collector_operations_service.py
-  - tests/test_market_data/test_storage_maintenance_worker.py
-  - tests/test_portal/test_storage_management_db.py
   - src/market_data/archive.py
   - src/market_data/archive_namespace.py
-  - tests/test_market_data/test_archive_namespace.py
   - src/core/settings.py
-  - tests/test_market_data/test_archive_shared_ownership.py
   - scripts/automation/storage_host_boundary.py
   - scripts/automation/storage_handoff_pause.py
-  - tests/test_storage_handoff_pause.py
   - scripts/automation/storage_online_drain.py
-  - tests/test_storage_online_drain.py
-  - tests/test_market_data/test_storage_online_collector_drain_db.py
-  - tests/test_market_data/tiered_v1_ingestion.py
   - scripts/automation/storage_online_recovery.py
-  - tests/test_storage_online_recovery.py
   - scripts/automation/storage_online_final.py
-  - tests/test_storage_online_final.py
   - scripts/automation/storage_online_prepare.py
-  - tests/test_storage_online_prepare.py
-  - tests/test_storage_online_prepare_db.py
   - scripts/automation/server_deploy.sh
-  - tests/test_server_promotion.py
   - scripts/automation/storage_online_controller.py
   - scripts/automation/storage_online_launch.py
   - scripts/ci/rehearse_online_launch.py
   - scripts/ci/rehearse_online_prepared.py
   - scripts/ci/online_start_reply_fixture.py
-  - tests/test_storage_online_launch.py
-  - tests/test_storage_online_controller.py
-  - tests/test_market_data/test_storage_online_controller_db.py
-  - tests/test_market_data/test_storage_online_entrypoint_db.py
   - scripts/db/fact_header_v2_cancel.py
   - scripts/automation/storage_online_worker.py
   - scripts/ci/rehearse_online_worker.py
-  - tests/test_storage_online_worker.py
   - scripts/db/fact_header_v2_online.py
-  - tests/test_market_data/test_fact_header_online_prepare_db.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
   - scripts/db/archive_file_v2_proof.py
@@ -133,10 +83,6 @@ code_paths:
   - portal/backend/service/storage/repos/query_diagnostic.py
   - portal/backend/service/market/canonical_retention.py
   - portal/backend/service/market/market_storage_lifecycle.py
-  - tests/test_portal/test_storage_retention_observability.py
-  - tests/test_portal/test_storage_retention_observability_db.py
-  - tests/test_market_data/test_canonical_retention_executor.py
-  - tests/test_market_data/test_recovery_supervisor.py
   - portal/frontend/src/v2/rooms/StorageRoom.test.jsx
   - docker/grafana/provisioning/dashboards/capacity-database-growth.json
   - portal/backend/service/storage/history_policy.py
@@ -166,6 +112,20 @@ blocked: a UI confirmation cannot prepare a database or prove a migration.
 The existing storage lifecycle supervisor performs history movement and local recovery
 copies under its deployment gates, saved policy and explicit operating limits. The
 settings page reports observed outcomes separately from saving configuration.
+
+## Reading this storage manual
+
+Use the capacity and observation sections to understand measured space and
+progress. Use [the migration ownership map](#one-online-migration-workflow-and-its-owners)
+before selecting a preserving/forward operator. Physical migration, application
+activation, repository preparation, native WAL delivery and complete recovery
+publication are separate outcomes. A saved policy, completed SQL transaction or
+healthy process cannot substitute for the next outcome.
+
+The lower sections document explicit operator/recovery seams and their refusal,
+retry and ownership rules. Their presence in source does not attest that a
+particular deployment has executed or qualified them. Installation identities,
+private receipts and current job status belong to operator-owned records.
 
 ## Storage capacity and workload admission
 
@@ -680,7 +640,7 @@ Temporary-file tests cover default and linked tablespaces, stale identities,
 wrong UUIDs/devices, malformed paths, missing files and mid-check file/mount
 changes. The PostgreSQL utility is mocked in those tests. A real
 PostgreSQL/worker-namespace fixture in
-`tests/test_market_data/test_header_namespace_db.py` has passed locally and in CI.
+`tests/test_market_data/test_header_namespace_db.py` provides the disposable validation scope.
 It starts PostgreSQL 15 as a non-root OS user, with TCP disabled and a private
 Unix socket. It probes real control data, process identity and relation files;
 the udev UUID entry is synthetic. It exercises a table-only tablespace change,
@@ -688,8 +648,8 @@ the subsequent index move, transaction rollback after table-only and whole-group
 movement, preserved row hashes, and rejection of copied
 identity, stale start time and a wrong UUID. Cleanup is restricted to its
 generated temporary cluster. This fixture does not qualify physical HDD
-performance or a production migration. Runtime wiring and movement remain
-pending; these helpers do not enable Apply.
+performance or a production migration. These helpers alone do not enable Apply; movement requires its separate
+runtime admission and resource envelope.
 
 ## Database records and cutover work
 
@@ -1161,9 +1121,9 @@ The configured drive UUID is rechecked during work. Byte, object, elapsed-time
 and free-space limits stop the attempt without publishing a completed copy.
 Object lengths and SHA-256 are checked; the dump subprocess is terminated and
 reaped on failure. The explicit object budget may be set up to ten million;
-the default remains one million. September 2026 measurements already observed
-about 380,000 raw objects and roughly 11,000 new objects per day, so an unchanged
-one-million ceiling is insufficient for the requested retention horizon.
+the default remains one million. Size the bound from the actual retained object
+inventory and growth rate; a default ceiling does not establish sufficient
+capacity for a requested retention horizon.
 Duplicate archive keys are rejected by exclusive creation in the private
 generation, without retaining every key in process memory. Catalog reads remain
 paged at 256 rows. Raising this ceiling does not qualify duration, byte capacity
@@ -1542,18 +1502,27 @@ generic planning while another connection holds a historical partition lock.
 Clean bootstrap and the explicit v1-to-v2 cutover install the corrected bodies;
 startup refuses mismatched installed bodies instead of silently replacing them.
 
-## Encrypted incremental recovery candidate — September 24
+## Recovery adapters and encrypted release requirements
 
-The user authorized replacing repeated logical full copies with encrypted
-incremental recovery. The existing logical-copy implementation and completed
-receipts remain intact while its replacement is qualified. The disposable
-physical/database-plus-archive experiment is described in
+Encrypted database-plus-archive recovery is a release requirement for the
+preserving storage composition. That requirement is separate from which adapter
+an admitted configuration actually constructs:
+
+| Configuration | Adapter | What completion establishes |
+| --- | --- | --- |
+| Legacy v1 maintenance limits without incremental settings | LocalRecoveryCopies | Bounded logical dump plus referenced archive-object generation; not encrypted recovery |
+| Explicit v2 incremental settings | EncryptedRecoveryCopies | Paired physical backup and encrypted archive snapshot under the pinned repository/key contract |
+
+The selection is explicit in
+portal/backend/service/storage/recovery_maintenance.py. The legacy adapter
+remains for compatibility and retained generations; its success must not satisfy
+an encrypted-pair release gate. Changing configuration does not provision keys,
+enable PostgreSQL WAL archiving or qualify restore. See
 [ADR 0072](../decisions/0072-use-encrypted-incremental-recovery-sets.md).
-It does not activate a new backup scheduler, alter saved retention semantics or
-qualify a production recovery. Report this candidate separately from the
-currently implemented local-copy maintenance path above.
+Both local adapters share the HDD failure domain; neither supplies off-server
+protection by itself.
 
-### Encrypted recovery runtime (explicit opt-in, not yet activated)
+### Encrypted recovery runtime and admission
 
 Maintenance-limits schema qt.storage_maintenance_limits.v2 adds a required
 recovery.incremental object containing pinned tool paths, the verified physical
@@ -1589,7 +1558,8 @@ changes backup formats or the paired-publication requirement.
 
 Production images contain pinned tools. Image availability does not enable WAL
 archiving, provision keys, qualify a restore or activate a backup policy. Those
-operator steps and full QT application recovery remain pending under ADR0072.
+operator steps and full QT application recovery require separate exact-source
+and installation qualification under ADR0072.
 
 The encrypted recovery deployment uses the fixed storage overlay's private SSD
 recovery-key bind (PostgreSQL and collector only) and shared database socket.
@@ -2680,10 +2650,9 @@ windows are never renewed. The complete production operator remains unfinished.
 
 The candidate application runs as UID1000, while PostgreSQL and physical
 maintenance run as UID70. Source ownership must be observed independently:
-the September27 production check found root-running application processes and
-root-owned0600 pending WAL beneath the UID1000 working root. The earlier legacy
-recovery fixture explicitly ran its producer as UID1000 and does not qualify
-access to those actual root-private files. Preserve original source bytes and
+a source may contain root-owned0600 pending WAL beneath a UID1000 working
+root. A UID1000-only recovery fixture cannot qualify access to root-private
+files. Preserve original source bytes and
 metadata; a separately bounded preserving recovery-copy transition is required
 before candidate activation. Do not infer child ownership from the mount root. The online reader can copy those archives without changing the
 source, but its UID70 private copies are not readable by UID1000. The former
@@ -2707,14 +2676,13 @@ operator reconciliation; retry does not repair an existing private directory.
 With the setting absent, publication remains private0600. The setting does not
 change the spool, temporary encoders, PGDATA, keys, repositories or backup files.
 
-This publication seam is implemented and tested with the actual legacy image
-and ordinary UID1000:70 / UID70:70 processes on disposable SSD/HDD. It is NOT an
-activated deployment or complete collector/recovery qualification. The next
+The publication seam and filesystem ownership must be qualified with the
+source and target identities actually admitted for the installation. The
 composition hosts the existing maintenance supervisor at the database-owned
 process boundary, retaining one lifecycle scheduler, status and recovery engine.
 The public overlay expresses this composition; it does not authorize activation.
-Disposable UID1000 legacy-WAL recovery, new intake and a complete encrypted pair
-have passed together. Actual source ownership admission, preserving recovery-copy
+Release qualification must cover UID1000 legacy-WAL recovery, new intake and
+a complete encrypted pair together. Actual source ownership admission, preserving recovery-copy
 preparation, host switch, read-worker retirement and post-switch activation still
 need integration and measured final-pause qualification. The legacy runtime
 validator continues to refuse the new topology. Existing prepared production directories are not
@@ -2888,23 +2856,17 @@ For the confirmed pre-preparation missing-config failure after commit, the
 existing recovery owner provides an explicit, bounded continuation. Its failed
 receipt and helper remain preserved, and ordinary migration replay stays closed.
 See [ADR 0073's recovery decision](../decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure)
-for the exact admission, clock and failure rules. Native qualification passed for
-the current and first-release application versions on October 9. Production
-repository preparation subsequently succeeded, but WAL delivery remained blocked
-by missing pgBackRest in the retained database image. The first production continuation
-failed at that boundary. The same continuation owner implements an explicitly bound
-v2 image correction for that completed-preparation failure. It preserves the
-same cluster, volumes, keys and runtime contract, requires identical PostgreSQL
-and Timescale binaries, journals replacement without volume removal, and verifies
-actual WAL delivery before continuing existing spool/runtime steps. Prior
-attempts remain evidence; uncertain outcomes refuse automatic replay. Native
-qualification passed for current and first-release application images, and the
-production correction reached `recovery_runtime_ready` on October 9. This does
-not establish fresh collection or a complete production backup pair.
+for the exact admission, clock and failure rules. A separately retained database
+image may lack the pinned native archiver even when application tooling is
+present. The continuation owner has an explicitly bound image-correction path
+for that completed-preparation failure. It preserves cluster, volumes, keys and
+runtime contract, requires identical PostgreSQL/Timescale binaries, journals
+replacement without volume removal and verifies actual WAL delivery. Prior
+attempts remain evidence; uncertain outcomes refuse automatic replay. Runtime
+readiness alone does not establish fresh collection or a complete backup pair.
 
-The first production write exposed a separate forward-handoff defect: a
-retained `online_guard_identity` trigger followed the promoted identity heap and
-still required the old header OID. The explicit operator repair
+An older forward handoff can retain an `online_guard_identity` trigger on the
+promoted identity heap whose proof still requires the old header OID. The explicit operator repair
 `scripts/db/manual_retire_promoted_identity_proof_v1.sql` checks the committed
 operation, original proof OIDs, exact trigger body and permanent canonical
 guards before removing only that obsolete row trigger. It uses a non-waiting
@@ -2913,14 +2875,13 @@ functions, truncate guard and other constraints. A lost reply requires catalog
 inspection; absence of the trigger refuses another dispatch. A disposable native
 rehearsal reproduced the rejected insert and verified restored ingestion,
 corrections, causal reads, frozen results and preservation of every other trigger.
-Production execution completed on October 9 with the same cluster and identity
-heap, and fresh accepted facts were observed. The forward-switch implementation
+The forward-switch implementation
 now retires the exact source-bound row guards from the identity heap and any raw
 mapping heap it promotes, within the existing final transaction. It verifies the
 original proof, target OIDs and guard definitions while preserving the proof,
 functions, truncate guards and unpromoted copies. Failure restores guards with the
-transaction. Native qualification of that preventive change is pending; the
-manual repair alone does not certify fleet-wide recovery.
+transaction. The manual repair alone does not certify fleet-wide recovery; qualify the
+preventive final transaction and subsequent writers on the exact release.
 
 Completion inspection preserves the immutable forward publication and all
 reschedule preimages. After a structurally complete `recovery_runtime_ready`
@@ -2934,12 +2895,9 @@ and clocks, not a duplicate database identity. The existing runtime observer mus
 then verify the actual containers,
 cluster, mounts, configuration and complete backup pair before deployment
 publication; matching a recipe alone grants no operational authority. Inspection
-never renews a deadline or dispatches the retired migration. This reader correction
-passed 651 focused host tests; the identity-reader correction passed its 74-test
-runtime suite. Read-only production completion inspection now verifies the actual
-runtime and leaves the journals unchanged, returning
-`current_layout_recovery_pending` until a complete backup pair exists. Deployment
-publication remains unverified.
+never renews a deadline or dispatches the retired migration. The reader can report
+current_layout_recovery_pending until a complete backup pair exists.
+Deployment publication requires the full runtime/recovery observation.
 
 After `recovery_database_ready`, the existing final-state owner can continue under
 that same live source/deployment hold through `storage_online_repositories`.

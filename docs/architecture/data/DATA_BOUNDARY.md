@@ -74,14 +74,7 @@ empty series contribute no value. This preserves the calling transaction's MVCC
 snapshot and excludes uncommitted rows and sequence-allocation gaps. Dataset
 freeze still pins each series' visible watermark in its repeatable snapshot.
 
-A production observation on October 9 found the previous global aggregate still
-scanning history after 24 seconds. A single bounded candidate read took 19.982 ms
-of database execution, with 299 shared block hits, 180 reads and no temporary
-blocks. This is query-level evidence under that cache/load state, not a research
-speedup claim. Cost still grows with series and header partitions. The repository
-change was deployed with revision `9119b4e1` on October 9. All 17 collectors
-were healthy in the first post-deployment observations; repeated preparation
-measurements remain required.
+
 
 ## Candle coverage preflight cost
 
@@ -122,8 +115,8 @@ The execution budget accounts returned projection rows and logical bytes. Gap
 checking also charges the timestamps it expands against the existing row budget,
 with cancellation/deadline checks. These counters are not PostgreSQL scanned rows
 or physical device I/O. Database cancellation and statement deadlines still bound
-the SQL work. The optimization is implemented in this branch; production gains
-must be measured with the unchanged year-scale request before being claimed.
+the SQL work. This is a selection-planning optimization. Workload gains require measurement
+with the same declared request and resource limits.
 
 ## Scientific protocol allocation
 
@@ -220,43 +213,24 @@ funding, exact numeric facts, trades, market-state features, and normalized
 features share one database-wide market fact commit sequence, allowing one
 mixed-fact dataset watermark.
 
-Physical fact storage is typed by fact contract, not by provider, venue, or
-instrument. `candle_versions` stores all `candle.ohlcv.v1` series,
-`open_interest_versions` stores all `derivatives.open_interest.v1` series,
-`funding_rate_versions` stores all `derivatives.funding_rate.v1` series,
-`numeric_fact_versions` stores compatible exact scalar numeric contracts,
-`market_trade_versions` stores all `market.trade.v1` series, and
-`trade_flow_aggregate_versions` stores all `market.trade_flow.v1` series.
-The generic source, series, ingestion, gap, dataset, collection-definition,
-collection-attempt, pacing, lease, and commit-clock tables are shared.
-`collector_worker_state` is a mutable operational read model: its independent
-heartbeat proves idle or in-flight process liveness without becoming a market
-fact. Successful and failed collection attempts retain one bounded typed timing
-payload separating schedule lag, pacing, provider request wall time, contract
-validation, canonical normalization, lease heartbeat, and persistence.
+All active Fact families share schema-registered payloads in the canonical Fact
+store. The logical relation is market.fact_versions; dated headers, global
+identity and hot/cold payload placement are persistence concerns. Family meaning
+is enforced by the registered schema and canonical writer, not by selecting a
+family-specific table. Superseded family version tables are migration inputs
+only and are rejected as active runtime surfaces.
 
-Market-state tables preserve typed BBO, depth, flow, futures/spot,
-derivative-state, and response facts. Immutable normalization specs add
-append-only normalized revisions without replacing their source facts. A
-registry declares each fact type's contract version, timeframe behavior,
-record-time field, archive policy, and dataset eligibility; reconstructed L2
-book state is intentionally replay input rather than a dataset fact surface.
+Source, series, ingestion, gap, Dataset, collector definition/attempt, pacing,
+lease and commit-clock evidence remain separately typed. Worker-state rows are
+mutable operational projections; they do not become market Facts. Normalization
+specifications are immutable definitions whose resulting Facts retain source
+lineage. Raw Level 2 state is replay input rather than an automatically eligible
+Dataset surface. See [Generalized Fact data plane](GENERALIZED_FACT_DATA_PLANE.md)
+for physical placement, hash validation and frozen reads.
 
-Frozen dataset requests may select a legacy candle identity or an exact typed
-series identity. Normalized outputs require the exact transitive source series
-and range in the same dataset. Dataset freeze and read verify spec/input
-fingerprints and any required raw archive object bytes and checksums, preserving
-provider-free execution after ordinary hot-store compaction or correction.
-
-A new fact family gets a different physical storage shape only when its value
-and temporal constraints differ materially. Compatible exact scalar contracts
-reuse `numeric_fact_versions`; no fact gets one table per provider, exchange,
-feed, or symbol. This keeps database constraints and causal reads explicit
-without collapsing unrelated facts into a universal JSON payload. The
-scheduler itself is provider-neutral. OI and funding use explicit typed
-collector handlers behind
-the same schedule, retry, pacing, ownership, evidence, and gap lifecycle.
-Lease-fence validation remains one shared repository guard.
+Collectors use provider-neutral scheduling and common retry, pacing, ownership,
+gap and attempt-evidence contracts. Each Fact family supplies a registered typed
+handler. A new provider or symbol is not a reason to add another Fact table.
 
 ### Coinbase Futures/Spot Trades
 
@@ -445,8 +419,9 @@ replacing source provenance and quality.
   recent delivery evidence are current.
 - Collector work is idempotent by scheduled sample, resumable after restart,
   paced in PostgreSQL, bounded in retries, and fenced across processes.
-- Candle, OI, and funding revisions are TimescaleDB hypertables indexed for
-  series/time, revision, commit, and known-at reads.
+- Canonical Fact readers use series, observation/revision, commit and known-at
+  selection. Physical partitions and verified payload placement are described
+  by the generalized Fact storage contract.
 - Historical ingestion uses staged set operations and bounded provider segments.
   Collector and historical concurrency remain conservative until measurements
   justify widening them.
@@ -509,7 +484,7 @@ replacing source provenance and quality.
 - [Numeric Facts And On-Demand Acquisition](NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md)
 - [Chainlink Numeric Facts Operator Guide](../../guides/chainlink-numeric-facts.md)
 - [Market Structure Data Plane](MARKET_STRUCTURE_DATA_PLANE.md)
-- [Historical market-structure trade-capture record](MARKET_STRUCTURE_PHASE_1_TRADES.md)
+- [Historical market-structure trade-capture record](MARKET_STRUCTURE_DATA_PLANE.md)
 - [Accepted ADR 0053: Tiered market-structure archive and replay](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
 
 ## Sparse Book Range Evidence

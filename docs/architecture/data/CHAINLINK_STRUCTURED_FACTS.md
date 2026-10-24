@@ -31,16 +31,12 @@ code_paths:
 ---
 # Chainlink Structured Facts
 
-## Discovery boundary
+## Provider boundary
 
-QT rechecked the current Chainlink data surface on 2026-08-09 rather than
-assuming the earlier AggregatorV3 proof represented SmartData. The authoritative
-surfaces used were the Chainlink
-[SmartData overview](https://docs.chain.link/data-feeds/smartdata),
-[Multiple-Variable Response documentation](https://docs.chain.link/data-feeds/mvr-feeds),
-[MVR proxy API](https://docs.chain.link/data-feeds/mvr-feeds/api-reference),
-[historical data guidance](https://docs.chain.link/data-feeds/historical-data),
-and the [SmartData catalog](https://data.chain.link/smartdata).
+The adapter separates scalar AggregatorV3 round history from atomic MVR
+bundles. Provider contracts, reviewed manifests and the
+[Chainlink MVR API](https://docs.chain.link/data-feeds/mvr-feeds/api-reference)
+define supported acquisition; catalog presence alone does not establish it.
 
 SmartData currently has two materially different acquisition shapes:
 
@@ -52,13 +48,9 @@ SmartData currently has two materially different acquisition shapes:
   only the latest report, so reliable history requires an off-chain indexer or
   a collector that was already running.
 
-At discovery time the official metadata catalog listed 21 MVR feeds: 12
-SmartData, six Proof-of-Reserve, and three NAVLink feeds. Catalog presence is not
-an implementation decision. QT admits a feed only when its subject, fields,
-units, clocks, provenance, update behavior, and access model support a useful
-canonical fact.
 
-## Initial production set
+
+## Reviewed structured feed
 
 The bounded initial set contains one structured feed:
 
@@ -79,16 +71,10 @@ The bounded initial set contains one structured feed:
 | Historical class | B: current/latest only |
 | Access | public read-only EVM JSON-RPC; endpoint supplied by environment reference |
 
-The on-chain discovery read confirmed chain ID 42161, proxy version 7, and the
-description `nxtAssets Bitcoin Direct ETP Proof of Reserves (DE000NXTA018)`.
-The report visible during discovery had timestamp 2026-08-07T19:00:00Z, ID
-`DE000NXTA018`, and raw reserve `51432323119`, interpreted under the verified
-eight-decimal layout as 514.32323119 BTC. This was discovery evidence, not a
-database ingest and not a claim about the current reserve balance.
-
-The official page described historical data as forthcoming. QT does not infer
-history from that statement and does not reconstruct prior bundles from later
-latest-state reads.
+A feed descriptor is configuration, not a current reserve assertion or evidence
+of deployment activation. MVR latest-state reads do not reconstruct earlier
+bundles. Admission must verify the descriptor against the selected chain and
+finalized block before accepting an observation.
 
 ## Canonicalization and provenance
 
@@ -97,13 +83,14 @@ acquisition boundary. It reads one finalized block, verifies chain ID,
 description, proxy version, field order/types/decimals, and subject ID, then
 decodes the ABI bundle. It rejects future or stale reports.
 
-The canonical payload is deliberately small and provider-free:
+The canonical payload is deliberately small and provider-free. This synthetic
+quantity illustrates its shape; it is not an observed reserve balance:
 
 ```json
 {
   "report_id": "DE000NXTA018",
   "reserve_asset": "BTC",
-  "reserve_quantity": "514.32323119",
+  "reserve_quantity": "1.00000000",
   "unit": "BTC"
 }
 ```
@@ -127,7 +114,7 @@ updates the prior row in place.
 | MVR reserve, NAV, AUM, or other latest bundle | B: limited/impractical historically | durable scheduled collection from activation forward; preserve every meaningful update and gap |
 | MVR feed with a future bounded official history endpoint | C: hybrid only after proof | backfill only the verified available range, record its boundary, then continue durable collection |
 
-No current production MVR binding is classified C. Historical classification
+A latest-only MVR binding cannot claim class C without verified history. Historical classification
 is per feed and can change only after new provider capability is verified and a
 new reviewed acquisition contract is committed.
 
@@ -164,21 +151,15 @@ quantity without inspecting Chainlink provenance. The end-to-end database test
 replaces provider construction with a fail-fast trap and proves identical
 Check result hashes on replay.
 
-## Candidate families and risks
+## Admitting another structured family
 
-| Candidate | Canonical direction | History | Recommendation | Main unresolved risk |
-| --- | --- | --- | --- | --- |
-| Mainnet MVR reserve bundles with explicit asset/unit | `asset.reserve_state.v1` or a new schema if fields differ | current-only | add one at a time after subject/custodian review | third-party/self-reported source quality and revision behavior |
-| AggregatorV3 reserve balance | `market.reserve_balance.v1` | usually bounded round history | use existing explicit acquisition after feed-specific verification | scalar balance may omit liabilities or supply |
-| NAV/AUM/shares bundle | a new atomic `fund.nav`-like schema derived from actual fields | current-only unless proven otherwise | defer until a relevant mainnet feed is available | valuation clock, currency, share class, revision/finality semantics |
-| Superstate USTB rich MVR bundle | would require NAV/AUM/shares/net-income fields | current-only | do not enable; catalog deployment observed on Arbitrum Sepolia | test network is not production evidence |
-| MetalLink PoR | reserve-state candidate | current-only | do not enable from this review | selected Avalanche feed was stale during discovery |
-
-Likely later research projections include reserve quantity/change, report age,
-reserve-to-separately-observed supply, NAV premium/discount, and relationships
-with price, volume, open interest, funding, liquidations, issuance, and
-redemptions. These are observable features only. QT makes no claim that any has
-predictive value.
+A reviewed feed needs explicit subject, fields, units, effective/publication/
+known-at clocks, finality, provenance and gap policy. Add one family at a time
+through the existing schema and provider registries. A reserve statement does
+not imply liabilities or supply; NAV/AUM and other fields require their own
+atomic schema and accounting meaning. Test-network or stale catalog entries
+cannot establish production capability. No feature has predictive value merely
+because it is observable.
 
 ## Known limitations
 

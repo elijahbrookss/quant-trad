@@ -386,7 +386,9 @@ failed; invalid means evidence explicitly failed a validity contract.
 ## Deliberate Limits
 
 - no single synthetic platform-wide heartbeat; collector workers, bot containers, streams, and API reachability retain separate authority;
-- no browser mutation or run-control commands;
+- no browser-owned research execution or bot run-control authority; collector
+  lifecycle actions and Storage policy reviews use separately admitted backend
+  contracts and retain their confirmation/audit requirements;
 - no unbounded historical inventory; run history advances only through the stable cursor;
 - no claim that every completed run has usable BotLens evidence;
 - no claim that hot BotLens projection equals complete persisted replay until
