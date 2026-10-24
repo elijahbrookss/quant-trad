@@ -326,7 +326,8 @@ write tools and their confirmation/admission behavior are unchanged.
 `measurement_profile` (currently `"18"`) and optional `expected_hashes` containing
 result/evidence/selection manifest hashes. It returns the validated exact saved
 reference/context and a request for the existing requirements/dispatch tools.
-Only saved selection 12/14/17 contracts are admitted. It shares the backend binding
+Only supported Check17 saved selections are admitted; retired selection
+contracts cannot feed a new measurement. It shares the backend binding
 validator and never loads candles, calls providers, calculates outcomes, freezes
 inputs, allocates attempts or writes records. Persisted eligibility flags belong
 in the saved Check payload; optional API-projected copies are not required when
