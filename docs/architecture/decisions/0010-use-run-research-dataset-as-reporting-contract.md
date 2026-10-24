@@ -59,5 +59,4 @@ reasons, and material fingerprint.
 ## References
 
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
-- [Reporting contract redesign](../reporting/REPORTING_CONTRACT_REDESIGN.md)
 - [Reporting datasets concept](../../concepts/reporting-datasets.md)

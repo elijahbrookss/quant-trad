@@ -115,9 +115,6 @@ mixed candle/OI datasets while preserving this preparation/execution split.
   `tests/test_portal/test_run_research_dataset.py`, and
   `tests/test_portal/test_report_execution_mode_contract.py` preserve and expose
   dataset identity through artifacts, fingerprints, trust, and compact reports.
-- The campaign acceptance dataset contains 8,804 ordered Coinbase BTC/USD
-  one-hour candles for the declared 2024 evaluation plus 20 warmup bars. A
-  repeated preparation reused the same dataset without provider acquisition.
 
 ## References
 

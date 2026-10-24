@@ -11,7 +11,7 @@ tags:
   - boundaries
 code_paths:
   - docs/architecture
-  - docs/architecture/ARCHITECTURE_DOCS_MODEL.md
+  - docs/engineering/documentation/component-documentation-standard.md
   - scripts/docs/build_architecture_index.py
 ---
 # ADR 0001: Use Boundary-First Architecture Documentation
@@ -54,7 +54,7 @@ becoming normative contracts.
 
 ## References
 
-- [Architecture docs model](../ARCHITECTURE_DOCS_MODEL.md)
+- [Documentation standard](../../engineering/documentation/component-documentation-standard.md)
 - [Architecture README](../README.md)
 - [Engineering contract](../../contracts/platform/03_engineering_contract.md)
 

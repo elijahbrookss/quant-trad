@@ -15,7 +15,6 @@ code_paths:
   - portal/backend/service/reports/schemas.py
   - scripts/reporting/golden_repeatability.py
   - docs/architecture/reporting/REPORTING_BOUNDARY.md
-  - docs/architecture/reporting/REPORTING_CONTRACT_REDESIGN.md
 ---
 # ADR 0015: Split Semantic And Operational Golden Fingerprints
 
@@ -61,6 +60,5 @@ operational traces.
 ## References
 
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
-- [Reporting contract redesign](../reporting/REPORTING_CONTRACT_REDESIGN.md)
 - [ADR 0010: Use RunResearchDataset v1 as the reporting contract](0010-use-run-research-dataset-as-reporting-contract.md)
 - [ADR 0016: Treat runtime event ledger order as operational evidence](0016-treat-runtime-event-ledger-order-as-operational-evidence.md)

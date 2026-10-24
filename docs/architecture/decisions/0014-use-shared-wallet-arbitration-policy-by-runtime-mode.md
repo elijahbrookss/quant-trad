@@ -22,6 +22,10 @@ code_paths:
 
 Accepted on 2026-05-13.
 
+The paper/live implementation limitations in the original context are dated.
+Use the [runtime composition boundary](../execution-runtime/RUNTIME_COMPOSITION_ROOT.md)
+for current mode support; this decision preserves the arbitration ownership seam.
+
 ## Context
 
 Shared-wallet ordering has two responsibilities that change at different rates.
