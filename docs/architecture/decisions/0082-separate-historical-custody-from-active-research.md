@@ -19,8 +19,6 @@ code_paths:
   - src/engines/indicator_engine/signal_output.py
   - src/research_science/hashing.py
   - src/research_science/temporal.py
-  - portal/backend/service/research/historical_check_custody.py
-  - portal/backend/service/research/historical_check_custody.json
   - portal/backend/service/research/recognition_preparation.py
   - portal/backend/service/research/registry.py
   - portal/backend/service/research/catalog.py
@@ -59,26 +57,32 @@ through explicit changes. Keep versioned Indicator contracts separate and admit
 reusable recognizers through the existing runtime, rather than a parallel Signal
 framework. Discovery must reflect supported preview/evidence capabilities.
 
-Historical reading validates retained definitions, request/plan/input/result
-links and original hash conventions. It must not register a retired evaluator
-merely to make inspection succeed or substitute a current calculation for an old
-one.
+Saved Check payloads, Observations, Study interpretations and their existing
+relationships remain readable without rewriting original records. A retired
+method is inspectable as `legacy_frozen_unverifiable`, with current verification,
+execution, replay and new evidence-based admission unavailable. This is an
+availability limit, not a claim that the original result was invalid. Reading
+must not substitute a current calculation for the original procedure.
 
-The implementation at this documentation baseline uses a code-owned exact
-receipt allowlist for retired Check acceptance. Acceptance requires the original
-record identity and matching definition, evidence and result hashes through
-`historical_check_custody.py`; unknown or changed records refuse. Removing or
-broadening that allowlist is a separate implementation change, not behavior
-granted by this ADR.
+The earlier record-specific runtime custody allowlist is removed. Source code
+must not carry private research-record identities or hashes to grant selected
+legacy records verified-history status. Retirement installs no replacement
+registry and requires no data migration.
 
-A successful historical validation may describe integrity within that admitted
-boundary, with execution unavailable and replay unavailable. It is not
-deterministic recomputation. Scientific authority that requires supported replay
-cannot substitute historical inspection for that requirement.
+New Check-to-Observation admission, publication references, image attachments
+and verified exports require supported Check validation. Existing Study
+interpretation history and saved image bindings remain readable without
+re-admitting retired research. Saved-selection measurements accept supported
+Check17 selections; retired selection profiles cannot feed a new measurement.
+The versioned Check18 rule metadata stays fixed for existing payload identities;
+current admission does not restore retired input procedures. ScientificAttempt
+references that require deterministic replay still need actual supported replay.
 
-Actual research records remain in private QT custody. The repository documents
+Actual research records belong in private QT custody. The repository documents
 schemas and reusable behavior; this decision neither publishes record contents
-nor claims that a custody transfer or verification has occurred.
+nor claims that a custody transfer or verification has occurred. Discovery follows
+the current code-owned catalog, including each method's frozen-only or preview
+capabilities, rather than maintaining another version inventory here.
 
 ## Shared execution observability
 
@@ -96,12 +100,10 @@ precedence over waiting for a diagnostic snapshot.
 
 ## Consequences
 
-The active catalog follows supported reusable capabilities while historical
-reading retains a distinct, explicit admission boundary. New unanchored history
-requires custody review; it cannot cause automatic re-registration or migration.
-Producing-source archives may support separate forensic reproduction, but current
-code cannot claim it executes a removed evaluator.
-
-This avoids turning private experiment inventories into public runtime policy.
-New semantics need an admitted version and focused validation, not a generic DSL
-or an implied upgrade of old evidence.
+No original evidence payload, hash, image, Study publication or scientific
+result is rewritten. Historical dependencies do not cause automatic
+re-registration, new evidence eligibility or data migration. Producing-source
+archives may support separate forensic reproduction, but current code cannot
+claim it executes a removed evaluator. New analytical semantics require an
+admitted version and focused validation, not a generic DSL or an implied upgrade
+of old evidence.

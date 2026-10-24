@@ -258,12 +258,18 @@ applicable replay-only/diagnostic classification. Original payloads, hashes,
 and revisions are never rewritten, and legacy records cannot be represented as
 new replayable evidence.
 
-Historical integrity and execution availability are different properties.
-Current registry admission determines which requests may execute. Retired
-records may remain readable under their retained custody contract without a
-runnable factory. Read the reported replay/assurance classification rather than
-inferring replay from a stored hash or old method name. This documentation does
-not attest that any particular private record was retained or replayed.
+Current registry admission determines which requests may execute and undergo
+fresh evidence validation. Retired records remain inspectable as
+`legacy_frozen_unverifiable`, with verification, execution, replay, new
+evidence-based admission and saved-selection reuse unavailable. Reading does
+not re-admit the stored result; no record-specific runtime allowlist grants an
+exception. Original payloads and existing Observation/Study relationships remain
+intact. Existing Study interpretation history and saved image bindings remain
+readable; fresh publication references, image attachments and verified exports
+require supported Check validation. See
+[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md#decision).
+This documentation does not attest that particular private records were retained,
+migrated or replayed.
 
 ## Shared Operator Surface
 
@@ -386,6 +392,11 @@ Generic price paths, weights and dependence diagnostics are reusable engineering
 meaning. A selected instrument/window, concrete pair ledger, fixed study request,
 source hash or outcome record is private research content and does not belong
 in this table or the public repository.
+
+The Check18 definition's versioned input-rule metadata remains immutable to
+preserve existing payload identities. Current runtime admission accepts supported
+Check17 selections only; retained metadata mentioning older input contracts does
+not make those retired selections reusable.
 
 ## Causal sampling and analytical outcomes
 

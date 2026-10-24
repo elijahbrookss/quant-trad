@@ -190,7 +190,7 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
 
 
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
-    """Admit current registered evaluator pairs; historical custody is separate."""
+    """Admit current registered evaluator pairs; retired records grant no exceptions."""
     try:
         base = CHECK_REGISTRY.resolve_definition(
             definition.definition_id, definition.definition_version.split("+", 1)[0])

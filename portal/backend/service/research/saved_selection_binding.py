@@ -1,4 +1,4 @@
-"""Validated saved v12/v14 populations; no replay, recognition or matching."""
+"""Validated supported saved populations; no replay, recognition or matching."""
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,9 +13,7 @@ from research_science.recognition import utc, plain
 from research_science.reversal_selection import moment_weights
 from research_science.hashing import stable_hash
 
-MANIFEST_FIELDS = ('rules', 'cases', 'pairs', 'dependence', 'populations', 'compatibility')
-SCHEMAS = {'12': 'reversal_selection_only_result.v2', '14': 'reversal_two_block_selection_result.v1',
-           '17': 'reversal_population_selection_result.v1'}
+SCHEMAS = {'17': 'reversal_population_selection_result.v1'}
 STEP = timedelta(minutes=15)
 CONTEXT_KEYS = {'dataset_id', 'dataset_hash', 'input_binding_hash', 'max_commit_seq', 'instrument_id',
     'input_start', 'input_end_exclusive', 'decision_start', 'decision_end_exclusive',
@@ -108,10 +106,8 @@ class SavedSelection:
     evaluator_version: str
 
 
-def load_saved_selection(raw_reference, declared_context, *, item_loader, checkpoint=lambda: None,
-                         admitted_versions=('12','14')):
+def load_saved_selection(raw_reference, declared_context, *, item_loader, checkpoint=lambda: None):
     """Validate immutable envelopes/context without ScientificAttempt resolution."""
-    from .historical_check_custody import historical_base
     from .service import _validate_research_check_evidence_payload
     from research_science.reversal_population import RULES as POPULATION_RULES, MANIFEST_FIELDS as POPULATION_FIELDS
     from .reversal_population_evaluator import population_for
@@ -125,20 +121,17 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
     # a projected flag must still agree with the required persisted True.
     if (item['id'] != ref['source_check_id'] or item['kind'] != 'research_check' or item['status'] != 'tested'
             or ('observation_eligible' in item and item['observation_eligible'] is not True)
-            or ('replayable' in item and item['replayable'] is not True and not (
-                item.get('stored_evidence_integrity') == 'verified'
-                and item.get('execution_available') is False
-                and str((payload.get('result') or {}).get('evaluator_version')) in {'12','14'}))
+            or ('replayable' in item and item['replayable'] is not True)
             or payload.get('replayable') is not True or payload.get('observation_eligible') is not True):
         invalid('completed replayable eligible frozen Check required')
-    _validate_research_check_evidence_payload(payload, item_id=str(item['id']))
+    _validate_research_check_evidence_payload(payload)
     definition = CheckDefinition.from_dict(payload['definition'])
     request = CheckRequest.from_dict(payload['request'])
     plan = ResolvedCheckPlan.from_dict(payload['plan'])
     result = CheckResult.from_dict(payload['result'])
     evidence = CheckEvidenceBinding.from_dict(payload['evidence'])
     version = result.evaluator_version
-    if (result.evaluator_id != 'raw_forward_outcome' or version not in admitted_versions or version not in SCHEMAS
+    if (result.evaluator_id != 'raw_forward_outcome' or version not in SCHEMAS
             or definition.evaluator_id != result.evaluator_id or definition.evaluator_version != version
             or definition.definition_id != result.evaluator_id or definition.definition_version.split('+')[0] != version
             or request.mode != 'evidence' or evidence.evidence_kind != 'frozen_market_data'
@@ -152,27 +145,18 @@ def load_saved_selection(raw_reference, declared_context, *, item_loader, checkp
     if (plan.indicator_graph or plan.gap_policy != 'reject' or plan.outcome_tail['seconds'] != 0):
         invalid('saved selection execution/support contract differs')
     selection, binding = deepcopy(dict(result.result)), deepcopy(dict(evidence.input_binding))
-    source_rules = (POPULATION_RULES if version == '17' else
-                    historical_base('raw_forward_outcome', version).material_rules['selection_rules'])
-    fields = POPULATION_FIELDS if version == '17' else MANIFEST_FIELDS
+    source_rules = POPULATION_RULES
+    fields = POPULATION_FIELDS
     if (selection['schema_version'] != SCHEMAS[version] or selection['outcomes_calculated'] is not False
             or selection['rules'] != source_rules
             or selection['status'] != 'completed' or selection['selection_manifest_hash'] != ref['selection_manifest_hash']
             or len(json.dumps(selection, allow_nan=False).encode()) > 16777216):
         invalid('unsupported or oversized saved selection')
     manifest = deepcopy({key: selection[key] for key in fields})
-    if version == '12':
-        # Preserve the historical int-key hash projection, including numeric order.
-        for population in manifest['populations'].values():
-            histogram = population['selection_summary']['chains_per_completion_clock_histogram']
-            if any(not isinstance(k, str) or not k.isdecimal() or str(int(k)) != k for k in histogram):
-                invalid('historical v12 histogram key encoding differs')
-            population['selection_summary']['chains_per_completion_clock_histogram'] = {int(k): v for k,v in histogram.items()}
-    else:
-        if selection['selection_manifest_fields'] != list(fields):
-            invalid('JSON-canonical manifest fields differ')
-        manifest = json.loads(json.dumps(manifest, allow_nan=False))
-    if version == '17' and selection['population_recipe'] != population_for(
+    if selection['selection_manifest_fields'] != list(fields):
+        invalid('JSON-canonical manifest fields differ')
+    manifest = json.loads(json.dumps(manifest, allow_nan=False))
+    if selection['population_recipe'] != population_for(
             request.parameters['detector'], request.scope, request.parameters['outcomes']['populations']).to_dict():
         invalid('saved population configuration differs from its pinned request')
     if stable_hash(manifest) != ref['selection_manifest_hash']:

@@ -1,7 +1,6 @@
-"""Synthetic typed saved populations: shared binding, composition and legacy parity."""
+"""Synthetic supported populations: exact binding and unchanged measurement kernels."""
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 from datetime import datetime, timedelta
 import json
 from types import SimpleNamespace
@@ -11,15 +10,12 @@ import pytest
 from market_data.frozen import build_frozen_market_data_read_binding, frozen_subject_snapshot_hash
 from portal.backend.service.research import catalog, execution
 from portal.backend.service.research import saved_selection_measurements_evaluator as adapter
-from portal.backend.service.research.saved_selection_binding import load_saved_selection, MANIFEST_FIELDS
+from portal.backend.service.research.saved_selection_binding import load_saved_selection
 from portal.backend.service.research.registry import normalize_check_request, pin_check_definition_to_plan, definition_allows_evidence
 from portal.backend.service.research.planning import plan_research_check
 from research_science.check import CheckResult, CheckEvidenceBinding
 from research_science.recognition import utc, plain, RecognitionCandle
 from research_science.reversal_selection import moment_weights
-from portal.backend.service.research.historical_check_custody import historical_base
-SIX_BLOCK_RULES=historical_base("raw_forward_outcome","12").material_rules["selection_rules"]
-TWO_BLOCK_RULES=historical_base("raw_forward_outcome","14").material_rules["selection_rules"]
 from research_science.reversal_population import RULES as POPULATION_RULES, SelectionPopulation, MANIFEST_FIELDS as POPULATION_FIELDS
 from research_science.reversal_matched_outcomes import describe_selected_pairs
 from research_science.reversal_matched_progress import describe_progress
@@ -27,21 +23,6 @@ from research_science.hashing import stable_hash
 
 CHECK_ID = '11111111-1111-4111-8111-111111111111'
 SOURCE = 'e'*64
-
-
-@pytest.fixture(autouse=True)
-def synthetic_original_receipts(monkeypatch):
-    # Test-only anchors for immutable synthetic fixtures; never add production receipts.
-    from portal.backend.service.research import historical_check_custody as custody
-    archive=deepcopy(custody._archive())
-    for version in ('12','14'):
-        frozen=json.loads((Path(__file__).parent/f'fixtures/historical_saved_selection_v{version}.json').read_text())
-        item=frozen['item'];payload=item['payload']
-        archive['receipts'].append({'id':item['id'],'definition_id':payload['definition']['definition_id'],
-            'definition_version':payload['definition']['definition_version'],'definition_hash':payload['definition']['definition_hash'],
-            'evidence_hash':payload['evidence']['evidence_hash'],'result_hash':payload['result']['result_hash'],
-            'observation_eligible_at_creation':True})
-    monkeypatch.setattr(custody,'_archive',lambda:archive)
 
 
 def planned(payload):
@@ -52,12 +33,9 @@ def planned(payload):
     return definition, request, plan
 
 
-def seal_selection(selection, version):
-    fields = POPULATION_FIELDS if version == '17' else MANIFEST_FIELDS
-    material = deepcopy({k: selection[k] for k in fields})
-    if version in {'14','17'}:
-        material = json.loads(json.dumps(material))
-        selection['selection_manifest_fields'] = list(fields)
+def seal_selection(selection):
+    material = json.loads(json.dumps({k: selection[k] for k in POPULATION_FIELDS}))
+    selection['selection_manifest_fields'] = list(POPULATION_FIELDS)
     selection['selection_manifest_hash'] = stable_hash(material)
 
 
@@ -70,17 +48,10 @@ def reseal(item):
         'selection_manifest_hash': result.result['selection_manifest_hash']}
 
 
-def synthetic(version='14'):
+def synthetic():
     from tests.test_research_science.test_reversal_matched_outcomes import fixture
     selection, bars, _ = fixture()
-    if version in {'12','14'}:
-        frozen=json.loads((Path(__file__).parent/f'fixtures/historical_saved_selection_v{version}.json').read_text())
-        return frozen['item'],frozen['reference'],frozen['context'],bars
-    rows = 8352 if version == '14' else 19104
-    end = '2025-03-29T00:00:00Z' if version == '14' else '2025-07-19T00:00:00Z'
-    if version == '14':
-        selection['cases'] = selection['cases'][:2]; selection['pairs'] = selection['pairs'][:2]
-        for pair in selection['pairs']: pair['completion_moment_weight'] = .5
+    rows, end = 19104, '2025-07-19T00:00:00Z'
     origin = utc('2025-01-01T00:00:00Z'); step = timedelta(minutes=15)
     weights = moment_weights(selection['cases'])
     for case in selection['cases']:
@@ -95,28 +66,20 @@ def synthetic(version='14'):
     selection['selection_summary'].update(all={'chains':count,'completion_clocks':clocks},matched={'chains':count,'completion_clocks':clocks},case_status_counts={'matched':count})
     for pop in selection['populations'].values():
         pop['selection_summary'] = {'chains_per_completion_clock_histogram': {2:1, 11:1}}
-    selection.update(schema_version=('reversal_two_block_selection_result.v1' if version == '14' else 'reversal_population_selection_result.v1' if version == '17' else 'reversal_selection_only_result.v2'),
+    selection.update(schema_version='reversal_population_selection_result.v1',
         status='completed',outcomes_calculated=False,source_identity_key=SOURCE,computation_origin=plain(origin),
         processed_bars=rows,candidate_count=count,sample_count=clocks,evaluation_range={'start':'2025-02-01T00:00:00Z','end_exclusive':end},
-        dependence={'ancestry': 'synthetic retained'},rules=deepcopy(SIX_BLOCK_RULES if version=='12' else POPULATION_RULES if version=='17' else TWO_BLOCK_RULES),compatibility={'synthetic':True})
-    if version=='17':
-        selection['population_recipe']=SelectionPopulation.from_configuration(origin=origin,start='2025-02-01T00:00:00Z',end=end,
-            views=[{'name':'old','start_block':0,'block_count':3},{'name':'new','start_block':3,'block_count':3}]).to_dict()
-    if version=='17':
-        recipe=SelectionPopulation.from_configuration(origin=origin,start='2025-02-01T00:00:00Z',end=end,views=selection['population_recipe']['views'])
-        for name,left,right in recipe.ranges():
-            selection['populations'][name]['evaluation_range']={'start':plain(left),'end_exclusive':plain(right)}
-    if version in {'12','14'}:
-        mid='2025-03-01T00:00:00Z' if version=='14' else '2025-04-26T00:00:00Z'
-        for name,left,right in [('old','2025-02-01T00:00:00Z',mid),('new',mid,end),('combined','2025-02-01T00:00:00Z',end)]:
-            selection['populations'][name]['evaluation_range']={'start':plain(utc(left)),'end_exclusive':plain(utc(right))}
-    seal_selection(selection,version)
-    payload = deepcopy(catalog.get_check_definition('raw_forward_outcome',version)['examples'][0]['request'])
+        dependence={'ancestry': 'synthetic retained'},rules=deepcopy(POPULATION_RULES),compatibility={'synthetic':True})
+    recipe = SelectionPopulation.from_configuration(origin=origin,start='2025-02-01T00:00:00Z',end=end,
+        views=[{'name':'old','start_block':0,'block_count':3},{'name':'new','start_block':3,'block_count':3}])
+    selection['population_recipe'] = recipe.to_dict()
+    for name,left,right in recipe.ranges():
+        selection['populations'][name]['evaluation_range']={'start':plain(left),'end_exclusive':plain(right)}
+    seal_selection(selection)
+    payload = deepcopy(catalog.get_check_definition('raw_forward_outcome','17')['examples'][0]['request'])
     payload.update(mode='evidence',dataset_id='mds_'+'a'*32)
-    payload['scope']['instrument_id'] = 'instrument-1'
-    if version=='17':
-        payload['scope']['end']=end
-        payload['outcomes']['populations']=selection['population_recipe']['views']
+    payload['scope'].update(instrument_id='instrument-1',end=end)
+    payload['outcomes']['populations']=selection['population_recipe']['views']
     definition, request, plan = planned(payload)
     plan = replace(plan,plan_hash='',materialization_range={**plan.materialization_range,'as_of_commit_seq':10})
     definition,request,plan = pin_check_definition_to_plan(definition,request,plan)
@@ -136,7 +99,7 @@ def synthetic(version='14'):
         gap_transition_hash='transitions',quality_hash=stable_hash(dict(binding.get('quality') or {})),gaps_hash=stable_hash({'recorded_gaps':list(binding.get('recorded_gaps') or [])}))
     result = CheckResult(schema_version='research.check_result.v2',definition_hash=definition.definition_hash,
         request_hash=request.request_hash,plan_hash=plan.plan_hash,evidence_hash=evidence.evidence_hash,
-        evaluator_id='raw_forward_outcome',evaluator_version=version,result={**selection,'promotion_authority':False,'execution_authority':False})
+        evaluator_id='raw_forward_outcome',evaluator_version='17',result={**selection,'promotion_authority':False,'execution_authority':False})
     item = json.loads(json.dumps({'id':CHECK_ID,'kind':'research_check','status':'tested','instrument_id':'instrument-1','timeframe':'15m',
         'replayable':True,'observation_eligible':True,'payload':{'schema_version':'research_check_payload.v2','replayable':True,'observation_eligible':True,
         'definition':definition.to_dict(),'request':request.to_dict(),'plan':plan.to_dict(),'result':result.to_dict(),'evidence':evidence.to_dict()}}))
@@ -164,18 +127,15 @@ def payload(ref,ctx,measurement_version='18'):
         'detector':deepcopy(adapter.DETECTOR),'outcomes':{'schema_version':adapter.REUSABLE_SCHEMA if measurement_version=='18' else adapter.SCHEMA,'selection_reference':ref,'frozen_context':ctx},'gap_policy':'reject'}
 
 
-@pytest.mark.parametrize('version',['12','14'])
-def test_typed_saved_context_and_manifest_round_trip_without_replay(version):
-    item,ref,ctx,_ = synthetic(version);before=deepcopy(item);calls=[]
+def test_typed_saved_context_and_manifest_round_trip_without_replay():
+    item,ref,ctx,_ = synthetic();before=deepcopy(item);calls=[]
     saved=load_saved_selection(ref,ctx,item_loader=lambda key:(calls.append(key) or item))
     assert calls==[CHECK_ID] and item==before
-    assert saved.evaluator_version==version and saved.context['pair_count']==len(saved.selection['pairs'])
-    if version=='12':
-        assert stable_hash({k:saved.selection[k] for k in MANIFEST_FIELDS}) != ref['selection_manifest_hash']
+    assert saved.evaluator_version=='17' and saved.context['pair_count']==len(saved.selection['pairs'])
 
 
 @pytest.mark.parametrize('key,value', [('dataset_hash','f'*64),('max_commit_seq',11),('instrument_id','other'),
-    ('source_identity_key','f'*64),('pair_count',1),('completion_clock_count',2),('case_count',3),('input_binding_hash','f'*64)])
+    ('source_identity_key','f'*64),('pair_count',1),('completion_clock_count',1),('case_count',4),('input_binding_hash','f'*64)])
 def test_declared_context_is_not_authority(key,value):
     item,ref,ctx,_=synthetic();ctx[key]=value
     with pytest.raises(ValueError,match='saved_selection_invalid|check_evidence_payload_invalid'):
@@ -205,7 +165,7 @@ def test_changed_envelope_or_ineligible_source_is_rejected(change):
 ])
 def test_resigned_semantically_inconsistent_selection_is_rejected(change):
     item,ref,ctx,_=synthetic();selection=item['payload']['result']['result'];change(selection)
-    seal_selection(selection,'14');ref=reseal(item)
+    seal_selection(selection);ref=reseal(item)
     with pytest.raises(ValueError,match='saved_selection_invalid|check_evidence_payload_invalid'):
         load_saved_selection(ref,ctx,item_loader=lambda key:item)
 
@@ -224,7 +184,7 @@ def test_plan_catalog_and_no_tail_or_db_lookup_during_declaration():
     lambda p:p['outcomes'].update(target=.5),lambda p:p.update(statistics={'bins':2}),
     lambda p:p.update(gap_policy='continue_degraded'),lambda p:p.update(assertions=[{'metric_path':'sample_count','operator':'gte','threshold':1}]),
     lambda p:p['outcomes']['frozen_context'].update(pair_count=1000),
-    lambda p:p['outcomes']['frozen_context'].update(completion_clock_count=3),
+    lambda p:p['outcomes']['frozen_context'].update(completion_clock_count=4),
     lambda p:p['scope'].update(warmup_bars=0),
 ])
 def test_no_scope_tuning_protocol_expansion_or_scientific_gate(change):
@@ -232,9 +192,9 @@ def test_no_scope_tuning_protocol_expansion_or_scientific_gate(change):
     with pytest.raises(ValueError):planned(p)
 
 
-@pytest.mark.parametrize('source_version,measurement_version',[('12','18'),('14','18'),('17','18')])
-def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monkeypatch,source_version,measurement_version):
-    item,ref,ctx,bars=synthetic(source_version)
+def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monkeypatch):
+    measurement_version='18'
+    item,ref,ctx,bars=synthetic()
     # repository.get_item returns persisted fields, before API classification.
     item = repository_envelope(item)
     definition,request,plan=planned(payload(ref,ctx,measurement_version))
@@ -264,7 +224,7 @@ def test_composed_actual_loader_matches_both_pure_kernels_and_retains_input(monk
     assert result['measurements']['first_passage']==passage['matched_outcome_comparison']['combined']
     assert result['measurements']['progress']==progress['progress_comparison']['combined']
     if measurement_version=='18':
-        for name in (('old','new','combined') if source_version in {'12','17'} else ('combined',)):
+        for name in ('old','new','combined'):
             assert result['measurements_by_population'][name]['first_passage']==passage['matched_outcome_comparison'][name]
             assert result['measurements_by_population'][name]['progress']==progress['progress_comparison'][name]
     assert result['outcome_provenance']['kind']=='computed_in_this_check' and not result['reselection_performed']
@@ -316,19 +276,19 @@ def test_no_mutable_or_other_dataset_execution(mode,dataset):
 
 
 def test_configured_selection_admission_is_explicit_and_retired16_cannot_execute():
-    item,ref,ctx,_=synthetic('17')
-    with pytest.raises(ValueError,match='saved_selection_invalid|check_evidence_payload_invalid'):
-        load_saved_selection(ref,ctx,item_loader=lambda key:item)
-    saved=load_saved_selection(ref,ctx,item_loader=lambda key:item,admitted_versions=('12','14','17'))
+    item,ref,ctx,_=synthetic()
+    saved=load_saved_selection(ref,ctx,item_loader=lambda key:item)
     assert saved.evaluator_version=='17'
+    constraints = catalog.get_check_definition('raw_forward_outcome','18')['settings']['configurable']['scope']['constraints']
+    assert 'v17' in constraints and 'v12' not in constraints and 'retired' in constraints
     definition,request,plan=planned(payload(ref,ctx,'18'))
     assert definition.evaluator_version=='18' and plan.outcome_tail['seconds']==0
     with pytest.raises(ValueError,match='retired'):
         planned(payload(ref,ctx,'16'))
     selection=item['payload']['result']['result'];selection['population_recipe']['views'][0]['name']='changed'
-    seal_selection(selection,'17');ref=reseal(item)
+    seal_selection(selection);ref=reseal(item)
     with pytest.raises(ValueError,match='population configuration'):
-        load_saved_selection(ref,ctx,item_loader=lambda key:item,admitted_versions=('12','14','17'))
+        load_saved_selection(ref,ctx,item_loader=lambda key:item)
 
 
 def test_pair_admission_above999_is_explicit_and_never_truncates():
@@ -345,15 +305,13 @@ def test_pair_admission_above999_is_explicit_and_never_truncates():
     assert 'Caller-named' in population and '1through6' in population and 'first3blocks' not in population
 
 
-@pytest.mark.parametrize('version', ['12', '14', '17'])
-def test_raw_repository_envelope_matches_projected_saved_selection(version):
-    projected, ref, ctx, _ = synthetic(version)
+def test_raw_repository_envelope_matches_projected_saved_selection():
+    projected, ref, ctx, _ = synthetic()
     raw = repository_envelope(projected)
     assert 'replayable' not in raw and 'observation_eligible' not in raw
     before = deepcopy(raw)
-    kwargs = {'admitted_versions': ('12', '14', '17')}
-    expected = load_saved_selection(ref, ctx, item_loader=lambda key: projected, **kwargs)
-    actual = load_saved_selection(ref, ctx, item_loader=lambda key: raw, **kwargs)
+    expected = load_saved_selection(ref, ctx, item_loader=lambda key: projected)
+    actual = load_saved_selection(ref, ctx, item_loader=lambda key: raw)
     assert actual == expected and raw == before
 
 

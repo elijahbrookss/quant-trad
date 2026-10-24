@@ -79,7 +79,7 @@ def resolve_reference(raw: Mapping[str, Any], session: Any) -> dict[str, Any]:
     resolved = {"item_id": identifier, "kind": kind, "role": role, "resolution": "resolved_at_publication"}
     if kind == "research_check":
         from .service import _validate_research_check_evidence_payload, _definition_evidence_classification
-        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(item["payload"], item_id=item["id"])
+        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(item["payload"])
         for field, actual in (("result_hash", result.result_hash), ("evidence_hash", evidence.evidence_hash)):
             if required(raw.get(field), field) != actual:
                 raise ValueError(f"question_evidence_hash_mismatch: {field}")

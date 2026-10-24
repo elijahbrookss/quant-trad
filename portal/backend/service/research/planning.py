@@ -822,7 +822,6 @@ def rederive_research_check_plan_from_pinned_inputs(
     persisted_plan: ResolvedCheckPlan,
     *,
     subject_snapshots: Mapping[str, Mapping[str, Any]],
-    historical_execution: Mapping[str, Any] | None = None,
 ) -> ResolvedCheckPlan:
     """Rebuild plan semantics without consulting mutable Indicator/instrument rows."""
 
@@ -859,12 +858,9 @@ def rederive_research_check_plan_from_pinned_inputs(
             )
         return dict(snapshot)
 
-    planner = plan_research_check if historical_execution is None else _plan_research_check_from_declaration
-    declaration_kwargs = {} if historical_execution is None else {"declaration": historical_execution}
-    return planner(
+    return plan_research_check(
         definition,
         request,
-        **declaration_kwargs,
         indicator_planner=pinned_indicator_planner,
         instrument_loader=pinned_instrument_loader,
         inspect_coverage=False,

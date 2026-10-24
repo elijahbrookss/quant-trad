@@ -43,7 +43,7 @@ def prepare_saved_selection_measurement_request(source_check_id, *, measurement_
             invalid('expected saved hashes differ')
         context = saved_context(result.result, evidence.input_binding, request)
         saved = load_saved_selection(reference, context, item_loader=lambda key:item,
-            checkpoint=execution_checkpoint, admitted_versions=('12','14','17'))
+            checkpoint=execution_checkpoint)
     from .saved_selection_measurements_evaluator import DETECTOR, REUSABLE_SCHEMA
     ready = {'check_family':'raw_forward_outcome','mode':'evidence','dataset_id':saved.context['dataset_id'],
         'scope':{'instrument_id':saved.context['instrument_id'],'timeframe':'15m',

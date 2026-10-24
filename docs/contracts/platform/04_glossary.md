@@ -30,7 +30,7 @@ definition needs more detail.
 | [Observation key](#observation-key) | Stable logical observation identity inside a series; revisions share it. |
 | [Fact type, payload schema version, and revision](#fact-type-payload-schema-version-and-revision) | Three independent axes: meaning, historical interpretation, and correction sequence. |
 | [Runtime fact, qualified](#runtime-fact-qualified) | `Runtime fact` is qualified vocabulary for a fact owned by a named runtime boundary, such as a lifecycle event or Wallet Ledger fact. |
-| [Research Observation](#research-observation) | Durable research finding; active Check admission requires eligible frozen replayable evidence; retired originals retain eligibility only through verified original-ID/hash custody. |
+| [Research Observation](#research-observation) | Durable research finding; active Check admission requires eligible frozen replayable evidence; retired records remain readable without new evidence admission; existing Observations remain intact. |
 | [Frozen Dataset](#frozen-dataset) | Immutable `market_dataset.v1` manifest over exact Fact revisions, ranges, sources, hashes, gaps, and watermark. |
 | [Frozen Market Data Read Binding](#frozen-market-data-read-binding) | Exact consumer binding to a Frozen Dataset and its subjects/ranges/revisions/hashes/gaps. |
 | [RunResearchDataset](#runresearchdataset) | Canonical reporting/read-model product derived from durable run truth. |
@@ -138,9 +138,9 @@ Three independent axes: meaning, historical interpretation, and correction seque
 
 A Research Observation is a durable research-memory item. Active
 Check-to-Observation admission requires completed, frozen, replayable, eligible
-evidence. An exact original retired Check may retain its original eligibility
-only through verified original-ID/hash custody. This does not make that Check
-executable or replayable.
+evidence. Retired Checks remain inspectable without current verification,
+execution, replay or new evidence admission. Existing Observations and their
+relationships are preserved.
 
 **Use:** Manual Observation creation remains a separately owned and admitted path. Ordinary market observations and durable Research Observations are distinct; legacy V1 Check/Observation records remain readable and are not upgraded by this definition.
 
@@ -229,10 +229,10 @@ A Check preview is ephemeral analysis. It persists no Check evidence and cannot 
 Frozen Check evidence is a completed Check execution bound to immutable,
 provider-free inputs and exact definition, plan, result and evidence hashes.
 Current execution availability is separate from retained evidence integrity.
-Retired evidence may remain hash-verified and readable while its evaluator is
-unavailable; this is not a claim of current deterministic replay.
+Retired evidence remains readable while its evaluator is unavailable; the current
+runtime does not grant fresh verification, replay or new evidence admission.
 
-**Use:** Not a scientific verdict. Historical custody cannot substitute for an
+**Use:** Not a scientific verdict. Reading a historical record cannot substitute for an
 authority operation that explicitly requires actual deterministic replay.
 
 **Defined by:**
