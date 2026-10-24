@@ -7,6 +7,11 @@ definitions immutable event records, explicit source linkage and clocks. Existin
 versioned Check evidence remains responsible for persistence and input custody.
 There is no second registry, expression language or workflow engine.
 
+This public page describes reusable code contracts. Actual recognition runs,
+bound cases, selected populations, visual outputs and study decisions are private
+research records under the [public infrastructure/private research contract](../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+Use synthetic inputs when publishing examples or fixtures.
+
 ## Start with typed, available facts
 
 `RecognitionCandle.from_mapping` converts canonical closed-candle rows into the
@@ -30,7 +35,7 @@ earlier snapshots never change when more bars arrive. A viewport filters the
 output; it does not initialize, crop or reset state. A deliberately changed
 origin is a changed input with different context and left censoring.
 
-## The reversal pilot is the first consumer
+## A reusable sequential recognizer
 
 [`reversal_recognition.py`](../../src/research_science/reversal_recognition.py)
 implements `completed_reversal_candidates`, version `provisional.1`. All four
@@ -38,8 +43,8 @@ settings are required, without unknown keys:
 
 | Setting | Supported meaning |
 | --- | --- |
-| `reference_basis` | `rising_leg_only` uses highs of the rising-close rebound; `rising_leg_plus_retreat` explicitly includes its first retreat candle. These remain competing semantic proposals. |
-| `ownership` | Only `retain_all_provisional`; no independent Study population has been approved. |
+| `reference_basis` | `rising_leg_only` uses highs of the rising-close rebound; `rising_leg_plus_retreat` explicitly includes its first retreat candle. Each choice is part of immutable configuration identity. |
+| `ownership` | Only `retain_all_provisional`; recognition does not establish an independent analytical population. |
 | `max_bars` | Integer 1–100000; fail at the bound rather than truncate. |
 | `max_candidates` | Integer 1–10000; bounds all confirmed reference chains, including completed ones. |
 
@@ -54,22 +59,17 @@ There is no minimum size, maximum formation length, expiry, implicit reset or
 winner selection. Each reference can complete once, but this bookkeeping does
 not settle which overlapping chains should become independent events.
 
-The pilot requires contiguous, single-source candles available at their close,
+This recognizer requires contiguous, single-source candles available at their close,
 starting exactly at the supplied origin. It rejects gaps and delayed availability
 rather than reinterpret execution timing. This is narrower than the generic
 event contract, which can describe delayed knowledge. Resource limits stop the
 whole call; partial state after an exception must be discarded.
 
-`raw_forward_outcome@9` is a recognition-only adapter in the existing registry.
-An explicit `reversal_recognition.v1` schema selects it. Its detector pins the
-origin and four settings into Check material identity. Requirements fetch origin
-through evaluation end, with no forward tail, Indicator or statistical settings.
-Candidate membership uses completion close in `[start,end)`; reference and
-pending records describe context through `snapshot_known_at`, including the
-final input close at end. Counts are separately labeled: `candidate_count` is
-descriptive bookkeeping, `sample_count` and `study_events_admitted` are zero,
-and `outcomes_calculated` is false. Historical raw methods v2–v8 are unchanged.
-Registration provides a capability; it does not authorize a real-data Check.
+A Check adapter must explicitly admit the recognizer and pin its settings,
+origin and input binding. Discover currently supported adapters through
+`qt research check definitions`; retired method descriptions do not confer
+execution support. Recognition bookkeeping is not an outcome calculation,
+independent event population or scientific authorization.
 
 ## Compose definitions with ordinary functions
 
@@ -125,22 +125,11 @@ directory and calculates no outcomes. It needs explicit retained input custody;
 it has no provider or production access. A real-data preview still needs its
 research scope approved, even though the renderer itself cannot dispatch a Check.
 
-Read-only inspection of the runtime
+The runtime
 [`SignalOutputEvent`](../../src/engines/indicator_engine/signal_output.py)
-contract found a different boundary: key/direction/pattern/known-at/metadata,
-published by the Indicator engine. These research records are not directly
-runtime signal items. Any future adapter must preserve the canonical Indicator
-timeline, publication contract and execution separation. This pilot adds no
-signal, Strategy, Bot or backtest integration. First-passage continuation,
-failure and unresolved outcomes also await a visually accepted formation and
-explicit ownership/support protocol; old body-only engulfing is no substitute.
-
-The subsequent user decision selects `rising_leg_plus_retreat` for the new
-`raw_forward_outcome@10` first-passage study. V9 and earlier previews retain their
-original provisional meaning. V10 reuses the same recognizer and canonical
-preparation, adds the explicit fixed twelve-bar first-passage procedure, and
-retains all chains in outcome-blind overlap components. Its completion-close
-anchor is an observational price; no execution signal or fill is created. See
-the [fixed development protocol](../research-campaigns/reversal-first-passage-20261016.md)
-for thresholds, censoring, dependence and stopping decisions. Registration still
-does not authorize execution before qualified deployment and QT admission.
+contract is a separate boundary: key, direction, pattern, known-at and metadata
+are published by the canonical Indicator engine. Research recognition records
+do not become runtime signal items merely because their shapes are similar.
+Any adapter must preserve the Indicator timeline, publication contract and
+execution separation. Forward-path outcomes remain Check-owned analytical
+measurements rather than fills.

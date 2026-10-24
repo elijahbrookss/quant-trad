@@ -264,9 +264,8 @@ summary through normal logging; async jobs retain execution metrics with their
 existing result. Archive source/cache read bytes, cache writes and cache events
 join existing stage timing. They count application reads, not cache-miss disk
 traffic. Keep collector lag, physical disk activity and per-process RSS in the
-measurement receipt; do not infer them from these counters. Preserve the H04
-one-Check/one-replay budget and frozen/holdout rules when measuring the first
-workload. Check/replay totals alone do not isolate cache speedup.
+measurement receipt; do not infer them from these counters. Preserve the separately authorized measurement budget and frozen/holdout
+rules for each workload. Check/replay totals alone do not isolate cache speedup.
 
 The shared admission helper reports successful ownership observations into the
 existing `ExecutionControl`. A nonblocking check at execution checkpoints and its

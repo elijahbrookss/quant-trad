@@ -35,8 +35,7 @@ code_paths:
 
 ## Offline Research Authority Ceiling
 
-The production research surface now includes three additional, provider-free
-boundaries:
+The offline research surface separates three provider-free boundaries:
 
 - [Scientific Research Authority](SCIENTIFIC_RESEARCH_AUTHORITY.md) owns
   immutable protocols, role-derived frozen datasets, attempt/search accounting,
@@ -54,8 +53,8 @@ or auditor microservices. Stronger identity/custody services are future seams,
 not a prerequisite for honest controlled-workflow claims.
 
 [Check Evidence Boundary](CHECK_EVIDENCE_BOUNDARY.md) defines the canonical
-preview, frozen evidence, replay, Observation, and trail workflow. It replaces
-objective-specific calculations with versioned QT-owned evaluators. An external
+preview, frozen evidence, replay, Observation, and trail workflow. It uses versioned QT-owned evaluators rather than embedding an objective
+in orchestration code. An external
 research objective does not become QT domain vocabulary or product authority.
 
 The autonomous research workflow cannot choose provider data, resolve a sealed
@@ -114,7 +113,7 @@ The boundary may:
 - expose MCP resources and tools that call these same API and CLI contracts.
 - create research-memory observations, checks, hypotheses, studies, and links
   through the research API.
-- dispatch long-running research checks and sweeps through shared async jobs,
+- dispatch supported long-running research operations through shared async jobs,
   then read status/result contracts by job id.
 - sequence Check requirement planning, explicit preparation, Dataset freeze,
   provider-free execution, replay, Observation creation, and trail inspection
@@ -159,8 +158,13 @@ validation and certification.
 
 ## Local Log Partitioning
 
-CLI-generated logs and report exports are local operator artifacts and are not
-repo source.
+CLI-generated logs, requests, experiment plans and report exports are private
+operator/research artifacts, not repository source. Keep them in authorized
+private storage. An ignored local path reduces accidental staging but is not an
+access-control or durable-record guarantee. Actual findings and interpretations
+belong in QT's private record stores under the
+[public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+Public documentation and fixtures use synthetic material or placeholders.
 
 Default partitions:
 
@@ -209,18 +213,15 @@ single explicit instrument/window before a bot or experiment plan exists.
 `qt research` captures the reasoning trail around research work. Observations,
 lightweight research checks, hypotheses, studies, and links to strategies,
 variants, runs, reports, and experiments live in the research-memory boundary.
-Research checks may request source candles, persisted indicator output evidence,
-or completed run report evidence through existing backend contracts and produce
-analytical evidence. `qt research check sweep` runs non-persisted
-indicator-backed check variants, ranks explicit emitted metric paths, and can
-render either JSON or a compact metric table. It does not create research
-memory, execute strategies, or simulate trades.
+Current analytical execution uses registered raw-candle and event-and-fact
+procedures with explicit frozen bindings and canonical Indicator/Fact inputs.
+Legacy diagnostic/audit/sweep interfaces do not override current registry
+admission or promise that retired procedures execute.
 
-For heavier check runs and sweeps, `qt research check ... --dispatch` submits a
-research async job and returns a job id immediately. `qt research jobs status`
-and `qt research jobs result` read the shared backend job contract. This keeps
-agent workflows from polling progress while preserving the same research check
-contracts for final evidence.
+For heavier admitted operations, `qt research check ... --dispatch` submits a
+research async job and returns a receipt. `qt research jobs status` and
+`qt research jobs result` read the same backend job contract. Dispatch changes
+where work runs, not its scientific eligibility or accounting.
 
 `qt experiments summarize` reads the local suite artifacts and emits
 `experiment_summary.v1`: suite status, compact run metrics, readiness caveats,
@@ -255,12 +256,12 @@ backend snapshot remains the execution truth for what actually ran.
 | Makefile | Local development, Docker, DB, validation, and forensic audit support index. |
 | QuantLab/UI | Human visualization and inspection surface, especially for candles, indicators, overlays, BotLens, playback, and reports. |
 
-Agent mutation and research promotion are not yet a fully enforced security
-boundary. Current MCP mutations are guarded and usually plan by default, while
-CLI audit is enabled by default, but direct CLI commands are not uniformly
-plan/apply/confirm gated and audit can be disabled. [ADR 0048](../decisions/0048-gate-agent-mutation-and-research-promotion.md)
-is therefore `proposed`: agents should use approved wrappers, and no workflow
-may represent recommendation or profitability as completed promotion.
+The offline governance service enforces its proposal/decision, evidence and
+state-transition contract. General CLI/MCP confirmation is a different boundary:
+not every local command has a plan/apply envelope, and local invocation logs are
+not governance audit. The local backend does not provide a remote authenticated
+principal boundary. Use authorized operations and the owning service's admission;
+do not infer deployment or trading permission from a confirmation flag.
 
 ## Current CLI Surface
 
@@ -283,11 +284,9 @@ for:
 - the primary Check workflow through `qt research check requirements`,
   `preview`, `prepare`, `run`, and `replay`, plus evidence-backed Observation
   creation and `qt research trail`,
-- compatibility/diagnostic checks through `qt research ...`:
-  `qt research check raw`, `qt research check indicator`,
-  `qt research check audit`, `qt research check lifecycle`,
-  `qt research check signal`, `qt research check decision`, and
-  `qt research check sweep`,
+- explicitly supported preview/diagnostic operations exposed by current CLI
+  help and registry admission; dormant compatibility commands do not promise
+  executable historical methods,
 - asynchronous research check dispatch through `qt research check ... --dispatch`
   plus `qt research jobs status/result <job_id>`,
 - research evidence read models through `qt research run`, `qt research trail`,
@@ -376,7 +375,7 @@ returns unsupported/failed rather than inventing a metric.
   workflows.
 - CLI output should be machine-readable JSON so agent workflows can store and
   compare artifacts.
-- CLI audit logs should remain local under `logs/` and should not be committed.
+- CLI audit logs remain private under `logs/` and must not be committed.
 - Normal CLI research commands should prefer compact API contracts over full UI
   projection payloads.
 - Humans inspect runtime and research state through UI views; agents and tools
@@ -399,9 +398,9 @@ returns unsupported/failed rather than inventing a metric.
   access is an explicit forensic path, not the default orchestration path.
 - Run-aware Make diagnostics should use a `forensic-` prefix so they are not
   confused with normal `qt` workflows.
-- Agent mutation/promotion cannot be called fully enforced until ADR 0048's
-  actor, idempotency, durable audit, validation, and negative-bypass evidence
-  exists.
+- Confirmation, local invocation audit, scientific authority and offline
+  governance have distinct admission contracts. None grants external-order,
+  credential, capital or deployment authority.
 
 ## Known Gaps
 
@@ -409,8 +408,8 @@ returns unsupported/failed rather than inventing a metric.
   auth boundary.
 - Detached/background orchestration and bounded parallel run execution are
   deferred until foreground plan execution proves insufficient.
-- Agent mutation and research promotion have partial guards but no uniform,
-  durable enforcement contract yet.
+- General local CLI confirmation does not create an authenticated security
+  boundary; offline governance retains its separately enforced contract.
 - Email/SMS notification sinks are deferred; the current sinks are console/file.
 
 

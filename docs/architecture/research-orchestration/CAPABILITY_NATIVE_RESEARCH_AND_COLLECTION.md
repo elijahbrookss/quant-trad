@@ -21,14 +21,14 @@ code_paths:
 ---
 # Capability-Native Research and Collection
 
-## Current execution and historical custody
+## Execution support and private records
 
-[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md)
-defines the current Indicator/Check/Study boundary and current-only execution
-catalog. Earlier version-specific descriptions below are historical method
-meaning, not promises that retired factories remain executable. Original
-records remain integrity-checked and readable through data-only custody.
-
+Current registry admission determines executable procedures. Retained historical
+record custody is separate from executor availability; a saved hash or old
+method description does not promise replay. This manual describes infrastructure
+and does not attest that particular private records were retained or verified.
+Actual requests, results and interpretations stay in QT's private record stores
+under the [public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
 
 ## Canonical nouns
 
@@ -75,7 +75,8 @@ StreamEnrollment manifest
   -> provider frames -> durable spool -> archive -> canonical facts
 ```
 
-The Coinbase perpetual trade and L2 fleets currently enroll BIP, ETP, and SLP.
+The checked-in Coinbase perpetual trade and L2 fleet manifests name BIP, ETP
+and SLP. Manifest configuration alone does not establish current live enrollment.
 Each has no `stop_at`; the worker runs it until an operator stop, a persistent
 safety latch, or a fail-closed local spool condition. A compatible product is
 added by manifest data and catalog registration. Authentication is enrollment

@@ -22,6 +22,17 @@ idea
 Skipping a step usually makes the final number easier to produce and harder to
 trust.
 
+## Keep research records private
+
+This public guide describes reusable procedures. Actual hypotheses, requests,
+selections, date/asset allocations, Strategy configurations, results, findings,
+interpretations and operational receipts belong in QT's private record stores.
+Do not commit them as examples, dossiers, fixtures, screenshots, exports or
+historical appendices. Use synthetic examples or placeholders unless the exact
+content has explicit public-release approval. Publication inside QT is an
+interpretation revision, not permission to publish its contents in this repository.
+See the [public infrastructure/private research contract](../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+
 ## Research Purpose And Stopping Decisions
 
 QT currently develops revisable, inspectable understanding of market behavior.
@@ -48,9 +59,6 @@ criteria. This is reasoning guidance, not a new entity, schema, required metadat
 or knowledge subsystem. A research-memory Study owns the question and its
 interpretation; admitted Checks and scientific authority keep their existing
 contracts.
-
-Reviewed 2026-10-12: general agent research guidance; no research outcome or
-operational authority is implied.
 
 ## Writing Research For Human Inspection
 
@@ -138,7 +146,7 @@ incoming references and fields. Changing title/body/metadata changes reasoning
 content identity. Preserve original records and frozen snapshots. Use the existing append-only publication revision with `expected_previous_hash`
 for a published narrative correction; retain unchanged exact references when only
 the Study prose changes. Create a corrected Observation only if that referenced
-Observation also needs correction, as in the audited B2 case. Pin unchanged
+Observation also needs correction. Pin unchanged
 Check/evidence identities and retain previous versions. Do not silently edit an
 old conclusion, backfill metadata, alter a question adopted immutably, or treat a
 presentation correction as permission to rerun research. A new version alone does
@@ -252,7 +260,7 @@ Discover an implemented method before writing a request:
 
 ```bash
 qt research check definitions
-qt research check definition event_fact_analysis --version 11
+qt research check definition <definition_id> --version <version>
 ```
 
 The list identifies registered base versions and eligibility. Detail returns the
@@ -263,12 +271,9 @@ requirements and preparation commands below; catalogue examples do not grant
 execution permission or claim those resources exist. Preparation returns
 `next_request` for an evidence run after a Dataset has been frozen.
 
-Definition 11 is deliberately a fixed Candle Stats ATR-crossing comparison.
-It exposes its pinned indicator parameters, horizons and matching constraints;
-it does not accept another indicator or a new matching threshold as a setting.
-Other supported methods can express different questions through their existing
-parameters. A genuinely new calculation is an ordinary reviewed Python method;
-see [extending analytical Checks](#extending-analytical-checks).
+A fixed method rejects changes to its scientific choices. Other methods admit
+explicit settings through their current catalog contract. A new calculation is
+an ordinary reviewed Python method; see [extending analytical Checks](#extending-analytical-checks).
 
 Use a request file so the question is reviewable and repeatable:
 
@@ -313,7 +318,8 @@ acquisition or freeze. Embedded JSON cannot enable either effect in place of
 explicit CLI/MCP flags. A Check run remains provider-free.
 
 Preview is useful for shaping a question, but it is exploratory. A durable
-evidence run binds the question to frozen inputs and can later be replayed:
+evidence run binds the question to frozen inputs. Where its executor and exact
+producing source remain supported, request a replay explicitly:
 
 ```bash
 qt research check replay <check_id>
@@ -368,7 +374,8 @@ contracts; requesting cancellation is not acknowledgement of stopped work.
 
 A Check and a **Research Observation** are deliberately separate. A preview is
 temporary and cannot support an Observation. A durable Check first has to
-finish against frozen inputs, remain replayable, and use a reviewed Check
+finish against frozen inputs, pass the required custody and assurance checks,
+and use a reviewed Check
 definition that is eligible to support an Observation.
 
 Even then, QT does not create an Observation automatically. Recording the
@@ -594,7 +601,7 @@ When comparing two runs, verify more than the return:
 | Result | What it may honestly say | What it may not say |
 | --- | --- | --- |
 | Check preview | “This exploratory calculation ran against the current store with stated provenance.” | That evidence was frozen, persisted, replayable, or eligible for an Observation. |
-| Durable Check | “This bounded analytical result and verdict came from exact frozen inputs and can be replayed.” | That a Strategy is validated, scientifically certified, or authorized to trade. |
+| Durable Check | “This bounded analytical result and verdict came from exact frozen inputs; replay availability is reported separately.” | That a Strategy is validated, scientifically certified, or authorized to trade. |
 | Research Observation | “QT retained this finding in research memory with a traceable evidence link.” | That the finding is true beyond its evidence, promoted, certified, or executable. |
 | Backtest | “This exact Strategy behaved this way on this frozen history under these execution assumptions.” | That venue fills were available or future/live performance will match. |
 | Paper run | “The declared observe-only or simulated workflow behaved this way as data arrived.” | That external orders occurred, simulated economics were real, or profitability was validated. |
@@ -708,7 +715,9 @@ second engine.
 Register the evaluator ID/version and immutable CheckDefinition in the existing
 research registry. Put settings validation in that method's existing normalizer
 and wire explicit selection in `materialize_check_definition`. Changed scientific
-semantics need a new version; preserve old registrations for historical replay.
+semantics need a new version. Preserve historical record identity and report
+retired execution separately from data custody; an old registration is not an
+implicit requirement to retain an executable factory.
 Add a description and examples to the code-backed catalogue, keeping its
 metadata outside `material_rules` so documentation edits cannot change old
 definition hashes. The catalogue must cover every registered definition and
@@ -722,193 +731,67 @@ contract, with API/CLI parity. Frozen data, scientific admission and accounting
 remain with their existing owners. There is no plugin installer, expression
 language, saved configuration resource or independent evaluator lifecycle.
 
-### Raw candle predicates with durable evidence
-
-Discover `raw_forward_outcome` version 3 through `qt research check definition
-raw_forward_outcome --version 3`. Select it explicitly with
-`outcomes.schema_version: raw_candle_forward_outcome.v1` and use the existing
-requirements, prepare, frozen evidence and replay workflow. Version 2 remains
-preview-only. V3 requires canonical clocks and source identity, real contiguous
-entry/outcome paths, and genuine volume where used. Its entry is a causal candle
-close; targets end strictly before the declared evaluation boundary. Use
-`continue_degraded` and inspect local exclusions and complete support counts.
-
-The canonical `mean_forward_return_pct` and related `_pct` fields are fractions;
-percentage display multiplies by 100. Compare requested cohort summaries as
-emitted; the all-bar baseline edge is a different comparison. Method availability
-and successful deployment do not allocate a scientific experiment or permit
-tuning, more dates, extra Checks, or external order submission.
-
-
-Use `qt research check definition raw_forward_outcome --version 5` for the
-configurable controlled-reversal template. Keep physical windows fixed when
-changing interval: the three-hour decline/outcome and 24-hour RMS choice uses
-12/96/12 bars at 15m, 6/48/6 at 30m and 3/24/3 at 1h, with warmup 97/49/25.
-That expresses supported variations without implementing another method. It
-does not authorize new studies or choose a timeframe from favorable results.
-
-Use `qt research check definition event_fact_analysis --version 15` when an
-existing Indicator already emits the completed public event and the question is
-about explicit reference/target/failure barriers plus completion-known features.
-The request must name a complete native 15m frozen Dataset, the exact Indicator,
-an explicit computation origin, a one-to-12-bar horizon and public metadata
-paths. It is evidence-only. Preparation and dispatch continue through the normal
-Check admission path.
-
-The result keeps the original continuation/failure/neither/unresolved label and
-includes strictly-later original-target evidence for failure rows in the same
-Check. A same-bar first target/failure touch is unresolved; a later target does
-not relabel failure or extend the deadline. Inspect original clock weights,
-feature missing mass, support components and the pre-label population hash.
-These are descriptive profiles, not trading or predictive evidence.
-
-Use `qt research check definition event_fact_analysis --version 13` for explicit
-retrospective numeric association. Declare the real analysis cutoff; preserve
-late receipts. The July 25–September 23 exclusive hourly example has 1,440
-nominal buckets, separate long/short liquidation inputs and one fixed paired
-logistic comparison beyond recent return and ATR. Its dates and train/validation
-split are a template to fix before dispatch, not an allocation or measured
-coverage claim. Results are conditional on unverified bucket-start meaning and
-cannot supply point-in-time predictive, backtest or certification evidence.
-
-
-For an explicitly bounded complete-case comparison, add
-`outcomes.retrospective.input_coverage_policy: complete_paired_rows` to v13.
-It admits acquired partial source ranges without relabeling them as complete,
-requires liquidation buckets only within the fixed dates, and does not acquire
-prices beyond the exclusive end. Missing values on either side and unavailable
-boundary outcomes are excluded and counted; returned zeros remain values.
-Inspect both fold counts and the retained source-quality evidence. Omitting the
-option preserves the historical strict input plan. Preparation and execution
-still use the existing freeze/run operations; do not backdate receipts or repair
-missing buckets with invented zero values.
-
-
-For the user-selected completed-reversal comparison feasibility question,
-discover `raw_forward_outcome` version11 and read
-[selection only](reversal-selection-only.md). This fixed84-day method reports
-matched/excluded populations, completion-moment weights and dependence without
-forward outcomes, arbitrary coverage gates or repeated matching adjustments.
-It does not acquire data or relax canonical derivation resource limits.
-
-
 ## Reusing Check recipes
 
 Start with `qt research check definitions` and
-`qt research check definition <family> --version <version>`. The same read-only
-catalog is available through MCP `list_research_check_definitions` and
-`get_research_check_definition`. Settings/examples and returned-field metadata
-come from the existing backend catalog; discovery never prepares data or runs
-science. The `discovery` annotation identifies fixed historical profiles and a
-preferred reusable route where one exists. Normalizers remain authoritative.
+`qt research check definition <definition_id> --version <version>`. API and MCP
+expose the same read-only catalog. Settings, examples and returned-field metadata
+come from the backend; normalizers and registry admission remain authoritative.
+The catalog lists supported executors, not private research records.
 
-For configured reversal populations, method17 supplies outcome-blind selection
-and method18 measures a validated saved population. Bind dates, symbol, original
-frozen input and report populations within the published bounds instead of
-copying an evaluator for a question. Keep recognition/selection identity separate
-from subsequent outcome interpretation. Historical methods and their accepted
-requests remain available for exact replay.
+Use public schemas and synthetic examples to understand a method. Keep the real
+request and its source/Dataset bindings in private QT records. A method's
+availability does not allocate attempts, authorize acquisition, permit tuning or
+open sealed evidence. When a reusable method fits, configure it rather than
+copying an evaluator for a new question.
 
-Use declared measurement units and missingness policies. Generic fractional
-excursions can be negative relative to the anchor; target-relative progress
-starts at zero and may exceed 100 percent or occur after failure. Historical
-`_pct` field aliases retain fractional units. Extrema timing is not inferred from
-an endpoint timestamp. Weighted/unweighted summaries and different accumulation
-or interpolation policies are not interchangeable. Neither matched pairs nor
-support components automatically provide independent observations.
+Keep recognition/selection identity separate from subsequent measurement and
+interpretation. A saved-population consumer must validate the existing typed
+result, manifest, weights, scope and original frozen context. It must fail on a
+changed reference, unsupported profile or resource overflow rather than silently
+truncate, rematch or substitute data.
 
+Use declared units and missingness policies. Historical `_pct` aliases can carry
+fractions; inspect the emitted contract before multiplying for display. Endpoint
+returns, excursions, first passage and full-window progress answer different
+questions. Weighted and unweighted summaries, interpolation and accumulation
+policies are not interchangeable. Matched pairs, overlap components and calendar
+groups do not automatically establish independent observations.
 
-### Inspect controlled-reversal excursions
+### Prepare a saved-selection request
 
-For new controlled-reversal requests that need saved excursions, inspect
-`raw_forward_outcome@19` and its `controlled_reversal_comparison.v3` example
-through the existing definition list/detail API, CLI or MCP catalog. It uses the
-same configurable matching choices as v5 and keeps the original endpoint-return
-analysis. Each saved treated/control arm now carries fractional MFE/MAE and
-first-attaining future-candle offset/open/close/known-at, with explicit long
-entry-close anchor, horizon, status and unresolved reason. The first tied candle
-wins. The entry candle is excluded; no new tail is loaded. Candle clocks cannot
-establish intrabar order or a fill. Historical v4/v5 remain replayable with their
-original output shape; do not retrofit old saved evidence.
-
-
-### Saved selection measurements and execution observations
-
-For a new measurement on a supported saved selection, build the exact request
-from server metadata instead of copying hashes and frozen context by hand:
+For a supported saved selection, build a request from server metadata rather
+than copying hashes and frozen context by hand:
 
 ```bash
-qt research check from-selection SAVED_CHECK_ID --profile 18 --request-only > measurement-request.json
-qt research check requirements --request-json measurement-request.json
-qt research jobs snapshot --request-json measurement-request.json --limit 25
+qt research check from-selection <saved_check_id> --profile <supported_profile> --request-only > <private-request.json>
+qt research check requirements --request-json <private-request.json>
+qt research jobs snapshot --request-json <private-request.json> --limit 25
 ```
 
-`from-selection` reads one persisted Check and runs the existing typed binding,
-manifest, native-input, scope, cardinality, weight and support validation. It
-supports selection versions 12, 14, 17 and measurement profile 18 only. Optional
-`--result-hash`, `--evidence-hash` and `--selection-manifest-hash` reject a changed
-reference. Without `--request-only`, its JSON also includes the validated reference
-and context. It does not read candles, call providers, freeze data, calculate
-outcomes, allocate attempts, dispatch jobs or write a Study/ledger. Requirements
-and actual execution still validate the original frozen input through their
-existing paths; metadata preparation does not replace those checks.
+The preparation read validates saved references and returns metadata; it does
+not load candles, acquire data, freeze, calculate outcomes, allocate attempts or
+dispatch work. Requirements and execution still validate the frozen input. Read
+the current CLI help/catalog for supported source contracts and profiles.
 
-The execution snapshot observes global queued/running/retry jobs and the actual
-existing research execution lock. With a request it also lists exact dispatch
-fingerprint matches, including failed and completed jobs. `--job-id JOB_ID` adds
-the unchanged job-status response. The limit is 1..100 (default 25), with separate
-truncation flags for inflight and matching lists. It never returns SQL or generic
-database access. Its metadata queries use 5-second statement and 250 ms lock limits
-under the existing 20-second read control; these are limits, not latency promises.
+The execution snapshot observes queued/running/retry jobs and the existing
+research lock. Request matches use the modeled dispatch fingerprint, not a claim
+of scientific equivalence between differently worded requests. This is a
+point-in-time diagnostic, not a reservation, retry grant or budget decision.
+A failed job remains failed and its consumed attempt remains recorded.
 
-This is a point-in-time diagnostic, not a slot reservation, dispatch admission,
-retry grant or budget decision. Request matching uses the same modeled request
-and fingerprint as dispatch, including descriptive fields/defaults; it does not
-claim scientific equivalence between differently worded requests. Job status is
-read through the existing status operation and may be observed slightly later.
-A known failed job remains failed and its consumed attempt remains recorded;
-recovery uses the already authorized scope and normal fresh admission rather
-than hiding or resetting it.
-
-Existing commands already cover machine-readable dispatch, known-job status,
-results and ledger reads. Prefer them over parsing human text or issuing SQL:
+Use the ordinary machine-readable receipt and job/item operations for private
+reconciliation:
 
 ```bash
-qt research check run --request-json measurement-request.json --dispatch --single-attempt --format json
-qt research jobs status JOB_ID --json
-qt research jobs result JOB_ID --format json
-qt research items list --kind observation
-qt research items list --kind research_check
-qt research items get ITEM_ID
+qt research check run --request-json <private-request.json> --dispatch --single-attempt --format json
+qt research jobs status <job_id> --json
+qt research jobs result <job_id> --format json
+qt research items get <item_id>
 ```
 
-Use the established item/link operations for this session's Observation ledger;
-typed authority attempt-register/attempt-complete remain the separate existing
-protocol/family budget surface. No additional accounting system is introduced.
-The shared operations are also exposed as read-only MCP tools
-`prepare_saved_selection_measurement_request` and
-`get_research_execution_snapshot` when the configured QT MCP server is available.
-Their HTTP routes are `POST /api/research/checks/saved-selection/request` and
-`POST /api/research/jobs/snapshot`; POST carries structured read inputs and does
-not imply execution or mutation.
-
-
-### Describe every completed reversal
-
-Discover `qt research check definition raw_forward_outcome --version 20` and bind
-the existing catalogue example to an exact native15m frozen Dataset. Select
-`outcomes.schema_version: reversal_completed_recovery.v1`; use explicit computation
-origin, one through six whole28day decision blocks and at most two named block
-views. Run the normal requirements/prepare/admission/dispatch path. There is no
-provider acquisition or extra outcome tail inside this method.
-
-Version20 retains every completed formation, its causal context, inclusive
-trough-to-completion candle duration N and unchanged12bar first-passage label.
-Each view reports all four labels separately with original all-case clock mass,
-observed/missing N mass and count, conditional weighted mean/CDF quantiles, and
-context missingness. It performs no matching or context-adjusted comparison.
-These descriptive summaries do not establish incremental prediction or independent
-samples. An existing Dataset's metadata is not proof of a newly frozen subset:
-validate exact source, slots, revisions, clocks and material/provenance, comparing
-the retained original slice if claiming unchanged historical input. Freeze pins
-its actual current watermark; a metadata reference cannot replace that binding.
+The shared MCP tools `prepare_saved_selection_measurement_request` and
+`get_research_execution_snapshot` provide the same reads. Their POST routes
+carry structured read inputs; POST alone does not mean mutation. Neither read
+replaces normal execution admission, scientific accounting or explicit record
+publication.

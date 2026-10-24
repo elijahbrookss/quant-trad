@@ -20,14 +20,14 @@ code_paths:
 ---
 # Research Replay Availability
 
-## Current execution and historical custody
+## Execution support and private records
 
-[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md)
-defines the current Indicator/Check/Study boundary and current-only execution
-catalog. Earlier version-specific descriptions below are historical method
-meaning, not promises that retired factories remain executable. Original
-records remain integrity-checked and readable through data-only custody.
-
+Current registry admission determines executable procedures. Retained historical
+record custody is separate from executor availability; a saved hash or old
+method description does not promise replay. This manual describes infrastructure
+and does not attest that particular private records were retained or verified.
+Actual requests, results and interpretations stay in QT's private record stores
+under the [public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
 
 ## Purpose
 
@@ -85,15 +85,8 @@ versions and cannot silently change existing run evidence.
 
 ## Runnable Check Timing
 
-The [Check evidence boundary](CHECK_EVIDENCE_BOUNDARY.md#availability-triggered-fact-samples)
+The [Check evidence boundary](CHECK_EVIDENCE_BOUNDARY.md#causal-sampling-and-analytical-outcomes)
 defines the v5 required-fact availability trigger. It uses canonical historical
 availability directly and does not apply the receipt-replay counterfactual
 above. A Check can evaluate later without changing when its source facts became
 known. These are separate capabilities.
-
-## Historical record
-
-The terminal BTC perpetual V3 dossier is retained as a postmortem of an invalid
-input contract. Its executable definition and runner were deleted, not migrated
-or translated. Immutable generic protocol/family/trial evidence remains in the
-research authority database.
