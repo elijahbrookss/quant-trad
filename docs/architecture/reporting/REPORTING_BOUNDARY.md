@@ -421,6 +421,85 @@ of the dataset, not new execution semantics.
   series metadata. Worker aggregation must not replace known rules, params, ATM,
   or variant provenance with empty placeholders.
 
+## Report API reference
+
+The controller at portal/backend/controller/reports.py and typed schemas under
+portal/backend/service/reports are the route and wire-shape authorities.
+A compact response does not imply a metadata-only build: readiness, summary and
+section routes may share full dataset reconstruction on a cold cache.
+Use the materialization status route to observe an existing report build.
+
+## Routes
+
+| Route | Contract | Notes |
+|---|---|---|
+| `GET /api/reports` | `ReportList` | Lightweight catalog rows with summary and readiness state. |
+| `GET /api/reports/{run_id}` | `RunResearchDataset` | Canonical complete dataset. |
+| `GET /api/reports/{run_id}/run-report` | `RunReportDTO` or materialization status | Side-effect-free typed research cockpit read. Terminal runs return a ready materialized artifact when available or `202` with the current status when no artifact exists; builds are requested only through `POST /run-report/build`, and active runs are rejected. |
+| `GET /api/reports/{run_id}/run-report/status` | `ReportMaterializationStatusDTO` | Materialized report artifact lifecycle (`not_started`, `building`, `ready`, `failed`, `stale`) for UI actions and automation. |
+| `GET /api/reports/compare?left_run_id=...&right_run_id=...` | `RunComparisonDTO` | Frontend comparison contract over ready materialized RunReportDTO contract (`run_report.v2`) artifacts. It returns structured blocked states when either artifact is unavailable, reads existing golden evidence when available, and does not enqueue cold report or golden builds by default. |
+| `GET /api/reports/{run_id}/readiness` | `ReportReadiness` | Dataset-derived readiness and diagnostics; a cold request may reconstruct the full dataset. |
+| `GET /api/reports/{run_id}/summary` | `RunReportSummary` | Compact run summary. |
+| `GET /api/reports/{run_id}/sections` | `ReportSections` | Section availability, row counts, and unsupported states. |
+| `GET /api/reports/{run_id}/trades` | `TradeDataset` | Paged/filterable trade rows. |
+| `GET /api/reports/{run_id}/decisions` | `DecisionDataset` | Paged/filterable decision rows. |
+| `GET /api/reports/{run_id}/signals` | `SignalDataset` | Paged/filterable signal rows when available. |
+| `GET /api/reports/{run_id}/timeseries/{section}` | `ReportTimeseries` | Paged canonical chart/analysis series such as equity, drawdown, returns, exposure, positions, and rolling metrics. |
+| `GET /api/reports/{run_id}/context` | `ReportContext` | Paged context/world-state sections such as decision context, trade context, indicator snapshots, and market state. |
+| `GET /api/reports/{run_id}/candles/catalog` | `CandleCatalog` | Run-scoped candle availability and continuity summary without full candle rows. |
+| `GET /api/reports/{run_id}/candles` | `CandleDataset` | Bounded candle rows for an explicit instrument/timeframe/window. |
+| `GET /api/reports/{run_id}/trades/{trade_id}/candle-window` | `CandleDataset` | Bounded entry/exit context window. |
+| `GET /api/reports/{run_id}/decisions/{decision_id}/candle-window` | `CandleDataset` | Bounded decision context window. |
+| `GET /api/reports/{run_id}/signals/{signal_id}/candle-window` | `CandleDataset` | Bounded signal context window. |
+| `GET /api/reports/{run_id}/diagnostics` | `ReportDiagnostics` | Normalized diagnostics relevant to the report. |
+| `GET /api/reports/{run_id}/metrics` | `ReportMetrics` | Metrics, accounting, data-quality, execution, and operational sections. |
+| `GET /api/reports/{run_id}/operational-health` | `OperationalHealth` | Runtime/load/projection health for scale assessment. |
+| `GET /api/reports/{run_id}/metrics/{metric_name}/explanation` | `MetricExplanation` | Formula and source references for supported metrics. |
+| `GET /api/reports/{run_id}/export/manifest` | `ExportManifest` | Files and unavailable sections for export. |
+| `POST /api/reports/{run_id}/export` | `ExportBundle` | Zip generated from the reporting data product. |
+| `POST /api/reports/compare` | `RunComparisonResult` | Legacy dataset comparison result; blocked comparisons do not return deltas. |
+
+## Export
+
+Export is generated from `RunResearchDataset`. The zip includes:
+
+- `manifest.json`,
+- metadata,
+- readiness,
+- summary,
+- diagnostics,
+- trades,
+- decisions,
+- signals,
+- metrics and accounting sections.
+- timeseries sections,
+- candle catalog,
+- context/world-state sections,
+- operational health.
+
+CSV files are included for tabular sections. JSON files are included for the
+sectioned structured contract. The export intentionally does not include a
+single full `run_research_dataset.json` by default because table sections can
+grow large over time. Consumers should reconstruct the dataset from the manifest
+and section files when they need an offline bundle.
+
+Full candle files are optional. Standard exports omit full candles. Research
+exports can pass `include_candles=true`, which adds per-series candle files and
+manifest entries when candle identity and storage access are available.
+
+The manifest lists unavailable sections explicitly and describes each included
+file with section, format, row count when applicable, byte size, and SHA-256
+hash. `manifest.json` is listed without a self-hash to avoid circular metadata.
+
+## Timeseries and context reads
+
+Canonical timeseries sections carry run/series identity, timestamps, values and
+source fields. Equity, drawdown, returns, capital, exposure, positions and
+rolling metrics are analytical datasets rather than frontend chart blobs.
+Unavailable sections carry a reason. Context reads expose captured Indicator,
+decision, trade and market-state evidence; missing capture cannot be repaired by
+reading private Indicator internals. The schemas own exact fields.
+
 ## Related Docs
 
 - [Persistence boundary](../persistence/PERSISTENCE_BOUNDARY.md)

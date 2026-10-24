@@ -11,6 +11,7 @@ tags:
   - lineage
   - known-at
 code_paths:
+  - src/engines/bot_runtime/core/series_identity.py
   - src/strategies/evaluator.py
   - src/strategies/compiler.py
   - src/engines/bot_runtime/core/runtime_events.py
@@ -37,7 +38,7 @@ Core identifiers:
 - `strategy_id`: saved strategy definition.
 - `strategy_hash`: compiled strategy material identity.
 - `instrument_id`: strategy/runtime instrument binding.
-- `series_key`: normalized symbol/timeframe series key.
+- `series_key`: canonical instrument/timeframe series key.
 - `signal_id`: emitted signal provenance.
 - `decision_id`: evaluated strategy decision artifact.
 - `trade_id`: trade lifecycle identity.
@@ -49,7 +50,7 @@ Core identifiers:
 
 1. A strategy definition compiles into a `strategy_hash`.
 2. A bot starts a `run_id` with a strategy, instruments, and runtime config.
-3. Each symbol/timeframe path has a normalized `series_key`.
+3. Each canonical instrument/timeframe path has a normalized `series_key`.
 4. Decision evaluation produces `decision_id` values tied to strategy, instrument, bar time, and rule context.
 5. Signal events preserve `signal_id` provenance. `signal_id` and `decision_id` are intentionally distinct.
 6. Accepted decisions may create or update a `trade_id`.

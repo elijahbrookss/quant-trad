@@ -15,6 +15,8 @@ code_paths:
   - src/engines/indicator_engine
   - src/strategies
   - src/engines/bot_runtime
+  - src/market_data/frozen.py
+  - portal/backend/service/research
   - src/data_providers
   - portal/backend
   - portal/frontend
@@ -22,105 +24,129 @@ code_paths:
 ---
 # System Architecture Model
 
-## Purpose
+Quant-Trad separates market evidence, analytical evidence and simulated execution.
+Its central rule is causal: a consumer may use only facts available at its
+evaluation boundary. A reproducible result must identify its inputs and the
+versioned procedure that interpreted them. Reproducibility alone does not
+establish economic realism, scientific validity or permission to trade.
 
-This is the top-level systems-engineering model for Quant-Trad. It explains how source market facts move through indicators, decision logic, execution, event storage, projections, reporting, and operator surfaces.
+The [platform contracts](../../contracts/README.md) define product meaning.
+This model explains their composition; component documents explain individual
+owners. [Current system](../../current-system.md) is the product introduction.
 
-Canonical diagram source: [system-runtime-truth-flow.mmd](diagrams/system-runtime-truth-flow.mmd).
+## Two paths share frozen evidence
 
-## System Thesis
+[system-runtime-truth-flow.mmd](diagrams/system-runtime-truth-flow.mmd) shows the
+shared data boundary and the separate research and execution paths.
 
-Quant-Trad is a deterministic walk-forward runtime. The system is trustworthy only when every downstream artifact can be explained from what the runtime knew at the time.
+Explicit acquisition normalizes provider observations into schema-registered,
+append-only Facts. Source identity, effective time, publication/receipt time,
+platform acceptance, known-at, revision and quality have distinct meanings.
+Canonical readers select revisions under the admitted source and causal scope;
+a cache miss never authorizes acquisition.
 
-```text
-Data -> Indicators -> Decisions -> Execution -> Events -> BotLens / Reports
-```
+Dataset preparation freezes exact series, selected ranges, per-series committed
+watermarks, provenance and gap evidence. Freeze preserves what QT knows,
+including gaps; each consumer still decides whether that evidence is usable.
+A frozen manifest is an input identity, not a universal readiness certificate.
 
-Reports, charts, fleet cards, exports, and narrative summaries are views. They do not create execution truth.
+A Check consumes an explicit frozen read binding through its registered,
+versioned method. Indicator-based Checks use the same indicator engine as other
+consumers. Checks produce analytical evidence; they do not create fills, mutate
+wallets or make a Strategy executable. Research Observations and Studies retain
+findings, relationships and interpretation revisions separately from Check
+execution. Scientific protocol, holdout and governance operations have their
+own admission boundaries. A completed Check or saved interpretation does not
+grant scientific certification, promotion or deployment authority.
 
-## Diagram Walkthrough
+A backtest admits a frozen Dataset and pinned Strategy, Indicator and execution
+contracts. It advances the indicator timeline, evaluates typed outputs and
+applies simulated order, fee, margin, wallet and settlement semantics. Runtime
+events and trade/accounting facts explain what it did. Reports and BotLens
+project those facts; neither can rewrite execution.
 
-[system-runtime-truth-flow.mmd](diagrams/system-runtime-truth-flow.mmd) shows the platform as a truth pipeline:
+Paper intake is a separate provider-stream composition. Closed candles become
+runtime inputs only through its admitted persistence path; provisional candles
+remain display-only. Existing live-candle aggregation is not a preparation
+route for new research Datasets. New research candles must be provider-native
+at the requested timeframe. No current execution mode authorizes external
+order submission; a lifecycle label of live means actively producing facts.
 
-1. Explicit provider intake appends canonical candle facts; causal feeds and instrument services supply them downstream.
-2. Indicator runtime advances state and publishes typed outputs.
-3. The decision layer evaluates strategy rules against typed outputs and bounded history.
-4. Execution runtime applies deterministic ordering, FAST/FULL semantics, fees, margin, wallet, settlement, and trade lifecycle changes.
-5. Runtime/domain events and trade rows become durable truth.
-6. BotLens, reports, compare views, and frontend state project from durable/runtime truth.
-7. Observability describes health and failure, but does not alter trading truth.
+## Ownership at the boundaries
 
-## Boundary Ownership
-
-| Boundary | Owns | Must Not Own |
+| Owner | What it establishes | What it cannot establish |
 | --- | --- | --- |
-| Data | Explicit provider intake, immutable market facts, instruments, causal reads, provenance, and gap classification | Decisions or fills |
-| Indicator runtime | Private indicator state, typed outputs, overlays, details | Strategy rule evaluation |
-| Decision layer | Signals, guards, rules, decision artifacts, rejected reasons | Wallet, fills, settlement |
-| Execution runtime | Ordering, FAST/FULL execution, fees, margin, wallet, lifecycle, events | UI playback semantics |
-| Persistence | Durable ledgers and read-model support rows | Alternate execution reconstruction |
-| BotLens projections | Debug/read models over runtime facts | Execution truth |
-| Reporting | Research datasets, compare, exports, diagnostics, narrative summaries | Runtime mutation |
-| Research orchestration | API-backed CLI workflow and operation surface for agents/tools | Runtime, strategy, wallet, report, or persistence semantics |
-| Observability | Logs, metrics, diagnostics, fallback/degrade visibility | Domain truth |
-| Frontend | Human visualization and inspection state | Canonical runtime state or agent workflow orchestration |
+| Data | Registered Fact meaning, acquisition, source/provenance, revisions, causal selection, gaps and frozen input identity | Consumer readiness, trading decisions or fills |
+| Indicator engine | Dependency order, state transitions, validated typed outputs and indicator-scoped clocks | Strategy policy or execution |
+| Decision layer | Compiled rules, typed-output history, decision artifacts and rejection reasons | Wallet, fills or settlement |
+| Execution runtime | Admitted simulated orders, ordering, fills, fees, margin, wallet, lifecycle and events | Venue-realized fills or live-trading authorization |
+| Research execution and memory | Check evidence, recorded findings, Studies and versioned interpretations | Alternate Indicator/runtime truth or self-certification |
+| Scientific authority | Explicit protocol, attempt, holdout and governance operations under their contracts | Implicit authority from a chart, narrative or successful experiment |
+| Persistence | Durable evidence, transactional ownership and verified storage reads | Alternate semantic reconstruction |
+| BotLens and reporting | Bounded inspection, durable replay/read models, metrics, comparison and export | New execution facts |
+| Observability | Health, failures, resource usage and diagnostic attribution | Market facts, PnL correctness or scientific validity |
+| API, CLI, MCP and frontend | Typed requests, admitted operations and human inspection | Independent product semantics or client-owned truth |
 
-## Hot Path And Cold Path
+The API/backend contracts own operations. CLI and MCP adapt them; the browser
+offers inspection and separately admitted collector/storage controls. Frontend
+state is never the authority for a run, Dataset or research record.
 
-Hot path:
+## One event can have several clocks
 
-```text
-bar -> indicator snapshot -> decision artifact -> execution outcome -> runtime event
-```
+The ordinary bar path is:
 
-The hot path should carry bounded, typed payloads needed for execution, audit, and projection.
+    available candle -> indicator snapshot -> decision -> execution effects -> runtime events
 
-Cold path:
+Candle open time identifies the interval; availability determines when it may be
+used. The indicator engine advances through initialize, apply_bar and snapshot.
+No output can appear before its known-at time. Strategy rules read typed
+signal, context and metric outputs rather than overlays or mutable internals.
 
-```text
-event ledger / trade rows -> BotLens forensics -> reports -> compare -> export
-```
+Durable run_seq is persistence order. Indicator, position, wallet and overlay
+commit clocks preserve their respective causal transitions; one global arrival
+order cannot replace them. Stable IDs connect these transitions to reports,
+forensics and logs. See [identity](../identity/IDENTITY_AND_CORRELATION_BOUNDARY.md)
+and [persistence](../persistence/PERSISTENCE_BOUNDARY.md).
 
-Cold paths may page history, assemble heavy debug payloads, or produce analyst summaries. They must not feed back into execution for the same historical bar.
+## Durability and projection are different obligations
 
-## What Counts As Run Evidence
+Canonical persistence is required: queue overflow, failed writes or an undrained
+terminal buffer prevent a successful complete run. Live projection may arrive
+before an asynchronous durable batch commits, so visible data is not proof of
+commit. Terminal finalization must establish the required durability boundary.
 
-Run evidence begins with provider-backed candle facts, then moves through
-known-at indicator outputs, strategy decision artifacts, accepted and rejected
-decision events, trade lifecycle rows, runtime/domain events, and wallet, fee,
-margin, and settlement effects. Those are the facts other layers must explain
-from.
+Visual fanout, overlays, debug payloads and metrics use bounded queues, windows
+and caches. Their failure must produce explicit unavailable, invalid, incomplete
+or degraded state. A missing projection is not an empty valid execution result.
+Cold inspection can page durable history; it cannot feed later facts back into
+the original decision.
 
-Overlays, details, BotLens selected-symbol projections, frontend status cards,
-report summaries, narrative insight text, and observability dashboards are
-views over that evidence. They are useful, but they can be late, partial,
-rebuilt, or unavailable. Projection failure should produce unavailable or
-degraded state, not fabricated valid execution state.
+Frozen data reads verify selected material and required archive checksums.
+Header-only planning can establish selection metadata without proving payload
+integrity. Transactional snapshots, reference/expiry fences and filesystem
+identity protect different boundaries; none alone proves a complete recovery.
+Local recovery generations share a failure domain with the archive. Encrypted
+database-plus-archive recovery is a separate configured adapter and release
+requirement, not a claim that every local copy is encrypted or restore-qualified.
 
-## System Invariants
+## Read at the depth of the change
 
-- All derived outputs respect `initialize -> apply_bar -> snapshot`.
-- No artifact appears retroactively before its known-at time.
-- Strategy logic consumes typed indicator outputs, not overlays or mutable indicator internals.
-- Signals are decision-layer inputs and decision provenance, not an independent execution subsystem.
-- Execution mode is separate from UI playback and animation.
-- Domain events and stable IDs connect runtime truth to BotLens and reports.
-- Heavy debug/history stays off the hot path.
-- Contracts beat explanatory docs when they disagree.
+- [Data boundary](../data/DATA_BOUNDARY.md): acquisition, Facts and Dataset admission.
+- [Generalized Fact data plane](../data/GENERALIZED_FACT_DATA_PLANE.md): canonical storage and frozen reads.
+- [Indicator runtime](../indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md) and
+  [decision layer](../decision-layer/DECISION_LAYER_BOUNDARY.md): analytical and Strategy inputs.
+- [Check evidence](../research-orchestration/CHECK_EVIDENCE_BOUNDARY.md) and
+  [research memory](../research-memory/RESEARCH_MEMORY_BOUNDARY.md): research evidence and interpretation.
+- [Execution runtime](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md) and
+  [wallet](../execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md): simulated economic effects.
+- [BotLens](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md) and
+  [reporting](../reporting/REPORTING_BOUNDARY.md): inspection and comparison.
+- [Storage management](../persistence/STORAGE_MANAGEMENT.md): physical placement,
+  recovery and explicit operator cutovers.
+- [Observability](../observability/OBSERVABILITY_BOUNDARY.md) and
+  [security](../security/SECURITY_LAYER.md): operational evidence and trust assumptions.
 
-## Related Docs
-
-- [Engine state model](../engine/ENGINE_STATE_MODEL.md)
-- [Identity and correlation boundary](../identity/IDENTITY_AND_CORRELATION_BOUNDARY.md)
-- [Data boundary](../data/DATA_BOUNDARY.md)
-- [Indicator runtime boundary](../indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md)
-- [Decision layer boundary](../decision-layer/DECISION_LAYER_BOUNDARY.md)
-- [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
-- [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
-- [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
-- [Operator console v2](../frontend/OPERATOR_CONSOLE_V2.md)
-
-## Known Gaps
-
-- Paper/live runtime mode details should be documented when their collaborators diverge from backtest behavior.
-- SVG diagram generation is pending Mermaid tooling.
+Historical method records and architectural decisions explain earlier choices.
+They do not expand the current executable catalog, establish current deployment
+status or override platform contracts. Public documentation describes reusable
+infrastructure and process; actual research records remain in QT's private stores.

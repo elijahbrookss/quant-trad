@@ -379,6 +379,44 @@ A rejected exit fill leaves its leg and position open. Closed-trade fact
 projection requires all terminal fields and fails loudly when the domain
 snapshot is incomplete; it does not infer reasons or prices from legs.
 
+## Provider-backed paper runtime
+
+Paper is an execution-runtime composition over live provider market data. It
+reuses the existing Strategy evaluator, simulated execution adapter, wallet,
+order lifecycle, retained events and report owners. Provider parsing and product
+IDs remain in acquisition/stream adapters. The current concrete paper stream
+adapter is Coinbase; this is not proof of a live order adapter for that venue.
+
+Observe-only paper validates connectivity and intake without evaluating Strategy
+decisions or creating orders, fills, trades, fees or wallet mutations. Simulated
+paper warms Indicator state from historical candles, then advances the normal
+runtime only on closed live Strategy-timeframe candles. Seed history does not
+create paper trades. The existing live aggregation path is compatibility
+behavior; it must not be used to prepare new research candle Datasets, which
+require provider-native candles at the requested timeframe.
+
+The implementation owners are src/engines/bot_runtime/live_market.py and
+portal/backend/service/bots/paper_market_stream.py. Closed live candles are
+persisted before runtime consumption. Provider ticker/candle updates may also
+emit throttled provisional display candles. Their provider event time chooses
+the displayed interval and local receipt time records availability; they remain
+live-only BotLens projections and never become Indicator, Strategy, report or
+replay input.
+
+The provider-neutral stream runtime owns reconnect backoff, heartbeat staleness
+and the continuous-disconnect budget. The resolved market_data_stream_policy is
+frozen into the run configuration. Recovered disconnects are operational
+diagnostics; fatal provider/configuration errors or an exhausted disconnect
+budget fail intake. Terminal summaries retain disconnect/reconnect counts,
+duration and last-reason evidence. Current defaults are owned by settings and
+the policy adapter, rather than a second configuration inventory here.
+
+See the [paper setup guide](../../guides/coinbase-derivatives-paper-setup.md)
+for the admitted operator workflow. A successful connectivity or long-running
+paper check does not establish profitability, calibrated slippage or
+venue-realized execution. REST comparison of locally aggregated live bars is
+a separate audit capability; provisional chart display is already implemented.
+
 ## Live-Order Boundary
 
 The current execution runtime supports deterministic simulated fills and
@@ -400,7 +438,8 @@ controls.
 - Missing source series fails or degrades with explicit context.
 - Ambiguous intrabar execution uses contract-defined pessimistic fallback and emits diagnostics.
 - Runtime exceptions become lifecycle/runtime events and terminal state.
-- Projection/storage failures should surface as degraded or unavailable states without fabricating execution.
+- Projection failures surface degraded or unavailable inspection state. Required
+  persistence failures fail the run rather than fabricating complete evidence.
 
 ## Invariants
 

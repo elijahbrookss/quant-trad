@@ -92,12 +92,12 @@ They require justified historical scope, compatible reads and bounded migration
 interruptions while preserving the current research architecture. Operational
 admission remains separate from this design guidance.
 
-## Status
+## Canonical ownership
 
 ADR 0063 is accepted and this is the active contract. The schema registry,
 canonical envelope, append-only `market.fact_versions` store, causal selector,
 Dataset freeze, and frozen read binding own every active market Fact family.
-The 17 superseded family version tables are absent after the hard cutover; no
+Superseded family version tables are absent after the hard cutover; no
 runtime dual write, fallback read, or compatibility flag remains.
 
 Level 2 validity intervals, reconstruction state, raw archives, checkpoints,
@@ -1474,11 +1474,8 @@ bound constant array prefilter. The exact per-request series, family, hash and
 causal predicates remain authoritative. Each hot match obtains its header through
 an ID/day-parameterized lateral lookup, with an `OFFSET 0` boundary to prevent
 pulling it into a merge against the entire header history. This retains all
-matching revisions and adds no index, stored alias or schema change. The earlier
-October 9 three-root read-only probe returned three
-source revisions in 1.30 seconds under a two-second statement limit. That small
-sample is not an archive-throughput estimate, and normal maintenance budgets
-still apply. Hydrated rows must
+matching revisions and adds no index, stored alias or schema change. Normal maintenance budgets still apply. A query-plan optimization is not an
+archive-throughput guarantee. Hydrated rows must
 prove their actual material, series, family, observation and causal clocks.
 
 Legacy material-source selection groups at most 128 requests sharing one exact
@@ -2207,10 +2204,9 @@ ownership. Do not print credentials from the rendered configuration. A longer
 final budget can delay publication; observe the actual fence/waiters and collector
 recovery, rather than interpreting an allowance as a measured pause guarantee.
 
-The reviewed operating profile is32768 distinct verification objects per partition,
-4294967296 verification bytes,1000pages,60seconds final handoff and600seconds overall.
-The byte/page bounds are unchanged. The object allowance covers the measured four
-complete partition catalogues (peak18474objects), not the entire unsized backlog.
-Fresh whole-partition integrity/dependency/pin/placement verification is still
-required for every reclamation. The saved hot-history policy, reserve floors,
-resource cancellation, scheduling and concurrency protections remain unchanged.
+Choose operating limits from measured partition catalogues and the admitted
+publication-pause budget. Per-partition bounds are not an estimate of the
+entire backlog. Fresh whole-partition integrity, dependency, pin and placement
+verification remains required for every reclamation; a larger allowance never
+changes the saved hot-history policy, reserve floors, cancellation, scheduling
+or concurrency guards.

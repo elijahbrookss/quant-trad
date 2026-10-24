@@ -102,7 +102,9 @@ truth, wallet/order/trade facts, or research-valid status.
 1. Runtime, projectors, storage, and transport emit structured metrics/events.
 2. The in-memory sink keeps hot-path emission cheap.
 3. The exporter persists durable observability rows after applying a storage budget.
-4. Grafana, Loki, and operator tools inspect health and incidents.
+4. Structured stdout/stderr follows a separate Docker-log/shipper/Loki path.
+5. Grafana and operator tools inspect the database rollups and Loki logs through
+   their respective data sources; the database exporter does not send rows to Loki.
 
 `qt logs` is the operator-facing Loki tool. It does not create observability
 truth; it queries Loki, parses Quant-Trad structured log lines into fields, and

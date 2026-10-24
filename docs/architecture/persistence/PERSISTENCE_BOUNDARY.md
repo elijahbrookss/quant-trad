@@ -52,9 +52,9 @@ code_paths:
 ---
 # Persistence Boundary
 
-## Offline scientific authority and governance
+## Scientific authority and governance persistence
 
-Phase 4-6 records remain inside the primary PostgreSQL boundary. The schema
+Scientific authority and governance records remain inside the primary PostgreSQL boundary. The schema
 contract creates and validates immutable protocol manifests, experiment family
 projections, complete attempt records, typed strategy graph artifacts, frozen
 candidates, database-unique holdout uses, scientific certificates, append-only
@@ -130,17 +130,15 @@ are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference
 artifacts for old local databases, not normal fresh-start instructions.
 
-Market-data persistence is model-declared in
-`portal/backend/db/market_data_models.py` under schema `market`. It owns
-source and typed-series identity, ingestion operations, append-only candle
-and exact-numeric revisions, gap/acquisition evidence, and frozen dataset
-manifests. Fresh bootstrap continues to create model-owned market objects other
-than the explicit numeric tables, converts eligible revisions to TimescaleDB
-hypertables, and installs their existing immutability triggers. Startup fails if
-active legacy tables remain in `public`; the explicit v2 hard-cutover migration
-verifies and archives them instead of supporting dual readers or writers.
-Provider credential helpers do not create their own table;
-`portal_provider_credential_refs` remains owned by portal ORM metadata.
+Market-data models and the schema registry own the canonical Fact relation,
+global identity, dated headers and registered payload placement. Every active
+Fact family uses this shared boundary. Former candle, OI, funding, numeric,
+trade and derived-feature version tables are legacy cutover inputs, not
+current runtime storage. Clean bootstrap creates the current registered
+objects. Existing installations use explicit reviewed cutovers; startup
+validates their resulting contract rather than applying historical migrations.
+Provider credential helpers likewise do not create their own table:
+portal_provider_credential_refs remains owned by portal ORM metadata.
 
 Normalization specifications are immutable evidence. Catalog reads recompute
 the full material hash and require the current 31-hex identity. A retired
@@ -187,8 +185,8 @@ Active schema surfaces are justified by role:
   `portal_bot_run_event_seq_allocators`, `portal_bot_trades`,
   `portal_bot_trade_events`, `portal_bot_run_leases`, strategy/bot/instrument
   config tables, plus `market.sources`, `market.series`,
-  `market.ingestion_runs`, `market.candle_versions`,
-  `market.numeric_fact_versions`, `market.gap_evidence`,
+  `market.ingestion_runs`, `market.fact_schemas`, `market.fact_versions`,
+  the canonical identity/header/payload relations, `market.gap_evidence`,
   `market.fact_acquisition_coverage`, `market.datasets`, and
   `market.dataset_series`.
 - Keep as definition only: `portal_bots`. Runtime state belongs to
@@ -431,9 +429,8 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 ## Failure And Recovery
 
 - Required persistence for audit trails fails loud.
-- Missing or drifted explicit-migration numeric objects fail with
-  `scripts/db/manual_migration_numeric_fact_store_v1.sql`; startup never
-  creates or repairs them.
+- Existing canonical schema drift fails with actionable contract diagnostics;
+  historical family-table migration scripts are not clean-install instructions.
 - Missing required columns fail with actionable errors.
 - Missing model-declared indexes are created during bootstrap.
 - Missing required indexes after bootstrap fail with actionable errors.
@@ -445,8 +442,8 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - Durable truth is append-friendly and replayable.
 - Runtime events preserve known-at context.
 - Storage does not perform hidden execution reconstruction.
-- Fresh schemas come from current clean definitions, with the explicitly named
-  numeric-fact migration applied before startup admits those new objects.
+- Fresh schemas come from current model definitions, the registered Fact schemas
+  and the reviewed clean-bootstrap clauses.
 - Existing schema drift fails loud instead of being patched with hidden runtime backfills.
 
 ## Related Docs
@@ -472,8 +469,9 @@ catalogue prevents startup or ingestion from silently recreating missing
 history. Ingestion resolves latest revisions through identity before fetching
 dated headers.
 
-This is schema support, not completed physical tiering. Existing installations
-require a separate operator cutover; runtime rejects v1 without modifying it.
+Logical schema support does not attest an installation's physical placement.
+Existing installations require a separate operator cutover; runtime rejects an
+incompatible v1 layout without modifying it.
 The [layout notes](../../engineering/fact-header-layout-v2.md) describe the
 deployment blocker and remaining migration work.
 
@@ -481,7 +479,10 @@ The v2 operator preflight inventories source structure and dependencies in a
 bounded read-only transaction. It uses PG_DSN directly without loading runtime
 settings and always reports migration readiness as false. Its catalog
 fingerprint is comparison evidence, not a substitute for writer fencing or
-verification. The operator cutover executor remains unimplemented.
+verification. The explicit preserving/forward operator owns
+existing-installation cutover;
+ordinary application startup does not execute it. See
+[Storage management](STORAGE_MANAGEMENT.md#one-online-migration-workflow-and-its-owners).
 
 The series/day directory under fact_series_day_schema.py is owned by clean
 bootstrap and the explicit legacy full-row cutover. Normal canonical range
@@ -490,8 +491,9 @@ payload rules remain outside that placement lookup. Missing or incompatible
 directories and filtered/disabled capture fail admission. Runtime never
 backfills bounds over existing headers. See
 [ADR 0071](../decisions/0071-route-range-reads-through-series-day-directory.md)
-for the snapshot and write-cost tradeoff. Physical placement and the existing
-tiered-v1 shadow migration remain separate, unfinished work.
+for the snapshot and write-cost tradeoff. Physical placement and operator
+migration remain separate from logical selection; their supported procedures
+and admission are owned by Storage management.
 
 
 The existing locked snapshot session also supports nonwaiting admission for

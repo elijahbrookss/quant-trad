@@ -1,32 +1,20 @@
 flowchart LR
-    provider["Provider adapters<br/>source candles + metadata"]
-    store["Canonical market feed<br/>causal source facts + gaps"]
-    indicator["Indicator runtime<br/>initialize -> apply_bar -> snapshot"]
-    strategy["Strategy evaluator<br/>typed outputs -> decision artifacts"]
-    runtime["Bot runtime<br/>ordering, fills, fees, margin, wallet, settlement"]
-    events["Domain event ledger<br/>runtime truth + hot fields"]
-    projections["Read models / projections<br/>BotLens, lifecycle, diagnostics"]
-    reports["RunResearchDataset<br/>reports, compare, export"]
-    ui["Frontend / BotLens<br/>inspection, not execution truth"]
-    observability["Observability<br/>logs, metrics, Grafana, Loki"]
+    provider["Explicit provider acquisition"]
+    facts["Canonical Facts<br/>source + revisions + known-at + gaps"]
+    dataset["Frozen Dataset<br/>ranges + per-series commit scope"]
+    binding["Frozen read binding<br/>verified material"]
+    check["Registered Check<br/>shared Indicator engine when required"]
+    memory["Research memory<br/>Observations + Studies"]
+    authority["Scientific authority<br/>protocol + holdout + governance"]
+    runtime["Admitted backtest<br/>Indicators -> decisions -> simulated execution"]
+    ledger["Durable runtime evidence<br/>orders + trades + wallet + events"]
+    views["BotLens + reports<br/>bounded inspection / compare / export"]
+    api["Backend operation contracts<br/>CLI / MCP / admitted UI controls"]
 
-    provider --> store
-    store --> indicator
-    indicator --> strategy
-    strategy --> runtime
-    runtime --> events
-    runtime --> observability
-    events --> projections
-    events --> reports
-    projections --> ui
-    reports --> ui
-    observability --> ui
-
-    ui -. commands/config .-> runtime
-
-    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
-    classDef view fill:#111827,stroke:#a78bfa,color:#ede9fe
-    classDef source fill:#13251d,stroke:#34d399,color:#dcfce7
-    class provider,store source
-    class indicator,strategy,runtime,events truth
-    class projections,reports,ui,observability view
+    provider --> facts --> dataset --> binding
+    binding --> check --> memory
+    binding --> runtime --> ledger --> views
+    memory --> authority
+    api -. explicit requests .-> provider
+    api -. admitted operations .-> check
+    api -. admitted run requests .-> runtime

@@ -285,7 +285,8 @@ Structured payloads and raw evidence are available in an Advanced/Raw section.
 Provider-specific diagnostic extensions may have a bounded typed renderer, but
 provider identity never selects generic lifecycle or actions.
 
-The operator route is **Operations -> Market**. It does not subscribe to every
+The operator destination is **Collectors**; exact legacy detail URLs remain
+compatible through the [operator console](../frontend/OPERATOR_CONSOLE_V2.md). It does not subscribe to every
 collector. One provider-summary stream communicates material fleet changes;
 details refresh only while the selected page is visible. At 200 or more
 collectors, the default workload therefore remains proportional to the number
