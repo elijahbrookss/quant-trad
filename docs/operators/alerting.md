@@ -97,7 +97,7 @@ needed to send mail:
 There are two different setup costs. The installation owner performs the
 provider and sender setup once. After that, adding or removing Quant-Trad users
 is only a comma-separated `QT_ALERT_EMAILS` edit, followed by validation and a
-Grafana-only apply. Application users do not need provider accounts or email
+monitoring-only apply. Application users do not need provider accounts or email
 credentials.
 
 ## One-time installation setup
@@ -188,7 +188,7 @@ before it can be tested. Use a detached worktree at the exact candidate commit.
 Set `CANDIDATE_REF` to the branch or commit being reviewed:
 
 ```bash
-CANDIDATE_REF=feat/example-alert-change
+CANDIDATE_REF=feature/example-alert-change
 git -C /srv/quanttrad/app fetch origin "$CANDIDATE_REF"
 CANDIDATE_SHA="$(git -C /srv/quanttrad/app rev-parse FETCH_HEAD)"
 git -C /srv/quanttrad/app worktree add \
@@ -258,8 +258,8 @@ bash scripts/automation/server_deploy.sh apply-alerts
 ```
 
 `apply-alerts` refuses a dirty checkout or a revision different from the
-recorded deployment. It force-recreates only Grafana with `--no-deps`; it does
-not restart the database, backend, frontends, Alloy, or collectors.
+recorded deployment. It force-recreates Alloy and Grafana with `--no-deps`; it does
+not restart the database, backend, frontends or collectors.
 
 Then open Grafana through the private SSH tunnel and check **Alerting**:
 
@@ -423,9 +423,8 @@ while Grafana remains operational.
 
 Activation is a separately coordinated monitoring change after review and
 qualification of the exact source, including the disposable Alloy configuration
-and Loki/Grafana rule proof in `scripts/ci/test_storage_alerts.py`. The deployed
-`7a34ead6` release does not contain this capability. Do not copy these files into
-that release or restart application/collector services to activate it.
+and Loki/Grafana rule proof in `scripts/ci/test_storage_alerts.py`. Do not copy candidate files into an older installed release or restart
+application/collector services as a shortcut to monitoring activation.
 
 A host owner must approve/install the two supplied systemd units and prepare
 only the new non-secret export directory. With the reviewed source at
@@ -483,7 +482,7 @@ qualified revision; a work-branch handoff receipt is not develop deployment
 admission. These are the existing runner's inner commands, not an instruction
 to bypass its verified operator container/profile. Preparing or starting that
 operator remains a separately authorized activation step. Do not run an ad-hoc
-Compose command or copy candidate files into deployed `7a34ead6`.
+Compose command or copy candidate files into an older deployed release.
 
 Enablement refuses an absent baseline or a recorded baseline that lacks the
 clock-rule cleanup file. This makes pinned rollback to a clock-disabled baseline

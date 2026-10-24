@@ -6,7 +6,9 @@ or grant trading authority.
 
 ## Prerequisites
 
-- Apply the canonical Fact store/data/hard-cutover migrations.
+- Use a database admitted by the current schema contract. Clean installations
+  bootstrap directly; older databases need an exact reviewed upgrade and
+  restore-tested backup, not replay of arbitrary historical migrations.
 - Set `CHAINLINK_ARBITRUM_RPC_URL` to a reviewed Arbitrum mainnet JSON-RPC
   endpoint in the worker environment. Do not place the endpoint or credentials
   in the manifest.
@@ -22,19 +24,24 @@ then install the checked-in definition:
 ```bash
 qt data collector-definitions install-structured \
   --manifest-path config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json \
-  --binding-id nxtassets-btc-direct-etp-reserves
+  --binding-id nxtassets-btc-direct-etp-reserves \
+  --enabled
 ```
 
 The installer accepts only a checked-in structured-Fact manifest and
 automatically installs the exact research-only canonical subject declared by
 that manifest. It cannot accept arbitrary provider configuration.
 
-Inspect the stored definition, source, series, cadence, and staleness policy.
-For a new reviewed installation, add `--enabled` to configure it with desired
-state `running`. If it was installed disabled first, enable it and then use the
-canonical collector `start` action shown by `qt data collectors fleet`.
-Operational state changes stay in the collector command path rather than the
-definition installer.
+Inspect the returned definition, source, series, cadence and staleness policy.
+For a new installation, `--enabled` configures initial desired state `running`.
+Reinstallation preserves an existing definition's enabled/desired state; it is
+not an enable command. The CLI has no general configuration-enable action for
+an already disabled definition. Diagnose that state and arrange a separately
+reviewed configuration change; do not edit database flags to bypass it.
+
+After configuration admission, use the actions advertised by
+`qt data collectors fleet`. See [collector operations](collector-operations.md)
+for exact kind/ID, diagnosis, stop/pause/resume and immutable operation history.
 
 ## Expected behavior
 
@@ -47,21 +54,21 @@ definition installer.
 - Treat all history before collector activation as unavailable unless a future
   reviewed historical source proves otherwise.
 
-Use normal `qt data collectors` status/history operations and worker logs to
-inspect claims, attempts, failures, gaps, and facts. Fact history is read through
+Use `qt data collectors detail scheduled_fact <collector-id>`, `events`,
+`gaps` and worker logs to inspect claims, attempts, failures, gaps and Facts.
+Fact history is read through
 the canonical repository and does not call Chainlink.
 
-## Disable or recover
+## Stop or recover
 
-Disable the definition through the normal collector control surface before
-changing endpoint, proxy, schema, cadence, or finality policy. Do not edit a
-running definition in place. Commit a new reviewed manifest/schema version when
+Stop or pause collection through the normal collector control surface before
+a reviewed change to endpoint, proxy, schema, cadence or finality policy. Do not
+edit a running definition in place. Commit a new reviewed manifest/schema version when
 semantic meaning changes.
 
 After a worker restart, the normal lease/retry path resumes polling. The first
 identical latest bundle is an idempotent no-op; downtime is not backfilled or
-hidden. If the manifest or on-chain metadata disagrees, leave the collector
-disabled, preserve the error evidence, and investigate rather than weakening
+hidden. If the manifest or on-chain metadata disagrees, keep collection stopped, preserve the error evidence, and investigate rather than weakening
 validation.
 
 For architecture, historical classification, feed semantics, and known risks,
