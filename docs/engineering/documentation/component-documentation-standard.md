@@ -56,6 +56,22 @@ This does not require a fixed section template. Use headings only when they help
 the reader move through the explanation. A short doc with three clear paragraphs
 is better than a long doc with ten impressive headings.
 
+## Public examples and durable information
+
+Follow the [public infrastructure/private research boundary](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+Document reusable interfaces, scientific methods, and operating procedures.
+Use synthetic examples or material explicitly approved for public release;
+private experiments and records do not become documentation examples merely
+because they are useful for debugging or reproducibility. Do not move removed
+private records into a public historical appendix.
+
+Give a changing fact one owner and link to it. Code-owned command catalogs,
+configuration, and test discovery should not be copied into status inventories.
+Keep dated engineering evidence when it explains a consequential decision or
+failure; remove implementation diaries and transient test counts once the
+owning contract, procedure, or ADR carries the useful information. Preserve
+manual cutover, backup, and recovery detail until its durable owner retains it.
+
 ## Architecture Docs
 
 Architecture docs should be boundary-first, but they should not read like
