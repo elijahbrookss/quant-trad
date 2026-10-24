@@ -44,7 +44,6 @@ from market_data.frozen import semantic_hash
 
 from . import repository
 from .preparation_acquisition import acquire_check_inputs
-from .historical_check_custody import (historical_identity, validate_historical_definition, validate_historical_receipt, historical_observation_eligible)
 from .checks import (
     CANDIDATE_LIFECYCLE,
     INDICATOR_FORWARD_OUTCOME,
@@ -164,7 +163,6 @@ def list_research_items(
 
 def _validate_research_check_evidence_payload(
     payload: Mapping[str, Any],
-    *, item_id: str | None = None,
 ) -> tuple[
     CheckDefinition,
     CheckRequest,
@@ -224,46 +222,38 @@ def _validate_research_check_evidence_payload(
         or result.evaluator_version != definition.evaluator_version
     ):
         raise ValueError("check_evidence_payload_invalid: evidence/result disagreement")
-    historical = historical_identity(definition)
-    if historical:
-        # Only exact inventoried original envelopes can use recorded declarations.
-        # This does not install an executor or admit new historical requests.
-        validate_historical_receipt(definition, evidence, result, item_id=item_id)
-        validate_historical_definition(definition, request, plan)
-        declared_execution = dict(plan.execution)
-    else:
-        registered = definition.material_rules.get("registered_definition")
-        if isinstance(registered, Mapping):
-            base = CHECK_REGISTRY.resolve_definition(
-                str(registered.get("definition_id") or ""),
-                str(registered.get("definition_version") or ""),
-            )
-            if (
-                base.definition_id != definition.definition_id
-                or base.definition_hash != str(registered.get("definition_hash") or "")
-                or base.evaluator_id != definition.evaluator_id
-                or base.evaluator_version != definition.evaluator_version
-            ):
-                raise ValueError(
-                    "check_evidence_payload_invalid: registered definition lineage disagrees"
-                )
-        else:
-            base = CHECK_REGISTRY.resolve_definition(
-                definition.definition_id, definition.definition_version
-            )
-            if base.definition_hash != definition.definition_hash:
-                raise ValueError(
-                    "check_evidence_payload_invalid: definition is not registered"
-                )
-        evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
-        declared_execution = dict(
-            evaluator.declare_requirements(definition=definition, request=request)
+    registered = definition.material_rules.get("registered_definition")
+    if isinstance(registered, Mapping):
+        base = CHECK_REGISTRY.resolve_definition(
+            str(registered.get("definition_id") or ""),
+            str(registered.get("definition_version") or ""),
         )
-        if dict(plan.execution) != declared_execution:
+        if (
+            base.definition_id != definition.definition_id
+            or base.definition_hash != str(registered.get("definition_hash") or "")
+            or base.evaluator_id != definition.evaluator_id
+            or base.evaluator_version != definition.evaluator_version
+        ):
             raise ValueError(
-                "check_evidence_payload_invalid: evaluator execution declaration disagrees "
-                "with plan"
+                "check_evidence_payload_invalid: registered definition lineage disagrees"
             )
+    else:
+        base = CHECK_REGISTRY.resolve_definition(
+            definition.definition_id, definition.definition_version
+        )
+        if base.definition_hash != definition.definition_hash:
+            raise ValueError(
+                "check_evidence_payload_invalid: definition is not registered"
+            )
+    evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
+    declared_execution = dict(
+        evaluator.declare_requirements(definition=definition, request=request)
+    )
+    if dict(plan.execution) != declared_execution:
+        raise ValueError(
+            "check_evidence_payload_invalid: evaluator execution declaration disagrees "
+            "with plan"
+        )
     input_kind = str(declared_execution.get("input_kind") or "").strip()
     expected_evidence_kind = {
         "market_data": "frozen_market_data",
@@ -274,12 +264,11 @@ def _validate_research_check_evidence_payload(
             "check_evidence_payload_invalid: evaluator input kind disagrees with "
             f"evidence binding input_kind={input_kind or '<missing>'}"
         )
-    if not historical:
-        reconstructed_definition = reconstruct_pinned_check_definition(request, plan)
-        if reconstructed_definition.to_dict() != definition.to_dict():
-            raise ValueError(
-                "check_evidence_payload_invalid: definition is not the canonical request/graph definition"
-            )
+    reconstructed_definition = reconstruct_pinned_check_definition(request, plan)
+    if reconstructed_definition.to_dict() != definition.to_dict():
+        raise ValueError(
+            "check_evidence_payload_invalid: definition is not the canonical request/graph definition"
+        )
     expected_graph_hash = semantic_hash(
         {"indicators": [dict(row) for row in plan.indicator_graph]}
     )
@@ -317,7 +306,6 @@ def _validate_research_check_evidence_payload(
             request,
             plan,
             subject_snapshots=subject_snapshots,
-            historical_execution=declared_execution if historical else None,
         )
         for field in (
             "market_data_requirements",
@@ -366,7 +354,6 @@ def _validate_research_check_evidence_payload(
             request,
             plan,
             subject_snapshots={},
-            historical_execution=declared_execution if historical else None,
         )
         for field in (
             "market_data_requirements",
@@ -453,8 +440,6 @@ def _validate_plan_binding_alignment(
 
 
 def _definition_evidence_classification(definition: CheckDefinition) -> str:
-    if historical_identity(definition):
-        return "historical_frozen_verified"
     if not definition_allows_evidence(definition):
         return "frozen_replayable_unqualified"
     if definition.definition_id in {SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}:
@@ -475,6 +460,9 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
                     _assert_access(projected, session)
                 projected["question_classification"] = "contracted_question"
         return projected
+    # Availability is a current read projection, never a rewrite of the saved record.
+    projected.update(execution_available=False, replayable=False, observation_eligible=False)
+    projected.pop("stored_evidence_integrity", None)
     payload = projected.get("payload")
     schema_version = (
         str(payload.get("schema_version") or "")
@@ -482,6 +470,18 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
         else ""
     )
     if schema_version == "research_check_payload.v2":
+        raw_definition = payload.get("definition")
+        if isinstance(raw_definition, Mapping):
+            base_version = str(raw_definition.get("definition_version") or "").split("+", 1)[0]
+            try:
+                CHECK_REGISTRY.resolve_definition(str(raw_definition.get("definition_id") or ""), base_version)
+            except ValueError:
+                projected["evidence_classification"] = "legacy_frozen_unverifiable"
+                projected["evidence_integrity_error"] = (
+                    "Check method is unavailable in the current runtime; saved record remains inspectable "
+                    "without current verification, execution, replay or new evidence admission"
+                )
+                return projected
         raw_plan = payload.get("plan") if isinstance(payload, Mapping) else None
         raw_evidence = (
             payload.get("evidence") if isinstance(payload, Mapping) else None
@@ -522,7 +522,7 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
             return projected
         try:
             definition, _request, _plan, _evidence, result = (
-                _validate_research_check_evidence_payload(payload, item_id=str(projected["id"]))
+                _validate_research_check_evidence_payload(payload)
             )
         except (KeyError, TypeError, ValueError) as exc:
             projected["evidence_classification"] = "invalid_v2"
@@ -530,16 +530,13 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
             projected["observation_eligible"] = False
             projected["evidence_integrity_error"] = str(exc)
         else:
-            historical = historical_identity(definition)
-            projected["evidence_classification"] = (
-                "historical_frozen_verified" if historical else _definition_evidence_classification(definition)
-            )
+            projected["evidence_classification"] = _definition_evidence_classification(definition)
             projected["stored_evidence_integrity"] = "verified"
-            projected["execution_available"] = not historical
-            projected["replayable"] = not historical
+            projected["execution_available"] = True
+            projected["replayable"] = True
             projected["observation_eligible"] = (
                 str(result.result.get("status") or "") == "completed"
-                and (historical_observation_eligible(str(projected["id"])) if historical else definition_allows_evidence(definition))
+                and definition_allows_evidence(definition)
             )
     else:
         projected["evidence_classification"] = "legacy_unpinned"
@@ -1241,17 +1238,13 @@ def create_observation_from_check_evidence(
     )
     if check.get("kind") != "research_check":
         raise ValueError("observation_evidence_invalid: item is not a Check")
-    verified_historical = (
-        check.get("stored_evidence_integrity") == "verified"
-        and check.get("execution_available") is False
-    )
-    if not check.get("observation_eligible") or not (check.get("replayable") or verified_historical):
+    if not check.get("observation_eligible") or not check.get("replayable"):
         raise ValueError(
             "observation_evidence_invalid: Check is not durable replayable evidence"
         )
     check_payload = dict(check.get("payload") or {})
     _definition, request, _plan, evidence_contract, result = (
-        _validate_research_check_evidence_payload(check_payload, item_id=str(check["id"]))
+        _validate_research_check_evidence_payload(check_payload)
     )
     evidence = evidence_contract.to_dict()
     observation_title = str(
@@ -1324,13 +1317,11 @@ def replay_research_check(check_id: str) -> dict[str, Any]:
             "evidence_classification": item.get("evidence_classification"),
             "matches": False,
             "provider_call_performed": False,
-            "reasons": (["historical method retired; stored integrity does not provide current execution or exact-source replay"]
-                        if item.get("stored_evidence_integrity") == "verified" and item.get("execution_available") is False
-                        else ["legacy Check has no immutable input binding"]),
+            "reasons": [item.get("evidence_integrity_error") or "Check has no currently replayable evidence"],
         }
     payload = dict(item.get("payload") or {})
     definition, request, original_plan, original_evidence_contract, original_result = (
-        _validate_research_check_evidence_payload(payload, item_id=str(item["id"]))
+        _validate_research_check_evidence_payload(payload)
     )
     original_evidence = original_evidence_contract.to_dict()
     try:

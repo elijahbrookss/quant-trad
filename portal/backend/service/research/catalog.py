@@ -631,7 +631,7 @@ def _settings_fields(family: str, version: str) -> dict[str, Any]:
             fields["method_configuration"] = {"fixed": "See settings.fixed; explicit forward_risk schema selects this method; statistics must be empty/zero. No alternative horizons, matching knobs or inference settings."}
         return fields
     if family == "raw_forward_outcome" and version == "18":
-        return {"scope": {"constraints": "Exact saved v12/v14/v17 decision scope and original frozen native15m Dataset; evidence mode only; no tail."},
+        return {"scope": {"constraints": "Exact supported saved v17 decision scope and original frozen native15m Dataset; retired selections unavailable; evidence mode only; no tail."},
             "detector": {"fixed": {"type": "saved_reversal_selection"}},
             "outcomes": {"schema_version": "reversal_saved_measurements.v2",
                 "selection_reference": "Exact Check/result/evidence/selection-manifest hashes.",

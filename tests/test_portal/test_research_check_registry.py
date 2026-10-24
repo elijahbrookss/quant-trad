@@ -336,10 +336,10 @@ def test_candle_only_definition_rejects_fact_sampling_and_unbound_features():
 def test_evidence_admission_requires_current_registered_evaluator_pair():
     from dataclasses import replace
     from portal.backend.service.research.registry import definition_allows_evidence
-    from portal.backend.service.research.historical_check_custody import _custody, historical_base
     for definition in CHECK_REGISTRY.definitions():
         assert definition_allows_evidence(definition)
         assert not definition_allows_evidence(replace(definition,evaluator_version="unregistered",definition_hash=""))
-    for key in _custody():
-        family,version=key.split("@")
-        assert not definition_allows_evidence(historical_base(family,version)),key
+    supported = CHECK_REGISTRY.resolve_definition("raw_forward_outcome", "17")
+    for version in ("2", "9", "10", "11", "12", "13", "14", "15", "16"):
+        retired = replace(supported, definition_version=version, evaluator_version=version, definition_hash="")
+        assert not definition_allows_evidence(retired)

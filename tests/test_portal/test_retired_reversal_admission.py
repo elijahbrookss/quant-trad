@@ -1,6 +1,6 @@
 """Retired research adapters are unavailable; immutable definitions remain data."""
 import pytest
-from portal.backend.service.research.historical_check_custody import historical_base
+from dataclasses import replace
 from portal.backend.service.research.registry import CHECK_REGISTRY, normalize_check_request
 
 SCHEMAS = {
@@ -12,8 +12,9 @@ SCHEMAS = {
 
 
 @pytest.mark.parametrize('version,schema', SCHEMAS.items())
-def test_retired_reversal_schemas_never_admit_execution_but_keep_definition_custody(version,schema):
-    base=historical_base('raw_forward_outcome',version)
+def test_retired_reversal_schemas_never_admit_execution_(version,schema):
+    base=replace(CHECK_REGISTRY.resolve_definition('raw_forward_outcome','17'),
+        definition_version=version,evaluator_version=version,definition_hash='')
     assert base.evaluator_version == version
     with pytest.raises(ValueError,match='check_definition_unavailable'):
         CHECK_REGISTRY.resolve_definition('raw_forward_outcome',version)

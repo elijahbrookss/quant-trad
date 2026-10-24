@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from portal.backend.controller import research as routes
 from portal.backend.service.research import operator_reads as ops
 from portal.backend.service.research.async_dispatch import research_request_fingerprint, JOB_TYPE_RESEARCH_CHECK_RUN
-from tests.test_portal.test_saved_selection_measurements import synthetic, planned, synthetic_original_receipts
+from tests.test_portal.test_saved_selection_measurements import synthetic, planned
 from portal.backend.db.models import ResearchItemRecord
 
 
@@ -47,9 +47,8 @@ def bind(monkeypatch, session):
     monkeypatch.setattr(ops,'db',SimpleNamespace(session=factory))
 
 
-@pytest.mark.parametrize('version',['12','14','17'])
-def test_prepare_uses_real_repository_envelope_and_existing_validation(monkeypatch,version):
-    item,ref,ctx,_=synthetic(version); before=deepcopy(item)
+def test_prepare_uses_real_repository_envelope_and_existing_validation(monkeypatch):
+    item,ref,ctx,_=synthetic(); before=deepcopy(item)
     session=Session(item);bind(monkeypatch,session)
     prepared=ops.prepare_saved_selection_measurement_request(item['id'],expected_hashes={'result_hash':ref['result_hash']})
     assert prepared['selection_reference']==ref and prepared['frozen_context']==ctx
@@ -126,3 +125,15 @@ def test_snapshot_without_request_does_not_invent_duplicate_matches(monkeypatch)
     assert result['request_fingerprint'] is None and result['matching_jobs']==[]
     assert result['truncated']['matching_jobs'] is False and result['requested_job'] is None
     assert not any('request_fingerprint =' in s for s in session.statements)
+
+
+@pytest.mark.parametrize("version", ["12", "14"])
+def test_prepare_rejects_retired_selection_without_new_measurement(version, monkeypatch):
+    import json
+    from pathlib import Path
+    frozen = json.loads((Path(__file__).parent / f"fixtures/historical_saved_selection_v{version}.json").read_text())
+    before = deepcopy(frozen)
+    bind(monkeypatch, Session(frozen["item"]))
+    with pytest.raises(ValueError, match="unavailable|eligible"):
+        ops.prepare_saved_selection_measurement_request(frozen["item"]["id"])
+    assert frozen == before

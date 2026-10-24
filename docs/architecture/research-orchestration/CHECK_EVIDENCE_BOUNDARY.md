@@ -80,7 +80,10 @@ code_paths:
 defines the current Indicator/Check/Study boundary and current-only execution
 catalog. Earlier version-specific descriptions below are historical method
 meaning, not promises that retired factories remain executable. Original
-records remain integrity-checked and readable through data-only custody.
+records and existing relationships remain readable in QT. Retired methods have
+no current verification, execution, replay, new evidence admission or
+saved-selection reuse. Reading does not re-admit the stored result; no record-specific runtime
+allowlist grants exceptions.
 
 
 ## Bounded input delivery
@@ -1255,14 +1258,15 @@ view. Views affect summaries only: matching, original root weights, nominal
 support and event identities remain governed by the same fixed scientific policy.
 The selector declares no outcome horizons and calls no measurement procedure.
 Recognition/selection adapters share the same outcome-blind requirement builder
-and canonical preparation. Fixed v11/v12/v14 entry points retain their exact
-request/result behavior and replay identity.
+and canonical preparation. Retired v11/v12/v14 records retain their original stored meaning; their entry
+points are unavailable for execution and replay.
 
-`raw_forward_outcome@18` explicitly admits saved v12/v14/v17 selections through
-the shared binding and measurement adapter. It validates the configured v17
-population recipe against its pinned request and JSON-stable manifest. Method16
-continues to admit only its original v12/v14 contracts. Both profiles reuse the
-same first-passage/progress functions and retain the 999-pair measurement ceiling;
+`raw_forward_outcome@18` admits supported saved v17 selections through the shared
+binding and measurement adapter. It validates the configured population recipe
+against its pinned request and JSON-stable manifest. Retired v12/v14 selections
+and method16 are unavailable for new measurement. Versioned rule metadata stays
+fixed for existing payload identities; it does not grant retired input admission.
+The same first-passage/progress functions and 999-pair measurement ceiling apply;
 a larger selection is not silently truncated. No population is rematched to fit
 a downstream measurement request.
 
@@ -1355,7 +1359,8 @@ completion-population hash uses JSON-canonical cases with only `outcome` removed
 dependence and population_recipe; the outer normal Check result/evidence hashes
 retain complete output and frozen-source custody. Historical definitions and
 results are preserved; actual replay requires a currently supported executor.
-Retired versions use the verified custody boundary described above.
+Retired versions remain inspectable without current verification or new evidence
+authority, as described above.
 
 
 ## Shared execution observations

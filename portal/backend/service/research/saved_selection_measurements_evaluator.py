@@ -33,6 +33,8 @@ RULES = {
 
 REUSABLE_SCHEMA = 'reversal_saved_measurements.v2'
 REUSABLE_RESULT_SCHEMA = 'reversal_saved_measurements_result.v2'
+# Versioned rule metadata stays fixed for existing Check18 payload identities.
+# Current execution accepts only supported Check17 selections.
 REUSABLE_RULES = deepcopy(RULES)
 REUSABLE_RULES.update(version=REUSABLE_SCHEMA,
     selection_contracts=['raw_forward_outcome@12', 'raw_forward_outcome@14', 'raw_forward_outcome@17'],
@@ -62,7 +64,6 @@ class ReusableSelectionMeasurementsEvaluator:
     version: str = '18'
     result_schema_version: str = REUSABLE_RESULT_SCHEMA
     configuration_schema: str = REUSABLE_SCHEMA
-    admitted_selection_versions: tuple = ('12','14','17')
     measurement_rules: ClassVar[dict] = REUSABLE_RULES
 
     def additional_measurements(self, selection, passage, progress):
@@ -105,7 +106,7 @@ class ReusableSelectionMeasurementsEvaluator:
             scope={'instrument_id': primary['instrument_id'], 'timeframe': '15m',
                    'start': plan.evaluation_range['start'], 'end': plan.evaluation_range['end_exclusive']}, schema=self.configuration_schema)
         saved = load_saved_selection(config['selection_reference'], config['frozen_context'],
-            item_loader=repository.get_item, checkpoint=checkpoint, admitted_versions=self.admitted_selection_versions)
+            item_loader=repository.get_item, checkpoint=checkpoint)
         ctx = saved.context
         if (inputs.get('frozen_input_binding') != saved.binding or plan.indicator_graph
                 or utc(plan.materialization_range['start']) != utc(ctx['input_start'])

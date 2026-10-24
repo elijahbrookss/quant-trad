@@ -1,160 +1,133 @@
-"""Stored historical evidence has custody without an installed executor."""
+"""Retired records are inspectable snapshots, never special runtime authorities."""
+from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from research_science.check import CheckDefinition,CheckRequest,ResolvedCheckPlan,CheckEvidenceBinding,CheckResult
-from portal.backend.service.research import historical_check_custody as custody
-from portal.backend.service.research import service
 
-ID='synthetic-original-historical-check'
+from market_data.frozen import semantic_hash
+from portal.backend.service.research import service, publication, images
 
 
 @pytest.fixture
-def historical_payload(monkeypatch):
-    payload=json.loads((Path(__file__).parent/'fixtures/historical_check_v2_synthetic.json').read_text())
-    archive=deepcopy(custody._archive())
-    archive['receipts'].append({'id':ID,'definition_id':payload['definition']['definition_id'],
-        'definition_version':payload['definition']['definition_version'],
-        'definition_hash':payload['definition']['definition_hash'],
-        'evidence_hash':payload['evidence']['evidence_hash'],'result_hash':payload['result']['result_hash'],
-        'observation_eligible_at_creation':False})
-    monkeypatch.setattr(custody,'_archive',lambda:archive)
-    def no_executor(*args,**kwargs):
-        raise AssertionError('Historical integrity must not resolve an installed evaluator or definition')
-    monkeypatch.setattr(service.CHECK_REGISTRY,'resolve_evaluator',no_executor)
-    monkeypatch.setattr(service.CHECK_REGISTRY,'resolve_definition',no_executor)
-    return payload,archive
+def retired_item():
+    payload = json.loads((Path(__file__).parent / "fixtures/historical_check_v2_synthetic.json").read_text())
+    return {"id": "synthetic-retired-check", "kind": "research_check", "status": "tested",
+            "body": "Retained synthetic result", "payload": payload,
+            "stored_evidence_integrity": "verified", "execution_available": True,
+            "replayable": True, "observation_eligible": True}
 
 
-def test_complete_frozen_envelope_validates_without_installed_method(historical_payload):
-    payload,_=historical_payload
-    before=deepcopy(payload)
-    values=service._validate_research_check_evidence_payload(payload,item_id=ID)
-    assert values[-1].result_hash==payload['result']['result_hash']
-    assert payload==before
+def test_retired_record_is_readable_without_current_verification_or_mutation(retired_item, monkeypatch):
+    before = deepcopy(retired_item)
+    monkeypatch.setattr(service.repository, "get_item", lambda *a, **k: retired_item)
+    monkeypatch.setattr(service.CHECK_REGISTRY, "resolve_evaluator", lambda *a, **k: pytest.fail("No retired evaluator"))
+    projected = service.get_research_item(retired_item["id"])
+    assert projected["payload"] == before["payload"] and projected["body"] == before["body"]
+    assert projected["evidence_classification"] == "legacy_frozen_unverifiable"
+    assert projected["execution_available"] is False
+    assert projected["replayable"] is False and projected["observation_eligible"] is False
+    assert "stored_evidence_integrity" not in projected
+    assert "unavailable" in projected["evidence_integrity_error"]
+    assert retired_item == before
 
 
-@pytest.mark.parametrize('item_id',[None,'copied-new-record'])
-def test_missing_or_copied_item_identity_refused(historical_payload,item_id):
-    payload,_=historical_payload
-    with pytest.raises(ValueError,match='no original custody receipt'):
-        service._validate_research_check_evidence_payload(payload,item_id=item_id)
+def test_copied_or_rehashed_retired_record_never_gains_admission(retired_item):
+    retired_item["id"] = "synthetic-copy"
+    retired_item["payload"]["result"]["result"]["changed"] = True
+    projected = service._project_evidence_classification(retired_item)
+    assert projected["replayable"] is False and projected["observation_eligible"] is False
+    with pytest.raises(ValueError):
+        service._validate_research_check_evidence_payload(retired_item["payload"])
 
 
-def test_coordinated_rehash_cannot_substitute_saved_result(historical_payload):
-    payload,_=historical_payload
-    changed=CheckResult.from_dict({**payload['result'],'result':{**payload['result']['result'],'new_field':'changed'},'result_hash':''})
-    payload['result']=changed.to_dict()
-    with pytest.raises(ValueError,match='no original custody receipt'):
-        service._validate_research_check_evidence_payload(payload,item_id=ID)
+def test_retired_replay_and_new_observation_fail_before_execution_or_write(retired_item, monkeypatch):
+    monkeypatch.setattr(service.repository, "get_item", lambda *a, **k: retired_item)
+    monkeypatch.setattr(service.repository, "create_item", lambda **k: pytest.fail("No new Observation"))
+    monkeypatch.setattr(service.repository, "create_link", lambda **k: pytest.fail("No new link"))
+    monkeypatch.setattr(service, "execute_check_evidence", lambda *a, **k: pytest.fail("No retired replay"))
+    outcome = service.replay_research_check(retired_item["id"])
+    assert outcome["status"] == "not_replayable" and outcome["provider_call_performed"] is False
+    assert "unavailable" in outcome["reasons"][0]
+    with pytest.raises(ValueError, match="not durable replayable"):
+        service.create_observation_from_check_evidence(retired_item["id"], {"title": "Do not admit"})
 
 
-def test_verified_historical_projection_is_not_execution_or_replay(historical_payload):
-    payload,_=historical_payload
-    item={'id':ID,'kind':'research_check','status':'tested','payload':payload}
-    projected=service._project_evidence_classification(item)
-    assert projected['stored_evidence_integrity']=='verified'
-    assert projected['execution_available'] is False
-    assert projected['replayable'] is False
-    assert projected['observation_eligible'] is False  # raw2 was never durable-eligible
-    assert projected['evidence_classification']=='historical_frozen_verified'
+def test_existing_observation_and_study_links_remain_readable(retired_item, monkeypatch):
+    records = {retired_item["id"]: retired_item,
+        "observation": {"id": "observation", "kind": "observation", "status": "active", "payload": {"source_check": retired_item["id"]}},
+        "study": {"id": "study", "kind": "study", "status": "active", "payload": {"saved_interpretation": "unchanged"}}}
+    links = [{"id": "check-observation", "source_item_id": retired_item["id"], "target_type": "research_item", "target_id": "observation"},
+             {"id": "study-observation", "source_item_id": "study", "target_type": "research_item", "target_id": "observation"}]
+    before = deepcopy((records, links))
+    monkeypatch.setattr(service.repository, "get_item", lambda identifier, **k: records[identifier])
+    monkeypatch.setattr(service.repository, "list_links", lambda identifier, **k: [link for link in links if identifier in (link["source_item_id"], link["target_id"])])
+    monkeypatch.setattr(service.repository, "create_item", lambda **k: pytest.fail("Reads cannot write"))
+    trail = service.get_research_trail("observation")
+    assert trail["item"]["payload"] == records["observation"]["payload"]
+    assert {item["id"] for item in trail["related_items"]} == {"study", retired_item["id"]}
+    assert {link["id"] for link in trail["links"]} == {link["id"] for link in links}
+    assert trail["checks"][0]["replayable"] is False
+    assert (records, links) == before
 
 
-def test_stored_plan_semantics_still_rederived_even_with_trusted_test_receipt(historical_payload):
-    payload,archive=historical_payload
-    changed_plan=ResolvedCheckPlan.from_dict({**payload['plan'],'evaluation_range':{
-        **payload['plan']['evaluation_range'],'start':'2026-01-01T06:00:00.000000Z'},'plan_hash':''})
-    evidence=CheckEvidenceBinding.from_dict({**payload['evidence'],'plan_hash':changed_plan.plan_hash,'evidence_hash':''})
-    result=CheckResult.from_dict({**payload['result'],'plan_hash':changed_plan.plan_hash,
-        'evidence_hash':evidence.evidence_hash,'result_hash':''})
-    payload.update(plan=changed_plan.to_dict(),evidence=evidence.to_dict(),result=result.to_dict())
-    archive['receipts'][-1].update(evidence_hash=evidence.evidence_hash,result_hash=result.result_hash)
-    with pytest.raises(ValueError,match='request/plan semantic disagreement'):
-        service._validate_research_check_evidence_payload(payload,item_id=ID)
+def test_existing_study_publication_reads_without_readmitting_retired_reference(retired_item, monkeypatch):
+    question = {"question": "Synthetic question", "scope": "Synthetic scope"}
+    revision = {"question_id": "study", "question": question, "revision": 1,
+        "previous_hash": None, "request_id": "synthetic-publication", "references": [
+            {"item_id": retired_item["id"], "kind": "research_check", "role": "supports", "evidence_classification": "historical_frozen_verified"}]}
+    revision["publication_hash"] = semantic_hash(revision)
+    contract = {"schema_version": publication.SCHEMA, "question": question, "publications": [revision]}
+    study = {"id": "study", "kind": "study", "payload": {publication.KEY: contract}}
+    before = deepcopy(study)
+    @contextmanager
+    def session():
+        yield object()
+    monkeypatch.setattr(publication.db, "session", session)
+    monkeypatch.setattr(publication.repository, "get_item", lambda *a, **k: study)
+    monkeypatch.setattr(publication, "_assert_access", lambda *a: None)
+    monkeypatch.setattr(service, "_validate_research_check_evidence_payload", lambda *a, **k: pytest.fail("Historical publication reads cannot readmit Checks"))
+    assert publication.history("study")["publications"] == [revision]
+    assert service.get_research_item("study")["payload"] == study["payload"]
+    assert study == before
 
 
-@pytest.fixture(params=['12','14'])
-def historical_selection(request,monkeypatch):
-    frozen=json.loads((Path(__file__).parent/f'fixtures/historical_saved_selection_v{request.param}.json').read_text())
-    item=frozen['item'];payload=item['payload'];archive=deepcopy(custody._archive())
-    archive['receipts'].append({'id':item['id'],'definition_id':payload['definition']['definition_id'],
-        'definition_version':payload['definition']['definition_version'],'definition_hash':payload['definition']['definition_hash'],
-        'evidence_hash':payload['evidence']['evidence_hash'],'result_hash':payload['result']['result_hash'],
-        'observation_eligible_at_creation':True})
-    monkeypatch.setattr(custody,'_archive',lambda:archive)
-    def no_executor(*args,**kwargs):
-        raise AssertionError('Historical saved read must not resolve evaluator')
-    monkeypatch.setattr(service.CHECK_REGISTRY,'resolve_evaluator',no_executor)
-    monkeypatch.setattr(service.CHECK_REGISTRY,'resolve_definition',no_executor)
-    return frozen
-
-
-def test_saved_population_reader_preserves_original_manifest_without_executor(historical_selection):
+@pytest.mark.parametrize("version", ["12", "14"])
+def test_retired_selection_cannot_feed_new_measurement(version):
     from portal.backend.service.research.saved_selection_binding import load_saved_selection
-    frozen=historical_selection;before=deepcopy(frozen)
-    raw=deepcopy(frozen['item']);raw.pop('replayable');raw.pop('observation_eligible')
-    saved=load_saved_selection(frozen['reference'],frozen['context'],item_loader=lambda key:raw)
-    assert saved.selection['selection_manifest_hash']==frozen['reference']['selection_manifest_hash']
-    assert frozen==before
-    projected=service._project_evidence_classification(frozen['item'])
-    assert projected['replayable'] is False and projected['observation_eligible'] is True
-    assert load_saved_selection(frozen['reference'],frozen['context'],item_loader=lambda key:projected).reference==saved.reference
+    frozen = json.loads((Path(__file__).parent / f"fixtures/historical_saved_selection_v{version}.json").read_text())
+    item = frozen["item"]
+    before = deepcopy(item)
+    with pytest.raises(ValueError, match="unavailable|eligible"):
+        load_saved_selection(frozen["reference"], frozen["context"], item_loader=lambda _: item)
+    assert item == before
 
 
-def test_explicit_ineligible_projection_still_rejected(historical_selection):
-    from portal.backend.service.research.saved_selection_binding import load_saved_selection
-    frozen=historical_selection;item=service._project_evidence_classification(frozen['item'])
-    item['observation_eligible']=False
-    with pytest.raises(ValueError,match='saved_selection_invalid'):
-        load_saved_selection(frozen['reference'],frozen['context'],item_loader=lambda key:item)
+def test_retired_check_cannot_gain_new_publication_or_image_binding(retired_item, monkeypatch):
+    monkeypatch.setattr(publication, "_assert_access", lambda *a: None)
+    monkeypatch.setattr(publication.repository, "get_item", lambda *a, **k: retired_item)
+    with pytest.raises(ValueError):
+        publication.resolve_reference({"item_id": retired_item["id"], "kind": "research_check", "role": "supports"}, object())
+    with pytest.raises(ValueError):
+        images._binding(retired_item, {}, object())
 
 
-def test_original_historical_images_binding_remains_readable(historical_selection,monkeypatch):
-    from portal.backend.service.research import images,publication
-    frozen=historical_selection;item=frozen['item'];ref=frozen['reference']
-    monkeypatch.setattr(publication,'_assert_access',lambda *args:None)
-    binding=images._binding(item,{'result_hash':ref['result_hash'],'evidence_hash':ref['evidence_hash']},None)
-    assert binding['item_id']==item['id'] and binding['result_hash']==ref['result_hash']
-
-
-def test_original_historical_publication_reference_classification(historical_selection,monkeypatch):
-    from types import SimpleNamespace
-    from portal.backend.service.research import publication
-    from portal.backend.service.storage.repos.market_data import market_data_repo
-    from portal.backend.service.market import backtest_dataset_service
-    from market_data import contracts
-    frozen=historical_selection;item=frozen['item'];ref=frozen['reference'];binding=item['payload']['evidence']['input_binding']
-    monkeypatch.setattr(publication,'_assert_access',lambda *args:None)
-    monkeypatch.setattr(publication.repository,'get_item',lambda *args,**kwargs:item)
-    dataset=SimpleNamespace(dataset_id=binding['dataset_id'],dataset_hash=binding['dataset_hash'],series=[])
-    monkeypatch.setattr(market_data_repo,'get_dataset',lambda *args:dataset)
-    monkeypatch.setattr(contracts,'build_dataset_identity_hash',lambda *args:dataset.dataset_hash)
-    monkeypatch.setattr(backtest_dataset_service,'validate_frozen_dataset_series',lambda **kwargs:None)
-    session=SimpleNamespace(scalars=lambda *args:SimpleNamespace(all=lambda:[]))
-    result=publication.resolve_reference({'item_id':item['id'],'kind':'research_check','role':'supports',
-        'result_hash':ref['result_hash'],'evidence_hash':ref['evidence_hash']},session)
-    assert result['evidence_classification']=='historical_frozen_verified'
-    assert result['replay_evidence']=='not_established_by_publication'
-
-
-
-def test_historical_replay_refuses_without_resolving_or_executing(historical_selection,monkeypatch):
-    item=historical_selection['item']
-    monkeypatch.setattr(service.repository,'get_item',lambda *args,**kwargs:item)
-    monkeypatch.setattr(service,'execute_check_evidence',lambda *args,**kwargs:pytest.fail('retired replay cannot execute'))
-    outcome=service.replay_research_check(item['id'])
-    assert outcome['status']=='not_replayable' and outcome['provider_call_performed'] is False
-    assert 'retired' in outcome['reasons'][0]
-
-
-def test_eligible_historical_observation_uses_original_hashes_without_replay(historical_selection,monkeypatch):
-    item=historical_selection['item'];writes=[]
-    monkeypatch.setattr(service.repository,'get_item',lambda *args,**kwargs:item)
-    monkeypatch.setattr(service.repository,'create_item',lambda **kwargs:(writes.append(kwargs) or {'id':'new-observation',**kwargs}))
-    monkeypatch.setattr(service.repository,'create_link',lambda **kwargs:kwargs)
-    result=service.create_observation_from_check_evidence(item['id'],{'title':'Preserved historical finding'})
-    assert writes[0]['payload']['result_hash']==item['payload']['result']['result_hash']
-    assert writes[0]['payload']['evidence_hash']==item['payload']['evidence']['evidence_hash']
-    assert result['link']['source_item_id']==item['id']
+def test_existing_retired_image_binding_is_readable_but_not_new_admission(retired_item, monkeypatch):
+    monkeypatch.setattr(publication, "_assert_access", lambda *a: None)
+    payload = retired_item["payload"]; evidence = payload["evidence"]
+    binding = {"kind": "research_check", "item_id": retired_item["id"],
+        "definition_hash": payload["definition"]["definition_hash"], "request_hash": payload["request"]["request_hash"],
+        "plan_hash": payload["plan"]["plan_hash"], "result_hash": payload["result"]["result_hash"],
+        "evidence_hash": evidence["evidence_hash"], "input_hash": evidence["input_hash"], "input_binding": deepcopy(evidence["input_binding"])}
+    manifest = {"schema_version": images.SCHEMA, "item_id": retired_item["id"], "binding": binding}
+    identity = semantic_hash(manifest); manifest["image_id"] = identity
+    record = SimpleNamespace(id=identity, manifest=manifest, created_at=datetime(2026, 1, 1))
+    before = deepcopy((retired_item, manifest))
+    assert images._summary(record, retired_item, object())["binding"] == binding
+    assert (retired_item, manifest) == before
+    payload["evidence"]["input_hash"] = "changed"
+    with pytest.raises(ValueError, match="binding_mismatch"):
+        images._summary(record, retired_item, object())

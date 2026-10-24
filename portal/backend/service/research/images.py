@@ -64,7 +64,7 @@ def _binding(item: Mapping[str, Any], expected: Mapping[str, Any], session: Any)
     publication._assert_access(item, session)
     if item["kind"] == "research_check":
         from .service import _validate_research_check_evidence_payload
-        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(item["payload"], item_id=item["id"])
+        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(item["payload"])
         if set(expected) != {"result_hash", "evidence_hash"} or any(
             expected.get(key) != actual for key, actual in (
                 ("result_hash", result.result_hash), ("evidence_hash", evidence.evidence_hash)
@@ -110,7 +110,24 @@ def _summary(record: ResearchImageRecord, item: Mapping[str, Any], session: Any)
     material = {key: value for key, value in manifest.items() if key != "image_id"}
     if semantic_hash(material) != record.id or manifest.get("image_id") != record.id:
         raise ValueError("research_image_integrity_error: manifest hash")
-    if _binding(item, _expected(manifest["binding"]), session) != manifest["binding"]:
+    # Reading an existing attachment preserves its original binding, without
+    # granting a retired Check current evidence authority or admitting a new image.
+    from .service import _project_evidence_classification
+    if (item["kind"] == "research_check" and
+            _project_evidence_classification(item).get("evidence_classification") == "legacy_frozen_unverifiable"):
+        publication._assert_access(item, session)
+        payload = item["payload"]
+        evidence = payload["evidence"]
+        binding = {"kind": "research_check", "item_id": item["id"],
+                   "definition_hash": payload["definition"]["definition_hash"],
+                   "request_hash": payload["request"]["request_hash"],
+                   "plan_hash": payload["plan"]["plan_hash"],
+                   "result_hash": payload["result"]["result_hash"],
+                   "evidence_hash": evidence["evidence_hash"], "input_hash": evidence["input_hash"],
+                   "input_binding": deepcopy(evidence["input_binding"])}
+    else:
+        binding = _binding(item, _expected(manifest["binding"]), session)
+    if binding != manifest["binding"]:
         raise ValueError("research_image_binding_mismatch: retained evidence changed")
     return {**manifest, "created_at": record.created_at.isoformat() + "Z",
             "content_url": f"/api/research/items/{item['id']}/images/{record.id}/content"}

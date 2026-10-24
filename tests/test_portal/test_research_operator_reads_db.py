@@ -16,7 +16,7 @@ pytestmark=pytest.mark.db
 
 
 def test_saved_request_preparation_reads_persisted_research_item():
-    item,_,ctx,_=synthetic('17');key=str(uuid4());item['id']=key
+    item,_,ctx,_=synthetic();key=str(uuid4());item['id']=key
     try:
         with db.session()as session:
             session.add(ResearchItemRecord(**{k:item[k]for k in

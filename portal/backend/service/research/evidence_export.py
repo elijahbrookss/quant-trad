@@ -66,7 +66,7 @@ def _collect(item_id: str, revision: int | None, expected_publication_hash: str 
     root_origin = {"item_id": item_id, "meaning": "current_record_snapshot_at_export"}
     if root["kind"] == "research_check":
         from .service import _validate_research_check_evidence_payload
-        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(root["payload"], item_id=root["id"])
+        definition, request, plan, evidence, result = _validate_research_check_evidence_payload(root["payload"])
         root_origin.update({"definition_hash": definition.definition_hash, "request_hash": request.request_hash,
                             "plan_hash": plan.plan_hash, "evidence_hash": evidence.evidence_hash, "result_hash": result.result_hash})
     add("records/root-current.json", json_bytes(root), root_origin)
@@ -99,7 +99,7 @@ def _collect(item_id: str, revision: int | None, expected_publication_hash: str 
             raise ValueError("research_export_integrity: referenced kind changed")
         if ref["kind"] == "research_check":
             from .service import _validate_research_check_evidence_payload
-            _, _, _, evidence, result = _validate_research_check_evidence_payload(current["payload"], item_id=current["id"])
+            _, _, _, evidence, result = _validate_research_check_evidence_payload(current["payload"])
             if evidence.evidence_hash != ref.get("evidence_hash") or result.result_hash != ref.get("result_hash"):
                 raise ValueError("research_export_integrity: referenced Check hashes changed")
             record = current

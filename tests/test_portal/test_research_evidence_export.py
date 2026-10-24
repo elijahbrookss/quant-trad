@@ -86,8 +86,7 @@ def test_direct_check_export_uses_same_typed_integrity_validation(saved, monkeyp
     from portal.backend.service.research import service
     root, records = saved
     records["check"] = {"id": "check", "kind": "research_check", "payload": {"tampered": True}}
-    def denied(payload, *, item_id):
-        assert item_id == "check"
+    def denied(payload):
         assert payload == {"tampered": True}
         raise ValueError("check_evidence_payload_invalid: hash mismatch")
     monkeypatch.setattr(service, "_validate_research_check_evidence_payload", denied)

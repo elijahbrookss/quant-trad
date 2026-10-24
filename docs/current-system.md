@@ -111,8 +111,9 @@ QT protects six high-consequence outcomes:
    rewritten.
 2. **Frozen research authority.** Durable research identifies the exact market
    evidence it used. Current methods support provider-free replay; retired
-   evidence retains verified custody with execution/replay availability stated
-   separately. Exploratory previews do not silently become durable evidence.
+   records remain readable without current verification, execution, replay or
+   new evidence admission; existing relationships remain intact. Exploratory
+   previews do not silently become durable evidence.
 3. **Decision and execution authority.** Indicators and Strategies can explain
    a decision, while the runtime alone owns execution and accounting truth.
 4. **Capital, order, and accounting integrity.** Order history, settlement,

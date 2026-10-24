@@ -19,8 +19,6 @@ code_paths:
   - src/engines/indicator_engine/signal_output.py
   - src/research_science/hashing.py
   - src/research_science/temporal.py
-  - portal/backend/service/research/historical_check_custody.py
-  - portal/backend/service/research/historical_check_custody.json
   - portal/backend/service/research/recognition_preparation.py
   - portal/backend/service/research/registry.py
   - portal/backend/service/research/catalog.py
@@ -81,21 +79,26 @@ procedure into a current one. Shared scientific kernels remain reusable.
 Methods 17, 18 and 20 require frozen evidence; discovery must not advertise
 preview where the evaluator rejects it.
 
-Historical reading is independent of current execution. A data-only archive
-pins retired base metadata and eight original server Check receipts. It
-requires the original item ID and exact definition/result/evidence hashes,
-then verifies typed request/plan/evidence/result links and recorded planning
-declarations through the shared planner. Unknown or changed history refuses;
-no fallback trusts caller-supplied hashes. Publication, image binding, export
-and saved-selection inputs propagate the actual record ID. Saved v12/v14
-selection decoding retains original weights, scopes and hash conventions.
+Historical reading is independent of current execution. Saved Check payloads,
+Observations, Study interpretations and their existing relationships remain in
+QT without being rewritten. A retired method is inspectable as
+`legacy_frozen_unverifiable`, with current execution, replay and new
+evidence-based admission unavailable. This is an availability limit, not a
+claim that the original result was invalid.
 
-Verified retired evidence is classified historical_frozen_verified with
-execution_available=false and replayable=false. Original Observation
-eligibility is retained only when anchored by its receipt. Historical
-integrity is not deterministic recomputation. ScientificAttempt result
-references still require actual supported deterministic replay; custody does
-not substitute for that authority. Active replay guards remain unchanged.
+The earlier record-specific runtime custody allowlist is removed. Source code
+must not carry private research-record identities or hashes to grant selected
+legacy records a verified-history status. Retirement does not install a private
+replacement registry or require a data migration.
+
+New Observation admission, publication references, image attachment and verified
+exports use supported Check validation. Existing Study interpretation history
+and image bindings remain readable without re-admitting retired research.
+Saved-selection measurements accept supported Check17 selections; retired
+selection profiles cannot feed a new measurement. The versioned Check18 rule
+metadata remains fixed for existing payload identities; current admission does
+not restore retired input procedures. ScientificAttempt references still
+require actual supported deterministic replay.
 
 ## Shared execution observability
 
@@ -141,8 +144,7 @@ No new tracker, profiling store, telemetry platform or resource limit is added.
 
 No original evidence payload, hash, image, Study publication or scientific
 result is rewritten. Current runtime no longer carries retired executors to
-read those records. Newly discovered unanchored historical dependencies need
-explicit custody review; they do not cause automatic re-registration or data
-migration. Producing-source archives may permit separate future forensic
-reproduction, but current QT does not claim that it can execute retired code.
+read those records. Historical dependencies do not cause automatic
+re-registration, new evidence eligibility or data migration. Producing-source
+archives may permit separate future forensic reproduction, but current QT does not claim that it can execute retired code.
 New analytical semantics require a new admitted version, not a generic DSL.
