@@ -146,16 +146,28 @@ The workflow steps are:
 5. `Prove clean current-schema bootstrap` against `quanttrad_bootstrap`;
 6. `Verify PostgreSQL filesystem namespace` through the Docker DB runner; and
 7. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
-   the clean-bootstrap and namespace fixture files excluded from this invocation.
+   the clean-bootstrap and namespace fixture files excluded from this invocation;
+   and
+8. `Prove frozen baseline refuses archive-generation reader floor` by starting the
+   source-attested pre-generation application image against its own disposable
+   layout, applying the current metadata-only migration, and requiring the same
+   frozen image to refuse the changed reader contract.
 
-Clean bootstrap, namespace verification and PostgreSQL-marked contracts are
-three sequential steps in this fourth job. They are not separate workflow jobs.
+Clean bootstrap, namespace verification, PostgreSQL-marked contracts and the
+frozen-reader proof are four sequential steps in this fourth job. They are not
+separate workflow jobs.
 The two host invocations set `RUN_DB_TESTS=1`, `QT_DB_TEST_ISOLATED=1`, disable
 Loki delivery, and use an explicit disposable DSN. The namespace step uses the
 repository's isolated Docker runner because its fixture needs PostgreSQL 15
 server utilities and a private process/filesystem environment. The fixture
 starts a temporary Unix-socket-only cluster with no inherited database
 credentials and a synthetic udev UUID entry; it does not exercise live disks.
+The storage-demo proof collection also includes a named nondefault-tablespace
+generation migration: the prepared alias and canonical-dependency heap, TOAST
+relation and indexes must inherit their legacy catalog's owned history placement.
+The reader-floor proof uses the immediate pre-generation application commit and
+the localhost-only disposable PostgreSQL service. Neither proof deploys or
+contacts production.
 
 The disposable CI service disables extension telemetry and reloads its
 configuration before database setup, matching the local isolated stack.

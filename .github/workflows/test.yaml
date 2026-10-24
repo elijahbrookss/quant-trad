@@ -628,6 +628,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -693,3 +694,37 @@ jobs:
           python -m pytest -q -m db \
             --ignore=tests/test_portal/test_clean_database_bootstrap_db.py \
             --ignore=tests/test_market_data/test_header_namespace_db.py
+
+      - name: Prove frozen baseline refuses archive-generation reader floor
+        env:
+          PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_generation_floor
+          QT_DISABLE_DOTENV: '1'
+          QT_ARCHIVE_GENERATION_BASELINE_REVISION: 91d5a0564c0aa9e04159d6faaef670ae809fed60
+        run: |
+          baseline_root="$RUNNER_TEMP/archive-generation-baseline"
+          baseline_image="qt-archive-generation-baseline:$QT_ARCHIVE_GENERATION_BASELINE_REVISION"
+          mkdir "$baseline_root"
+          git archive "$QT_ARCHIVE_GENERATION_BASELINE_REVISION" | tar -x -C "$baseline_root"
+          baseline_tree="$(python scripts/provenance/source_tree_hash.py --root "$baseline_root")"
+          docker build --file "$baseline_root/portal/backend/Dockerfile" --target production \
+            --build-arg QT_SOURCE_REVISION="$QT_ARCHIVE_GENERATION_BASELINE_REVISION" \
+            --build-arg QT_SOURCE_TREE_HASH="$baseline_tree" \
+            --tag "$baseline_image" "$baseline_root"
+          docker exec "${{ job.services.timescaledb.id }}" \
+            createdb -U quanttrad quanttrad_generation_floor
+          docker exec "${{ job.services.timescaledb.id }}" \
+            psql -v ON_ERROR_STOP=1 -U quanttrad -d quanttrad_generation_floor \
+            -c "CREATE EXTENSION IF NOT EXISTS timescaledb" \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto"
+          probe=(docker run --rm --network host --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --tmpfs /app/logs:rw,nosuid,nodev,size=16m \
+            --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env PG_DSN --env QT_DISABLE_DOTENV=1 --env QT_LOGGING_LOKI_URL= \
+            --env QT_EXPECTED_SOURCE_REVISION="$QT_ARCHIVE_GENERATION_BASELINE_REVISION" \
+            --mount "type=bind,source=$PWD/scripts/ci/prove_archive_generation_reader_floor.py,target=/qt-reader-floor-probe.py,readonly" \
+            --entrypoint python "$baseline_image" /qt-reader-floor-probe.py)
+          "${probe[@]}" --expect ready
+          PYTHONPATH=src:. python -m scripts.db.manual_migration_fact_archive_generations_v1
+          "${probe[@]}" --expect refused
