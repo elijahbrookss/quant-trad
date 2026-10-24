@@ -27,12 +27,16 @@ from scripts.automation import storage_online_recovery as recovery
 
 logger = logging.getLogger(__name__)
 _FAMILIES = {"raw_archive_manifests", "fact_archive_manifests", "book_checkpoint_manifests"}
-_CATALOGS = (
+_LEGACY_CATALOGS = (
     "market.fact_archive_material_aliases",
     "market.fact_archive_canonical_dependencies",
+)
+_CATALOGS = (
+    *_LEGACY_CATALOGS,
     "market.fact_archive_prepared_material_aliases",
     "market.fact_archive_prepared_canonical_dependencies",
 )
+_CATALOG_PROTOCOLS = frozenset((_LEGACY_CATALOGS, _CATALOGS))
 
 
 @dataclass(frozen=True)
@@ -107,10 +111,13 @@ def prepare_background(exchange, *, preparation_seconds, forward=False):
         phase("identity_capture")
     after = None
     seen = set()
+    catalogs = None
     while True:
         page = exchange("inspect_references", after=after)["result"]
         names = [row["relation"] for row in page["references"]]
-        if (tuple(page["catalogs"]) != _CATALOGS or len(names) > 32
+        page_catalogs = tuple(page["catalogs"])
+        if (page_catalogs not in _CATALOG_PROTOCOLS
+                or catalogs is not None and page_catalogs != catalogs or len(names) > 32
                 or names != sorted(set(names)) or seen.intersection(names)
                 or any(type(row.get("prepared")) is not bool
                     or type(row.get("validated")) is not bool
@@ -119,6 +126,7 @@ def prepare_background(exchange, *, preparation_seconds, forward=False):
                 or len(seen)+len(names) > 8192
                 or page["next_after"] is not None and (not names or page["next_after"] != names[-1])):
             raise RuntimeError("storage_online_operation_reference_page_invalid")
+        catalogs = page_catalogs
         for row in page["references"]:
             relation = row["relation"]
             if not row["prepared"]:
@@ -132,7 +140,7 @@ def prepare_background(exchange, *, preparation_seconds, forward=False):
         if after is None:
             break
     phase("reference_adopt")
-    for relation in _CATALOGS:
+    for relation in catalogs:
         phase("catalog_history", relation)
     baselines = set()
     rounds = 0
