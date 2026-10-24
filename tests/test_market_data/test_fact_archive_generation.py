@@ -7,7 +7,8 @@ from sqlalchemy.exc import DBAPIError
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.db.fact_storage_schema import (
     COLD_FACT_READ_BODY, FACT_ARCHIVE_GENERATION_TABLES,
-    ensure_fact_payload_partition,
+    assert_fact_storage_contract, ensure_fact_payload_partition,
+    install_fact_archive_generation_functions,
 )
 from portal.backend.service.storage.repos import fact_archival
 from scripts.db.manual_migration_fact_archive_generations_v1 import migrate
@@ -258,6 +259,28 @@ def test_generation_migration_from_legacy_layout_is_idempotent_and_sets_reader_f
         assert all(session.execute(text("SELECT to_regclass(:name)"), {
             "name": "market." + name,
         }).scalar_one_or_none() is not None for name in FACT_ARCHIVE_GENERATION_TABLES)
+
+
+@pytest.mark.db
+def test_generation_guard_install_is_idempotent(storage):
+    with storage.database.session() as session:
+        install_fact_archive_generation_functions(session.connection())
+        install_fact_archive_generation_functions(session.connection())
+        triggers = session.execute(text("""
+            SELECT c.relname,t.tgname,t.tgenabled
+            FROM pg_trigger t
+            JOIN pg_class c ON c.oid=t.tgrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='market'
+              AND c.relname=ANY(:tables)
+              AND t.tgname LIKE 'trg_guard_fact_archive_%'
+              AND NOT t.tgisinternal
+            ORDER BY c.relname,t.tgname
+        """), {"tables": list(FACT_ARCHIVE_GENERATION_TABLES)}).all()
+    assert len(triggers) == 6
+    assert all(enabled == "A" for _table, _trigger, enabled in triggers)
+    with storage.database.session() as session:
+        assert_fact_storage_contract(session.connection())
 
 
 @pytest.mark.db

@@ -290,7 +290,7 @@ def install_fact_archive_generation_functions(conn) -> None:
         "LANGUAGE plpgsql AS $qt$" + FACT_ARCHIVE_ACTIVE_GENERATION_MUTATION_BODY + "$qt$"
     ))
     conn.execute(text(
-        "CREATE TRIGGER trg_guard_fact_archive_preparation BEFORE UPDATE OR DELETE "
+        "CREATE OR REPLACE TRIGGER trg_guard_fact_archive_preparation BEFORE UPDATE OR DELETE "
         "ON market.fact_archive_preparations FOR EACH ROW "
         "EXECUTE FUNCTION market.guard_fact_archive_preparation_mutation()"
     ))
@@ -299,7 +299,7 @@ def install_fact_archive_generation_functions(conn) -> None:
         "ENABLE ALWAYS TRIGGER trg_guard_fact_archive_preparation"
     ))
     conn.execute(text(
-        "CREATE TRIGGER trg_guard_fact_archive_active_generation BEFORE INSERT OR UPDATE OR DELETE "
+        "CREATE OR REPLACE TRIGGER trg_guard_fact_archive_active_generation BEFORE INSERT OR UPDATE OR DELETE "
         "ON market.fact_archive_active_generations FOR EACH ROW "
         "EXECUTE FUNCTION market.guard_fact_archive_active_generation_mutation()"
     ))
@@ -312,7 +312,7 @@ def install_fact_archive_generation_functions(conn) -> None:
         "fact_archive_prepared_material_aliases", "fact_archive_prepared_canonical_dependencies",
     ):
         conn.execute(text(
-            f"CREATE TRIGGER trg_guard_{table_name} BEFORE INSERT OR UPDATE OR DELETE ON market.{table_name} "
+            f"CREATE OR REPLACE TRIGGER trg_guard_{table_name} BEFORE INSERT OR UPDATE OR DELETE ON market.{table_name} "
             "FOR EACH ROW EXECUTE FUNCTION market.guard_fact_archive_prepared_mutation()"
         ))
         conn.execute(text(
