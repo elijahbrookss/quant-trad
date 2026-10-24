@@ -2573,7 +2573,7 @@ deployment/source holds; inspect authoritative state after a lost reply rather
 than redispatching automatically. The implementation and exact refusal checks
 belong to `scripts/automation/storage_online_recovery.py`.
 
-The image-correction path It preserves cluster, volumes, keys and
+The image-correction path preserves cluster, volumes, keys and
 runtime contract, requires identical PostgreSQL/Timescale binaries, journals
 replacement without volume removal and verifies actual WAL delivery. Prior
 attempts remain evidence; uncertain outcomes refuse automatic replay. Runtime
