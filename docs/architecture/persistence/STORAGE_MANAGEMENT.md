@@ -127,6 +127,43 @@ retry and ownership rules. Their presence in source does not attest that a
 particular deployment has executed or qualified them. Installation identities,
 private receipts and current job status belong to operator-owned records.
 
+## Qualification and operation scope
+
+This manual describes source-supported operations and their admission contracts,
+not a live installation status or a history of passing fixtures. Commands that
+mutate storage require explicit authorization for the exact release, operation,
+source fleet and physical layout. Inspection, preparation, COMMIT, runtime
+activation, complete paired recovery and deployment publication remain distinct
+outcomes; no earlier receipt silently grants the next outcome.
+
+| Evidence | What it can support | What still needs independent admission |
+| --- | --- | --- |
+| Unit/fault-injection checks | Exact input/refusal rules, journal preimages and uncertain-outcome handling | Real process/file ownership, SQL locks and physical cost |
+| Disposable native PostgreSQL and Docker qualification | Transaction/constraint behavior, actual worker transport, interruption, rollback and restore for the tested layout | Production cardinality, physical-drive capacity, collector load and pause duration |
+| Source attestation and prepared-runtime inspection | Matching immutable package, source, mounts, processes and configuration at observation | A completed operation or future resource availability |
+| Durable operation receipt | The specific committed transition and its pinned identity/clocks | Fresh fleet health, collection continuity or a matching current recovery pair |
+| Encrypted paired recovery/restore proof | Exact selected database/archive recovery point and supported restore behavior | Off-server protection or an unmeasured recovery-time guarantee |
+
+Before a mutation, measure remaining copy/index/attachment work, growth, queue
+occupancy, WAL/temp/recovery allocation and rollback time above reserve floors.
+Account for the actual collector finalizer and pending-segment limits, not only
+free disk. Longer query, batch or handoff allowances change permitted disruption;
+they are not throughput or downtime measurements.
+
+Every phase retains its original durable clock and owning session/fence.
+Inspection never renews time. An absent reply or exited attach CLI is not proof
+that SQL or a Docker request failed. Reconcile exact durable/native outcome and
+independently retire the admitted worker before recovery or secret mounts.
+When uncertainty prevents reconciliation, preserve source, target, WAL and
+journals and use the separately admitted terminal/recovery owner. Ordinary
+reentry never invents permission to redispatch, reclaim or delete evidence.
+
+Validation tools and fixtures belong under scripts/ci and the test topology.
+Their flags are not alternative operator commands. Use the normal validation
+matrix and release workflow for the exact source. Repeated qualification caveats
+below are intentionally expressed once here; the per-operation sections retain
+the distinct schemas, clocks, locks, refusal cases and recovery actions.
+
 ## Storage capacity and workload admission
 
 [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
@@ -262,26 +299,22 @@ write, duplicate/FK, timeout, cancellation and full-rollback contracts remain
 in the ordinary disposable PostgreSQL CI suite. A diagnostic success is neither
 maintenance authority nor a worst-case cache guarantee.
 
-## Proposed forward-only transition
+## Forward-only transition
 
-[ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md)
-records a proposed alternative for the demonstrated copy and capacity problem:
-retain the existing header table as one sealed range beneath the same canonical
-parent, then use daily partitions for new writes. Disposable mechanics and real
-QT read-path diagnostics and bounded physical inventory support further implementation,
-but forward operator admission remains incomplete. It is not an alternative deploy command. Keeping old history on SSD would be an intermediate
-state; final historical placement and measured recovery remain required.
-The first runtime slice binds one sealed legacy relation and includes it in the
-same STABLE range reader; clean daily layouts use an empty binding catalogue.
-Missing/changed retained history refuses admission. The fixed full-copy handoff
-installs that empty catalogue without changing saved copy target fingerprints.
-The physical catalogue inventories this fixed range with its complete heap,
-TOAST and ordinary indexes. It shares startup integrity checks within the same
-query budget. The constant-boundary helper avoids a legacy heap lock during
-new-day ingestion/provisioning. Canonical reads that include retained history
-still wait for its read lock; a large movement is not qualified by this fix.
-The forward operator and production movement qualification remain
-incomplete; inventory admission alone does not authorize a cutover.
+The forward operator retains an existing header heap as one sealed range below
+the canonical dated parent, then writes new days to daily partitions. The
+[canonical forward operation](#canonical-forward-operation-and-utc-cutover-window)
+owns its publication, adoption, final proof and UTC window. Retained history on
+SSD is an intermediate placement; it does not satisfy the historical-capacity
+or matching-recovery goal.
+
+The same STABLE range reader includes the sealed legacy relation. Clean layouts
+use an empty binding catalog; the full-copy handoff installs that empty catalog
+without changing saved copy fingerprints. Missing or changed retained history
+refuses admission. Physical inventory includes heap, TOAST and ordinary indexes.
+The constant-boundary helper avoids locking the legacy heap for new-day
+provisioning; reads of retained history still take its read lock. Inventory alone
+never grants attachment, movement or final-switch authority.
 
 ## One online migration workflow and its owners
 
@@ -289,9 +322,9 @@ The release workflow is: prepare the fixed SSD/HDD destination, copy and catch u
 while the original source serves, admit a short final pause, switch once, then
 activate the matching runtime and publish a complete encrypted recovery pair.
 This is the workflow required by [ADR 0073](../decisions/0073-prepare-storage-migrations-with-live-collection.md).
-**The single operator reaches runtime readiness; production release remains
-unqualified.** Internal phase helpers and disposable rehearsals are not
-alternative supported release commands.
+Runtime readiness is an intermediate result. Internal phase helpers are not
+alternative release commands; complete recovery and deployment publication
+remain separately admitted outcomes.
 The historical operator that holds clients throughout copying is not this
 release's production path.
 
@@ -404,24 +437,6 @@ or malformed pipe reply, failed inspection or uncommitted outcome retains the
 unresolved dispatch intent; no replay, source restart or automatic reversal is
 allowed. The original initial, capture, wall, boot and final monotonic ceilings
 are never renewed. Both commands return no runtime or collection-start authority.
-
-The disposable real SSD/HDD integration exercises actual gate closure, bounded
-residual copy, guarded SQL COMMIT and fresh outcome, including a deliberately
-lost real COMMIT result. Host Docker observations and the command exchange are
-controlled adapters in that test; it does not qualify a complete Docker-pipe
-operator, production publishers, source-image rollout or recovery activation.
-Original capture and frozen records survive. Separate source-start tests cover
-the actual guarded entrypoints after loss of the kernel owner with logins closed.
-
-The connected Docker rehearsal now sends that same one-shot command over the
-actual private attach pipe, observes the committed SQL state, closes the worker
-and verifies its container stopped with PID0 before releasing the source hold.
-Its three source peers are explicitly synthetic images using the actual lifetime
-fence; an independent genuine QT publisher exercises copy/catch-up before final
-pause. This proves the host/worker connection and retirement ordering, not the
-production source fleet, post-switch recovery or a production pause allowance.
-The fixture's closed-login restoration occurs only after verified retirement
-and remains teardown, never production activation authority.
 
 The existing launcher has a caller-locked internal context for this transition.
 The ordinary `launched_online_worker` wrapper still acquires and retains the
@@ -600,7 +615,7 @@ schema, or perform disk operations.
 ### Filesystem binding
 
 `header_filesystem.verify_header_filesystem` connects the unbound catalog
-snapshot to registered targets through read-only file probes. The future worker
+snapshot to registered targets through read-only file probes. The physical worker
 must share the database server's PID namespace and database storage paths; running it
 against similar-looking paths in the API container is insufficient. Its
 absolute `pg_controldata` executable is trusted worker configuration, not a
@@ -632,24 +647,9 @@ Process identity, mount identity and relation-file inode/device evidence are
 checked again before returning bound target IDs and fresh capacity observations.
 The function has a bounded inventory and elapsed-time checks between probes;
 this is not a hard interrupt for a kernel filesystem call that hangs. The
-future worker needs an outer operation timeout as well as retry/recovery
+physical worker requires an outer operation timeout as well as retry/recovery
 controls. None of these checks reserve capacity or prevent later file growth,
 so a movement worker must obtain fresh evidence before executing.
-
-Temporary-file tests cover default and linked tablespaces, stale identities,
-wrong UUIDs/devices, malformed paths, missing files and mid-check file/mount
-changes. The PostgreSQL utility is mocked in those tests. A real
-PostgreSQL/worker-namespace fixture in
-`tests/test_market_data/test_header_namespace_db.py` provides the disposable validation scope.
-It starts PostgreSQL 15 as a non-root OS user, with TCP disabled and a private
-Unix socket. It probes real control data, process identity and relation files;
-the udev UUID entry is synthetic. It exercises a table-only tablespace change,
-the subsequent index move, transaction rollback after table-only and whole-group
-movement, preserved row hashes, and rejection of copied
-identity, stale start time and a wrong UUID. Cleanup is restricted to its
-generated temporary cluster. This fixture does not qualify physical HDD
-performance or a production migration. These helpers alone do not enable Apply; movement requires its separate
-runtime admission and resource envelope.
 
 ## Database records and cutover work
 
@@ -687,11 +687,11 @@ qt storage plan ID, and qt storage apply ID --policy-hash HASH. Apply preserves
 the same settings-only and physical-cutover guards as the page. CLI success from review means a plan was saved,
 not that data moved. The existing CLI audit records these requests.
 
-The clean-schema dated-header foundation is now described in
+The clean-schema dated-header foundation is described in
 [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md).
 It preserves global identity while allowing detail partitions to move later.
-It does not enable Apply or prove physical tiering, and cannot yet be deployed
-over an existing v1 layout.
+It does not enable Apply or prove physical placement; existing v1 installations
+require the explicit preserving or forward cutover.
 
 The identity-registration guard uses an explicit Fact-ID equality lookup before
 checking the full immutable projection. A row-wise null-safe comparison alone
@@ -703,10 +703,10 @@ For newly bound private migration copies, `CopyPlacement.recent_lookup_indexes`
 keeps only the identity ID, identity/day and raw-mapping primary-key indexes on
 the verified recent SSD. The existing copy owner still places their heaps,
 TOAST and other indexes on HDD and verifies every member. The absent/default
-choice preserves the original all-history receipts. This candidate does not
+choice preserves the original all-history receipts. This placement option does not
 move already retained copies, reopen retired adoption, activate runtime or
 change the recent-data policy. Its durable SSD cost and recovery implications
-are recorded in [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md#candidate-refinement-keep-measured-global-lookup-indexes-on-ssd).
+are described in the [placement preview](#historical-header-placement-preview).
 
 ## Durable header intent and reservations
 
@@ -745,12 +745,10 @@ never automatically release their space. There is no completion or running
 transition exposed by this repository yet.
 
 These are canonical clean-schema models, with no runtime backfill or live
-migration. The journal remains internal and unconnected to the public queue
-endpoint. Destination enrollment/worker wiring, locked pre-execution
-checks, physical table/index DDL, crash reconciliation, execution logging and
-full capacity coverage still belong to the future worker. No reservation
-activates policy or moves bytes. Existing installations will require explicit,
-reviewed schema preparation as part of the later operator cutover.
+migration. The journal is internal. Registration, locked pre-execution checks, physical DDL,
+crash reconciliation and resource coverage belong to the operator/movement
+owners below. A reservation never activates policy or moves bytes; existing
+installations require explicit reviewed schema preparation.
 
 
 ## Prepared PostgreSQL destination evidence
@@ -788,7 +786,7 @@ Returned destination evidence includes database identity, the observed configure
 tablespace OID/name/location, worker and server directory paths, the verified
 directory inode and catalog version.
 It remains an observation until the internal registration and reservation
-boundaries below accept it. The future worker must repeat the checks while
+boundaries below accept it. The executing worker must repeat the checks while
 holding execution locks before moving any table or index. Neither these
 observations nor an existing reservation enables Apply.
 
@@ -803,7 +801,7 @@ enrollment, preventing reuse of an observation from an old target root. Existing
 directory paths, catalog version, target root or filesystem UUID is refused.
 A tablespace cannot belong to two targets in the same database. Registration is
 idempotent and transactional; it creates no PostgreSQL tablespace or directory
-and is not yet connected to a public API or operator command.
+and remains an internal boundary composed by the admitted operator.
 
 Stable registration excludes the current device number and directory inode.
 A remount or physical restore can change those observations without changing
@@ -1146,8 +1144,8 @@ and ownership rehearsal, measured operating limits and preserving cutover.
 The copy's own filesystem limits remain local guards. No new placement controls
 are added.
 
-The restore rehearsal covers a preserving v1 handoff followed by new v2
-observations, corrections and raw archive publication. Recovery must restore the
+Recovery qualification must include new observations, corrections and raw
+archive publication after a preserving layout change. Restore the
 active snapshot and its archive objects, admit the active layout and accept new
 collection. Retained v1 tables are historical evidence; they cannot substitute
 for that snapshot after new writes resume. Migration progress copied by a logical
@@ -1262,31 +1260,6 @@ still do not provide the matching PostgreSQL namespace. Configure the
 runtime only as part of the explicit preserving cutover after those deployment
 prerequisites and the bounded preserving migration are qualified. No live
 configuration or deployment is implied by this local implementation.
-
-### Runtime-image storage rehearsal
-
-The existing storage-demo topology now builds the backend Dockerfile's
-storage-test target. It inherits the deployable runtime code, locked Python
-dependencies and PostgreSQL 15 utilities, adding only test inputs. The default
-production target inherits the same runtime without those storage test inputs.
-The topology still uses isolated PostgreSQL and two disposable filesystems,
-UID 70 and a shared PostgreSQL PID namespace; it introduces no live host mounts.
-
-This closes the test-image dependency difference when the demonstration passes.
-It does not qualify current server file ownership, change server Compose mounts,
-or authorize activation. The real-process rehearsal runs the backend supervisor
-and its indicator/research workers alongside collector maintenance as UID 70.
-The initializer installs code-owned instruments with all provider enrollment
-disabled. The Storage API must read both drive identities, and a fresh process
-using the production repository must return the same frozen record identities
-and hashes before and after history movement. The fixture retains an internal-only
-network and matches the server's PostgreSQL extension preload.
-
-These checks target common file-owner compatibility. They do not grant the
-backend a real Docker socket, convert root-owned retained files, exercise full
-provider load, or qualify the final server Compose mount arrangement. Those
-remain explicit prerequisites for the preserving deployment, regardless of
-whether the local process rehearsal passes.
 
 Archive object manifests use logical market-archive keys resolved beneath the
 configured object root. A verified root relocation need not rewrite those keys.
@@ -1429,11 +1402,6 @@ prepared directories and their contents; it can finish only an empty interrupted
 root-owned or runtime-owned directory. Foreign ownership, nonempty inconsistent
 permissions, symlinks, nested foreign filesystems and read-only mounts refuse.
 
-The disposable native rehearsal uses real process UIDs, filesystem permissions
-and tmpfs mounts; only hardware audit/findmnt observations are synthetic. This
-does not qualify the live disk or transfer ownership of existing SSD files. That
-existing-data permission admission and the complete host cutover remain required.
-
 
 ### Preserving database process boundary
 
@@ -1470,9 +1438,6 @@ to reconcile without reverting to old software. The initial release records
 ssd-hdd-v1 and leaves previous_revision empty: the pre-migration image is not an
 automatic rollback for new-layout writes. Its revision remains in migration
 evidence. The original bounded attempt deadline is not extended on retry.
-
-This implementation still requires the combined real-service rehearsal and
-physical-drive qualification before deployment or a public activation control.
 
 ### Preserving-copy throughput
 
@@ -1551,10 +1516,8 @@ only complete snapshot IDs, hosts and tags, still capped at 8 MiB of metadata.
 This avoids both retaining an archive-sized JSON response and inventing a JSON
 parser. Truncated, ambiguous or malformed metadata refuses retirement; paths
 remain in the native snapshot and encrypted inventory. Cancellation, deadline
-and process-group cleanup apply while streaming. The production-image tests
-exercise real metadata above the ordinary output cap, bounded Python allocation,
-chunk-triggered progress, failure handling and child termination. Neither fix
-changes backup formats or the paired-publication requirement.
+and process-group cleanup apply while streaming. This preserves bounded allocation, cancellation and child cleanup without
+changing backup formats or the paired-publication requirement.
 
 Production images contain pinned tools. Image availability does not enable WAL
 archiving, provision keys, qualify a restore or activate a backup policy. Those
@@ -1568,13 +1531,6 @@ logs for all saved points while bounding obsolete between-backup history;
 arbitrary later PITR is outside the paired archive contract. The existing
 maintenance failure surface reports disabled or failing PostgreSQL archiving
 even when the next backup is not due.
-
-Release validation runs the fixed SSD/HDD core recreation and actual held
-preserving-cutover fixture in the existing deployment-contract CI job. The latter
-exercises the explicitly admitted recovery key/socket mounts across database
-preparation and interrupted activation. The separate actual encrypted recovery
-fixture verifies the configured receipt format and stale-generation rejection.
-These disposable tests do not replace physical-drive performance qualification.
 
 The fixed preserving staging sequence relocates the completed identity table and
 indexes to the HDD before starting the raw lookup copy. Their full temporary
@@ -1757,14 +1713,6 @@ ordinary UID70 permissions control destination writes; read-only source mount
 enforcement remains separate. Executed child programs do not inherit read
 bypass. File ownership, modes and contents are never changed by the transition.
 
-The disposable native rehearsal uses private root/UID1000 files, exact archive
-copying and live file proofs, rejects write bypass/root recovery/extra authority,
-and exercises an independent UID1000 publisher through its own RW fixture mount.
-It is a permission/ownership boundary proof, not a running QT collector, full
-production inventory admission or final ownership/runtime activation proof.
-No production entrypoint invokes this helper yet; persistent controller wiring
-and final spool ownership remain required.
-
 
 ### Persistent online controller and private command channel
 
@@ -1810,10 +1758,8 @@ This is an internal controller component, not a deployed host supervisor.
 Production launcher/mount admission, entry through the source-read identity,
 initial preparation and old-runtime resumption, short final publisher drain,
 safe host abort/re-entry, final working-spool ownership and matching runtime/
-recovery activation remain required. The small SSD/HDD fixtures exercise real QT
-publication and database switching, not running collector performance or measured
-production downtime. Original attempt clocks and file/resource limits remain;
-online capacity and production-cardinality metadata costs are still unqualified.
+recovery activation are owned by the canonical operation. Original attempt
+clocks and file/resource limits apply throughout.
 
 ### Explicit online worker launch boundary
 
@@ -1843,51 +1789,6 @@ write aliases and control path overlaps. The existing recovery-prepared producti
 recipe does not meet this restriction. The next host integration must resolve
 that boundary without exposing keys, weakening physical proof, or changing
 permissions beneath live publishers. The launcher is not ready for that recipe.
-
-Disposable native startup qualification admits the actual Docker contract,
-rejects a peer recovery-secret mount, preserves legacy source ownership, and
-reaches a deliberately unavailable database with empty protocol stdout. It does
-not prove successful prepared-controller startup, collection performance, full
-host recovery preparation or a short outage. Unit tests additionally cover
-configuration drift and interruption after create before receipt persistence.
-The complete initial/final host pauses and resource admission remain release
-requirements. No final switch command is exposed on this channel.
-
-The positive host-driven entrypoint fixture now prepares real QT v1 capture and
-protected shadows on distinct SSD/HDD filesystems with canonical PGDATA, source
-and history paths. It starts the actual root entrypoint through the admitted
-Docker arguments, drops to the restricted identity before imports, and exercises
-bounded copy/reproof commands while a separate real QT publisher adds archives.
-Source/frozen records and original capture start remain unchanged. Restarting the
-same exited worker container produces a new controller ID and zero live proof.
-The fixture database has only PGDATA/HDD mounts and archiving stays off; it does
-not qualify a recovery-key-bearing database, initial/final host pause, matching
-runtime activation, full launcher-context lifecycle, or production throughput.
-The synthetic UUID metadata and small application fixture establish only this
-entrypoint boundary. Existing native UID1000 publication/permission evidence is
-separate; this positive application fixture's source owner is UID70.
-
-
-The separate opt-in scripts/ci/rehearse_online_prepared.py now drives the
-complete launched_online_worker context against a fresh owned cluster. Its
-application fixture uses that cluster's bound database instead of creating a
-different database behind host admission; the existing disposable-database
-prefix and isolation guards remain. Real QT archive publication overlaps
-bounded copying and live file proof while synthetic service peers remain
-running. The rehearsal checks the deployment lock, exact source container
-identities, saved request/resource bindings, original deadline, normal exit,
-same-container reentry with empty proof, and host-exception cleanup.
-
-Run it only with owned test image IDs, a disposable output directory and a
-scratch history parent on a distinct filesystem. It generates private test
-credentials, uses an internal network, and removes only its owned containers,
-network, volume and scratch children while retaining logs and receipts. This
-manual fixture is not part of the ordinary database suite. Its source owner is
-UID70; the earlier legacy UID1000/private-file proof remains separate. The default fixture mode starts
-from prepared SQL state without an initial preparation receipt, so it does not
-qualify the combined initial-resumption-to-launch transition, production guard
-installation, a running collector's performance, recovery activation, or final
-outage. No production algorithm or switch authority is changed by this fixture.
 
 ### Durable online intent exclusion
 
@@ -1948,16 +1849,6 @@ the database image or complete terminal host reconciliation. Host admission must
 first bind the actual deployment guard. Full production inventory admission, actual intake/query performance and complete initial/final
 outages remain to be qualified; running synthetic clients cannot prove those.
 
-
-The disposable initial-transition rehearsal kills its host controller after the
-first exact source client restarts, then re-enters under the original deadline.
-It verifies preserved cluster/table/source-directory metadata, identical source
-client identities, continued synthetic file intake, retained holds and ordinary
-deployment exclusion. Completed reentry leaves the receipt unchanged. This is a
-real Docker/PostgreSQL boundary proof using synthetic clients and UUID metadata
-on disposable host directories. It is not a running QT collector, distinct-drive
-admission, packaged complete online handoff or production outage measurement.
-
 ### Atomic online capture preparation
 
 fact_header_v2_online.prepare_attempt combines the existing header/raw shadow,
@@ -1977,31 +1868,6 @@ steps below. Complete production host-to-recovery orchestration remains required
 
 ### Initial preparation through background worker admission
 
-The opt-in prepared-host rehearsal also accepts --prepare-source. This starts
-with a fresh owned database exposing only PGDATA and synthetic serving clients.
-It runs prepare_online_source, verifies the preserved cluster and original
-600-second receipt, and resumes the same clients before invoking atomic SQL/raw/
-archive capture preparation. The full launcher then admits the retained hold
-through that completed source receipt. Receipt bytes remain unchanged across
-background copy, concurrent QT archive publication, worker reentry and host
-exception cleanup. The completed initializer stays stopped and synthetic file
-intake continues.
-
-Real QT publication runs in a separately owned application fixture; it is not
-the synthetic collector service. Source directories use UID70, and disposable
-history permissions allow both the host fixture user and database user to pass
-the normal writability admission. UUID evidence is synthetic; the optional
-distinct-device check independently verifies SSD/HDD separation. These facts
-do not establish production permission admission, collector/query performance,
-production-size outage duration or complete final recovery activation.
-
-After atomic preparation, the --prepare-source fixture uses bounded SQL copy
-passes and explicit preparation_step calls for private identity/raw relocation,
-identity mirroring, individual reference preparation/validation and parent
-adoption. Fixed retained/reference catalog moves remain separately invoked
-through the existing catalog mover. Initial archive copying belongs to the live
-controller. The default already-prepared fixture retains its older finite setup.
-
 ### Explicit online preparation steps
 
 fact_header_v2_online.preparation_step admits one fixed operation per transaction.
@@ -2017,15 +1883,6 @@ the source writer fence used for brief reference installation. Earlier committed
 steps survive a later failed transaction; retries inspect actual placement and
 constraint identities. A step report never grants switch authority. These internal
 calls add no host pause, ownership change or wire activation command.
-
-Disposable qualification inserts native v1 records while reference validation
-holds its locks, kills a later validation backend, and confirms that earlier
-validation commits, original capture time and frozen records survive. The combined
-host fixture runs these steps after source resumption and before live controller
-copy/reproof. These small fixtures do not measure production lock impact or
-collector throughput. Production still requires admitted phase resources,
-complete final stop/drain/switch, safe abort/reconciliation, and recovery activation
-after the read-capability worker exits.
 
 
 ### Separately bounded final database transaction
@@ -2077,21 +1934,6 @@ then prepares/validates/adopts references and catches archive intake. It checks
 original capture/frozen preservation and refusal of excess phase duration.
 This component qualification is not a complete packaged host phase driver,
 production lock-impact measurement or final outage admission.
-
-
-The optional owned host rehearsal adds --worker-phases with --prepare-source.
-After initial source resumption and atomic capture, it sends explicit private
-moves, identity mirroring and reference preparation/validation/adoption through
-the launched worker's real pipe, alongside real QT publication and bounded copy
-commands. After mirroring, `inspect_references` uses the existing reference inspector and
-returns at most 32 names per reply, with a fresh sequence for every observation.
-The existing bounded reference inventory and each mutation still validate the
-actual database. The same worker moves the three fixed catalogs through
-`catalog_history`; the fixture only verifies their final placement and retained
-rows. No test process supplies production reference names or moves catalogs. Existing source receipts, empty-proof reentry and worker-only
-exception cleanup are still checked. Synthetic services/UUID metadata/UID70
-directories and small data do not establish production collector performance or
-the final pause/recovery sequence.
 
 
 ### Rollback ownership across source-resumption admission
@@ -2151,9 +1993,7 @@ This helper supplies no SQL switch, source resumption, recovery mount transition
 terminal marker removal or production entrypoint. The complete host flow must
 still combine publisher/spool drain, same-worker delta/COMMIT/reconciliation,
 the live rollback fence with supervised exact source restart, and matching
-runtime/recovery activation. Host expiry or uncertainty remains held. The optional
-owned --final-pause rehearsal exercises interrupted stop re-entry; it is not a
-complete cutover, running production collector test or outage estimate.
+runtime/recovery activation. Host expiry or uncertainty remains held.
 
 
 ### Read-only spool observation during the final hold
@@ -2176,82 +2016,19 @@ not prove no in-flight database transaction or unpublished object, perform final
 catch-up, switch roots or authorize collector resumption. Pending WAL remains for
 normal source recovery; forced cleanup is not an admission mechanism.
 
-The owned final-pause rehearsal observes the real fixture spool, injects one
-owned sealed diagnostic segment plus acknowledgement, verifies refusal to call
-that spool empty and preservation of the bytes, and removes only its diagnostic
-files. Synthetic peers and small fixture data do not qualify actual collector
-shutdown, production spool cardinality or complete downtime.
-
 ### Collector finalization qualification
 
-The disposable online-capture fixture runs ContinuousStreamRuntime with the real
-Coinbase parser, trade projection, archive publication and PostgreSQL repository.
-Only the transport supplies scripted frames. The preserved v1 source uses its
-frozen deployed ingestion method, v1 partition provisioning and v1 read clause;
-the candidate v2 writer cannot serve that schema before the switch.
+Archive publication can precede canonical acknowledgement. A blocked
+acknowledgement keeps shutdown pending and sealed WAL present; failure must
+propagate while preserving the segment. Normal startup recovers it before a new
+transport session. Unrelated pending WAL and capture/frozen bindings remain.
+A completed runtime or momentarily empty spool does not authorize switching.
 
-A blocked canonical acknowledgement keeps the runtime stop pending and the sealed
-WAL present after archive publication. A failed acknowledgement must propagate
-failure and retain the segment. Normal runtime startup recovers it before opening
-a new transport session, with one canonical fact, manifest and raw mapping.
-Preexisting unrelated pending WAL and original capture/frozen bindings remain.
-This tests the runtime finalizer boundary; Docker SIGTERM, supervisor lifecycle,
-all production stream projections, complete publisher exclusion and host
-stop/delta/COMMIT/recovery remain separate qualification requirements. A completed
-runtime or a momentarily empty spool does not authorize a storage switch.
-
-The supervisor now preserves finalizer exceptions/cancellation, timed-out drain,
-and unresolved task failure during restart backoff; stop() raises after a failed
-thread or drain instead of reporting clean shutdown. A successful replacement
-collector that drains clears its earlier failure. Actual Linux SIGTERM tests
-exercise the worker's existing exit0/exit5 paths with isolated infrastructure.
-The SSD/HDD fixture additionally runs the real supervisor around the real QT
-collector/repository, with controlled discovery/safety metadata and scripted
-transport. It proves drain error propagation and retained-WAL recovery, not
-production safety registration, Docker stop or a complete held-host switch.
-The legacy source image predates this fix: its exit0 must not be treated as
-proof of publisher drain. Spool preservation and exact source admission remain
-required, and the source image is not changed by these tests.
-
-The optional prepared-host rehearsal --worker-shutdown path replaces the synthetic
-collector shell with the actual worker and supervisor process. Docker delivers
-SIGTERM through the bound final-stop helper while the same migration worker stays
-alive. Discovery, adapter, lifecycle and heartbeat effects are controlled fixture
-inputs; separate database tests qualify real publication and WAL recovery. The
-failure case retains an owned pending segment and reports exit5. The existing
-strict inventory guard refuses paused admission and retains stopping intent; the
-source is not restarted. Even clean paused state supplies no publisher-drain,
-switch or source-resumption authority. Initial
-preparation uses a clean stop and resumes the same source process container before
-the final failure is injected. No production runtime or migration algorithm changes.
-
-Internal final_delta rounds admit completed SQL and archive baselines plus the
-same controller's background file reproof before any tail copying. Each round
-copies at most two alternating SQL tail pages and one page per fixed archive
-family. Per-page tail-only checks refuse bulk fallback. All work shares an
-absolute caller deadline capped by the unchanged short command allowance,
-original admitted resources and original capture lifetime. SQL and archive
-transactions only shorten existing timeout/watch ceilings. A process binds its
-first final deadline; later rounds must retain it and commit/rollback cannot
-widen it. Background copy/preparation requests are refused after entry.
-
-A failed round closes ordinary work. Already committed pages remain durable;
-an interrupted archive transaction retains its queue. Replacement controllers
-start with zero file proof and must reprove while source admission permits it.
-The fixed final_delta pipe command accepts only its caller's absolute deadline.
-The internal host helper admits the exact paused source and same live worker
-before and after each bounded round under the persisted original wall/boot
-window. It validates the controller and all three archive-family replies; it
-never modifies the final receipt or grants a new deadline on retry. Same-process
-sequence replay retains the existing framing rules.
-
-This tail-copy path provides no publisher-drain, host stop/restart,
-switch-entered receipt or runtime authority. Pending spool files remain intact.
-Late publisher commits can be copied, but tail emptiness is only an observation;
-publisher exclusion and the complete exact verifier remain required at COMMIT.
-Database commit is not exposed on the pipe. Full outer-controller loss and safe
-source resumption still require separate host reconciliation.
-
+Supervisor shutdown preserves finalizer exceptions/cancellation, drain timeout
+and unresolved failure during restart backoff. stop() raises for a failed thread
+or drain. A replacement collector that drains successfully can clear its earlier
+failure. A legacy source image may predate these semantics: exit zero is not
+publisher-drain proof. Preserve spool and admit the exact source image independently.
 
 ### Durable entry before possible database switching
 
@@ -2289,25 +2066,6 @@ host receipt unchanged and source held. An uncommitted response is not the live
 rollback fence; a committed response does not permit recovery mounts while the
 read-capability worker survives. COMMIT dispatch, publisher admission, supervised
 source resumption and terminal host reconciliation remain separate requirements.
-
-
-### Real publication during Docker shutdown rehearsal
-
-The explicit `--real-worker-publication` host rehearsal combines Docker SIGTERM
-to the actual worker/supervisor with ContinuousStreamRuntime, the Coinbase parser,
-trade projection, PostgreSQL archive publication and canonical acknowledgement.
-Transport is scripted. The owned v1 fixture binds the frozen v1 ingestion and
-partition/read clauses; it does not run the candidate v2 bootstrap against v1.
-The same admitted migration worker and file proof remain alive during shutdown.
-
-A diagnostic acknowledgement delay checks the intermediate state: a durable raw
-manifest/mapping and sealed WAL exist before the canonical fact commits. Normal
-completion must produce exactly one fact/manifest/mapping, retire only that
-segment and preserve unrelated fixture WAL. The held tail-copy path then catches
-publication that completed during stopping. Discovery, lifecycle and heartbeat
-remain controlled, as do UUID metadata and UID70 fixture directories. This is not
-full deployed-image readiness, all-projector drain, real collector performance,
-production downtime, COMMIT dispatch or source resumption authority.
 
 
 ### Retained rollback fence on the private worker channel
@@ -2361,39 +2119,8 @@ After all exact original clients are healthy, the helper ends the live fence,
 terminalizes that controller and records source_resumed. Lost end/save replies
 retain uncertainty. Even successful resumption retains the final marker; it
 cannot authorize marker removal, a replacement controller, candidate runtime or
-recovery mount activation. Terminal reconciliation, full outer-process loss and
-production readiness remain separate qualification requirements. The optional
-owned --abort-resume rehearsal exercises this internal host path; it is not a
-production entrypoint or a production outage measurement.
-
-
-The optional --abort-resume-fence-loss disposable rehearsal uses a private Unix
-HTTP proxy limited to ping and one exact owned container start. The real Docker
-engine completes that start while its reply to the actual CLI is withheld. The
-fixture then terminates only the owned database migration-fence backend. It
-checks that host supervision refuses further starts, reaps the local CLI and
-preserves source_resuming with the exact in-flight action and original clocks.
-One source client is already running: the result is explicitly unresolved, not
-an assertion that the source remains stopped. This controlled reply fault does
-not qualify a daemon start completing after ownership loss or full host death.
-The proxy is confined to the one child CLI environment and removed at fixture
-exit; production Docker configuration and migration behavior are unchanged.
-
-
-The optional --abort-resume-late-start mode accepts that one exact start at the
-private proxy but does not forward it yet. With all source clients stopped, it
-terminates the owned SQL fence and waits for the real local Docker CLI to be
-reaped. Only then does the proxy forward the already accepted request to Docker.
-The actual engine starts the client and returns 204. Monotonic observations
-record this ordering; no deadline is renewed and no extra start is permitted.
-
-The retained source_resuming journal still has the exact in-flight container and
-an empty completed list. Replay and ordinary relaunch refuse, while one original
-client is running. Normal launcher cleanup retires the read-capability worker.
-This demonstrates a queued intermediary request surviving local cancellation.
-It does not prove Docker-internal queue behavior, full outer-host death, or a
-safe terminal reconciliation of incomplete starts. No production transition or
-additional resumption authority is introduced by this fixture.
+recovery mount activation. Partial starts, outer-process loss and uncertain Docker completion remain
+held until the separately admitted reconciliation owner establishes outcome.
 
 
 ### Reconcile a completed resumption on the same live worker
@@ -2417,9 +2144,8 @@ This covers a fully received end reply discarded by the host or an unrecorded
 completion while that exact channel remains usable. Unread/partial framing,
 worker/outer-host death, partial starts, delayed daemon completion, reboot and
 expiry remain unresolved; there is no fence recreation or saved-negative restart
-shortcut. The optional owned --abort-resume-lost-end rehearsal qualifies this
-limited terminal path. It is not COMMIT dispatch, recovery activation, ordinary
-deployment authorization or a production downtime measurement.
+shortcut. This is a bounded resumption reconciliation, not COMMIT dispatch,
+recovery activation or deployment authority.
 
 
 ### Verify worker retirement independently of its attach CLI
@@ -2438,14 +2164,6 @@ These are worker cleanup bounds, not a renewed copy, source stop, COMMIT, runtim
 or recovery activation allowance. A cleanup failure remains unresolved and
 must prevent any later recovery mount transition. No receipt/marker is removed.
 
-The optional --worker-attach-loss owned rehearsal SIGSTOPs only the admitted
-migration Python process, then kills/reaps its actual Docker attach CLI. It
-checks that Docker still reports the worker running before normal launcher
-cleanup retires it. It then exercises a fresh controller with zero proof under
-the original capture deadline while source clients keep serving. This proves
-cleanup of a live outer launcher; full outer-process death and recovery-mount
-activation remain separate requirements.
-
 
 Final online source admission also checks bounded Docker-wide mount/state
 snapshots. An unadmitted live peer with a writable mount overlapping database or
@@ -2453,8 +2171,7 @@ collector storage refuses before further host work; no unexpected peer is stoppe
 or edited. Read-only/stopped peers remain preserved. The original deadline bounds
 the observation and drift refuses. This supplements strict project/network
 inventory; it is not host-process, future-start, SQL-publisher or filesystem-alias
-exclusion and does not create COMMIT authority. See ADR0073 for the owned publisher
-retirement fixture and remaining final-handoff requirements.
+exclusion and does not create COMMIT authority.
 
 
 Final source admission also resolves Docker network/PID namespace aliases within
@@ -2530,9 +2247,8 @@ ordinary stop/restart/relaunch and gate replay, retain the marker and grant no
 COMMIT or automatic reopen. Confirmed `login_closed` has the separately guarded
 internal abort path described below; `login_closing` remains unresolved. Prepared transactions still refuse the switch;
 archive/spool publishers and terminal recovery still require admission.
-The preserving production gate-restoration transition is unfinished. Disposable
-rehearsal cleanup restores access only after verified read-worker retirement;
-that fixture action supplies no production recovery authority.
+Gate restoration requires the admitted retained-session abort/recovery owner;
+worker teardown alone never grants access restoration.
 
 The same host intent now covers `final_session_quiesce`: the retained worker calls
 Timescale's existing stop-background-workers function after proving the target
@@ -2578,10 +2294,8 @@ COMMIT. The host requires the live admission result before changing access;
 a saved result grants no replay or switch authority. This deliberately avoids
 arbitrary custom-job interruption/replay support. The built-ins perform telemetry
 and job-error cleanup rather than QT fact publication, but their normal retry
-behavior still does not promise exactly-once execution. The previous generic
-scheduler fixture remains lower-level lifecycle evidence only. Source-image,
-archive/spool publisher exclusion and the complete host switch remain separate
-unfinished release requirements.
+behavior still does not promise exactly-once execution. Source-image and archive/spool publisher exclusion remain separate final-switch
+requirements.
 
 Jobs can publish changes between the last tail pass and their retirement. The
 existing `copy_final_delta_locked` now also accepts confirmed `login_closed` and
@@ -2680,9 +2394,7 @@ The publication seam and filesystem ownership must be qualified with the
 source and target identities actually admitted for the installation. The
 composition hosts the existing maintenance supervisor at the database-owned
 process boundary, retaining one lifecycle scheduler, status and recovery engine.
-The public overlay expresses this composition; it does not authorize activation.
-Release qualification must cover UID1000 legacy-WAL recovery, new intake and
-a complete encrypted pair together. Actual source ownership admission, preserving recovery-copy
+The public overlay expresses this composition; it does not authorize activation. Actual source ownership admission, preserving recovery-copy
 preparation, host switch, read-worker retirement and post-switch activation still
 need integration and measured final-pause qualification. The legacy runtime
 validator continues to refuse the new topology. Existing prepared production directories are not
@@ -2723,8 +2435,7 @@ This is an opt-in process seam, not an activated server recipe. The fixed overla
 and bot reader now express it as described below; the old runtime/mount validator
 still refuses that topology. Installing and admitting one dedicated owner, exact
 legacy-WAL recovery and fresh intake, physical maintenance and a complete encrypted
-recovery pair remain integration requirements. Unit shutdown
-and real database registry/status tests do not establish those outcomes.
+recovery pair remain integration requirements.
 
 
 ### Preserving runtime recipe
@@ -2741,8 +2452,7 @@ no host files are repaired, chowned or widened by startup.
 
 Backend retains the registered SSD/PGDATA mount for filesystem capacity reporting.
 Its UID1000 cannot traverse private UID70 PostgreSQL directories. This is capacity
-observation, not physical inspection: the rehearsal explicitly checks PG_VERSION
-read denial. The initializer and collector do not mount PostgreSQL data.
+observation, not physical inspection; PG_VERSION remains inaccessible to that UID. The initializer and collector do not mount PostgreSQL data.
 Bot containers receive the same explicit archive-group setting, run as UID1000
 with that supplemental group, drop capabilities, and retain only the existing
 read-only archive/udev mounts. Unconfigured bot launches keep their prior behavior.
@@ -2751,23 +2461,6 @@ The existing bounded read-only heartbeat probe also recognizes maintenance's
 host-scoped worker prefix and running/degraded lifecycle. It does not bootstrap
 schema or turn liveness into proof of a completed backup. Storage continues to
 show actual phase outcomes through its existing projection.
-
-The disposable core recreation rehearsal now targets this split composition,
-private UID1000 source metadata, archive publication/read access in both
-application/maintenance directions, confined PG files, one maintenance owner and
-service recreation. Its synthetic filesystems and unconfigured saved policy do
-not qualify actual legacy-WAL recovery or encrypted-pair publication. The old held
-runtime validator deliberately refuses the additional maintenance service; its
-activation contract has not been broadened. The final online operator must bind
-and qualify this composition under the existing outcome/retirement/recovery
-requirements before deployment. A rendered overlay alone is not release authority.
-
-
-The held-operator regression fixture explicitly reconstructs its historical
-common-UID private-file composition from the rendered mounts. This keeps that
-existing interruption/recovery regression intact without broadening its production
-validator to accept the new service. Its result is historical-path evidence only;
-the changed core recreation rehearsal owns the new split-runtime checks.
 
 
 The confined online worker's existing private request may explicitly bind
@@ -2855,8 +2548,7 @@ a private tmpfs input and does not require duplicate configuration beside keys.
 For the confirmed pre-preparation missing-config failure after commit, the
 existing recovery owner provides an explicit, bounded continuation. Its failed
 receipt and helper remain preserved, and ordinary migration replay stays closed.
-See [ADR 0073's recovery decision](../decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure)
-for the exact admission, clock and failure rules. A separately retained database
+This continuation retains the original admission, clock and failure rules. A separately retained database
 image may lack the pinned native archiver even when application tooling is
 present. The continuation owner has an explicitly bound image-correction path
 for that completed-preparation failure. It preserves cluster, volumes, keys and
@@ -2872,11 +2564,8 @@ operation, original proof OIDs, exact trigger body and permanent canonical
 guards before removing only that obsolete row trigger. It uses a non-waiting
 table lock and five-second SQL bounds, changes no rows, and preserves the proof,
 functions, truncate guard and other constraints. A lost reply requires catalog
-inspection; absence of the trigger refuses another dispatch. A disposable native
-rehearsal reproduced the rejected insert and verified restored ingestion,
-corrections, causal reads, frozen results and preservation of every other trigger.
-The forward-switch implementation
-now retires the exact source-bound row guards from the identity heap and any raw
+inspection; absence of the trigger refuses another dispatch. The forward-switch
+implementation retires the exact source-bound row guards from the identity heap and any raw
 mapping heap it promotes, within the existing final transaction. It verifies the
 original proof, target OIDs and guard definitions while preserving the proof,
 functions, truncate guards and unpromoted copies. Failure restores guards with the
@@ -3023,17 +2712,6 @@ current policy before the host accepts the outcome. The existing final receipt
 binds that confirmation; older committed receipts without it cannot enter recovery.
 No possibly dispatched COMMIT is replayed. This closes the missing registration
 that otherwise let application startup reach an unconfigured history worker.
-
-The connected disposable rehearsal now covers the atomic switch/policy, verified
-reader retirement, preserving recovery mounts and native WAL, private pending-file
-copy, normal book/trade recovery of all 12 retained segments, duplicate-free reentry,
-a fresh scripted trade, current and frozen reads, and a complete encrypted pair
-through the dedicated supervisor. History maintenance is configured and idle for
-the small fixture; raw compaction runs successfully. Collector startup and the
-fresh record precede maintenance startup and the physical baseline. This uses
-synthetic guarded source peers and filesystem identities and does not establish
-production pause, throughput, capacity, or full-fleet admission. The supported
-production operator and reviewed deployment remain unfinished.
 
 
 ### Retained worker channel ownership
@@ -3417,24 +3095,6 @@ inherits the qualified image entrypoint. Empty or custom entrypoint overrides
 remain prohibited, and actual image/container entrypoints remain bound by the
 preserving preparation checks.
 
-The existing disposable online rehearsal accepts
-`--canonical-deployment-repository <exact-clean-checkout>` with the full-operation
-and completion-observation modes. It renders that checkout's public composition,
-uses real read-only filesystem UUID metadata and distinct owned listeners,
-and drives the existing terminal publication and ordinary deployer. It uses
-synthetic guarded source peers and disposable credentials; it cannot establish
-production collection performance or production admission. Its new empty archive
-root is prepared with the application/operator owner and database shared group
-before source startup. The backend keeps internal port 8000 and uses a distinct
-loopback address for its owned host listener. Deployment runs as the ordinary
-operator; no host account membership or original source permission is changed.
-After ordinary Compose adoption, the rehearsal resolves the unique current
-database container and verifies the original cluster and frozen data. It records
-any container recreation and the additional deployment time, and checks the
-actual pgAdmin HTTP endpoint from inside its container. The fixture network
-remains internal, so this does not qualify external listener access. This elapsed
-fixture time is not production downtime.
-
 
 Terminal deployment admission also verifies the initial preserving hold through
 its immutable hash in the completed online preparation receipt, itself bound by
@@ -3446,1055 +3106,483 @@ operation is replayed.
 
 ### Online baseline order and SSD headroom
 
-For a new online attempt, finish the bounded raw lookup baseline and commit its
-existing physical HDD relocation. Next build the private identity registry on
-SSD through a separate bounded cursor, and commit its existing HDD relocation
-before allocating copied header pages. The three large SSD allocations therefore
-occur in sequence. Building random identity indexes directly on HDD failed the
-bounded working-set comparison; the identity prepass retains SSD construction.
+For a new online attempt, complete the raw lookup baseline and its HDD
+relocation, build the identity registry on SSD and relocate it to HDD, then
+allocate copied headers. This sequence prevents the three large SSD allocations
+from overlapping. The saved progress owns each cursor, completion bit and
+placement. Earlier attempts without the identity cursor retain their original
+combined copy order; reentry cannot reinterpret a started cursor.
 
-The existing copy-progress row owns the optional identity cursor and completion
-bit. They are created atomically only for a new online attempt; ordinary preparation never alters existing progress
-schemas; the explicit pre-header ordering step below is separately admitted. Earlier targets without this cursor retain their
-combined identity/header copy and recorded order. Reentry preserves every cursor,
-placement and the original capture deadline. No new operator or policy is added.
+Identity pages compare every field and retain the source high-water mark.
+They never retire captured header entries: only exact full-header comparison
+may do that. Header pages compare existing identities before inserting missing
+ones, reread inserts including concurrent conflicts, and retain native FKs and
+source guards. Page comparison, checkpoint advancement and queue retirement
+commit atomically. Source and earlier committed work survive failed pages.
 
-Identity pages compare every identity field, retain the source high-water mark,
-and never retire a captured header entry. Only the existing exact full-header
-page comparison can do that. Both source and private shadow remain protected by
-the existing immutable guards. Identity mirroring still begins only after header
-baseline/catch-up; final verification and the writer boundary remain unchanged.
-
-Failed pages or relocation retain earlier committed work and original source.
-Header copying refuses until the completed staged identity registry has verified
-HDD placement. Every page retains the same resource watcher and original clock.
-The prepass and relocation count toward total elapsed time. Production admission
-must still include queues, source growth, retained data, WAL/temp and full pauses;
-less allocation overlap alone does not establish sufficient capacity or speed.
-
-
-After identity history placement, each header page first reads and compares the
-complete identity projection for its IDs. It inserts only missing identities,
-then reads those back exactly, including any concurrent conflict. Existing rows
-therefore avoid duplicate INSERT proof-trigger and unique-index work on HDD.
-The header INSERT still runs its native foreign key and exact-source guards;
-full-row verification, page checkpoint and queue retirement remain atomic. Fresh
-identity construction keeps the original insertion path. This reduces repeated
-work without changing table definitions, cursors, placement or deadline limits;
-production throughput still requires measurement before admitting reentry.
-
-The remaining 4,096-row HDD identity read also exceeded the existing 30-second
-SQL bound. The coupled correction adds an explicit `identity_order` preparation
-step before the first header page: PostgreSQL clusters only the completed private
-identity table using its existing primary index, then records `header_id_order`
-in the existing copy-progress row in the same transaction. This explicit step
-may add that one column to an existing unstarted header copy; ordinary preparation
-and reentry never silently change a saved cursor's meaning. Started header copies
-retain their original order. The step refuses active identity mirroring, existing
-headers, insufficient rewrite allowance, or an unavailable NOWAIT private lock.
-
-With that recorded mode, header pages advance by global ID while retaining the
-original `(storage_day, market_commit_seq, id)` upper bound. Concurrent arrivals
-remain in the capture queue, including arrivals below an already passed ID. Exact
-page comparisons and the native FK remain mandatory. The private rewrite and its
-mode record roll back together; the original capture clock, source data and prior
-raw/identity proof remain intact. Temporary sorting uses the admitted SSD path,
-a bounded backend temp-file limit and no parallel maintenance workers; the
-rewrite uses the existing HDD maintenance allowance and resource watcher. This
-candidate still requires integrated correctness, interruption, measured physical
-cost and preserving package-transition qualification before production reentry.
+The explicit identity_order step is available only before the first header
+page and identity mirroring. It clusters the completed private identity table
+using its primary index and records header_id_order in the same transaction.
+An active mirror, existing header copy, insufficient rewrite allowance or
+unavailable NOWAIT lock refuses it. Started copies retain their original order.
+In this mode, pages advance by global ID under the original
+(storage_day, market_commit_seq, id) upper bound; captured arrivals behind the
+cursor remain queued. Sorting uses admitted SSD temporary space, a backend
+temp-file bound and no parallel maintenance workers. Rewrites retain the
+existing HDD allowance, resource watch and original capture clock.
 
 ### Background SQL page budget
 
-The online worker's existing explicit `page_rows` request accepts up to 4,096
-rows for background SQL copying and identity-capture preparation, matching the
-existing database page helpers. Requests omitted by direct callers retain the
-128-row default; existing requests of at most 256 keep their previous behavior.
-Archive copy/reproof and all held final work use at most `min(page_rows, 256)`.
-Their byte, object and final-time limits are unchanged. The worker keeps two
-pages per SQL command, per-page transactions/resource watches, the admitted
-command deadline and original cumulative capture deadline. A final-bound worker
-cannot return to background copying. No new request field or execution path is
-introduced.
-
-The split addresses measured normal-controller overhead: the prior 256-row
-request projected beyond the existing 96-hour window for the observed source
-cardinality. A larger declared SQL batch still needs measured allocation,
-throughput and workload admission; it does not extend any clock or establish a
-production migration estimate.
-
+An explicit page_rows request accepts up to 4,096 rows for background SQL copy
+and identity preparation; direct callers default to 128. Archive copy/reproof
+and held final work use at most min(page_rows, 256), preserving their byte,
+object and final-time bounds. Each SQL command handles at most two pages with
+per-page transactions and resource observations. A final-bound worker cannot
+return to background copying. Larger batches do not extend command or
+cumulative capture deadlines.
 
 ### Baseline-to-identity transition under ongoing collection
 
-After the finite raw, identity and header baselines, the existing operation driver
-continues bounded, alternating SQL catch-up passes until both queues have been
-observed empty. Entering the `catch_up` phase alone does not establish readiness
-for identity mirroring: a long baseline can leave more captured arrivals than the
-short identity-capture fence permits. The same original capture, resource and
-command deadlines apply to these passes. Failure or expiry stops preparation;
-there is no new retry clock or writer hold for the backlog.
-
-The empty observation only permits an attempt at the existing identity-capture
-step. That step still takes its nonwaiting writer fence and independently checks
-its bounded queue, exact source and live attempt. New arrivals can still make it
-refuse. Reference validation and the final SQL/archive catch-up follow normally;
-none of these observations grants final switch or runtime authority.
-
+After finite raw, identity and header baselines, alternate bounded SQL catch-up
+passes until both queues have been observed empty. Entering catch_up is not
+identity-mirror readiness. The identity-capture step independently takes its
+nonwaiting writer fence and rechecks queue bounds, exact source and live
+attempt; intervening arrivals can still make it refuse. References and final
+SQL/archive catch-up follow under the original deadlines. No empty-queue
+observation grants final-switch authority.
 
 ### Explicit amendment of an unexpired capture deadline
 
-An operator may explicitly increase the total capture duration through the same
-`qt storage migrate --operation-file ... --extend-attempt-seconds ...
---capacity-file ...` command. Inspection remains the default; `--execute` applies
-the amendment only. It does not start another migration or stop source clients.
-The ceiling remains 96 hours measured from the original database capture start.
-Ordinary reentry still requires unchanged clocks and byte-identical requests.
-Legacy captures without an explicit duration, expired/canceled attempts, a live
-worker, and any final-switch intent are ineligible.
+    qt storage migrate --operation-file <plan> --extend-attempt-seconds <seconds> --capacity-file <forecast>
 
-The existing deployment flock must be free and the exact background worker must
-be independently verified stopped with PID zero. Collection keeps serving. The
-host reuses the full prepared-source preflight and requires a fresh private
-`qt.storage_deadline_capacity.v1` forecast bound to the original plan bytes and
-amended absolute deadline. Both actual source/history filesystems must have room
-for named remaining targets, growth, queue, WAL, temporary, maintenance and
-recovery allocations above unchanged policy and operation reserve floors.
-Forecast evidence digests are retained; the operator remains responsible for
-measuring those inputs. A supplied number is not itself production admission.
-The normal live phase/resource guards still apply on migration reentry.
+Inspection is the default; --execute applies only the amendment. It does not
+launch another migration or stop clients. The maximum is 96 hours from the
+original database capture start. Legacy implicit durations, expired/canceled
+attempts, a live worker or final-switch intent are ineligible.
 
-`scripts/automation/storage_online_deadline.py` owns the host amendment journal,
-request/launch/plan publication and preservation of the retired worker. Its
-300-second wall/boot/monotonic transition window never restarts on reentry.
-`scripts/db/fact_header_v2_deadline.py` owns only the transactional duration change
-and audit. It excludes both the controller session lock and capture/page lock,
-checks the exact existing capture and intact capture contract, and stays bounded
-by the old attempt deadline. The duration and exact before/after audit commit
-together. The original capture timestamp, queued writes, completed pages,
-placements and all shorter phase limits remain unchanged.
+Require the deployment flock, independent proof that the exact background worker
+is stopped with PID zero, full prepared-source preflight, and a fresh private
+qt.storage_deadline_capacity.v1 forecast bound to the original plan and amended
+deadline. Both filesystems must cover remaining targets, source growth, queues,
+WAL, temporary, maintenance and recovery allocations above unchanged floors.
+Forecast digests are retained; supplied numbers are not measured capacity.
 
-Durable intent precedes possible SQL dispatch. A lost reply requires exact audit
-and capture reconciliation; absence of that audit never permits blind replay.
-The old stopped container is retained under an amendment-specific name, and all
-original private plan/request/launch bytes remain in the private journal. Only
-exact old/new file states permit interrupted publication to finish. An incomplete
-journal blocks ordinary operation and direct worker launch. Reboot, transition
-expiry or unresolved SQL outcome requires explicit reconciliation, not a fresh
-clock. Once publication is complete, ordinary reentry creates an independently
-admitted worker using the same pinned image and amended request. No old process
-or cached live proof is edited. This boundary does not grant final-switch,
-recovery, backup-completion or deployment authority.
+storage_online_deadline.py owns host publication and its original 300-second
+wall/boot/monotonic transition window. fact_header_v2_deadline.py owns the
+transactional duration/audit change, excluding controller and page owners and
+remaining within the old attempt deadline. The duration and before/after audit
+commit together. Original start, pages, queues, placements and shorter phase
+limits do not change.
 
-Disposable database checks prove concurrent capture, old-clock refusal, owner
-exclusion and transactional rollback. Host fault injection covers lost replies
-and interruption between file publications. These are component qualifications;
-actual worker replacement/reentry and full production capacity admission must
-also be demonstrated before applying an amendment to a live migration.
+Intent precedes dispatch. A lost reply requires exact audit/capture
+reconciliation, never blind replay. Preserve the stopped container and original
+plan/request/launch bytes; interrupted publication accepts only recorded old/new
+states. Incomplete publication blocks launch. Reboot, transition expiry or
+uncertain SQL needs explicit reconciliation. Completed publication permits
+separate ordinary worker admission; it does not grant a final switch.
 
 ### Preserving a retired worker's package before header copying
 
-The same operator accepts an explicit `--replacement-package-file` manifest for
-a stopped migration that has completed raw and identity history preparation but
-has not copied any header page or enabled identity mirroring. The private
-`qt.storage_online_package.v1` manifest binds the original plan hash and the new
-candidate image, source revision and source tree hash. Inspection is the default.
-This amendment is separate from a deadline amendment and changes no capture
-timestamp, duration, placement, resource budget, serving source or private path.
+--replacement-package-file accepts a private qt.storage_online_package.v1
+manifest binding the original plan hash and immutable image, source revision
+and source-tree hash. It is separate from a deadline amendment and is admitted
+only after raw/identity history preparation, before any header page or identity
+mirroring, with the worker stopped and no final intent.
 
-The existing stopped-worker amendment owner holds the deployment lock, admits
-both old and proposed packages through the full prepared-operation preflight,
-and compares their read-only observations of the original capture, completed
-progress and live proof contract. A running worker, final intent, differing
-observation or partially completed deadline amendment refuses. The SQL probes
-have only database network access, no data, PID namespace or recovery-key mounts.
+Under deployment ownership, compare old and proposed packages through complete
+prepared-operation preflights and read-only observations of the same capture,
+progress and proof. SQL probes have database networking only, without data,
+PID-namespace or key mounts. Record old/new request, launch, plan and runtime
+recipe before preserving the stopped container and publishing files.
 
-Before publishing files, the owner durably records exact old and proposed
-request, launch and plan states. It preserves the stopped container under an
-intent-bound name. An interrupted rename or file publication can reconcile only
-those exact states under the original 300-second wall/boot/monotonic transition
-window, bounded by the unchanged capture deadline. Ordinary launch remains
-blocked while publication is incomplete. The amendment does not launch a worker,
-perform a database migration, authorize a final switch or deploy the candidate.
-Subsequent normal operation must independently admit the replacement worker and
-all phase resources. A completed journal is historical evidence, not current
-capture or capacity authority.
-
-Native worker replacement/reentry and measured physical preparation cost remain
-necessary before applying this package change to production. Unit fault
-injection and a small database ordering fixture do not establish those outcomes.
-
-The existing disposable prepared-host rehearsal accepts
-`--replacement-package-image` with initial capture and worker phases. It finishes
-raw/identity history using the old package, retires that worker before any header
-page, injects a lost reply after publishing the new request, reconciles the
-original durable intent, and admits a different worker with the unchanged capture
-and deadline. The new worker performs identity ordering; the existing rehearsal
-then continues copying, reference validation and concurrent publication checks.
-Synthetic source peers qualify this transition only: production runtime preflight,
-physical rewrite cost, capacity and final handoff remain separate requirements.
-
-The package journal also preserves and publishes the future runtime recipe's
-four application image references. Every other recipe field, including database
-image, credentials, mounts, ownership, settings and limits, stays byte-equivalent
-as data. Both old and proposed recipes pass the same complete runtime validator
-before publication; ordinary activation continues to read the saved recipe.
-Inspection never publishes the proposal. File drift refuses, and partial recipe
-publication reconciles under the same package intent and clock. Private package
-journals are bounded to 2 MiB to retain both recipe states; the separate deadline
-journal keeps its existing 64 KiB bound. Recipe contents are never logged.
-
+Only the four application image references may change in the recipe; database
+image, credentials, mounts, ownership, settings and limits remain equivalent.
+Both recipes pass the runtime validator. Partial publication reconciles exact
+preimages within the original 300-second transition and unchanged capture
+deadline. Ordinary launch remains blocked until complete. The amendment
+neither launches nor deploys. Package journals are bounded to 2 MiB; deadline
+journals retain their 64 KiB bound. Never log recipe contents.
 
 ### Explicit preserving terminal operator
 
-The production runtime explicitly packages and attests the fixed terminal module,
-its existing launch/host boundary imports and the SQL controller-lock dependency.
-It does not depend on the test image's broad script copy. The native host rehearsal
-can select a separate production terminal image while its disposable publisher
-uses the test image; both retain source attestation and fixed-command admission.
+    qt storage migrate --operation-file <plan> --cancel-attempt-file <package>
 
+Inspection is read-only. --execute records one private terminal intent before
+cancellation. qt.storage_online_terminal.v1 binds plan_sha256, immutable image,
+source_revision and source_tree_hash. This route cannot combine with package
+or deadline amendments and never edits their original files.
 
-`qt storage migrate --operation-file <private-plan> --cancel-attempt-file
-<private-package>` inspects the original capture by default. `--execute` saves
-one private terminal intent before dispatching cancellation. The package has
-schema `qt.storage_online_terminal.v1` and exact `plan_sha256`, immutable `image`,
-`source_revision` and `source_tree_hash` fields. It does not amend the expired
-operation or any of its original files. This route is mutually exclusive with
-package and deadline amendments.
+Admit the original retired worker, serving fleet, immutable request and prepared
+runtime. The confined terminal command has read-only local mounts, retaining
+only source-read capability after UID transition. PostgreSQL remains the writer
+and must independently prove writable PGDATA/history on the same files. No
+keys or recovery mounts are exposed.
 
-The host verifies the original retired worker, exact source fleet, immutable
-request and prepared runtime through the existing owners. A new fixed terminal
-command uses the existing explicit-mount confinement, but every local mount is
-read-only. PostgreSQL remains the SQL writer. The terminal physical inspector
-requires local read-only targets while independently proving that the serving
-postmaster sees the same files and privately writable PGDATA/history directory.
-Normal copy placement still requires locally writable targets. The terminal
-command retains only source-read capability after its UID transition; no keys
-or new recovery mounts are exposed.
-
-Inspection records private worker lifecycle evidence without SQL mutation.
-Execution owns one 300-second wall/boot/monotonic intent window, retaining time
-for exact worker retirement. The SQL transaction remains at most 30 seconds.
-Prepared reentry cannot renew its clock or survive reboot as dispatch authority.
-Dispatched reentry only reads the exact SQL cancellation receipt; even an absent
-receipt never authorizes automatic replay. Read-only reconciliation may occur
-after the dispatch window or reboot without changing any original clock.
-The retired transient worker is removed without removing volumes, and its
-retirement is saved first. The original migration worker remains preserved.
-Any terminal intent blocks normal copying and amendment entrypoints.
-
-A controller cancelling its own active attempt uses its retained owning SQL
-session, so foreign controllers remain excluded without a lock handoff gap.
-
-This host route requires native confined-worker and physical/partial-reference/
-archive qualification before production use. Host fault injection and prior
-capture-only SQL tests do not prove that integration or production lock costs.
-It does not adopt copied targets, create a replacement capture, switch source,
-activate recovery or complete the storage release.
+Dispatch has one 300-second wall/boot/monotonic window with retirement time
+reserved; SQL is bounded to 30 seconds. Reentry cannot renew dispatch or survive
+reboot as execution authority. After dispatch, even an absent SQL receipt permits
+only observation. Read-only reconciliation can occur later. Save confirmed
+transient-worker retirement before removal without volumes; preserve the
+original migration worker. Any terminal intent blocks copying and amendments.
+A controller cancelling its own attempt retains the owning SQL session so
+foreign controllers cannot enter a lock-handoff gap.
 
 ## Explicit composite-key preparation after terminal cancellation
 
-The internal `scripts/db/fact_header_forward_keys.py` owner prepares the two
-composite keys needed to attach retained headers. It first reconciles the exact
-committed cancellation, admits the original v1 layout and preserved shadow
-shapes, and binds the source heap/search-index identities. The original
-capture, queues, targets and cancellation receipt are never changed.
+fact_header_forward_keys.py reconciles exact committed cancellation, original
+v1 layout and preserved shadow shapes before binding source heap/search-index
+identities. It prepares both unique composite indexes concurrently while the
+same SQL session retains controller exclusion. One original preparation
+deadline covers builds and reentry. A valid index with lost acknowledgement is
+reconciled by definition/OID; invalid, foreign or replaced indexes refuse
+without automatic deletion or rebuild. Existing statement/lock limits remain.
 
-Both unique indexes use concurrent native PostgreSQL builds while the same SQL
-session retains controller exclusion. A separate preparation journal records
-one original deadline for both indexes and retries. Valid publication with a
-lost reply can be reconciled by exact index definition and OID; an invalid,
-foreign or replaced index refuses without automatic removal or rebuilding.
-Existing caller statement/lock limits are not weakened. No range check is
-installed early that could reject collection when the UTC date changes.
-
-This is an internal preparation primitive, not a production forward entrypoint.
-The host still needs a bound resource watch, original phase wall/boot/monotonic
-clocks and actual capacity/elapsed admission before using it. The retained
-identity/raw baseline is not made current by adding these indexes. Subsequent
-adoption must account explicitly for the uncaptured interval after terminal
-cancellation, then prove catch-up and the final live reference boundary. No new
-capture, header attachment, source switch, history placement or runtime/recovery
-activation is authorized by a `keys_prepared` result.
+The keys do not refresh identity/raw baselines across the uncaptured interval.
+They install no early range CHECK that could reject collection at UTC rollover.
+A keys_prepared result grants no adoption, attachment, switch, placement or
+runtime activation; these belong to the following owners.
 
 ## Explicit schedule amendment while source collection continues
 
-Candidate `qt storage migrate --operation-file <original-successor-plan>
---reschedule-forward-file <package>` inspects by default; `--execute` publishes
-one stopped-worker amendment. It does not stop source services, launch a worker,
-switch schemas, apply retention or start research. The command cannot combine
-with another migration phase.
+    qt storage migrate --operation-file <successor-plan> --reschedule-forward-file <package>
 
-The exact package (`qt.storage_online_forward_reschedule_package.v1`) names the
-original plan hash and operation digest, qualified image/revision/source hash,
-later UTC `end_day`, finite `max_objects`, corresponding `descriptor_limit`, new
-plan path and fresh capacity evidence. All other scope and resource limits remain
-unchanged. The date plus final allowance must fit the original adoption expiry.
-Preserved guards make the existing proof reusable; no progress cursor or clock
-is reset. A retired adoption is ineligible.
+Inspection is the default; --execute publishes one stopped-worker amendment,
+without launching work or stopping services. The command cannot combine with
+another migration phase.
 
-`storage_online_reschedule.py` extends the existing host publication boundary;
-`storage_online_forward_worker.py` extends the existing initializer binding. No
-new SQL structure or generic conversion service is needed. The amendment journal
-retains exact preimages, SQL proof identity and one five-minute publication clock.
-SQL dispatch is recorded before sending. An uncertain result is inspected, never
-replayed. Interrupted file publication accepts only recorded old/new bytes.
-Unknown outcomes or expired incomplete publication refuse and retain evidence.
-After completion, a separately invoked canonical worker must present the new
-request and still uses the original adoption and launch clocks. Ordinary startup
-rejects an unpublished request change; old packages cannot resume the amended
-initializer. Terminal retirement uses the same binding check.
+| Package schema | Permitted change | Preserved authority |
+| --- | --- | --- |
+| qt.storage_online_forward_reschedule_package.v1 | Later UTC end_day, finite max_objects and matching descriptor_limit, new plan path and fresh capacity | Original adoption expiry, proof, scope/resource limits and all start clocks |
+| qt.storage_online_forward_reschedule_package.v2 | Exact completed V1 journal digest plus a strictly larger cumulative attempt_seconds, at most 345600 seconds from original adoption | Original start, progress, placements, archive queues and unchanged floors/byte/memory limits |
+| V3 package correction after completed V2 retained-raw publication | Immutable worker image/source provenance only, bound to exact predecessor | Effective request, day, starts, expiry, inventory ceilings, placements and budgets |
 
-Qualification covers real SQL rollback, concurrent facts/archive publication,
-preserved frozen inputs and partial proof, ownership conflict, lost COMMIT and
-file replies, changed clocks, actual confined transport, replacement-worker
-reentry and retirement. Small fixtures establish correctness, not production
-duration or capacity. See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
+Publication retains exact preimages, SQL proof identity and the original
+five-minute wall/boot/monotonic clock. Intent precedes SQL; uncertain dispatch
+is observation-only. Torn/expired publication refuses launch. Initializer
+duration/expiry and archive-capture expiry change atomically for V2; queued
+entries are never rewritten. No automatic extension exists. V3 is one package
+correction, not another duration amendment.
 
-The V2 follow-up candidate uses the same command with the current V1 plan.
-`qt.storage_online_forward_reschedule_package.v2` adds
-`previous_amendment_sha256` (the exact completed V1 journal bytes) and
-`attempt_seconds` (a strictly larger cumulative bound, at most 345600 seconds
-from the original adoption start). It normally requires a later boundary, an unexpired
-adoption, a stopped worker, unchanged guards/ownership and a fresh forecast
-through the amended expiry. Object and descriptor limits may increase together;
-other resource floors and byte/memory limits remain unchanged.
+V2 continue_guarded_proof=true is limited to raw_mapping_mode=retain_source.
+An expired but unretired adoption requires exact live native/reference/archive
+verification, complete identity proof and intact ALWAYS guards. Ordinary worker
+admission still refuses expiry. Only this explicit amendment can extend the
+allowance; starts and the 96-hour cumulative maximum remain. A missed new day,
+insufficient capacity, changed guards or reboot refuses.
 
-The existing initializer atomically changes its binding, the adoption's
-duration/expiry and the archive capture's matching expiry. It preserves start
-time, archive cursors/queue identities and the full progress/physical proof;
-queued entries are never rewritten or removed by the amendment.
-Host publication retains the V1 journal and writes one operation-specific `-v2`
-journal. It updates the launch/worker deadline without resetting wall, monotonic
-or boot anchors. Each uncertain SQL dispatch remains observation-only on reentry;
-expired or torn publication refuses launch. There is no third amendment, automatic
-extension, source stop or worker restart. Completed publication remains readable
-after the old expiry; execution is limited by the new finite bound. This candidate
-is not a production extension until its SQL/host rehearsal, resource admission
-and exact operational authorization are satisfied.
-
-The optional `continue_guarded_proof: true` is limited to V2 with
-`raw_mapping_mode: retain_source`. It admits an expired, **unretired** adoption
-only after exact live native/reference/archive verification and complete identity
-proof. The existing ALWAYS guards must remain intact. Ordinary worker admission
-still refuses expiry; only this explicit amendment may inspect the preserved
-proof and atomically extend its allowance. It adds no scan, queue, service or
-registry. Original starts, receipts and the 96-hour cumulative maximum remain;
-a missed new boundary, insufficient capacity, changed guards or reboot refuses.
-See [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#reschedule-a-stopped-worker-without-discarding-guarded-proof).
-
-The V3 package correction uses the same command after a completed V2 retained-raw
-publication. It names that exact predecessor and changes only the immutable
-worker image and source provenance. The effective request, selected day, original
-starts, expiry, inventory ceilings, physical placement and resource budgets stay
-fixed. It requires a stopped worker, an unexpired adoption, fresh capacity and
-candidate/runtime qualification. The existing initializer changes only its
-request binding under controller exclusion; it does not rescan or reset completed
-work. A separate V3 receipt in the existing publication journal preserves all
-predecessor bytes and makes interrupted file publication recoverable. An uncertain
-SQL dispatch is observed without replay. This narrowly supports one qualified
-package correction; it is not a new deadline extension or an automatic retry.
-Unit and native rehearsals cover rollback, lost replies, source/frozen preservation
-and reentry. Production image qualification and pause admission remain separate.
+A separately invoked worker must present the published request and original
+launch/adoption clocks. Completed publication remains readable after expiry,
+without authorizing unfinished work.
 
 ### Explicit retention of the canonical raw mapping table
 
-The V2 amendment optionally accepts only `raw_mapping_mode: retain_source`.
-Without this field, existing copy-and-swap behavior and receipts keep their meaning.
-The initializer requires completed identity-source and identity-target checks,
-briefly fences the raw relations, and records the choice with its exact new request.
-It changes no data, cursor, count or file. It removes only the raw source mirror
-to stop writes to the abandoned copy, preserving every identity guard. A
-preservation digest excludes only this named decision, that raw mirror and the
-independently admitted expiry fields. Unknown
-modes, changed proof, an active controller or incomplete identities refuse.
+V2 may select only raw_mapping_mode=retain_source. Omission preserves historical
+copy-and-swap behavior. Initializer admission requires completed source/target
+identity checks and a brief raw-relation fence. It records the choice without
+changing rows, cursors, counts or files and removes only the obsolete raw source
+mirror; identity guards remain.
 
-The adopted worker omits both raw-copy scans. Native FK validation, archive
-verification and resource bounds remain required. The final atomic handoff keeps
-the original canonical raw OID, moves the unfinished copy into the retained
-namespace, closes that copy to mutation, and records the original canonical OID
-plus `raw_history_placement_pending: true`. Existing source readers, corrections,
-frozen inputs and raw provenance continue through the same schema. Rollback
-restores the entire switch; uncertain completion is inspected without replay.
+The worker omits both raw-copy scans but retains native FK, archive and resource
+verification. Final handoff preserves the original canonical raw OID, seals the
+abandoned copy in the retained namespace and records
+raw_history_placement_pending=true. This is an SSD capacity bridge, not completed
+HDD placement. Forecasts cannot claim reclamation credit. The distinct physical
+move below must be followed by matching recovery verification.
 
-This candidate deliberately verifies the retained canonical raw table on SSD.
-It is a temporary capacity bridge, not completed HDD placement. Publication needs
-a fresh whole-operation forecast with no reclamation credit. A separate bounded
-physical move and matching recovery verification must retire that bridge before
-the full capacity goal is considered complete. The current amendment does not
-implement or authorize that move. See the
-[raw-table decision](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#keep-the-unchanged-canonical-raw-table)
-for remaining work and the distinction between stopping a worker and retiring
-its continuously maintained identity proof.
+    qt storage place-retained-raw --request-file <file-or-dash>
 
-The separate `raw_mapping_v2_placement` database candidate closes that physical
-bridge after cutover. Its fixed target is the retained canonical raw relation:
-heap/TOAST and secondary indexes go to the bound HDD, while the already selected
-primary lookup index stays on SSD. No Fact, mapping row, key, permission, archive,
-retained copy or historical handoff is rewritten. It owns no service lifecycle.
+The request schema qt.retained_raw_history.v1 binds source_revision, request_id,
+handoff_sha256, saved policy and existing resource_limits. It cannot select
+arbitrary tables, drives or SQL. Inspection creates no intent or clock and
+reads catalogs/sizes in a bounded read-only transaction. --execute performs
+the admitted move; --cancel reconciles an unmoved intent. Flags are exclusive.
 
-An explicit request uses the existing storage-plan table for its original clock
-and completion. Session locks exclude competing storage work; fresh capacity
-admission and the existing watcher separately enforce declared resource limits.
-Native DDL and the completion pointer in `fact_storage_state.evidence` commit
-together. Reentry verifies completion before considering another move. Interrupted
-work keeps its original deadline; explicit cancellation first proves the original
-files remain in place. A different request can follow only a reconciled terminal
-plan. The historical handoff inspector accepts the new placement only through
-the matching completed plan and physical checks.
+raw_mapping_v2_placement moves the fixed retained canonical heap/TOAST and
+secondary indexes to HDD, keeping its selected primary lookup index on SSD.
+Native DDL and fact_storage_state.evidence completion commit atomically under
+storage exclusion, fresh capacity/watchers and the original plan clock.
+Reentry first verifies completion. Cancellation proves original placement;
+a new request follows only a reconciled terminal plan. No rows, keys,
+permissions, archives or historical journals are rewritten.
 
-The explicit candidate command is `qt storage place-retained-raw --request-file
-<file-or-dash>` inside the existing maintenance container. Default inspection
-reads catalogs and relation sizes in a bounded read-only transaction, creates no
-plan and starts no attempt clock. `--execute` performs the separately admitted
-move; `--cancel` reconciles an unmoved intent. These flags cannot be combined.
-The bounded JSON request has `schema_version: qt.retained_raw_history.v1`, exact
-`source_revision`, `request_id`, `handoff_sha256`, the saved `policy` and existing
-`resource_limits` fields. Inputs cannot select arbitrary tables, drives or SQL.
+The packaged adapter requires dedicated database UID, QT_IMAGE_SOURCE_*
+attestation, admitted archive/working mounts and a live maintenance heartbeat.
+It uses PG_DSN without bootstrap. During ordinary SQL, psycopg2 wait_select
+permits SIGINT/SIGTERM cancellation through the watcher; restore prior callbacks
+and handlers on exit. No COPY/large-object API or failed dispatch renews intent.
 
-The adapter requires the dedicated database UID, matching immutable image
-attestation (the image's `QT_IMAGE_SOURCE_*`, without requiring research `SOURCE_*` settings),
-archive/working mounts and a live maintenance heartbeat. It opens only `PG_DSN`
-without schema bootstrap. During this dedicated CLI's ordinary SQL, psycopg2's
-`wait_select` callback lets Python receive SIGINT/SIGTERM while the database call
-waits, so signals request cancellation through the existing move watcher. The
-adapter restores the previous callback and signal handlers on success or failure;
-it does not use driver COPY or large-object APIs. The native CLI regression sends
-real signals only after PostgreSQL reports the child query active, and verifies
-the existing watcher cancels it before the statement timeout. Failed/disconnected
-dispatch is inspected with the same request before retry. No callback silently
-renews an expired intent. The existing
-`scripts/automation/server_deploy.sh qt storage place-retained-raw --request-file -`
-route holds the deployment lock and selects maintenance only when the recorded
-SSD/HDD release, clean checkout and running image match. Ordinary `qt` commands
-retain their backend owner. Routing does not replace collector/spool admission
-or recovery evidence. Do not inject this command into an older image or weaken the original
-pre-recovery migration launcher's mount checks to run it. The already pinned
-first release must settle before a qualified subsequent release can include it.
+    scripts/automation/server_deploy.sh qt storage place-retained-raw --request-file -
 
-This is not automatic maintenance and is not production-qualified. Its native
-fixture covers read-only/no-intent inspection, rollback, concurrent-reader
-refusal, duplicate requests, cancellation, lost replies, preserved frozen inputs
-and the SSD primary index. The atomic completion pointer changes the existing
-recovery layout fingerprint; an older pair is no longer current. A placement
-result deliberately returns `recovery_verified: false`. The separate
-`test_incremental_raw_placement_db.py` rehearsal runs the packaged CLI using its
-image identity and a labelled heartbeat fixture. It takes a full encrypted pair
-before movement and an incremental pair afterward, restores into an empty
-disposable volume, then compares current/frozen facts, book replay, canonical and
-retained raw rows, native relation identities and completion evidence. Original
-archive paths are unavailable and writes after the selected pair must be absent.
-It runs in a separate `incremental-recovery` invocation; the test topology cannot
-reuse a restore volume or postmaster from the original full-copy rehearsal.
-Host admission, successful exact-image recovery qualification and representative
-time/WAL/spool measurements remain required. A small
-fixture cannot establish a production pause or turn timeout into a recovery SLA.
+This route owns deployment exclusion and requires the recorded SSD/HDD release,
+clean checkout and matching maintenance image. It changes no collector/spool
+or recovery admission. Settle the pinned first release before using a subsequent
+qualified image; do not bypass old mount guards to inject the command.
 
-Collector admission must include the configured pending-segment queue, its
-occupancy, byte-triggered rotation and rollback time; a disk/WAL reservation alone
-is insufficient. Raw publication and canonical stream writers wait for raw
-relation access before taking lease-row locks, so their wait does not prevent
-capture heartbeats. Expiry checks use the current wall clock after waiting.
-The native regression exercises multiple queued segments across heartbeat
-intervals, complete publication after release, and expired ownership refusal.
-Default collector limits remain unchanged. Larger tested fixture queues are
-not approved production settings or a guarantee of capture continuity for an
-arbitrary maintenance duration.
+The completion pointer changes the recovery layout fingerprint. Older pairs
+are no longer current; a placement result returns recovery_verified=false.
+Obtain a matching encrypted pair and restore qualification separately.
+Collector admission includes pending-segment queue occupancy, rotation and rollback
+time. Writers wait for raw-relation access before lease-row locks; after waiting,
+expiry uses current wall time. Disk/WAL reservation alone does not establish
+capture continuity for the maintenance duration.
 
 ## Retained-target adoption after an uncaptured interval
 
-The candidate successor path keeps a separately authorized operation's adoption
-and archive journals in its own private SQL namespace. It binds an exactly
-reconciled predecessor retirement and the unchanged predecessor row/OID; all
-older records and queues remain intact. The existing database copy, reference,
-controller and handoff owners receive the explicit operation identity. They do
-not select a latest attempt or reset an expired clock. This database path still
-requires qualified host publication and a separate preserving placement
-transition before production use; see [ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md#successor-ownership-after-preserving-retirement).
+A separately authorized successor owns new adoption/archive journals and an
+explicit operation identity. It binds reconciled predecessor retirement and
+unchanged retained row/OIDs. Older queues and journals remain intact; no latest
+attempt selection or expired-clock reset is permitted.
 
+    qt storage migrate --place-forward-lookups-file <package>
 
-The fixed `fact_header_forward_placement.py` helper admits a separate, at-most
-one-hour move of the three measured lookup indexes after the predecessor's
-retirement is reconciled. It extends existing physical placement, storage locking,
-resource admission and the same-session cancellation watcher. A single temporary
-`lookup_placement` row preserves intent, original deadline and completion because
-old copy/adoption records cannot be rewritten. Only private target relations are
-fenced; v1 collection remains authoritative. All three index moves and completion
-commit atomically. Crash/cancellation rolls them back; a lost commit reply is
-reconciled against actual files without another move or renewed clock. Incomplete
-expired work stays preserved and refused.
+fact_header_forward_placement.py performs at most one hour of fixed three-index
+placement after reconciled retirement. It fences only private targets while v1
+collection remains authoritative. All moves and completion commit together.
+Intent preserves deadline and files; cancellation rolls back, and lost COMMIT is
+reconciled without another move. Effective placement derives from the completed
+lookup_operation_sha256 receipt; the previous all-HDD binding is not rewritten.
+The confined host retires its worker and confirms SQL before publication.
 
-The successor explicitly supplies `lookup_operation_sha256`. Its effective
-placement derives from the completed receipt, leaving the prior all-HDD binding
-unchanged. The old retirement is reconciled through only those recorded physical
-file changes; all other metadata, source data and prior evidence must still match.
-The candidate `qt storage migrate --place-forward-lookups-file` command uses
-this helper through the existing confined terminal transport. Its package binds
-one retired predecessor and three-index operation; inspection is the default.
-The host owns one original one-hour transport clock. The physical phase caps
-the retained catch-up movement limit at one hour, preserving any shorter limit
-and all growth, WAL, temporary and maintenance allowances. Interrupted work first retires the exact confined
-worker and inspects SQL; a completed move is not repeated. Publication requires
-both completed placement and confirmed worker retirement.
+The v2 --forward-package-file binds this placement and predecessor terminal
+receipt while preserving earlier journals. fact_header_forward_adoption.py then
+uses a short NOWAIT writer fence to install source-to-target mirrors and exact
+mutation guards under one original adoption deadline. Native uniqueness/FKs,
+trigger bodies/enablement and single-heap/OID/file topology remain required.
 
-The v2 `--forward-package-file` then binds that receipt and the exact predecessor
-terminal file. It preserves legacy journals and writes operation-specific new
-publication/launch/terminal records. A separate initializer reuses completed
-keys, and old/new host observers select the request's operation explicitly.
-These are temporary records owned by the existing migration boundary. No normal
-read performs conversion, and this command neither changes retention nor starts
-research. Exact-image host qualification, measured collector impact and final
-paired recovery remain required before production deployment. See [ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md)
-for the permanent SSD growth and compatibility tradeoff.
+Target verification compares retained rows to source; forward coverage inserts
+only missing source rows and rejects extra target rows. Mirrors cover inserts
+behind the scan cursor. Page inserts and progress commit together. This closes
+the uncaptured interval without assuming timestamps or allocated sequences are
+commit ordered.
 
-The internal `fact_header_forward_adoption.py` phase binds a separately supplied
-forward operation intent to the exact committed cancellation, prepared keys and
-retained identity/raw targets. It never resumes the expired attempt, rewrites its
-journals or consumes its queues. Under a short nonwaiting writer fence it adds
-native source-to-target mirrors and mutation guards, then records one original
-adoption deadline. Existing native uniqueness and foreign keys remain enforced. Admission binds both application guards and internal foreign-key trigger definitions and enablement. The retained identity must remain one persistent native heap with no inheritance parent or child; preparation, page reentry and retirement reject a changed heap topology before trusting its physical cursor.
-
-A bounded primary-key scan compares existing target rows and inserts only missing
-source rows, using batch lookups rather than a database round trip per retained
-row. A reverse scan rejects preexisting extra target rows. Native target insertion
-guards require an exact matching source row; mirrors cover subsequent inserts,
-including keys behind a committed scan cursor. This covers the post-cancellation
-gap without assuming timestamps or allocated sequences are commit ordered. Page
-inserts and cursor advancement commit together; reentry retains the same intent,
-clock and physical/catalog bindings. Header contents and search indexes are not
-copied by this phase. Original source/copy/queue data and frozen references remain.
-
-This is database preparation, not an executable production forward operation or
-a final proof token. Synchronous writes to retained HDD targets require measured
-collection/latency and capacity admission. The host must own physical/resource
-checks, wall/boot/monotonic bounds and a preserving terminal transition on failure
-or expiry; controller exit alone does not remove native mirrors/guards. Qualified
-reference staging, live final proof, UTC range preparation/abort, table attachment,
-historical placement and complete recovery/deployment remain required. Tests of
-tiny owned two-filesystem fixtures do not establish those production properties.
-
-The internal preserving terminal transaction `retire_adoption` removes only the
-exact eight admitted mirror/validation/seal triggers, retaining all source,
-target and original queue rows, functions and journals. It can retire an expired
-phase without changing its start or deadline. Trigger removal and the durable
-terminal receipt commit together; an interrupted transaction rolls back and a
-lost commit reply reconciles the exact post-state. Retired work cannot resume.
-This database primitive still requires the separately qualified host owner and
-physical/resource admission; it is not a production operation by itself.
+retire_adoption removes only the eight owned mirror/validation/seal triggers,
+preserving rows, functions, queues and journals. It can retire expired work
+without renewing clocks. Removal and terminal receipt are atomic; a lost reply
+permits exact post-state inspection. Retired work cannot resume.
 
 ### Forward reference preparation
 
-After retained identity/raw adoption verifies both directions, the forward owner
-can stage the fixed payload and archive foreign keys through the shared native
-reference mechanics. Its own intent, deadline and physical/catalog binding govern
-each transaction; the canceled capture is never reopened. Original source FKs
-remain authoritative until final handoff. Validation permits ordinary collection,
-and native parent adoption retains the prevalidated leaf constraint identities.
-New partitions before adoption require validation; later partitions inherit the
-admitted parent reference.
+After bidirectional adoption proof, stage fixed payload/archive FKs through
+the shared reference owner. Original FKs stay authoritative until final handoff.
+Validate new leaves before parent adoption; later partitions inherit the admitted
+parent reference. The header composite identity FK uses an ordered mirror to
+publish identity before the immediate FK check. Retirement removes dependencies
+before mirrors and restores the original header constraint shape atomically.
 
-Forward retirement removes staged dependencies before its mirrors, atomically and
-with exact commit reconciliation. This preserves source publication after failure
-or expiry. These are internal database preparation operations; the canonical host
-entrypoint, live final proof, bounded retained-table attachment, measured HDD
-placement and complete encrypted recovery/deployment are still required.
+Identity/raw verification reads physical heap pages bounded by 128 blocks and
+the configured row limit, committing original extent and tuple cursor with each
+page. Exact source lookups prove retained rows; key-only target lookups avoid
+repeated heap reads for already-proven rows. Missing rows are inserted in source
+order and compared exactly. File/single-heap bindings reject rewrites/inheritance.
 
-The forward reference inventory additionally prepares the retained header's native
-composite identity reference. An explicitly ordered source mirror publishes the
-identity before the immediate native FK check; both changes roll back together.
-The journal binds this single allowed header-shape change. Retirement restores the
-original header constraint shape while preserving the heap and all rows.
-
-Forward retained-identity verification now reads bounded physical heap ranges
-before source coverage: at most 128 blocks and the existing row bound per page,
-with the original extent and physical row cursor committed atomically. Exact
-source lookups establish every retained row; subsequent key-only target lookups
-avoid repeating historical heap reads while filling missing source identities.
-The source coverage cursor also selects IDs only. Missing identities are copied
-from the sealed source and compared with a bounded full-metadata point read;
-already-proven identities do not force source heap reads merely to advance the
-cursor. This candidate query change preserves the existing scan journal, exact
-missing-row comparison, atomic page commit and original operation clocks. It
-requires a qualified package and stopped-worker admission before an existing
-operation can use it; editing operator code does not update a running worker.
-Native insertion validation, immutable seals and OID/file bindings preserve the
-proof and reject rewrites. Old identity scan journals
-refuse resume under the new protocol; explicit preserving retirement remains.
-This addresses observed 10.7–10.9s disjoint 2,048-row comparisons on the existing
-drives, but does not yet establish production elapsed time or admission. See
-[ADR 0077](../decisions/0077-retain-legacy-headers-during-forward-cutover.md).
-
-The raw-mapping candidate now verifies retained target contents in physical
-order, then scans source heap pages for key coverage. Both scans reuse the same
-128-block and configured row bounds. Missing mappings are inserted in that
-page's source order, keeping archive-object groups together, and compared exactly
-after insertion. Existing primary keys, secondary indexes and native constraints
-remain active. The performance hypothesis is fewer scattered HDD index reads;
-bounded query samples do not establish whole-job speed or collector impact.
-
-The explicit adoption job initializes `raw_heap_v1` extents atomically with its
-first page. It preserves earlier key cursors, completed passes, operation clocks,
-guards and identity progress. `heap_verified` counts this physical pass;
-`verified` retains earlier verification work and adds physical visits, so it is
-not a distinct-row total after a query transition. Reentry uses the saved extent
-and tuple cursor; rollback leaves neither partial inserts nor advanced progress.
-Single-heap checks and file bindings reject inheritance and rewrites. Ordinary
-observers and application reads never initialize these scans. This candidate
-does not admit a replacement image, another schedule amendment, or more operating
-time; a live operation still needs separately qualified host admission.
-
+raw_heap_v1 extents initialize only in explicit adoption, not observer reads.
+heap_verified counts physical visits; verified retains older work and physical
+visits, so it is not a distinct-row count after protocol transition. Old identity
+scan journals refuse incompatible resume; preserve them and use explicit terminal
+retirement. A package/query change never updates a running worker or its clocks.
 
 ### Atomic forward SQL handoff
 
-The internal `stage_forward_tables` phase retains the original header heap and
-search-index files under the dated parent. It requires the live completed
-adoption/reference proof and exact actual UTC boundary under fixed writer fences.
-Native range validation, guard removal, reference promotion, attachment and the
-terminal receipt share one transaction; interruption rolls them back together.
-There is no committed early range CHECK that can strand collection at rollover.
-The original private copied headers/catalogues and raw source remain preserved.
-The native range scan is part of the final pause and needs measured production
-admission within the existing deadline.
-Required FK validations log elapsed SQL time, reuse status, heap sizes and
-before/after transaction-local scan counters through the existing reference
-owner. These catalog/statistics reads add no historical scan and change no
-migration or pause allowance. They distinguish a reused constraint from actual
-validation work. [PostgreSQL transaction statistics](https://www.postgresql.org/docs/15/monitoring-stats.html)
-update within the transaction; shared I/O counters can lag or include collectors.
-A reused constraint, index-only path, disabled statistics or incomplete parallel
-accounting cannot qualify the full header range scan. Review the observations
-with collector health, I/O/temp/WAL peaks and other final phases before source
-pause; logs alone confer no cutover authority. The host entrypoint, durable COMMIT
-reconciliation, full physical qualification, recovery and deployment remain open.
+stage_forward_tables requires live complete adoption/reference proof and the
+exact UTC boundary under fixed writer fences. Native range validation, guard
+removal, FK promotion, retained heap attachment, archive retirement, policy and
+terminal receipt commit in one transaction. Rollback restores the original
+state. No early committed range CHECK may strand collection at rollover.
+Preserve copied headers/catalogs and original raw source.
+
+FK observations report elapsed SQL, reuse, heap size and transaction-local scan
+counters. Reused constraints, index-only access or incomplete statistics do not
+measure the full header scan. Assess final range validation and other pause
+phases against the actual collector/I/O/temp/WAL envelope.
 
 ## Forward archive catch-up ownership
 
-The existing archive copier and complete inventory verifier also serve the fixed
-forward operation. This route requires the exact unexpired adoption intent,
-retained physical placement and original adoption deadline. It uses separate
-forward-schema capture/progress/queue records and triggers; the canceled
-operation's journals and queues remain unchanged. Both routes retain the same
-file hashes, path checks, resource watch, expiry fence and transaction bounds.
+The existing copier/verifier uses the forward adoption identity, placement and
+original deadline with separate capture/progress/queues. Canceled-operation
+records remain unchanged. Late manifest inserts behind the baseline cursor enter
+the capture queue; file publication surviving SQL rollback is verified and
+reused before queue consumption.
 
-Archive loops use the existing resource watch's `check_progress` callback between
-fresh page and transaction inspections. This avoids repeating both filesystem
-inspections for every file and hash chunk. Cancellation and deadlines are checked
-on each callback; filesystem identity and free space continue to be polled every
-0.1 seconds. Progress refuses a failed or stopped watcher, or an observation older
-than the existing cancellation grace. File hashes, read leases and exact path
-checks are unchanged, and the final lease pass is followed by a fresh inspection.
-This is candidate implementation behavior, not evidence of deployment or a
-qualified production pause duration.
+Resource check_progress observes cancellation/deadlines each callback and
+filesystem identity/free space every 0.1 seconds. Failed/stopped/stale watchers
+refuse progress. Hashes, paths and read leases retain their normal checks;
+perform a fresh inspection after the final lease pass.
 
-Manifest IDs are not commit ordered. A forward catalog insert queue captures
-late arrivals behind the baseline cursor. File publication can survive a failed
-SQL page; retry verifies and reuses it before committing queue consumption.
-The final retained-header transaction retires this capture only inside the
-matching live complete-inventory context. Rollback restores capture and all
-renames together. Preserving adoption cancellation removes its archive triggers
-atomically while retaining every queued row, file and journal; an expired work
-clock is never renewed by that terminal path.
-
-These are internal database phases. The canonical host operation must still
-bind publisher drain, physical/capacity admission, final COMMIT reconciliation,
-worker retirement, recovery activation and deployment. Disposable correctness
-tests do not establish production copy throughput or final pause duration.
-
+Only the final retained-header transaction inside the live complete-inventory
+context retires archive capture. Adoption cancellation removes its archive
+triggers atomically while preserving queue rows/files/journals. Neither path
+renews an expired work clock.
 
 ### Forward durable handoff certificate
 
-The existing fixed catalog relocation and `commit_handoff` boundaries accept an
-explicit forward adoption intent. They retain the original adoption deadline,
-physical placement/resource checks and the caller's owning SQL session. A pooled
-second session cannot borrow the controller lock. Forward catalog relocation
-admits only the two existing reference catalogues; it does not reopen the
-canceled capture or move arbitrary relations.
+Catalog relocation admits only the two fixed reference catalogs under the
+original deadline and owning SQL session; a pooled second session cannot borrow
+controller ownership. commit_handoff pins new parent/catalog OIDs, retained
+legacy/raw OIDs, archive digest, forward terminal receipt and adoption-journal
+digest. Finite baseline counters are not current full-row totals.
 
-The supervised final transaction holds the complete archive inventory through
-retained-header attachment and publishes the existing handoff certificate with
-exact newly created parent/catalog OIDs, retained legacy/raw OIDs, archive digest,
-forward terminal receipt and a digest of the original adoption journals. It does
-not label finite baseline counters as a current full-row count. Initial policy
-publication can join that same transaction. Any failure before COMMIT rolls back
-the switch, archive retirement, certificate and policy together.
+Outcome inspection uses the transaction fence, exact terminal/archive binding
+and native legacy seal/partition contract. It remains observational after expiry.
+Switch-time file identities are not permanent prohibitions on later policy-owned
+relocation, and inspection is not a fresh whole-data hash verification.
 
-Outcome inspection uses the existing transaction ownership fence, exact forward
-terminal/journal binding, archive retirement and the native legacy seal/partition
-contract. It remains available after the work deadline and grants no replay,
-collection restart or source-read capability. Original file identities remain
-switch-time evidence; normal policy-owned historical relocation is not prohibited
-by treating those file numbers as permanent. Inspection is not a fresh full data
-hash proof. Canonical host request/controller integration and production physical,
-capacity, pause, recovery and fleet qualification remain separate requirements.
-
-
-The existing process-local online controller has an explicit forward mode bound
-to the adoption operation, original start and UTC end day. It keeps its owning
-SQL session for adoption pages, native references, archive work, catalog moves,
-final attachment and outcome inspection. Mutable proof progress is validated by
-the adoption owner; it is not confused with the immutable operation, cancellation,
-placement and clock binding. Session loss refuses instead of reconnecting.
-
-Forward background sequencing skips the obsolete whole-header copy and capture
-preparation steps. Adoption/reference pages reuse the existing staging resource
-watch through COMMIT. Final residual work refuses incomplete finite baselines;
-synchronous mirrors maintain SQL arrivals while the archive queue is drained.
-Rollback inspection preserves the original source guards, including after work
-expiry, without reauthorizing work. This internal mode does not yet supply the
-canonical forward host request, key/adoption preparation or login-gate authority;
-those owners must explicitly admit the same session and operation before use.
-
-
-Forward concurrent-key preparation now has a supervised entrypoint that retains
-the actual build connection. It admits the original physical placement and
-existing declared two-drive budgets, holds the storage session lock across
-AUTOCOMMIT, and keeps the existing filesystem/deadline watcher attached through
-both index builds and durable progress writes. A watcher cancellation targets
-that same driver. The watcher joins before connection reuse; a lost session is
-not reconnected to release an old lock. The durable key deadline is retained on
-reentry and a caller deadline can only shorten it. Completed indexes survive a
-lost reply and are verified before reuse. This is net filesystem supervision,
-not per-backend WAL attribution or a production size/timing estimate. The
-canonical forward host route still must invoke and qualify this boundary.
-
-The final-session wire observation now includes the exact forward intent,
-committed cancellation intent, original adoption start/expiry/duration and UTC
-end day. The host login and gated rollback verifier permits equal owner/backend
-PIDs only when its already-admitted binding contains that exact, valid forward
-identity. A reply cannot opt a legacy host binding into forward mode; absent,
-changed or malformed identities refuse. The original capture remains separate
-evidence and never supplies the forward work clock. This wire integration does
-not yet create the canonical forward publication/request/worker authority or
-admit a production source stop.
-
+The forward controller retains one actual SQL session across adoption,
+references, archive work, catalog relocation, final attachment and observation.
+Session loss refuses; it cannot reconnect to recover old ownership. Forward mode
+and the actual adoption clock must be pinned by host admission before the
+same-PID rule is allowed. Replies cannot opt legacy bindings into forward mode.
 
 ### Separate forward package publication after cancellation
 
-`qt storage migrate --operation-file <original> --forward-package-file <package>`
-inspects a separate candidate publication after exact committed cancellation;
-`--execute` publishes that package. The manifest binds the original plan digest,
-immutable candidate image/revision/source digest, intended UTC end day, and a new
-sibling operation-file path. The original operation file and terminal receipt
-remain unchanged. This is metadata preparation, not permission to launch a
-worker, capture writes, stop collection, switch the database or deploy.
+    qt storage migrate --operation-file <original> --forward-package-file <package>
 
-The existing deployment lock encloses two complete prepared-runtime preflights
-(original and candidate) and actual read-only cancellation reconciliation using
-the attested original request. Exact source client identities, the retired worker,
-inventory and all file preimages are required. A private durable intent precedes
-publication of the four future application image references, canonical request,
-worker binding and separate operation plan. The original retired worker is
-retained under a name bound to that intent. Every incomplete retry accepts only
-recorded old/new bytes under the same original 300-second wall/boot/monotonic
-window. Foreign edits, reboot, expiry, proof drift or changed source clients
-refuse without overwriting the foreign state. Completion observation verifies
-published bytes without claiming fresh production admission.
+Inspection is the default; --execute publishes only metadata. The manifest
+binds original plan digest, immutable image/source provenance, selected UTC
+end_day and a new sibling operation path. Under deployment exclusion, preflight
+both prepared runtimes and reconcile cancellation with the attested original
+request, exact fleet, worker, inventory and file preimages.
 
-The expired capture remains evidence; its start and lifetime are never renewed.
-The new forward request binds its separate operation identity and committed
-cancellation, but does not invent key/adoption phase clocks. Ordinary launch
-remains blocked by the terminal owner until a separately verified canonical
-forward worker route owns those clocks and authority. Interrupted native
-publication and invocation must be qualified before production use; private-file
-unit tests do not establish full runtime, cardinality, pause or capacity admission.
-
+Durable intent precedes publishing request, worker binding, separate plan and
+four future application-image references. Preserve the original worker and
+operation. Interrupted publication accepts recorded preimages within the original
+300-second wall/boot/monotonic clock. Foreign edits, expiry, reboot or proof/fleet
+drift refuse. Completed metadata does not launch work or grant capture/source
+stop. Key, initialization and adoption clocks belong to their actual owners.
 
 ### Confined worker preparation clocks
 
-The fixed worker entrypoint explicitly selects the forward request after its
-existing image, source-read identity and database checks. It calls supervised
-composite-key preparation under one persisted background deadline (at most
-3600 seconds). Only after verifying the complete keys and their exact OIDs does
-it persist a separate initialization receipt (at most 600 seconds), before
-installing adoption or archive guards. It never calls expired capture preparation
-or changes the original capture/initial receipt.
+The fixed entrypoint admits image, source-read identity and database before
+supervised key preparation. Keys share one persisted deadline of at most 3600
+seconds. After exact key/OID verification, persist initialization's separate
+600-second intent before installing adoption/archive guards. Resource forecasts
+use rounded-up actual remaining phase time, including tighter caller/retry bounds;
+later phases receive fresh admission rather than charging the full horizon again.
 
-Resource admission for each preparation phase uses the rounded-up time left on
-that phase's actual deadline, including a shorter caller bound or saved retry
-expiry. It retains the request's growth rates, cancellation grace, maintenance,
-WAL, temporary-space and policy reserves. The longer migration horizon is not
-charged again to a one-hour key build or ten-minute initialization; neither the
-request nor a durable deadline is rewritten to perform this calculation. Each
-later phase still requires its own fresh capacity admission.
+The initializer retains SQL/controller/storage ownership. Adoption, archive capture
+and initialization completion commit atomically. Reentry keeps original intents
+and keys; lost COMMIT reconciles the complete record. Complete initialization
+yields to the original active adoption expiry. Foreign bindings, changed keys,
+expired incomplete work or retired adoption refuse.
 
-The initializer retains its actual SQL session and storage/controller exclusion.
-The existing physical inventory and resource watcher bound that same session.
-Adoption, archive interval capture and the complete initialization receipt commit
-in one transaction. Interruption rolls them back while retaining the initial
-intent and completed keys; reentry keeps their original clocks. A lost COMMIT
-reply reconciles the same complete record. A complete initializer verifies the
-original active adoption instead of building keys or starting another clock.
-Foreign requests, changed keys, expired incomplete initialization and retired
-adoption refuse. Source/copy/queue rows and original cancellation remain intact.
-
-The launcher separately verifies publication/cancellation, the retired original
-worker and actual phase clocks as described below. Canonical operation dispatch
-and preserving host failure retirement remain required before production launch,
-alongside physical and pause qualification, recovery and deployment. A direct
-worker or disposable fixture cannot establish production performance.
-
-
-The host publication inspector reconstructs the effective forward request from
-its completed publication, original operation and committed cancellation. It
-checks exact published request/runtime/plan bytes, retained inventory, and the
-permitted worker-binding changes. The original plan remains immutable; a
-recomputed journal digest cannot substitute foreign runtime or source bindings.
-Worker lifecycle progression still belongs to the launcher and is not granted
-by this read-only inspection.
-
-The host can read initialization and adoption together in one database snapshot,
-without scanning historical rows. It rejects absent, ambiguous or retired
-adoption. Request/cancellation identity and actual initialization/adoption clocks
-must match exactly. Completed initialization need not remain unexpired; the
-original active adoption expiry controls subsequent work. This observer does
-not renew either clock or grant source-stop or preserving terminal authority.
-Those lifecycle integrations require their own exact owners.
-
+Publication inspection reconstructs exact effective request/runtime/plan bytes.
+Initialization and adoption are read together in one snapshot without scanning
+history; request/cancellation and clocks must match. Observation never renews
+time or grants source stop.
 
 ### Durable forward launch and final observation
 
-The existing confined launcher selects forward preparation only from a verified
-completed publication. Before Docker creation it persists one launch intent with
-the publication, request and worker-binding digests, original wall/monotonic/boot
-clocks and fixed 3600-second key deadline. Worker container, contract and eventual
-adoption deadline progress through durable old/new preimages. Interrupted
-publication reconciles only those preimages and reuses the exact created worker;
-missing or changed owned containers refuse. Neither reentry nor observation
-creates another preparation clock.
+Before Docker creation, record publication/request/worker-binding digests,
+original wall/monotonic/boot clocks and key deadline. Container/contract/adoption
+progress uses durable old/new preimages; interruption reuses only the exact created
+worker. Changed or missing owned containers refuse instead of creating another
+clock.
 
-The launch journal retains full cancellation and placement proofs within the
-existing 2 MiB metadata budget, enforced before writes and on reads. Control
-replies carry the canonical digest of that complete proof and its operation and
-clock fields, keeping the existing small control-message bound. The host compares
-that digest against its pinned full proof while logins are closed; it neither
-truncates metadata nor opens another database session.
+The 2 MiB launch journal retains complete cancellation/placement proof. Small
+control replies carry its canonical digest; the host compares that digest to the
+pinned full proof while logins are closed without reconnecting or truncating it.
+Startup observes actual key and initialization receipts. Already committed
+phases can reconcile after a deadline; unfinished work cannot extend.
 
-Startup observes the actual SQL key and initialization receipts. Complete keys
-pin their index OIDs. Initialization uses its own once-persisted 600-second
-window after the keys, while completed initialization yields to the original
-active adoption expiry. A bounded read can reconcile a phase already committed
-before the prior deadline; it cannot extend unfinished work. Reboot, changed
-request, changed pinned clocks, missing receipts and expired phases refuse.
-
-Before final-session admission the host requires the verified publication and
-ready launch receipt, exact live worker and pinned initialization/adoption. With
-logins closed, it compares the retained owning-session capture to that receipt;
-it does not reconnect. Forward controller replies carry the actual adoption
-identity and clock, not the canceled capture. The existing same-PID rule applies
-only after this host admission; legacy PID rules remain unchanged.
-
-The disposable `--forward-worker` rehearsal extends interrupted package
-publication with interruption after actual Docker creation, exact worker reuse,
-confined entrypoint preparation and host adoption observation. Controller
-retirement preserves source clients and rows. This is not canonical host failure
-retirement, login closure, final COMMIT, production capacity or pause admission.
-The canonical operation route below reuses these owners; production final
-qualification remains separate.
-
+Final-session admission requires completed publication, ready launch, exact live
+worker and pinned initialization/adoption. With logins closed, compare its retained
+owning-session observation to the receipt. Forward replies carry adoption identity,
+not the canceled capture clock.
 
 ### Preserving forward retirement through the canonical terminal route
 
-After forward publication, `qt storage migrate --operation-file <forward-plan>
---cancel-attempt-file <package>` selects a separate forward terminal owner.
-Inspection is read-only by default. Execution requires the exact completed
-publication, canonical request, durable launch and stopped worker, preserved
-original worker, prepared runtime and serving source fleet. A final-switch intent
-refuses this route; the retained-session rollback owner handles that boundary.
+    qt storage migrate --operation-file <forward-plan> --cancel-attempt-file <package>
 
-The forward terminal journal and confined probe have separate filenames and
-container names. The original canceled operation, terminal receipt, worker,
-request lineage and source/copy rows remain intact. The existing fixed terminal
-command uses read-only filesystem mounts and validates the database, image and
-request before selecting the existing SQL adoption retirement owner.
+This selects the separate forward terminal owner after publication. Inspection
+is read-only. Execution requires exact request/publication/launch, stopped worker,
+preserved original worker, prepared runtime and serving source. Final-switch
+intent refuses this route; retained-session rollback owns that state.
 
-One durable 300-second intent precedes dispatch. A lost COMMIT reply permits only
-read-only reconciliation against the exact adoption identity, original clocks,
-committed retirement and current trigger/reference/archive post-state. Missing
-or changed outcomes refuse; retries never repeat dispatch. Reconciliation may
-occur after expiry or reboot without renewing the saved dispatch deadline.
-Forward SQL retirement removes only its owned temporary guards and references;
-it preserves every retained row and grants no new capture, switch or deployment.
-
-The disposable `--forward-retirement` rehearsal exercises the actual confined
-terminal command, lost COMMIT reply and read-only reconciliation without another
-dispatch. It checks original clocks and source/copy/queue row counts. Its
-synthetic runtime peers and small data do not qualify production capacity,
-final-pause duration, recovery or deployment. Canonical operation dispatch is
-described below; its production final boundary still requires qualification.
-
-The confined forward terminal uses the same explicit read-only local mount
-verification as original cancellation. The archive retirement owner retains
-exact placement identity and independently requires PostgreSQL's own PGDATA
-and history directory to remain writable; worker mounts never gain write access.
-
+One 300-second intent precedes dispatch. The confined probe uses read-only mounts
+and independently proves PostgreSQL's PGDATA/history writable. Lost COMMIT allows
+only exact identity/clock/guard/reference/archive reconciliation; missing or changed
+outcomes refuse. SQL removes only forward-owned temporary guards/references.
+Preserve original journals and every source/target/queue row. Reconciliation can
+occur after expiry or reboot without redispatch.
 
 ### Explicit recovery after a failed forward retirement
 
-A source writer can make the ordinary nonwaiting retirement refuse before any
-change. A stopped probe and an absent terminal receipt do not make automatic
-redispatch safe. The original dispatched journal remains immutable.
+A stopped probe or absent terminal receipt cannot authorize retry after a
+nonwaiting lock refusal. --cancel-attempt-file may instead accept one explicitly
+reviewed qt.storage_online_terminal_recovery.v1 package: the existing terminal
+fields plus previous_terminal_sha256 binding the exact dispatched predecessor.
+Preserve that journal and create a separate recovery journal/probe.
 
-The same `--cancel-attempt-file` surface accepts a separately reviewed
-`qt.storage_online_terminal_recovery.v1` package with the five existing terminal
-fields plus `previous_terminal_sha256`, the exact SHA-256 of that dispatched
-forward terminal journal. This creates one separate recovery journal and probe.
-It requires the same plan, source fleet, worker, capture and preimage, proves
-retirement of the original probe, and reconciles the live SQL state first. A
-completed predecessor or already-retired adoption cannot dispatch recovery.
-
-Only this explicit recovery drains the Fact writer gate, then acquires the
-remaining identity, raw-mapping and archive-manifest locks without waiting. A
-known lock refusal rolls back that lock-only savepoint, releasing the gate before
-another attempt; no retirement DDL runs until every required lock is held. This
-allows an existing archive publisher to finish its own Fact work without a
-maintenance lock cycle. All lock acquisition shares one 20-second ceiling inside
-the existing 30-second SQL and new 300-second terminal bounds. Reads/writes may
-briefly queue; the operator never stops clients or cancels competing queries.
-Timeout rolls back; an uncertain reply permits
-only reconciliation, never another dispatch. Original adoption clocks, plans,
-failed journals, every retained row and indexes remain intact. This does not
-resume preparation, grant a cutover, or qualify HDD throughput.
+Recheck the same plan/fleet/worker/capture/preimages and prove old probe retirement.
+Reconcile SQL first; completed retirement or retired adoption cannot redispatch.
+Only this recovery drains the Fact writer gate before acquiring remaining
+identity/raw/archive locks without waiting. A known refusal rolls back the
+lock-only savepoint and releases the gate before another attempt. No retirement
+DDL runs without all locks. Lock acquisition shares a 20-second ceiling within
+30-second SQL and 300-second terminal bounds. Clients are neither stopped nor
+cancelled; timeout rolls back, and uncertain replies remain observation-only.
 
 ### Canonical forward operation and UTC cutover window
 
-`qt storage migrate --operation-file <forward-plan> --execute` derives the
-forward request only from the verified completed publication and its separate
-operation path. It retains the immutable base plan for reread comparison and
-checks the original retired worker. Retirement admission selects the explicit
-operation journal: a completed predecessor remains preserved while a successor
-can proceed; any retirement journal for that successor still prevents normal
-dispatch. Legacy terminal admission is unchanged.
-Successor publication changes the backend source revision/hash and bot-image
-label together with the application image IDs, deriving all three labels from
-the exact package. Other environment values remain preserved. Its replay
-inspector reconstructs the same recipe; legacy image-only publication receipts
-retain their original interpretation. The complete canonical deployment
-comparison still rejects unrelated configuration drift.
-The command reuses the durable launcher, observed key/initialization/adoption
-clocks, explicit forward background phases and both prepared-runtime preflights.
-It never invokes the canceled capture or renews its initial receipt.
+    qt storage migrate --operation-file <forward-plan> --execute
 
-After background reference preparation, collection continues while bounded SQL
-and archive catch-up waits for the selected UTC boundary under the original
-adoption expiry. The command admits a stop only within 30 seconds of that
-boundary (or half the final allowance, if smaller). Any remaining wait after
-source drain is charged to the same final receipt. A missed day, insufficient
-adoption lifetime, expired worker or changed publication refuses. Both the
-command and the actual stop owner cap forward final work at 600 seconds.
+Derive the request only from completed publication and the separate operation
+path. A successor's retirement journal prevents its normal dispatch; completed
+predecessors remain evidence. Match package-derived backend source revision/hash,
+bot-image label and application image IDs while preserving unrelated environment.
+Legacy image-only receipts retain their interpretation.
 
-The native `--forward-operation` case uses an old-day disposable source and
-injects refusal immediately before source stop. It exercises canonical dispatch,
-real forward background work, interrupted created-worker reuse and subsequent
-preserving terminal retirement. It does not qualify actual login closure, gated
-rollback, final COMMIT, UTC rollover under live production writes or production
-range-scan duration. Those checks remain required before production use. The
-complete range CHECK, heap attachment and exact proof still belong to one final
-transaction and its original time bound; this route does not precommit a CHECK.
-
-
-The separate `--forward-final commit|rollback` disposable modes use the existing
-source lifetime-guard fixture. Its immutable image is bound in the original
-operation plan before cancellation or forward publication, and its final limit
-is declared once. The commit case runs the canonical operation through source
-stop, namespace hold, drain, login closure and COMMIT, replaces only the worker's
-acknowledgement certainty, and requires the host to inspect the durable outcome.
-It stops after reader retirement and before recovery mounts. The rollback case
-uses the same phase owners, releases the source namespace while logins remain
-closed, and lets the retained SQL rollback fence own login restoration and every
-source restart. Neither case changes a saved date, clock, or production input.
-These synthetic source peers and old-day records do not establish production
-source-runtime admission, UTC rollover, throughput, or range-scan duration.
-
+Reuse the launcher and actual key/init/adoption clocks for background reference,
+SQL and archive catch-up. Wait for the selected UTC day under adoption expiry
+while collection serves. Source stop is admitted only within 30 seconds of the
+boundary, or half the final allowance when smaller. Both operation and stop owner
+cap final work at 600 seconds. Remaining wait after drain consumes that same
+final allowance. Missed day, expired worker, insufficient lifetime or changed
+publication refuses. Complete range CHECK and attachment remain one transaction.
 
 ### Review online preparation before source stop
 
-The existing command also accepts `--prepare-forward-only` with a published
-forward operation plan. Without `--execute` it only inspects. With `--execute`
-it runs the same bounded identity/raw adoption, reference preparation and archive
-catch-up, rechecks source/runtime admission and publication, closes the control
-channel, and independently retires the worker before returning
-`forward_background_prepared`. It never enters the UTC wait, source stop, login
-gate, final handoff, recovery activation or deployment. A failed preparation,
-changed preflight, expired owner, uncertain close or failed retirement propagates
-instead of returning success. Combining this option with a publication, key,
-cancellation or deadline operation refuses before dispatch, as does using it on
-a non-forward or already-final operation.
+--prepare-forward-only inspects by default. With --execute, it runs the same
+bounded adoption/reference/archive preparation, rechecks publication/source/runtime,
+closes control and independently retires the worker before returning
+forward_background_prepared. It never enters the UTC wait, source stop, login
+gate, handoff, recovery or deployment. Incompatible phase options or a non-forward/
+already-final operation refuse before dispatch; failed or uncertain retirement
+cannot report success.
 
-This is a stopping point in the existing operator, with no new journal, worker,
-proof format or schema. Preparation is a production mutation: adoption mirrors
-and archive capture remain active after the worker retires, so collection keeps
-writing to the admitted targets and must remain monitored for lag and capacity.
-The result includes the original adoption expiry and bound UTC day. A later separately authorized
-normal invocation reuses the same operation, worker identity, durable progress
-and clocks; it rechecks current tails/references and rebuilds its process-local
-archive file proof. It does not renew the deadline or change the already-bound
-UTC day. If the operation cannot continue, its existing preserving terminal
-owner must retire capture explicitly. There is no automatic cancellation,
-relaunch or cleanup on return, and elapsed time is not cutover approval.
-Normal execution refuses a new source stop at or after the selected midnight;
-an already admitted pause may finish draining across midnight under its original
-deadline. Missing the window cannot be repaired by stopping collection late.
+Preparation is a mutation: mirrors and archive capture remain after worker
+retirement, so collection still writes admitted targets and requires monitoring.
+The result retains original expiry/day. A later separately authorized invocation
+rechecks tails/references and rebuilds process-local archive proof under unchanged
+clocks and worker identity. It neither renews time nor changes the day. Abandoned
+preparation needs explicit preserving retirement; return does not cancel it.
+A new source stop at or after the selected midnight refuses. An already-admitted
+pause may drain across midnight within its original deadline.
 
-Reference discovery already verifies native constraint ownership and reports
-strict boolean `prepared` and `validated` fields. The host reuses that current
-worker observation: completed references require no schema step, while an
-existing unvalidated reference requires only validation. Missing, non-boolean or
-contradictory flags refuse before reference dispatch. This avoids reacquiring
-writer-conflicting preparation locks on completed constraints after a stop.
-The same worker still rechecks the complete native reference set during parent
-adoption and final handoff; a discovery result never authorizes a switch. New
-reference preparation retains its existing non-waiting locks, phase budget and
-failure behavior. No automatic retry, clock renewal or new persisted state is
-introduced.
-
-The disposable forward-operation rehearsal exercises this preparation-only
-return, verifies actual worker retirement and continued source serving, then
-reenters the normal operation under the unchanged launch/SQL clocks and refuses
-immediately before source stop. This covers the new boundary, not production
-preparation throughput, actual UTC rollover or final-pause duration. The fixture
-substitutes only stop-window admission; unit tests exercise early/late requests
-and a held pause crossing midnight. The implementation remains
-subject to exact release qualification and production admission.
+Reference discovery returns strict prepared/validated booleans. Complete references
+need no schema step; an existing unvalidated reference needs validation only.
+Missing or contradictory flags refuse. Parent adoption/final handoff still
+recheck the entire reference set; discovery is not switch authority.
 
 ### Measure forward keys before selecting a cutover
 
-`qt storage migrate --operation-file <original-plan> --prepare-forward-keys-file
-<candidate-package>` inspects the canceled source and candidate using both existing
-prepared-runtime preflights. `--execute` runs only the existing supervised two-key
-preparation in a confined source-read worker. It does not publish the candidate,
-create adoption or archive capture, stop clients, change the runtime, or select a
-UTC cutover. The candidate proposal's date and separate plan remain unpublished.
+    qt storage migrate --operation-file <original-plan> --prepare-forward-keys-file <package>
 
-Before key preparation has an intent, another candidate may repeat inspection of
-the same original operation. The previous key probe must be positively retired
-and absent under both its exact container ID and name. Its exact receipt bytes
-are retained in a digest-named sibling before the active probe receipt is
-replaced. An interrupted handoff reuses that retained receipt. Foreign owners,
-changed original plans, unresolved containers and any existing key-preparation
-journal still refuse the handoff; terminal cancellation and forward-retirement
-receipts cannot use it. This remains within the existing operator's private
-receipts, with no schema, migration-clock or data-authority change.
-The deployment CI job runs this candidate change through real disposable
-containers, distinct disposable filesystems and PostgreSQL before interrupted key
-preparation and subsequent adoption/retirement. Synthetic service peers qualify the ownership transition;
-they do not establish production duration, hardware capacity or collector impact.
+Inspection preflights original and proposed runtimes. --execute runs only the
+supervised two-key preparation in a confined source-read worker, without
+publication, adoption, archive capture, client stop or selected cutover date.
 
-The host records one 3600-second wall/boot/monotonic intent before dispatch. The
-native key receipt retains its original 3600-second start, expiry and index OIDs;
-reentry narrows to both original clocks. Valid committed indexes may be reconciled
-and reused, while invalid or foreign indexes fail without automatic deletion.
-The transport independently retires the worker before a fresh read-only SQL proof
-can complete the host journal. Lost acknowledgements do not make a new clock.
-An expired or rebooted host may inspect a completed result but cannot dispatch.
-Normal forward publication refuses an unresolved key-preparation journal or
-unretired reader. Later adoption verifies and reuses the completed key receipt.
-A completed SQL key-build deadline does not expire those reusable indexes.
-Before initialization exists, the host retains its own original launch deadline;
-unfinished key work also remains bounded by the earlier SQL key deadline. This
-allows separately prepared keys to be reused without rewriting either clock.
+Before a key intent exists, another proposal may inspect the same original
+operation only after the previous probe is positively retired and absent by ID
+and name. Preserve its exact receipt in a digest-named sibling before replacement.
+Interruption reuses that receipt. Foreign owners, changed plans, unresolved
+containers, existing key intent, terminal cancellation or retirement receipts
+cannot use this handoff.
 
-This explicit preparation boundary addresses production cost uncertainty without
-coupling the measurement to automatic adoption and a premature cutover date. It
-adds no new data-copy algorithm, recovery format, policy or recurring process.
-Host unit checks and native SQL fixtures have different scopes; production use
-also requires qualification of the actual confined command, dynamic capacity and
-collection/read impact. Merely exposing this command is not deployment admission.
+Record one original 3600-second host wall/boot/monotonic intent before dispatch;
+native keys retain their own original 3600-second start/expiry/OIDs. Reentry uses
+the tighter bound. Valid committed keys may reconcile and later be reused;
+invalid/foreign keys refuse without automatic removal. Retire the worker before
+a fresh read-only proof completes host publication. Expired/rebooted hosts may
+observe completed results only. Normal forward publication refuses unresolved
+key journals or live readers. Reusable completed keys do not renew the later
+launch deadline or unfinished key work.
