@@ -98,7 +98,7 @@ def test_source_handoff_requires_current_binding_placement_and_unique_cold_cover
     archive = PostgresCanonicalFactArchiveRepository(database=storage.database, object_store=flow.store,
         temporary_directory=tmp_path / "canonical-staging")
     reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
-    if change == "cold_overlap":
+    if change in {"cold_changed", "cold_overlap"}:
         _archive_day(archive, flow.source_day)
         assert reclaimer.reclaim_partition(flow.source_day, eligible_before=storage.today,
                                            execute=True)["status"] == "partition_reclaimed"

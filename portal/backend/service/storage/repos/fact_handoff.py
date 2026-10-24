@@ -566,8 +566,22 @@ class FactHandoffProof:
             session.execute(text(f"LOCK TABLE ONLY {relation} IN SHARE MODE NOWAIT"))
         for oid, expected in sorted(self.relations.items()):
             name = expected["relname"]
+            kind = self.relation_kinds[oid]
+            # A source hot partition can be reclaimed between the initial proof
+            # and this final transaction. Detect that committed placement change
+            # before issuing LOCK TABLE against a relation name that no longer
+            # exists, so the refusal stays typed and the transaction remains a
+            # normal rollback rather than leaking an UndefinedTable exception.
+            if kind == "hot" and self._metadata(session, oid) != expected:
+                raise RuntimeError(
+                    f"canonical_reclaim_source_placement_changed: storage_day={self.bound[0]}"
+                )
             session.execute(text(f'LOCK TABLE ONLY market."{name}" IN SHARE MODE NOWAIT'))
             if self._metadata(session, oid) != expected:
+                if kind == "hot":
+                    raise RuntimeError(
+                        f"canonical_reclaim_source_placement_changed: storage_day={self.bound[0]}"
+                    )
                 raise RuntimeError("canonical_handoff_relation_changed")
         # Reuse the canonical admission (keys, nondeferrable validated composite
         # FK, legacy seals, inherited indexes/references and partition topology).
