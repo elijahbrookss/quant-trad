@@ -47,14 +47,14 @@ def test_selected_accepted_adrs_are_indexed_and_linked() -> None:
         "0065": "0065-use-explicit-frozen-check-admission-for-new-research-observations.md",
         "0066": "0066-scale-validation-to-consequence-and-trust-boundaries.md",
     }
-    for adr_id, target in expected.items():
+    for target in expected.values():
         repo_path = f"docs/architecture/decisions/{target}"
         assert repo_path in indexed
         assert (ROOT / repo_path).is_file()
         assert _frontmatter(repo_path)["status"] == "accepted"
 
 
-def test_architecture_navigation_and_asset_lineage_are_current() -> None:
+def test_architecture_navigation_and_diagram_sources_are_current() -> None:
     architecture = _read("docs/architecture/README.md")
     boundary_map = architecture.split("## Boundary Map", 1)[1].split(
         "## Decision Records", 1
