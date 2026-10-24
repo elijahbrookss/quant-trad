@@ -271,6 +271,8 @@ def _incoming_references(conn):
         "market.fact_hot_payloads":"id",
         "market.fact_archive_material_aliases":"fact_version_id",
         "market.fact_archive_canonical_dependencies":"fact_version_id",
+        "market.fact_archive_prepared_material_aliases":"fact_version_id",
+        "market.fact_archive_prepared_canonical_dependencies":"fact_version_id",
     }
     child_owners={row["relation"]:"id" for row in children}
     rows=_rows(conn,"""

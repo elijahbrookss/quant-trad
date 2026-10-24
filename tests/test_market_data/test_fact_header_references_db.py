@@ -79,7 +79,7 @@ def test_reference_validation_allows_collection_and_reuses_verified_constraints(
         assert conn.scalar(text("""
             SELECT count(*) FROM pg_constraint WHERE contype='f'
             AND confrelid='market.fact_versions'::regclass AND conparentid=0
-        """))==3
+        """))==5
         for row in (first,later):
             assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_identities WHERE id=:id"),
                                {"id":row["id"]})==1
