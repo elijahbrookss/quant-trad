@@ -401,8 +401,8 @@ before relying on it. The internal final host retains the exclusive side using
 binds the three fixed source commands, image, root and environment, then retains
 the actual directory inode hold across its caller's transition. Its callback
 rechecks original clocks and root metadata; it cannot be reused after exit.
-The preparatory release and complete publisher/operator admission remain
-unfinished. A saved observation is never lock authority.
+The preparatory release and complete publisher/operator admission must be
+qualified together before use. A saved observation is never lock authority.
 Arbitrary tools, unqualified images, alternate entrypoints and privileged path
 replacement are not excluded by this helper. Database gates, live proofs, original
 deadlines, durable intent and uncertain-outcome handling remain separate required
@@ -1625,14 +1625,11 @@ retains its proof. Restart requires bounded background re-verification; saved
 hashes alone cannot substitute. File descriptors and proof bytes/time are
 bounded without changing host limits. Descriptor/kernel-memory capacity and the
 remaining metadata scan require measured admission. The default final verifier
-still hashes all files. Publisher drain, invocation of terminal cancellation and runtime activation
-remain separate unfinished host integration.
-
-The complete online operator, archive reconciliation and measured short final
-switch remain unfinished. The held host operator cannot be advertised as a
-short-outage path. Additional source lookups in protected inserts require
-throughput/collector-impact qualification. The old held-growth capacity
-sensitivity must be replaced by live-ingestion and capture-backlog admission.
+still hashes all files. These proof components alone do not perform publisher
+drain, terminal cancellation or runtime activation; use the connected operator
+described below. Its exact release still needs measured archive reconciliation,
+final-pause, live-ingestion, capture-backlog and collector-impact qualification.
+The historical held host operator is not a short-outage guarantee.
 
 ### Online archive capture retirement
 
@@ -2317,7 +2314,8 @@ terminalizes this controller; it is not permission to reconnect or resume it.
 Background bulk work remains forbidden in this window. Empty tail observations
 still do not authorize COMMIT; exact final verification and host/archive/spool
 publisher admission remain mandatory. Actual scheduled QT job semantics,
-restoration after uncertain/outer loss and the complete host switch are unfinished.
+restoration after uncertain/outer loss and the complete host switch require
+separate connected qualification.
 
 
 ### Returning to the original source after confirmed gating
@@ -2358,7 +2356,8 @@ Disposable qualification covers this full controlled-source abort and a fully
 received restoration reply discarded after actual access reopening. Outer host
 loss, unread framing, late SQL completion and production job/source/spool
 admission remain separate limits. The original preparation, capture and final
-windows are never renewed. The complete production operator remains unfinished.
+windows are never renewed. This abort component does not qualify the connected
+operator for a production source or workload.
 
 ## Application and database file ownership
 
@@ -2531,7 +2530,7 @@ terminate sessions or relax the zero-backend/zero-prepared-transaction guard.
 Database mount readiness grants no collection or runtime activation authority.
 The internal continuation below prepares repositories and confirms native WAL
 delivery. Preserving private spool-copy recovery, matching runtime startup and a
-complete encrypted pair remain required steps of the unfinished complete operator.
+complete encrypted pair remain required steps of the connected operator.
 Production pause and resource admission still require the integrated measured operation.
 
 
@@ -2548,10 +2547,33 @@ a private tmpfs input and does not require duplicate configuration beside keys.
 For the confirmed pre-preparation missing-config failure after commit, the
 existing recovery owner provides an explicit, bounded continuation. Its failed
 receipt and helper remain preserved, and ordinary migration replay stays closed.
-This continuation retains the original admission, clock and failure rules. A separately retained database
-image may lack the pinned native archiver even when application tooling is
-present. The continuation owner has an explicitly bound image-correction path
-for that completed-preparation failure. It preserves cluster, volumes, keys and
+Invoke the existing `qt storage migrate --operation-file <private-plan>
+--recover-repositories-file <private-request>` inspection first; only explicit
+`--execute` dispatches recovery. The strict v1 request uses
+`schema_version: qt.storage_repository_continuation.v1`, exact original-byte
+`operation_sha256` and `final_sha256`, and integer `duration_seconds` from 1
+through 600. It admits only the confirmed missing-config exception before
+repository preparation mutated state, with the original failed helper and
+retired migration reader independently identified and stopped.
+
+A separately retained database image may lack the pinned native archiver after
+preparation completes. Only this recognized missing-archiver failure admits
+`qt.storage_repository_continuation.v2`; its request adds
+`previous_continuation_sha256` over the exact expired v1 continuation bytes and
+`database_image` as an immutable `sha256:` image identity. Completed preparation,
+helper retirement, unchanged archive configuration and the missing binary must
+be verified rather than inferred from a timeout.
+
+The at-most-600-second allowance is an explicit recovery-only extension, never
+a renewed migration/capture attempt or permission to replay SQL. Preserve prior
+final/continuation bytes, original start anchors and downtime evidence. Reboot,
+changed clocks/bindings, restarted source clients, changed helpers/readers,
+unknown in-flight actions or unresolved prior outcomes refuse. Retain the
+deployment/source holds; inspect authoritative state after a lost reply rather
+than redispatching automatically. The implementation and exact refusal checks
+belong to `scripts/automation/storage_online_recovery.py`.
+
+The image-correction path It preserves cluster, volumes, keys and
 runtime contract, requires identical PostgreSQL/Timescale binaries, journals
 replacement without volume removal and verifies actual WAL delivery. Prior
 attempts remain evidence; uncertain outcomes refuse automatic replay. Runtime
@@ -2613,7 +2635,7 @@ WAL delivery. A lost action/reply leaves its intent unresolved and permits no
 replay or automatic reversal. This state grants no application-start authority.
 Private spool recovery, matching runtime activation, fresh collection and complete
 encrypted-pair publication still require connected qualification. Production
-pause and capacity admission remain unfinished. The runtime package explicitly
+pause and capacity admission require exact-release qualification. The runtime package explicitly
 includes the existing online worker/controller dependency closure, and those files
 participate in source attestation.
 
@@ -2732,8 +2754,8 @@ the existing launcher independently verifies process retirement. A caller that
 has fully received a valid response and then discards it can continue on that
 same channel with the next sequence; unread or partial replies cannot take
 that path. No replacement deadline, receipt, state owner, listener or operator
-entrypoint is added. The complete production operator and actual source/load
-admission remain unfinished.
+entrypoint is added. This channel alone does not qualify the complete operator
+or actual source/load admission.
 
 ### Initial capture in the same confined worker
 
