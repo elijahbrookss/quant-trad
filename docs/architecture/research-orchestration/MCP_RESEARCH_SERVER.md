@@ -56,6 +56,12 @@ Useful Make targets:
 - `make mcp-smoke`
 - `make mcp-register-codex`
 
+Research requests, returned records, tool receipts, images and exports are
+private content. MCP resource access and confirmation do not grant permission to
+copy real records into public docs, fixtures or CI artifacts. Use synthetic
+public examples and follow the
+[public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).
+
 ## Boundary
 
 The MCP server sits on top of the same contracts as the `qt` CLI:
@@ -216,8 +222,8 @@ message. The body may contain a reconciliation job ID even when receipt
 readback failed after enqueue/reuse. A policy mismatch or uncertain receipt is
 not permission to redispatch or change policy. Timeout does not prove server
 cancellation; status/result and explicit cancellation retain their existing
-contracts. This adapter change adds no admission, budget, retry or cancellation
-semantics and does not change other tools' error handling.
+contracts. This receipt handling adds no admission, budget, retry or cancellation
+authority; other tools retain their declared error contracts.
 
 For wider scout-window planning, `qt instruments coverage-matrix` calls the
 backend instrument coverage matrix and combines instrument readiness with candle

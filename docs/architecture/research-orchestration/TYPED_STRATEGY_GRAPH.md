@@ -21,10 +21,9 @@ code_paths:
 ---
 # Typed Strategy and Action Graph
 
-## Implemented capability
+## Compile a bounded strategy graph
 
-Phase 5 gives research agents bounded creative authority over data-only strategy
-graphs. A graph declares approved facts, typed expressions, prioritized rules,
+The offline research boundary admits bounded data-only strategy graphs. A graph declares approved facts, typed expressions, prioritized rules,
 canonical actions, sizing, risk limits, and execution policy. It compiles to a
 stable hash and emits a `canonical_action_intent.v1`; it does not submit orders.
 
@@ -77,6 +76,12 @@ evaluation, files, paths, shell commands, network/URLs, providers, credentials,
 secrets/tokens, deployment, runtime mutation, external orders, and capital.
 There is no arbitrary-code node or extension hook.
 
-Phase 5 grants strategy invention for offline experiments. Runtime support for
+Graph creation is confined to authorized offline experiments. Runtime support for
 every new action still depends on the existing canonical action/risk/execution
 adapters; a compiled graph is never deployment or trading authorization.
+
+Actual authored graphs, selected configurations, search lineage and results are
+private research/Strategy records. Public documentation describes the schema
+and compiler; examples and tests must use synthetic material unless exact
+contents have explicit public-release approval. See the
+[public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).

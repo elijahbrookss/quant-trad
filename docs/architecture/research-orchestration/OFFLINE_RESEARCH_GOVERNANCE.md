@@ -23,11 +23,11 @@ code_paths:
 ---
 # Offline Research Governance
 
-## Implemented lifecycle and ceiling
+## Research lifecycle and authority ceiling
 
-Phase 6 governs research-registry promotion only:
+Governance controls research-registry transitions only:
 
-Diagram source: [offline autonomy Phase 4-6](diagrams/offline-autonomy-phase4-6.mmd).
+Diagram source: [offline research lifecycle](diagrams/offline-autonomy-phase4-6.mmd).
 
 ```text
 OBSERVATION
@@ -90,10 +90,16 @@ increase protocol budgets, edit protocols or frozen candidates, reopen a
 consumed holdout, fabricate certificates, bypass audit, mutate runtime state,
 deploy, access trading credentials, submit orders, or obtain capital.
 
-## Honest deployment statement
+## Local identity boundary
 
 This is one application with logical actor roles, not cryptographic institutional
 separation. API actor identity remains an application identity assertion; a
 future authenticated principal/authorization service can harden that seam.
 Within the implemented workflow, policy and evidence checks are transactional
 and durable. No operational trading transition is connected.
+
+Proposals, authorizations, decisions and evidence references are private QT
+records. Describing their schema does not approve copying real records into
+public documentation or fixtures; QT interpretation publication is not public
+repository release. See the
+[public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research).

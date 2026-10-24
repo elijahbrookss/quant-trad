@@ -23,11 +23,11 @@ code_paths:
 ---
 # Scientific Research Authority
 
-## Implemented boundary
+## Bound a scientific claim
 
-Scientific authority is implemented inside the existing application and
-primary PostgreSQL boundary. It is a protocol, controlled operation set, and durable
-state projection—not a collection of pretend institutional microservices.
+Scientific authority lives inside the existing application and primary
+PostgreSQL boundary. Protocols, controlled operations and durable state implement
+its logical roles; they are not separately deployed institutional services.
 
 ```text
 authorized immutable protocol
@@ -56,14 +56,13 @@ declared hash matches, whose series are non-empty, and whose frozen ranges cover
 the assigned window. Resolution reads frozen storage and performs no provider
 fetch.
 
-Studies using derived trade flow additionally require the
-[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md).
-The admitted Check definition declares raw trades, aggregate trade flow, and every
-contextual fact through `FactRequirement`; no orchestrator inserts OI or
-funding implicitly. The immutable protocol pins train, validation, and private
-holdout datasets. Saved Check evidence retains its exact definition, plan and
-frozen input binding. Canonical `known_at` remains unchanged; the replay clock
-is admitted only after exact raw/aggregate/coverage reconciliation.
+An admitted procedure declares all actual input requirements and clocks;
+orchestration must not insert contextual facts implicitly. Saved evidence pins
+its definition, plan and frozen input binding. A counterfactual availability
+transform is a separate capability described in
+[research replay availability](RESEARCH_REPLAY_AVAILABILITY.md); its pure helpers
+are not a generic runnable Study executor. Only an explicitly admitting Check
+may consume such a transform. Canonical `known_at` is never rewritten.
 
 The research agent receives the public protocol. For a sealed historical
 holdout, its dataset ID, hash, and window are redacted. Trial registration
@@ -71,12 +70,9 @@ derives the dataset binding from the private protocol; the caller may choose
 only `train` or `validation`, never a dataset. A material protocol change
 requires a new protocol ID/hash and family.
 
-Before activation, the trusted runner constructs causal entry/exit
-opportunities under the replay clock for train, every validation fold, and the
-privately resolved holdout. Declared sample, signal-capable trade, calendar,
-exposure, and horizon floors must pass before an attempt budget can be opened.
-Public evidence exposes train/validation counts but only a sealed pass/fail for
-the holdout.
+Activation applies the protocol's declared eligibility and evidence requirements
+before opening the attempt budget. Public feedback must preserve the configured
+holdout blindness class; private bindings stay behind the scientific authority.
 
 ## Immutable protocol manifest
 
@@ -257,7 +253,13 @@ shadow, paper, live, external-order, credential, capital, or deployment access.
 
 Scientific authority governs its existing protocol/family/trial/candidate
 contracts. Runnable analysis uses explicit CheckDefinition settings and frozen
-Check evidence; Studies retain questions/findings. The unused executable
-StudyDefinition/bundle registry has been removed. Historical integrity alone
+Check evidence; Studies retain questions/findings. There is no executable StudyDefinition/bundle registry in this route. Historical integrity alone
 cannot satisfy an authority operation requiring deterministic replay. See
 [ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md).
+
+Protocols, trial inputs, candidate configurations, certificates and findings are
+private research records. Public schemas and synthetic examples explain the
+procedure without publishing real selections, allocations or results. The
+[public infrastructure/private research contract](../../contracts/platform/00_system_contract.md#public-infrastructure-and-private-research)
+also applies to generated exports and verification receipts. This manual makes
+no assertion about custody or scientific validity of a particular private run.
