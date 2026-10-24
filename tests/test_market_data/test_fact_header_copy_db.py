@@ -309,7 +309,9 @@ def test_interrupted_handoff_restores_original_layout_before_retry(source):
         assert conn.scalar(text("SELECT state FROM market.fact_storage_state WHERE layout_version='market.fact_storage_tiers.v1'"))=="ready"
         assert conn.scalar(text("SELECT to_regnamespace('qt_fact_header_retained_v1')")) is None
         assert conn.scalar(text("SELECT to_regclass('market.fact_identities')")) is None
-        assert conn.scalar(text("SELECT count(*) FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass AND conparentid=0"))==3
+        # Three historical consumers plus the two hidden preparation catalogs
+        # retain source-header identity while an interrupted handoff rolls back.
+        assert conn.scalar(text("SELECT count(*) FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass AND conparentid=0"))==5
     with engine.begin() as conn:
         stage_shadow_handoff_fixture(conn,source)
     _assert_application_after_handoff(source)

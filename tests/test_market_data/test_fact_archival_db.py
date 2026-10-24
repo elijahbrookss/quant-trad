@@ -298,16 +298,23 @@ def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, t
     )
     archive.seal_partition(day)
     first = archive.stage_next_page(day)
+    with storage.database.session() as session:
+        first_generation = session.execute(text(
+            "SELECT generation FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": first["manifest_id"]}).scalar_one()
     actual_catalogs = archive._page_catalogs
     def missing_series(*args):
         return {**actual_catalogs(*args), "series": []}
     with monkeypatch.context() as patch:
         patch.setattr(archive, "_page_catalogs", missing_series)
-        with pytest.raises(RuntimeError, match="catalog_incomplete.*catalog=series"):
-            archive.verify_next_page(day)
+        assert archive.verify_next_page(day)["status"] == "page_verified"
     with storage.database.session() as session:
-        assert session.execute(text("SELECT count(*) FROM market.fact_archive_verifications")).scalar_one() == 0
-    archive.verify_next_page(day)
+        assert session.execute(text(
+            "SELECT generation FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": first["manifest_id"]}).scalar_one() == first_generation + 1
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_verifications")).scalar_one() == 1
+    assert archive.verify_next_page(day)["status"] == "no_unverified_pages"
     with pytest.raises(RuntimeError, match="source_coverage_mismatch"):
         archive.verify_partition(day)
     archive.stage_next_page(day)
@@ -729,7 +736,8 @@ def test_canonical_dependency_batch_stop_rolls_back_every_page_catalog(
         ):
             assert session.execute(text(f"SELECT count(*) FROM market.{table}")).scalar_one() == 0
         preparation = session.execute(text(
-            "SELECT id,state FROM market.fact_archive_preparations WHERE storage_day=:day"
+            "SELECT id,state,canonical_dependency_count FROM market.fact_archive_preparations "
+            "WHERE storage_day=:day"
         ), {"day": fixture.day}).mappings().one()
         assert preparation["state"] == "building"
         persisted = session.execute(text(
@@ -841,10 +849,14 @@ def test_failed_generation_supersession_keeps_old_authority_and_resumes(
             "FROM market.fact_archive_active_generations WHERE manifest_id=:id"
         ), {"id": acknowledged["manifest_id"]}).mappings().one()) == old
         states = session.execute(text(
-            "SELECT generation,state FROM market.fact_archive_preparations "
+            "SELECT generation,state,lease_expires_at <= clock_timestamp() AS released "
+            "FROM market.fact_archive_preparations "
             "WHERE manifest_id=:id ORDER BY generation"
         ), {"id": acknowledged["manifest_id"]}).all()
-        assert states == [(1, "active"), (2, "ready")]
+        assert [(row.generation, row.state) for row in states] == [
+            (1, "active"), (2, "ready"),
+        ]
+        assert states[1].released is True
         assert session.execute(text(
             "SELECT count(*) FROM market.fact_archive_verifications WHERE manifest_id=:id"
         ), {"id": acknowledged["manifest_id"]}).scalar_one() == 0

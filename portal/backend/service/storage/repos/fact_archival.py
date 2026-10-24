@@ -416,7 +416,8 @@ class PostgresCanonicalFactArchiveRepository:
         self._current_stage_page_ordinal = None
         self._archive_generation_owner = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
         self._generation = ArchiveGenerationCoordinator(
-            database=self.database, lock_day=self._lock, check_budget=self.check_budget,
+            database=self.database, lock_day=self._lock, release_day=self._release_lock,
+            check_budget=self.check_budget,
             statement_timeout_ms=self.statement_timeout_ms,
             owner_token_hash=self._archive_generation_owner,
             verifier_version=FACT_ARCHIVE_VERIFIER_VERSION,
@@ -454,6 +455,52 @@ class PostgresCanonicalFactArchiveRepository:
         if self.partition_guard is not None:
             self.partition_guard(session, row)
         return row
+
+    def _release_lock(self, session, day):
+        """Take the normal lock order for lease cleanup without spent work budget.
+
+        This transaction can only shorten the current owner's hidden-preparation
+        lease. Keep it independently bounded; failure falls back to lease expiry.
+        """
+        self._day(day)
+        timeout = min(self.statement_timeout_ms or 5_000, 5_000)
+        session.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                        {"value": str(timeout)})
+        session.execute(text("SELECT set_config('lock_timeout','250',true)"))
+        market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+        acquired = session.execute(text(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"
+        ), {"name": f"quant-trad:canonical-archive:{day.isoformat()}"}).scalar_one()
+        if not acquired:
+            raise MarketStorageLifecycleBusyError(
+                f"canonical_archive_partition_busy: storage_day={day}"
+            )
+        row = session.execute(text(
+            "SELECT * FROM market.fact_retention_partitions WHERE storage_day=:day FOR UPDATE"
+        ), {"day": day}).mappings().one_or_none()
+        if row is None:
+            raise RuntimeError(f"canonical_archive_partition_unknown: storage_day={day}")
+        return row
+
+    def _release_generation_claim(self, *, day, page_ordinal: int, claim) -> None:
+        preparation = claim["preparation"]
+        try:
+            released = self._generation.release(
+                day=day, preparation_id=preparation["id"],
+                fence=preparation["fence"],
+            )
+            logger.info(
+                "canonical_archive_preparation_released | storage_day=%s "
+                "page_ordinal=%s preparation_id=%s fence=%s released=%s",
+                day, page_ordinal, preparation["id"],
+                preparation["fence"], released,
+            )
+        except BaseException:
+            logger.exception(
+                "canonical_archive_preparation_release_failed | storage_day=%s "
+                "page_ordinal=%s preparation_id=%s fence=%s",
+                day, page_ordinal, preparation["id"], preparation["fence"],
+            )
 
     def inspect_partition(self, day: date) -> dict:
         """Read-only progress; does not open/create files or seal the partition."""
@@ -850,20 +897,26 @@ class PostgresCanonicalFactArchiveRepository:
                 canonical_dependencies=plan["canonical_dependencies"],
             ),
         )
-        ready = _timed_stage_call(
-            phase="catalog_generation_stage", day=day, page_ordinal=plan["page_ordinal"],
-            operation=lambda: self._generation.stage(
-                day=day, claim=claim, alias_batch_rows=_ALIAS_CATALOG_WRITE_BATCH_ROWS,
-                dependency_batch_rows=_CATALOG_WRITE_BATCH_ROWS,
-            ),
-        )
-        activated = _timed_stage_call(
-            phase="catalog_generation_activate", day=day,
-            page_ordinal=plan["page_ordinal"],
-            operation=lambda: self._generation.activate(
-                day=day, preparation_id=ready["id"], fence=ready["fence"],
-            ),
-        )
+        try:
+            ready = _timed_stage_call(
+                phase="catalog_generation_stage", day=day, page_ordinal=plan["page_ordinal"],
+                operation=lambda: self._generation.stage(
+                    day=day, claim=claim, alias_batch_rows=_ALIAS_CATALOG_WRITE_BATCH_ROWS,
+                    dependency_batch_rows=_CATALOG_WRITE_BATCH_ROWS,
+                ),
+            )
+            activated = _timed_stage_call(
+                phase="catalog_generation_activate", day=day,
+                page_ordinal=plan["page_ordinal"],
+                operation=lambda: self._generation.activate(
+                    day=day, preparation_id=ready["id"], fence=ready["fence"],
+                ),
+            )
+        except BaseException:
+            self._release_generation_claim(
+                day=day, page_ordinal=plan["page_ordinal"], claim=claim,
+            )
+            raise
         logger.info(
             "canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
             "rows=%s bytes=%s generation=%s preparation_id=%s catalog_commitment=%s",
@@ -1296,21 +1349,27 @@ class PostgresCanonicalFactArchiveRepository:
                     canonical_dependencies=plan["canonical_dependencies"],
                 ),
             )
-            ready = _timed_verification_call(
-                timings=timings, phase="catalog_supersession_stage", day=day,
-                page=plan["page"], operation=lambda: self._generation.stage(
-                    day=day, claim=claim,
-                    alias_batch_rows=_ALIAS_CATALOG_WRITE_BATCH_ROWS,
-                    dependency_batch_rows=_CATALOG_WRITE_BATCH_ROWS,
-                ),
-            )
-            _timed_verification_call(
-                timings=timings, phase="catalog_supersession_activate", day=day,
-                page=plan["page"], operation=lambda: self._generation.supersede_verified(
-                    day=day, preparation=ready,
-                    verification_receipt=plan["receipt"],
-                ),
-            )
+            try:
+                ready = _timed_verification_call(
+                    timings=timings, phase="catalog_supersession_stage", day=day,
+                    page=plan["page"], operation=lambda: self._generation.stage(
+                        day=day, claim=claim,
+                        alias_batch_rows=_ALIAS_CATALOG_WRITE_BATCH_ROWS,
+                        dependency_batch_rows=_CATALOG_WRITE_BATCH_ROWS,
+                    ),
+                )
+                _timed_verification_call(
+                    timings=timings, phase="catalog_supersession_activate", day=day,
+                    page=plan["page"], operation=lambda: self._generation.supersede_verified(
+                        day=day, preparation=ready,
+                        verification_receipt=plan["receipt"],
+                    ),
+                )
+            except BaseException:
+                self._release_generation_claim(
+                    day=day, page_ordinal=plan["page"]["page_ordinal"], claim=claim,
+                )
+                raise
             receipt = plan["receipt"]
         _record_verification_phase(
             timings=timings, phase="transaction_total", day=day, page=page,

@@ -145,6 +145,48 @@ def test_generation_claim_takeover_fences_stale_worker_and_wrong_day(
 
 
 @pytest.mark.db
+def test_handled_failure_release_allows_immediate_fenced_resume(
+        storage, tmp_path, monkeypatch):
+    archive, day, plan, original = _unfinished_generation(
+        storage, tmp_path, monkeypatch,
+    )
+    contender = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database,
+        object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        temporary_directory=tmp_path / "contender",
+    )
+    inputs = {
+        "day": day, "page_ordinal": plan["page_ordinal"],
+        "manifest": plan["manifest"], "series_catalog": plan["series"],
+        "dependencies": plan["dependencies"], "aliases": plan["aliases"],
+        "canonical_dependencies": plan["canonical_dependencies"],
+    }
+    with pytest.raises(RuntimeError, match="preparation_busy"):
+        contender._generation.claim(**inputs)
+    def spent_budget():
+        raise RuntimeError("spent work budget")
+    archive.check_budget = spent_budget
+    assert archive._generation.release(
+        day=day, preparation_id=original["preparation"]["id"],
+        fence=original["preparation"]["fence"],
+    ) is True
+    resumed = contender._generation.claim(**inputs)
+    assert resumed["preparation"]["fence"] == original["preparation"]["fence"] + 1
+    assert archive._generation.release(
+        day=day, preparation_id=original["preparation"]["id"],
+        fence=original["preparation"]["fence"],
+    ) is False
+    with storage.database.session() as session:
+        current = session.execute(text(
+            "SELECT owner_token_hash,fence,lease_expires_at > clock_timestamp() AS leased "
+            "FROM market.fact_archive_preparations WHERE id=:id"
+        ), {"id": original["preparation"]["id"]}).mappings().one()
+    assert current["owner_token_hash"] == contender._generation.owner_token_hash
+    assert current["fence"] == resumed["preparation"]["fence"]
+    assert current["leased"] is True
+
+
+@pytest.mark.db
 def test_expired_preparation_from_older_verifier_is_abandoned_not_reused(
         storage, tmp_path, monkeypatch):
     archive, day, plan, old = _unfinished_generation(

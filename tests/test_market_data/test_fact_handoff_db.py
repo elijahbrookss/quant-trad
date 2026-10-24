@@ -197,7 +197,7 @@ def test_batched_final_catalogs_keep_multipage_history_and_late_mutation_refusal
             assert result["reclaimed_bytes"] > 0
     finally:
         event.remove(storage.database._engine, "before_cursor_execute", query)
-    catalogs = [q for q in statements if "AS manifest_id, proof.*" in q]
+    catalogs = [q for q in statements if "AS logical_count" in q and "AS hinted_count" in q]
     receipts = [q for q in statements if "FROM market.fact_archive_verifications" in q]
     assert len(receipts) == 1
     assert len(catalogs) == (4 if mutate_last_page else 8)

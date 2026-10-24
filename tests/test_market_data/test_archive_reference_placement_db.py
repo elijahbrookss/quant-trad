@@ -109,8 +109,9 @@ def _member_tablespaces(conn, relation):
     """), {"relation": relation}).all()
 
 
-def test_generation_migration_inherits_named_reference_tablespace(placed):
+def test_generation_migration_inherits_named_reference_tablespace(storage, tmp_path, monkeypatch):
     """Every actual prepared heap, TOAST table and index inherits HDD placement."""
+    placed = _configure_placement(storage, tmp_path, monkeypatch)
     engine = placed.database._engine
     legacy = (
         "market.fact_archive_material_aliases",

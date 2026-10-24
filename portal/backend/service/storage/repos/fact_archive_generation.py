@@ -143,12 +143,13 @@ class ArchiveGenerationCoordinator:
     follows that same lock order before touching a preparation row.
     """
 
-    def __init__(self, *, database, lock_day, check_budget, statement_timeout_ms,
+    def __init__(self, *, database, lock_day, release_day, check_budget, statement_timeout_ms,
                  owner_token_hash: str, verifier_version: str, lease_seconds: int = 120):
         if type(lease_seconds) is not int or lease_seconds < 30:
             raise ValueError("canonical_archive_preparation_lease_invalid")
         self.database = database
         self.lock_day = lock_day
+        self.release_day = release_day
         self.check_budget = check_budget
         self.statement_timeout_ms = statement_timeout_ms
         self.owner_token_hash = owner_token_hash
@@ -557,6 +558,30 @@ class ArchiveGenerationCoordinator:
             """), {"id": row["id"]})
             return {"manifest_id": row["manifest_id"], "preparation_id": row["id"],
                     "generation": row["generation"], "catalog_commitment": row["catalog_commitment"]}
+
+    def release(self, *, day, preparation_id: str, fence: int) -> bool:
+        """Release this worker's resumable preparation after a handled failure.
+
+        A process crash still relies on the bounded lease. A caller that has
+        already observed and unwound an exception can relinquish only its exact
+        owner/fence so another worker can resume committed hidden batches
+        immediately. Active or superseded generations are never changed.
+        """
+        with self.database.session() as session:
+            self.release_day(session, day)
+            current = session.execute(text(
+                "SELECT id,storage_day FROM market.fact_archive_preparations WHERE id=:id FOR UPDATE"
+            ), {"id": preparation_id}).mappings().one()
+            self._require_day(current, day)
+            changed = session.execute(text("""
+                UPDATE market.fact_archive_preparations
+                SET lease_expires_at=clock_timestamp(),updated_at=clock_timestamp()
+                WHERE id=:id AND fence=:fence AND owner_token_hash=:owner
+                  AND state IN ('building','ready')
+                RETURNING id
+            """), {"id": preparation_id, "fence": fence,
+                   "owner": self.owner_token_hash}).scalar_one_or_none()
+            return changed is not None
 
 
     @staticmethod
