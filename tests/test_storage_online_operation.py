@@ -40,8 +40,11 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
     assert sum(op=='sql_copy' for op,_ in calls[:identity_at])==6
     assert not any(op in {'inspect_references','archive_copy','reprove'} for op,_ in calls[:identity_at])
     steps=[kw['step'] for op,kw in calls if op=='prepare_step']
-    assert steps==['catalog_history','raw_history','identity_history','identity_order','identity_capture',
-                   'reference_prepare','reference_validate','reference_adopt','catalog_history','catalog_history']
+    assert steps == [
+        'catalog_history', 'raw_history', 'identity_history', 'identity_order',
+        'identity_capture', 'reference_prepare', 'reference_validate',
+        'reference_adopt', *(['catalog_history'] * len(operation._CATALOGS)),
+    ]
     assert all(kw['max_duration_seconds']==30 for op,kw in calls if op=='prepare_step')
 
 

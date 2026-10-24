@@ -150,6 +150,8 @@ class _Rows:
     digest: str
     days: tuple = ()
     hashed_rows: bool = False
+    table: str | None = None
+    relation_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,13 +169,15 @@ class FactHandoffProof:
         self.relations = {}
         self.pages = {}
         self.catalogs = {}
+        self.generations = {}
         self.sources = {}
         self.targets = set()
         self.source_hashes = {}
         self.source_frames = {}
         self.source_headers = []
         self.retained_bytes = sum(sys.getsizeof(value) for value in (
-            self.relations, self.pages, self.catalogs, self.sources, self.targets, self.source_hashes, self.source_frames, self.source_headers))
+            self.relations, self.pages, self.catalogs, self.generations, self.sources, self.targets,
+            self.source_hashes, self.source_frames, self.source_headers))
         self.bound = None
         self.admitted = False
         self.headers_current = False
@@ -245,11 +249,13 @@ class FactHandoffProof:
             "{" + ",".join('"' + value + '"' for value in tids) + "}",
             len(ordered), _digest(ordered, columns), tuple(days)))
 
-    def capture_page(self, page, receipt, catalogs, physical):
+    def capture_page(self, page, receipt, catalogs, physical, generation=None):
         identity = page["id"]
         if self.bound is not None or identity in self.pages:
             raise RuntimeError("canonical_handoff_page_scope_invalid")
         self._assign(self.pages, identity, self._keep((dict(page), dict(receipt))))
+        self._assign(self.generations, identity,
+                     self._keep(dict(generation)) if generation is not None else None)
         # Physical fields are deliberately excluded from historical receipt hashing.
         self.retained_bytes += sys.getsizeof(physical) + sum(sys.getsizeof(key) for key in physical)
         self._assign(self.catalogs, identity, physical)
@@ -261,14 +267,30 @@ class FactHandoffProof:
                 self.retained_bytes += sys.getsizeof(self.targets) - before
                 self._keep(None)
 
-    def catalog_rows(self, session, name, manifest_id, rows):
-        table, columns = _CATALOGS[name]
+    def catalog_rows(self, session, name, manifest_id, rows, *, table=None, relation_identity=None):
+        legacy_table, columns = _CATALOGS[name]
+        table = table or legacy_table
+        permitted = {legacy_table}
+        if name == "aliases":
+            permitted.add("fact_archive_prepared_material_aliases")
+        elif name == "canonical_dependencies":
+            permitted.add("fact_archive_prepared_canonical_dependencies")
+        if table not in permitted:
+            raise RuntimeError("canonical_handoff_catalog_relation_invalid")
         keys = {"series": ("series_id",), "aliases": ("fact_version_id", "evidence_key"),
                 "dependencies": ("target_kind", "target_id"), "canonical_dependencies": ("fact_version_id",)}[name]
         if len({tuple(row[key] for key in keys) for row in rows}) != len(rows):
             raise RuntimeError("canonical_handoff_duplicate_catalog_key")
-        columns = (("manifest_id", "text"),) + columns
-        return self._rows(session, [{**row, "manifest_id": manifest_id} for row in rows], columns, table=table)
+        physical_identity = relation_identity or manifest_id
+        identity_column = "preparation_id" if table.startswith("fact_archive_prepared_") else "manifest_id"
+        columns = ((identity_column, "text"),) + columns
+        witness = self._rows(
+            session, [{**row, identity_column: physical_identity} for row in rows],
+            columns, table=table,
+        )
+        return _Rows(witness.oid, witness.columns, witness.tids, witness.count,
+                     witness.digest, witness.days, witness.hashed_rows, table,
+                     physical_identity)
 
     def capture_sources(self, session, manifest_id, headers, matches):
         if self.bound is not None or manifest_id not in self.pages:
@@ -353,6 +375,7 @@ class FactHandoffProof:
 
     def bind(self, day, relation_oid, evidence, limits):
         if (self.bound is not None or len(self.pages) != evidence["page_count"]
+                or set(self.generations) != set(self.pages)
                 or set(self.source_hashes) != set(self.pages) or not set(self.sources) <= set(self.pages)):
             raise RuntimeError("canonical_handoff_incomplete_first_proof")
         self._compile_headers()
@@ -370,7 +393,10 @@ class FactHandoffProof:
             raise RuntimeError("canonical_handoff_evidence_changed")
         # No waiting and no advisory-lock upgrade. These short relation locks
         # freeze DDL/rewrites and prevent uncoordinated catalog/header DML.
-        for relation in ("market.fact_identities", "market.fact_versions"):
+        for relation in (
+            "market.fact_identities", "market.fact_versions",
+            "market.fact_archive_active_generations",
+        ):
             session.execute(text(f"LOCK TABLE ONLY {relation} IN SHARE MODE NOWAIT"))
         for oid, expected in sorted(self.relations.items()):
             name = expected["relname"]
@@ -414,50 +440,71 @@ class FactHandoffProof:
                 or any(self.pages.get(page["id"]) != (dict(page), dict(receipt))
                        for page, receipt in pages)):
             raise RuntimeError("canonical_archive_verification_missing_or_stale: handoff page scope")
-        for name, (table, _) in _CATALOGS.items():
-            requested = [(page["id"], self.catalogs[page["id"]][name]) for page, _ in pages
-                         if name in self.catalogs[page["id"]]]
-            offset = 0
-            while offset < len(requested):
-                check_budget()
-                batch, chars = [], 0
-                # Bound round trips and parameter volume without rejecting a
-                # single previously admissible large page. Its witness already
-                # passed the unchanged retained-memory refusal.
-                while offset < len(requested) and len(batch) < 16:
-                    identity, witness = requested[offset]
-                    if batch and chars + len(witness.tids) > 256 * 1024:
-                        break
-                    batch.append((identity, witness))
-                    chars += len(witness.tids)
-                    offset += 1
-                columns = batch[0][1].columns
-                if any(witness.columns != columns for _, witness in batch):
-                    raise RuntimeError("canonical_handoff_catalog_scope_invalid")
-                statements, parameters = [], {}
-                for index, (identity, witness) in enumerate(batch):
-                    # Independent bound constants keep the existing direct TID
-                    # lookup plan; no correlated outer-variable TID scan.
-                    identity_key, tids_key = f"id_{index}", f"tids_{index}"
-                    statements.append(
-                        f"SELECT CAST(:{identity_key} AS text) AS manifest_id, proof.*, "
-                        "(SELECT count(*) FROM market." + table
-                        + f" WHERE manifest_id=:{identity_key}) AS logical_count FROM "
-                        "(SELECT count(*) AS hinted_count,"
-                        + _fingerprint_sql(columns, order="q.ctid")
-                        + " AS digest FROM market." + table
-                        + f" q WHERE q.ctid=ANY(CAST(:{tids_key} AS tid[]))) AS proof")
-                    parameters[identity_key], parameters[tids_key] = identity, witness.tids
-                rows = session.execute(text(" UNION ALL ".join(statements)), parameters).mappings().all()
-                check_budget()
-                current = {row["manifest_id"]: row for row in rows}
-                if len(rows) != len(batch) or set(current) != {identity for identity, _ in batch}:
-                    raise RuntimeError("canonical_archive_verification_missing_or_stale: catalog result scope")
-                for identity, witness in batch:
-                    proof = current[identity]
-                    if (proof["hinted_count"] != witness.count or proof["logical_count"] != witness.count
-                            or proof["digest"] != witness.digest):
-                        raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={identity} catalog={name}")
+        generation_rows = session.execute(text("""
+            SELECT manifest_id,preparation_id,generation,catalog_commitment
+            FROM market.fact_archive_active_generations
+            WHERE manifest_id=ANY(CAST(:ids AS text[]))
+        """), {"ids": [page["id"] for page, _ in pages]}).mappings().all()
+        current_generations = {page["id"]: None for page, _ in pages}
+        for generation in generation_rows:
+            identity = generation["manifest_id"]
+            if identity not in current_generations or current_generations[identity] is not None:
+                raise RuntimeError("canonical_archive_generation_pointer_scope_changed")
+            current_generations[identity] = dict(generation)
+        if any(self.generations[identity] != generation
+               for identity, generation in current_generations.items()):
+            raise RuntimeError("canonical_archive_generation_pointer_changed")
+        for name, (legacy_table, _) in _CATALOGS.items():
+            all_requested = [(page["id"], self.catalogs[page["id"]][name]) for page, _ in pages
+                             if name in self.catalogs[page["id"]]]
+            relations = sorted({witness.table or legacy_table for _, witness in all_requested})
+            for table in relations:
+                requested = [(identity, witness) for identity, witness in all_requested
+                             if (witness.table or legacy_table) == table]
+                offset = 0
+                while offset < len(requested):
+                    check_budget()
+                    batch, chars = [], 0
+                    # Bound round trips and parameter volume without rejecting a
+                    # single previously admissible large page. Its witness already
+                    # passed the unchanged retained-memory refusal.
+                    while offset < len(requested) and len(batch) < 16:
+                        identity, witness = requested[offset]
+                        if batch and chars + len(witness.tids) > 256 * 1024:
+                            break
+                        batch.append((identity, witness))
+                        chars += len(witness.tids)
+                        offset += 1
+                    columns = batch[0][1].columns
+                    if any(witness.columns != columns for _, witness in batch):
+                        raise RuntimeError("canonical_handoff_catalog_scope_invalid")
+                    statements, parameters = [], {}
+                    for index, (identity, witness) in enumerate(batch):
+                        # Independent bound constants keep the existing direct TID
+                        # lookup plan; no correlated outer-variable TID scan.
+                        identity_key, lookup_key, tids_key = f"id_{index}", f"lookup_{index}", f"tids_{index}"
+                        identity_column = "preparation_id" if table.startswith("fact_archive_prepared_") else "manifest_id"
+                        statements.append(
+                            f"SELECT CAST(:{identity_key} AS text) AS manifest_id, proof.*, "
+                            "(SELECT count(*) FROM market." + table
+                            + f" WHERE {identity_column}=:{lookup_key}) AS logical_count FROM "
+                            "(SELECT count(*) AS hinted_count,"
+                            + _fingerprint_sql(columns, order="q.ctid")
+                            + " AS digest FROM market." + table
+                            + f" q WHERE q.ctid=ANY(CAST(:{tids_key} AS tid[]))) AS proof")
+                        parameters[identity_key] = identity
+                        parameters[lookup_key] = witness.relation_identity or identity
+                        parameters[tids_key] = witness.tids
+                    rows = session.execute(text(" UNION ALL ".join(statements)), parameters).mappings().all()
+                    check_budget()
+                    current = {row["manifest_id"]: row for row in rows}
+                    if len(rows) != len(batch) or set(current) != {identity for identity, _ in batch}:
+                        raise RuntimeError("canonical_archive_verification_missing_or_stale: catalog result scope")
+                    for identity, witness in batch:
+                        proof = current[identity]
+                        if (proof["hinted_count"] != witness.count or proof["logical_count"] != witness.count
+                                or proof["digest"] != witness.digest):
+                            raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={identity} catalog={name}")
         check_budget()
         before = sys.getsizeof(self.fresh_catalogs)
         self.fresh_catalogs.update(page["id"] for page, _ in pages)

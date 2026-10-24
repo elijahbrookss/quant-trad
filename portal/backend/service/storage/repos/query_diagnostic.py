@@ -39,6 +39,7 @@ from .fact_archival import (
     _CANONICAL_DEPENDENCY_CATALOG_INSERT,
     archive_page_catalog_statement,
 )
+from .fact_archive_generation import PREPARED_CATALOG_TABLES
 from .fact_lineage import raw_archive_mapping_lookup_statement
 from .fact_reclamation import (
     _PINNED_RANGES_QUERY,
@@ -362,11 +363,16 @@ def _select_scope(database, storage_day: date, limits: QueryDiagnosticLimits,
             SELECT target_kind,target_id FROM market.fact_archive_dependencies
             WHERE manifest_id=:page_id ORDER BY target_kind,target_id LIMIT 1
         """), {"page_id": page["id"]}).mappings().one_or_none()
+        generation = execute(text("""
+            SELECT preparation_id,generation,catalog_commitment
+            FROM market.fact_archive_active_generations WHERE manifest_id=:page_id
+        """), {"page_id": page["id"]}).mappings().one_or_none()
         version = execute(text("SHOW server_version")).scalar_one()
         return {
             "partition": dict(partition), "page": dict(page),
             "raw": None if raw is None else dict(raw),
             "dependency": None if dependency is None else dict(dependency),
+            "generation": None if generation is None else dict(generation),
             "postgresql_version": str(version),
         }
 
@@ -443,12 +449,17 @@ def _cases(scope: Mapping[str, Any], limits: QueryDiagnosticLimits) -> list[Quer
         "dependencies": limits.max_dependency_rows,
         "canonical_dependencies": limits.max_raw_mapping_rows,
     }
-    for name, table, columns, order in ARCHIVE_PAGE_CATALOG_SPECS:
+    generation = scope.get("generation")
+    for name, legacy_table, columns, order in ARCHIVE_PAGE_CATALOG_SPECS:
+        table = PREPARED_CATALOG_TABLES.get(name, legacy_table) if generation else legacy_table
+        identity = generation["preparation_id"] if table.startswith(
+            "fact_archive_prepared_"
+        ) else page["id"]
         cases.append(QueryCase(
             f"verification.catalog.{name}", "verification",
             "fact_archival.archive_page_catalog_statement",
             archive_page_catalog_statement(table=table, columns=columns, order=order),
-            {"id": page["id"], "limit": limits_by_name[name] + 1},
+            {"id": identity, "limit": limits_by_name[name] + 1},
             limits_by_name[name] + 1, "maximum_supported", "plan",
         ))
     dependency = scope["dependency"]

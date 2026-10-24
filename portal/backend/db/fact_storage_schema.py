@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v2"
 FACT_BOOK_PREFIX_TABLES = ("fact_book_prefix_chunks", "fact_book_prefix_dependencies")
 FACT_CANONICAL_DEPENDENCY_TABLES = ("fact_archive_canonical_dependencies",)
+FACT_ARCHIVE_GENERATION_TABLES = (
+    "fact_archive_preparations", "fact_archive_preparation_dependencies",
+    "fact_archive_catalog_batches", "fact_archive_prepared_material_aliases",
+    "fact_archive_prepared_canonical_dependencies", "fact_archive_active_generations",
+    "fact_archive_verification_generations",
+)
 FACT_STORAGE_TABLES = (
     *IDENTITY_TABLES, *SERIES_DAY_TABLES, "fact_header_legacy",
     "fact_hot_payloads", "fact_retention_partitions", "fact_archive_manifests",
@@ -34,6 +40,7 @@ FACT_STORAGE_TABLES = (
     "fact_archive_verifications", "fact_storage_state",
     *FACT_BOOK_PREFIX_TABLES,
     *FACT_CANONICAL_DEPENDENCY_TABLES,
+    *FACT_ARCHIVE_GENERATION_TABLES,
 )
 FACT_STORAGE_IMMUTABLE_TABLES = (
     *IDENTITY_TABLES,
@@ -42,9 +49,11 @@ FACT_STORAGE_IMMUTABLE_TABLES = (
     "fact_archive_verifications",
     *FACT_BOOK_PREFIX_TABLES,
     *FACT_CANONICAL_DEPENDENCY_TABLES,
+    "fact_archive_verification_generations",
 )
 FACT_PAYLOAD_INDEXES = frozenset(index.name for index in MarketFactHotPayloadRecord.__table__.indexes)
 FACT_STORAGE_CUTOVER = "scripts/db/manual_migration_fact_storage_tiers_v1.py"
+FACT_ARCHIVE_GENERATION_CUTOVER = "scripts/db/manual_migration_fact_archive_generations_v1.py"
 
 HOT_PAYLOAD_VALIDATION_BODY = """
 DECLARE
@@ -85,6 +94,7 @@ END;
 """
 
 COLD_FACT_READ_BODY = """
+-- archive-generation-reader-floor-v1: older binaries must refuse this layout.
 BEGIN
     RAISE EXCEPTION 'canonical_fact_cold_read_required: fact_version_id=% field=% use the tier-aware repository',
         fact_id, field_name;
@@ -149,6 +159,165 @@ def install_fact_storage_functions(conn) -> None:
     # This SQL projection preserves existing hot query fields. A consumer not
     # yet using the tier-aware repository must fail, never silently lose cold rows.
     conn.execute(text("CREATE VIEW market.fact_rows AS " + FACT_ROWS_VIEW_SELECT))
+    install_fact_archive_generation_functions(conn)
+
+
+FACT_ARCHIVE_PREPARATION_MUTATION_BODY = """
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_tombstone_immutable: preparation_id=%', OLD.id;
+    END IF;
+    IF (NEW.id,NEW.manifest_id,NEW.storage_day,NEW.page_ordinal,NEW.generation,
+        NEW.verifier_version,NEW.source_binding_hash,NEW.manifest_descriptor,NEW.series_catalog,
+        NEW.alias_count,NEW.canonical_dependency_count,NEW.alias_root,NEW.canonical_dependency_root,
+        NEW.created_at)
+       IS DISTINCT FROM
+       (OLD.id,OLD.manifest_id,OLD.storage_day,OLD.page_ordinal,OLD.generation,
+        OLD.verifier_version,OLD.source_binding_hash,OLD.manifest_descriptor,OLD.series_catalog,
+        OLD.alias_count,OLD.canonical_dependency_count,OLD.alias_root,OLD.canonical_dependency_root,
+        OLD.created_at)
+    THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_identity_immutable: preparation_id=%', OLD.id;
+    END IF;
+    IF NEW.fence < OLD.fence OR NEW.fence > OLD.fence + 1 THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_fence_invalid: preparation_id=%', OLD.id;
+    END IF;
+    IF NEW.fence = OLD.fence AND NEW.owner_token_hash <> OLD.owner_token_hash THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_owner_without_fence: preparation_id=%', OLD.id;
+    END IF;
+    IF NEW.fence = OLD.fence + 1 AND OLD.lease_expires_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_owner_live: preparation_id=%', OLD.id;
+    END IF;
+    IF NOT (
+        NEW.state = OLD.state OR
+        (OLD.state='building' AND NEW.state IN ('ready','abandoned') AND NOT EXISTS (
+            SELECT 1 FROM market.fact_archive_active_generations WHERE preparation_id=OLD.id)) OR
+        (OLD.state='ready' AND NEW.state='abandoned' AND NOT EXISTS (
+            SELECT 1 FROM market.fact_archive_active_generations WHERE preparation_id=OLD.id)) OR
+        (OLD.state='ready' AND NEW.state='active' AND EXISTS (
+            SELECT 1 FROM market.fact_archive_active_generations WHERE preparation_id=NEW.id)) OR
+        (OLD.state='active' AND NEW.state='superseded' AND NOT EXISTS (
+            SELECT 1 FROM market.fact_archive_active_generations WHERE preparation_id=OLD.id))
+    ) THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_transition_invalid: preparation_id=% old=% new=%',
+            OLD.id,OLD.state,NEW.state;
+    END IF;
+    IF OLD.catalog_commitment IS NOT NULL AND NEW.catalog_commitment IS DISTINCT FROM OLD.catalog_commitment THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_commitment_immutable: preparation_id=%', OLD.id;
+    END IF;
+    IF NEW.state IN ('ready','active','superseded') AND NEW.catalog_commitment IS NULL THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_commitment_missing: preparation_id=%', OLD.id;
+    END IF;
+    IF NEW.updated_at < OLD.updated_at THEN
+        RAISE EXCEPTION 'canonical_archive_preparation_clock_regressed: preparation_id=%', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+"""
+
+FACT_ARCHIVE_ACTIVE_GENERATION_MUTATION_BODY = """
+DECLARE
+    target market.fact_archive_preparations%ROWTYPE;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'canonical_archive_active_generation_delete_refused: manifest_id=%', OLD.manifest_id;
+    END IF;
+    SELECT * INTO target FROM market.fact_archive_preparations WHERE id=NEW.preparation_id FOR UPDATE;
+    IF target.id IS NULL OR target.manifest_id <> NEW.manifest_id OR
+       target.generation <> NEW.generation OR target.catalog_commitment <> NEW.catalog_commitment THEN
+        RAISE EXCEPTION 'canonical_archive_active_generation_binding_invalid: manifest_id=%', NEW.manifest_id;
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF target.state <> 'ready' THEN
+            RAISE EXCEPTION 'canonical_archive_active_generation_not_ready: preparation_id=%', target.id;
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF target.state <> 'ready' OR NEW.generation <= OLD.generation THEN
+        RAISE EXCEPTION 'canonical_archive_generation_supersession_refused: manifest_id=%', OLD.manifest_id;
+    END IF;
+    RETURN NEW;
+END;
+"""
+
+
+FACT_ARCHIVE_PREPARED_MUTATION_BODY = """
+DECLARE
+    parent_state text;
+    cleanup_id text;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT state INTO parent_state FROM market.fact_archive_preparations
+        WHERE id=NEW.preparation_id
+          AND owner_token_hash=current_setting('qt.archive_preparation_owner', true)
+          AND fence::text=current_setting('qt.archive_preparation_fence', true)
+          AND id=current_setting('qt.archive_preparation_id', true);
+        IF parent_state IS DISTINCT FROM 'building' THEN
+            RAISE EXCEPTION 'prepared archive insert refused: preparation_id=% state=%', NEW.preparation_id,parent_state;
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'immutable prepared archive relation %.% rejects UPDATE', TG_TABLE_SCHEMA,TG_TABLE_NAME;
+    END IF;
+    SELECT state INTO parent_state FROM market.fact_archive_preparations WHERE id=OLD.preparation_id;
+    cleanup_id := current_setting('qt.archive_cleanup_preparation_id', true);
+    IF parent_state IS DISTINCT FROM 'abandoned' OR cleanup_id IS DISTINCT FROM OLD.preparation_id THEN
+        RAISE EXCEPTION 'prepared archive cleanup refused: preparation_id=% state=%', OLD.preparation_id,parent_state;
+    END IF;
+    RETURN OLD;
+END;
+"""
+
+
+def install_fact_archive_generation_functions(conn) -> None:
+    # This exact-body marker makes pre-generation binaries fail their existing
+    # startup contract before they can ignore an active prepared generation.
+    conn.execute(text(
+        "CREATE OR REPLACE FUNCTION market.cold_fact_read_required(fact_id text, field_name text) RETURNS jsonb "
+        "LANGUAGE plpgsql AS $qt$" + COLD_FACT_READ_BODY + "$qt$"
+    ))
+    conn.execute(text(
+        "CREATE OR REPLACE FUNCTION market.guard_fact_archive_preparation_mutation() RETURNS trigger "
+        "LANGUAGE plpgsql AS $qt$" + FACT_ARCHIVE_PREPARATION_MUTATION_BODY + "$qt$"
+    ))
+    conn.execute(text(
+        "CREATE OR REPLACE FUNCTION market.guard_fact_archive_prepared_mutation() RETURNS trigger "
+        "LANGUAGE plpgsql AS $qt$" + FACT_ARCHIVE_PREPARED_MUTATION_BODY + "$qt$"
+    ))
+    conn.execute(text(
+        "CREATE OR REPLACE FUNCTION market.guard_fact_archive_active_generation_mutation() RETURNS trigger "
+        "LANGUAGE plpgsql AS $qt$" + FACT_ARCHIVE_ACTIVE_GENERATION_MUTATION_BODY + "$qt$"
+    ))
+    conn.execute(text(
+        "CREATE TRIGGER trg_guard_fact_archive_preparation BEFORE UPDATE OR DELETE "
+        "ON market.fact_archive_preparations FOR EACH ROW "
+        "EXECUTE FUNCTION market.guard_fact_archive_preparation_mutation()"
+    ))
+    conn.execute(text(
+        "ALTER TABLE market.fact_archive_preparations "
+        "ENABLE ALWAYS TRIGGER trg_guard_fact_archive_preparation"
+    ))
+    conn.execute(text(
+        "CREATE TRIGGER trg_guard_fact_archive_active_generation BEFORE INSERT OR UPDATE OR DELETE "
+        "ON market.fact_archive_active_generations FOR EACH ROW "
+        "EXECUTE FUNCTION market.guard_fact_archive_active_generation_mutation()"
+    ))
+    conn.execute(text(
+        "ALTER TABLE market.fact_archive_active_generations "
+        "ENABLE ALWAYS TRIGGER trg_guard_fact_archive_active_generation"
+    ))
+    for table_name in (
+        "fact_archive_preparation_dependencies", "fact_archive_catalog_batches",
+        "fact_archive_prepared_material_aliases", "fact_archive_prepared_canonical_dependencies",
+    ):
+        conn.execute(text(
+            f"CREATE TRIGGER trg_guard_{table_name} BEFORE INSERT OR UPDATE OR DELETE ON market.{table_name} "
+            "FOR EACH ROW EXECUTE FUNCTION market.guard_fact_archive_prepared_mutation()"
+        ))
+        conn.execute(text(
+            f"ALTER TABLE market.{table_name} ENABLE ALWAYS TRIGGER trg_guard_{table_name}"
+        ))
 
 
 def fact_partition_name(storage_day: date) -> str:
@@ -260,7 +429,8 @@ def assert_fact_storage_contract(
                 continue
             if allow_missing_canonical_dependency_tables and name in FACT_CANONICAL_DEPENDENCY_TABLES:
                 continue
-            raise RuntimeError(f"Canonical Fact storage is missing market.{name}. Run {FACT_STORAGE_CUTOVER}")
+            cutover = FACT_ARCHIVE_GENERATION_CUTOVER if name in FACT_ARCHIVE_GENERATION_TABLES else FACT_STORAGE_CUTOVER
+            raise RuntimeError(f"Canonical Fact storage is missing market.{name}. Run {cutover}")
     assert_fact_series_day_contract(conn)
     assert_fact_identity_references(
         conn, allow_missing_canonical_dependencies=allow_missing_canonical_dependency_tables,
@@ -313,3 +483,45 @@ def assert_fact_storage_contract(
         ), {"relation": "market." + table, "trigger": trigger}).one_or_none()
         if actual is None or tuple(actual) != (kind, "A", deferred, deferred, "market", function):
             raise RuntimeError(f"Canonical Fact storage enforcement differs: {table}.{trigger}. Run {FACT_STORAGE_CUTOVER}")
+
+    for name, body in (
+        ("guard_fact_archive_preparation_mutation", FACT_ARCHIVE_PREPARATION_MUTATION_BODY),
+        ("guard_fact_archive_prepared_mutation", FACT_ARCHIVE_PREPARED_MUTATION_BODY),
+        ("guard_fact_archive_active_generation_mutation", FACT_ARCHIVE_ACTIVE_GENERATION_MUTATION_BODY),
+    ):
+        stored = conn.execute(text(
+            "SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE n.nspname='market' AND p.proname=:name"
+        ), {"name": name}).scalars().all()
+        if stored != [body]:
+            raise RuntimeError(
+                f"Canonical archive generation function differs: market.{name}. "
+                f"Run {FACT_ARCHIVE_GENERATION_CUTOVER}"
+            )
+    generation_triggers = [
+        ("fact_archive_preparations", "trg_guard_fact_archive_preparation",
+         "guard_fact_archive_preparation_mutation", 27),
+        ("fact_archive_active_generations", "trg_guard_fact_archive_active_generation",
+         "guard_fact_archive_active_generation_mutation", 31),
+        ("fact_archive_verification_generations",
+         "trg_reject_mutation_fact_archive_verification_generations",
+         "reject_immutable_mutation", 27),
+        *((table, "trg_guard_" + table, "guard_fact_archive_prepared_mutation", 31)
+          for table in (
+              "fact_archive_preparation_dependencies", "fact_archive_catalog_batches",
+              "fact_archive_prepared_material_aliases",
+              "fact_archive_prepared_canonical_dependencies",
+          )),
+    ]
+    for table, trigger, function, kind in generation_triggers:
+        actual = conn.execute(text(
+            "SELECT t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,n.nspname,p.proname "
+            "FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE t.tgrelid=to_regclass(:relation) AND t.tgname=:trigger"
+        ), {"relation": "market." + table, "trigger": trigger}).one_or_none()
+        if actual is None or tuple(actual) != (kind, "A", False, False, "market", function):
+            raise RuntimeError(
+                f"Canonical archive generation enforcement differs: {table}.{trigger}. "
+                f"Run {FACT_ARCHIVE_GENERATION_CUTOVER}"
+            )

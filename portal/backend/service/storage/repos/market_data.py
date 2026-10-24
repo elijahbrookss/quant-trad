@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from portal.backend.db.execution_control import owned_connection_cancel
+from .fact_archive_generation import material_alias_projection
 from core.execution_control import (
     consume_execution_json, consume_execution_resource, current_execution_control,
     execution_checkpoint, measure_execution_stage,
@@ -600,7 +601,7 @@ def _load_lineage_material_rows(
             raise ValueError(f"market_dataset_provenance_key_invalid: fact_type={fact_type} evidence_key={evidence_key}")
         base_params["evidence_key"] = str(evidence_key)
         selection = (
-            """
+            f"""
             SELECT versions.id, hot.provenance -> :evidence_key
                 ->> 'legacy_material_hash' AS lineage_material_hash
             FROM market.fact_versions AS versions
@@ -611,7 +612,7 @@ def _load_lineage_material_rows(
                   ->> 'legacy_material_hash' = ANY(:material_hashes)
             UNION ALL
             SELECT aliases.fact_version_id AS id, aliases.material_hash AS lineage_material_hash
-            FROM market.fact_archive_material_aliases AS aliases
+            FROM {material_alias_projection("aliases")}
             JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
               AND manifest.storage_day=versions.storage_day

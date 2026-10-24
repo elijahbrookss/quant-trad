@@ -717,6 +717,63 @@ conflicting witnesses fail; an index entry alone cannot prove lineage. Derived
 book traversal includes the connection epoch: a repeated receive ordinal in a
 later connection cannot be satisfied by an earlier connection's archive.
 
+### Resumable archive catalog generations
+
+A canonical page no longer has to publish its two largest PostgreSQL catalogs in
+the same transaction that acknowledges the manifest. The writer first creates a
+hidden `fact_archive_preparations` generation. Exact raw/checkpoint holds are
+attached before any catalog batch can become useful. Alias and canonical-source
+rows commit in bounded batches with immutable count, key-range and content-hash
+receipts. A retry claims the same compatible generation after its lease expires,
+increments the fence, and skips batches whose stored receipt matches exactly.
+Stale owners cannot append, mark ready, activate or clean the generation.
+
+Readiness is a proof, not a row-count shortcut. The writer rereads both hidden
+catalogs in canonical order, recomputes every batch receipt and both full content
+roots, and requires the saved cardinalities and monotone key ranges. Prepared
+rows remain invisible until one transaction inserts the ordinary manifest,
+small series/dependency catalogs and one `fact_archive_active_generations`
+pointer. There is no final copy of the large catalogs. Readers choose the hidden
+catalogs only through that pointer; historical manifests without a pointer keep
+using the legacy tables. Handoff records the exact pointer and refuses if it
+changes between proof passes.
+
+A later verifier rule may require a monotone catalog extension. It prepares a
+new hidden generation after releasing the deep-proof transaction, then atomically
+checks the owner fence, live lease, immutable manifest, old-membership subset,
+unexpired holds and exact new verification receipt. Only that transaction moves
+the active pointer, marks the old generation superseded, transfers new permanent
+holds and binds the receipt to the new catalog commitment. Failure leaves the
+old pointer authoritative; the ready replacement is resumed on the next pass.
+Reverse pointer movement is deliberately unsupported.
+
+Abandoned payload rows are removed only in bounded cleanup calls. The preparation
+tombstone, binding, generation and failure history remain. Active and superseded
+generations are retained as evidence. Cleanup cannot target a building, ready,
+active or superseded generation and cannot cascade through an unbounded catalog.
+
+The explicit generation migration rewrites no historical archive row. It must run
+with backend and retention workers stopped, requires the complete old layout, and
+places each hidden large catalog on the same effective heap/index/TOAST
+tablespace as its legacy counterpart. Mixed placement or a partial layout
+refuses. The migration also changes the cold-reader contract marker, so binaries
+that do not understand active generations refuse startup instead of silently
+reading incomplete legacy catalogs.
+
+The migration itself creates an intentional rollback floor, before any
+generation is activated: it changes the exact reader contract so an older binary
+refuses the layout. An unfinished hidden generation can still be abandoned and
+cleaned, but doing so does not restore older-binary compatibility. Rollback after
+migration therefore requires a generation-aware reader build. Operators can stop
+new archive work while retaining current readers and evidence, but there is no
+reverse-generation switch or schema downgrade. Production migration and
+activation therefore require a separate reviewed rollout, exact PostgreSQL
+qualification and a retained compatible application image. The one readiness
+scan still reads the full prepared catalogs once. No live throughput benefit is
+claimed until a natural production partition completes. Compact commitments and
+removal of existing authoritative rows or
+indexes remain outside this change.
+
 Raw/checkpoint retention status, dry-run planning, and execution include
 `canonical_dependency_count`. Such holds cannot be released by user-pin release
 or disappear when no frozen dataset currently references the data. Compacted
@@ -1552,6 +1609,10 @@ silently becoming trusted lineage.
 The verifier version names the complete deep-admission rules. Strengthening
 lineage/dependency checks requires a new version; an older receipt must never
 bypass a new check simply because its unchanged file checksum still matches.
+For a page backed by an active generation, an exact
+`fact_archive_verification_generations` row additionally binds the receipt to
+the preparation and catalog commitment. A current receipt without that binding,
+or a binding that differs from the handoff pointer, cannot authorize reclaim.
 
 For an already-verified hot partition with older receipts,
 `restart_partition_verification` explicitly returns progress to `sealed` and

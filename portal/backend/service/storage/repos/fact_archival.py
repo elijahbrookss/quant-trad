@@ -7,6 +7,8 @@ reclamation is a separate lifecycle gate.
 from __future__ import annotations
 
 from collections import defaultdict
+import hashlib
+import uuid
 from dataclasses import asdict
 from datetime import date
 import logging
@@ -25,7 +27,7 @@ from market_data.fact_archive import (
 from portal.backend.db import (
     MarketFactArchiveManifestRecord, MarketFactArchiveSeriesRecord,
     MarketFactArchiveDependencyRecord, MarketFactArchiveMaterialAliasRecord,
-    MarketFactArchiveVerificationRecord,
+    MarketFactArchiveVerificationRecord, MarketFactArchiveVerificationGenerationRecord,
     MarketFactArchiveCanonicalDependencyRecord,
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
@@ -35,6 +37,9 @@ from .fact_storage import (
     _catalog_manifest, ensure_payload_contracts,
 )
 from .fact_dependencies import CanonicalSourceByteBudgetExceeded
+from .fact_archive_generation import (
+    ArchiveGenerationCoordinator, LEGACY_CATALOG_TABLES, PREPARED_CATALOG_TABLES,
+)
 from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_lifecycle_repository
 
 logger = logging.getLogger(__name__)
@@ -167,12 +172,17 @@ def archive_page_catalog_statement(*, table: str, columns: str, order: str,
                                    handoff: bool = False):
     """Return the exact bounded catalog statement used by verification."""
     permitted = {(item[1], item[2], item[3]) for item in ARCHIVE_PAGE_CATALOG_SPECS}
+    permitted.update({
+        ("fact_archive_prepared_material_aliases", ARCHIVE_PAGE_CATALOG_SPECS[1][2], ARCHIVE_PAGE_CATALOG_SPECS[1][3]),
+        ("fact_archive_prepared_canonical_dependencies", ARCHIVE_PAGE_CATALOG_SPECS[3][2], ARCHIVE_PAGE_CATALOG_SPECS[3][3]),
+    })
     if (table, columns, order) not in permitted:
         raise ValueError("canonical_archive_catalog_statement_invalid")
     physical = ",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff else ""
+    identity_column = "preparation_id" if table.startswith("fact_archive_prepared_") else "manifest_id"
     return text(
         f"SELECT {columns}{physical} FROM market.{table} "
-        f"WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+        f"WHERE {identity_column}=:id ORDER BY {order} LIMIT :limit"
     )
 
 
@@ -335,6 +345,50 @@ def _partition_manifest_set_hash(day, expected_rows, page_verifications):
     })
 
 
+def _verified_generation_bindings(session, manifest_ids):
+    """Bind every active pointer to the exact current-version receipt."""
+    manifest_ids = list(manifest_ids)
+    rows = session.execute(text("""
+        SELECT scope.manifest_id,
+               active.preparation_id AS active_preparation_id,
+               active.generation AS active_generation,
+               active.catalog_commitment AS active_catalog_commitment,
+               binding.preparation_id AS binding_preparation_id,
+               binding.catalog_commitment AS binding_catalog_commitment
+        FROM unnest(CAST(:ids AS text[])) AS scope(manifest_id)
+        LEFT JOIN market.fact_archive_active_generations AS active
+          ON active.manifest_id=scope.manifest_id
+        LEFT JOIN market.fact_archive_verification_generations AS binding
+          ON binding.manifest_id=scope.manifest_id
+         AND binding.verifier_version=:version
+        ORDER BY scope.manifest_id
+    """), {"ids": manifest_ids,
+           "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().all()
+    if len(rows) != len(manifest_ids):
+        raise RuntimeError("canonical_archive_verification_generation_scope_changed")
+    result = {}
+    for row in rows:
+        active = row["active_preparation_id"]
+        bound = row["binding_preparation_id"]
+        if active is None and bound is None:
+            result[row["manifest_id"]] = None
+            continue
+        if (active is None or bound is None or active != bound
+                or row["active_catalog_commitment"]
+                   != row["binding_catalog_commitment"]):
+            raise RuntimeError(
+                "canonical_archive_verification_generation_changed: "
+                f"manifest_id={row['manifest_id']}"
+            )
+        result[row["manifest_id"]] = {
+            "manifest_id": row["manifest_id"],
+            "preparation_id": active,
+            "generation": row["active_generation"],
+            "catalog_commitment": row["active_catalog_commitment"],
+        }
+    return result
+
+
 class PostgresCanonicalFactArchiveRepository:
     def __init__(self, *, database, object_store: RawArchiveObjectStore,
                  temporary_directory: Path, limits: FactArchiveLimits = FactArchiveLimits(),
@@ -360,6 +414,13 @@ class PostgresCanonicalFactArchiveRepository:
         self.check_budget = check_budget
         self._prepared_page = None
         self._current_stage_page_ordinal = None
+        self._archive_generation_owner = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+        self._generation = ArchiveGenerationCoordinator(
+            database=self.database, lock_day=self._lock, check_budget=self.check_budget,
+            statement_timeout_ms=self.statement_timeout_ms,
+            owner_token_hash=self._archive_generation_owner,
+            verifier_version=FACT_ARCHIVE_VERIFIER_VERSION,
+        )
 
     def _check_budget(self):
         if self.check_budget is not None:
@@ -776,6 +837,52 @@ class PostgresCanonicalFactArchiveRepository:
         return self._stage_alias_catalog_batches(session, manifest_id, aliases)
 
     def _stage_next_page(self, day: date) -> dict:
+        prepared = self._prepare_next_page_plan(day)
+        plan = prepared.get("_generation_plan") if isinstance(prepared, dict) else None
+        if plan is None:
+            return prepared
+        claim = _timed_stage_call(
+            phase="catalog_generation_claim", day=day, page_ordinal=plan["page_ordinal"],
+            operation=lambda: self._generation.claim(
+                day=day, page_ordinal=plan["page_ordinal"], manifest=plan["manifest"],
+                series_catalog=plan["series"], dependencies=plan["dependencies"],
+                aliases=plan["aliases"],
+                canonical_dependencies=plan["canonical_dependencies"],
+            ),
+        )
+        ready = _timed_stage_call(
+            phase="catalog_generation_stage", day=day, page_ordinal=plan["page_ordinal"],
+            operation=lambda: self._generation.stage(
+                day=day, claim=claim, alias_batch_rows=_ALIAS_CATALOG_WRITE_BATCH_ROWS,
+                dependency_batch_rows=_CATALOG_WRITE_BATCH_ROWS,
+            ),
+        )
+        activated = _timed_stage_call(
+            phase="catalog_generation_activate", day=day,
+            page_ordinal=plan["page_ordinal"],
+            operation=lambda: self._generation.activate(
+                day=day, preparation_id=ready["id"], fence=ready["fence"],
+            ),
+        )
+        logger.info(
+            "canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
+            "rows=%s bytes=%s generation=%s preparation_id=%s catalog_commitment=%s",
+            day, plan["page_ordinal"], plan["manifest"].manifest_id,
+            plan["manifest"].row_count, plan["manifest"].byte_count,
+            activated["generation"], activated["preparation_id"], activated["catalog_commitment"],
+        )
+        return {
+            "storage_day": day, "status": "page_acknowledged",
+            "page_ordinal": plan["page_ordinal"], "manifest_id": plan["manifest"].manifest_id,
+            "row_count": plan["manifest"].row_count,
+            "canonical_dependency_count": len(plan["canonical_dependencies"]),
+            "canonical_dependency_batch_count": (
+                len(plan["canonical_dependencies"]) + _CATALOG_WRITE_BATCH_ROWS - 1
+            ) // _CATALOG_WRITE_BATCH_ROWS,
+            "catalog_generation": activated["generation"],
+        }
+
+    def _prepare_next_page_plan(self, day: date) -> dict:
         with self.database.session() as session:
             admission_started = perf_counter()
             partition = self._lock(session, day)
@@ -933,65 +1040,21 @@ class PostgresCanonicalFactArchiveRepository:
             )
             self._check_budget()
 
-            def insert_manifest():
-                session.add(MarketFactArchiveManifestRecord(
-                    id=manifest.manifest_id, storage_day=day, page_ordinal=ordinal,
-                    object_key=manifest.object_key, object_sha256=manifest.object_sha256,
-                    manifest_hash=manifest.manifest_hash, row_count=manifest.row_count,
-                    byte_count=manifest.byte_count,
-                    first_commit_seq=manifest.first_cursor[0], first_id=manifest.first_cursor[1],
-                    last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1],
-                    descriptor=manifest.to_dict(),
-                ))
-                session.flush()
-            _timed_stage_call(
-                phase="manifest_insert", day=day, page_ordinal=ordinal,
-                operation=insert_manifest,
+            aliases = tuple(
+                alias for row in rows if (alias := legacy_material_alias(row)) is not None
             )
-            _timed_stage_call(
-                phase="series_catalog_insert", day=day, page_ordinal=ordinal,
-                operation=lambda: self._stage_catalog_rows(
-                    session, MarketFactArchiveSeriesRecord,
-                    manifest.manifest_id, _series_catalog(manifest),
-                ),
+            canonical_dependencies = tuple(
+                {"fact_version_id": row["id"], "row_hash": row["row_hash"]}
+                for row in source_rows
             )
-            alias_catalog = _timed_stage_call(
-                phase="alias_catalog_insert", day=day, page_ordinal=ordinal,
-                operation=lambda: self._stage_alias_catalog_rows(
-                    session, manifest.manifest_id,
-                    (alias for row in rows if (alias := legacy_material_alias(row)) is not None),
-                ),
-            )
-            _timed_stage_call(
-                phase="dependency_catalog_insert", day=day, page_ordinal=ordinal,
-                operation=lambda: self._stage_catalog_rows(
-                    session, MarketFactArchiveDependencyRecord,
-                    manifest.manifest_id, dependencies,
-                ),
-            )
-            canonical_dependency_catalog = _timed_stage_call(
-                phase="canonical_dependency_catalog_insert", day=day, page_ordinal=ordinal,
-                operation=lambda: self._stage_canonical_dependency_catalog_rows(
-                    session, manifest.manifest_id,
-                    ({"fact_version_id": row["id"], "row_hash": row["row_hash"]}
-                     for row in source_rows),
-                ),
-            )
-        logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s "
-                    "rows=%s bytes=%s dependencies=%s aliases=%s alias_batches=%s "
-                    "alias_max_batch_seconds=%.6f "
-                    "canonical_dependencies=%s canonical_dependency_batches=%s "
-                    "canonical_dependency_max_batch_seconds=%.6f",
-                    day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies),
-                    alias_catalog["row_count"], alias_catalog["batch_count"],
-                    alias_catalog["max_batch_seconds"],
-                    canonical_dependency_catalog["row_count"],
-                    canonical_dependency_catalog["batch_count"],
-                    canonical_dependency_catalog["max_batch_seconds"])
-        return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
-                "manifest_id": manifest.manifest_id, "row_count": manifest.row_count,
-                "canonical_dependency_count": canonical_dependency_catalog["row_count"],
-                "canonical_dependency_batch_count": canonical_dependency_catalog["batch_count"]}
+            return {"_generation_plan": {
+                "page_ordinal": ordinal,
+                "manifest": manifest,
+                "series": tuple(_series_catalog(manifest)),
+                "dependencies": tuple(dependencies),
+                "aliases": aliases,
+                "canonical_dependencies": canonical_dependencies,
+            }}
 
     def _page_catalogs(self, session, manifest_id, *, handoff=None):
         catalogs = {}
@@ -1004,20 +1067,30 @@ class PostgresCanonicalFactArchiveRepository:
             "dependencies": self.max_dependency_objects,
             "canonical_dependencies": self.max_raw_mapping_rows,
         }
-        for name, table, columns, order in ARCHIVE_PAGE_CATALOG_SPECS:
+        active_generation = session.execute(text(
+            "SELECT manifest_id,preparation_id,generation,catalog_commitment "
+            "FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": manifest_id}).mappings().one_or_none()
+        active_preparation_id = (active_generation["preparation_id"]
+                                 if active_generation is not None else None)
+        tables = PREPARED_CATALOG_TABLES if active_generation is not None else LEGACY_CATALOG_TABLES
+        for name, legacy_table, columns, order in ARCHIVE_PAGE_CATALOG_SPECS:
+            table = tables.get(name, legacy_table)
+            catalog_id = active_preparation_id if table.startswith("fact_archive_prepared_") else manifest_id
             limit = limits[name]
             rows = session.execute(archive_page_catalog_statement(
                 table=table, columns=columns, order=order, handoff=handoff is not None,
-            ), {"id": manifest_id, "limit": limit + 1}).mappings().all()
+            ), {"id": catalog_id, "limit": limit + 1}).mappings().all()
             if len(rows) > limit:
                 raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
             if handoff is not None:
-                physical[name] = handoff.catalog_rows(session, name, manifest_id, rows)
+                physical[name] = handoff.catalog_rows(session, name, manifest_id, rows, table=table, relation_identity=catalog_id)
                 catalogs[name] = [{key: value for key, value in row.items()
                                    if key not in {"_handoff_tid", "_handoff_oid"}} for row in rows]
             else:
                 catalogs[name] = [dict(row) for row in rows]
-        return (catalogs, physical) if handoff is not None else catalogs
+        return ((catalogs, physical, dict(active_generation) if active_generation is not None else None)
+                if handoff is not None else catalogs)
 
     def restart_partition_verification(self, day: date) -> dict:
         """Withdraw an older verifier's admission, without deleting any evidence.
@@ -1062,6 +1135,7 @@ class PostgresCanonicalFactArchiveRepository:
         their existing dependency bindings, without republishing their bytes.
         """
         transaction_started = perf_counter()
+        supersession_plan = None
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
@@ -1142,29 +1216,98 @@ class PostgresCanonicalFactArchiveRepository:
             # Older pages can gain newly required monotone proof edges under
             # this explicit verification transaction. Never rewrite bytes,
             # existing raw bindings, an existing edge, or a prior receipt.
-            additions = 0
-            for name, model, identity_fields in (
-                ("aliases", MarketFactArchiveMaterialAliasRecord, ("fact_version_id", "evidence_key")),
-                ("canonical_dependencies", MarketFactArchiveCanonicalDependencyRecord, ("fact_version_id",)),
-                ("dependencies", MarketFactArchiveDependencyRecord, ("target_kind", "target_id")),
-            ):
-                existing = {tuple(item[key] for key in identity_fields): item for item in catalogs[name]}
-                for item in expected[name]:
-                    identity = tuple(item[key] for key in identity_fields)
-                    if identity not in existing and (name in {"canonical_dependencies", "aliases"} or item["target_kind"] == "book_checkpoint"):
-                        session.add(model(manifest_id=manifest.manifest_id, **item))
-                        additions += 1
-            if additions:
-                session.flush()
-                catalogs = self._page_catalogs(session, manifest.manifest_id)
-                logger.info("canonical_archive_proof_edges_added | manifest_id=%s verifier_version=%s edges=%s",
-                            manifest.manifest_id, FACT_ARCHIVE_VERIFIER_VERSION, additions)
-            for name, items in expected.items():
-                if catalogs[name] != items:
-                    raise RuntimeError(f"canonical_archive_catalog_incomplete: manifest_id={manifest.manifest_id} catalog={name}")
-            receipt = _receipt(page, archive_evidence_hash(catalogs))
-            self._check_budget()
-            session.add(MarketFactArchiveVerificationRecord(**receipt))
+            active_generation = session.execute(text(
+                "SELECT preparation_id,generation,catalog_commitment "
+                "FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+            ), {"id": manifest.manifest_id}).mappings().one_or_none()
+            if active_generation is not None and any(
+                    catalogs[name] != expected[name] for name in expected):
+                # Do not mutate an active immutable generation. Persist the
+                # replacement in independently committed hidden batches after
+                # this proof transaction releases its locks. Supersession
+                # rechecks monotonicity, expiry, ownership, and the exact
+                # receipt before switching authority atomically.
+                receipt = _receipt(page, archive_evidence_hash(expected))
+                supersession_plan = {
+                    "page": dict(page), "manifest": manifest,
+                    "series": tuple(expected["series"]),
+                    "aliases": tuple(expected["aliases"]),
+                    "dependencies": tuple(expected["dependencies"]),
+                    "canonical_dependencies": tuple(expected["canonical_dependencies"]),
+                    "receipt": receipt,
+                }
+            else:
+                additions = 0
+                for name, model, identity_fields in (
+                    ("aliases", MarketFactArchiveMaterialAliasRecord,
+                     ("fact_version_id", "evidence_key")),
+                    ("canonical_dependencies", MarketFactArchiveCanonicalDependencyRecord,
+                     ("fact_version_id",)),
+                    ("dependencies", MarketFactArchiveDependencyRecord,
+                     ("target_kind", "target_id")),
+                ):
+                    existing = {
+                        tuple(item[key] for key in identity_fields): item
+                        for item in catalogs[name]
+                    }
+                    for item in expected[name]:
+                        identity = tuple(item[key] for key in identity_fields)
+                        if (identity not in existing
+                                and (name in {"canonical_dependencies", "aliases"}
+                                     or item["target_kind"] == "book_checkpoint")):
+                            session.add(model(manifest_id=manifest.manifest_id, **item))
+                            additions += 1
+                if additions:
+                    session.flush()
+                    catalogs = self._page_catalogs(session, manifest.manifest_id)
+                    logger.info(
+                        "canonical_archive_proof_edges_added | manifest_id=%s "
+                        "verifier_version=%s edges=%s",
+                        manifest.manifest_id, FACT_ARCHIVE_VERIFIER_VERSION, additions,
+                    )
+                for name, items in expected.items():
+                    if catalogs[name] != items:
+                        raise RuntimeError(
+                            "canonical_archive_catalog_incomplete: "
+                            f"manifest_id={manifest.manifest_id} catalog={name}"
+                        )
+                receipt = _receipt(page, archive_evidence_hash(catalogs))
+                self._check_budget()
+                session.add(MarketFactArchiveVerificationRecord(**receipt))
+                if active_generation is not None:
+                    session.add(MarketFactArchiveVerificationGenerationRecord(
+                        manifest_id=manifest.manifest_id,
+                        verifier_version=FACT_ARCHIVE_VERIFIER_VERSION,
+                        preparation_id=active_generation["preparation_id"],
+                        catalog_commitment=active_generation["catalog_commitment"],
+                    ))
+        if supersession_plan is not None:
+            plan = supersession_plan
+            claim = _timed_verification_call(
+                timings=timings, phase="catalog_supersession_claim", day=day,
+                page=plan["page"], operation=lambda: self._generation.claim(
+                    day=day, page_ordinal=plan["page"]["page_ordinal"],
+                    manifest=plan["manifest"], series_catalog=plan["series"],
+                    dependencies=plan["dependencies"], aliases=plan["aliases"],
+                    canonical_dependencies=plan["canonical_dependencies"],
+                ),
+            )
+            ready = _timed_verification_call(
+                timings=timings, phase="catalog_supersession_stage", day=day,
+                page=plan["page"], operation=lambda: self._generation.stage(
+                    day=day, claim=claim,
+                    alias_batch_rows=_ALIAS_CATALOG_WRITE_BATCH_ROWS,
+                    dependency_batch_rows=_CATALOG_WRITE_BATCH_ROWS,
+                ),
+            )
+            _timed_verification_call(
+                timings=timings, phase="catalog_supersession_activate", day=day,
+                page=plan["page"], operation=lambda: self._generation.supersede_verified(
+                    day=day, preparation=ready,
+                    verification_receipt=plan["receipt"],
+                ),
+            )
+            receipt = plan["receipt"]
         _record_verification_phase(
             timings=timings, phase="transaction_total", day=day, page=page,
             seconds=perf_counter() - transaction_started, outcome="completed",
@@ -1225,6 +1368,9 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"day": day, "ordinal": ordinal, "limit": min(100, limits.max_pages - ordinal + 1)}).mappings().all()
             if not pages:
                 break
+            verified_generations = _verified_generation_bindings(
+                session, [page["id"] for page in pages],
+            )
             if final_handoff:
                 # Same bounded metadata page, same final transaction. Read
                 # receipts once per batch rather than once per manifest.
@@ -1252,7 +1398,14 @@ class PostgresCanonicalFactArchiveRepository:
                 if final_handoff:
                     catalogs = None
                 elif handoff is not None:
-                    catalogs, physical = self._page_catalogs(session, manifest.manifest_id, handoff=handoff)
+                    catalogs, physical, generation = self._page_catalogs(
+                        session, manifest.manifest_id, handoff=handoff,
+                    )
+                    if generation != verified_generations[manifest.manifest_id]:
+                        raise RuntimeError(
+                            "canonical_archive_verification_generation_changed: "
+                            f"manifest_id={manifest.manifest_id}"
+                        )
                 else:
                     catalogs = self._page_catalogs(session, manifest.manifest_id)
                 receipt = (receipt_by_id[manifest.manifest_id] if final_handoff else session.execute(text("""
@@ -1266,7 +1419,9 @@ class PostgresCanonicalFactArchiveRepository:
                     if receipt is None or dict(receipt) != _receipt(page, archive_evidence_hash(catalogs)):
                         raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
                     if handoff is not None:
-                        handoff.capture_page(page, receipt, catalogs, physical)
+                        handoff.capture_page(
+                            page, receipt, catalogs, physical, generation=generation,
+                        )
                     if objects is not None:
                         objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
                     placement_hash = verify_canonical_source_placements(

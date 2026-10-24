@@ -31,6 +31,7 @@ def _scope(*, raw=True, dependency=True):
         } if raw else None),
         "dependency": ({"target_kind": "raw_manifest", "target_id": "raw-manifest-1"}
                        if dependency else None),
+        "generation": None,
         "postgresql_version": "15.15",
     }
 
@@ -85,6 +86,24 @@ def test_closed_inventory_names_critical_read_paths_and_disposable_only_work():
     assert write_cases["publication.alias_write"]["reason"] == "production_write_forbidden"
     assert write_cases["reclamation.exclusive_handoff_and_drop"]["outcome"] == "unsupported"
     assert all(item.get("durable_ci_coverage") for item in write_cases.values())
+
+
+def test_generation_catalog_diagnostics_use_preparation_identity():
+    scope = _scope()
+    scope["generation"] = {
+        "preparation_id": "preparation-2", "generation": 2,
+        "catalog_commitment": "b" * 64,
+    }
+    cases = {case.case_id: case for case in query_diagnostic._cases(
+        scope, query_diagnostic.QueryDiagnosticLimits(),
+    )}
+    aliases = cases["verification.catalog.aliases"]
+    dependencies = cases["verification.catalog.canonical_dependencies"]
+    assert "fact_archive_prepared_material_aliases" in str(aliases.statement)
+    assert "fact_archive_prepared_canonical_dependencies" in str(dependencies.statement)
+    assert aliases.params["id"] == "preparation-2"
+    assert dependencies.params["id"] == "preparation-2"
+    assert cases["verification.catalog.series"].params["id"] == "manifest-1"
 
 
 def test_lineage_diagnostic_uses_production_builder_shapes():

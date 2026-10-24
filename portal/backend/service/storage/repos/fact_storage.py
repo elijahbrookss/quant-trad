@@ -19,6 +19,8 @@ from core.execution_control import execution_checkpoint, consume_execution_json,
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
 from market_data.fact_archive import CanonicalArchiveReadPage, FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
+from .fact_archive_generation import material_alias_projection
+
 from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION, build_normalized_fact_payload_schema,
     get_fact_payload_schema, register_fact_payload_schema,
@@ -230,7 +232,7 @@ class PostgresCanonicalFactStorageRepository:
                     WHERE jsonb_typeof(evidence.value)='object'
                       AND evidence.value->>'legacy_material_hash'=:material_hash {key_predicate})
                 UNION ALL
-                SELECT versions.id FROM market.fact_archive_material_aliases AS aliases
+                SELECT versions.id FROM {material_alias_projection("aliases")}
                 JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
                 JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
                   AND manifest.storage_day=versions.storage_day

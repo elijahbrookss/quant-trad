@@ -249,6 +249,14 @@ class PostgresCanonicalFactReclamationRepository:
             self._timeouts(session)
             partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
             self._eligibility(session, partition, eligible_before=eligible_before)
+            unfinished = session.execute(text(
+                "SELECT id FROM market.fact_archive_preparations "
+                "WHERE storage_day=:day AND state IN ('building','ready') ORDER BY page_ordinal,generation LIMIT 1"
+            ), {"day": day}).scalar_one_or_none()
+            if unfinished is not None:
+                raise RuntimeError(
+                    f"canonical_reclaim_archive_preparation_incomplete: storage_day={day} preparation_id={unfinished}"
+                )
             already_reclaimed = partition["state"] == "reclaimed"
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
             objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,

@@ -75,17 +75,21 @@ def test_fresh_catalog_rejects_missing_added_or_reused_rows(change):
     proof.admitted = True
     page, receipt = {"id": "page"}, {"verification_hash": "old"}
     proof.pages["page"] = (page, receipt)
+    proof.generations["page"] = None
     witness = handoff._Rows(1, (("manifest_id", "text"), ("fact_version_id", "text"), ("row_hash", "text")),
                             '{"(1,1)"}', 1, "expected")
     proof.catalogs["page"] = {"canonical_dependencies": witness}
     sql = []
     def execute(statement, parameters):
         sql.append(str(statement))
+        if "FROM market.fact_archive_active_generations" in str(statement):
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: []))
         return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [{
             "manifest_id": "page", "hinted_count": 1, "logical_count": 1, "digest": "expected", **change}]))
     with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
         proof.verify_catalogs(SimpleNamespace(execute=execute), page, receipt, lambda: None)
-    assert len(sql) == 1 and "logical_count" in sql[0] and "q.ctid=ANY" in sql[0]
+    assert len(sql) == 2 and "fact_archive_active_generations" in sql[0]
+    assert "logical_count" in sql[1] and "q.ctid=ANY" in sql[1]
 
 
 def test_unbound_wrong_day_and_incomplete_source_scope_refuse_before_sql():
@@ -216,6 +220,7 @@ def _catalog_batch_fixture(count, *, tid_chars=8):
         identity = f"page-{index:04d}"
         page, receipt = {"id": identity}, {"verification_hash": identity}
         proof.pages[identity] = (page, receipt)
+        proof.generations[identity] = None
         proof.catalogs[identity] = {name: handoff._Rows(
             1, (("manifest_id", "text"),) + columns, '{"(1,1)"}' + " " * tid_chars,
             index % 3, identity + name) for name, (_, columns) in handoff._CATALOGS.items()}
@@ -227,9 +232,14 @@ def _batch_session(proof, *, change=None):
     calls = []
     def execute(statement, parameters):
         sql = str(statement)
+        if "FROM market.fact_archive_active_generations" in sql:
+            rows = [proof.generations[identity] for identity in parameters["ids"]
+                    if proof.generations[identity] is not None]
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: rows))
         name = next(name for name, (table, _) in handoff._CATALOGS.items() if f"market.{table} " in sql)
-        parameters = {"ids": [parameters[f"id_{i}"] for i in range(len(parameters) // 2)],
-                      "tids": [parameters[f"tids_{i}"] for i in range(len(parameters) // 2)]}
+        batch_size = sum(key.startswith("id_") for key in parameters)
+        parameters = {"ids": [parameters[f"id_{i}"] for i in range(batch_size)],
+                      "tids": [parameters[f"tids_{i}"] for i in range(batch_size)]}
         calls.append((name, parameters))
         assert "requested.tids" not in sql
         if len(parameters["ids"]) > 1:
@@ -275,6 +285,35 @@ def test_late_catalog_mismatch_never_marks_batch_current(change):
     with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
         proof.verify_catalog_batch(session, pages, lambda: None)
     assert calls and proof.fresh_catalogs == set()
+
+
+def test_changed_active_generation_pointer_refuses_before_catalog_freshness():
+    proof, pages = _catalog_batch_fixture(1)
+    proof.generations["page-0000"] = {
+        "manifest_id": "page-0000", "preparation_id": "prep-original",
+        "generation": 1, "catalog_commitment": "a" * 64,
+    }
+    session, calls = _batch_session(proof)
+    proof.generations["page-0000"] = {
+        "manifest_id": "page-0000", "preparation_id": "prep-changed",
+        "generation": 2, "catalog_commitment": "b" * 64,
+    }
+    captured = dict(proof.generations["page-0000"])
+    proof.generations["page-0000"] = {
+        "manifest_id": "page-0000", "preparation_id": "prep-original",
+        "generation": 1, "catalog_commitment": "a" * 64,
+    }
+
+    original_execute = session.execute
+    def changed_pointer(statement, parameters):
+        if "FROM market.fact_archive_active_generations" in str(statement):
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [captured]))
+        return original_execute(statement, parameters)
+    session.execute = changed_pointer
+
+    with pytest.raises(RuntimeError, match="generation_pointer_changed"):
+        proof.verify_catalog_batch(session, pages, lambda: None)
+    assert not calls and not proof.fresh_catalogs
 
 
 def test_catalog_parameter_volume_is_bounded_and_large_single_page_stays_supported():

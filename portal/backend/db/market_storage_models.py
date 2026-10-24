@@ -5,7 +5,7 @@ its large JSON documents live; they never create a new market revision.
 """
 
 from sqlalchemy import (
-    BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, Index,
+    BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index,
     Integer, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -222,6 +222,162 @@ class MarketFactArchiveCanonicalDependencyRecord(Base):
     manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
     fact_version_id = Column(String(64), ForeignKey("market.fact_identities.id", ondelete="RESTRICT"), primary_key=True)
     row_hash = Column(String(64), nullable=False)
+
+
+class MarketFactArchivePreparationRecord(Base):
+    """Mutable lifecycle row for one hidden, fenced archive catalog generation."""
+
+    __tablename__ = "fact_archive_preparations"
+    __table_args__ = (
+        UniqueConstraint("manifest_id", "generation", name="uq_market_fact_archive_preparation_generation"),
+        UniqueConstraint("storage_day", "page_ordinal", "generation", name="uq_market_fact_archive_preparation_page"),
+        CheckConstraint("generation >= 1 AND page_ordinal >= 0", name="ck_market_fact_archive_preparation_position"),
+        CheckConstraint("state IN ('building','ready','active','superseded','abandoned')", name="ck_market_fact_archive_preparation_state"),
+        CheckConstraint("fence >= 1", name="ck_market_fact_archive_preparation_fence"),
+        CheckConstraint("alias_count >= 0 AND canonical_dependency_count >= 0", name="ck_market_fact_archive_preparation_counts"),
+        CheckConstraint("jsonb_typeof(manifest_descriptor)='object' AND jsonb_typeof(series_catalog)='array'", name="ck_market_fact_archive_preparation_documents"),
+        CheckConstraint("source_binding_hash ~ '^[0-9a-f]{64}$' AND alias_root ~ '^[0-9a-f]{64}$' AND canonical_dependency_root ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_preparation_hashes"),
+        CheckConstraint("catalog_commitment IS NULL OR catalog_commitment ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_preparation_commitment"),
+        Index("ix_market_fact_archive_preparation_page_state", "storage_day", "page_ordinal", "state"),
+        {"schema": "market"},
+    )
+
+    id = Column(String(128), primary_key=True)
+    manifest_id = Column(String(128), nullable=False)
+    storage_day = Column(Date, ForeignKey("market.fact_retention_partitions.storage_day", ondelete="RESTRICT"), nullable=False)
+    page_ordinal = Column(Integer, nullable=False)
+    generation = Column(BigInteger, nullable=False)
+    state = Column(String(16), nullable=False)
+    fence = Column(BigInteger, nullable=False)
+    owner_token_hash = Column(String(64), nullable=False)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=False)
+    verifier_version = Column(String(64), nullable=False)
+    source_binding_hash = Column(String(64), nullable=False)
+    manifest_descriptor = Column(JSONB, nullable=False)
+    series_catalog = Column(JSONB, nullable=False)
+    alias_count = Column(BigInteger, nullable=False)
+    canonical_dependency_count = Column(BigInteger, nullable=False)
+    alias_root = Column(String(64), nullable=False)
+    canonical_dependency_root = Column(String(64), nullable=False)
+    catalog_commitment = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactArchivePreparationDependencyRecord(Base):
+    """Raw/checkpoint hold retained while a hidden generation is unfinished."""
+
+    __tablename__ = "fact_archive_preparation_dependencies"
+    __table_args__ = (
+        CheckConstraint("target_kind IN ('raw_manifest','book_checkpoint')", name="ck_market_fact_archive_preparation_dependency_kind"),
+        CheckConstraint("object_sha256 ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_preparation_dependency_hash"),
+        Index("ix_market_fact_archive_preparation_dependency_target", "target_kind", "target_id"),
+        {"schema": "market"},
+    )
+
+    preparation_id = Column(String(128), ForeignKey("market.fact_archive_preparations.id", ondelete="RESTRICT"), primary_key=True)
+    target_kind = Column(String(32), primary_key=True)
+    target_id = Column(String(128), primary_key=True)
+    object_key = Column(Text, nullable=False)
+    object_sha256 = Column(String(64), nullable=False)
+
+
+class MarketFactArchiveCatalogBatchRecord(Base):
+    """Immutable receipt committed atomically with one resumable catalog batch."""
+
+    __tablename__ = "fact_archive_catalog_batches"
+    __table_args__ = (
+        CheckConstraint("catalog_kind IN ('aliases','canonical_dependencies')", name="ck_market_fact_archive_catalog_batch_kind"),
+        CheckConstraint("batch_ordinal >= 0 AND row_count > 0", name="ck_market_fact_archive_catalog_batch_position"),
+        CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_catalog_batch_hash"),
+        CheckConstraint("jsonb_typeof(first_key)='array' AND jsonb_typeof(last_key)='array'", name="ck_market_fact_archive_catalog_batch_keys"),
+        {"schema": "market"},
+    )
+
+    preparation_id = Column(String(128), ForeignKey("market.fact_archive_preparations.id", ondelete="RESTRICT"), primary_key=True)
+    catalog_kind = Column(String(32), primary_key=True)
+    batch_ordinal = Column(Integer, primary_key=True)
+    row_count = Column(Integer, nullable=False)
+    first_key = Column(JSONB, nullable=False)
+    last_key = Column(JSONB, nullable=False)
+    content_hash = Column(String(64), nullable=False)
+    committed_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactArchivePreparedMaterialAliasRecord(Base):
+    """Immutable hidden aliases; authoritative only through the active pointer."""
+
+    __tablename__ = "fact_archive_prepared_material_aliases"
+    __table_args__ = (
+        UniqueConstraint("preparation_id", "fact_version_id", "evidence_key", name="uq_market_fact_archive_prepared_alias"),
+        CheckConstraint("batch_ordinal >= 0", name="ck_market_fact_archive_prepared_alias_batch"),
+        CheckConstraint("material_hash ~ '^[0-9a-f]{64}$' AND evidence_key <> ''", name="ck_market_fact_archive_prepared_alias"),
+        Index("ix_market_fact_archive_prepared_alias_lookup", "series_id", "evidence_key", "material_hash"),
+        {"schema": "market"},
+    )
+
+    preparation_id = Column(String(128), ForeignKey("market.fact_archive_preparations.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_identities.id", ondelete="RESTRICT"), primary_key=True)
+    evidence_key = Column(String(64), primary_key=True)
+    batch_ordinal = Column(Integer, nullable=False)
+    series_id = Column(BigInteger, ForeignKey("market.series.id", ondelete="RESTRICT"), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+
+
+class MarketFactArchivePreparedCanonicalDependencyRecord(Base):
+    """Immutable hidden source hashes; authoritative only through the active pointer."""
+
+    __tablename__ = "fact_archive_prepared_canonical_dependencies"
+    __table_args__ = (
+        CheckConstraint("batch_ordinal >= 0", name="ck_market_fact_archive_prepared_dependency_batch"),
+        CheckConstraint("row_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_prepared_dependency_hash"),
+        Index("ix_market_fact_archive_prepared_dependency_source", "fact_version_id"),
+        {"schema": "market"},
+    )
+
+    preparation_id = Column(String(128), ForeignKey("market.fact_archive_preparations.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_identities.id", ondelete="RESTRICT"), primary_key=True)
+    batch_ordinal = Column(Integer, nullable=False)
+    row_hash = Column(String(64), nullable=False)
+
+
+class MarketFactArchiveActiveGenerationRecord(Base):
+    """Small atomic authority pointer from a manifest to one complete generation."""
+
+    __tablename__ = "fact_archive_active_generations"
+    __table_args__ = (
+        UniqueConstraint("preparation_id", name="uq_market_fact_archive_active_preparation"),
+        CheckConstraint("generation >= 1 AND catalog_commitment ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_active_generation"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    preparation_id = Column(String(128), ForeignKey("market.fact_archive_preparations.id", ondelete="RESTRICT"), nullable=False)
+    generation = Column(BigInteger, nullable=False)
+    catalog_commitment = Column(String(64), nullable=False)
+    activated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactArchiveVerificationGenerationRecord(Base):
+    """Bind a durable verification receipt to the exact active catalog generation."""
+
+    __tablename__ = "fact_archive_verification_generations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["manifest_id", "verifier_version"],
+            ["market.fact_archive_verifications.manifest_id",
+             "market.fact_archive_verifications.verifier_version"],
+            ondelete="RESTRICT", name="fk_market_fact_archive_verification_generation_receipt",
+        ),
+        CheckConstraint("catalog_commitment ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_verification_generation_hash"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    verifier_version = Column(String(64), primary_key=True)
+    preparation_id = Column(String(128), ForeignKey("market.fact_archive_preparations.id", ondelete="RESTRICT"), nullable=False)
+    catalog_commitment = Column(String(64), nullable=False)
+    bound_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
 class MarketFactBookPrefixChunkRecord(Base):

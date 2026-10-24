@@ -525,37 +525,44 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
         """))
         session.execute(text("""
             CREATE TRIGGER test_slow_alias_insert BEFORE INSERT
-            ON market.fact_archive_material_aliases FOR EACH ROW
+            ON market.fact_archive_prepared_material_aliases FOR EACH ROW
             EXECUTE FUNCTION market.test_slow_alias_insert()
         """))
-    # Apply the artificial deadline only to the writes under test. Source
-    # selection retains the repository's normal timeout on slower CI hosts.
-    stage_aliases = fixture.archive._stage_alias_catalog_rows
-    def stage_with_alias_deadline(session, manifest_id, rows):
-        previous_timeout = session.execute(text("SHOW statement_timeout")).scalar_one()
-        session.execute(text("SELECT set_config('statement_timeout', '2000', true)"))
-        result = stage_aliases(session, manifest_id, rows)
-        session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
-                        {"timeout": previous_timeout})
-        # A failed INSERT aborts and rolls back the transaction, including its
-        # local timeout. Do not mask that failure with a reset in finally.
-        return result
-    monkeypatch.setattr(fixture.archive, "_stage_alias_catalog_rows", stage_with_alias_deadline)
+    # Apply the artificial deadline through the normal repository contract.
+    # Every hidden catalog transaction reacquires the day lock and inherits it.
+    fixture.archive.statement_timeout_ms = 2000
     # A coarse batch is the control under the same row cost and deadline. It
-    # must fail at the actual alias INSERT, leaving the entire page uncommitted.
+    # must fail at the prepared alias INSERT. Its one transaction rolls back,
+    # while the fenced preparation remains resumable and stays invisible.
     with monkeypatch.context() as coarse:
         coarse.setattr(fact_archival, "_ALIAS_CATALOG_WRITE_BATCH_ROWS", 1000)
         with pytest.raises(DBAPIError) as failed:
             _acknowledge_alias_page(fixture)
     assert failed.value.orig.pgcode == "57014"
-    assert failed.value.statement.startswith("INSERT INTO market.fact_archive_material_aliases")
+    assert "INSERT INTO market.fact_archive_prepared_material_aliases" in failed.value.statement
     assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
+    with storage.database.session() as session:
+        preparation = session.execute(text(
+            "SELECT id,state FROM market.fact_archive_preparations WHERE storage_day=:day"
+        ), {"day": fixture.day}).mappings().one()
+        assert preparation["state"] == "building"
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_prepared_material_aliases "
+            "WHERE preparation_id=:id"
+        ), {"id": preparation["id"]}).scalar_one() == 0
     result = _acknowledge_alias_page(fixture)
     assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
     with storage.database.session() as session:
         assert session.execute(text(
             "SELECT count(*) FROM market.fact_archive_material_aliases WHERE manifest_id=:id"
-        ), {"id": result["manifest_id"]}).scalar_one() == fixture.count
+        ), {"id": result["manifest_id"]}).scalar_one() == 0
+        active = session.execute(text(
+            "SELECT preparation_id FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": result["manifest_id"]}).scalar_one()
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_prepared_material_aliases "
+            "WHERE preparation_id=:id"
+        ), {"id": active}).scalar_one() == fixture.count
     assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
     assert fixture.read() == fixture.before
 
@@ -638,7 +645,7 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
 
     def inserted(_conn, _cursor, statement, *_):
         nonlocal wrote_aliases
-        if statement.startswith("INSERT INTO market.fact_archive_material_aliases"):
+        if "INSERT INTO market.fact_archive_prepared_material_aliases" in statement:
             wrote_aliases = True
 
     error = CanonicalRetentionStopRequested if stop == "cancel" else CanonicalRetentionBudgetExceeded
@@ -661,6 +668,14 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases")).scalar_one() == 0
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_series")).scalar_one() == 0
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies")).scalar_one() == 0
+        preparation = session.execute(text(
+            "SELECT id,state FROM market.fact_archive_preparations WHERE storage_day=:day"
+        ), {"day": fixture.day}).mappings().one()
+        assert preparation["state"] == "building"
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_prepared_material_aliases "
+            "WHERE preparation_id=:id"
+        ), {"id": preparation["id"]}).scalar_one() == fact_archival._ALIAS_CATALOG_WRITE_BATCH_ROWS
         assert session.execute(text(
             "SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"
         ), {"day": fixture.day}).scalar_one() == fixture.count
@@ -681,7 +696,7 @@ def test_canonical_dependency_batch_stop_rolls_back_every_page_catalog(
 
     def inserted(_conn, _cursor, statement, *_):
         nonlocal wrote_canonical
-        if statement.startswith("INSERT INTO market.fact_archive_canonical_dependencies"):
+        if "INSERT INTO market.fact_archive_prepared_canonical_dependencies" in statement:
             wrote_canonical = True
 
     def check_budget():
@@ -704,10 +719,156 @@ def test_canonical_dependency_batch_stop_rolls_back_every_page_catalog(
             "fact_archive_dependencies", "fact_archive_canonical_dependencies",
         ):
             assert session.execute(text(f"SELECT count(*) FROM market.{table}")).scalar_one() == 0
+        preparation = session.execute(text(
+            "SELECT id,state FROM market.fact_archive_preparations WHERE storage_day=:day"
+        ), {"day": fixture.day}).mappings().one()
+        assert preparation["state"] == "building"
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_prepared_canonical_dependencies "
+            "WHERE preparation_id=:id"
+        ), {"id": preparation["id"]}).scalar_one() == fact_archival._CATALOG_WRITE_BATCH_ROWS
     objects = set(fixture.store.root.rglob("*.parquet"))
     result = _acknowledge_alias_page(fixture)
     assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count
     assert set(fixture.store.root.rglob("*.parquet")) == objects
+    assert fixture.read() == fixture.before
+
+
+def test_verifier_publishes_changed_catalog_as_atomic_generation(
+        storage, tmp_path, monkeypatch):
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=12)
+    original_alias = fact_archival.legacy_material_alias
+    monkeypatch.setattr(fact_archival, "legacy_material_alias", lambda _row: None)
+    acknowledged = _acknowledge_alias_page(fixture)
+    with storage.database.session() as session:
+        old = session.execute(text(
+            "SELECT preparation_id,generation FROM market.fact_archive_active_generations "
+            "WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).mappings().one()
+        assert old["generation"] == 1
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_prepared_material_aliases "
+            "WHERE preparation_id=:id"
+        ), {"id": old["preparation_id"]}).scalar_one() == 0
+
+    monkeypatch.setattr(fact_archival, "legacy_material_alias", original_alias)
+    verified = fixture.archive.verify_next_page(fixture.day)
+    assert verified["status"] == "page_verified"
+    with storage.database.session() as session:
+        active = session.execute(text(
+            "SELECT preparation_id,generation,catalog_commitment "
+            "FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).mappings().one()
+        assert active["generation"] == 2
+        assert active["preparation_id"] != old["preparation_id"]
+        states = dict(session.execute(text(
+            "SELECT id,state FROM market.fact_archive_preparations "
+            "WHERE manifest_id=:id ORDER BY generation"
+        ), {"id": acknowledged["manifest_id"]}).all())
+        assert states == {old["preparation_id"]: "superseded",
+                          active["preparation_id"]: "active"}
+        binding = session.execute(text(
+            "SELECT preparation_id,catalog_commitment "
+            "FROM market.fact_archive_verification_generations "
+            "WHERE manifest_id=:id AND verifier_version=:version"
+        ), {"id": acknowledged["manifest_id"],
+            "version": fact_archival.FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one()
+        assert dict(binding) == {
+            "preparation_id": active["preparation_id"],
+            "catalog_commitment": active["catalog_commitment"],
+        }
+        catalogs = fixture.archive._page_catalogs(session, acknowledged["manifest_id"])
+        assert len(catalogs["aliases"]) == fixture.count
+    assert fixture.read() == fixture.before
+
+
+def test_failed_generation_supersession_keeps_old_authority_and_resumes(
+        storage, tmp_path, monkeypatch):
+    fixture = _alias_catalog_page(storage, tmp_path, monkeypatch, count=12)
+    original_alias = fact_archival.legacy_material_alias
+    monkeypatch.setattr(fact_archival, "legacy_material_alias", lambda _row: None)
+    acknowledged = _acknowledge_alias_page(fixture)
+    monkeypatch.setattr(fact_archival, "legacy_material_alias", original_alias)
+    with storage.database.session() as session:
+        old = dict(session.execute(text(
+            "SELECT preparation_id,generation,catalog_commitment "
+            "FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).mappings().one())
+
+    original_dependencies = fixture.archive._dependencies
+    late_hold = {
+        "target_kind": "book_checkpoint", "target_id": "fixture-late-hold",
+        "object_key": "fixture/late-hold", "object_sha256": "e" * 64,
+    }
+
+    def dependencies_with_late_hold(session, rows, **kwargs):
+        dependencies, source_rows = original_dependencies(session, rows, **kwargs)
+        return [*dependencies, late_hold], source_rows
+
+    monkeypatch.setattr(fixture.archive, "_dependencies", dependencies_with_late_hold)
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE FUNCTION market.test_fail_generation_binding() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN
+                RAISE EXCEPTION 'fixture_generation_binding_failure';
+            END $$
+        """))
+        session.execute(text("""
+            CREATE TRIGGER test_fail_generation_binding BEFORE INSERT
+            ON market.fact_archive_verification_generations FOR EACH ROW
+            EXECUTE FUNCTION market.test_fail_generation_binding()
+        """))
+
+    # This fault occurs after the transaction inserts new permanent holds,
+    # changes the active pointer and generation states, and inserts the receipt.
+    # PostgreSQL must roll every one of those writes back together.
+    with pytest.raises(DBAPIError, match="fixture_generation_binding_failure"):
+        fixture.archive.verify_next_page(fixture.day)
+    with storage.database.session() as session:
+        assert dict(session.execute(text(
+            "SELECT preparation_id,generation,catalog_commitment "
+            "FROM market.fact_archive_active_generations WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).mappings().one()) == old
+        states = session.execute(text(
+            "SELECT generation,state FROM market.fact_archive_preparations "
+            "WHERE manifest_id=:id ORDER BY generation"
+        ), {"id": acknowledged["manifest_id"]}).all()
+        assert states == [(1, "active"), (2, "ready")]
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_verifications WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).scalar_one() == 0
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_dependencies "
+            "WHERE manifest_id=:id AND target_kind=:kind AND target_id=:target"
+        ), {"id": acknowledged["manifest_id"], "kind": late_hold["target_kind"],
+            "target": late_hold["target_id"]}).scalar_one() == 0
+        assert fixture.archive._page_catalogs(
+            session, acknowledged["manifest_id"]
+        )["aliases"] == []
+
+    with storage.database.session() as session:
+        session.execute(text(
+            "DROP TRIGGER test_fail_generation_binding "
+            "ON market.fact_archive_verification_generations"
+        ))
+        session.execute(text("DROP FUNCTION market.test_fail_generation_binding()"))
+
+    assert fixture.archive.verify_next_page(fixture.day)["status"] == "page_verified"
+    with storage.database.session() as session:
+        active = session.execute(text(
+            "SELECT preparation_id,generation FROM market.fact_archive_active_generations "
+            "WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).mappings().one()
+        assert active["generation"] == 2
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_preparations "
+            "WHERE manifest_id=:id"
+        ), {"id": acknowledged["manifest_id"]}).scalar_one() == 2
+        assert session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_dependencies "
+            "WHERE manifest_id=:id AND target_kind=:kind AND target_id=:target"
+        ), {"id": acknowledged["manifest_id"], "kind": late_hold["target_kind"],
+            "target": late_hold["target_id"]}).scalar_one() == 1
     assert fixture.read() == fixture.before
 
 

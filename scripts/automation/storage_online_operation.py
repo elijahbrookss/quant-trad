@@ -27,7 +27,12 @@ from scripts.automation import storage_online_recovery as recovery
 
 logger = logging.getLogger(__name__)
 _FAMILIES = {"raw_archive_manifests", "fact_archive_manifests", "book_checkpoint_manifests"}
-_CATALOGS = ("market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies")
+_CATALOGS = (
+    "market.fact_archive_material_aliases",
+    "market.fact_archive_canonical_dependencies",
+    "market.fact_archive_prepared_material_aliases",
+    "market.fact_archive_prepared_canonical_dependencies",
+)
 
 
 @dataclass(frozen=True)

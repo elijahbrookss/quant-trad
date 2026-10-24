@@ -16,13 +16,14 @@ from market_data.fact_archive import FactArchiveLimits
 from market_data.market_state import derive_basis_features
 
 from .fact_dependencies import read_canonical_dependency_rows
+from .fact_archive_generation import material_alias_projection
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
 DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state", "market.trade_flow", "market.trade_flow_feature", "market.market_response"})
 
 
-_LEGACY_MATERIAL_CANDIDATES = """
+_LEGACY_MATERIAL_CANDIDATES = f"""
                 UNION
                 SELECT requested.root_id,requested.role,source.id
                 FROM requested JOIN market.fact_hot_payloads AS hot
@@ -41,7 +42,7 @@ _LEGACY_MATERIAL_CANDIDATES = """
                 WHERE hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
                 UNION
                 SELECT requested.root_id,requested.role,source.id
-                FROM requested JOIN market.fact_archive_material_aliases AS aliases
+                FROM requested JOIN {material_alias_projection("aliases")}
                   ON aliases.series_id=requested.series_id AND aliases.evidence_key=requested.evidence_key
                   AND aliases.material_hash=requested.material_hash
                 JOIN market.fact_versions AS source ON source.id=aliases.fact_version_id
