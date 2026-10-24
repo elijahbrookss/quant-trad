@@ -111,6 +111,7 @@ def _member_tablespaces(conn, relation):
 
 def test_generation_migration_inherits_named_reference_tablespace(storage, tmp_path, monkeypatch):
     """Every actual prepared heap, TOAST table and index inherits HDD placement."""
+    storage.open_day = storage.today
     placed = _configure_placement(storage, tmp_path, monkeypatch)
     engine = placed.database._engine
     legacy = (

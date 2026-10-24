@@ -318,7 +318,7 @@ def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, t
     with pytest.raises(RuntimeError, match="source_coverage_mismatch"):
         archive.verify_partition(day)
     archive.stage_next_page(day)
-    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+    with pytest.raises(RuntimeError, match="canonical_archive_verification_generation_changed"):
         archive.verify_partition(day)
     archive.verify_next_page(day)
     # Legacy rows remain insert-only for historical compatibility, but an
