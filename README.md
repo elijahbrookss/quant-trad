@@ -9,6 +9,11 @@ QT supports research, backtesting, walk-forward evaluation, reporting, and
 bounded paper simulation or observe-only operation. **It does not submit orders
 to external venues and is not live-capital trading infrastructure.**
 
+QT's infrastructure, reusable Indicators, and generic research procedures are
+public; actual research records and proprietary research remain private in QT.
+See the [public infrastructure/private research boundary](docs/contracts/platform/00_system_contract.md#public-infrastructure-and-private-research)
+for record custody and public-example rules.
+
 ## Quick Start
 
 ### Prerequisites
