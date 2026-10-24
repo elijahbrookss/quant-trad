@@ -182,7 +182,9 @@ def test_ci_topology_matches_workflow_jobs() -> None:
     assert documented_jobs == expected_jobs
     normalized = _squash(topology)
     assert "the workflow defines fifteen jobs" in normalized
-    assert "four sequential steps in this fourth job" in normalized
+    assert "five sequential proof steps in this fourth job" in normalized
+    assert "prove encrypted incremental database and archive recovery" in normalized
+    assert "Prove encrypted incremental database and archive recovery" in bootstrap_steps
     assert "they are not separate workflow jobs" in normalized
 
 

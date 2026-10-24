@@ -2,8 +2,11 @@
 
 This document describes the GitHub Actions topology defined by
 [`.github/workflows/test.yaml`](../../../.github/workflows/test.yaml). The
-workflow runs for pushes to `develop`, `main`, `feature/**` and `hotfix/**`, and
-for pull requests targeting `develop` or `main`.
+workflow supports pushes to `develop`, `main`, `feature/**` and `hotfix/**`,
+pull requests targeting `develop` or `main`, and manual dispatch. Work-branch
+checks are selected as described below; release-targeting PRs and develop/main
+pushes retain the full required scope. This describes configured checks, not a
+claim that a particular source revision has completed them successfully.
 
 ## Goals
 
@@ -25,8 +28,8 @@ identifies the six existing qualification jobs for reproduction.
 | ---: | --- | --- |
 | 1 | `pr-suite` | Complete ordinary non-database backend pytest screen on the runner host |
 | 2 | `frontend` | Current frontend test command plus production asset build |
-| 3 | `deployment-contract` | Server shell/Compose validation and attested production-image builds |
-| 4 | `clean-database-bootstrap` | Clean-schema bootstrap, private namespace verification, then PostgreSQL-marked contract tests |
+| 3 | `deployment-contract` | Aggregate of configuration, attested images, disposable runtime/storage, and restore proofs |
+| 4 | `clean-database-bootstrap` | Clean schema, private namespace, encrypted recovery, PostgreSQL contracts, and frozen-reader refusal |
 | 5 | `deployment-rehearsal` | Real deployment controller with synthetic Docker services and injected rollout failure |
 | 6 | `committed-recovery` | Native Linux missing-config recovery after a committed switch and expired final window, against current and first-release runtimes |
 
@@ -144,18 +147,20 @@ The workflow steps are:
    disposable service, creating `quanttrad_contracts`, and installing
    `timescaledb` and `pgcrypto` in both databases;
 5. `Prove clean current-schema bootstrap` against `quanttrad_bootstrap`;
-6. `Verify PostgreSQL filesystem namespace` through the Docker DB runner; and
-7. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
+6. `Verify PostgreSQL filesystem namespace` through the Docker DB runner;
+7. `Prove encrypted incremental database and archive recovery` in a separately
+   built, network-disabled recovery container;
+8. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
    the clean-bootstrap and namespace fixture files excluded from this invocation;
    and
-8. `Prove frozen baseline refuses archive-generation reader floor` by starting the
+9. `Prove frozen baseline refuses archive-generation reader floor` by starting the
    source-attested pre-generation application image against its own disposable
    layout, applying the current metadata-only migration, and requiring the same
    frozen image to refuse the changed reader contract.
 
-Clean bootstrap, namespace verification, PostgreSQL-marked contracts and the
-frozen-reader proof are four sequential steps in this fourth job. They are not
-separate workflow jobs.
+Clean bootstrap, namespace verification, encrypted incremental recovery,
+PostgreSQL-marked contracts and the frozen-reader proof are five sequential
+proof steps in this fourth job. They are not separate workflow jobs.
 The two host invocations set `RUN_DB_TESTS=1`, `QT_DB_TEST_ISOLATED=1`, disable
 Loki delivery, and use an explicit disposable DSN. The namespace step uses the
 repository's isolated Docker runner because its fixture needs PostgreSQL 15
@@ -182,7 +187,7 @@ does not claim per-test database isolation for the rest of the DB corpus.
 
 ## What The Workflow Protects
 
-The workflow catches:
+The workflow is configured to check:
 
 - non-database backend import, logic, provider-wiring, runtime, accounting,
   reporting, BotLens, CLI, MCP, and service-contract regressions;
@@ -192,19 +197,26 @@ The workflow catches:
   attestation/build failures, and failures to build the four production images;
 - clean current-schema bootstrap failures on PostgreSQL 15 / TimescaleDB
   2.14.2; and
-- tests currently marked `db` against the job's disposable contract database.
+- tests currently marked `db` against the job's disposable contract database;
+- the selected composed QT core, storage-layout, archive, and current/frozen
+  reader restore paths; and
+- promotion failure/recovery and committed-switch continuation in owned
+  disposable environments.
 
 ## Honest Ceilings
 
 A passing workflow does not by itself prove:
 
-- composed-service networking or runtime behavior after containers start;
-- deployment, rollback, backup restoration, or server health on an actual host;
-- full backtest, paper, or live runtime orchestration;
+- composed-service networking or runtime paths outside the selected disposable
+  fixtures;
+- deployment, rollback, backup restoration, or server health on an actual
+  operator or production host;
+- every backtest, paper, or live runtime orchestration path;
 - browser-specific frontend behavior or frontend tests outside the current
   package test discovery;
 - per-test database isolation within `quanttrad_contracts`;
-- behavior against an existing migrated operator database; or
+- compatibility with an actual existing operator database merely because
+  clean bootstrap or selected synthetic historical migrations passed; or
 - external-provider availability, live order submission, production safety, or
   production readiness.
 
@@ -238,8 +250,15 @@ make frontend-check
 
 ### Reproduce `deployment-contract`
 
-Run this only in a disposable checkout because `init-env` writes the named
-operator-environment file.
+The commands below reproduce only shell/Compose validation and production
+image construction. They do not reproduce the aggregate's runtime, storage,
+restore, online-shard, artifact-binding, or coverage checks. For the full scope,
+use the exact revision's workflow proof jobs and their commands under
+[`scripts/ci/`](../../../scripts/ci/); the aggregate also needs their matching
+source-bound receipts. A successful local build is not an aggregate pass.
+
+Run these commands only in a disposable checkout because `init-env` writes the
+named operator-environment file.
 
 ```bash
 qt_ci_private="$(mktemp -d "${TMPDIR:-/tmp}/qt-disposable-operator.XXXXXX")"
@@ -275,8 +294,14 @@ the checkout remains unchanged between commands.
 
 ### Reproduce `clean-database-bootstrap`
 
-There is no single local wrapper that exactly reproduces all three CI database
-steps. For exact topology, provision a fresh disposable
+There is no single local wrapper for this entire job. The commands below cover
+clean bootstrap, namespace verification, and broad DB contracts only. They omit
+the separate encrypted incremental recovery container and frozen-baseline
+startup/refusal proof. Reproduce those from the exact workflow steps, including
+their image/source binding and disposable databases, when that evidence is
+required.
+
+For the database commands below, provision a fresh disposable
 `timescale/timescaledb:2.14.2-pg15` service with user `quanttrad`, database
 `quanttrad_bootstrap`, trust authentication, and localhost port 5432. Create a
 second database named `quanttrad_contracts`, then install `timescaledb` and
@@ -285,8 +310,10 @@ second database named `quanttrad_contracts`, then install `timescaledb` and
 configuration, as the CI preparation step does. Do not apply these fixture
 settings to a live database.
 
-After installing the Python dependencies as in `pr-suite`, run the three CI test
-steps separately:
+After installing the Python dependencies as in `pr-suite`, run these three
+database checks separately. The final invocation below uses fresh-mode fixtures;
+the workflow's reviewed schema-template pilot and source binding are described
+in the [developer workflow](../developer-workflow.md#exact-source-ci-equivalence-for-broad-dbrecovery-handoff).
 
 ```bash
 QT_CI_BOOTSTRAP_DSN='postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_bootstrap'
@@ -305,6 +332,7 @@ python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
 PG_DSN="$QT_CI_CONTRACT_DSN" \
 RUN_DB_TESTS=1 \
 QT_DB_TEST_ISOLATED=1 \
+QT_SCHEMA_TEMPLATE_PILOT=0 \
 QT_LOGGING_LOKI_URL='' \
 QT_LOGGING_DEBUG='false' \
 python -m pytest -q -m db \
@@ -317,9 +345,9 @@ local DB profile. It builds a source image that excludes local environment and
 secret files, generates a unique synthetic database identity and Compose
 project for every invocation, runs on an internal network without a host port,
 and tears down only that project's containers, network, volumes, and locally
-built test image. It is still not an exact
-reproduction of the fourth workflow job's two-database layout and separate
-clean-bootstrap invocation.
+built test image. It does not reproduce the workflow job's separate database
+layouts, clean-bootstrap invocation, incremental recovery container, or
+frozen-reader proof.
 
 ## Ownership And Maintenance
 
@@ -332,7 +360,8 @@ clean-bootstrap invocation.
   [the Makefile](../../../Makefile) own `frontend-check` test/build composition.
 - [`tests/conftest.py`](../../../tests/conftest.py) owns DB opt-in and isolated
   DSN guards, required-dependency checks, and suppression of implicit dotenv
-  discovery; the workflow owns the two CI database invocations.
+  discovery; the workflow owns the explicit CI database invocations and
+  recovery commands.
 - Update this document whenever workflow jobs or their step boundaries change.
 
 Do not infer full runtime, deployment, or production coverage from a job name. Read the commands and environment of the exact workflow step.
@@ -345,8 +374,12 @@ uses real Git, Docker Compose, images, health gates, locks, and isolated volumes
 with tiny synthetic services and local GitHub API responses. It verifies CI
 rejection, compatible promotion, failed rollout recovery, synthetic worker
 drain/restart, and volume continuity. It does not replace the real-QT core smoke
-or the PostgreSQL and collector contract suites. Reproduce it with the same
-command on a Docker-enabled local machine; no provider credentials are needed.
+or the PostgreSQL and collector contract suites. Reproduce this original
+rehearsal with the same command on a Docker-enabled local machine; no provider
+credentials are needed. The same job also runs the hosted-only
+[`--routine` rehearsal](#actual-routine-path-disposable-rehearsal), which refuses
+local execution. Running only the original command does not reproduce the
+whole job.
 
 ## Local disposable storage demonstration
 
@@ -409,8 +442,8 @@ receive full qualification.
 
 `ci-required` checks every computed required job for success. Failure,
 cancellation, a missing result or an unexpected skip fails the gate; an explicitly
-unrequired skip remains a skip. The existing release receipt still requires all
-seven expanded original jobs and both recovery bundles. A selected iteration run
+unrequired skip remains a skip. The release receipt still requires the complete expanded qualification scope,
+including the deployment proof jobs and both recovery bundles. A selected iteration run
 cannot satisfy it. GitHub must require the stable `ci-required` check when this
 policy is activated; changing repository rules needs separate approval. This
 component does not change GitHub rules or any production trigger.

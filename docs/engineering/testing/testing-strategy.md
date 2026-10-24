@@ -2,459 +2,193 @@
 
 ## Purpose
 
-Tests in Quant-Trad exist to protect critical behavior, not to maximize coverage.
+Tests protect meaningful behavior, risk boundaries, and regressions. Coverage
+and test counts are not goals or evidence of production readiness.
 
-They are guardrails for:
-
-- correctness in financial and runtime behavior
-- determinism in backtests and derived artifacts
-- safe refactoring of core engine paths
-- catching regressions that would otherwise be expensive to rediscover
-
-We do not write tests just because a function exists. A test should protect a meaningful contract, a meaningful risk boundary, or a bug we do not want to pay for twice.
+The [platform contracts](../../contracts/README.md) and accepted decisions define
+intended behavior. Tests check the implementation against those contracts; a
+passing test supports only the behavior and environment it actually exercises.
+[ADR 0066](../../architecture/decisions/0066-scale-validation-to-consequence-and-trust-boundaries.md)
+explains how verification scales with consequence and the audience that must
+trust the result.
 
 ## Default Posture
 
-The default posture in this repo is:
+Start with the affected contract and the consequence of failure. Add or update
+tests when a change affects an important outcome, crosses a real boundary, or
+fixes a regression. Do not add tests merely because a function is new or a file
+has no coverage.
 
-- tests are not added automatically
-- tests must be justified by risk, contract protection, or regression value
-- if a proposed test does not protect a real system outcome, it should usually not be written
-
-That means "I changed code, so I need to add tests somewhere" is not sufficient reasoning.
-
-Good reasons to add a test:
-
-- the change affects deterministic backtest behavior
-- the change affects trade decisions, fills, wallet state, margin, fees, or other money logic
-- the change protects a runtime contract or module boundary that is easy to break
-- the test locks in a real regression we have already paid for
-
-Bad reasons to add a test:
-
-- the file had no tests
-- the function is new
-- coverage would go up
-- an assistant generated a test by following control flow line by line
-
-## Supported Commands And Environment Boundaries
-
-Normal validation is split by the boundary a test actually needs:
-
-| Boundary | Command | What it covers |
-| --- | --- | --- |
-| Documentation | `make validate-docs` | Architecture navigation, glossary links, and current documentation integrity |
-| Ordinary Python | `make backend-check` | Non-database contracts, domain behavior, services, CLI, runtime, reporting, and configuration |
-| PostgreSQL / TimescaleDB | `./scripts/ci/run_test_suite.sh db` | Tests marked `db`, using only the repository's disposable test stack |
-| Frontend | `make frontend-check` | Node-native and JSX tests plus the production Vite build |
-| Deployment configuration | the `deployment-contract` commands in [`ci-test-topology.md`](ci-test-topology.md) | Shell, Compose, source binding, image construction, and isolated QT core recreation |
-
-`make check` combines repository hygiene, documentation validation, and the
-ordinary Python boundary. `make check-all` adds the supported frontend tests and
-production build. A broad `pytest` invocation is not a substitute for the
-database command: DB-marked tests skip unless the explicit isolation flags and
-disposable DSN are present. Clean bootstrap is a separate check against an
-empty disposable database.
-
-The repository-owned DB command builds the source captured by `.dockerignore`
-instead of mounting the developer checkout. Each invocation generates a new
-synthetic database identity and Compose project, uses an internal network with
-no host database port, and tears down that exact project's containers, network,
-volumes, and locally built test image on both success and failure.
-
-The Python test harness does not load repository `.env` or `secrets.env` files.
-Commands must provide their environment explicitly. Locked Python packages are
-required test dependencies; if one is missing, collection fails instead of
-silently converting its tests into skips. Real credentials, shared databases,
-live providers, collectors, production data, and external-order submission are
-outside normal testing.
-
-An unavailable environment is reported as unavailable. Do not turn it into a
-pass, and do not point a test at a less isolated resource. A skip is acceptable
-only when the supported workflow deliberately runs that check in another
-explicit environment, as with clean database bootstrap. Otherwise give the skip
-a current reason and an owning exit condition, or fix its routing.
-
-## Current Engineering Posture
-
-This project currently has an engine-first posture.
-
-Current priorities are:
-
-- building a stable engine
-- making backtests reproducible
-- improving performance
-- enabling future strategy research and AI integration
-
-That means the testing strategy is intentionally selective right now.
-
-- Broad integration coverage is mostly deferred until runtime and backtest architecture are more stable.
-- Unit tests are still valuable, but only when they protect behavior that matters.
-- Temporary test gaps are acceptable when they are intentional, visible, and tied to active architectural churn.
-
-The rule is simple: do not pretend the system is more stable than it is. Test the parts where failure would distort the engine, corrupt research, or make refactors unsafe.
+Use focused checks during development, then satisfy the applicable handoff
+checks in [AGENTS.md](../../../AGENTS.md#normal-validation-matrix) and the
+[developer workflow](../developer-workflow.md#validation). Declining a low-value
+new test does not waive existing validation. Architectural churn is a reason to
+test a stable public contract, not to defer protection for risky behavior.
 
 ## What Should Be Tested Now
 
-### Deterministic Backtest Behavior
+The [six core promises](../../core-promises.md) connect high-consequence behavior
+to its owning contracts and decisions. Use them to identify the relevant risks:
 
-If the same inputs, params, versions, and market data produce different outputs, the platform becomes untrustworthy.
+| Boundary | Valuable protection |
+| --- | --- |
+| Causal market truth | Known-at timing, prefix invariance, immutable Fact revisions, explicit gaps, and provider-free canonical reads |
+| Frozen research authority | Exact frozen inputs and versions, deterministic replay, preserved historical meaning, and explicit Check-to-Observation admission |
+| Decision and execution authority | One `initialize -> apply_bar -> snapshot` timeline; Strategy decisions separate from fills; reporting, Playback, CLI, MCP, and UI respecting their owning contracts |
+| Capital, order, and accounting integrity | Order transitions, partial fills, fees, slippage, sizing, margin, reservations, settlement, wallet reconciliation, and fail-closed external-order submission |
+| Credential confinement | Synthetic secrets remaining behind the credential boundary and absent from public payloads and logs |
+| Durable persistence and recovery | Clean schema and historical cutovers, constraints, transaction rollback, fencing, archive/reference integrity, and bounded source-to-restore recovery |
 
-High-value examples:
+Import/bootstrap, configuration, API responsiveness, frontend adapters, and
+service boundaries also need regression protection when their failure changes
+supported behavior. This is not an exhaustive test inventory.
 
-- identical backtest inputs producing identical trade sequences
-- stable ordering of state updates and emitted events
-- known-at timing behavior that does not drift across refactors
-- reproducible snapshots and derived runtime outputs when inputs are fixed
-- stable handling of intrabar execution when the same scenario is replayed
+Integration testing is already part of QT's validation. Use it where real
+interactions determine correctness; isolated unit tests cannot prove PostgreSQL
+constraints, process ownership, container wiring, or recovery. Some broader
+properties have representative coverage only. Check the actual test selection
+and assertions before claiming a flow is protected.
 
-### Financial Math Correctness
+## Supported Commands And Environment Boundaries
 
-Financial math errors are dangerous because they can look plausible while being wrong.
+Choose checks by what changed and what the test actually needs. Multiple rows
+may apply; broad or cross-system changes use the full normal validation matrix.
 
-High-value examples:
+| Change or boundary | Focused feedback and applicable handoff checks |
+| --- | --- |
+| Documentation, glossary, architecture metadata, or indexes | `make validate-docs`; this refreshes the architecture index and checks documentation contracts |
+| Backend, domain, CLI, service, runtime, reporting, or configuration | Focused test files/node IDs first, then `make backend-check` for the ordinary non-database Python corpus |
+| Persistence, schema, repository, recovery guard, or database-backed behavior | `./scripts/ci/run_test_suite.sh db <test-path-or-node-id>` for focused work; the same command without arguments for the broad disposable DB row; check whether specialized fixtures are also needed |
+| Frontend, frontend adapters, or API-view contracts | `make frontend-check` for Node-native and JSX tests plus the production Vite build |
+| Deployment scripts or Compose/configuration | Shell syntax and disposable Compose rendering from the normal validation matrix; use the [CI topology](ci-test-topology.md#3-deployment-contract) for additional image/runtime proof scope |
+| Destructive storage, archive, or recovery behavior | Relevant owned disposable topology and failure/recovery cases; follow the [DB/recovery coverage map](../developer-workflow.md#exact-source-ci-equivalence-for-broad-dbrecovery-handoff) rather than assuming the broad DB profile exercises every optional case |
+| Every handoff | `git diff --check`, review known failures, and preserve unrelated changes; follow the repository's commit and clean-tree requirements |
 
-- PnL calculations
-- fee and slippage calculations
-- position sizing and quantity rounding
-- wallet reservation math
-- margin, liquidation, and contract-multiplier handling
-- partial-fill accounting
+Focused non-database checks use the repository Python environment and explicit
+test paths, for example `QT_OMIT_DB_TESTS=1 python -m pytest -q <test-path>`.
+This omits DB-marked files; it is not evidence for their behavior. Use
+`make help` for existing helpers such as `test-reporting`, `test-reporting-api`,
+and `test-botlens`. Use the checked-in Python and frontend lockfiles.
 
-### State Transition Correctness
+`make check` combines repository hygiene, documentation, and ordinary Python
+validation. `make check-all` adds frontend tests and the production build.
+Neither includes the disposable database or specialized recovery proofs. A
+broad `pytest` invocation does not replace the DB command: DB-marked tests skip
+without explicit isolation flags. Clean bootstrap is a separate empty-database
+check; it does not prove an existing database can be migrated.
 
-This repo is full of stateful systems. State bugs are often worse than obvious exceptions because they silently distort runtime behavior.
+The DB runner builds checkout source subject to `.dockerignore`, rather than
+mounting the developer checkout. It generates a synthetic database identity and
+Compose project for each invocation, uses an internal network without a host DB
+port, and attempts teardown of that project's containers, network, volumes, and
+locally built test image on success and failure. Inspect cleanup failures.
+The broad DB profile is not a promise of a fresh database for every test.
 
-High-value examples:
-
-- order lifecycle transitions
-- wallet and reservation updates
-- partial-fill to filled/cancelled transitions
-- runtime state-engine transitions across `initialize -> apply_bar -> snapshot`
-- monotonic event sequencing
-- run-status transitions and failure handling
-
-### Import, Bootstrap, and Module-Boundary Regressions
-
-Some breakages are architectural, not mathematical. A bad import path, startup dependency, or module coupling can take out the runtime even when the core logic is fine.
-
-High-value examples:
-
-- module import tests that prevent accidental bootstrap failures
-- startup/config wiring that affects runtime availability
-- boundary regressions where one subsystem starts depending on the wrong layer
-- tests that prevent the backend or worker bootstrap path from accidentally requiring the full runtime in the wrong place
-
-### Pure Logic With Real Business Value
-
-Pure logic is worth testing only when it materially affects:
-
-- trade decisions
-- risk or exposure logic
-- state transitions
-- research outputs
-- reproducibility
-
-This does not mean "any pure function."
-
-It means logic such as:
-
-- signal classification that changes whether a trade is taken
-- regime logic that changes overlays, execution policy, or research interpretation
-- normalization rules that change the meaning of derived data
-- scheduling or selection logic that changes what the engine sees and when
-
-If the logic is pure but does not materially affect system behavior, backtest meaning, runtime contracts, or research output, it usually does not need a test right now.
-
-## What Should Not Usually Be Tested Right Now
-
-Do not spend test budget on low-signal coverage.
-
-Usually not worth testing:
-
-- trivial helpers
-- obvious pass-through wrappers
-- getters, setters, and formatting glue
-- tests that mirror implementation line by line
-- tests built from excessive mocking where the mock interactions are the whole assertion
-- snapshot-style tests that fail on every refactor without protecting a meaningful outcome
-- tests whose main effect is to freeze internal structure that is still changing
-
-Examples of low-value tests under this posture:
-
-- asserting that a wrapper calls one internal helper with the same arguments and returns the same object
-- mocking five collaborators just to prove a branch executed
-- testing a tiny conversion helper whose behavior is already obvious from one line of code
-- asserting the exact shape of an unstable internal snapshot payload when only one derived value matters
-- freezing the order of internal helper calls in a runtime path that is still being refactored
-
-## When It Is Acceptable To Not Add Tests
-
-It is acceptable to not add tests when that choice is deliberate and technically honest.
-
-Common acceptable cases:
-
-- the code is exploratory and the contract is not settled yet
-- the area is in active architectural churn and any test would be tightly coupled to implementation details
-- the change is a refactor where the only possible new tests would fossilize unstable internals
-- the logic is temporary and will likely be replaced once the engine boundary is clarified
-- the change is better protected later by a higher-value deterministic or integration-style test that does not exist yet
-
-This is not an excuse to skip tests for risky behavior.
-
-It is acceptable to skip tests when the alternative would be low-value noise. In that case, the task or PR should say so clearly:
-
-- what changed
-- why tests were not added
-- what future stable contract should eventually carry the protection
-
-If a change touches determinism, money logic, state transitions, runtime contracts, or a real regression surface, the bar for skipping tests is much higher.
-
-## Decision Framework Before Adding a Test
-
-Before adding a test, ask:
-
-- If this breaks, does it corrupt backtests?
-- If this breaks, does it affect money, fills, margin, wallet state, or risk logic?
-- If this breaks, does it introduce nondeterministic behavior?
-- If this breaks, does it damage a critical state transition?
-- If this breaks, does it change known-at timing or artifact visibility?
-- If this breaks, would a future refactor likely miss it?
-- If this breaks, would debugging it later be expensive or misleading?
-
-If none of those apply, the test may not be worth adding.
-
-## Preferred Test Hierarchy
-
-### Highest Priority
-
-- deterministic behavior tests
-- correctness tests for financial math
-- state transition and sequencing tests
-- tests that protect known-at timing and runtime semantics
-
-### Medium Priority
-
-- module contract tests for critical architecture boundaries
-- import/bootstrap regression tests that protect runtime startup
-- focused regression tests for bugs that previously escaped
-
-### Lower Priority
-
-- isolated unit tests for stable pure logic with clear business impact
-
-### Deferred For Now
-
-- broad integration suites across the full runtime
-- end-to-end orchestration coverage for every service path
-- large scenario matrices that will churn with the architecture
-
-We will need those later. They are just not the highest-leverage tests right now.
+The Python harness disables implicit repository `.env` and `secrets.env`
+discovery. Provide test inputs explicitly. Required dependencies must be
+installed; missing supported dependencies must not silently become skips.
+Normal validation uses synthetic data and isolated resources, never shared or
+production databases, real credentials, live providers, or external orders.
 
 ## Unit Test Style Rules
 
 ### Test Behavior, Not Implementation
 
-Assert outcomes, invariants, and contracts. Do not assert every internal step unless the internal step is itself the contract.
+Assert outcomes, invariants, and contracts. For example, prove that a partial
+fill updates quantity, fees, reservation, and remaining order state coherently;
+do not merely assert the sequence of private helper calls. An internal detail
+is worth asserting only when it is itself the contract.
 
-Bad pattern:
-
-- test knows the exact helper sequence, exact private method flow, and exact internal data shape
-
-Better pattern:
-
-- test proves the engine emitted the correct state, trade, timing gate, reservation amount, or calculation result
-
-### Keep Fixtures Small
-
-Use the smallest amount of state needed to make the behavior obvious.
-
-Good unit tests should be readable without scrolling through a factory maze or a giant JSON fixture to find the one field that matters.
-
-### Prefer In-Memory State Over Heavy Mocks
-
-If a test can use a small real object, a small runtime state, or a small fake in-memory structure, prefer that over mocking the world.
-
-### Avoid Mocking the World
-
-Mocks are acceptable at real boundaries:
-
-- storage
-- external providers
-- process/container orchestration
-- network calls
-
-Mocks are not a substitute for understanding behavior. If the test mostly verifies that mocks were called, it is probably too implementation-focused.
-
-Unit tests must not touch live storage, container orchestration, telemetry hubs,
-or network services through an accidental service path. Stub those boundaries
-explicitly, or mark the test as integration and make the infrastructure
-dependency visible.
-
-### Keep Scaffolding Small
-
-Do not introduce large fixture, factory, or mock systems unless they are clearly reused and actually reduce complexity.
-
-One bug should not create a large permanent test framework.
-
-If a regression can be protected with one focused test and a small in-memory setup, do that. Do not respond to a narrow bug by building a miniature testing platform around it.
-
-### Make The Contract Obvious
-
-A reader should be able to answer:
-
-- what behavior is protected?
-- what regression would this catch?
-- why does this matter to the engine or backtest system?
-
-If that is not obvious, tighten the test.
-
-### Control Time And Concurrency Directly
-
-When the rule is about ordering or progress, coordinate the participants with
-events, barriers, deferred promises, injected clocks, or explicit queue drains.
-A timeout may remain as a generous deadlock guard. Do not use a narrow elapsed-
-time threshold as a proxy for "request B progressed while request A was held."
-
-Real sleeps are still reasonable when elapsed time is the behavior under test
-or when an external library exposes no controllable clock. State that reason
-and leave enough margin that host scheduling is not the assertion.
-
-### Build Historical Database States Explicitly
-
-Migration tests must create the smallest valid pre-migration schema in its real
-dependency order, assert that pre-state, run the actual migration, and inspect
-the resulting database. Do not call the current full ORM `create_all()` and then
-drop pieces to imitate history; current constraints can depend on migration-
-owned functions and make an impossible hybrid schema.
-
-Use a fresh disposable database identity when migration ordering, destructive
-cutover, extensions, or teardown are part of the claim. Prove cleanup on failure
-paths. Tests must never discover or reuse a developer, shared, live, or
-production DSN.
+Use small fixtures, real in-memory objects, and controlled fakes. Avoid large
+snapshot payloads, excessive mocks, trivial wrapper tests, and new fixture
+frameworks that add maintenance without protecting meaningful behavior. A reader
+should see the rule, the failing case, and why the assertion matters.
 
 ### Keep External Boundaries Closed
 
-Provider, credential, network, container, filesystem, and order-execution
-boundaries should use synthetic data and controlled fakes unless the test is
-explicitly assigned an isolated integration environment. A mock is useful when
-it traps a forbidden call. It is misleading when it replaces the behavior the
-test claims to check.
+Stub provider, credential, network, container, and order-execution boundaries
+unless the test explicitly owns an isolated integration environment. Unit tests
+must not reach storage, telemetry, or network services through accidental paths.
+The `integration` marker describes a test; it does not provision infrastructure,
+isolate resources, or exclude the test from ordinary Python validation. DB tests
+must declare `db` and use the supported disposable runner or prescribed CI
+environment. Declare other infrastructure dependencies in their owning fixture
+and execution profile.
 
-Credential tests use recognizable synthetic secrets and a synthetic key so
-plaintext leakage is detectable. External-order tests prove that the admission
-or composition seam fails closed; they never contact a venue.
+Use recognizable synthetic secrets to detect leakage. External-order tests
+prove admission and composition fail closed, without contacting a venue. A mock
+can trap a forbidden call, but cannot replace the behavior the test claims to
+validate.
+
+### Control Time And Concurrency Directly
+
+Coordinate ordering and progress with events, barriers, deferred promises,
+injected clocks, or explicit queue drains. Timeouts may guard deadlocks; narrow
+wall-clock thresholds should not stand in for a progress assertion. Real sleeps
+are reasonable when elapsed time is the behavior or an external library offers
+no controllable clock; explain that dependency and allow scheduling margin.
+
+### Build Historical Database States Explicitly
+
+Migration tests create the smallest valid historical schema in dependency order,
+assert the pre-state, run the actual migration, and inspect the result. Do not
+create today's full ORM schema and drop pieces to imitate history: current
+constraints may depend on migration-owned functions.
+
+Use fresh disposable database identities when ordering, destructive cutover,
+extensions, or teardown are part of the claim. Exercise rollback and cleanup
+failure paths. Fixtures must never discover or reuse a developer or live DSN.
 
 ### Use Generated Cases And Controlled Defects Selectively
 
-Property-based or generated cases are valuable when varying inputs exposes a
-real rule—for example numeric bounds, state transitions, ordering, or parser
-normalization. A concrete regression example remains better when one known edge
-case tells the story clearly.
-
-For a small number of high-consequence rules, temporarily introducing one
-representative defect in a disposable working copy can confirm that the owning
-test fails. Remove the defect immediately and record only the detection result.
-Do not commit mutations or add broad mutation tooling merely to increase a
-score. Passing this kind of check improves confidence; it does not replace review or
-system-level validation.
-
-## Examples Of Good Tests
-
-- a deterministic backtest test proving the same bars and config produce the same fills, PnL, and event sequence twice
-- a known-at timing test proving an overlay or signal is not visible before its contract says it should exist
-- a wallet reservation test proving reserved capital is reduced correctly across order creation, partial fill, and cancellation
-- a partial-fill accounting test proving quantity, average fill price, fees, and remaining order state stay coherent
-- a state transition test proving `initialize -> apply_bar -> snapshot` produces the expected runtime state at a critical edge case
-- an import/bootstrap regression test proving a backend or worker module still imports without pulling in the wrong runtime dependencies
-- a margin or liquidation math test proving futures exposure and contract-size math stays correct after a refactor
-
-## Examples Of Low-Value Tests
-
-- a test that asserts a helper called another helper with the same arguments and returned the same result
-- a test that snapshots a large internal runtime payload even though only one field matters to correctness
-- a mock-heavy test for a bot service where every collaborator is stubbed and the only real assertion is that mocks were invoked
-- a test that freezes the exact structure of unstable internal state during an ongoing engine refactor
-- a test for a trivial parser or formatter that has no effect on trades, risk, timing, or reproducibility
-- a test that reproduces implementation branches instead of protecting a contract, such as asserting each internal method was called in sequence during a backtest step
+Generated/property-based cases help where varying numeric bounds, transitions,
+ordering, or normalization exposes a real rule. Prefer a concrete regression
+example when it explains the risk clearly. For a high-consequence rule, a
+temporary representative defect in a disposable copy may confirm the test
+detects it. Remove the defect immediately; detection does not replace review or
+system validation, and does not justify broad mutation tooling for a score.
 
 ## Regression Tests
 
-When a real bug happens, a targeted regression test is usually worth adding.
-
-This is especially true for:
-
-- determinism bugs
-- import/bootstrap failures
-- state transition bugs
-- calculation bugs
-- runtime contract mismatches
-
-The regression test should be minimal and focused.
-
-Good regression test:
-
-- reproduces the failing input or state
-- proves the intended behavior after the fix
-- stays narrow enough that future refactors can still move code around
-
-Bad regression response:
-
-- building a giant new test scaffold around one bug
-- freezing unrelated internals because one path broke once
-- turning a one-off failure into a permanent factory/mocking system nobody wants to maintain
-
-## What We Are Intentionally Not Optimizing For
-
-Right now we are not optimizing for:
-
-- maximum code coverage
-- testing every file
-- premature integration coverage
-- enterprise process for its own sake
-- large test suites that create maintenance drag without protecting real outcomes
-
-Coverage is a side effect of testing important behavior well. It is not the goal.
-
-## How To Evolve This Policy Later
-
-As the engine and runtime architecture stabilize, this policy should evolve toward broader system confidence.
-
-Next layers to add over time:
-
-- integration tests around runtime flows and storage boundaries
-- backtest scenario suites for representative market conditions
-- strategy validation harnesses for research workflows
-- reproducibility benchmarks
-- performance benchmarks on critical engine paths
-
-The order matters. First stabilize the runtime contracts, then expand the coverage surface.
-
-## Testing Rules Of Thumb
-
-- Test where failure would make results wrong, not merely inconvenient.
-- Prefer one sharp test over five noisy tests.
-- If a test breaks every refactor, it should justify that cost.
-- If a bug changed money, timing, state, or determinism, write a regression test.
-- If a test mostly proves that mocks were configured correctly, rewrite or delete it.
-- "No test added" is acceptable when the alternative is low-value implementation coupling.
+A real bug usually merits a focused regression: reproduce the failing input or
+state, assert the intended outcome, and keep unrelated internals free to change.
+For determinism, compare the relevant outputs under identical frozen inputs,
+parameters, and versions. For known-at behavior, show that a later observation
+cannot change an earlier decision. For persistence or recovery, exercise the
+real database or owned recovery topology when that boundary caused the bug.
 
 ## PR Test Expectations
 
-For normal feature work under the current engineering posture:
+Record what was exercised and what remains unknown:
 
-- add or update tests when the change affects determinism, financial math, state transitions, runtime contracts, or a known regression surface
-- do not add low-value tests just to pad coverage
-- it is acceptable to ship without new tests when the area is still in active churn, as long as that choice is deliberate
-- if tests are skipped, the PR or task notes should say why the gap is acceptable right now
+- Identify the affected contract/risk and the checks actually run, including
+  relevant environment and scope.
+- Explain why no new test was needed when existing coverage protects the change
+  or the proposed test would only mirror implementation.
+- Report unavailable prerequisites as unavailable, not passing. An expected
+  environment-specific skip must identify the check's actual execution route;
+  otherwise record a current reason, owner, and exit condition or fix routing.
+- Preserve known failures and reconcile them with focused reproduction or an
+  explicit disposition. A later green suite does not erase them.
 
-Current CI note:
+The host-run `pr-suite` is only the ordinary non-database screen. The complete
+workflow also defines frontend, database, container/runtime, deployment
+rehearsal, and recovery checks. Work-branch selection and release-targeting PR
+requirements are described in the
+[CI topology](ci-test-topology.md#conservative-work-branch-selection). Read the
+actual required jobs, selected cases, results, and artifacts; a green selected
+iteration is not a complete qualification run.
 
-- GitHub PR CI is currently a fast host-run regression screen, not a full container-runtime proof.
-- Do not write tests that assume the PR gate already reproduces all Docker/runtime behavior.
-- If a change is only meaningful under container/runtime wiring, treat that as a separate validation problem instead of forcing low-value unit coverage.
+For broad DB/recovery handoff, the developer workflow permits a successful
+complete CI attempt for the exact final integrated commit instead of repeating
+the same broad checks locally. Its source/artifact and coverage requirements
+still apply, including focused checks for omitted specialized cases. Report
+accepted CI evidence as CI evidence, not as a local pass.
 
-Expected standard:
-
-- enough testing to protect meaningful risk
-- not enough testing to fossilize unstable internals
+Contracts state intended behavior; code and workflow definitions show what is
+implemented; completed checks show what was exercised. None alone establishes
+universal correctness, production throughput, recovery on an actual host, or
+production readiness. Deployment admission and authorization remain separate
+under the [developer workflow](../developer-workflow.md#exact-source-ci-equivalence-for-broad-dbrecovery-handoff).
+This strategy records policy and test boundaries, not the qualification status
+of a particular release or archive candidate.
