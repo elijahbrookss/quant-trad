@@ -17,12 +17,6 @@ The repository includes disabled references:
 | `eth-usd` | `benchmark` | `0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419` | `market.reference_price.v1`, instrument `ETH`, quote/unit `USD` | 8 decimals, `ETH / USD` | `2026-08-07T00:00:00Z` |
 | `tusd-reserves` | `primary` | `0xBE456fd14720C3aCCc30A2013Bffd782c9Cb75D5` | `market.reserve_balance.v1`, instrument `TUSD`, reserve/unit `USD` | 18 decimals, `TUSD Reserves` | `2026-08-07T00:00:00Z` |
 
-The 2026-08-07 official-catalog review records a 0.5% ETH/USD deviation
-threshold. Its heartbeat remains explicitly unknown in the reference rather
-than inferred. The TUSD page records a 5% deviation threshold and describes a
-once-per-day standard reporting interval, represented as 500 basis points and
-86,400 seconds. These are reviewed metadata, not an availability guarantee.
-
 The files under `config/market-data/numeric-facts/` are references, not
 enablement. Both their root `enabled` and binding `enabled` fields are false.
 Verify the network, proxy, deployment/history lower bounds, decimals,
@@ -325,9 +319,9 @@ Common failures:
   stale gap and partial status.
 - A provider's successful response is not proof of complete history by itself;
   phase, log, round, latest-round, and finality reconciliation determine status.
-- OI/funding v1 consolidation is deliberately deferred. Do not point their
-  specialized series at this store or fabricate exact values from retained
-  floats. See ADR 0061 for the bounded v2 gate.
+- Canonical storage preserves each payload's numeric meaning. OI/funding v1
+  floats cannot recover lost raw decimal text; do not relabel them as exact
+  provider observations. See [Coinbase scheduled Facts](coinbase-scheduled-facts.md).
 
 ## References
 

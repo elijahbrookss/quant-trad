@@ -76,7 +76,7 @@ The installation owner performs these steps once:
    delivery to every inbox.
 
 After that, a routine ownership change edits only `QT_ALERT_EMAILS`, validates,
-applies the Grafana-only change, and sends another test. Application users do
+applies the monitoring-only change, and sends another test. Application users do
 not need provider accounts or credentials.
 
 Workstation-to-host connection details, SSH aliases, and locally selected paths
@@ -188,7 +188,7 @@ coverage.
 | Store or rotate a provider credential | No | Credentials use the encrypted provider boundary. |
 | Add another product supported by a deployed collector pack | No | Product metadata and definitions are validated at enrollment. |
 | Change the poll interval while re-enrolling a supported product | No | The scheduled definition is durable configuration. |
-| Change alert recipients or delivery credentials | Grafana only | Run `validate-alerts` then `apply-alerts`; collectors and other services are not restarted. |
+| Change alert recipients or delivery credentials | Alloy and Grafana | Run `validate-alerts` then `apply-alerts`; application and collector services are not restarted. |
 | Add a provider transport, WebSocket channel, projection, Fact schema, or recovery behavior | Yes | Executable behavior and contracts must pass review and CI. |
 | Change database or archive contracts | Yes | Persistence compatibility and clean-schema validation are release concerns. |
 | Change the default clean-install fleet | Yes | Defaults are reviewed source-controlled release material. |

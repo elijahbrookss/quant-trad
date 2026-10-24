@@ -74,6 +74,8 @@ Candles must preserve source-data truth:
 - preserve OHLCV semantics;
 - be ordered deterministically;
 - avoid duplicate bars;
+- acquire provider-native candles at the requested timeframe; never synthesize
+  a new input from other intervals;
 - expose missing data instead of silently filling it;
 - carry enough provider/venue/symbol/timeframe context for diagnostics.
 
@@ -147,7 +149,7 @@ mismatch. Acquisition/provider construction separately validates source and
 adapter configuration shape; live feed metadata mismatch fails loud before
 ingest.
 
-If the new fact fits this contract, reuse `market.numeric_fact_versions`,
+If the new fact fits this contract, reuse the canonical Fact repository,
 `market.fact_acquisition_coverage`, canonical gaps, the shared fact commit
 clock, and frozen datasets. Do not add provider-specific tables, DSNs, caches,
 repository branches, or migrations.
@@ -196,14 +198,12 @@ genuinely new storage shape is approved, coordinate its contract, current clean
 definition, existing-database upgrade, startup validation, tests, and
 architecture docs under one owner.
 
-## OI And Funding Warning
+## Preserve versioned numeric meaning
 
-Do not route `derivatives.open_interest.v1` or
-`derivatives.funding_rate.v1` through exact numeric storage.
-**`NUMERIC_FACT_CONSOLIDATION_DEFERRED`** preserves their specialized v1 rows
-and frozen datasets because retained floats cannot recover raw decimal truth and
-funding interval is not a v1 series dimension. Any future consolidation uses new
-v2 contracts/series and must prove v1 dataset identities unchanged.
+OI/funding v1 payloads retain accepted floating-point values. Canonical storage
+preserves those contracts alongside exact numeric payloads; lost raw decimal
+text cannot be recovered. New precision/identity semantics need a versioned
+contract and unchanged old Dataset identities. Do not manufacture exact values.
 
 ## Testing Expectations
 
@@ -240,6 +240,5 @@ Useful examples:
 - Provider boundary: [data boundary](../architecture/data/DATA_BOUNDARY.md).
 - Exact numeric architecture: [numeric facts and on-demand acquisition](../architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md).
 - Chainlink operation: [Chainlink numeric facts](chainlink-numeric-facts.md).
-- Archive-backed example: [Binance futures public data setup](binance-futures-public-data.md).
 - Live-stream/paper example: [Coinbase derivatives paper setup](coinbase-derivatives-paper-setup.md).
 - Runtime contract: [runtime contract](../contracts/platform/01_runtime_contract.md).

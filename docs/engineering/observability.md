@@ -158,7 +158,6 @@ Quant-Trad should fail loudly for invalid states. A fallback is allowed only whe
 
 ## Next
 
-- Historical context: [retained observability doctrine](observability-doctrine.md).
 - Engineering contract: [engineering contract](../contracts/platform/03_engineering_contract.md).
 - Runtime event storage: [persistence boundary](../architecture/persistence/PERSISTENCE_BOUNDARY.md).
 - BotLens diagnostics: [BotLens projection boundary](../architecture/botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md).

@@ -19,7 +19,9 @@ One release moves through five visible boundaries:
    Compose contract, production container builds, and PostgreSQL-backed suite.
    GitHub Actions starts a disposable TimescaleDB service container on the
    GitHub-hosted runner, proves an empty database initializes directly at the
-   current schema, then runs all tests marked `db`.
+   current schema, then executes the selected database contract proofs. See
+   [CI topology](testing/ci-test-topology.md) for exact coverage and specialized
+   topology exclusions.
 2. `doctor` verifies Docker, Compose, the private operator environment, storage,
    source cleanliness, and the rendered Compose model on the target host.
 3. `deploy` resolves one Git ref to a commit, installs the reviewed Python and
@@ -168,8 +170,8 @@ the `postgres-data` named volume. The deployment helper does not run a migration
 before, during, or after that recreate; any separately required historical
 schema transition remains an explicit operator-run procedure.
 
-For the Level 2 bounded-status change, use this future rollout order after its
-pull request is reviewed; merging alone performs none of these steps:
+For an older database lacking the bounded book operational rollups, use its
+reviewed upgrade sequence. A clean installation does not run this migration:
 
 1. Take a database backup and prove it can be restored.
 2. Stop the backend and collector writers, then wait for every stream lease to
@@ -305,7 +307,7 @@ bash scripts/automation/server_deploy.sh apply-alerts
 ```
 
 `apply-alerts` requires the clean checkout to match the recorded deployed
-revision and force-recreates only Grafana without starting its dependencies.
+revision and force-recreates Alloy and Grafana without starting their dependencies.
 When `QT_ALERTS_ENABLED=true`, validation requires the managed relay host,
 credential, verified sender, and at least one valid recipient. The deployment
 helper adds `docker/docker-compose.alert-email.yml`; when false, the overlay,
@@ -365,7 +367,7 @@ database instead.
 
 ## Provider Credentials And Immediate Collection
 
-The first release enrolls and starts the reviewed market-data fleet by default:
+The single-node preset enrolls its reviewed default market-data fleet:
 
 - scheduled open-interest and funding collectors for the three reviewed
   futures products;
@@ -437,19 +439,17 @@ bash scripts/automation/server_deploy.sh qt \
   data collector-definitions enroll-product \
   --provider COINBASE \
   --venue COINBASE_DIRECT \
-  --product-id LNP-20DEC30-CDE \
+  --product-id <coinbase-product-id> \
   --actor-id <operator-id> \
-  --reason "Add LINK market-data coverage" \
+  --reason "Approved market-data coverage" \
   --confirm
 ```
 
-Coinbase's [public product page](https://www.coinbase.com/futures/lnp-20dec30-cde/)
-and product API identify `LNP-20DEC30-CDE` as a future with one-contract
-quantity increments, a `0.001` price increment, and 50 LINK per contract.
-Enrollment refreshes that metadata from Coinbase instead of trusting those
-prose values, creates the canonical instrument, and installs the existing
-scheduled OI/funding and continuous trade/L2 definitions. The worker discovers
-them from durable configuration.
+Enrollment refreshes provider product metadata, validates contract units and
+funding support, creates the canonical instrument, and installs the selected
+scheduled OI/funding and continuous trade/L2 definitions. It does not trust tick
+sizes or contract sizes copied from documentation. The worker discovers admitted
+definitions from durable configuration.
 
 The command is idempotent. Initial enrollment starts the definitions, while a
 later reapplication does not override audited lifecycle intent. Use repeated
@@ -503,9 +503,8 @@ inspect rather than pre-emptively disabling L2:
 6. retain one-hour and 24-hour evidence as the initial capacity baseline.
 
 Safety policies continue collection through warning thresholds and fail closed
-at critical disk/spool thresholds. On the reference server, the configured
-reserves are small relative to the available NVMe; projected exhaustion and
-actual growth remain the meaningful soak signals.
+at critical disk/spool thresholds. Measure reserves against the installation's actual growth and projected
+exhaustion; a configured percentage alone does not establish adequate headroom.
 
 ## Private Operator Access
 
@@ -540,7 +539,7 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
-For the specific committed cutover whose repository helper failed because
+For a committed cutover whose repository helper failed because
 `/run/quanttrad/recovery/incremental-config.json` was absent, inspect with
 `qt storage migrate --operation-file <original-private-plan> --recover-repositories-file <private-request>`.
 The strict private JSON request has `schema_version` equal to
@@ -595,15 +594,13 @@ bound inputs. Only verified layout, service health and a published recovery copy
 for the current layout permit the procedure to record the release and retire the
 hold. Automatic rollback to a pre-migration image is disabled after that switch.
 
-The combined disposable rehearsal passed migration and activation interruption,
-recent and frozen reads, service health, recovery publication and repeat-call
-reconciliation. This establishes functional recovery, not production readiness:
-physical SSD/HDD performance during movement, measured total migration and
-collector downtime, and complete capacity accounting must still qualify the release.
-Existing cumulative operator deadlines require an explicit bounded adjustment
-if the measured plan needs longer; do not reset them between phases. The
-internal entrypoint requires an explicitly prepared request, inventory, operating
-limits and pinned runtime recipe; there is no public pause/resume command.
+Before activation, qualify interruption/retry, recent and frozen reads, actual
+service health, recovery publication and repeat-call reconciliation on the exact
+combined source. Functional fixtures do not certify physical SSD/HDD throughput,
+full-volume migration time, collector downtime or complete capacity. Use measured
+limits and an explicit cumulative deadline; never reset it between phases. The
+internal entrypoint needs a prepared request, inventory, operating limits and
+pinned runtime recipe; there is no public pause/resume command.
 
 The fixed pause refuses unexpected project/network peers, including bot runtime
 containers; it does not silently stop trading work. It retains PostgreSQL and
@@ -716,10 +713,9 @@ gate, default false). Keeping the schedule off does not prohibit an explicitly
 requested, otherwise enabled manual run. Setting a hot window alone never
 enables mutation.
 
-This release starts honoring outer flag values that the earlier server preset
-hard-coded. Before deploying it, inspect the private operator file and rendered
-Compose configuration and explicitly set **both execution flags false** for the
-cutover. Do not assume an old, previously ignored `true` value is harmless.
+Before a cutover, inspect the private environment and rendered Compose model and
+explicitly set **both execution flags false**. An older preset may have ignored
+configured values; do not assume a retained `true` value remains harmless.
 
 Rollback begins by disabling canonical execution and stopping/draining the
 lifecycle worker. Already committed cold movement is not undone by that flag:
@@ -736,7 +732,8 @@ The preserving storage procedure owns first activation. Once it records
 `storage_layout=ssd-hdd-v1` in private `release.env`, subsequent helper operations
 retain the fixed storage overlay; a candidate without that overlay is refused
 before service replacement. Do not activate storage by manually editing this
-field. The complete preserving cutover is still under local qualification.
+field. Installation still requires exact-source qualification, compatible recovery and
+measured resource/physical-placement admission.
 
 Compatible recovery retains the exact rendered mounts and image tags captured
 before promotion. Its recorded layout and snapshot fingerprint must match before
@@ -817,9 +814,8 @@ bash scripts/automation/server_deploy.sh promote-routine <candidate-full-sha> --
 This is a capability for a later explicitly approved trigger. No unattended
 trigger, credential, host runner, GitHub rule or Docker setting is installed.
 The initial controller installation remains an explicitly reviewed deployment;
-an older installed helper cannot invoke the new path. Coordinate its integration
-base after the active release. Do not insert this component into a source already
-being qualified.
+an older installed helper cannot invoke the new path. Qualify the final combined
+source before any activation.
 
 Routine eligibility is deliberately narrower than CI selection: only documented
 static assets and the exact six reviewed presentation files in
@@ -916,8 +912,9 @@ or changed compatibility retains the marker. Once actual state is reconciled to
 the qualified baseline, a successful matching probe can admit explicit recovery. Failed/interrupted recovery retains its marker and blocks
 new updates. This path does not claim provider acquisition progress or scientific
 Check interpretation; retain the release owner's bounded acquisition checks and
-scientific owner's serial checks where applicable. The hosted `test_server_promotion.py --routine` step now exercises actual
-routine success/refusal/recovery with tiny images and real disposable PostgreSQL,
-including a genuine tiny restore before fixture admission. GitHub CI metadata
-there is synthetic and cannot admit production. This new step and real artifact
-provenance must pass before activation; unit tests are insufficient.
+scientific owner's serial checks where applicable.
+
+The disposable `test_server_promotion.py --routine` step exercises routine
+success/refusal/recovery with tiny images and PostgreSQL, including a fixture
+restore. Its GitHub metadata is synthetic and cannot admit production. Current
+exact-source CI and real artifact provenance must pass before activation.

@@ -111,7 +111,8 @@ comparing results.
 ## Optional Provider Setup
 
 Backtests over canonical stored data do not require Coinbase credentials.
-Provider-backed acquisition, streaming, and paper workflows do.
+Public Coinbase metadata and market-data acquisition/streams do not require
+credentials. Configure credentials only for an explicitly authenticated workflow.
 
 After the core stack is healthy:
 
