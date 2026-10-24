@@ -87,9 +87,12 @@ order submission; a lifecycle label of live means actively producing facts.
 | Observability | Health, failures, resource usage and diagnostic attribution | Market facts, PnL correctness or scientific validity |
 | API, CLI, MCP and frontend | Typed requests, admitted operations and human inspection | Independent product semantics or client-owned truth |
 
-The API/backend contracts own operations. CLI and MCP adapt them; the browser
-offers inspection and separately admitted collector/storage controls. Frontend
-state is never the authority for a run, Dataset or research record.
+The API/backend contracts own operations. CLI and MCP adapt them. Browser
+primary rooms and inventories are read-only; the separately routed collector
+lens calls the canonical collector-action contract, and Settings > Storage calls
+the storage-management contract. These scoped controls do not make inventory
+views mutating or browser state authoritative. See the
+[operator-surface contract](../../contracts/platform/00_system_contract.md#operator-surface-authority).
 
 ## One event can have several clocks
 

@@ -548,7 +548,7 @@ computed from the exact original file bytes, and `duration_seconds` from 1 to 60
 Only explicit `--execute` resumes recovery. Preserve every failed receipt and
 helper; never rerun the original migration, edit its clocks manually, or retry an
 uncertain continuation. The request does not imply deployment authorization or a
-complete backup. Follow the [bounded recovery decision](../architecture/decisions/0073-prepare-storage-migrations-with-live-collection.md#explicit-recovery-after-a-committed-missing-config-failure).
+complete backup. Follow the [bounded recovery procedure](../architecture/persistence/STORAGE_MANAGEMENT.md#repository-preparation-and-native-wal-continuation).
 
 The opt-in fixed layout is defined in `docker/docker-compose.storage-server.yml`.
 It is not automatically activated by the normal deployment helper. Its host
@@ -562,9 +562,12 @@ private SSD recovery directory (`QT_STORAGE_RECOVERY_SECRETS_ROOT`).
 
 Inside the fixed layout, history is `/qt-history`, archives are
 `/qt-history/archives`, PostgreSQL retains `/var/lib/postgresql/data`, and spool
-references retain `/app/logs/market-structure`. All three application writers use
-UID/GID 70. The collector also shares the database PID namespace. Existing host
-files must be admitted for that ownership; neither this overlay nor image build
+references retain `/app/logs/market-structure`. Backend, initializer and collector
+services use UID/GID 1000. The dedicated storage-maintenance service uses UID/GID
+70 and shares the database PID namespace; ordinary application writers do not.
+Use the [storage overlay](../../docker/docker-compose.storage-server.yml) as the
+service/mount authority. Existing host files must be admitted for those distinct
+ownership boundaries; neither this overlay nor image build
 changes host ownership, mounts or formats a device. Runtime reads injected Compose
 environment values instead of attempting to open the host-owner-only secrets file.
 
@@ -576,39 +579,40 @@ permissions or physical-HDD performance. The complete preserving activation and
 recovery procedure remains required before this overlay is used on a host.
 
 
-The preserving procedure is implemented in the internal
-`run_held_runtime_handoff` entrypoint in
-`scripts/automation/storage_handoff_pause.py`. It records a persistent
-`storage-handoff.json` in the existing deployment state directory before stopping
-the fixed application and query clients. All ordinary mutating deployment-helper
-actions refuse that hold, including compatible old-image recovery.
-`server_deploy.sh release` continues to show the hold even if no successful release
-is recorded. An ordinary deployment does not perform the initial storage cutover.
+Current storage migration uses the admitted online operation:
 
-Do not remove the hold to bypass an interrupted storage switch or use an older
-checkout/direct Docker command to restart clients. The preserving procedure
-reconciles the database certificate, archive root and policy, then starts the
-admitted candidate services under the same deployment lock. Interrupted calls
-resume the saved worker or candidate containers with the original deadline and
-bound inputs. Only verified layout, service health and a published recovery copy
-for the current layout permit the procedure to record the release and retire the
-hold. Automatic rollback to a pre-migration image is disabled after that switch.
+```bash
+qt storage migrate --operation-file <private-reviewed-operation-plan>
+# Only after inspecting the bound plan and qualifying its prerequisites:
+qt storage migrate --operation-file <private-reviewed-operation-plan> --execute
+```
 
-Before activation, qualify interruption/retry, recent and frozen reads, actual
-service health, recovery publication and repeat-call reconciliation on the exact
-combined source. Functional fixtures do not certify physical SSD/HDD throughput,
-full-volume migration time, collector downtime or complete capacity. Use measured
-limits and an explicit cumulative deadline; never reset it between phases. The
-internal entrypoint needs a prepared request, inventory, operating limits and
-pinned runtime recipe; there is no public pause/resume command.
+The CLI dispatches to `storage_online_operation.run_operation_plan`. The
+[storage manual](../architecture/persistence/STORAGE_MANAGEMENT.md) owns plan
+admission, online preparation, the final bounded pause, runtime activation and
+paired recovery. Inspection does not authorize execution. Ordinary deployment
+does not perform this cutover.
 
-The fixed pause refuses unexpected project/network peers, including bot runtime
-containers; it does not silently stop trading work. It retains PostgreSQL and
-passive telemetry, accepts only `no`/`unless-stopped` restart policies, and checks
-that known clients actually exited without a forced kill. Stopped processes are
-not proof that spool contents or a database switch are safe; those remain
-separate checks in the preserving procedure.
+The retained internal `run_held_runtime_handoff` helper in
+`scripts/automation/storage_handoff_pause.py` is historical compatibility for
+its admitted recipe, including the old collector/database PID relationship.
+It is not the current installation procedure or permission to apply that old
+recipe to the dedicated-maintenance topology.
 
+Preserve durable holds and every interrupted receipt. Never remove a hold,
+reset clocks or restart clients through an older checkout/direct Docker command
+to bypass an unresolved transition. Resolve unknown database outcomes through
+the owning operator before retrying. After a committed switch, admit the matching
+reader/runtime and current-layout recovery; an old application image or retained
+source heap is not a storage rollback.
+
+Before activation, qualify the exact combined source for interruption/retry,
+recent and frozen reads, actual service health, recovery publication and
+repeat-call reconciliation. Functional fixtures do not certify physical
+SSD/HDD throughput, full-volume duration, collector downtime or complete
+capacity. Use measured limits and the original cumulative deadline. Publisher,
+worker and database fences remain separate obligations; stopped processes alone
+do not prove that spool contents or the database switch are safe.
 
 For a dedicated HDD, configure both values in the private operator environment:
 

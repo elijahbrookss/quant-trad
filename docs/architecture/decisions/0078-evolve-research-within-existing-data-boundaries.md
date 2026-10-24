@@ -129,7 +129,7 @@ a safe rollback plan for a system accepting new writes.
 - Promise that date partitioning eliminates future schema migrations.
 - Add a migration framework, second data authority, feature store or resource
   scheduler before a concrete requirement exceeds existing owners.
-- Make H04 or general caching prerequisites for this storage transition, or couple
+- Make a particular research workload or general caching prerequisites for this storage transition, or couple
   separately authorized streaming/cancellation to physical cutover by default.
 
 ## Enforcement and references

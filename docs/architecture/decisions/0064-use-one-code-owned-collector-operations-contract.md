@@ -172,5 +172,5 @@ runtime fallback from missing control fields.
 
 ## Evidence
 
-- [Collector operations discovery](../../engineering/collector-operations-discovery.md)
+- [Collector operating procedure](../../guides/collector-operations.md)
 - [Collector operations control plane](../data/COLLECTOR_OPERATIONS_CONTROL_PLANE.md)

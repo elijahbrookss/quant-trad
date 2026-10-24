@@ -129,7 +129,6 @@ Read these after the main workflow when a result is surprising:
 - [Adding a provider](guides/adding-a-provider.md)
 - [Chainlink structured Facts](guides/chainlink-structured-facts.md)
 - [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md)
-- [Binance futures public data setup](guides/binance-futures-public-data.md)
 - [Developer workflow](engineering/developer-workflow.md)
 
 ## Documentation Rule

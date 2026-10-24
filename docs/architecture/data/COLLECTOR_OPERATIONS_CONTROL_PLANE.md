@@ -306,7 +306,7 @@ and validates that no active claim or stream lease exists. Runtime has no
 missing-column fallback.
 
 See [ADR 0064](../decisions/0064-use-one-code-owned-collector-operations-contract.md)
-and the [discovery report](../../engineering/collector-operations-discovery.md).
+for the architectural decision.
 Operator commands, action guards, and failure procedures are documented in the
 [collector operations guide](../../guides/collector-operations.md).
 

@@ -795,22 +795,12 @@ intervening objects when a request contains sparse endpoints. Both filters use
 `EXISTS`, so overlapping witnesses do not multiply placements. Existing frozen
 bindings, missing-position failures, byte verification, expiry checks and mapping
 budgets remain unchanged; this query change creates no index or historical work.
-A bounded production comparison using 14 sparse scopes and 610 current prefix
-bindings timed out at 2 seconds with the prior shape; the paired-manifest shape
-returned 14 mappings in 278 ms. The bindings were reconstructed from current
-prefix metadata because the failure log truncated its list, so this is a
-representative observation, not an exact replay or a throughput guarantee.
-
-The prefix query materializes the paired manifest selection before joining its
-mappings. PostgreSQL could otherwise flatten the semijoin and apply the exact
-manifest filter after mapping expansion. A later 19-endpoint lookup exceeded the
-five-second production statement limit with that flattened plan. Its bounded
-metadata reconstruction selected 19 manifests (1,219 declared records), compared
-with 352 manifests (22,281 records) before paired filtering; the materialized
-candidate returned 19 mappings in 404 ms in one read-only diagnostic. This is
-query-level evidence, not a whole-retention speedup or deployment receipt. The
-native sparse-prefix test checks the executed manifest subplan as well as exact
-references, overlapping witnesses and inaccessible intervening archive files.
+The query materializes the paired manifest selection before joining mappings.
+Without that boundary PostgreSQL can flatten the semijoin and apply exact
+manifest filtering after expansion. The native sparse-prefix regression checks
+its executed manifest subplan, exact references, overlapping witnesses and
+inaccessible intervening archive files. Query-level plans do not establish
+whole-retention throughput or deployment qualification.
 
 ### Exact Raw-Revision Evidence
 
@@ -1115,11 +1105,8 @@ constant definition/session sets and the outer ordinal envelope, as the existing
 exact-position query does. These redundant predicates let PostgreSQL prune
 manifests before visiting their mappings. The independent sets are only coarse
 bounds: the paired definition/session/epoch/ordinal predicate remains authoritative,
-so unrelated combinations and holes cannot satisfy a witness. A bounded
-production `EXPLAIN` comparison selected the existing manifest primary-key index
-instead of a manifest-table scan for 48 endpoint scopes across 24 known manifests.
-That is planner evidence, not a measured execution speedup or sustained archival
-throughput result; the bounds remain a source candidate until separately deployed.
+so unrelated combinations and holes cannot satisfy a witness. Planner selection
+and bounded regression evidence do not establish sustained archival throughput.
 Placement bounds, expiry exclusion, deterministic ordering, and raw byte
 verification remain unchanged. These query changes add no index or backfill.
 
@@ -1802,11 +1789,11 @@ from expiry, not from a byte-equivalent tier move. Complete all-revision archive
 coverage preserves every pinned subset; overlapping dataset-range counts are
 reported for audit and refreshed during the exclusive handoff.
 
-Each SQL statement defaults to a 1-second timeout. The exclusive phase has a
-10-second checked handoff budget, with checks between pages/dependencies and
-before committing deletion. These are conservative failure bounds, not measured
-production capacity or a promise that transaction commit/fsync completes within
-10 seconds. Large catalogs can fail these bounds safely and need measured tuning.
+Each SQL statement defaults to a 1-second timeout. The exclusive phase checks
+its [configured handoff budget](#configurable-final-reclamation-handoff-budget)
+between pages/dependencies and before committing deletion. These are failure
+bounds rather than measured capacity or a hard commit/fsync deadline. Large
+catalogs can fail safely and require measured tuning.
 No production activation is justified by small disposable fixtures alone.
 
 Performance follow-up: final catalog/source checks run twice and temporarily
@@ -2039,8 +2026,8 @@ meaning; old physical storage does not.
 
 See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
 [Chainlink Structured Facts](CHAINLINK_STRUCTURED_FACTS.md),
-[Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
-and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).
+[Explicit legacy Fact cutover](../../engineering/storage-tiering-validation.md#select-an-explicit-legacy-cutover),
+and [Isolated logical restore](../../engineering/storage-tiering-validation.md#restore-a-logical-backup-in-isolation).
 
 ### Saved Storage policy and canonical archival
 

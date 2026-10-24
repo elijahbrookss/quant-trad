@@ -20,7 +20,7 @@ code_paths:
   - portal/backend/controller/bots.py
   - src/core/settings.py
   - config/defaults.yaml
-  - docs/architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md
+  - docs/architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md
 ---
 # ADR 0020: Use Budgeted Market Data Stream Reconnect Policy
 
@@ -104,6 +104,6 @@ path once the stream policy declares the outage terminal.
 
 ## References
 
-- [Paper Engine V1 Design](../execution-runtime/PAPER_ENGINE_V1_DESIGN.md)
+- [Paper Engine V1 Design](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md#provider-backed-paper-runtime)
 - [Execution & Playback Contract](../../contracts/platform/02_execution_playback_contract.md)
 - [Runtime Contract](../../contracts/platform/01_runtime_contract.md)

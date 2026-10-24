@@ -4,7 +4,7 @@ Coinbase market data can drive an observe-only or simulated paper Bot through
 the normal container runtime. Paper mode does not submit Coinbase orders.
 Use this guide for provider setup; the
 [execution boundary](../architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
-and [paper design](../architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md)
+and [paper design](../architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md#provider-backed-paper-runtime)
 own execution and stream-composition semantics.
 
 ## Check product identity and access

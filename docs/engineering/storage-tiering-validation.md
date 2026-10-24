@@ -45,11 +45,13 @@ The restore sequence is:
 
 1. Create an empty target database and install its required extensions.
 2. Call `timescaledb_pre_restore()` in that target.
-3. Restore pre-data, data and post-data with `pg_restore --exit-on-error`, using
-   `--no-owner --no-privileges` only when the selected ownership plan permits it.
-4. Put the unique `market.fact_schemas` TABLE DATA entry first in the data TOC:
-   hot payload CHECKs call `market.validate_fact_payload`, which reads that
-   catalog. PostgreSQL does not infer this data-order dependency from a function.
+3. Before restoring data, prepare a reviewed TOC list from `pg_restore --list`.
+   Require exactly one `market.fact_schemas` TABLE DATA entry and put it first in
+   that list. Hot payload CHECKs call `market.validate_fact_payload`, which reads
+   the catalog; PostgreSQL cannot infer that data-order dependency.
+4. Restore pre-data, then data with `--section=data --use-list=<ordered-toc>`,
+   then post-data. Use `pg_restore --exit-on-error` throughout, and
+   `--no-owner --no-privileges` only when the ownership plan permits it.
 5. Restore serially for this schema; do not assume `pg_restore -j` is supported.
 6. Call `timescaledb_post_restore()`, including cleanup of restore mode after an
    unsuccessful attempt, then run `ANALYZE`.

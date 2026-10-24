@@ -51,6 +51,7 @@ A candidate signal can exist before validation; its existence establishes
 neither usefulness nor profitability. Strategy owns decisions and Bot owns
 execution.
 
+<a id="decision"></a>
 ## Retirement must preserve interpretation without claiming replay
 
 Remove unused executable composition registries and unsupported catalog entries

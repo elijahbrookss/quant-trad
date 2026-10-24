@@ -204,8 +204,8 @@ Useful relations include:
 
 ## Invariants
 
-- Research memory owns reasoning and evidence relationships; runtime owns
-  decisions, execution and accounting facts.
+- Research memory owns reasoning and evidence relationships. Strategy owns
+  decision logic; runtime owns execution and accounting facts.
 - Every durable finding preserves its actual input, quality, method and result
   classification. A manual note or legacy payload cannot masquerade as calculated
   frozen evidence.

@@ -263,6 +263,6 @@ forbidden legacy-symbol/table scans, query-plan tests for declared indexes, and
 full repository/CLI/API/MCP regression tests.
 
 See [Generalized Fact Data Plane](../data/GENERALIZED_FACT_DATA_PLANE.md) and
-[Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
-[Migration Validation](../../engineering/canonical-fact-migration-validation.md),
+[Explicit legacy Fact cutover](../../engineering/storage-tiering-validation.md#select-an-explicit-legacy-cutover),
+[Migration Validation](../../engineering/storage-tiering-validation.md#use-the-existing-disposable-proofs),
 and [Chainlink Structured Facts](../data/CHAINLINK_STRUCTURED_FACTS.md).

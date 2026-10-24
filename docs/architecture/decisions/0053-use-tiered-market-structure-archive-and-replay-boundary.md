@@ -40,6 +40,7 @@ the original family-table topology is historical. Current retention and operator
 admission belong to [the Fact data plane](../data/GENERALIZED_FACT_DATA_PLANE.md)
 and [storage management](../persistence/STORAGE_MANAGEMENT.md).
 
+<a id="decision"></a>
 ## Keep receipt evidence separate from query facts
 
 High-volume provider frames, typed query facts and frozen execution inputs have
@@ -61,6 +62,7 @@ Consumers replay admitted local evidence without provider access.
 Delivery between durable boundaries is at-least-once with deterministic
 idempotency. This design does not promise distributed exactly-once delivery.
 
+<a id="invariants"></a>
 ## Publication and reconstruction need explicit evidence
 
 Local durability is the minimum before canonical publication. The implemented
