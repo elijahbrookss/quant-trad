@@ -9,6 +9,9 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.fact_archive import FactArchiveLimits
 from market_data.archive_verification import ArchiveVerificationLimits
 from portal.backend.service.storage.repos import fact_archival
+from portal.backend.service.storage.repos.fact_archive_generation import (
+    canonical_dependency_projection, material_alias_projection,
+)
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, _ingest, _read
 
 pytestmark = pytest.mark.db
@@ -141,7 +144,7 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
                                {"day": day}).scalar_one() == 3
         assert session.execute(text("SELECT sum(row_count) FROM market.fact_archive_series")).scalar_one() == 3
 
-    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+    with pytest.raises(RuntimeError, match="verification_generation_changed"):
         restarted.verify_partition(day)
     assert restarted.verify_next_page(day)["page_ordinal"] == 0
 
@@ -254,9 +257,11 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
         assert public_status["pinned"] is execution_status["pinned"] is True
         assert public_status["ordinary_retention_eligible"] is False
     with storage.database.session() as session:
-        assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases")).scalar_one() == 2
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases")).scalar_one() == 0
+        assert session.execute(text(f"SELECT count(*) FROM {material_alias_projection()}")).scalar_one() == 2
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_dependencies")).scalar_one() == 3
-        assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies")).scalar_one() == 2
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies")).scalar_one() == 0
+        assert session.execute(text(f"SELECT count(*) FROM {canonical_dependency_projection()}")).scalar_one() == 2
     assert archive.verify_next_page(day)["status"] == "page_verified"
     path.write_bytes(b"x" * len(original))
     with pytest.raises(RuntimeError, match="checksum_mismatch"):
@@ -309,8 +314,8 @@ def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, t
     with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
         archive.verify_partition(day)
     archive.verify_next_page(day)
-    # Immutability prevents changing existing entries, but inserting a new
-    # false alias after a receipt must invalidate its exact catalog binding.
+    # Legacy rows remain insert-only for historical compatibility, but an
+    # active generation excludes them from its authoritative catalog projection.
     with storage.database.session() as session:
         fact_id = session.execute(text("SELECT first_id FROM market.fact_archive_manifests WHERE id=:id"),
                                   {"id": first["manifest_id"]}).scalar_one()
@@ -318,9 +323,11 @@ def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, t
             manifest_id=first["manifest_id"], fact_version_id=fact_id, series_id=storage.series_id,
             evidence_key="forged-test-alias", material_hash="a" * 64,
         ))
-    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
-        archive.verify_partition(day)
-    assert archive.inspect_partition(day)["state"] == "sealed"
+    # A legacy row is not authoritative once this manifest has an active
+    # prepared generation. It cannot extend or invalidate that generation's
+    # verification receipt.
+    assert archive.verify_partition(day)["row_count"] == 2
+    assert archive.inspect_partition(day)["state"] == "verified"
 
 
 def test_page_verification_fences_expiry_and_other_workers_but_allows_collection(storage, tmp_path, monkeypatch):
@@ -528,9 +535,11 @@ def test_catalogue_writes_finish_under_per_statement_limit_with_slow_rows(
             ON market.fact_archive_prepared_material_aliases FOR EACH ROW
             EXECUTE FUNCTION market.test_slow_alias_insert()
         """))
-    # Apply the artificial deadline through the normal repository contract.
-    # Every hidden catalog transaction reacquires the day lock and inherits it.
-    fixture.archive.statement_timeout_ms = 2000
+    # Apply the artificial deadline to hidden catalog transactions only.
+    # Shared-CI source planning retains the ordinary statement policy.
+    fixture.archive._generation.lock_day = lambda session, day: fixture.archive._lock(
+        session, day, statement_timeout_ms=2000,
+    )
     # A coarse batch is the control under the same row cost and deadline. It
     # must fail at the prepared alias INSERT. Its one transaction rolls back,
     # while the fenced preparation remains resumable and stays invisible.
@@ -723,10 +732,12 @@ def test_canonical_dependency_batch_stop_rolls_back_every_page_catalog(
             "SELECT id,state FROM market.fact_archive_preparations WHERE storage_day=:day"
         ), {"day": fixture.day}).mappings().one()
         assert preparation["state"] == "building"
-        assert session.execute(text(
+        persisted = session.execute(text(
             "SELECT count(*) FROM market.fact_archive_prepared_canonical_dependencies "
             "WHERE preparation_id=:id"
-        ), {"id": preparation["id"]}).scalar_one() == fact_archival._CATALOG_WRITE_BATCH_ROWS
+        ), {"id": preparation["id"]}).scalar_one()
+        assert 0 < persisted <= fact_archival._CATALOG_WRITE_BATCH_ROWS
+        assert persisted == preparation["canonical_dependency_count"]
     objects = set(fixture.store.root.rglob("*.parquet"))
     result = _acknowledge_alias_page(fixture)
     assert result["page_ordinal"] == 0 and result["row_count"] == fixture.count

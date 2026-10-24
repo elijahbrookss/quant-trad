@@ -13,6 +13,9 @@ from scripts.db.fact_header_v2_capture import SCHEMA
 from tests.test_market_data.test_fact_header_copy_db import source, _finish, _insert, _headers
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, BASE
 from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture, stage_shadow_handoff_fixture
+from portal.backend.service.storage.repos.fact_archive_generation import (
+    canonical_dependency_projection, material_alias_projection,
+)
 
 pytestmark=pytest.mark.db
 
@@ -140,8 +143,12 @@ def test_prevalidated_cold_references_survive_interrupted_handoff_and_frozen_rea
     with engine.connect() as conn:
         source_before=_headers(conn,copy.SOURCE)
         frozen_pairs=conn.execute(text("SELECT dataset_id,series_id FROM market.dataset_series ORDER BY dataset_id,series_id")).all()
-        relationships={name:conn.execute(text(f"SELECT to_jsonb(t) FROM market.{name} t ORDER BY to_jsonb(t)::text")).scalars().all()
-                       for name in ("fact_archive_material_aliases","fact_archive_canonical_dependencies")}
+        projections = {
+            "aliases": material_alias_projection("t"),
+            "dependencies": canonical_dependency_projection("t"),
+        }
+        relationships={name:conn.execute(text(f"SELECT to_jsonb(t) FROM {projection} ORDER BY to_jsonb(t)::text")).scalars().all()
+                       for name,projection in projections.items()}
         assert all(relationships.values())
         ranges=conn.execute(text("""
             SELECT series_id,min(observation_time),max(observation_time) FROM market.fact_versions GROUP BY series_id
@@ -185,5 +192,5 @@ def test_prevalidated_cold_references_survive_interrupted_handoff_and_frozen_rea
         assert storage.repo.read_facts(series_id=series,start=start-timedelta(seconds=1),end=end+timedelta(seconds=1))==records
     with engine.connect() as conn:
         for name,rows in relationships.items():
-            assert conn.execute(text(f"SELECT to_jsonb(t) FROM market.{name} t ORDER BY to_jsonb(t)::text")).scalars().all()==rows
+            assert conn.execute(text(f"SELECT to_jsonb(t) FROM {projections[name]} ORDER BY to_jsonb(t)::text")).scalars().all()==rows
     assert archive_bytes=={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.rglob("*") if p.is_file()}

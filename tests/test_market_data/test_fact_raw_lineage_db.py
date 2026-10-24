@@ -527,7 +527,7 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
             with monkeypatch.context() as old_verifier:
                 old_verifier.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", "market.canonical_archive_verification.v1")
                 assert archive.verify_next_page(day)["page_ordinal"] == 0
-            with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+            with pytest.raises(RuntimeError, match="verification_generation_changed"):
                 archive.verify_partition(day)
         assert archive.verify_next_page(day)["status"] == "page_verified"
     assert archive.verify_partition(day)["row_count"] == 2
@@ -592,7 +592,7 @@ def test_older_verified_partitions_restart_without_reusing_deletion_authority(st
         raw_key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
                                   {"id": fixture.manifests[0]}).scalar_one()
     reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
-    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+    with pytest.raises(RuntimeError, match="verification_generation_changed"):
         reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert _physical(storage, day)["hot_rows"] == 2
     policy = CanonicalFactRetentionPolicy(execution_enabled=True, hot_days=1, max_steps_per_run=1,

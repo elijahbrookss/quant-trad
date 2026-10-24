@@ -162,13 +162,21 @@ def test_batched_final_catalogs_keep_multipage_history_and_late_mutation_refusal
         if phases == 2 and mutate_last_page:
             # The last page crosses the16-manifest batch boundary. It must not
             # inherit another page's empty-alias proof or first-pass authority.
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_verification_generations DISABLE TRIGGER "
+                "trg_reject_mutation_fact_archive_verification_generations"
+            ))
             session.execute(text("""
-                INSERT INTO market.fact_archive_material_aliases
-                    (manifest_id,fact_version_id,series_id,evidence_key,material_hash)
-                SELECT id,first_id,:series,'late-batch-alias',:hash
-                FROM market.fact_archive_manifests WHERE storage_day=:day
-                ORDER BY page_ordinal DESC LIMIT 1
-            """), {"day":day,"series":storage.series_id,"hash":"b"*64})
+                DELETE FROM market.fact_archive_verification_generations
+                WHERE manifest_id=(
+                    SELECT id FROM market.fact_archive_manifests WHERE storage_day=:day
+                    ORDER BY page_ordinal DESC LIMIT 1
+                )
+            """), {"day":day})
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_verification_generations ENABLE ALWAYS TRIGGER "
+                "trg_reject_mutation_fact_archive_verification_generations"
+            ))
     def query(_connection, _cursor, statement, *_):
         if phases == 2:
             statements.append(statement)
@@ -176,7 +184,7 @@ def test_batched_final_catalogs_keep_multipage_history_and_late_mutation_refusal
     event.listen(storage.database._engine, "before_cursor_execute", query)
     try:
         if mutate_last_page:
-            with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+            with pytest.raises(RuntimeError, match="verification_generation_changed"):
                 reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
             assert archive.inspect_partition(day) == initial
             after = _physical(storage, day)

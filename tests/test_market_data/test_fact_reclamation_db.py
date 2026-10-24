@@ -237,15 +237,23 @@ def test_reclamation_failures_leave_hot_partition_and_progress_intact(storage, t
         actual_timeouts(session)
         calls += 1
         if calls == 2:
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_verification_generations DISABLE TRIGGER "
+                "trg_reject_mutation_fact_archive_verification_generations"
+            ))
             session.execute(text("""
-                INSERT INTO market.fact_archive_material_aliases
-                    (manifest_id, fact_version_id, series_id, evidence_key, material_hash)
-                SELECT id, first_id, :series, 'injected-alias', :hash
-                FROM market.fact_archive_manifests WHERE storage_day=:day
-            """), {"day": day, "series": storage.series_id, "hash": "a" * 64})
+                DELETE FROM market.fact_archive_verification_generations
+                WHERE manifest_id IN (
+                    SELECT id FROM market.fact_archive_manifests WHERE storage_day=:day
+                )
+            """), {"day": day})
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_verification_generations ENABLE ALWAYS TRIGGER "
+                "trg_reject_mutation_fact_archive_verification_generations"
+            ))
     with monkeypatch.context() as patch:
         patch.setattr(reclaimer, "_timeouts", changed_catalog)
-        with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="verification_generation_changed"):
             reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert calls == 2
     assert archive.inspect_partition(day) == initial

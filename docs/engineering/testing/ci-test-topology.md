@@ -163,8 +163,9 @@ server utilities and a private process/filesystem environment. The fixture
 starts a temporary Unix-socket-only cluster with no inherited database
 credentials and a synthetic udev UUID entry; it does not exercise live disks.
 The storage-demo proof collection also includes a named nondefault-tablespace
-generation migration: the prepared alias and canonical-dependency heap, TOAST
-relation and indexes must inherit their legacy catalog's owned history placement.
+generation migration: each prepared alias and canonical-dependency heap,
+every TOAST relation that exists, and all indexes must inherit the corresponding
+legacy catalog's owned history placement.
 The reader-floor proof uses the immediate pre-generation application commit and
 the localhost-only disposable PostgreSQL service. Neither proof deploys or
 contacts production.

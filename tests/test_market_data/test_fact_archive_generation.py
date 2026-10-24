@@ -272,6 +272,12 @@ def test_interrupted_catalog_batch_is_resumed_then_activated_without_legacy_copy
         temporary_directory=tmp_path / "staging",
     )
     archive.seal_partition(day)
+    monkeypatch.setattr(fact_archival, "legacy_material_alias", lambda row: {
+        "fact_version_id": row["id"],
+        "evidence_key": "generation-interruption-fixture",
+        "series_id": row["series_id"],
+        "material_hash": row["material_hash"],
+    })
     original = archive._generation._stage_batch
     failed = False
 

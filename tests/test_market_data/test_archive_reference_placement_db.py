@@ -110,7 +110,7 @@ def _member_tablespaces(conn, relation):
 
 
 def test_generation_migration_inherits_named_reference_tablespace(placed):
-    """Prepared heap, TOAST and indexes inherit the real legacy HDD tablespace."""
+    """Every actual prepared heap, TOAST table and index inherits HDD placement."""
     engine = placed.database._engine
     legacy = (
         "market.fact_archive_material_aliases",
@@ -126,7 +126,7 @@ def test_generation_migration_inherits_named_reference_tablespace(placed):
         for relation in legacy:
             _move_relation_with_indexes(conn, relation, placed.copy_history_name)
             observed = _member_tablespaces(conn, relation)
-            assert {role for role, _ in observed} >= {"heap", "toast", "index"}
+            assert {role for role, _ in observed} >= {"heap", "index"}
             assert {name for _, name in observed} == {placed.copy_history_name}
 
     receipt = migrate(placed.database)
@@ -134,7 +134,7 @@ def test_generation_migration_inherits_named_reference_tablespace(placed):
     with engine.connect() as conn:
         for relation in prepared:
             observed = _member_tablespaces(conn, relation)
-            assert {role for role, _ in observed} >= {"heap", "toast", "index"}
+            assert {role for role, _ in observed} >= {"heap", "index"}
             assert {name for _, name in observed} == {placed.copy_history_name}
             _assert_disk(conn, relation, Path("/qt-history"))
 

@@ -12,6 +12,7 @@ from market_data.market_state import MarketStateValuationContract, derive_basis_
 from portal.backend.db import InstrumentRecord
 from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
 from portal.backend.service.storage.repos import fact_archival, fact_reclamation, market_data, market_structure
+from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from portal.backend.service.storage.repos.fact_derived_admission import resolve_material_source_revisions
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
@@ -173,7 +174,7 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
                                                {"id": old_page["id"]}).mappings().one())
             assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies WHERE manifest_id=:id"),
                                    {"id": old_page["id"]}).scalar_one() == 0
-        with pytest.raises(RuntimeError, match="canonical_archive_verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="canonical_archive_verification_generation_changed"):
             reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
         assert _physical(storage, day)["relation"] is not None
         assert archive.restart_partition_verification(day)["status"] == "partition_verification_restarted"
@@ -186,9 +187,9 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
                 "WHERE manifest_id=:id AND verifier_version=:version"),
                 {"id": old_page["id"], "version": old_receipt["verifier_version"]}).mappings().one()) == old_receipt
     with storage.database.session() as session:
-        edges = session.execute(text("""
+        edges = session.execute(text(f"""
             SELECT source.id,source.fact_type,source.market_commit_seq,source.known_at
-            FROM market.fact_archive_canonical_dependencies AS edge
+            FROM {canonical_dependency_projection("edge")}
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=edge.manifest_id
             JOIN market.fact_versions AS source ON source.id=edge.fact_version_id
             WHERE manifest.storage_day=:day ORDER BY source.id

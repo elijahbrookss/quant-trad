@@ -124,6 +124,21 @@ SELECT json_build_object(
         raise RuntimeError("storage_online_recovery_database_not_quiescent")
 
 
+def _wait_database_quiescent(identity, deadline, *, interval_seconds=0.2):
+    """Wait within the operation deadline for transient database workers to exit."""
+    while True:
+        try:
+            _require_database_quiescent(identity)
+            return
+        except RuntimeError as exc:
+            if str(exc) != "storage_online_recovery_database_not_quiescent":
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(interval_seconds, remaining))
+
+
 def prepare_database(state_root, *, saved, worker_process, keys_root, socket_volume,
                      max_duration_seconds, source_check):
     """Single live invocation; every failed dispatch remains unresolved, never retried."""
@@ -171,7 +186,7 @@ def prepare_database(state_root, *, saved, worker_process, keys_root, socket_vol
             observed = json.loads(host.maintenance_query(identity, _GATE_OBSERVE))
             if observed != expected_gate:
                 raise RuntimeError("storage_online_recovery_gate_changed")
-            _require_database_quiescent(identity)
+            _wait_database_quiescent(identity, deadline)
 
         gate(original["id"])
         _admit_mount_writers(rows, operator_id=worker_id)

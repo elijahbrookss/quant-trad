@@ -200,3 +200,28 @@ def test_quiescence_zero_counts_remain_silent(monkeypatch, capsys):
         dict(backends=0, prepared=0, backend_sample=[], backend_sample_truncated=False)))
     recovery._require_database_quiescent("owned-database")
     assert capsys.readouterr().err == ""
+
+
+def test_quiescence_wait_admits_transient_worker_without_weakening_gate(monkeypatch):
+    outcomes = [
+        RuntimeError("storage_online_recovery_database_not_quiescent"),
+        RuntimeError("storage_online_recovery_database_not_quiescent"),
+        None,
+    ]
+    calls = []
+    def require(identity):
+        calls.append(identity)
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+    monkeypatch.setattr(recovery, "_require_database_quiescent", require)
+    monkeypatch.setattr(recovery.time, "sleep", lambda seconds: calls.append(seconds))
+    recovery._wait_database_quiescent("owned-database", recovery.time.monotonic() + 1)
+    assert calls == ["owned-database", 0.2, "owned-database", 0.2, "owned-database"]
+
+
+def test_quiescence_wait_preserves_refusal_at_deadline(monkeypatch):
+    refusal = RuntimeError("storage_online_recovery_database_not_quiescent")
+    monkeypatch.setattr(recovery, "_require_database_quiescent", lambda identity: (_ for _ in ()).throw(refusal))
+    with pytest.raises(RuntimeError, match="^storage_online_recovery_database_not_quiescent$"):
+        recovery._wait_database_quiescent("owned-database", recovery.time.monotonic())
