@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
-import hashlib
+from itertools import repeat
 import struct
 from types import SimpleNamespace
 from contextlib import nullcontext
@@ -111,6 +111,8 @@ def test_admission_refuses_changed_physical_or_identity_contract(monkeypatch, fa
     proof.bound = (day, 1, {"manifest_set_hash": "root"}, limits)
     relation = {"relname": "fact_versions_20000101", "parents": [10], "filenode": 20}
     proof.relations[1] = relation
+    proof.relation_kinds[1] = "header"
+    proof.header_days[1] = {day}
     monkeypatch.setattr(proof, "_metadata", lambda *a: {**relation, **({"filenode": 21} if failure == "rewrite" else {})})
     if failure == "wrong_parent":
         relation["parents"] = [11]
@@ -118,10 +120,15 @@ def test_admission_refuses_changed_physical_or_identity_contract(monkeypatch, fa
         if failure == "key_contract":
             raise RuntimeError("key_contract_changed")
     monkeypatch.setattr(handoff, "assert_fact_identity_contract", contract)
+    monkeypatch.setattr(proof, "_assert_immutable_guards", lambda *a: None)
+    monkeypatch.setattr(proof, "_assert_hot_insert_guards", lambda *a: None)
     statements = []
     def execute(statement, *_):
         value = str(statement); statements.append(value)
-        scalar = ("replica" if failure == "replica" else "origin") if "session_replication_role" in value else 10
+        scalar = (("replica" if failure == "replica" else "origin")
+                  if "session_replication_role" in value else
+                  20 if "fact_hot_payloads'::regclass" in value else
+                  30 if "fact_archive_manifests'::regclass" in value else 10)
         checks = [{"proname": "RI_FKey_check_ins", "tgtype": 5, "tgenabled": "D" if failure == "disabled_fk" else "O", "unqualified": True},
                   {"proname": "RI_FKey_check_upd", "tgtype": 17, "tgenabled": "O", "unqualified": True}]
         return SimpleNamespace(scalar_one=lambda: scalar, mappings=lambda: SimpleNamespace(all=lambda: checks))
@@ -151,66 +158,176 @@ def test_nested_schema_queries_check_deadline_and_remove_listener():
     engine.dispose()
 
 
-def test_global_header_runs_deduplicate_only_identical_fresh_bindings(monkeypatch):
+def _cold_manifest(source_id="cold", manifest_id="manifest"):
+    return {
+        "source_id": source_id, "id": manifest_id,
+        "storage_day": date(1999, 12, 31), "page_ordinal": 0,
+        "object_key": "object", "object_sha256": "a" * 64,
+        "manifest_hash": "b" * 64, "row_count": 1, "byte_count": 2,
+        "first_commit_seq": 1, "first_id": "cold",
+        "last_commit_seq": 1, "last_id": "cold",
+        "_handoff_descriptor": "{}",
+    }
+
+
+def test_source_batches_retain_page_and_relation_authority_without_row_witnesses(monkeypatch):
     proof = handoff.FactHandoffProof(check_budget=lambda: None)
     monkeypatch.setattr(proof, "_relation", lambda *a, **k: None)
     proof.pages["page"] = ({}, {})
-    def row(tid, identity):
-        return {"id": identity, "storage_day": date(2000, 1, 1), "row_hash": "a" * 64,
-                "market_commit_seq": 1, "hot_present": True, "_handoff_oid": 1, "_handoff_tid": tid}
-    first, second = row("(10,2)", "first"), row("(2,10)", "second")
-    proof.capture_sources(None, "page", [first], [])
-    proof.capture_sources(None, "page", [second, first], [])
-    proof._compile_headers()
-    assert proof.source_frames == {}
-    witness, = proof.source_headers
-    assert witness.count == 2 and witness.tids == '{"(2,10)","(10,2)"}'
-    assert witness.digest == hashlib.sha256(b"".join(hashlib.sha256(handoff._record(item, handoff._HEADER)).digest()
-                                                   for item in [second, first])).hexdigest()
-    assert witness.hashed_rows is True
+    proof.source_batches["page"] = []
+    rows = [
+        {"id": identity, "storage_day": date(2000, 1, 1), "row_hash": "a" * 64,
+         "market_commit_seq": index, "hot_present": True,
+         "_handoff_oid": 1, "_handoff_hot_oid": 2}
+        for index, identity in enumerate(("first", "second"), 1)
+    ]
+    proof.capture_sources(None, "page", rows, [])
+    proof.record_source_hash("page", "p" * 64)
+    commitment = proof.source_commitments["page"]
+    assert proof.source_batches == {}
+    assert commitment.placement_hash == "p" * 64
+    assert commitment.batches == (handoff._source_batch(rows, []),)
+    assert proof.source_row_count == 2
+    assert proof.header_days == {1: {date(2000, 1, 1)}}
+    assert proof.hot_days == {2: {date(2000, 1, 1)}}
+    assert proof.cold_manifests == {}
 
 
-def test_global_duplicate_tuple_with_different_first_pass_fields_refuses(monkeypatch):
+def test_source_capture_binds_distinct_cold_manifest_authority(monkeypatch):
     proof = handoff.FactHandoffProof(check_budget=lambda: None)
     monkeypatch.setattr(proof, "_relation", lambda *a, **k: None)
     proof.pages["page"] = ({}, {})
+    proof.source_batches["page"] = []
+    header = {"id": "cold", "storage_day": date(1999, 12, 31),
+              "row_hash": "a" * 64, "market_commit_seq": 1,
+              "hot_present": False, "_handoff_oid": 1,
+              "_handoff_hot_oid": None}
+    manifest = _cold_manifest()
+    proof.capture_sources(None, "page", [header], [manifest])
+    proof.capture_sources(None, "page", [header], [manifest])
+    assert proof.cold_days == {date(1999, 12, 31)}
+    assert proof.cold_manifests == {"manifest": handoff._digest([manifest], handoff._MANIFEST)}
+
+
+def test_duplicate_or_out_of_order_source_batch_refuses(monkeypatch):
+    proof = handoff.FactHandoffProof(check_budget=lambda: None)
+    monkeypatch.setattr(proof, "_relation", lambda *a, **k: None)
+    proof.pages["page"] = ({}, {})
+    proof.source_batches["page"] = []
     row = {"id": "same", "storage_day": date(2000, 1, 1), "row_hash": "a" * 64,
-           "market_commit_seq": 1, "hot_present": True, "_handoff_oid": 1, "_handoff_tid": "(2,1)"}
-    proof.capture_sources(None, "page", [row], [])
-    proof.capture_sources(None, "page", [{**row, "row_hash": "b" * 64}], [])
-    with pytest.raises(RuntimeError, match="inconsistent_source_tuple"):
-        proof._compile_headers()
+           "market_commit_seq": 1, "hot_present": True, "_handoff_oid": 1,
+           "_handoff_hot_oid": 2}
+    with pytest.raises(RuntimeError, match="source_commitment_order_invalid"):
+        proof.capture_sources(None, "page", [row, dict(row)], [])
 
 
-def test_duplicate_heavy_source_merge_checks_cancellation_before_distinct_flush():
-    calls = []
-    def cancel():
-        calls.append(True)
-        if len(calls) == 4:
-            raise RuntimeError("cancel duplicate-heavy merge")
-    proof = handoff.FactHandoffProof(check_budget=cancel)
-    frame = struct.pack("!IHi", 1, 1, 0) + b"a" * 32
-    proof.source_frames[1] = [frame * 10000]
-    with pytest.raises(RuntimeError, match="cancel duplicate-heavy"):
-        proof._compile_headers()
-    assert len(calls) == 4 and proof.bound is None and not proof.source_headers
+def test_failed_scale_capture_path_retains_only_page_batch_commitments(monkeypatch):
+    proof = handoff.FactHandoffProof(check_budget=lambda: None)
+    monkeypatch.setattr(proof, "_relation", lambda *a, **k: None)
+    monkeypatch.setattr(handoff, "_digest", lambda *a, **k: "d" * 64)
+    monkeypatch.setattr(
+        handoff,
+        "_source_batch",
+        lambda headers, matches: handoff._SourceBatch(
+            len(headers), "h" * 64, len(matches), "c" * 64,
+        ),
+    )
+
+    class RepeatedRows:
+        def __init__(self, row, count):
+            self.row, self.count = row, count
+
+        def __iter__(self):
+            return repeat(self.row, self.count)
+
+        def __len__(self):
+            return self.count
+
+    pages, rows = 529, 5_221_054
+    base, remainder = divmod(rows, pages)
+    header = {
+        "id": "source", "storage_day": date(2000, 1, 1),
+        "row_hash": "a" * 64, "market_commit_seq": 1,
+        "hot_present": False, "_handoff_oid": 1, "_handoff_hot_oid": None,
+    }
+    manifest = _cold_manifest(source_id="source")
+    for page in range(pages):
+        identity = f"page-{page:04d}"
+        proof.pages[identity] = ({}, {})
+        proof.source_batches[identity] = []
+        count = base + int(page < remainder)
+        proof.capture_sources(
+            None, identity, RepeatedRows(header, count),
+            RepeatedRows(manifest, count),
+        )
+        proof.record_source_hash(identity, "a" * 64)
+    assert proof.source_row_count == rows
+    assert len(proof.source_commitments) == pages
+    assert proof.retained_bytes < 4 * 1024 * 1024
+    assert proof.cold_days == {date(1999, 12, 31)}
+    assert set(proof.cold_manifests) == {"manifest"}
+    assert not hasattr(proof, "source_frames") and not hasattr(proof, "source_headers")
 
 
-def test_preparation_does_not_admit_or_make_cached_source_hash_current(monkeypatch):
+def test_prepare_validates_page_commitment_cardinality_without_rereading_sources():
     proof = handoff.FactHandoffProof(check_budget=lambda: None)
     proof.bound = (None, None, {}, None)
-    proof.source_hashes["page"] = "old"
-    calls = []
-    monkeypatch.setattr(proof, "_compare_headers", lambda *a: calls.append("fresh read"))
+    proof.source_commitments["page"] = handoff._SourceCommitment(
+        (handoff._SourceBatch(1, "h" * 64, 0, "c" * 64),), "a" * 64,
+    )
+    proof.catalogs["page"] = {"canonical_dependencies": SimpleNamespace(count=1)}
     proof.prepare_headers(None, lambda: None)
-    assert calls == ["fresh read"] and not proof.admitted and not proof.headers_current
+    assert proof.authority_prepared and not proof.admitted and not proof.headers_current
     with pytest.raises(RuntimeError, match="source_proof_not_current"):
         proof.source_hash("page")
     with pytest.raises(RuntimeError, match="not_admitted"):
         proof.verify_headers(None, lambda: None)
-    with pytest.raises(RuntimeError, match="source_proof_not_current"):
-        proof.verify_sources(None, "page", lambda: None)
 
+
+def test_prepare_refuses_mismatched_page_commitment():
+    proof = handoff.FactHandoffProof(check_budget=lambda: None)
+    proof.bound = (None, None, {}, None)
+    proof.source_commitments["page"] = handoff._SourceCommitment(
+        (handoff._SourceBatch(1, "h" * 64, 0, "c" * 64),), "a" * 64,
+    )
+    proof.catalogs["page"] = {"canonical_dependencies": SimpleNamespace(count=2)}
+    with pytest.raises(RuntimeError, match="source_commitment_invalid"):
+        proof.prepare_headers(None, lambda: None)
+
+
+def test_admitted_authority_check_is_required_before_page_source_hash(monkeypatch):
+    proof = handoff.FactHandoffProof(check_budget=lambda: None)
+    proof.admitted = True
+    proof.authority_prepared = True
+    proof.source_commitments["page"] = handoff._SourceCommitment((), "p" * 64)
+    calls = []
+    monkeypatch.setattr(proof, "_verify_manifest_authority", lambda *a: calls.append("authority"))
+    proof.verify_headers(None, lambda: calls.append("budget"))
+    assert calls == ["authority", "budget"] and proof.headers_current
+    proof.fresh_catalogs.add("page")
+    proof.verify_sources(None, "page", lambda: None)
+    assert proof.source_hash("page") == "p" * 64
+
+
+def test_manifest_authority_rejects_changed_row():
+    proof = handoff.FactHandoffProof(check_budget=lambda: None)
+    manifest = _cold_manifest()
+    proof.cold_manifests["manifest"] = handoff._digest([manifest], handoff._MANIFEST)
+    proof.cold_days.add(date(1999, 12, 31))
+
+    def execute(statement, parameters):
+        sql = str(statement)
+        if "FROM market.fact_archive_manifests" in sql and "WITH ordered" not in sql:
+            changed = {**manifest, "manifest_hash": "c" * 64}
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [changed]))
+        if "FROM market.fact_retention_partitions" in sql:
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [
+                {"storage_day": date(1999, 12, 31), "state": "verified"},
+            ]))
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    with pytest.raises(RuntimeError, match="manifest_authority_changed"):
+        proof._verify_manifest_authority(SimpleNamespace(execute=execute))
 
 def _catalog_batch_fixture(count, *, tid_chars=8):
     proof = handoff.FactHandoffProof(check_budget=lambda: None)

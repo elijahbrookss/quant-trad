@@ -270,14 +270,14 @@ class PostgresCanonicalFactReclamationRepository:
             self._assert_archive_admission(objects)
             if handoff is not None:
                 handoff.bind(day, relation_oid, evidence, verification_limits)
-                # Keep the current source working set near the handoff. This
-                # extra shared-phase check is inside the original run budget;
-                # the exclusive phase MUST still read/compare every row again.
+                # Validate the complete bounded commitment set before the
+                # handoff. Final authority comes from immutable relation and
+                # manifest admission plus fresh page-catalog verification.
                 prepared = perf_counter()
                 handoff.prepare_headers(session, self.archive._check_budget)
                 self._assert_archive_admission(objects)
                 logger.info("canonical_reclaim_handoff_prepared | storage_day=%s source_rows=%s seconds=%s witness_bytes=%s",
-                            day, sum(item.count for item in handoff.source_headers),
+                            day, handoff.source_row_count,
                             perf_counter() - prepared, handoff.retained_bytes)
             evidence["protected_dataset_ranges"], evidence["pinned_ranges_statement_timeout_ms"] = (
                 self._pinned_ranges(session, day))

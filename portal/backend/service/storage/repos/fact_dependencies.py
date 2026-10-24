@@ -312,7 +312,8 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
     return result
 
 
-def verify_canonical_source_placements(session, dependencies, *, objects=None, check_budget=None, handoff=None, manifest_id=None):
+def verify_canonical_source_placements(session, dependencies, *, objects=None, check_budget=None,
+                                       handoff=None, manifest_id=None):
     """Recheck exact source headers and cold bytes while lifecycle-fenced.
 
     The returned hash is ephemeral: compare it across the destructive handoff,
@@ -342,8 +343,10 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
         headers = session.execute(text("""
             SELECT versions.id, versions.row_hash, versions.storage_day,
                    hot.id IS NOT NULL AS hot_present
-            """ + (", versions.market_commit_seq,versions.ctid::text AS _handoff_tid,versions.tableoid AS _handoff_oid "
-                   if handoff is not None else "") + """
+            """ + (", versions.market_commit_seq " if handoff is not None else "")
+                   + (", versions.tableoid::bigint AS _handoff_oid,"
+                      "hot.tableoid::bigint AS _handoff_hot_oid "
+                      if handoff is not None else "") + """
             FROM market.fact_versions AS versions
             LEFT JOIN market.fact_hot_payloads AS hot
               ON hot.storage_day=versions.storage_day AND hot.id=versions.id

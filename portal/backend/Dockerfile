@@ -64,6 +64,7 @@ COPY scripts/db/archive_file_v2_proof.py \
 # Fixed online worker and preserving recovery dependencies. The held worker
 # drops to the database UID before opening a connection.
 COPY scripts/automation/storage_online_controller.py \
+     scripts/automation/canonical_retention_action.py \
      scripts/automation/storage_online_terminal.py \
      scripts/automation/storage_online_keys.py \
      scripts/automation/storage_online_launch.py \

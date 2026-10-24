@@ -60,6 +60,150 @@ def test_step_budget_and_next_phase_are_driven_by_replanned_progress(tmp_path, m
     assert seen[-1] == "verify_page" and calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
 
 
+@pytest.mark.parametrize("action", ["stage_page", "reclaim_partition"])
+def test_selected_action_executes_exactly_one_fresh_matching_plan_item(tmp_path, monkeypatch, action):
+    executor, calls = _executor([_plan([_item(action), _item(day=DAY + timedelta(days=1))])])
+    seen = []
+    committed = module._SELECTED_SUCCESS[action]
+    monkeypatch.setattr(
+        executor, "_execute_step",
+        lambda **kwargs: seen.append(kwargs["item"]) or {"status": committed},
+    )
+    result = executor.run_selected(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+        storage_root=tmp_path, storage_day=DAY, expected_action=action, execute=True,
+    )
+    assert calls == [{
+        "policy": calls[0]["policy"], "storage_root": tmp_path,
+        "after_storage_day": DAY - timedelta(days=1),
+    }]
+    assert seen == [_item(action)]
+    assert result["schema_version"] == "market.canonical_retention_selected_run.v1"
+    assert result["stop_reason"] == "selected_action_complete"
+    assert result["outcomes"] == [{
+        "status": committed, "action": action, "storage_day": DAY.isoformat(),
+    }]
+
+
+@pytest.mark.parametrize(
+    "planned,expected,error",
+    [
+        ([], "stage_page", "matching_actions=0"),
+        ([_item("verify_page")], "stage_page", "actual_action=verify_page"),
+        ([_item("stage_page", eligible=False)], "stage_page", "eligible=False"),
+        ([_item("stage_page"), _item("stage_page")], "stage_page", "matching_actions=2"),
+    ],
+)
+def test_selected_action_refuses_changed_or_ineligible_selection_before_mutation(
+        tmp_path, monkeypatch, planned, expected, error):
+    executor, _ = _executor([_plan(planned)])
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: pytest.fail("no mutation"))
+    with pytest.raises(RuntimeError, match=error):
+        executor.run_selected(
+            policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+            storage_root=tmp_path, storage_day=DAY, expected_action=expected, execute=True,
+        )
+
+
+def test_selected_action_never_uses_retry_schedule_or_runs_a_second_step(tmp_path, monkeypatch):
+    executor, calls = _executor([_plan([_item("stage_page")]), _plan([_item("reclaim_partition")])])
+    executor._retry_states[DAY] = module._RetryState(DAY, 0, 0, 0, 7, "old failure")
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: {"status": "page_acknowledged"})
+    result = executor.run_selected(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=64),
+        storage_root=tmp_path, storage_day=DAY, expected_action="stage_page", execute=True,
+    )
+    assert len(calls) == 1
+    assert result["outcomes"][0]["status"] == "page_acknowledged"
+    assert executor._retry_states[DAY].attempt_count == 7
+
+
+def test_selected_action_records_one_failure_without_retrying(tmp_path, monkeypatch):
+    executor, calls = _executor([_plan([_item("reclaim_partition")])])
+    attempts = []
+
+    def fail(**kwargs):
+        attempts.append(kwargs["item"])
+        raise RuntimeError("handoff proof refused")
+
+    monkeypatch.setattr(executor, "_execute_step", fail)
+    result = executor.run_selected(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=64),
+        storage_root=tmp_path, storage_day=DAY,
+        expected_action="reclaim_partition", execute=True,
+    )
+    assert len(calls) == 1 and attempts == [_item("reclaim_partition")]
+    assert result["status"] == "failed" and result["failure_count"] == 1
+    assert result["outcomes"] == [{
+        "action": "reclaim_partition", "storage_day": DAY.isoformat(),
+        "status": "failed", "error": "handoff proof refused",
+    }]
+    assert result["stop_reason"] == "selected_action_stopped"
+
+
+@pytest.mark.parametrize(
+    "action,actual",
+    [("stage_page", "source_exhausted"),
+     ("stage_page", "page_prerequisite_budget"),
+     ("reclaim_partition", "already_reclaimed")],
+)
+def test_selected_action_requires_the_exact_intended_committed_outcome(
+        tmp_path, monkeypatch, action, actual):
+    executor, calls = _executor([_plan([_item(action)])])
+    raw = {"status": actual}
+    if actual == "page_prerequisite_budget":
+        raw.update(
+            reason="canonical_archive_page_prerequisite_budget",
+            prerequisite_commit_count=2,
+            prerequisite_commits=[{"status": "book_prefix_verified"},
+                                  {"status": "trade_prefix_verified"}],
+        )
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: raw)
+    result = executor.run_selected(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+        storage_root=tmp_path, storage_day=DAY, expected_action=action, execute=True,
+    )
+    assert len(calls) == 1
+    assert result["status"] == "failed" and result["failure_count"] == 1
+    assert result["outcomes"][0]["status"] == "failed"
+    assert result["outcomes"][0]["actual_status"] == actual
+    assert f"actual_status={actual}" in result["outcomes"][0]["error"]
+    if actual == "page_prerequisite_budget":
+        assert result["outcomes"][0]["prerequisite_commit_count"] == 2
+        assert len(result["outcomes"][0]["prerequisite_commits"]) == 2
+        assert result["outcomes"][0]["reason"] == "canonical_archive_page_prerequisite_budget"
+
+
+def test_selected_action_dry_run_validates_exact_fresh_selection(tmp_path):
+    item = _item("stage_page")
+    executor, calls = _executor([_plan([item])])
+    result = executor.run_selected(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+        storage_root=tmp_path, storage_day=DAY,
+        expected_action="stage_page", execute=False,
+    )
+    assert len(calls) == 1 and result["status"] == "dry_run"
+    assert result["selected_action"] == item and result["outcomes"] == []
+
+    changed, _ = _executor([_plan([_item("verify_page")])])
+    with pytest.raises(RuntimeError, match="actual_action=verify_page"):
+        changed.run_selected(
+            policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+            storage_root=tmp_path, storage_day=DAY,
+            expected_action="stage_page", execute=False,
+        )
+
+
+def test_selected_action_rejects_generic_or_unsupported_actions_before_planning(tmp_path):
+    executor, calls = _executor([_plan([_item()])])
+    with pytest.raises(ValueError, match="selected_request_invalid"):
+        executor.run_selected(
+            policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+            storage_root=tmp_path, storage_day=DAY, expected_action="verify_page", execute=True,
+        )
+    assert calls == []
+
+
 def test_blocked_candidate_page_cannot_starve_a_later_eligible_day(tmp_path, monkeypatch):
     executor, calls = _executor([_plan([_item(eligible=False)], next_day=DAY),
                                  _plan([_item(day=DAY + timedelta(days=1))])])

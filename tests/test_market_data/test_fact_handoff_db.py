@@ -77,7 +77,15 @@ def test_transaction_gap_mutation_or_rewrite_refuses_and_rolls_back(storage, tmp
         """)).scalar_one() == "O"
 
 
-@pytest.mark.parametrize("change", ["disabled_fk", "hot_removed", "cold_overlap"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "disabled_fk", "disabled_immutable", "changed_immutable_function",
+        "disabled_payload_insert_guard", "disabled_payload_root_insert_guard",
+        "changed_payload_insert_function",
+        "hot_removed", "cold_changed", "cold_overlap",
+    ],
+)
 def test_source_handoff_requires_current_binding_placement_and_unique_cold_coverage(storage, tmp_path, monkeypatch, change):
     from portal.backend.db.fact_identity_schema import fact_header_partition_name
     from portal.backend.db.fact_storage_schema import fact_partition_name
@@ -104,8 +112,43 @@ def test_source_handoff_requires_current_binding_placement_and_unique_cold_cover
         calls += 1
         if calls != 2:
             return
-        if change == "disabled_fk":
+        if change == "changed_immutable_function":
+            session.execute(text("""
+                CREATE OR REPLACE FUNCTION market.reject_immutable_mutation()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'changed test guard'; END;
+                $$
+            """))
+            return
+        if change == "changed_payload_insert_function":
+            session.execute(text("""
+                CREATE OR REPLACE FUNCTION market.assert_fact_hot_payload_valid()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RETURN NEW; END;
+                $$
+            """))
+            return
+        if change == "disabled_payload_insert_guard":
+            leaf = fact_partition_name(flow.source_day)
+            session.execute(text(
+                f'ALTER TABLE market."{leaf}" DISABLE TRIGGER '
+                'trg_assert_fact_hot_payload_valid'
+            ))
+            return
+        if change == "disabled_payload_root_insert_guard":
+            session.execute(text(
+                "ALTER TABLE market.fact_hot_payloads DISABLE TRIGGER "
+                "trg_assert_fact_hot_payload_valid"
+            ))
+            return
+        if change in {"disabled_fk", "disabled_immutable"}:
             leaf = fact_header_partition_name(flow.source_day)
+            if change == "disabled_immutable":
+                session.execute(text(
+                    f'ALTER TABLE market."{leaf}" DISABLE TRIGGER '
+                    'trg_reject_mutation_fact_versions'
+                ))
+                return
             trigger = session.execute(text("""
                 SELECT t.tgname FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
                 JOIN pg_constraint c ON c.oid=t.tgconstraint
@@ -117,6 +160,21 @@ def test_source_handoff_requires_current_binding_placement_and_unique_cold_cover
         elif change == "hot_removed":
             leaf = fact_partition_name(flow.source_day)
             session.execute(text(f'TRUNCATE market."{leaf}"'))
+        elif change == "cold_changed":
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_manifests DISABLE TRIGGER "
+                "trg_reject_mutation_fact_archive_manifests"
+            ))
+            changed = session.execute(text("""
+                UPDATE market.fact_archive_manifests
+                SET manifest_hash=repeat('f',64)
+                WHERE storage_day=:day AND page_ordinal=0
+            """), {"day": flow.source_day})
+            assert changed.rowcount == 1
+            session.execute(text(
+                "ALTER TABLE market.fact_archive_manifests ENABLE TRIGGER "
+                "trg_reject_mutation_fact_archive_manifests"
+            ))
         else:
             # Respect descriptor binding and unique object keys. This must reach
             # the fresh cold-coverage refusal, not fail during fixture INSERT.
@@ -132,7 +190,15 @@ def test_source_handoff_requires_current_binding_placement_and_unique_cold_cover
                 FROM market.fact_archive_manifests WHERE storage_day=:day ORDER BY page_ordinal LIMIT 1
             """), {"id": "fam_" + "f" * 64, "day": flow.source_day})
     monkeypatch.setattr(reclaimer, "_timeouts", inject)
-    with pytest.raises(RuntimeError, match="identity_enforcement_invalid|source_placement_changed|reference_binding_invalid"):
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "identity_enforcement_invalid|immutable_function_changed|immutable_trigger_changed|relation_changed|"
+            "payload_insert_function_changed|payload_insert_trigger_changed|"
+            "source_placement_changed|reference_binding_invalid|manifest_authority_changed|"
+            "manifest_ranges_overlap"
+        ),
+    ):
         reclaimer.reclaim_partition(flow.flow_day, eligible_before=storage.today, execute=True)
     assert calls == 2
     assert archive.inspect_partition(flow.flow_day) == initial

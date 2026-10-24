@@ -1712,35 +1712,50 @@ requires a retry. Placement is deliberately excluded from immutable receipt
 hashes so a legitimate move cannot invalidate a dependent forever.
 The fresh-byte pass uses the permanent identity directory to route exact source
 headers to their storage days and validates every returned ID/day/hash. Executed
-reclamation also captures private, invocation-bound tuple locations and full-field
-fingerprints from those same validated rows. These witnesses are never persisted
-as receipts or accepted as current data. The exclusive phase locks/re-admits each
-physical relation, its filenode, columns and topology, then reads every hinted
-row's current proof fields again. A preparatory current-source comparison near
-the end of the shared phase warms the same bounded working set, inside the
-existing overall run budget. It grants no permission: the exclusive phase still
-repeats every source read/comparison within its original ten seconds. A
-missing/moved/reused tuple or changed field refuses the handoff. Canonical v12 receipt ordering and hashes remain unchanged.
+reclamation retains private typed commitments for each page/query batch, the
+complete placement hash, captured header/hot relation identity and day scope,
+and each distinct referenced cold manifest's typed digest. These witnesses are
+never persisted as receipts or accepted as current data. They retain bounded
+state per page, relation and distinct manifest instead of one Python object or
+tuple location per source occurrence. Canonical v12 receipt ordering and hashes
+remain unchanged.
+
+The exclusive phase locks and re-admits each physical relation, its filenode,
+columns and topology. It requires the exact immutable-mutation function and
+trigger contracts for header, hot-payload and manifest relations, the
+always-enabled hot-payload insertion guard, current origin replication role,
+validated nondeferrable identity foreign keys and the correct daily partition
+bounds. It locks and admits any retained hot child for a cold source day so
+closed-day state plus the guard preserve hot absence. It freshly reads every
+referenced cold manifest
+and retention state, refuses overlapping manifest ranges, and freshly verifies
+each page's authoritative dependency catalog and active generation pointer.
+Missing/changed enforcement, relations, manifests, catalog rows or generations
+refuse the handoff. Under supported storage operations this preserves the exact
+first-pass source commitment without an O(source-row) exclusive reread.
 
 For each catalog, the fresh full-field fingerprint and the unfiltered manifest
 row count are computed in one SQL snapshot. Distinct matching hinted rows plus
 the same total count prove that no rows were added, lost or substituted. Empty
-catalogs still require a current zero count. Source runs are merged in bounded
-physical order; only identical bindings for the same tuple may be deduplicated.
-Retained witness memory is capped at 128 MiB, including container overhead; an
-oversized proof refuses without permission to reclaim.
+catalogs still require a current zero count. Retained witness memory is capped
+at 128 MiB, including container overhead; an oversized proof refuses without
+permission to reclaim. The failed 5,221,054 source-occurrence/529-page shape
+retains less than 1 MiB in the representative gate; this is a boundedness result,
+not production throughput evidence.
 
-The final source reads retain exact ID/day/hash/commit comparisons, current hot
-lookup and fresh cold coverage/multiplicity/full manifest material. The separately
+The first pass retains exact ID/day/hash/commit comparisons, current hot lookup
+and complete cold coverage/multiplicity/manifest material. The separately
 repeated directory read is replaced by re-admission of the canonical keys and
-actively enforced, validated, nondeferrable `(id,storage_day)` foreign key.
-A current header therefore proves its current directory pair; the global identity
-key excludes a different day or duplicate header. The first pass's explicit
-logical directory proof remains required. This relies on the admitted canonical
-constraint contract remaining enforced between phases, not on `convalidated`
-alone or historically bypassed constraints. Invalid/disabled enforcement,
-changed relation identity or topology refuses. Short `SHARE ... NOWAIT` locks
-hold this contract and the checked header/catalog rows stable through DROP.
+actively enforced, validated, nondeferrable `(id,storage_day)` foreign key. A
+current immutable header therefore preserves its admitted directory pair; the
+global identity key excludes a different day or duplicate header. The first
+pass's explicit logical directory proof remains required. This relies on the
+admitted canonical constraint and immutability contracts remaining enforced
+between phases, not on `convalidated` or metadata alone. It does not defend
+against a privileged actor deliberately disabling guards, changing data and
+restoring the guards between the two transactions; such mutation is outside
+the supported storage contract. Short `SHARE ... NOWAIT` locks keep the
+re-admitted relations and catalogs stable through DROP.
 
 Final receipt reads use the existing bounded manifest batch (at most100 pages).
 Catalog revalidation transports at most16 manifests per SQL statement, further

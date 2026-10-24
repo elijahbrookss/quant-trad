@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 _PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_verified"})
 _MAX_PAGE_PREREQUISITE_COMMITS = 64
+_SELECTED_ACTIONS = frozenset({"stage_page", "reclaim_partition"})
+_SELECTED_SUCCESS = {
+    "stage_page": "page_acknowledged",
+    "reclaim_partition": "partition_reclaimed",
+}
 
 
 @dataclass
@@ -226,6 +231,210 @@ class CanonicalFactRetentionExecutor:
             # Committed catalog progress is the only state carried across runs.
             self._archive = None
             self._run_lock.release()
+
+    def run_selected(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
+                     storage_day: date, expected_action: str, execute: bool = False,
+                     cancelled=None, progress=None):
+        """Execute exactly one freshly planned private canary action.
+
+        This is deliberately narrower than ``run``: it never advances a scan,
+        consults retry hints or performs another lifecycle family. The normal
+        planner, saved policy, admission checks and action repositories remain
+        authoritative. A changed day/action/eligibility refuses before mutation.
+        """
+        if (type(execute) is not bool or type(storage_day) is not date
+                or type(expected_action) is not str or expected_action not in _SELECTED_ACTIONS):
+            raise ValueError("canonical_retention_selected_request_invalid")
+        witness = None
+        if self.use_saved_history_policy:
+            policy, witness = saved_canonical_policy(
+                self.repository.database, policy=policy, storage_root=storage_root,
+            )
+        if not policy.execution_enabled:
+            return {
+                "schema_version": "market.canonical_retention_selected_run.v1",
+                "status": "disabled",
+                "storage_day": storage_day.isoformat(),
+                "expected_action": expected_action,
+                "outcomes": [],
+                "failure_count": 0,
+                "plan": self.repository.plan(
+                    policy=policy, storage_root=storage_root,
+                    after_storage_day=storage_day - timedelta(days=1),
+                ),
+            }
+        if not execute:
+            plan = self.repository.plan(
+                policy=policy, storage_root=storage_root,
+                after_storage_day=storage_day - timedelta(days=1),
+            )
+            item = self._selected_plan_item(
+                plan=plan, storage_day=storage_day, expected_action=expected_action,
+            )
+            result = {
+                "schema_version": "market.canonical_retention_selected_run.v1",
+                "status": "dry_run",
+                "storage_day": storage_day.isoformat(),
+                "expected_action": expected_action,
+                "outcomes": [],
+                "failure_count": 0,
+                "plan": plan,
+                "selected_action": item,
+            }
+            if self.use_saved_history_policy:
+                result["storage_policy"] = witness
+            return result
+        if not self._run_lock.acquire(blocking=False):
+            raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
+        try:
+            return self._run_selected(
+                policy=policy, storage_root=storage_root, storage_day=storage_day,
+                expected_action=expected_action, cancelled=cancelled,
+                storage_policy_witness=witness, progress=progress,
+            )
+        finally:
+            self._archive = None
+            self._run_lock.release()
+
+    @staticmethod
+    def _selected_plan_item(*, plan, storage_day, expected_action):
+        matches = [
+            item for item in plan["actions"]
+            if date.fromisoformat(item["storage_day"]) == storage_day
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "canonical_retention_selected_action_changed: "
+                f"storage_day={storage_day} expected_action={expected_action} "
+                f"matching_actions={len(matches)}"
+            )
+        item = matches[0]
+        if item["action"] != expected_action or not item["eligible"]:
+            raise RuntimeError(
+                "canonical_retention_selected_action_changed: "
+                f"storage_day={storage_day} expected_action={expected_action} "
+                f"actual_action={item['action']} eligible={item['eligible']} "
+                f"blockers={item.get('blockers', [])}"
+            )
+        return item
+
+    def _run_selected(self, *, policy, storage_root, storage_day, expected_action,
+                      cancelled, storage_policy_witness=None, progress=None):
+        started = monotonic()
+        deadline = started + policy.max_run_seconds
+
+        def observe(**fields):
+            if progress is None:
+                return
+            try:
+                progress({"schema_version": "market.canonical_retention_progress.v1", **fields})
+            except Exception:
+                logger.warning("canonical_retention_progress_observer_failed", exc_info=True)
+
+        def check_budget():
+            if cancelled is not None and cancelled():
+                raise CanonicalRetentionStopRequested(
+                    "canonical_retention_stop_requested: no selected action started"
+                )
+            if monotonic() >= deadline:
+                raise CanonicalRetentionBudgetExceeded(
+                    "canonical_retention_run_budget_exceeded: no selected action retry"
+                )
+
+        def remaining_run_seconds():
+            check_budget()
+            return deadline - monotonic()
+
+        observe(stage="planning", completed_steps=0,
+                after_storage_day=(storage_day - timedelta(days=1)).isoformat())
+        check_budget()
+        planning_started = perf_counter()
+        plan_policy = replace(
+            policy,
+            max_plan_seconds=min(policy.max_plan_seconds, max(1, int(deadline - monotonic()))),
+        )
+        plan = self.repository.plan(
+            policy=plan_policy, storage_root=storage_root,
+            after_storage_day=storage_day - timedelta(days=1),
+        )
+        planning_seconds = perf_counter() - planning_started
+        check_budget()
+        item = self._selected_plan_item(
+            plan=plan, storage_day=storage_day, expected_action=expected_action,
+        )
+        observe(stage="executing", completed_steps=0, storage_day=storage_day.isoformat(),
+                action=expected_action)
+        failure_count = 0
+        status = "completed"
+        try:
+            raw_outcome = self._execute_step(
+                item=item, policy=policy, storage_root=storage_root,
+                check_budget=check_budget, remaining_seconds=remaining_run_seconds,
+                storage_policy_witness=storage_policy_witness, prerequisite_commits=[],
+            )
+            if raw_outcome.get("status") != _SELECTED_SUCCESS[expected_action]:
+                status = "failed"
+                failure_count = 1
+                error = (
+                    "canonical_retention_selected_outcome_changed: "
+                    f"storage_day={storage_day} expected_action={expected_action} "
+                    f"expected_status={_SELECTED_SUCCESS[expected_action]} "
+                    f"actual_status={raw_outcome.get('status')}"
+                )
+                outcome = {
+                    **raw_outcome, "action": expected_action,
+                    "storage_day": storage_day.isoformat(), "status": "failed",
+                    "actual_status": raw_outcome.get("status"), "error": error,
+                }
+            else:
+                outcome = {**raw_outcome, "action": expected_action,
+                           "storage_day": storage_day.isoformat()}
+        except (CanonicalRetentionBudgetExceeded, MarketStorageLifecycleBusyError) as exc:
+            status = "deferred"
+            failure_count = 1
+            outcome = {"action": expected_action, "storage_day": storage_day.isoformat(),
+                       "status": "deferred", "reason": str(exc)}
+            logger.warning(
+                "canonical_retention_selected_step_deferred | storage_day=%s action=%s reason=%s",
+                storage_day, expected_action, exc,
+            )
+        except Exception as exc:
+            status = "failed"
+            failure_count = 1
+            outcome = {"action": expected_action, "storage_day": storage_day.isoformat(),
+                       "status": "failed", "error": str(exc)}
+            logger.exception(
+                "canonical_retention_selected_step_failed | storage_day=%s action=%s",
+                storage_day, expected_action,
+            )
+        finished = monotonic()
+        result = {
+            "schema_version": "market.canonical_retention_selected_run.v1",
+            "status": status,
+            "stop_reason": ("selected_action_complete" if status == "completed"
+                            else "selected_action_stopped"),
+            "storage_day": storage_day.isoformat(),
+            "expected_action": expected_action,
+            "plan": plan,
+            "outcomes": [outcome],
+            "failure_count": failure_count,
+            "planning_pages": 1,
+            "planning_seconds": planning_seconds,
+            "elapsed_seconds": finished - started,
+            "resume_authority": "committed_partition_pages_and_verifications",
+            "prerequisite_commit_count": outcome.get("prerequisite_commit_count", 0),
+        }
+        if self.use_saved_history_policy:
+            result["storage_policy"] = storage_policy_witness
+        observe(stage="finished", completed_steps=1, status=status,
+                storage_day=storage_day.isoformat(), action=expected_action)
+        logger.info(
+            "canonical_retention_selected_run_finished | storage_day=%s action=%s "
+            "status=%s planning_seconds=%.6f elapsed_seconds=%.6f",
+            storage_day, expected_action, outcome.get("status"), planning_seconds,
+            result["elapsed_seconds"],
+        )
+        return result
 
     def _run(self, *, policy, storage_root, after_storage_day, cancelled, storage_policy_witness=None,
              progress=None):

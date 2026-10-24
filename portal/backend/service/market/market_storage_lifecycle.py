@@ -261,6 +261,29 @@ class MarketStorageLifecycleService:
             "canonical_retention": canonical_run,
         }
 
+    def run_canonical_action(
+        self,
+        *,
+        policy: MarketStorageLifecyclePolicy,
+        storage_day: date,
+        expected_action: str,
+        storage_root: Path = DEFAULT_STORAGE_ROOT,
+        execute: bool = False,
+        cancelled=None,
+        progress=None,
+    ) -> dict[str, Any]:
+        """Run one exact canonical action without raw/history/recovery work."""
+        policy = self._canonical_policy(policy, storage_root)
+        return self.canonical_executor.run_selected(
+            policy=policy.canonical_retention,
+            storage_root=storage_root,
+            storage_day=storage_day,
+            expected_action=expected_action,
+            execute=execute,
+            cancelled=cancelled,
+            progress=progress,
+        )
+
     def _plan_compactions(
         self, *, policy: MarketStorageLifecyclePolicy, now: datetime
     ) -> list[dict[str, Any]]:
