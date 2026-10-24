@@ -1275,6 +1275,10 @@ class PostgresCanonicalFactArchiveRepository:
                 self._check_budget()
                 session.add(MarketFactArchiveVerificationRecord(**receipt))
                 if active_generation is not None:
+                    # The generation binding has a composite FK to this receipt.
+                    # SQLAlchemy has no mapped relationship between the models,
+                    # so make the parent write order explicit without committing.
+                    session.flush()
                     session.add(MarketFactArchiveVerificationGenerationRecord(
                         manifest_id=manifest.manifest_id,
                         verifier_version=FACT_ARCHIVE_VERIFIER_VERSION,
