@@ -311,7 +311,9 @@ environment values taking precedence. It passes the URL only to the backend;
 credentials remain exclusive to Grafana. Keep these new settings out of shared
 `secrets.env` so activation does not change PostgreSQL's container environment. It never falls back to the broad legacy `quanttrad-postgres` login.
 Missing datasource/configuration or query failure is visibly unavailable, not a
-successful empty result.
+successful empty result. Activation configures only `quanttrad-storage-metrics`;
+it does not replace authentication on the legacy datasource used by other
+dashboards.
 
 Function/index installation and restricted-role authorization are explicit
 operator procedures; source files do not establish deployed qualification.
@@ -320,7 +322,17 @@ The reviewed grant procedure transfers only the admitted functions to a NOLOGIN
 owner with required source-column reads, grants the reader execution, and admits
 the dedicated `qt_storage_metrics_grafana` login. It refuses existing conflicting
 authority, ambient source/schema privileges and database TEMP inherited through
-PUBLIC. It does not revoke PUBLIC privileges on an operator's behalf. Any
+PUBLIC. Its source-access check admits SELECT only on the two standard
+`public.pg_stat_statements` / `public.pg_stat_statements_info` views belonging to
+extension 1.10, after checking their ownership and native function definitions.
+This preserves PostgreSQL's existing PUBLIC monitoring interface: workload
+counters, user/database IDs and timings remain visible, while other users' SQL
+text and query IDs are masked. No statistics-reader/monitor membership, reset
+privilege, raw application-table read or application write is granted. The login
+is therefore not literally limited to function execution; normal PostgreSQL
+catalog visibility also remains.
+
+The procedure does not revoke PUBLIC privileges on an operator's behalf. Any
 database-wide hardening, compensating grants, login/credential creation or
 persistent access change requires its own approval.
 
