@@ -303,6 +303,14 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Disabled by default; selecting the restricted datasource requires an
+      # explicit operator-reviewed access/configuration installation.
+      - type: bind
+        source: ${QT_GRAFANA_STORAGE_DATASOURCE_FILE:-./grafana/provisioning/datasources/storage-metrics.yml}
+        target: /etc/grafana/provisioning/datasources/storage-metrics.yml
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - quanttrad
 
