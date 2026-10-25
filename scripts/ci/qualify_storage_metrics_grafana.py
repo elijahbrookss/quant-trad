@@ -131,7 +131,14 @@ def install_sql(connection, filename, *, api_role=None, individual=False):
         source = source.replace(':"api_role"', sql.Identifier(api_role).as_string(connection))
     with connection.cursor() as cursor:
         # Index CONCURRENTLY commands must be separate autocommit statements.
-        for statement in source.split(";") if individual else [source]:
+        statements = [source]
+        if individual:
+            # The reviewed index script contains semicolons in line comments.
+            # Strip only comment lines before splitting its simple DDL statements.
+            ddl = "\n".join(line for line in source.splitlines()
+                            if not line.lstrip().startswith("--"))
+            statements = ddl.split(";")
+        for statement in statements:
             if statement.strip():
                 cursor.execute(statement)
 
