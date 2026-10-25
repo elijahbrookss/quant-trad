@@ -699,3 +699,79 @@ def test_restricted_definer_transition_does_not_grant_raw_market_access(postgres
                     admin.execute(text(f"REASSIGN OWNED BY {role} TO {quote(current)}"))
                     admin.execute(text(f"DROP OWNED BY {role}"))
                     admin.execute(text(f"DROP ROLE {role}"))
+
+
+def _ambient_monitoring_queries(login):
+    from pathlib import Path
+    source=(Path(__file__).parents[2]/"scripts/db/manual_grant_storage_metrics_v1.sql").read_text()
+    result=[]
+    for name in ("ambient_relation","reset_privilege"):
+        begin=f"-- storage_metrics_{name}_query_begin\n"
+        end=f"-- storage_metrics_{name}_query_end"
+        result.append(source.split(begin,1)[1].split(end,1)[0].replace("qt_storage_metrics_grafana",login))
+    return result
+
+
+@pytest.mark.parametrize("scenario,blocked,reset_blocked",[
+    ("namesake",True,False),
+    ("unrelated_public_select",True,False),
+    ("genuine",False,False),
+    ("public_write",True,False),
+    ("public_column_write",True,False),
+    ("external_relation",True,False),
+    ("builtin_expression",True,False),
+    ("definer_function",True,False),
+    ("reset_execute",False,True),
+])
+def test_monitoring_views_require_exact_standard_extension_visibility(postgres,scenario,blocked,reset_blocked):
+    from uuid import uuid4
+    engine,_=postgres
+    login=f"synthetic_monitor_reader_{uuid4().hex[:10]}"
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as admin:
+        if not admin.scalar(text("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user")):
+            pytest.skip("isolated extension/role administrator required")
+        # The fixture owns a generated isolated database; no operational extension
+        # or role is read or changed. No password or LOGIN access is introduced.
+        try:
+            admin.execute(text(f"CREATE ROLE {login} NOLOGIN INHERIT"))
+            admin.execute(text("DROP EXTENSION IF EXISTS pg_stat_statements"))
+            if scenario in ("namesake","unrelated_public_select"):
+                name="pg_stat_statements" if scenario=="namesake" else "synthetic_unrelated_monitor"
+                admin.execute(text(f"CREATE VIEW public.{name} AS SELECT 1 AS synthetic_value"))
+                admin.execute(text(f"GRANT SELECT ON public.{name} TO PUBLIC"))
+            else:
+                assert admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_available_extension_versions "
+                    "WHERE name='pg_stat_statements' AND version='1.10')")), "qualified pg_stat_statements 1.10 image required"
+                admin.execute(text("CREATE EXTENSION pg_stat_statements WITH SCHEMA public VERSION '1.10'"))
+                assert admin.scalar(text("SELECT has_table_privilege(:role,'public.pg_stat_statements','SELECT')"),dict(role=login))
+                assert admin.scalar(text("SELECT has_table_privilege(:role,'public.pg_stat_statements_info','SELECT')"),dict(role=login))
+                if scenario=="public_write":
+                    admin.execute(text("GRANT UPDATE ON public.pg_stat_statements_info TO PUBLIC"))
+                elif scenario=="public_column_write":
+                    admin.execute(text("GRANT UPDATE(stats_reset) ON public.pg_stat_statements_info TO PUBLIC"))
+                elif scenario=="external_relation":
+                    admin.execute(text("CREATE TABLE public.synthetic_monitor_source(value integer)"))
+                    admin.execute(text("CREATE OR REPLACE VIEW public.pg_stat_statements_info AS "
+                        "SELECT info.dealloc,info.stats_reset FROM public.pg_stat_statements_info() info "
+                        "CROSS JOIN public.synthetic_monitor_source"))
+                elif scenario=="builtin_expression":
+                    admin.execute(text("CREATE OR REPLACE VIEW public.pg_stat_statements_info AS "
+                        "SELECT info.dealloc,clock_timestamp() AS stats_reset FROM public.pg_stat_statements_info() info"))
+                elif scenario=="definer_function":
+                    admin.execute(text("ALTER FUNCTION public.pg_stat_statements_info() SECURITY DEFINER"))
+                elif scenario=="reset_execute":
+                    admin.execute(text("GRANT EXECUTE ON FUNCTION public.pg_stat_statements_reset(oid,oid,bigint) TO PUBLIC"))
+            # Match the installer's transaction-local deparse path and inspect the
+            # exact source predicates, not a copied/adapted classification formula.
+            admin.execute(text("SET search_path=pg_catalog,pg_temp"))
+            relation_query,reset_query=_ambient_monitoring_queries(login)
+            assert bool(admin.execute(text(relation_query)).all()) is blocked
+            assert bool(admin.execute(text(reset_query)).all()) is reset_blocked
+            assert not admin.scalar(text("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname=:role"),dict(role=login))
+            assert not admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m "
+                "JOIN pg_catalog.pg_roles r ON r.oid=m.member WHERE r.rolname=:role)"),dict(role=login))
+        finally:
+            admin.execute(text("RESET search_path"))
+            if admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=:role)"),dict(role=login)):
+                admin.execute(text(f"DROP OWNED BY {login}"))
+                admin.execute(text(f"DROP ROLE {login}"))

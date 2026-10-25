@@ -7,6 +7,7 @@
 BEGIN;
 SET LOCAL lock_timeout='250ms';
 SET LOCAL statement_timeout='5s';
+SET LOCAL search_path=pg_catalog,pg_temp;
 DO $check$
 BEGIN
  -- One-time transition: do not adopt pre-existing named principals or silently
@@ -40,13 +41,85 @@ BEGIN
     OR pg_catalog.has_database_privilege('qt_storage_metrics_owner',current_database(),'TEMP') THEN
   RAISE EXCEPTION 'storage_metrics_ambient_temporary_privilege_requires_separate_review';
  END IF;
- IF EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname IN ('public','market','observability_metrics','observability_events')
-      AND CASE WHEN c.relkind IN ('r','p','v','m','f') THEN
-          (pg_catalog.has_table_privilege('qt_storage_metrics_grafana',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-           OR pg_catalog.has_any_column_privilege('qt_storage_metrics_grafana',c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))
-          ELSE false END) THEN
+ -- Classification only: preserve existing SELECT on two standard monitoring
+ -- views, without adding any grants or allowing application-data visibility.
+ IF EXISTS (
+-- storage_metrics_ambient_relation_query_begin
+WITH candidate_monitoring_views AS MATERIALIZED (
+ SELECT v.oid,v.relname,v.relkind,f.oid AS function_oid,
+        CASE WHEN v.relname='pg_stat_statements' THEN 'true' ELSE '' END AS arguments
+ FROM pg_catalog.pg_class v
+ JOIN pg_catalog.pg_namespace ns ON ns.oid=v.relnamespace
+ JOIN pg_catalog.pg_extension e ON e.extname='pg_stat_statements'
+   AND e.extversion='1.10' AND e.extnamespace=ns.oid AND e.extowner=v.relowner
+ JOIN pg_catalog.pg_proc f ON f.pronamespace=ns.oid AND f.proname=v.relname
+   AND f.proowner=e.extowner AND f.prokind='f' AND NOT f.prosecdef
+   AND f.prorettype='pg_catalog.record'::regtype
+   AND f.probin='$libdir/pg_stat_statements'
+ JOIN pg_catalog.pg_language l ON l.oid=f.prolang AND l.lanname='c'
+ JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid AND r.rulename='_RETURN'
+   AND r.ev_type='1' AND r.is_instead AND r.ev_enabled='O'
+ WHERE ns.nspname='public' AND v.relkind='v'
+   AND ((v.relname='pg_stat_statements' AND f.pronargs=1 AND f.proargtypes='16'::oidvector
+         AND f.proretset AND f.prosrc='pg_stat_statements_1_10')
+     OR (v.relname='pg_stat_statements_info' AND f.pronargs=0 AND f.proargtypes=''::oidvector
+         AND NOT f.proretset AND f.prosrc='pg_stat_statements_info'))
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+     WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=v.oid AND d.objsubid=0
+       AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.refobjid=e.oid AND d.deptype='e')
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+     WHERE d.classid='pg_catalog.pg_proc'::regclass AND d.objid=f.oid AND d.objsubid=0
+       AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.refobjid=e.oid AND d.deptype='e')
+   AND (SELECT count(*) FROM pg_catalog.pg_rewrite other WHERE other.ev_class=v.oid)=1
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+     WHERE d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
+       AND d.refclassid='pg_catalog.pg_proc'::regclass AND d.refobjid=f.oid)
+   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+     WHERE d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
+       AND NOT ((d.refclassid='pg_catalog.pg_class'::regclass AND d.refobjid=v.oid)
+             OR (d.refclassid='pg_catalog.pg_proc'::regclass AND d.refobjid=f.oid)))
+), allowed_monitoring_views AS MATERIALIZED (
+ SELECT candidate.oid
+ FROM candidate_monitoring_views candidate
+ CROSS JOIN LATERAL (
+   SELECT string_agg(format('%I.%I',candidate.relname,a.attname),',' ORDER BY a.attnum) AS fields,
+          string_agg(format('%I',a.attname),',' ORDER BY a.attnum) AS aliases
+   FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid=candidate.oid AND a.attnum>0 AND NOT a.attisdropped
+ ) projection
+ -- Dependency catalogs omit pinned built-ins. Compare the full canonical
+ -- projection too, so an added builtin expression cannot hide behind that.
+ -- MATERIALIZED candidates and CASE prevent introspection of a non-view.
+ WHERE regexp_replace(CASE WHEN candidate.relkind='v'
+          THEN pg_catalog.pg_get_viewdef(candidate.oid,false) END,'[[:space:];]','','g')
+   IN (SELECT regexp_replace(format('SELECT %s FROM public.%I(%s) %s',
+          projection.fields,candidate.relname,candidate.arguments,suffix.alias),'[[:space:];]','','g')
+       FROM (VALUES (''), (format('%I',candidate.relname)),
+                    (format('%I(%s)',candidate.relname,projection.aliases)),
+                    (format('AS %I',candidate.relname)),
+                    (format('AS %I(%s)',candidate.relname,projection.aliases))) suffix(alias))
+)
+SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname IN ('public','market','observability_metrics','observability_events')
+   AND CASE WHEN c.relkind IN ('r','p','v','m','f') THEN
+          (pg_catalog.has_table_privilege('qt_storage_metrics_grafana',c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+           OR pg_catalog.has_any_column_privilege('qt_storage_metrics_grafana',c.oid,'INSERT,UPDATE,REFERENCES')
+           OR ((pg_catalog.has_table_privilege('qt_storage_metrics_grafana',c.oid,'SELECT')
+                OR pg_catalog.has_any_column_privilege('qt_storage_metrics_grafana',c.oid,'SELECT'))
+               AND NOT EXISTS (SELECT 1 FROM allowed_monitoring_views allowed WHERE allowed.oid=c.oid)))
+       ELSE false END
+-- storage_metrics_ambient_relation_query_end
+ ) THEN
   RAISE EXCEPTION 'storage_metrics_login_ambient_source_authority';
+ END IF;
+ IF EXISTS (
+-- storage_metrics_reset_privilege_query_begin
+SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+ WHERE n.nspname='public' AND p.proname='pg_stat_statements_reset'
+   AND pg_catalog.has_function_privilege('qt_storage_metrics_grafana',p.oid,'EXECUTE')
+-- storage_metrics_reset_privilege_query_end
+ ) THEN
+  RAISE EXCEPTION 'storage_metrics_login_monitoring_reset_authority';
  END IF;
  IF EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname IN ('public','market','observability_metrics','observability_events')
