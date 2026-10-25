@@ -22,3 +22,15 @@ def test_storage_metrics_mount_requires_explicit_configuration(name):
     active = ROOT / "docker/grafana/storage-metrics/enabled.yml"
     assert active.is_file()
     assert "provisioning" not in active.relative_to(ROOT / "docker/grafana").parts
+
+
+@pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.server.yml"])
+def test_default_capacity_dashboard_remains_the_existing_working_dashboard(name):
+    services = yaml.safe_load((ROOT / "docker" / name).read_text())["services"]
+    target = "/etc/grafana/provisioning/dashboards/capacity-database-growth.json"
+    mounts = [v for v in services["grafana"]["volumes"]
+              if isinstance(v, dict) and v.get("target") == target]
+    assert mounts == [{"type": "bind",
+        "source": "${QT_GRAFANA_STORAGE_DASHBOARD_FILE:-./grafana/provisioning/dashboards/capacity-database-growth.json}",
+        "target": target, "read_only": True, "bind": {"create_host_path": False}}]
+    assert (ROOT / "docker/grafana/storage-metrics/capacity-database-growth.json").is_file()

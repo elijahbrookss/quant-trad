@@ -477,6 +477,12 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        source: ${QT_GRAFANA_STORAGE_DASHBOARD_FILE:-./grafana/provisioning/dashboards/capacity-database-growth.json}
+        target: /etc/grafana/provisioning/dashboards/capacity-database-growth.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
         source: ./grafana/provisioning/dashboards
         target: /etc/grafana/provisioning/dashboards
         read_only: true
