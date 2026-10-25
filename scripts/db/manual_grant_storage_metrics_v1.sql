@@ -99,6 +99,7 @@ END
 $owner_check$;
 GRANT USAGE ON SCHEMA observability_metrics TO qt_storage_metrics_reader, :"api_role";
 GRANT qt_storage_metrics_reader TO qt_storage_metrics_grafana;
+ALTER ROLE qt_storage_metrics_grafana CONNECTION LIMIT 2;
 ALTER ROLE qt_storage_metrics_grafana SET statement_timeout='5s';
 ALTER ROLE qt_storage_metrics_grafana SET lock_timeout='250ms';
 ALTER ROLE qt_storage_metrics_grafana SET default_transaction_read_only=on;
