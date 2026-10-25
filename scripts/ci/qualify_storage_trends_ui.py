@@ -290,7 +290,7 @@ def run_viewport(browser, origin, artifact_dir, name, viewport, mobile, expect):
         stage = "range_presets"
         for preset, seconds in (("6h", 21600), ("7d", 604800), ("30d", 2592000)):
             with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
-                page.get_by_label("Range", exact=True).select_option(preset)
+                page.get_by_role("combobox", name=re.compile(r"^Range")).select_option(preset)
             expect(page.get_by_text(re.compile("Loading storage trends"))).to_have_count(0)
             payload = deepcopy(api.last_payload)
             require((timestamp(payload["range"]["to"]) - timestamp(payload["range"]["from"])).total_seconds() == seconds,
@@ -301,7 +301,7 @@ def run_viewport(browser, origin, artifact_dir, name, viewport, mobile, expect):
 
         stage = "custom_absolute_range"
         with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
-            page.get_by_label("Range", exact=True).select_option("custom")
+            page.get_by_role("combobox", name=re.compile(r"^Range")).select_option("custom")
         apply = page.get_by_role("button", name="Apply range", exact=True)
         expect(apply).to_be_enabled()
         page.get_by_label("From (UTC)", exact=True).fill("2026-01-01T00:00")
@@ -330,7 +330,7 @@ def run_viewport(browser, origin, artifact_dir, name, viewport, mobile, expect):
         reserve = page.get_by_label("Free space reserve (%)", exact=True)
         reserve.fill("25")
         with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
-            page.get_by_label("Range", exact=True).select_option("24h")
+            page.get_by_role("combobox", name=re.compile(r"^Range")).select_option("24h")
         with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
             page.get_by_label(re.compile("Live")).check()
         expect(page.get_by_text(re.compile("Loading storage trends"))).to_have_count(0)
@@ -372,7 +372,7 @@ def run_viewport(browser, origin, artifact_dir, name, viewport, mobile, expect):
         stale_href = assert_link(page, api.last_payload)
         api.mode = "error"
         with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
-            page.get_by_label("Range", exact=True).select_option("6h")
+            page.get_by_role("combobox", name=re.compile(r"^Range")).select_option("6h")
         expect(page.get_by_role("alert")).to_contain_text("Last successful range remains displayed")
         require(page.get_by_role("link", name="Open in Grafana", exact=False).get_attribute("href") == stale_href,
             "error_keeps_displayed_link")
@@ -390,7 +390,7 @@ def run_viewport(browser, origin, artifact_dir, name, viewport, mobile, expect):
         stage = "unavailable_samples"
         api.mode = "unavailable"
         with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
-            page.get_by_label("Range", exact=True).select_option("7d")
+            page.get_by_role("combobox", name=re.compile(r"^Range")).select_option("7d")
         expect(page.get_by_text("Recorded total Unavailable", exact=True)).to_have_count(3)
         table_summary.click()
         expect(region).to_be_visible()
