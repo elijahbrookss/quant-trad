@@ -19,6 +19,8 @@ backend:
     - http://127.0.0.1:5174
 
 storage:
+  # Full operator-visible HTTP(S) dashboard URL; no credentials or query parameters.
+  grafana_dashboard_url: null
   # Disabled until a prepared SSD cache root and measured headroom are admitted.
   history_cache_bytes: 0
   history_cache_min_free_bytes: 0

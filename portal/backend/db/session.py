@@ -42,6 +42,8 @@ from .fact_storage_schema import (
 )
 
 
+from .storage_metrics_schema import install_storage_metrics_functions
+
 logger = logging.getLogger(__name__)
 _SCHEMA_LOCK_KEY = 9021001
 _DB_SETTINGS = get_settings().database
@@ -500,6 +502,7 @@ class Database:
                 )
                 self._ensure_canonical_fact_insert_trigger(conn)
                 install_fact_storage_functions(conn)
+                install_storage_metrics_functions(conn)
                 self._ensure_book_checkpoint_rollup_trigger(conn)
                 self._ensure_market_data_immutability(conn)
                 storage_day = conn.execute(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date")).scalar_one()
@@ -1616,6 +1619,12 @@ class Database:
             for index in sorted(table.indexes, key=lambda item: str(item.name or "")):
                 index_name = str(index.name or "").strip()
                 if not index_name or index_name in existing:
+                    continue
+                if not include_clean_bootstrap and index_name in {
+                    "ix_market_archive_ack_metrics_v1", "ix_market_archive_verify_time_metrics_v1",
+                    "ix_market_reclaimed_time_metrics_v1", "ix_market_live_partition_metrics_v1",
+                }:
+                    logger.warning("storage_metrics_operator_index_missing | index=%s",index_name)
                     continue
                 if (
                     not include_clean_bootstrap
