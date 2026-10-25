@@ -424,7 +424,7 @@ maintenance. Applied-layout settings and execution retain their separate
 ## Storage trends inspection
 
 The Storage settings surface includes read-only trends from the shared
-\`qt.storage_metrics.v1\` API contract. It presents sampled database/market
+`qt.storage_metrics.v1` API contract. It presents sampled database/market
 allocation separately from archive, first-verification and physical-reclamation
 completion flows. Current backlog and oldest-day status retain their current
 scope. See [storage management](../persistence/STORAGE_MANAGEMENT.md#shared-storage-trends)

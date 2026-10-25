@@ -248,15 +248,15 @@ selected-range trends below. Neither surface grants execution authority.
 
 ## Shared storage trends
 
-\`GET /api/storage/metrics\` returns \`qt.storage_metrics.v1\` for an absolute UTC
-half-open range, \`from <= time < to\`. The only query parameters are \`from\`,
-\`to\` and \`resolution\`; repeated or unknown parameters refuse. Ranges are at
-most 30 days and 720 buckets. Resolution is \`auto\`, \`5m\`, \`30m\` or \`2h\`;
+`GET /api/storage/metrics` returns `qt.storage_metrics.v1` for an absolute UTC
+half-open range, `from <= time < to`. The only query parameters are `from`,
+`to` and `resolution`; repeated or unknown parameters refuse. Ranges are at
+most 30 days and 720 buckets. Resolution is `auto`, `5m`, `30m` or `2h`;
 auto selects an admitted bucket rather than silently truncating the range.
 
 The API and enabled Grafana dashboard use the same versioned SQL owners in
-\`observability_metrics\`: \`storage_series_v1\`, \`storage_growth_v1\` and
-\`storage_metric_status_v1\`. The schema module owns their definitions and bounds;
+`observability_metrics`: `storage_series_v1`, `storage_growth_v1` and
+`storage_metric_status_v1`. The schema module owns their definitions and bounds;
 consumers do not reconstruct archive or retention formulas from operational
 catalogs.
 
@@ -291,15 +291,15 @@ diagnostics. Its four canonical placeholders remain unavailable until the
 restricted shared-query path is explicitly selected.
 
 Shared-metric activation selects both templates:
-\`docker/grafana/storage-metrics/enabled.yml\` through
-\`QT_GRAFANA_STORAGE_DATASOURCE_FILE\`, and
-\`docker/grafana/storage-metrics/capacity-database-growth.json\` through
-\`QT_GRAFANA_STORAGE_DASHBOARD_FILE\`. They replace the corresponding provisioning
-files at the existing dashboard UID \`quanttrad-capacity-growth\`; they are
+`docker/grafana/storage-metrics/enabled.yml` through
+`QT_GRAFANA_STORAGE_DATASOURCE_FILE`, and
+`docker/grafana/storage-metrics/capacity-database-growth.json` through
+`QT_GRAFANA_STORAGE_DASHBOARD_FILE`. They replace the corresponding provisioning
+files at the existing dashboard UID `quanttrad-capacity-growth`; they are
 deployment alternatives, not competing metric definitions. The default datasource
-file contains no new datasource. The enabled \`quanttrad-storage-metrics\` uses
+file contains no new datasource. The enabled `quanttrad-storage-metrics` uses
 the installed PostgreSQL plugin, at most two open/idle connections and dedicated
-credentials. It never falls back to the broad legacy \`quanttrad-postgres\` login.
+credentials. It never falls back to the broad legacy `quanttrad-postgres` login.
 Missing datasource/configuration or query failure is visibly unavailable, not a
 successful empty result.
 
@@ -308,7 +308,7 @@ operator procedures; source files do not establish deployed qualification.
 Clean bootstrap installs invoker functions with PUBLIC execution revoked.
 The reviewed grant procedure transfers only the admitted functions to a NOLOGIN
 owner with required source-column reads, grants the reader execution, and admits
-the dedicated \`qt_storage_metrics_grafana\` login. It refuses existing conflicting
+the dedicated `qt_storage_metrics_grafana` login. It refuses existing conflicting
 authority, ambient source/schema privileges and database TEMP inherited through
 PUBLIC. It does not revoke PUBLIC privileges on an operator's behalf. Any
 database-wide hardening, compensating grants, login/credential creation or
@@ -322,7 +322,7 @@ defaults on newly opened and reused Grafana pool connections before activation.
 The API establishes its own bounded read transaction. These constraints limit
 diagnostic work, not privileged SQL clients or maintenance authorization.
 
-\`QT_STORAGE_GRAFANA_DASHBOARD_URL\` configures the optional HTTP(S) dashboard
+`QT_STORAGE_GRAFANA_DASHBOARD_URL` configures the optional HTTP(S) dashboard
 base URL without embedded credentials, query or fragment. The UI opens that URL
 with the exact displayed absolute range and UTC timezone. An absent or invalid
 URL disables the link while native trends remain usable.
@@ -330,7 +330,7 @@ URL disables the link while native trends remain usable.
 Implementation owners are
 [the versioned SQL module](../../../portal/backend/db/storage_metrics_schema.py),
 [the API adapter](../../../portal/backend/service/storage/metrics.py) and the
-explicit migration/index/grant scripts under \`scripts/db/\`. Use exact-source
+explicit migration/index/grant scripts under `scripts/db/`. Use exact-source
 disposable qualification and operator admission before installing or activating
 them; the existence of this interface is not a claim about a live database.
 
