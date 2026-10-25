@@ -42,14 +42,17 @@ BEGIN
  END IF;
  IF EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname IN ('public','market','observability_metrics','observability_events')
-      AND c.relkind IN ('r','p','v','m','f')
-      AND (pg_catalog.has_table_privilege('qt_storage_metrics_grafana',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-       OR pg_catalog.has_any_column_privilege('qt_storage_metrics_grafana',c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))) THEN
+      AND CASE WHEN c.relkind IN ('r','p','v','m','f') THEN
+          (pg_catalog.has_table_privilege('qt_storage_metrics_grafana',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+           OR pg_catalog.has_any_column_privilege('qt_storage_metrics_grafana',c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))
+          ELSE false END) THEN
   RAISE EXCEPTION 'storage_metrics_login_ambient_source_authority';
  END IF;
  IF EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname IN ('public','market','observability_metrics','observability_events') AND c.relkind='S'
-      AND pg_catalog.has_sequence_privilege('qt_storage_metrics_grafana',c.oid,'USAGE,SELECT,UPDATE')) THEN
+    WHERE n.nspname IN ('public','market','observability_metrics','observability_events')
+      AND CASE WHEN c.relkind='S' THEN
+          pg_catalog.has_sequence_privilege('qt_storage_metrics_grafana',c.oid,'USAGE,SELECT,UPDATE')
+          ELSE false END) THEN
   RAISE EXCEPTION 'storage_metrics_login_ambient_sequence_authority';
  END IF;
  IF EXISTS(SELECT 1 FROM pg_catalog.pg_namespace n
