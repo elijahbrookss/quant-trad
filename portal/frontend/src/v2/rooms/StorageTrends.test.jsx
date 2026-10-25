@@ -12,11 +12,22 @@ vi.mock('../../adapters/storage.adapter.js', () => ({
 }))
 vi.mock('lightweight-charts', () => ({
   LineSeries: 'line', HistogramSeries: 'histogram',
-  createChart: vi.fn(() => ({
-    addSeries: vi.fn(() => ({ setData: vi.fn() })),
-    timeScale: () => ({ setVisibleRange: vi.fn() }),
-    applyOptions: vi.fn(), remove: vi.fn(),
-  })),
+  createChart: vi.fn(() => {
+    const datasets = []
+    const setVisibleRange = vi.fn(() => {
+      if (!datasets.some((points) => points.some((point) => Number.isFinite(point.value)))) {
+        throw new Error('Chart range requires a plotted value')
+      }
+    })
+    return {
+      addSeries: vi.fn(() => {
+        const index = datasets.push([]) - 1
+        return { setData: vi.fn((points) => { datasets[index] = points }) }
+      }),
+      timeScale: () => ({ setVisibleRange }),
+      applyOptions: vi.fn(), remove: vi.fn(),
+    }
+  }),
 }))
 function metrics(range, overrides = {}) {
   return { schema_version: 'qt.storage_metrics.v1', generated_at: new Date().toISOString(),
@@ -60,6 +71,42 @@ describe('Storage trends', () => {
     const link = screen.getByRole('link', { name: /Open in Grafana/ })
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(api.reviewStorageChange).not.toHaveBeenCalled()
+    expect(api.applyStorageChange).not.toHaveBeenCalled()
+  })
+  it('keeps all-null history unavailable and leaves Storage policy controls usable', async () => {
+    const policy = { recent: [], history: [], archives: [], backups: [],
+      recent_days: 30, reserve_percent: 20, backup_interval_hours: 24, backup_copies: 2,
+      movement_enabled: false, backup_enabled: false }
+    api.readStorage.mockResolvedValue({ revision: 1, policy, targets: [], candidates: [],
+      health: 'available', movement: { state: 'unknown' }, backup: { state: 'unknown' } })
+    api.readStorageMetrics.mockImplementation(async (range) => {
+      const payload = metrics(range)
+      for (const series of payload.series) {
+        series.state = 'unavailable'
+        series.reason = 'no_observations'
+        series.points = [{ time: range.from, value: null, state: 'unavailable', observed_at: null }]
+        series.summary = { first_at: null, last_at: null, net_change_bytes: null,
+          average_bytes_per_day: null, total_bytes: null }
+      }
+      return payload
+    })
+    render(<StorageRoom />)
+    expect(await screen.findAllByText('Recorded total Unavailable')).toHaveLength(3)
+    expect(screen.getByRole('heading', { name: 'Storage', exact: true })).toBeVisible()
+    expect(screen.getAllByRole('img')).toHaveLength(4)
+    for (const chart of createChart.mock.results.map((result) => result.value)) {
+      expect(chart.timeScale().setVisibleRange).not.toHaveBeenCalled()
+    }
+    fireEvent.click(screen.getByText('Advanced'))
+    const reserve = screen.getByLabelText('Free space reserve (%)')
+    expect(reserve).toBeEnabled()
+    fireEvent.change(reserve, { target: { value: '25' } })
+    expect(reserve).toHaveValue(25)
+    fireEvent.click(screen.getByText('Accessible data table · UTC · bytes'))
+    const cells = screen.getByRole('region', { name: 'Scrollable storage trends data' }).querySelectorAll('tbody td')
+    expect(cells).toHaveLength(5)
+    for (const cell of cells) expect(cell).toHaveTextContent(/^Unavailable$/)
     expect(api.reviewStorageChange).not.toHaveBeenCalled()
     expect(api.applyStorageChange).not.toHaveBeenCalled()
   })

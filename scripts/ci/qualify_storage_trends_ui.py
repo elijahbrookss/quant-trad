@@ -392,12 +392,16 @@ def run_viewport(browser, origin, artifact_dir, name, viewport, mobile, expect):
         with page.expect_response(lambda response: "/api/storage/metrics?" in response.url):
             page.get_by_role("combobox", name=re.compile(r"^Range")).select_option("7d")
         expect(page.get_by_text("Recorded total Unavailable", exact=True)).to_have_count(3)
+        expect(page.get_by_role("heading", name="Storage", exact=True)).to_be_visible()
+        expect(reserve).to_be_enabled()
         table_summary.click()
         expect(region).to_be_visible()
         values = region.locator("tbody td").all_text_contents()
         require(bool(values) and all(value.strip() == "Unavailable" for value in values), "missing_samples_never_zero")
         check_layout(page, painted=False)
         expect(reserve).to_have_value("25")
+        page.screenshot(path=str(artifact_dir / (name + "-unavailable.png")), full_page=True)
+        result["screenshots"].append(name + "-unavailable.png")
         api.clean()
         result["checks"].extend(["missing_samples_not_zero", "no_mutations_or_external_services"])
         result["status"] = "passed"
