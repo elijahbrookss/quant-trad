@@ -7,6 +7,15 @@ on:
     branches: ['feature/**', 'hotfix/**']
     paths:
       - '.github/workflows/storage-metrics.yaml'
+      - '.gitignore'
+      - '.dockerignore'
+      - 'docker/docker-compose*.yml'
+      - 'tests/test_storage_trends_*.py'
+      - 'portal/backend/controller/storage_management.py'
+      - 'portal/backend/db/session.py'
+      - 'portal/backend/db/market_storage_models.py'
+      - 'src/core/settings.py'
+      - 'config/defaults.yaml'
       - 'portal/backend/db/storage_metrics_schema.py'
       - 'portal/backend/service/storage/metrics.py'
       - 'scripts/db/*storage_metrics*'
