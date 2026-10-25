@@ -110,6 +110,8 @@ class MarketFactRetentionPartitionRecord(Base):
             "(state = 'reclaimed' AND reclaimed_at IS NOT NULL AND reclaimed_bytes IS NOT NULL)",
             name="ck_market_fact_partition_reclaimed",
         ),
+        Index("ix_market_live_partition_metrics_v1", "storage_day", postgresql_where=text("state<>'reclaimed'")),
+        Index("ix_market_reclaimed_time_metrics_v1", "reclaimed_at", "storage_day", postgresql_where=text("state='reclaimed'")),
         {"schema": "market"},
     )
 
@@ -146,6 +148,7 @@ class MarketFactArchiveManifestRecord(Base):
             "(descriptor->>'byte_count')::bigint = byte_count AND descriptor->>'manifest_id' = id) IS TRUE",
             name="ck_market_fact_archive_descriptor_binding",
         ),
+        Index("ix_market_archive_ack_metrics_v1", "acknowledged_at", "id"),
         Index("ix_market_fact_archive_partition_cursor", "storage_day", "last_commit_seq", "last_id"),
         {"schema": "market"},
     )
@@ -443,6 +446,7 @@ class MarketFactArchiveVerificationRecord(Base):
     __tablename__ = "fact_archive_verifications"
     __table_args__ = (
         CheckConstraint("verifier_version <> ''", name="ck_market_fact_archive_verifier"),
+        Index("ix_market_archive_verify_time_metrics_v1", "verified_at", "manifest_id", "verifier_version"),
         CheckConstraint(
             "manifest_hash ~ '^[0-9a-f]{64}$' AND catalog_hash ~ '^[0-9a-f]{64}$' AND "
             "verification_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_verification_hashes",

@@ -2,7 +2,6 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 import json
-from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 
@@ -453,50 +452,209 @@ def test_projection_statement_timeout_cancels_delayed_query_on_fresh_connection(
     assert snapshot["retention"]["reason"] == "bounded_projection_unavailable"
 
 
-def test_grafana_metadata_panels_refuse_unbounded_queries_even_when_tables_are_locked(postgres):
+def test_storage_metrics_function_respects_pre_dispatch_lock_deadline(postgres):
+    from portal.backend.db.storage_metrics_schema import install_storage_metrics_functions
+    from sqlalchemy.exc import DBAPIError
+    from portal.backend.db.models import DatabaseCapacitySampleRecord, DatabaseRelationCapacitySampleRecord
     engine, _ = postgres
-    dashboard = json.loads((Path(__file__).parents[2] /
-        "docker/grafana/provisioning/dashboards/capacity-database-growth.json").read_text())
-    panels_by_id = {
-        panel["id"]: panel
-        for panel in dashboard["panels"] if panel.get("id") in {28, 29, 30, 31}
-    }
-    assert set(panels_by_id) == {28, 29, 30, 31}
-    assert all("bounded Storage API/UI projection" in panel["description"]
-               for panel in panels_by_id.values())
-    assert all(panel["fieldConfig"]["defaults"]["noValue"] ==
-               "Unavailable: Grafana pre-query deadline unavailable"
-               for panel in (panels_by_id[28], panels_by_id[29], panels_by_id[30]))
-    sql_by_id = {
-        panel_id: panel["targets"][0]["rawSql"]
-        for panel_id, panel in panels_by_id.items()
-    }
-    for sql in sql_by_id.values():
-        assert "bounded_storage_projection_unavailable" in sql
-        assert "fact_retention_partitions" not in sql
-        assert "fact_archive_manifests" not in sql
-        assert "fact_archive_verifications" not in sql
-        assert "set_config" not in sql
-
-    engine.dispose()
+    with engine.begin() as conn:
+        conn.execute(text("CREATE SCHEMA observability_metrics"))
+        DatabaseCapacitySampleRecord.__table__.create(conn)
+        DatabaseRelationCapacitySampleRecord.__table__.create(conn)
+        install_storage_metrics_functions(conn)
     locker = engine.connect()
     transaction = locker.begin()
     try:
-        locker.execute(text(
-            "LOCK TABLE market.fact_retention_partitions,"
-            "market.fact_archive_manifests,market.fact_archive_verifications "
-            "IN ACCESS EXCLUSIVE MODE"
-        ))
+        locker.execute(text("LOCK TABLE market.fact_archive_manifests IN ACCESS EXCLUSIVE MODE"))
         started = monotonic()
-        with Session(engine) as session, session.begin():
-            session.execute(text("SET TRANSACTION READ ONLY"))
-            results = {
-                panel_id: list(session.execute(text(sql)).mappings())
-                for panel_id, sql in sql_by_id.items()
-            }
-        assert monotonic() - started < 1
+        with pytest.raises(DBAPIError):
+            with Session(engine) as session, session.begin():
+                session.execute(text("SET TRANSACTION READ ONLY"))
+                session.execute(text("SET LOCAL statement_timeout='5s'"))
+                session.execute(text("SET LOCAL lock_timeout='250ms'"))
+                session.execute(text("SELECT * FROM observability_metrics.storage_series_v1("
+                    "'archive_compressed_bytes',now()-interval '1 hour',now(),300)" )).all()
+        assert monotonic()-started < 2
     finally:
         transaction.rollback()
         locker.close()
 
-    assert all(rows == [] for rows in results.values())
+
+def _install_metric_queries(engine, *, small_manifest_limit=False):
+    from portal.backend.db.models import DatabaseCapacitySampleRecord, DatabaseRelationCapacitySampleRecord
+    from portal.backend.db.storage_metrics_schema import install_storage_metrics_functions, STORAGE_SERIES_SQL
+    with engine.begin() as conn:
+        conn.execute(text("CREATE SCHEMA observability_metrics"))
+        DatabaseCapacitySampleRecord.__table__.create(conn)
+        DatabaseRelationCapacitySampleRecord.__table__.create(conn)
+        install_storage_metrics_functions(conn)
+        if small_manifest_limit:
+            conn.execute(text(STORAGE_SERIES_SQL.replace("LIMIT 10001","LIMIT 3").replace("ELSE 10000 END","ELSE 2 END")))
+
+
+def test_first_verification_counts_manifest_once_in_original_window(postgres):
+    engine, _=postgres
+    _install_metric_queries(engine)
+    start=datetime(2026,1,1,tzinfo=UTC)
+    day=start.date()
+    with Session(engine) as session,session.begin():
+        session.add(MarketFactRetentionPartitionRecord(storage_day=day,state="open"))
+        session.flush()
+        session.add(_manifest(day,ordinal=1,byte_count=123,acknowledged_at=start))
+        session.flush()
+        session.add_all([
+            MarketFactArchiveVerificationRecord(manifest_id="manifest-1",verifier_version=f"market.canonical_archive_verification.v{v}",
+               manifest_hash=HASH_B,catalog_hash=HASH_A,verification_hash=HASH_C,verified_at=at)
+            for v,at in [(1,start+timedelta(minutes=10)),(12,start+timedelta(hours=2))]
+        ])
+    with engine.connect() as conn:
+        conn.execute(text("SET TRANSACTION READ ONLY"))
+        conn.execute(text("SET LOCAL statement_timeout='5s'"))
+        conn.execute(text("SET LOCAL lock_timeout='250ms'"))
+        def series(metric,lower,upper):
+            return list(conn.execute(text("SELECT * FROM observability_metrics.storage_series_v1(:m,:lo,:hi,300)"),
+                dict(m=metric,lo=lower,hi=upper)).mappings())
+        original=series("verified_first_compressed_bytes",start,start+timedelta(hours=1))
+        retry=series("verified_first_compressed_bytes",start+timedelta(hours=1),start+timedelta(hours=3))
+        archive=series("archive_compressed_bytes",start,start+timedelta(hours=1))
+        assert sum(r["value"] or 0 for r in original)==123
+        assert all(r["value"] is None for r in retry)
+        assert sum(r["value"] or 0 for r in archive)==123
+        assert conn.scalar(text("SELECT count(*) FROM pg_catalog.pg_proc p, LATERAL pg_catalog.aclexplode(p.proacl) a "
+            "WHERE p.pronamespace='observability_metrics'::regnamespace AND p.proname LIKE 'storage_%_v1' "
+            "AND a.grantee=0 AND a.privilege_type='EXECUTE'"))==0
+
+
+def test_source_cap_hides_partial_sum_and_reports_sentinel(postgres):
+    engine,_=postgres
+    _install_metric_queries(engine,small_manifest_limit=True)
+    start=datetime(2026,1,1,tzinfo=UTC)
+    with Session(engine) as session,session.begin():
+        session.add(MarketFactRetentionPartitionRecord(storage_day=start.date(),state="open"))
+        session.flush()
+        session.add_all([_manifest(start.date(),ordinal=i,byte_count=100,acknowledged_at=start+timedelta(minutes=i))
+                         for i in range(4)])
+    with engine.connect() as conn:
+        conn.execute(text("SET TRANSACTION READ ONLY"))
+        conn.execute(text("SET LOCAL statement_timeout='5s'"))
+        conn.execute(text("SET LOCAL lock_timeout='250ms'"))
+        rows=list(conn.execute(text("SELECT * FROM observability_metrics.storage_series_v1("
+            "'archive_compressed_bytes',:lo,:hi,300)"),dict(lo=start,hi=start+timedelta(hours=1))).mappings())
+    assert all(r["truncated"] and not r["complete"] and r["source_count"]==3 for r in rows)
+    assert all(r["value"] is None and r["reason"]=="source_limit" for r in rows)
+
+
+def test_backlog_is_unknown_for_eligible_unsealed_partition(postgres):
+    engine,_=postgres
+    _install_metric_queries(engine)
+    day=(datetime.now(UTC)-timedelta(days=90)).date()
+    with Session(engine) as session,session.begin():
+        session.add(StoragePolicyRecord(id=1,revision=1,policy=_policy(recent_days=30)))
+        session.add(MarketFactRetentionPartitionRecord(storage_day=day,state="open"))
+    with engine.connect() as conn:
+        conn.execute(text("SET TRANSACTION READ ONLY"))
+        conn.execute(text("SET LOCAL statement_timeout='5s'"))
+        conn.execute(text("SET LOCAL lock_timeout='250ms'"))
+        rows=list(conn.execute(text("SELECT * FROM observability_metrics.storage_metric_status_v1()")).mappings())
+    assert all(r["value"] is None and r["reason"]=="eligible_unsealed_size_unknown" for r in rows)
+    assert all(r["oldest_day"]==day for r in rows)
+
+
+def test_coarse_stock_growth_uses_observed_elapsed_and_market_requires_whole_sample(postgres):
+    from portal.backend.db.models import DatabaseCapacitySampleRecord, DatabaseRelationCapacitySampleRecord
+    engine,_=postgres
+    _install_metric_queries(engine)
+    start=datetime(2026,1,1,tzinfo=UTC)
+    times=[start+timedelta(minutes=1+5*i,seconds=20) for i in range(6)]
+    times += [start+timedelta(minutes=31+5*i,seconds=50) for i in range(6)]
+    with engine.begin() as conn:
+        for i,at in enumerate(times):
+            # Complete DB sample says two relation rows; deliberately retain one.
+            d={c.name:0 for c in DatabaseCapacitySampleRecord.__table__.columns}
+            d.update(sampled_at=at.replace(tzinfo=None),created_at=at.replace(tzinfo=None),
+                     database_size_bytes=100+i*10,relation_count=2)
+            conn.execute(DatabaseCapacitySampleRecord.__table__.insert(),d)
+            r={c.name:0 for c in DatabaseRelationCapacitySampleRecord.__table__.columns}
+            r.update(sampled_at=at.replace(tzinfo=None),created_at=at.replace(tzinfo=None),
+                     schema_name="market",relation_name="synthetic",relation_kind="table",total_bytes=10)
+            conn.execute(DatabaseRelationCapacitySampleRecord.__table__.insert(),r)
+    with engine.connect() as conn:
+        conn.execute(text("SET TRANSACTION READ ONLY"))
+        conn.execute(text("SET LOCAL statement_timeout='5s'"))
+        conn.execute(text("SET LOCAL lock_timeout='250ms'"))
+        growth=list(conn.execute(text("SELECT * FROM observability_metrics.storage_growth_v1("
+            "'database_allocated_bytes',:lo,:hi,1800)"),dict(lo=start,hi=start+timedelta(hours=1))).mappings())
+        market=list(conn.execute(text("SELECT * FROM observability_metrics.storage_series_v1("
+            "'market_allocated_bytes',:lo,:hi,1800)"),dict(lo=start,hi=start+timedelta(hours=1))).mappings())
+    assert growth[0]["value"] is None
+    assert growth[1]["value"]==pytest.approx(60*86400/1830)
+    assert growth[1]["observed_at"]==times[-1]
+    assert all(r["value"] is None and not r["complete"] for r in market)
+    assert all(r["reason"]=="relation_sample_incomplete" for r in market)
+
+
+def test_metrics_refuses_unbounded_session_before_data_read(postgres):
+    from sqlalchemy.exc import DBAPIError
+    engine,_=postgres
+    _install_metric_queries(engine)
+    with engine.connect() as conn:
+        conn.execute(text("SET LOCAL statement_timeout='0'"))
+        with pytest.raises(DBAPIError,match="storage_metrics_session_bounds_required"):
+            conn.execute(text("SELECT * FROM observability_metrics.storage_metric_status_v1()" )).all()
+
+
+def test_restricted_definer_transition_does_not_grant_raw_market_access(postgres):
+    from pathlib import Path
+    from uuid import uuid4
+    from sqlalchemy.exc import DBAPIError
+    engine,_=postgres
+    _install_metric_queries(engine)
+    token=uuid4().hex[:10]
+    roles={name:f"{name}_{token}" for name in
+           ("qt_storage_metrics_owner","qt_storage_metrics_reader","qt_storage_metrics_grafana")}
+    api=f"synthetic_metrics_api_{token}"
+    sql=(Path(__file__).parents[2]/"scripts/db/manual_grant_storage_metrics_v1.sql").read_text()
+    for original,replacement in roles.items(): sql=sql.replace(original,replacement)
+    sql=sql.replace(':"api_role"',api)
+    sql="\n".join(line for line in sql.splitlines() if not line.startswith("\\"))
+    owner=roles["qt_storage_metrics_owner"]
+    reader=roles["qt_storage_metrics_reader"]
+    login=roles["qt_storage_metrics_grafana"]
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as admin:
+        if not admin.scalar(text("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user")):
+            pytest.skip("isolated role administrator required")
+        database=admin.scalar(text("SELECT current_database()"))
+        quote=admin.dialect.identifier_preparer.quote
+        try:
+            admin.execute(text(f"CREATE ROLE {login} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"))
+            admin.execute(text(f"CREATE ROLE {api} NOLOGIN"))
+            # Only this generated fixture database may have its TEMP baseline changed.
+            admin.execute(text(f"GRANT TEMP ON DATABASE {quote(database)} TO PUBLIC"))
+            with pytest.raises(DBAPIError,match="ambient_temporary_privilege"):
+                admin.execute(text(sql))
+            admin.execute(text("ROLLBACK"))
+            assert not admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=:name)"),dict(name=owner))
+            admin.execute(text(f"REVOKE TEMP ON DATABASE {quote(database)} FROM PUBLIC"))
+            admin.execute(text(sql))
+            admin.execute(text(f"SET ROLE {login}"))
+            admin.execute(text("BEGIN READ ONLY"))
+            admin.execute(text("SET LOCAL statement_timeout='5s'"))
+            admin.execute(text("SET LOCAL lock_timeout='250ms'"))
+            rows=admin.execute(text("SELECT * FROM observability_metrics.storage_metric_status_v1()" )).all()
+            assert len(rows)==2
+            admin.execute(text("ROLLBACK"))
+            with pytest.raises(DBAPIError):
+                admin.execute(text("SELECT byte_count FROM market.fact_archive_manifests LIMIT 1"))
+            with pytest.raises(DBAPIError):
+                admin.execute(text("INSERT INTO public.portal_storage_policy (id,revision,policy) VALUES (1,1,'{}'::jsonb)"))
+            admin.execute(text("RESET ROLE"))
+            assert not admin.scalar(text("SELECT has_schema_privilege(:role,'observability_metrics','CREATE')"),dict(role=owner))
+        finally:
+            admin.execute(text("ROLLBACK"))
+            admin.execute(text("RESET ROLE"))
+            current=admin.scalar(text("SELECT current_user"))
+            for role in (login,api,reader,owner):
+                if admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=:name)"),dict(name=role)):
+                    admin.execute(text(f"REASSIGN OWNED BY {role} TO {quote(current)}"))
+                    admin.execute(text(f"DROP OWNED BY {role}"))
+                    admin.execute(text(f"DROP ROLE {role}"))
