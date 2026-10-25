@@ -68,3 +68,33 @@
 @media (max-width: 480px) {
   .qt2-storage-current, .qt2-storage-metrics { grid-template-columns: 1fr; }
 }
+
+/* Historical metrics stay below current status and independent of policy forms. */
+.qt2-storage-trends { min-width: 0; margin-top: 1.5rem; padding: 1rem; border: 1px solid var(--qt2-border, #343530); border-radius: 12px; }
+.qt2-storage-trends h3 { margin: 1.2rem 0 .4rem; font-size: .95rem; }
+.qt2-storage-trends a { color: var(--qt2-ivory, #eeeae0); text-decoration: underline; text-underline-offset: 3px; }
+.qt2-storage-trend-controls, .qt2-storage-custom-range { display: flex; flex-wrap: wrap; align-items: end; gap: .85rem; margin: 1rem 0; }
+.qt2-storage-trend-controls label { display: flex; align-items: center; gap: .45rem; }
+.qt2-storage-custom-range label { display: grid; gap: .35rem; }
+.qt2-storage-trends input, .qt2-storage-trends select { color-scheme: dark; min-height: 36px; max-width: 100%; background: #191b19; border: 1px solid #494b45; border-radius: 5px; padding: .35rem .5rem; }
+.qt2-storage-trends input[type=checkbox] { min-height: auto; }
+.qt2-storage-trends button, .qt2-storage-trends summary { min-height: 40px; cursor: pointer; }
+.qt2-storage-trends :focus-visible { outline: 2px solid #9dbaea; outline-offset: 3px; }
+.qt2-storage-trend-chart { width: 100%; min-width: 0; overflow: hidden; }
+.qt2-storage-trend-summaries { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.qt2-storage-trend-caption { display: grid; gap: .25rem; margin: .6rem 0; min-width: 0; font-size: .8rem; overflow-wrap: anywhere; }
+.qt2-storage-trend-caption small { color: #a4a59e; }
+.qt2-storage-trend-lane { border-top: 1px solid rgba(160,160,160,.15); margin-top: .8rem; }
+.qt2-storage-trend-data { margin-top: 1rem; }
+.qt2-storage-trend-data table { border-collapse: collapse; font-size: .75rem; min-width: 820px; width: 100%; font-variant-numeric: tabular-nums; }
+.qt2-storage-trend-data th, .qt2-storage-trend-data td { padding: .5rem; text-align: left; border-bottom: 1px solid #363831; }
+.qt2-storage-trends .qt2-storage-section-heading { flex-wrap: wrap; gap: .7rem; }
+@media (max-width: 640px) {
+  .qt2-storage-trends { padding: .7rem; }
+  .qt2-storage-trend-summaries { grid-template-columns: 1fr; }
+  .qt2-storage-custom-range { align-items: stretch; }
+  .qt2-storage-custom-range label { width: 100%; }
+  .qt2-storage-trend-controls label, .qt2-storage-trend-controls button { min-height: 44px; }
+}
+
+.qt2-storage-observed-time { display: block; min-width: 140px; margin-top: .25rem; }
