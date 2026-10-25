@@ -266,7 +266,7 @@ def main():
     grafana = Grafana(args.grafana_url, grafana_password)
     cleanup_errors = []
     try:
-        admin = psycopg2.connect(**admin_options, connect_timeout=5)
+        admin = psycopg2.connect(**{**admin_options, "connect_timeout": 5})
         admin.autocommit = True
         with admin.cursor() as cursor:
             cursor.execute("SELECT current_setting('server_version_num')::integer")
@@ -280,7 +280,7 @@ def main():
             owned_roles.append(LOGIN)
             cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(API_ROLE)))
             owned_roles.append(API_ROLE)
-        connection = psycopg2.connect(**{**admin_options, "dbname": database}, connect_timeout=5)
+        connection = psycopg2.connect(**{**admin_options, "dbname": database, "connect_timeout": 5})
         connection.autocommit = True
         start, end = prepare(connection)
         owned_roles.extend((OWNER, READER))
