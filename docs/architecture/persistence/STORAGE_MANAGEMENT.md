@@ -156,6 +156,15 @@ code_paths:
   - scripts/automation/storage_host_prepare.py
   - scripts/ci/test_storage_runtime_directories.py
   - scripts/reporting/canonical_storage_query_diagnostic.py
+  - portal/backend/db/storage_metrics_schema.py
+  - portal/backend/service/storage/metrics.py
+  - scripts/db/manual_migration_storage_metrics_v1.sql
+  - scripts/db/manual_add_storage_metrics_indexes_v1.sql
+  - scripts/db/manual_grant_storage_metrics_v1.sql
+  - portal/frontend/src/v2/rooms/StorageTrends.jsx
+  - portal/frontend/src/v2/rooms/storageTrends.js
+  - docker/grafana/storage-metrics/enabled.yml
+  - docker/grafana/storage-metrics/capacity-database-growth.json
 ---
 # Storage Management
 
@@ -234,14 +243,96 @@ cannot change retention, recovery, scheduling, admission or retry behavior.
 Last durable advancement in the API is reconstructed from committed partition,
 manifest and verification timestamps rather than from process-local callbacks.
 
-The Storage room presents this bounded evidence with the explanation beside the
-numbers. The Capacity and Database Growth Grafana dashboard retains four named
-panels as explicit unavailable placeholders. Its PostgreSQL datasource cannot
-establish the required statement and lock deadlines before a metadata statement,
-so those panels do not query the retention catalog. Operators use the bounded
-Storage API/UI projection for the pipeline domains, oldest days and saved default
-eligibility window whose runtime adapter clears family overrides. Neither surface
-grants execution authority.
+The Storage room presents this current bounded evidence separately from the
+selected-range trends below. Neither surface grants execution authority.
+
+## Shared storage trends
+
+\`GET /api/storage/metrics\` returns \`qt.storage_metrics.v1\` for an absolute UTC
+half-open range, \`from <= time < to\`. The only query parameters are \`from\`,
+\`to\` and \`resolution\`; repeated or unknown parameters refuse. Ranges are at
+most 30 days and 720 buckets. Resolution is \`auto\`, \`5m\`, \`30m\` or \`2h\`;
+auto selects an admitted bucket rather than silently truncating the range.
+
+The API and enabled Grafana dashboard use the same versioned SQL owners in
+\`observability_metrics\`: \`storage_series_v1\`, \`storage_growth_v1\` and
+\`storage_metric_status_v1\`. The schema module owns their definitions and bounds;
+consumers do not reconstruct archive or retention formulas from operational
+catalogs.
+
+Database and market-schema allocation are sampled stocks. Their net change uses
+observed endpoints and actual elapsed time; it is not filesystem used space or
+reclaim throughput. A market-schema sample requires agreement with its companion
+database sample's relation count. Raw sample gaps retain explicit incompleteness.
+The three completion flows have different bases: acknowledged compressed archive
+bytes, compressed bytes at the first qualifying manifest-bound verification, and
+physical hot bytes recorded at completed reclamation. Attempts and subsequent
+reverification do not inflate completion totals. These flows cannot be subtracted
+to manufacture net physical growth or an ETA.
+
+Current eligible backlog, verified source awaiting fresh reclaim guards and
+oldest eligible day are current metadata, not historical samples. Applied-policy
+absence, unknown open/unsealed sizes, missing required indexes and source caps
+produce explicit reasons and unavailable or partial values. A verified stage is
+not current deletion permission.
+
+Responses retain readiness, reason, observed time and coverage/truncation.
+Unavailable observations and empty event buckets remain null, not measured zero.
+Partial known observations keep their flags; the native UI separates gapped
+segments, while Grafana conservatively masks non-ready/incomplete values. Missing
+history must not become a connected line or an inferred zero-completion interval.
+A failed trends query leaves Storage status/settings available.
+
+## Optional Grafana access
+
+The native Storage room works without Grafana. The legacy-compatible dashboard
+remains the default and keeps its working capacity/relation/insert/WAL/filesystem
+diagnostics. Its four canonical placeholders remain unavailable until the
+restricted shared-query path is explicitly selected.
+
+Shared-metric activation selects both templates:
+\`docker/grafana/storage-metrics/enabled.yml\` through
+\`QT_GRAFANA_STORAGE_DATASOURCE_FILE\`, and
+\`docker/grafana/storage-metrics/capacity-database-growth.json\` through
+\`QT_GRAFANA_STORAGE_DASHBOARD_FILE\`. They replace the corresponding provisioning
+files at the existing dashboard UID \`quanttrad-capacity-growth\`; they are
+deployment alternatives, not competing metric definitions. The default datasource
+file contains no new datasource. The enabled \`quanttrad-storage-metrics\` uses
+the installed PostgreSQL plugin, at most two open/idle connections and dedicated
+credentials. It never falls back to the broad legacy \`quanttrad-postgres\` login.
+Missing datasource/configuration or query failure is visibly unavailable, not a
+successful empty result.
+
+Function/index installation and restricted-role authorization are explicit
+operator procedures; source files do not establish deployed qualification.
+Clean bootstrap installs invoker functions with PUBLIC execution revoked.
+The reviewed grant procedure transfers only the admitted functions to a NOLOGIN
+owner with required source-column reads, grants the reader execution, and admits
+the dedicated \`qt_storage_metrics_grafana\` login. It refuses existing conflicting
+authority, ambient source/schema privileges and database TEMP inherited through
+PUBLIC. It does not revoke PUBLIC privileges on an operator's behalf. Any
+database-wide hardening, compensating grants, login/credential creation or
+persistent access change requires its own approval.
+
+The calling session must already be read-only with a positive statement timeout
+no greater than five seconds and lock timeout no greater than 250 ms. The SQL
+admission helper checks those effective settings before source reads; setting a
+timeout inside the data function is not the safety mechanism. Verify these
+defaults on newly opened and reused Grafana pool connections before activation.
+The API establishes its own bounded read transaction. These constraints limit
+diagnostic work, not privileged SQL clients or maintenance authorization.
+
+\`QT_STORAGE_GRAFANA_DASHBOARD_URL\` configures the optional HTTP(S) dashboard
+base URL without embedded credentials, query or fragment. The UI opens that URL
+with the exact displayed absolute range and UTC timezone. An absent or invalid
+URL disables the link while native trends remain usable.
+
+Implementation owners are
+[the versioned SQL module](../../../portal/backend/db/storage_metrics_schema.py),
+[the API adapter](../../../portal/backend/service/storage/metrics.py) and the
+explicit migration/index/grant scripts under \`scripts/db/\`. Use exact-source
+disposable qualification and operator admission before installing or activating
+them; the existence of this interface is not a claim about a live database.
 
 ## Canonical archive stage attribution
 
