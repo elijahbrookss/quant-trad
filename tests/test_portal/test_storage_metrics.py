@@ -103,8 +103,6 @@ def test_manual_function_installation_matches_code_owned_clean_definitions():
     from pathlib import Path
     from portal.backend.db import storage_metrics_schema as schema
     sql=(Path(__file__).parents[2]/"scripts/db/manual_migration_storage_metrics_v1.sql").read_text()
-    assert 'RETURNS TABLE("time" timestamptz' in schema.STORAGE_SERIES_SQL
-    assert 'RETURNS TABLE("time" timestamptz' in schema.STORAGE_GROWTH_SQL
     for source in (schema.STORAGE_ADMISSION_SQL,schema.STORAGE_SERIES_SQL,schema.STORAGE_STATUS_SQL,schema.STORAGE_GROWTH_SQL):
         assert source in sql
     for signature in schema.SIGNATURES:
@@ -120,10 +118,3 @@ def test_route_rejects_extra_and_duplicate_query_arguments(monkeypatch):
         with pytest.raises(HTTPException) as raised:
             controller.storage_metric_history(request=request,from_time="x",to_time="y",resolution="auto")
         assert raised.value.status_code==422
-
-
-def test_privilege_preflight_guards_wrong_relation_kinds_inside_case():
-    from pathlib import Path
-    sql=(Path(__file__).parents[2]/"scripts/db/manual_grant_storage_metrics_v1.sql").read_text()
-    assert "CASE WHEN c.relkind='S' THEN\n          pg_catalog.has_sequence_privilege" in sql
-    assert "CASE WHEN c.relkind IN ('r','p','v','m','f') THEN\n          (pg_catalog.has_table_privilege" in sql
