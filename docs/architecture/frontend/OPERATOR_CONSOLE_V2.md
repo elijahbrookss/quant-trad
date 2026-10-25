@@ -39,6 +39,10 @@ code_paths:
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/reports
   - portal/backend/service/research
+  - portal/frontend/src/v2/rooms/StorageTrends.jsx
+  - portal/frontend/src/v2/rooms/storageTrends.js
+  - portal/backend/controller/storage_management.py
+  - portal/backend/service/storage/metrics.py
 ---
 # Operator Console v2
 
@@ -412,9 +416,38 @@ advanced controls produce a durable backend review. Enrollment selects a
 host-prepared target ID. The page does not accept filesystem paths or execute
 storage work itself. Missing status and blocked plans stay explicit.
 
-Physical policy activation remains unavailable until its executor and migration
-are implemented. See [storage management](../persistence/STORAGE_MANAGEMENT.md).
+Enrollment and settings review do not perform a physical cutover or authorize
+maintenance. Applied-layout settings and execution retain their separate
+[storage-management admission](../persistence/STORAGE_MANAGEMENT.md).
 
+
+## Storage trends inspection
+
+The Storage settings surface includes read-only trends from the shared
+\`qt.storage_metrics.v1\` API contract. It presents sampled database/market
+allocation separately from archive, first-verification and physical-reclamation
+completion flows. Current backlog and oldest-day status retain their current
+scope. See [storage management](../persistence/STORAGE_MANAGEMENT.md#shared-storage-trends)
+for metric bases, SQL ownership and operator admission.
+
+Presets and custom UTC inputs resolve to an absolute half-open range before a
+request. Live mode refreshes every 60 seconds; custom or frozen history remains
+fixed. Requests have a 20-second client bound, abort on replacement/unmount and
+pause when hidden; returning to the page resumes interrupted reads. Staleness
+continues to age while a live request is pending. A failed refresh can retain the
+previous result with its error/freshness state rather than implying a new success.
+
+Charts split missing/gapped history instead of joining across it, show explicit
+partial/unavailable/stale reasons and retain an accessible exact-value table.
+Allocation deltas use observed time, not the nominal bucket width. Compressed
+completion flows remain separate from physical reclaimed bytes; the UI does not
+infer a drain ETA or a maintenance action from their difference.
+
+Grafana is optional and separately activated with restricted access. Its link
+uses the exact displayed absolute range and UTC timezone, then freezes that
+inspection window; it does not recalculate a moving preset at click time.
+Unconfigured/invalid links stay unavailable without disabling native trends.
+Neither chart interaction nor navigation starts storage work.
 
 ## Human Narrative Readability Review
 
