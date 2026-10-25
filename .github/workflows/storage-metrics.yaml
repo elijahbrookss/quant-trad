@@ -1,0 +1,40 @@
+name: Storage Metrics Qualification
+
+# Focused disposable proof; the full required release matrix remains authoritative.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feature/**', 'hotfix/**']
+    paths:
+      - '.github/workflows/storage-metrics.yaml'
+      - 'portal/backend/db/storage_metrics_schema.py'
+      - 'portal/backend/service/storage/metrics.py'
+      - 'scripts/db/*storage_metrics*'
+      - 'scripts/ci/qualify_storage_metrics_grafana.py'
+      - 'docker/grafana/storage-metrics/**'
+      - 'tests/test_portal/test_storage_metrics.py'
+      - 'tests/test_portal/test_storage_retention_observability_db.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-metrics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  storage-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qualify bounded storage queries with disposable PostgreSQL
+        env:
+          QT_DISABLE_DOTENV: '1'
+        run: |
+          ./scripts/ci/run_test_suite.sh db tests/test_portal/test_storage_metrics.py tests/test_portal/test_storage_retention_observability_db.py
