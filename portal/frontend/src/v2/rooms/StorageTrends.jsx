@@ -122,7 +122,7 @@ function MetricChart({ payload, metrics, bars = false, title }) {
     for (const metric of metrics) {
       const source = payload.series.find((entry) => entry.metric_id === metric.id)
       const points = chartPoints(source, payload.range, payload.cadence_seconds)
-      hasPoints ||= points.length > 0
+      hasPoints ||= points.some((point) => Number.isFinite(point.value))
       const segments = bars ? [points] : lineSegments(points)
       for (const segment of segments.length ? segments : [[]]) {
         const series = chart.addSeries(bars ? HistogramSeries : LineSeries, {
