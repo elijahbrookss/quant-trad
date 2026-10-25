@@ -39,9 +39,17 @@ def test_default_capacity_dashboard_remains_the_existing_working_dashboard(name)
 @pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.server.yml"])
 def test_metrics_credentials_are_loaded_only_by_grafana(name):
     services = yaml.safe_load((ROOT / "docker" / name).read_text())["services"]
-    expected = {"path": "${QT_GRAFANA_STORAGE_ENV_FILE:-../grafana-storage-metrics.env}",
+    expected = {"path": "${QT_GRAFANA_STORAGE_ENV_FILE:-../../grafana-storage-metrics.env}",
                 "required": False}
     assert expected in services["grafana"]["env_file"]
     for service_name, service in services.items():
         if service_name != "grafana":
             assert expected not in service.get("env_file", [])
+
+
+def test_metrics_secret_default_stays_outside_checkout_and_build_context():
+    # Standard sibling deployment layout; no real private file is opened.
+    relative = Path("../../grafana-storage-metrics.env")
+    assert (ROOT / "docker" / relative).resolve().parent == ROOT.parent
+    for name in (".gitignore", ".dockerignore"):
+        assert "/grafana-storage-metrics.env" in (ROOT / name).read_text().splitlines()

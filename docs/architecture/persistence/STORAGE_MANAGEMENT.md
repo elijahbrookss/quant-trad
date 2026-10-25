@@ -300,9 +300,12 @@ deployment alternatives, not competing metric definitions. The default datasourc
 file contains no new datasource. The enabled `quanttrad-storage-metrics` uses
 the installed PostgreSQL plugin, at most two open/idle connections and dedicated
 credentials, with a role-level limit of two sessions. Keep the generated password in the private Grafana-only runtime
-file selected by `QT_GRAFANA_STORAGE_ENV_FILE` (default sibling
-`grafana-storage-metrics.env`), never the shared application `secrets.env`.
-Only Grafana loads that optional file; this requires Compose 2.24 or newer. It never falls back to the broad legacy `quanttrad-postgres` login.
+file selected by `QT_GRAFANA_STORAGE_ENV_FILE`, never the shared application
+`secrets.env`. Set an absolute path outside the checkout and build context,
+with private owner-only permissions. The default `../../grafana-storage-metrics.env`
+is relative to `docker/`: the standard `/srv/quanttrad/app` checkout resolves it
+at `/srv/quanttrad/grafana-storage-metrics.env`. Only Grafana loads this optional
+file; this requires Compose 2.24 or newer. It never falls back to the broad legacy `quanttrad-postgres` login.
 Missing datasource/configuration or query failure is visibly unavailable, not a
 successful empty result.
 

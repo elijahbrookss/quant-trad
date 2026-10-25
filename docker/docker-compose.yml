@@ -295,7 +295,7 @@ services:
     env_file:
       - ../secrets.env
       # Metrics credentials belong only to Grafana, not the shared service env.
-      - path: ${QT_GRAFANA_STORAGE_ENV_FILE:-../grafana-storage-metrics.env}
+      - path: ${QT_GRAFANA_STORAGE_ENV_FILE:-../../grafana-storage-metrics.env}
         required: false
     environment:
       GF_SECURITY_ADMIN_USER: admin
