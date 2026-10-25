@@ -244,6 +244,14 @@ jobs:
       - name: Test and build production frontend
         run: make frontend-check
 
+      - name: Preserve built frontend for bounded browser qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-preview-${{ github.sha }}
+          path: portal/frontend/dist/
+          if-no-files-found: error
+          retention-days: 7
+
   deployment-proof-build:
     needs: changes
     if: ${{ needs.changes.outputs['deployment-contract'] == 'true' }}
