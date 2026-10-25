@@ -117,6 +117,50 @@ def rows(outcome):
     return output
 
 
+def prove_dashboard_targets(grafana, uid, start, end):
+    """Execute provisioned SQL after the browser's two known global expansions.
+
+    This covers SQL/plugin conversion, not browser rendering. NULL/unavailable
+    historical fixture values are valid; every selected target must query cleanly.
+    """
+    dashboard = json.loads((ROOT / "docker/grafana/storage-metrics/capacity-database-growth.json").read_text())
+    expected = {2: "bytes", 3: "Bps", 4: "bytes", 6: "bytes", 7: "bytes",
+                28: "bytes", 29: "bytes", 30: "bytes", 31: None, 32: None}
+    panels = {panel["id"]: panel for panel in dashboard["panels"]
+              if panel["id"] in expected}
+    require(set(panels) == set(expected), "dashboard_shared_panel_coverage")
+    start_ms, end_ms = (str(int(at.timestamp() * 1000)) for at in (start, end))
+    for panel_id, unit in expected.items():
+        panel = panels[panel_id]
+        label = "dashboard_panel_" + str(panel_id)
+        require(panel["fieldConfig"]["defaults"].get("unit") == unit, label + "_unit")
+        require(bool(panel.get("targets")), label + "_targets")
+        for target in panel["targets"]:
+            require(target.get("format") in {"table", "time_series"}
+                    and target.get("rawQuery") is True and not target.get("hide"),
+                    label + "_target_options")
+            query = dict(target)
+            source = query["rawSql"]
+            require("observability_metrics.storage_" in source, label + "_shared_sql")
+            if panel_id == 3:
+                require("storage_growth_v1(" in source and "value / 86400.0" in source,
+                        label + "_bytes_per_second")
+            # Grafana's frontend expands these globals before /api/ds/query.
+            # Leave SQL plugin macros intact for real backend interpolation.
+            query["rawSql"] = source.replace("${__from}", start_ms).replace("${__to}", end_ms)
+            require("${" not in query["rawSql"], label + "_unresolved_frontend_variable")
+            query["datasource"] = {"uid": uid, "type": "postgres"}
+            query.setdefault("intervalMs", 300000)
+            query.setdefault("maxDataPoints", panel.get("maxDataPoints", 720))
+            status, payload = grafana.request("/api/ds/query",
+                {"from": start_ms, "to": end_ms, "queries": [query]})
+            result = payload.get("results", {}).get(query["refId"])
+            require(status == 200 and isinstance(result, dict) and not result.get("error"),
+                    label + "_query_success")
+        print("storage_metrics_grafana stage=" + label
+              + " coverage=provisioned_sql_after_frontend_globals result=pass", flush=True)
+
+
 def rejected(outcome, label):
     status, payload = outcome
     result = payload.get("results", {}).get("A", {})
@@ -226,6 +270,7 @@ def prove(grafana, uid, connection, start, end):
     require(any(row.get("value") is not None for row in rows(grafana.query(uid,
         "SELECT * FROM observability_metrics.storage_growth_v1('database_allocated_bytes'," + bounds + ")"))),
         "growth_rows")
+    prove_dashboard_targets(grafana, uid, start, end)
     for label, forbidden in (
         ("raw_select_denied", "SELECT * FROM observability_metrics.database_capacity_samples"),
         ("raw_insert_denied", "INSERT INTO public.storage_metrics_ci_write_probe VALUES(1)"),
@@ -293,8 +338,10 @@ def main():
             owned_roles.append(API_ROLE)
         connection = psycopg2.connect(**{**admin_options, "dbname": database, "connect_timeout": 5})
         connection.autocommit = True
-        start, end = prepare(connection)
+        # Fresh-cluster preflight proved these names absent. Track planned
+        # ownership before SQL so cleanup covers an uncertain grant COMMIT reply.
         owned_roles.extend((OWNER, READER))
+        start, end = prepare(connection)
         template = yaml.safe_load((ROOT / "docker/grafana/storage-metrics/enabled.yml").read_text())
         datasource, = template["datasources"]
         datasource.update(uid=uid, name="Owned storage metrics CI " + uid,
@@ -322,7 +369,7 @@ def main():
                     if database_created:
                         cursor.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
                     for role in reversed(owned_roles):
-                        cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+                        cursor.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
             except Exception:
                 cleanup_errors.append("database_or_principals")
             finally:
