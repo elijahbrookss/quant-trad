@@ -1,6 +1,8 @@
 """Qualify real Grafana PostgreSQL pool sessions on GitHub-owned services.
 
 Requires fresh disposable PostgreSQL 15 and Grafana services supplied by CI.
+The CI PostgreSQL service must preload pg_stat_statements with compute_query_id
+enabled; prepare() installs extension 1.10 only inside the owned random database.
 No Docker lifecycle, production access, credentials in output, or runtime grants.
 The script creates one random database and synthetic principals, installs the
 checked-in SQL, and removes only its owned resources in finally.
@@ -197,6 +199,11 @@ def install_sql(connection, filename, *, api_role=None, individual=False):
 def prepare(connection):
     from psycopg2 import sql
     with connection.cursor() as cursor:
+        cursor.execute("CREATE EXTENSION pg_stat_statements WITH SCHEMA public")
+        cursor.execute("""SELECT e.extversion, n.nspname FROM pg_extension e
+            JOIN pg_namespace n ON n.oid=e.extnamespace
+            WHERE e.extname='pg_stat_statements'""")
+        require(cursor.fetchone() == ("1.10", "public"), "standard_monitoring_extension_1_10")
         cursor.execute("""
           CREATE SCHEMA market;
           CREATE SCHEMA observability_metrics;
@@ -238,6 +245,69 @@ def prepare(connection):
     return base, base + timedelta(minutes=30)
 
 
+def prove_monitoring_masking(grafana, uid, connection):
+    """Standard PUBLIC counters expose neither other-user SQL nor reset rights."""
+    from psycopg2 import sql
+    marker = "storage_metrics_ci_admin_" + secrets.token_hex(8)
+    with connection.cursor() as cursor:
+        require(connection.get_dsn_parameters()["user"] != LOGIN,
+                "monitoring_probe_other_user_required")
+        cursor.execute("SELECT current_setting('pg_stat_statements.track')")
+        require(cursor.fetchone()[0] in {"top", "all"}, "monitoring_probe_tracking_enabled")
+        cursor.execute("INSERT INTO public.storage_metrics_ci_write_probe VALUES(7)")
+        cursor.execute(sql.SQL("SELECT sum(value) AS {} FROM public.storage_metrics_ci_write_probe")
+                       .format(sql.Identifier(marker)))
+        require(cursor.fetchone()[0] == 7, "monitoring_synthetic_workload")
+        cursor.execute("""SELECT userid, dbid, queryid, calls, rows, total_exec_time
+            FROM public.pg_stat_statements
+            WHERE userid=(SELECT oid FROM pg_roles WHERE rolname=current_user)
+              AND dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
+              AND query LIKE %s AND queryid IS NOT NULL""", ("%" + marker + "%",))
+        records = cursor.fetchall()
+        require(len(records) == 1, "monitoring_admin_marker_recorded")
+        admin_oid, database_oid, query_id, calls, affected_rows, elapsed = records[0]
+    privileges, = rows(grafana.query(uid, """SELECT
+        pg_has_role(current_user,'pg_read_all_stats','MEMBER') AS stats_member,
+        pg_has_role(current_user,'pg_read_all_stats','USAGE') AS stats_usage,
+        pg_has_role(current_user,'pg_monitor','MEMBER') AS monitor_member,
+        pg_has_role(current_user,'pg_monitor','USAGE') AS monitor_usage,
+        has_function_privilege(current_user,
+            'public.pg_stat_statements_reset(oid,oid,bigint)','EXECUTE') AS reset_allowed,
+        (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS superuser,
+        EXISTS(SELECT 1 FROM pg_roles
+            WHERE rolname NOT IN (current_user,'qt_storage_metrics_reader')
+              AND (pg_has_role(current_user,oid,'MEMBER')
+                   OR pg_has_role(current_user,oid,'USAGE'))) AS other_effective_roles"""))
+    require(all(value is False for value in privileges.values()) and len(privileges) == 7,
+            "monitoring_privileged_roles_and_reset_denied")
+    # Only booleans and synthetic counters leave the DB: never return query text
+    # or query IDs through Grafana, even on an unexpected privilege regression.
+    observed = rows(grafana.query(uid, """SELECT
+        query = '<insufficient privilege>' AS sql_masked,
+        queryid IS NULL AS id_masked, calls, rows AS affected_rows, total_exec_time
+        FROM public.pg_stat_statements WHERE userid=""" + str(admin_oid)
+        + " AND dbid=" + str(database_oid)))
+    require(bool(observed) and all(item["sql_masked"] is True and item["id_masked"] is True
+                                  for item in observed), "monitoring_other_user_sql_masked")
+    require(calls > 0 and affected_rows > 0 and any(
+        item["calls"] == calls and item["affected_rows"] == affected_rows
+        and abs(item["total_exec_time"] - elapsed) < 0.000001 for item in observed),
+        "monitoring_synthetic_workload_counters_visible")
+    require(bool(rows(grafana.query(uid,
+        "SELECT dealloc, stats_reset FROM public.pg_stat_statements_info"))),
+        "monitoring_info_view_readable")
+    # Scope even this forbidden operation to the exact owned synthetic statement.
+    rejected(grafana.query(uid, "SELECT public.pg_stat_statements_reset("
+        + str(admin_oid) + "::oid," + str(database_oid) + "::oid,"
+        + str(query_id) + "::bigint)"), "monitoring_reset_denied")
+    with connection.cursor() as cursor:
+        cursor.execute("""SELECT count(*) FROM public.pg_stat_statements
+            WHERE userid=%s AND dbid=%s AND queryid=%s AND query LIKE %s""",
+            (admin_oid, database_oid, query_id, "%" + marker + "%"))
+        require(cursor.fetchone()[0] == 1, "monitoring_denied_reset_preserves_marker")
+    print("storage_metrics_grafana stage=monitoring_masking_and_denials result=pass", flush=True)
+
+
 def prove(grafana, uid, connection, start, end):
     require(grafana.request("/api/health")[0] == 200, "grafana_health")
     gate = Barrier(2)
@@ -271,6 +341,7 @@ def prove(grafana, uid, connection, start, end):
         "SELECT * FROM observability_metrics.storage_growth_v1('database_allocated_bytes'," + bounds + ")"))),
         "growth_rows")
     prove_dashboard_targets(grafana, uid, start, end)
+    prove_monitoring_masking(grafana, uid, connection)
     for label, forbidden in (
         ("raw_select_denied", "SELECT * FROM observability_metrics.database_capacity_samples"),
         ("raw_insert_denied", "INSERT INTO public.storage_metrics_ci_write_probe VALUES(1)"),
@@ -325,6 +396,12 @@ def main():
         admin = psycopg2.connect(**{**admin_options, "connect_timeout": 5})
         admin.autocommit = True
         with admin.cursor() as cursor:
+            # This connection creates a synthetic password using utility SQL.
+            # Disable its statement tracking before any credentials are supplied;
+            # the separate owned-DB workload connection retains normal tracking.
+            cursor.execute("SET pg_stat_statements.track='none'")
+            cursor.execute("SELECT current_setting('pg_stat_statements.track')")
+            require(cursor.fetchone()[0] == "none", "credential_session_tracking_disabled")
             cursor.execute("SELECT current_setting('server_version_num')::integer")
             require(150000 <= cursor.fetchone()[0] < 160000, "postgres_15_required")
             cursor.execute("SELECT 1 FROM pg_roles WHERE rolname=ANY(%s)", (list(ROLES),))
