@@ -43,7 +43,10 @@ SESSION_SQL = """SELECT current_user AS login,
  current_setting('transaction_read_only') AS read_only,
  current_setting('statement_timeout') AS statement_timeout,
  current_setting('lock_timeout') AS lock_timeout,
- pg_backend_pid() AS pid, has_database_privilege(current_user,current_database(),'TEMP') AS temporary_allowed
+ pg_backend_pid() AS pid, has_database_privilege(current_user,current_database(),'TEMP') AS temporary_allowed,
+ has_any_column_privilege(current_user,'observability_metrics.database_capacity_samples','SELECT') AS raw_select_allowed,
+ has_table_privilege(current_user,'public.storage_metrics_ci_write_probe','INSERT') AS raw_insert_allowed,
+ has_schema_privilege(current_user,'public','CREATE') AS schema_create_allowed
  FROM (SELECT pg_sleep(0.4)) AS owned_pause"""
 
 
@@ -114,13 +117,17 @@ def rows(outcome):
     return output
 
 
-def rejected(outcome, expected):
+def rejected(outcome, label):
     status, payload = outcome
     result = payload.get("results", {}).get("A", {})
-    require(status >= 400 or bool(result.get("error")), "negative_query_must_fail")
-    # Inspect internally, never emit database errors, SQL or datasource responses.
-    text = json.dumps(payload).lower()
-    require(any(token in text for token in expected), "negative_query_expected_failure")
+    # Grafana can redact PostgreSQL causes to a generic query error. Require
+    # the actual query's failure envelope, never an arbitrary HTTP/auth failure.
+    # Pool privilege facts and timeout elapsed bounds are asserted separately;
+    # direct authenticated DB qualification checks the precise SQLSTATE causes.
+    require(status in {200, 400, 500} and bool(result.get("error")),
+            label + "_query_must_fail")
+    print("storage_metrics_grafana stage=" + label + " http_status=" + str(status)
+          + " result=query_failed", flush=True)
 
 
 def install_sql(connection, filename, *, api_role=None, individual=False):
@@ -202,6 +209,8 @@ def prove(grafana, uid, connection, start, end):
         require(item["login"] == LOGIN and item["default_read_only"] == item["read_only"] == "on"
                 and item["statement_timeout"] == "5s" and item["lock_timeout"] == "250ms"
                 and item["temporary_allowed"] is False, "pooled_role_defaults")
+        require(item["raw_select_allowed"] is False and item["raw_insert_allowed"] is False
+                and item["schema_create_allowed"] is False, "pooled_source_privileges_denied")
     print("storage_metrics_grafana stage=pooled_role_defaults sessions=2 result=pass", flush=True)
     bounds = "'" + start.isoformat() + "'::timestamptz,'" + end.isoformat() + "'::timestamptz,300"
     query = "SELECT * FROM observability_metrics.storage_series_v1('database_allocated_bytes'," + bounds + ")"
@@ -217,14 +226,16 @@ def prove(grafana, uid, connection, start, end):
     require(any(row.get("value") is not None for row in rows(grafana.query(uid,
         "SELECT * FROM observability_metrics.storage_growth_v1('database_allocated_bytes'," + bounds + ")"))),
         "growth_rows")
-    rejected(grafana.query(uid, "SELECT * FROM observability_metrics.database_capacity_samples"),
-             ["permission denied"])
-    rejected(grafana.query(uid, "INSERT INTO public.storage_metrics_ci_write_probe VALUES(1)"),
-             ["read-only", "permission denied"])
-    rejected(grafana.query(uid, "CREATE TEMP TABLE storage_metrics_ci_temp(value integer)"),
-             ["read-only", "permission denied"])
+    for label, forbidden in (
+        ("raw_select_denied", "SELECT * FROM observability_metrics.database_capacity_samples"),
+        ("raw_insert_denied", "INSERT INTO public.storage_metrics_ci_write_probe VALUES(1)"),
+        ("temporary_table_denied", "CREATE TEMP TABLE storage_metrics_ci_temp(value integer)"),
+    ):
+        rejected(grafana.query(uid, forbidden), label)
+        # A working allowed query after each denial excludes a datasource outage.
+        require(bool(rows(grafana.query(uid, query))), label + "_pool_remains_usable")
     began = time.monotonic()
-    rejected(grafana.query(uid, "SELECT pg_sleep(7)"), ["statement timeout"])
+    rejected(grafana.query(uid, "SELECT pg_sleep(7)"), "statement_timeout")
     elapsed = time.monotonic() - began
     require(4 <= elapsed <= 10, "statement_timeout_elapsed_bound")
     print("storage_metrics_grafana stage=statement_timeout elapsed_seconds=" + str(round(elapsed, 2))
@@ -235,7 +246,7 @@ def prove(grafana, uid, connection, start, end):
             cursor.execute("SET LOCAL lock_timeout='1s'")
             cursor.execute("LOCK observability_metrics.database_capacity_samples IN ACCESS EXCLUSIVE MODE")
         began = time.monotonic()
-        rejected(grafana.query(uid, query), ["lock timeout"])
+        rejected(grafana.query(uid, query), "lock_timeout")
         elapsed = time.monotonic() - began
         require(0.15 <= elapsed <= 3, "lock_timeout_elapsed_bound")
         print("storage_metrics_grafana stage=lock_timeout elapsed_seconds=" + str(round(elapsed, 2))
