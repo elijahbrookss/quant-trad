@@ -1,5 +1,8 @@
 # Opt in only after restricted login/grants and pooled-session budgets are verified.
 # Outside automatic provisioning; never use broad PostgreSQL credentials.
+# Select this AND the paired capacity-database-growth.json after qualification.
+# That template replaces the legacy-compatible default at the same dashboard UID;
+# the backend versioned SQL functions remain the single metric authority.
 apiVersion: 1
 datasources:
   - name: QuantTrad Storage Metrics
