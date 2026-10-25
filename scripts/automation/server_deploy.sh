@@ -28,9 +28,10 @@ export QT_SERVER_ENV_FILE="$env_file"
 
 env_value() {
   local key="$1"
+  local query_file="${2:-$env_file}"
   local line=""
-  if test -f "$env_file"; then
-    line="$(grep -E "^${key}=" "$env_file" | tail -n 1 || true)"
+  if test -f "$query_file"; then
+    line="$(grep -E "^${key}=" "$query_file" | tail -n 1 || true)"
   fi
   printf '%s' "${line#*=}"
 }
@@ -45,6 +46,24 @@ first_value() {
   done
   return 0
 }
+
+# Keep Grafana activation settings out of the shared service env: changing that
+# file would also change PostgreSQL's resolved container environment. Never
+# source this private file or export its credentials into the host process.
+grafana_storage_env_file="$(first_value "${QT_GRAFANA_STORAGE_ENV_FILE:-}" "$(env_value QT_GRAFANA_STORAGE_ENV_FILE)" "$deployment_root/grafana-storage-metrics.env")"
+if [[ "$grafana_storage_env_file" != /* ]]; then
+  grafana_storage_env_file="$repo_root/$grafana_storage_env_file"
+fi
+export QT_GRAFANA_STORAGE_ENV_FILE="$grafana_storage_env_file"
+for storage_setting_key in QT_GRAFANA_STORAGE_DATASOURCE_FILE QT_GRAFANA_STORAGE_DASHBOARD_FILE QT_STORAGE_GRAFANA_DASHBOARD_URL; do
+  if [[ ! -v $storage_setting_key ]]; then
+    storage_setting_value="$(env_value "$storage_setting_key" "$grafana_storage_env_file")"
+    if test -n "$storage_setting_value"; then
+      export "$storage_setting_key=$storage_setting_value"
+    fi
+  fi
+done
+unset storage_setting_key storage_setting_value
 
 data_root="$(first_value "${QT_MARKET_DATA_ROOT:-}" "$(env_value QT_MARKET_DATA_ROOT)" "/srv/quanttrad/market-structure")"
 archive_uuid="$(first_value "${QT_MARKET_DATA_EXPECTED_UUID:-}" "$(env_value QT_MARKET_DATA_EXPECTED_UUID)")"

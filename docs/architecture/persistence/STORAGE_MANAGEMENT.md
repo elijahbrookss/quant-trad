@@ -304,8 +304,12 @@ file selected by `QT_GRAFANA_STORAGE_ENV_FILE`, never the shared application
 `secrets.env`. Set an absolute path outside the checkout and build context,
 with private owner-only permissions. The default `../../grafana-storage-metrics.env`
 is relative to `docker/`: the standard `/srv/quanttrad/app` checkout resolves it
-at `/srv/quanttrad/grafana-storage-metrics.env`. Only Grafana loads this optional
-file; this requires Compose 2.24 or newer. It never falls back to the broad legacy `quanttrad-postgres` login.
+at `/srv/quanttrad/grafana-storage-metrics.env`. Only Grafana loads the full optional
+file; this requires Compose 2.24 or newer. The server deployment helper reads
+only its two activation paths and public dashboard URL, with explicit process
+environment values taking precedence. It passes the URL only to the backend;
+credentials remain exclusive to Grafana. Keep these new settings out of shared
+`secrets.env` so activation does not change PostgreSQL's container environment. It never falls back to the broad legacy `quanttrad-postgres` login.
 Missing datasource/configuration or query failure is visibly unavailable, not a
 successful empty result.
 

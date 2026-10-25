@@ -106,6 +106,7 @@ services:
     env_file:
       - ${QT_SERVER_ENV_FILE:-../secrets.env}
     environment:
+      QT_STORAGE_GRAFANA_DASHBOARD_URL: ${QT_STORAGE_GRAFANA_DASHBOARD_URL:-}
       <<: *runtime-environment
       QT_BOT_RUNTIME_IMAGE: quanttrad-backend:${QT_RELEASE_REVISION}
       QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
