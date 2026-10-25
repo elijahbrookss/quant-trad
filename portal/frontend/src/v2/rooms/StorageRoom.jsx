@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
 import { HardDrive, Plus, RefreshCw } from 'lucide-react'
 import { applyStorageChange, readStorage, registerStorageTarget, reviewStorageChange } from '../../adapters/storage.adapter.js'
+import { StorageTrends } from './StorageTrends.jsx'
 import './storage.css'
 
 const ROLES = [
@@ -66,15 +67,6 @@ function RetentionOverview({ retention }) {
       <div><small>Eligible backlog</small><strong>{bytes(backlog.eligible_source_bytes)}</strong><span>{count(backlog.eligible_partitions)} partitions · oldest {backlog.oldest_eligible_age_days ?? 'unknown'} days</span></div>
       <div><small>Verified, guarded</small><strong>{bytes(backlog.verified_guarded_source_bytes)}</strong><span>{count(backlog.verified_guarded_partitions)} partitions await fresh reclaim guards</span></div>
     </div>
-    {!!retention.rates?.windows?.length && <div className="qt2-storage-rate-wrap"><table className="qt2-storage-rates">
-      <caption>Distinct lifecycle bytes by exact rolling window</caption>
-      <thead><tr><th>Window</th><th>Intake estimate</th><th>Archived</th><th>Verified</th><th>Reclaimed</th></tr></thead>
-      <tbody>{retention.rates.windows.map((window) => <tr key={window.name}>
-        <th>{window.name}</th><td>{bytes(window.intake?.estimated_source_bytes)}</td>
-        <td>{bytes(window.archive?.compressed_bytes)}</td><td>{bytes(window.verify?.compressed_bytes)}</td>
-        <td>{bytes(window.reclaim?.physical_hot_bytes)}</td>
-      </tr>)}</tbody>
-    </table></div>}
     <div className="qt2-storage-facts">
       <p><strong>Recovery floor:</strong> {floor.state === 'above_floor' || floor.state === 'below_floor'
         ? `${bytes(floor.available_bytes)} available · ${bytes(floor.margin_bytes)} ${floor.margin_bytes >= 0 ? 'above' : 'below'} floor`
@@ -82,8 +74,7 @@ function RetentionOverview({ retention }) {
       <p><strong>Completeness:</strong> {completeness.complete ? 'complete within declared bounds' : 'partial'}
         {completeness.truncated ? ' · truncated' : ''}
         {completeness.unknowns?.length ? ` · ${completeness.unknowns.map(words).join(', ')}` : ''}</p>
-      <p><strong>Drain ETA:</strong> {words(retention.rates?.eta?.reason || retention.rates?.eta?.state)}</p>
-      <p className="qt2-storage-muted">Intake is the sealed-partition source-byte estimate. Archive and verification use compressed bytes; reclaim uses physical hot bytes. Filesystem deltas and permanent metadata growth remain unavailable until aligned samples exist.</p>
+      <p className="qt2-storage-muted">Current storage and lifecycle status. Historical trends below use their own selected range.</p>
     </div>
   </section>
 }
@@ -190,12 +181,13 @@ export function StorageRoom() {
         </div>}
 
         <p className="qt2-storage-health" role="status">
-          Storage: {words(snapshot.health)} · Movement: {words(snapshot.movement?.state)} · Backup: {words(snapshot.backup?.state)}
+          Current · Storage: {words(snapshot.health)} · Movement: {words(snapshot.movement?.state)} · Backup: {words(snapshot.backup?.state)}
           {snapshot.backup?.last_completed_at && <> · Last copy: {new Date(snapshot.backup.last_completed_at).toLocaleString()}</>}
         </p>
         {active && <p role="status">Change {words(active.state)}{active.progress?.detail ? `: ${active.progress.detail}` : ''}</p>}
 
         <RetentionOverview retention={snapshot.retention} />
+        <StorageTrends />
 
         {draft && <details className="qt2-storage-advanced">
           <summary>Advanced</summary>

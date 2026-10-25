@@ -4,7 +4,7 @@ import { StorageRoom } from './StorageRoom.jsx'
 import * as api from '../../adapters/storage.adapter.js'
 
 vi.mock('../../adapters/storage.adapter.js', () => ({
-  readStorage: vi.fn(), registerStorageTarget: vi.fn(),
+  readStorage: vi.fn(), readStorageMetrics: vi.fn(), registerStorageTarget: vi.fn(),
   reviewStorageChange: vi.fn(), applyStorageChange: vi.fn(),
 }))
 
@@ -34,6 +34,7 @@ const snapshot = { revision: 3, policy, targets: [target('ssd', 'ssd'), target('
 
 beforeEach(() => {
   api.readStorage.mockResolvedValue(structuredClone(snapshot))
+  api.readStorageMetrics.mockRejectedValue(new Error('Metrics unavailable'))
 })
 
 describe('Storage settings', () => {
@@ -48,9 +49,10 @@ describe('Storage settings', () => {
     expect(screen.getByText('canonical retention')).toBeVisible()
     expect(screen.getByText(/Day 2026-09-02/)).toHaveTextContent('verify page')
     expect(screen.getByText('archive page committed')).toBeVisible()
-    expect(screen.getByText('Distinct lifecycle bytes by exact rolling window')).toBeVisible()
-    expect(screen.getByText(/Drain ETA:/).closest('p')).toHaveTextContent('aligned physical intake and reclaim series required')
-    expect(screen.getByText(/Intake is the sealed-partition/)).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Storage trends' })).toBeVisible()
+    expect(screen.queryByText('Distinct lifecycle bytes by exact rolling window')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Drain ETA:/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Current storage and lifecycle status/)).toBeVisible()
   })
   it('keeps a current backup failure visible alongside an older copy date', async () => {
     api.readStorage.mockResolvedValue({ ...snapshot, health: 'needs_attention',
@@ -96,7 +98,7 @@ describe('Storage settings', () => {
     api.reviewStorageChange.mockRejectedValue(new Error('storage_policy_changed'))
     render(<StorageRoom />)
     fireEvent.click(await screen.findByRole('button', { name: 'Review changes' }))
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('storage_policy_changed'))
+    await waitFor(() => expect(screen.getByText('storage_policy_changed')).toBeVisible())
     expect(api.applyStorageChange).not.toHaveBeenCalled()
   })
 })
