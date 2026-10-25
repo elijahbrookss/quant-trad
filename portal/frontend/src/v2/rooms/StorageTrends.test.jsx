@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StorageTrends } from './StorageTrends.jsx'
+import { createChart } from 'lightweight-charts'
 import { StorageRoom } from './StorageRoom.jsx'
 import { METRICS } from './storageTrends.js'
 import * as api from '../../adapters/storage.adapter.js'
@@ -42,8 +43,15 @@ describe('Storage trends', () => {
     render(<StorageTrends />)
     expect(await screen.findByRole('img', { name: /Database footprint/ })).toBeVisible()
     expect(screen.getAllByRole('img')).toHaveLength(4)
+    // Captions identify metrics once; disconnected segments must not repeat
+    // their names as native price-axis title labels.
+    for (const chart of createChart.mock.results.map((result) => result.value)) {
+      for (const [, options] of chart.addSeries.mock.calls) expect(options.title || '').toBe('')
+    }
     expect(screen.getByText(/Market schema is a subset/)).toBeVisible()
     expect(screen.getByText(/Separate byte bases and scales/)).toBeVisible()
+    expect(screen.getAllByText(/1 missing sample bucket/)).toHaveLength(2)
+    expect(screen.getAllByText(/1 bucket without completion records/)).toHaveLength(3)
     expect(screen.getByText(/Your local timezone:/)).toBeVisible()
     const details = screen.getByText('Accessible data table · UTC · bytes').closest('details')
     fireEvent.click(details.querySelector('summary'))

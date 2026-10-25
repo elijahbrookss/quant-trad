@@ -127,7 +127,7 @@ function MetricChart({ payload, metrics, bars = false, title }) {
       for (const segment of segments.length ? segments : [[]]) {
         const series = chart.addSeries(bars ? HistogramSeries : LineSeries, {
           color: metric.color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
-          pointMarkersVisible: !bars && segment.length === 1, title: metric.label,
+          pointMarkersVisible: !bars && segment.length === 1,
         })
         series.setData(segment)
       }
@@ -150,6 +150,8 @@ function MetricCaption({ payload, metric }) {
   const series = payload.series.find((entry) => entry.metric_id === metric.id)
   const state = seriesState(series)
   const summary = series?.summary
+  const missing = series?.coverage?.missing_buckets
+  const buckets = missing === 1 ? 'bucket' : 'buckets'
   return <div className="qt2-storage-trend-caption">
     <strong style={{ color: metric.color }}>{metric.label}</strong>
     <span>{state}{series?.reason ? ' · ' + series.reason.replaceAll('_', ' ') : ''}</span>
@@ -157,7 +159,7 @@ function MetricCaption({ payload, metric }) {
       : <span>Recorded total {byteLabel(summary?.total_bytes)}</span>}
     {summary?.first_at && summary?.last_at && <small>Observed {utc(summary.first_at)} — {utc(summary.last_at)}</small>}
     {series?.coverage && <small>Coverage {series.coverage.complete ? 'complete within declared bounds' : 'partial'}
-      {series.coverage.truncated ? ' · truncated' : ''}{Number.isFinite(series.coverage.missing_buckets) ? ' · ' + series.coverage.missing_buckets + ' missing buckets' : ''}</small>}
+      {series.coverage.truncated ? ' · truncated' : ''}{Number.isFinite(missing) ? ' · ' + missing + (metric.kind === 'stock' ? ' missing sample ' + buckets : ' ' + buckets + ' without completion records') : ''}</small>}
   </div>
 }
 
