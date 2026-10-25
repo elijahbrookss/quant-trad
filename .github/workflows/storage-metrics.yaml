@@ -70,6 +70,8 @@ jobs:
         env:
           GF_SECURITY_ADMIN_USER: admin
           GF_SECURITY_ADMIN_PASSWORD: synthetic-storage-ci-grafana
+          GF_PLUGINS_PREINSTALL_SYNC: 'grafana-postgresql-datasource@13.0.1'
+          GF_PLUGINS_PREINSTALL_AUTO_UPDATE: 'false'
           GF_USERS_ALLOW_SIGN_UP: 'false'
           GF_ANALYTICS_REPORTING_ENABLED: 'false'
           GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
