@@ -8,7 +8,7 @@ UID = "quanttrad-storage-metrics"
 
 
 def dashboard():
-    path = ROOT / "docker/grafana/provisioning/dashboards/capacity-database-growth.json"
+    path = ROOT / "docker/grafana/storage-metrics/capacity-database-growth.json"
     data = json.loads(path.read_text())
     return data, {panel["id"]: panel for panel in data["panels"]}
 
@@ -45,7 +45,11 @@ def test_current_metadata_has_no_fake_history_or_zero_fill():
         assert "observability_metrics.storage_metric_status_v1()" in sql
         assert "${__from}" not in sql and "${__to}" not in sql
         assert "state = 'ready' AND complete AND NOT truncated" in sql
-        assert "WHERE false" not in sql and "COALESCE" not in sql
+        assert "WHERE false" not in sql
+        if panel_id in (28, 29):
+            assert "coalesce(reason, \'\')" in sql
+        else:
+            assert "coalesce" not in sql.lower()
     assert "eligible_backlog_physical_bytes" in panels[28]["targets"][0]["rawSql"]
     assert "verified_guarded_physical_bytes" in panels[29]["targets"][0]["rawSql"]
     assert "oldest_day" in panels[31]["targets"][0]["rawSql"]
@@ -114,3 +118,18 @@ def test_growth_uses_shared_versioned_formula_with_explicit_unit_conversion():
     assert "value / 86400.0" in sql
     assert "LAG(" not in sql.upper()
     assert "ELSE 0" not in sql
+
+def test_default_dashboard_keeps_working_legacy_until_explicit_activation():
+    path = ROOT / "docker/grafana/provisioning/dashboards/capacity-database-growth.json"
+    legacy = json.loads(path.read_text())
+    enabled, _ = dashboard()
+    panels = {panel["id"]: panel for panel in legacy["panels"]}
+    assert legacy["uid"] == enabled["uid"] == "quanttrad-capacity-growth"
+    for panel_id in (2, 3, 4, 6, 7):
+        panel = panels[panel_id]
+        assert panel["datasource"]["uid"] == "quanttrad-postgres"
+        assert "observability_metrics.database_" in panel["targets"][0]["rawSql"]
+    assert "quanttrad-storage-metrics" not in path.read_text()
+    assert "Explicitly enabled" in enabled["description"]
+    for panel_id in (28, 29, 30, 31):
+        assert "bounded_storage_projection_unavailable" in panels[panel_id]["targets"][0]["rawSql"]
