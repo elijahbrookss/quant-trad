@@ -299,7 +299,10 @@ files at the existing dashboard UID `quanttrad-capacity-growth`; they are
 deployment alternatives, not competing metric definitions. The default datasource
 file contains no new datasource. The enabled `quanttrad-storage-metrics` uses
 the installed PostgreSQL plugin, at most two open/idle connections and dedicated
-credentials. It never falls back to the broad legacy `quanttrad-postgres` login.
+credentials. Keep the generated password in the private Grafana-only runtime
+file selected by `QT_GRAFANA_STORAGE_ENV_FILE` (default sibling
+`grafana-storage-metrics.env`), never the shared application `secrets.env`.
+Only Grafana loads that optional file. It never falls back to the broad legacy `quanttrad-postgres` login.
 Missing datasource/configuration or query failure is visibly unavailable, not a
 successful empty result.
 

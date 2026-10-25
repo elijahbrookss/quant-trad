@@ -440,6 +440,9 @@ services:
       loki.service: grafana
     env_file:
       - ${QT_SERVER_ENV_FILE:-../secrets.env}
+      # Metrics credentials belong only to Grafana, not the shared service env.
+      - path: ${QT_GRAFANA_STORAGE_ENV_FILE:-../grafana-storage-metrics.env}
+        required: false
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"

@@ -34,3 +34,14 @@ def test_default_capacity_dashboard_remains_the_existing_working_dashboard(name)
         "source": "${QT_GRAFANA_STORAGE_DASHBOARD_FILE:-./grafana/provisioning/dashboards/capacity-database-growth.json}",
         "target": target, "read_only": True, "bind": {"create_host_path": False}}]
     assert (ROOT / "docker/grafana/storage-metrics/capacity-database-growth.json").is_file()
+
+
+@pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.server.yml"])
+def test_metrics_credentials_are_loaded_only_by_grafana(name):
+    services = yaml.safe_load((ROOT / "docker" / name).read_text())["services"]
+    expected = {"path": "${QT_GRAFANA_STORAGE_ENV_FILE:-../grafana-storage-metrics.env}",
+                "required": False}
+    assert expected in services["grafana"]["env_file"]
+    for service_name, service in services.items():
+        if service_name != "grafana":
+            assert expected not in service.get("env_file", [])
