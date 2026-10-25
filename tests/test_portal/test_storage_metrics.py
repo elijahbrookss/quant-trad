@@ -103,6 +103,8 @@ def test_manual_function_installation_matches_code_owned_clean_definitions():
     from pathlib import Path
     from portal.backend.db import storage_metrics_schema as schema
     sql=(Path(__file__).parents[2]/"scripts/db/manual_migration_storage_metrics_v1.sql").read_text()
+    assert 'RETURNS TABLE("time" timestamptz' in schema.STORAGE_SERIES_SQL
+    assert 'RETURNS TABLE("time" timestamptz' in schema.STORAGE_GROWTH_SQL
     for source in (schema.STORAGE_ADMISSION_SQL,schema.STORAGE_SERIES_SQL,schema.STORAGE_STATUS_SQL,schema.STORAGE_GROWTH_SQL):
         assert source in sql
     for signature in schema.SIGNATURES:
