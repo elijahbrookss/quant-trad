@@ -35,7 +35,7 @@
       },
       "id": 1,
       "options": {
-        "content": "## Storage growth decisions\n**Physical free space is the capacity authority.** Database/relation bytes explain part of that use; never add them to filesystem used bytes. Retained migration copies are not reclaimable space until explicitly retired.\n\nNative SSD/HDD panels below compare two fresh **2-minute windows, 24 hours apart**, matched by resource, filesystem UUID, device and size. They show net physical growth and a linear planning estimate to the existing **85% usage alert**, not the storage policy reserve or permission to run maintenance. Negative projected days mean the threshold is already exceeded. Flat/falling growth, missing UUID/history or unhealthy telemetry produces no runway estimate\u2014not infinite capacity. Shared-device resources must not be added together.\n\nDatabase snapshots: **5-minute cadence / 30-day retention**. Filesystem telemetry: **15-second cadence / 7-day Loki retention**. Top relations include indexes and TOAST; sizes and row estimates do not establish compression, reclaimability or future growth.\n\nExisting alerts: **70% warning / 85% critical / 92% emergency**, plus missing/failed physical telemetry. They notify only. Use the storage capacity plan before changing placement, retention or hardware.",
+        "content": "## Storage growth decisions\n**Physical free space is the capacity authority.** Database/relation bytes explain part of that use; never add them to filesystem used bytes. Retained migration copies are not reclaimable space until explicitly retired.\n\nNative SSD/HDD panels below compare two fresh **2-minute windows, 24 hours apart**, matched by resource, filesystem UUID, device and size. They show net physical growth and a linear planning estimate to the existing **85% usage alert**, not the storage policy reserve or permission to run maintenance. Negative projected days mean the threshold is already exceeded. Flat/falling growth, missing UUID/history or unhealthy telemetry produces no runway estimate—not infinite capacity. Shared-device resources must not be added together.\n\nDatabase snapshots: **5-minute cadence / 30-day retention**. Filesystem telemetry: **15-second cadence / 7-day Loki retention**. Top relations include indexes and TOAST; sizes and row estimates do not establish compression, reclaimability or future growth.\n\nExisting alerts: **70% warning / 85% critical / 92% emergency**, plus missing/failed physical telemetry. They notify only. Use the storage capacity plan before changing placement, retention or hardware.\n\n**Shared storage metrics:** the dedicated datasource is disabled until explicitly configured with approved restricted access. Datasource-not-found or a query error means **unconfigured/unavailable**, never zero. The status table shows the shared contract's ready/partial/stale/unavailable reasons. Backlog/verified/oldest-day are CURRENT; trends use the selected UTC range (maximum 30 days / 720 buckets). Larger ranges fail visibly. Archived compressed, first-verified compressed and reclaimed physical bytes have different bases; they are not a net-growth equation. Legacy relation/insert/WAL/filesystem diagnostics retain their own datasource and labels.",
         "mode": "markdown"
       },
       "title": "How to use this dashboard",
@@ -204,11 +204,15 @@
     {
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "noValue": "Unavailable / partial - see metric status",
+          "custom": {
+            "spanNulls": false
+          }
         },
         "overrides": []
       },
@@ -221,12 +225,12 @@
       "id": 2,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -235,23 +239,26 @@
       },
       "targets": [
         {
+          "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT sampled_at AS time, database_size_bytes::double precision AS value FROM observability_metrics.database_capacity_samples WHERE $__timeFilter(sampled_at) ORDER BY sampled_at;",
-          "refId": "A"
+          "rawSql": "SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value FROM observability_metrics.storage_series_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY time;"
         }
       ],
       "title": "Database size",
-      "type": "stat"
+      "type": "stat",
+      "description": "Selected UTC half-open range. Shared versioned allocated bytes, not filesystem used or reclaimable bytes. Partial, missing or stale buckets are null. See Shared storage metric status.",
+      "maxDataPoints": 720
     },
     {
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "Bps"
+          "unit": "Bps",
+          "noValue": "Unavailable / partial - see metric status"
         },
         "overrides": []
       },
@@ -264,12 +271,12 @@
       "id": 3,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -278,23 +285,29 @@
       },
       "targets": [
         {
+          "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH p AS (SELECT sampled_at,database_size_bytes FROM observability_metrics.database_capacity_samples WHERE $__timeFilter(sampled_at)), b AS (SELECT min(sampled_at) first_at,max(sampled_at) last_at FROM p), v AS (SELECT (SELECT database_size_bytes FROM p ORDER BY sampled_at LIMIT 1) first_bytes,(SELECT database_size_bytes FROM p ORDER BY sampled_at DESC LIMIT 1) last_bytes) SELECT b.last_at AS time,CASE WHEN EXTRACT(EPOCH FROM (b.last_at-b.first_at))>0 THEN (v.last_bytes-v.first_bytes)::double precision/EXTRACT(EPOCH FROM (b.last_at-b.first_at)) ELSE 0 END value FROM b CROSS JOIN v;",
-          "refId": "A"
+          "rawSql": "SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value / 86400.0 END AS value FROM observability_metrics.storage_growth_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY time;"
         }
       ],
-      "title": "Database growth / second",
-      "type": "stat"
+      "title": "Database net allocated growth / second",
+      "type": "stat",
+      "description": "Shared versioned adjacent-bucket allocated-size change, converted from bytes/day to bytes/second for display. Previous missing or partial buckets remain null. This is not archive throughput or physical filesystem growth.",
+      "maxDataPoints": 720
     },
     {
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "noValue": "Unavailable / partial - see metric status",
+          "custom": {
+            "spanNulls": false
+          }
         },
         "overrides": []
       },
@@ -307,12 +320,12 @@
       "id": 4,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -321,14 +334,16 @@
       },
       "targets": [
         {
+          "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH l AS (SELECT max(sampled_at) sampled_at FROM observability_metrics.database_relation_capacity_samples WHERE $__timeFilter(sampled_at)) SELECT l.sampled_at AS time,COALESCE(sum(s.total_bytes),0)::double precision value FROM l LEFT JOIN observability_metrics.database_relation_capacity_samples s ON s.sampled_at=l.sampled_at AND s.schema_name='market' GROUP BY l.sampled_at;",
-          "refId": "A"
+          "rawSql": "SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value FROM observability_metrics.storage_series_v1('market_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY time;"
         }
       ],
       "title": "Market schema size",
-      "type": "stat"
+      "type": "stat",
+      "description": "Selected UTC half-open range. Shared versioned allocated bytes, not filesystem used or reclaimable bytes. Partial, missing or stale buckets are null. See Shared storage metric status.",
+      "maxDataPoints": 720
     },
     {
       "datasource": {
@@ -376,11 +391,15 @@
     {
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "noValue": "Unavailable / partial - see metric status",
+          "custom": {
+            "spanNulls": false
+          }
         },
         "overrides": []
       },
@@ -408,23 +427,29 @@
       },
       "targets": [
         {
+          "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT sampled_at AS time,database_size_bytes::double precision AS database FROM observability_metrics.database_capacity_samples WHERE $__timeFilter(sampled_at) ORDER BY sampled_at;",
-          "refId": "A"
+          "rawSql": "SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value FROM observability_metrics.storage_series_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY time;"
         }
       ],
       "title": "Database size history",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Selected UTC half-open range. Shared versioned allocated bytes, not filesystem used or reclaimable bytes. Partial, missing or stale buckets are null. See Shared storage metric status.",
+      "maxDataPoints": 720
     },
     {
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "noValue": "Unavailable / partial - see metric status",
+          "custom": {
+            "spanNulls": false
+          }
         },
         "overrides": []
       },
@@ -452,14 +477,16 @@
       },
       "targets": [
         {
+          "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT sampled_at AS time,schema_name AS metric,sum(total_bytes)::double precision AS value FROM observability_metrics.database_relation_capacity_samples WHERE $__timeFilter(sampled_at) AND schema_name ~ '${schema:regex}' GROUP BY sampled_at,schema_name ORDER BY sampled_at;",
-          "refId": "A"
+          "rawSql": "SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value FROM observability_metrics.storage_series_v1('market_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY time;"
         }
       ],
-      "title": "Schema size history",
-      "type": "timeseries"
+      "title": "Market schema size history",
+      "type": "timeseries",
+      "description": "Selected UTC half-open range. Shared versioned allocated bytes, not filesystem used or reclaimable bytes. Partial, missing or stale buckets are null. See Shared storage metric status.",
+      "maxDataPoints": 720
     },
     {
       "datasource": {
@@ -603,12 +630,13 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH s AS (SELECT * FROM observability_metrics.database_relation_capacity_samples WHERE $__timeFilter(sampled_at) AND schema_name ~ '${schema:regex}' AND relation_name ~ '${relation:regex}'), f AS (SELECT DISTINCT ON(schema_name,relation_name) schema_name,relation_name,sampled_at,total_bytes,estimated_live_rows FROM s ORDER BY schema_name,relation_name,sampled_at), l AS (SELECT DISTINCT ON(schema_name,relation_name) schema_name,relation_name,sampled_at,total_bytes,estimated_live_rows FROM s ORDER BY schema_name,relation_name,sampled_at DESC) SELECT l.schema_name,l.relation_name,pg_size_pretty(l.total_bytes) current_size,pg_size_pretty(l.total_bytes-f.total_bytes) growth,l.estimated_live_rows-f.estimated_live_rows row_growth,ROUND(CASE WHEN EXTRACT(EPOCH FROM(l.sampled_at-f.sampled_at))>0 THEN (l.total_bytes-f.total_bytes)::numeric/EXTRACT(EPOCH FROM(l.sampled_at-f.sampled_at)) ELSE 0 END,2) bytes_per_second FROM l JOIN f USING(schema_name,relation_name) ORDER BY l.total_bytes-f.total_bytes DESC LIMIT 50;",
+          "rawSql": "WITH s AS (SELECT * FROM observability_metrics.database_relation_capacity_samples WHERE $__timeFilter(sampled_at) AND schema_name ~ '${schema:regex}' AND relation_name ~ '${relation:regex}'), f AS (SELECT DISTINCT ON(schema_name,relation_name) schema_name,relation_name,sampled_at,total_bytes,estimated_live_rows FROM s ORDER BY schema_name,relation_name,sampled_at), l AS (SELECT DISTINCT ON(schema_name,relation_name) schema_name,relation_name,sampled_at,total_bytes,estimated_live_rows FROM s ORDER BY schema_name,relation_name,sampled_at DESC) SELECT l.schema_name,l.relation_name,pg_size_pretty(l.total_bytes) current_size,pg_size_pretty(l.total_bytes-f.total_bytes) growth,l.estimated_live_rows-f.estimated_live_rows row_growth,ROUND(CASE WHEN EXTRACT(EPOCH FROM(l.sampled_at-f.sampled_at))>0 THEN (l.total_bytes-f.total_bytes)::numeric/EXTRACT(EPOCH FROM(l.sampled_at-f.sampled_at)) ELSE NULL END,2) bytes_per_second FROM l JOIN f USING(schema_name,relation_name) ORDER BY l.total_bytes-f.total_bytes DESC LIMIT 50;",
           "refId": "A"
         }
       ],
       "title": "Relation growth over selected range",
-      "type": "table"
+      "type": "table",
+      "description": "Dedicated sampled relation diagnostic, not a canonical archive/reclamation flow or filesystem growth. Schema/relation filters apply here and to legacy diagnostics."
     },
     {
       "datasource": {
@@ -1218,11 +1246,11 @@
     {
       "id": 28,
       "type": "stat",
-      "title": "Canonical backlog: eligible source bytes",
-      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "title": "Canonical backlog: current eligible physical bytes",
+      "description": "CURRENT bounded metadata, independent of the selected history range. Source physical bytes are not compressed archive bytes or deletion permission. Unknown/open/unsealed/capped inputs remain unavailable or partial. See Shared storage metric status.",
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "gridPos": {
         "h": 6,
@@ -1233,7 +1261,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
+          "noValue": "Unavailable / partial - see metric status"
         },
         "overrides": []
       },
@@ -1244,30 +1272,30 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "value_and_name"
       },
       "targets": [
         {
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT now() AS time,NULL::bigint AS value WHERE false /* bounded_storage_projection_unavailable */;"
+          "rawSql": "SELECT current_timestamp AS time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value, metric_id || ' [' || state || ': ' || reason || ']' AS metric FROM observability_metrics.storage_metric_status_v1() WHERE metric_id = 'eligible_backlog_physical_bytes';"
         }
       ]
     },
     {
       "id": 29,
       "type": "stat",
-      "title": "Verified source awaiting fresh reclaim guards",
-      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "title": "Current verified source awaiting fresh reclaim guards",
+      "description": "CURRENT bounded metadata, independent of the selected history range. Source physical bytes are not compressed archive bytes or deletion permission. Unknown/open/unsealed/capped inputs remain unavailable or partial. See Shared storage metric status.",
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "gridPos": {
         "h": 6,
@@ -1278,7 +1306,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
+          "noValue": "Unavailable / partial - see metric status"
         },
         "overrides": []
       },
@@ -1289,30 +1317,30 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "value_and_name"
       },
       "targets": [
         {
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT now() AS time,NULL::bigint AS value WHERE false /* bounded_storage_projection_unavailable */;"
+          "rawSql": "SELECT current_timestamp AS time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value, metric_id || ' [' || state || ': ' || reason || ']' AS metric FROM observability_metrics.storage_metric_status_v1() WHERE metric_id = 'verified_guarded_physical_bytes';"
         }
       ]
     },
     {
       "id": 30,
       "type": "timeseries",
-      "title": "Canonical lifecycle byte events",
-      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "title": "Canonical lifecycle: unique completed bytes by basis",
+      "description": "Selected UTC half-open range. Unique completion bytes in occupied buckets: archived compressed, first verified compressed, reclaimed physical hot. These bases cannot be subtracted as net physical growth. Empty/incomplete buckets are null, never proof of zero. No attempts or repeated verification counts.",
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "gridPos": {
         "h": 9,
@@ -1322,15 +1350,16 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "Bps",
+          "unit": "bytes",
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
             "lineWidth": 1,
             "fillOpacity": 8,
-            "showPoints": "never"
+            "showPoints": "never",
+            "spanNulls": false
           },
-          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
+          "noValue": "Unavailable / partial - see metric status"
         },
         "overrides": []
       },
@@ -1338,9 +1367,7 @@
         "legend": {
           "displayMode": "table",
           "placement": "bottom",
-          "calcs": [
-            "sum"
-          ]
+          "calcs": []
         },
         "tooltip": {
           "mode": "multi",
@@ -1352,18 +1379,19 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT now() AS time,NULL::text AS metric,NULL::double precision AS value WHERE false /* bounded_storage_projection_unavailable */;"
+          "rawSql": "SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value, 'Archived compressed bytes' AS metric FROM observability_metrics.storage_series_v1('archive_compressed_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value, 'First verified compressed bytes' AS metric FROM observability_metrics.storage_series_v1('verified_first_compressed_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT time, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN value END AS value, 'Reclaimed physical hot bytes' AS metric FROM observability_metrics.storage_series_v1('reclaimed_physical_hot_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY time, metric;"
         }
-      ]
+      ],
+      "maxDataPoints": 720
     },
     {
       "id": 31,
       "type": "table",
-      "title": "Oldest canonical pipeline days",
-      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "title": "Current oldest eligible storage day",
+      "description": "CURRENT projection, not historical. Oldest day follows the applied policy and bounded eligible set. Partial/unknown inputs retain their reason. A known oldest day is not proof of reclaimable bytes.",
       "datasource": {
         "type": "postgres",
-        "uid": "quanttrad-postgres"
+        "uid": "quanttrad-storage-metrics"
       },
       "gridPos": {
         "h": 9,
@@ -1383,7 +1411,40 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT NULL::date AS storage_day,NULL::text AS state,NULL::bigint AS expected_rows,NULL::bigint AS source_bytes,NULL::timestamptz AS sealed_at,NULL::timestamptz AS verified_at,NULL::timestamptz AS reclaimed_at,NULL::text AS next_stage WHERE false /* bounded_storage_projection_unavailable */;"
+          "rawSql": "SELECT metric_id, CASE WHEN state = 'ready' AND complete AND NOT truncated THEN oldest_day END AS oldest_day, state, reason, complete, truncated, basis FROM observability_metrics.storage_metric_status_v1() ORDER BY metric_id;"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "table",
+      "title": "Shared storage metric status",
+      "description": "Shared SQL readiness and incompleteness beside the numbers. Datasource-not-found/query error means configuration/unavailable, never a successful empty metric. Production access needs approved restricted credentials and verified pooled-session deadlines before metadata statements.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-storage-metrics"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 101
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 'current'::text AS scope, metric_id, state, reason, complete, truncated FROM observability_metrics.storage_metric_status_v1() UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'database_allocated_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'market_allocated_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('market_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'archive_compressed_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('archive_compressed_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'verified_first_compressed_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('verified_first_compressed_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'reclaimed_physical_hot_bytes'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_series_v1('reclaimed_physical_hot_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) UNION ALL SELECT DISTINCT 'selected range'::text AS scope, 'database_growth_bytes_per_day'::text AS metric_id, state, reason, complete, truncated FROM observability_metrics.storage_growth_v1('database_allocated_bytes', to_timestamp(${__from}/1000.0), to_timestamp(${__to}/1000.0), CASE WHEN (${__to}-${__from}) <= 216000000 THEN 300 WHEN (${__to}-${__from}) <= 1296000000 THEN 1800 ELSE 7200 END) ORDER BY scope, metric_id, state, reason;"
         }
       ]
     }
@@ -1478,9 +1539,9 @@
       "30d"
     ]
   },
-  "timezone": "browser",
+  "timezone": "utc",
   "title": "QuantTrad Capacity & Database Growth",
   "uid": "quanttrad-capacity-growth",
-  "version": 3,
+  "version": 5,
   "weekStart": ""
 }
