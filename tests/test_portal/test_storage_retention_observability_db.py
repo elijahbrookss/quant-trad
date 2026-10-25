@@ -635,7 +635,48 @@ def test_restricted_definer_transition_does_not_grant_raw_market_access(postgres
             admin.execute(text("ROLLBACK"))
             assert not admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=:name)"),dict(name=owner))
             admin.execute(text(f"REVOKE TEMP ON DATABASE {quote(database)} FROM PUBLIC"))
+            admin.execute(text(f"GRANT CREATE ON DATABASE {quote(database)} TO {login}"))
+            with pytest.raises(DBAPIError,match="database_create_privilege"):
+                admin.execute(text(sql))
+            admin.execute(text("ROLLBACK"))
+            assert not admin.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=:name)"),dict(name=owner))
+            admin.execute(text(f"REVOKE CREATE ON DATABASE {quote(database)} FROM {login}"))
             admin.execute(text(sql))
+            # A new authenticated connection is required: SET ROLE does not load
+            # ALTER ROLE defaults. This password belongs only to a generated
+            # disposable fixture role and is never printed or stored in source.
+            synthetic_password=uuid4().hex+uuid4().hex
+            admin.engine.hide_parameters=True
+            admin.execute(text("SELECT set_config('qt.metrics_fixture_password',:password,false)"),
+                          dict(password=synthetic_password))
+            admin.execute(text(f"""DO $fixture_password$ BEGIN
+                EXECUTE format('ALTER ROLE %I PASSWORD %L','{login}',
+                    current_setting('qt.metrics_fixture_password'));
+                END $fixture_password$"""))
+            admin.execute(text("RESET qt.metrics_fixture_password"))
+            client_engine=create_engine(engine.url.set(username=login,password=synthetic_password),
+                future=True,pool_size=1,max_overflow=0,hide_parameters=True,
+                connect_args={"connect_timeout":3,"options":""})
+            try:
+                with client_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as client:
+                    assert client.scalar(text("SELECT current_user"))==login
+                    assert client.scalar(text("SHOW default_transaction_read_only"))=="on"
+                    assert client.scalar(text("SHOW transaction_read_only"))=="on"
+                    assert client.scalar(text("SHOW statement_timeout"))=="5s"
+                    assert client.scalar(text("SHOW lock_timeout"))=="250ms"
+                    assert len(client.execute(text("SELECT * FROM observability_metrics.storage_metric_status_v1()")).all())==2
+                    assert not client.scalar(text("SELECT has_database_privilege(current_user,current_database(),'CREATE')"))
+                    assert not client.scalar(text("SELECT has_database_privilege(current_user,current_database(),'TEMP')"))
+                    for statement in (
+                        "CREATE TEMP TABLE synthetic_denied_temp(value integer)",
+                        "CREATE SCHEMA synthetic_denied_schema",
+                        "SELECT byte_count FROM market.fact_archive_manifests LIMIT 1",
+                        "INSERT INTO public.portal_storage_policy (id,revision,policy) VALUES (1,1,'{}'::jsonb)",
+                    ):
+                        with pytest.raises(DBAPIError): client.execute(text(statement))
+            finally:
+                client_engine.dispose()
+
             admin.execute(text(f"SET ROLE {login}"))
             admin.execute(text("BEGIN READ ONLY"))
             admin.execute(text("SET LOCAL statement_timeout='5s'"))

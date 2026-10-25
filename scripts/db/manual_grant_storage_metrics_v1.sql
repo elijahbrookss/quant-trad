@@ -32,6 +32,10 @@ BEGIN
      AND rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls) THEN
   RAISE EXCEPTION 'storage_metrics_dedicated_login_missing_or_unsafe';
  END IF;
+ IF pg_catalog.has_database_privilege('qt_storage_metrics_grafana',current_database(),'CREATE')
+    OR pg_catalog.has_database_privilege('qt_storage_metrics_owner',current_database(),'CREATE') THEN
+  RAISE EXCEPTION 'storage_metrics_database_create_privilege_requires_separate_review';
+ END IF;
  IF pg_catalog.has_database_privilege('qt_storage_metrics_grafana',current_database(),'TEMP')
     OR pg_catalog.has_database_privilege('qt_storage_metrics_owner',current_database(),'TEMP') THEN
   RAISE EXCEPTION 'storage_metrics_ambient_temporary_privilege_requires_separate_review';
@@ -102,5 +106,5 @@ COMMIT;
 -- These are pre-dispatch defaults, not immutable ceilings against a malicious SQL client.
 -- Keep datasource SQL fixed; do not grant raw source access, CREATE, TEMP or other memberships.
 -- PostgreSQL commonly grants database TEMP through PUBLIC. This script refuses
--- that ambient authority; it never revokes PUBLIC privileges. Any database-wide
+-- that ambient authority and effective database CREATE; it never revokes PUBLIC privileges. Any database-wide
 -- PUBLIC change and compensating grants require separate explicit approval.

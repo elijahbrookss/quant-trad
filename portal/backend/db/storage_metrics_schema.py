@@ -27,7 +27,7 @@ $body$;
 STORAGE_SERIES_SQL = r"""
 CREATE OR REPLACE FUNCTION observability_metrics.storage_series_v1(
     p_metric text, p_from timestamptz, p_to timestamptz, p_bucket_seconds integer
-) RETURNS TABLE(time timestamptz,value bigint,state text,reason text,
+) RETURNS TABLE("time" timestamptz,value bigint,state text,reason text,
                 complete boolean,truncated boolean,source_count integer,
                 observed_at timestamptz,max_gap_seconds double precision)
 LANGUAGE plpgsql STABLE SECURITY INVOKER
@@ -252,7 +252,7 @@ $body$;
 STORAGE_GROWTH_SQL = r"""
 CREATE OR REPLACE FUNCTION observability_metrics.storage_growth_v1(
  p_metric text,p_from timestamptz,p_to timestamptz,p_bucket_seconds integer)
-RETURNS TABLE(time timestamptz,value double precision,state text,reason text,
+RETURNS TABLE("time" timestamptz,value double precision,state text,reason text,
  complete boolean,truncated boolean,source_count integer,
  observed_at timestamptz,max_gap_seconds double precision)
 LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = pg_catalog, pg_temp
