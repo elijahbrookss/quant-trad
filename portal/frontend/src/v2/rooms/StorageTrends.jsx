@@ -4,6 +4,8 @@ import { readStorageMetrics } from '../../adapters/storage.adapter.js'
 import { METRICS, byteLabel, chartPoints, exactRange, grafanaUrl, lineSegments, responseStale, seriesState, tableRows, validateMetrics } from './storageTrends.js'
 
 const POLL_MS = 60_000
+const REQUEST_TIMEOUT_MS = 20_000
+const AGE_TICK_MS = 15_000
 const utc = (time) => Number.isFinite(new Date(time).getTime()) ? new Date(time).toISOString().replace('T', ' ').replace('.000Z', ' UTC') : 'Unavailable time'
 const localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'local timezone'
 
@@ -12,12 +14,30 @@ function useMetrics(query) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [now, setNow] = useState(Date.now())
+  // Freshness must advance even when the next read has not settled.
+  useEffect(() => {
+    if (!query.live) return undefined
+    let timer
+    const tick = () => setNow(Date.now())
+    const visibility = () => {
+      clearInterval(timer)
+      if (document.visibilityState !== 'hidden') {
+        tick()
+        timer = setInterval(tick, AGE_TICK_MS)
+      }
+    }
+    document.addEventListener('visibilitychange', visibility)
+    visibility()
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', visibility) }
+  }, [query.live])
   useEffect(() => {
     let active = true
     let timer
+    let requestTimer
     let controller
     let startedAt = 0
     let running = false
+    let retryOnVisible = false
     const schedule = (delay) => {
       clearTimeout(timer)
       if (active && query.live && document.visibilityState !== 'hidden') timer = setTimeout(load, delay)
@@ -28,25 +48,47 @@ function useMetrics(query) {
       startedAt = Date.now()
       setNow(startedAt)
       setLoading(true)
-      controller = new AbortController()
+      const requestController = new AbortController()
+      controller = requestController
+      let timedOut = false
+      requestTimer = setTimeout(() => {
+        if (!active) return
+        timedOut = true
+        requestController.abort()
+        setLoading(false)
+        setError('Storage trends request timed out. Retry this range.')
+      }, REQUEST_TIMEOUT_MS)
       try {
         const range = query.frozen || exactRange(query.preset, query.custom)
-        const next = validateMetrics(await readStorageMetrics(range, controller.signal))
-        if (active && !controller.signal.aborted) { setDisplayed(next); setError('') }
+        const next = validateMetrics(await readStorageMetrics(range, requestController.signal))
+        if (active && !requestController.signal.aborted) { setDisplayed(next); setError('') }
       } catch (failure) {
-        if (active && !controller?.signal.aborted) setError(failure.message || 'Storage trends unavailable.')
+        if (active && !requestController.signal.aborted) setError(failure.message || 'Storage trends unavailable.')
+        else if (active && timedOut) setError('Storage trends request timed out. Retry this range.')
       } finally {
+        clearTimeout(requestTimer)
         running = false
         if (active) {
           setLoading(false)
-          schedule(Math.max(0, POLL_MS - (Date.now() - startedAt)))
+          if (retryOnVisible && document.visibilityState !== 'hidden') {
+            retryOnVisible = false
+            load()
+          } else schedule(Math.max(0, POLL_MS - (Date.now() - startedAt)))
         }
       }
     }
     const visibility = () => {
       clearTimeout(timer)
-      if (document.visibilityState === 'hidden') controller?.abort()
-      else if (query.live) schedule(Math.max(0, POLL_MS - (Date.now() - startedAt)))
+      if (document.visibilityState === 'hidden') {
+        if (running) {
+          retryOnVisible = true
+          clearTimeout(requestTimer)
+          controller?.abort()
+        }
+      } else if (retryOnVisible) {
+        // If abort is still unwinding, finally performs the single retry.
+        if (!running) { retryOnVisible = false; load() }
+      } else if (query.live) schedule(Math.max(0, POLL_MS - (Date.now() - startedAt)))
       else if (!startedAt) load()
     }
     document.addEventListener('visibilitychange', visibility)
@@ -54,6 +96,7 @@ function useMetrics(query) {
     return () => {
       active = false
       clearTimeout(timer)
+      clearTimeout(requestTimer)
       controller?.abort()
       document.removeEventListener('visibilitychange', visibility)
     }
@@ -170,6 +213,7 @@ export function StorageTrends() {
     <p className="qt2-storage-muted">Historical charts use UTC. Your local timezone: {localZone()}. Current cards above always show current status.</p>
     {rangeError && <p role="alert" className="qt2-storage-error">{rangeError}</p>}
     {error && <p role="alert" className="qt2-storage-error">Trends refresh failed: {error}{displayed ? ' Last successful range remains displayed.' : ''}</p>}
+    {error && !loading && <button type="button" onClick={() => setQuery({ ...query })}>Retry trends</button>}
     {loading && <p role="status">Loading storage trends…{displayed ? ' Previous successful range remains displayed.' : ''}</p>}
     {stale && <p role="status" className="qt2-storage-error">Stale trends response. The displayed response is more than three sampling cadences old.</p>}
     {!displayed && !loading && <p>No historical metrics available.</p>}

@@ -102,7 +102,7 @@ describe('Storage trends', () => {
     }))
     const view = render(<StorageTrends />)
     await flush()
-    await act(async () => vi.advanceTimersByTimeAsync(120_000))
+    await act(async () => vi.advanceTimersByTimeAsync(15_000))
     expect(api.readStorageMetrics).toHaveBeenCalledTimes(1)
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
     fireEvent(document, new Event('visibilitychange'))
@@ -120,6 +120,108 @@ describe('Storage trends', () => {
     expect(maxActive).toBe(1)
     view.unmount()
     expect(signals.at(-1).aborted).toBe(true)
+  })
+  it('retries an interrupted frozen custom range when the tab becomes visible', async () => {
+    vi.useFakeTimers()
+    render(<StorageTrends />)
+    await flush()
+    fireEvent.change(screen.getByLabelText('Range'), { target: { value: 'custom' } })
+    await flush()
+    let interruptedSignal
+    api.readStorageMetrics.mockImplementationOnce((range, signal) => new Promise((resolve, reject) => {
+      interruptedSignal = signal
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
+    fireEvent.change(screen.getByLabelText('From (UTC)'), { target: { value: '2026-01-01T00:00' } })
+    fireEvent.change(screen.getByLabelText('To exclusive (UTC)'), { target: { value: '2026-01-02T00:00' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply range' }))
+    await flush()
+    const interruptedRange = api.readStorageMetrics.mock.calls.at(-1)[0]
+    const callsBeforeHidden = api.readStorageMetrics.mock.calls.length
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    fireEvent(document, new Event('visibilitychange'))
+    await flush()
+    expect(interruptedSignal.aborted).toBe(true)
+    await act(async () => vi.advanceTimersByTimeAsync(120_000))
+    expect(api.readStorageMetrics).toHaveBeenCalledTimes(callsBeforeHidden)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    fireEvent(document, new Event('visibilitychange'))
+    await flush()
+    expect(api.readStorageMetrics).toHaveBeenCalledTimes(callsBeforeHidden + 1)
+    expect(api.readStorageMetrics.mock.calls.at(-1)[0]).toEqual(interruptedRange)
+    expect(screen.getByLabelText(/Live/)).not.toBeChecked()
+    expect(new URL(screen.getByRole('link', { name: /Open in Grafana/ }).href).searchParams.get('to')).toBe(String(Date.parse(interruptedRange.to)))
+  })
+  it('ages the last response while a later request hangs, then aborts with a retryable timeout', async () => {
+    vi.useFakeTimers()
+    api.readStorageMetrics.mockImplementationOnce(async (range) => metrics(range, {
+      generated_at: new Date(Date.now() - 840_000).toISOString(),
+    }))
+    render(<StorageTrends />)
+    await flush()
+    const original = screen.getByRole('link', { name: /Open in Grafana/ }).href
+    let hungSignal
+    api.readStorageMetrics.mockImplementationOnce((range, signal) => {
+      hungSignal = signal
+      // A transport that ignores abort must not stop the independent age clock
+      // or start overlapping reads.
+      return new Promise(() => {})
+    })
+    await act(async () => vi.advanceTimersByTimeAsync(75_000))
+    expect(api.readStorageMetrics).toHaveBeenCalledTimes(2)
+    expect(screen.getByText(/Stale trends response/)).toBeVisible()
+    expect(hungSignal.aborted).toBe(false)
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    expect(hungSignal.aborted).toBe(true)
+    expect(screen.getByRole('alert')).toHaveTextContent('timed out')
+    expect(screen.getByRole('button', { name: 'Retry trends' })).toBeEnabled()
+    expect(screen.getByRole('link', { name: /Open in Grafana/ }).href).toBe(original)
+    expect(screen.getAllByRole('img')).toHaveLength(4)
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(api.readStorageMetrics).toHaveBeenCalledTimes(2)
+  })
+  it('serializes current-status polling and rejects a superseded old response without resetting a dirty draft', async () => {
+    vi.useFakeTimers()
+    const policy = { recent: ['ssd'], history: ['ssd'], archives: ['ssd'], backups: ['ssd'],
+      recent_days: 30, reserve_percent: 20, backup_interval_hours: 24, backup_copies: 2,
+      movement_enabled: false, backup_enabled: false }
+    const current = { revision: 5, policy, targets: [], candidates: [], health: 'available',
+      movement: { state: 'ready' }, backup: { state: 'unknown' } }
+    let finishOld
+    let oldSignal
+    api.readStorage.mockImplementationOnce((signal) => {
+      oldSignal = signal
+      return new Promise((resolve) => { finishOld = resolve })
+    }).mockResolvedValue(current)
+    const view = render(<StorageRoom />)
+    await act(async () => vi.advanceTimersByTimeAsync(30_000))
+    expect(api.readStorage).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh storage' }))
+    await flush()
+    expect(oldSignal.aborted).toBe(true)
+    expect(api.readStorage).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByText('Advanced'))
+    fireEvent.change(screen.getByLabelText('Free space reserve (%)'), { target: { value: '25' } })
+    await act(async () => finishOld({ ...current, revision: 1, movement: { state: 'old' } }))
+    expect(screen.getByText(/Movement: ready/)).toBeVisible()
+    expect(screen.queryByText(/Movement: old/)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Free space reserve (%)')).toHaveValue(25)
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    fireEvent(document, new Event('visibilitychange'))
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(api.readStorage).toHaveBeenCalledTimes(2)
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    fireEvent(document, new Event('visibilitychange'))
+    await flush()
+    expect(api.readStorage).toHaveBeenCalledTimes(3)
+    expect(screen.getByLabelText('Free space reserve (%)')).toHaveValue(25)
+    const latestSignal = api.readStorage.mock.calls.at(-1)[0]
+    view.unmount()
+    // Completed reads need no cancellation; unmount clears every active owner.
+    expect(latestSignal).toBeInstanceOf(AbortSignal)
+    expect(api.reviewStorageChange).not.toHaveBeenCalled()
+    expect(api.applyStorageChange).not.toHaveBeenCalled()
   })
   it('keeps an unsaved policy draft during metrics range changes and status refreshes, without POST', async () => {
     vi.useFakeTimers()

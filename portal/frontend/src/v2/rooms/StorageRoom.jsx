@@ -90,24 +90,64 @@ export function StorageRoom() {
   const [notice, setNotice] = useState('')
   const dirty = useRef(false)
 
-  const refresh = useCallback(async (signal) => {
-    const next = await readStorage(signal)
-    if (signal?.aborted) return
-    setSnapshot(next)
-    if (!dirty.current) {
-      setDraft(next.policy || { ...DEFAULT_POLICY })
-      setDraftRevision(next.revision)
+  const statusRequest = useRef(null)
+  const mounted = useRef(true)
+  const refresh = useCallback(async (signal, supersede = true) => {
+    if (signal?.aborted || document.visibilityState === 'hidden') return
+    if (statusRequest.current) {
+      if (!supersede) return
+      statusRequest.current.abort()
+    }
+    const controller = new AbortController()
+    statusRequest.current = controller
+    const abort = () => {
+      controller.abort()
+      if (statusRequest.current === controller) statusRequest.current = null
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    try {
+      const next = await readStorage(controller.signal)
+      if (!mounted.current || controller.signal.aborted || statusRequest.current !== controller) return
+      setSnapshot(next)
+      if (!dirty.current) {
+        setDraft(next.policy || { ...DEFAULT_POLICY })
+        setDraftRevision(next.revision)
+      }
+    } catch (failure) {
+      if (!controller.signal.aborted) throw failure
+    } finally {
+      signal?.removeEventListener('abort', abort)
+      if (statusRequest.current === controller) statusRequest.current = null
     }
   }, [])
 
   useEffect(() => {
+    mounted.current = true
     const controller = new AbortController()
-    const load = () => refresh(controller.signal).catch((err) => {
+    let timer
+    const load = () => refresh(controller.signal, false).catch((err) => {
       if (!controller.signal.aborted) setError(err.message)
     })
-    load()
-    const timer = setInterval(load, 15_000)
-    return () => { controller.abort(); clearInterval(timer) }
+    const visibility = () => {
+      clearInterval(timer)
+      if (document.visibilityState === 'hidden') {
+        statusRequest.current?.abort()
+        statusRequest.current = null
+      } else {
+        load()
+        timer = setInterval(load, 15_000)
+      }
+    }
+    document.addEventListener('visibilitychange', visibility)
+    visibility()
+    return () => {
+      mounted.current = false
+      controller.abort()
+      statusRequest.current?.abort()
+      statusRequest.current = null
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', visibility)
+    }
   }, [refresh])
 
   function edit(key, value) {
