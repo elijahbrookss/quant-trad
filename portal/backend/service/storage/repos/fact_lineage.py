@@ -16,7 +16,8 @@ from sqlalchemy import text
 
 from market_data.archive import (
     RAW_ARCHIVE_COMPRESSION, RAW_ARCHIVE_FORMAT, RAW_ARCHIVE_SCHEMA_VERSION,
-    RawArchiveReadLimits, iter_raw_archive_parquet, read_raw_archive_content_fingerprint,
+    RawArchiveReadLimits, iter_raw_archive_parquet,
+    read_raw_archive_content_fingerprint, validate_raw_archive_parquet,
 )
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
@@ -189,7 +190,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                                        limits: RawArchiveReadLimits = RawArchiveReadLimits(),
                                        max_mapping_rows: int = 50_000, bound_manifest_ids=None, check_budget=None,
                                        preserve_book_prefixes: bool = False, book_prefix_ranges=None,
-                                       witness_manifest_ids=None):
+                                       witness_manifest_ids=None, identity_spool_directory=None):
     """Prove exact source rows in one current acknowledged placement per witness.
 
     Compacted mappings may be used after an original object's recorded expiry.
@@ -201,6 +202,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     through each root position. Raw control frames are included even when they
     produced no canonical book mutation; this does not reconstruct book state.
     """
+    resolution_started = perf_counter()
     if type(max_mapping_rows) is not int or max_mapping_rows <= 0 or len(rows) > max_mapping_rows:
         raise ValueError("canonical_raw_lineage_mapping_budget_invalid")
     wanted = defaultdict(list)
@@ -405,12 +407,22 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
         selected[mapping["id"]].append((mapping, witnesses))
     references = {}
     decoded_count = decoded_bytes = 0
+    batch_validation = identity_spool_directory is not None
+    timing_names = (
+        "object_verify", "archive_open", "decode_envelope", "parquet_batch_read",
+        "batch_conversion", "record_validation", "fingerprint_finalize",
+    )
+    timing_totals = {name: 0.0 for name in timing_names}
+    timing_maxima = {name: 0.0 for name in timing_names}
+    batch_objects = batch_count = spilled_objects = 0
     for identity in sorted(selected):
         manifest = manifests[identity]
         if (manifest["format"], manifest["schema_version"], manifest["compression"]) != (
                 RAW_ARCHIVE_FORMAT, RAW_ARCHIVE_SCHEMA_VERSION, RAW_ARCHIVE_COMPRESSION):
             raise RuntimeError(f"canonical_raw_lineage_archive_format_invalid: manifest_id={identity}")
+        verify_started = perf_counter()
         byte_verifier.verify(manifest["object_key"], manifest["object_sha256"], expected_bytes=manifest["byte_count"])
+        object_verify_seconds = perf_counter() - verify_started
         required = defaultdict(list)
         for mapping, witnesses in selected[identity]:
             index = mapping["object_row_index"]
@@ -423,23 +435,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             raise RuntimeError("canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size")
         remaining = replace(limits, max_rows=limits.max_rows - decoded_count,
                             max_logical_bytes=limits.max_logical_bytes - decoded_bytes)
-        count = first = last = 0
-        for index, record in enumerate(_raw_records(object_store.local_path(manifest["object_key"]), manifest_id=identity, limits=remaining)):
-            if check_budget is not None:
-                check_budget()
-            decoded_count += 1
-            # int64 epoch/ordinal, timestamp, and 11 variable-column offsets;
-            # matches the writer-owned non-null Arrow schema's logical size.
-            decoded_bytes += len(record.raw_frame) + 68 + sum(
-                len(value.encode("utf-8")) for value in record.__dict__.values() if isinstance(value, str))
-            if decoded_count > limits.max_rows or decoded_bytes > limits.max_logical_bytes:
-                raise RuntimeError("canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size")
-            if (record.definition_id, record.session_id, record.connection_epoch) != (
-                    manifest["definition_id"], manifest["session_id"], manifest["connection_epoch"]):
-                raise RuntimeError(f"canonical_raw_lineage_archive_scope_mismatch: manifest_id={identity}")
-            count += 1
-            first = first or record.receive_ordinal
-            last = record.receive_ordinal
+
+        def verify_required(index, record):
             for mapping, witnesses in required.pop(index, ()):
                 actual = (record.raw_record_id, record.spool_segment_id, record.session_id,
                           record.connection_epoch, record.receive_ordinal, record.raw_frame_sha256)
@@ -447,20 +444,112 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                             mapping["mapped_epoch"], mapping["mapped_ordinal"], mapping["mapped_frame_sha256"])
                 if actual != expected:
                     raise RuntimeError(f"canonical_raw_lineage_mapping_mismatch: manifest_id={identity} row_index={index}")
-                for row, evidence in witnesses:
-                    _verify_witness(row, evidence, record)
-        if required or (count, first, last) != (manifest["record_count"], manifest["first_receive_ordinal"], manifest["last_receive_ordinal"]):
+                for row, witness in witnesses:
+                    _verify_witness(row, witness, record)
+
+        if not batch_validation:
+            count = first = last = 0
+            for index, record in enumerate(_raw_records(
+                    object_store.local_path(manifest["object_key"]),
+                    manifest_id=identity, limits=remaining)):
+                if check_budget is not None:
+                    check_budget()
+                decoded_count += 1
+                record_decoded_bytes = len(record.raw_frame) + 68 + sum(
+                    len(value.encode("utf-8"))
+                    for value in record.__dict__.values() if isinstance(value, str)
+                )
+                decoded_bytes += record_decoded_bytes
+                if decoded_count > limits.max_rows or decoded_bytes > limits.max_logical_bytes:
+                    raise RuntimeError("canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size")
+                if (record.definition_id, record.session_id, record.connection_epoch) != (
+                        manifest["definition_id"], manifest["session_id"], manifest["connection_epoch"]):
+                    raise RuntimeError(f"canonical_raw_lineage_archive_scope_mismatch: manifest_id={identity}")
+                count += 1
+                first = first or record.receive_ordinal
+                last = record.receive_ordinal
+                verify_required(index, record)
+            fingerprint = read_raw_archive_content_fingerprint(
+                object_store.local_path(manifest["object_key"]),
+                limits=remaining, check_budget=check_budget,
+            )
+        else:
+            try:
+                evidence = validate_raw_archive_parquet(
+                    object_store.local_path(manifest["object_key"]),
+                    limits=remaining,
+                    witness_indices=required,
+                    identity_spool_directory=identity_spool_directory,
+                    check_budget=check_budget,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                if getattr(exc, "stop_reason", None) is not None:
+                    raise
+                raise RuntimeError(
+                    f"canonical_raw_lineage_decode_failed: manifest_id={identity} {exc}"
+                ) from exc
+            count = evidence.record_count
+            first = evidence.first_receive_ordinal
+            last = evidence.last_receive_ordinal
+            decoded_count += count
+            decoded_bytes += evidence.decoded_logical_bytes
+            if decoded_count > limits.max_rows or decoded_bytes > limits.max_logical_bytes:
+                raise RuntimeError("canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size")
+            if evidence.source_scope != (
+                    manifest["definition_id"], manifest["session_id"], manifest["connection_epoch"]):
+                raise RuntimeError(f"canonical_raw_lineage_archive_scope_mismatch: manifest_id={identity}")
+            for index, record in evidence.witness_records.items():
+                verify_required(index, record)
+            values = {
+                "object_verify": object_verify_seconds,
+                "archive_open": evidence.archive_open_seconds,
+                "decode_envelope": evidence.decode_seconds,
+                "parquet_batch_read": evidence.parquet_batch_read_seconds,
+                "batch_conversion": evidence.batch_conversion_seconds,
+                "record_validation": evidence.record_validation_seconds,
+                "fingerprint_finalize": evidence.fingerprint_finalize_seconds,
+            }
+            for name, seconds in values.items():
+                timing_totals[name] += seconds
+                timing_maxima[name] = max(timing_maxima[name], seconds)
+            batch_objects += 1
+            batch_count += evidence.batch_count
+            spilled_objects += int(evidence.identity_spilled_to_disk)
+            fingerprint = evidence.content_fingerprint
+        if required or (count, first, last) != (
+                manifest["record_count"], manifest["first_receive_ordinal"],
+                manifest["last_receive_ordinal"]):
             raise RuntimeError(f"canonical_raw_lineage_archive_coverage_mismatch: manifest_id={identity}")
-        fingerprint = read_raw_archive_content_fingerprint(
-            object_store.local_path(manifest["object_key"]), limits=remaining, check_budget=check_budget,
-        )
         if fingerprint != manifest["content_fingerprint"]:
             raise RuntimeError(f"canonical_raw_lineage_content_fingerprint_mismatch: manifest_id={identity}")
         references[identity] = {name: manifest[name] for name in ("object_key", "object_uri", "object_sha256", "content_fingerprint")}
     byte_verifier.assert_unchanged()
+    if batch_objects:
+        logger.info(
+            "canonical_raw_lineage_object_validation | outcome=completed objects=%s "
+            "records=%s batches=%s spilled_objects=%s "
+            "object_verify_total_seconds=%.6f object_verify_max_seconds=%.6f "
+            "archive_open_total_seconds=%.6f archive_open_max_seconds=%.6f "
+            "decode_envelope_total_seconds=%.6f decode_envelope_max_seconds=%.6f "
+            "parquet_batch_read_total_seconds=%.6f parquet_batch_read_max_seconds=%.6f "
+            "batch_conversion_total_seconds=%.6f batch_conversion_max_seconds=%.6f "
+            "record_validation_total_seconds=%.6f record_validation_max_seconds=%.6f "
+            "fingerprint_finalize_total_seconds=%.6f fingerprint_finalize_max_seconds=%.6f "
+            "timing_semantics=decode_envelope_includes_read_conversion_validation",
+            batch_objects, decoded_count, batch_count, spilled_objects,
+            timing_totals["object_verify"], timing_maxima["object_verify"],
+            timing_totals["archive_open"], timing_maxima["archive_open"],
+            timing_totals["decode_envelope"], timing_maxima["decode_envelope"],
+            timing_totals["parquet_batch_read"], timing_maxima["parquet_batch_read"],
+            timing_totals["batch_conversion"], timing_maxima["batch_conversion"],
+            timing_totals["record_validation"], timing_maxima["record_validation"],
+            timing_totals["fingerprint_finalize"], timing_maxima["fingerprint_finalize"],
+        )
     logger.info(
         "canonical_raw_lineage_resolution | outcome=completed requested_keys=%s "
-        "mapping_rows=%s selected_manifests=%s decoded_rows=%s decoded_logical_bytes=%s",
+        "mapping_rows=%s selected_manifests=%s decoded_rows=%s decoded_logical_bytes=%s "
+        "seconds=%.6f",
         len(wanted), len(matches), len(selected), decoded_count, decoded_bytes,
+        perf_counter() - resolution_started,
     )
     return references

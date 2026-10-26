@@ -598,6 +598,7 @@ class PostgresCanonicalFactArchiveRepository:
             bound_manifest_ids=bound_manifest_ids,
             check_budget=self.check_budget,
             witness_manifest_ids=root_bindings,
+            identity_spool_directory=self.temporary_directory,
         ))
         for identity, reference in self._flow_references(session, rows, objects, bound_manifest_ids=bound_manifest_ids).items():
             if references.setdefault(identity, reference) != reference:
@@ -642,7 +643,8 @@ class PostgresCanonicalFactArchiveRepository:
                 session, rows=additional, object_store=self.object_store, byte_verifier=objects,
                 limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
                 bound_manifest_ids=bound_manifest_ids, witness_manifest_ids=checkpoint_bindings,
-                check_budget=self.check_budget))
+                check_budget=self.check_budget,
+                identity_spool_directory=self.temporary_directory))
             for identity, reference in sorted(checkpoint_refs.items()):
                 if identity not in references:
                     result.append({"target_kind": "raw_manifest", "target_id": identity,
@@ -668,6 +670,7 @@ class PostgresCanonicalFactArchiveRepository:
             ), check_budget=self.check_budget), limits=self.raw_read_limits,
             max_mapping_rows=self.max_raw_mapping_rows, max_objects=self.max_dependency_objects,
             check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids,
+            identity_spool_directory=self.temporary_directory,
         )
         if progress is not None:
             # The executor logs completion only after this transaction commits.
@@ -682,7 +685,8 @@ class PostgresCanonicalFactArchiveRepository:
                 max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
             ), check_budget=self.check_budget), limits=self.raw_read_limits,
             max_mapping_rows=self.max_raw_mapping_rows, max_objects=self.max_dependency_objects,
-            check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids)
+            check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids,
+            identity_spool_directory=self.temporary_directory)
         if progress is not None:
             logger.info("canonical_archive_trade_prefix_prepared | storage_day=%s chunk_id=%s first_ordinal=%s last_ordinal=%s required_ordinal=%s",
                 day, progress["chunk_id"], progress["first_receive_ordinal"], progress["last_receive_ordinal"], progress["required_receive_ordinal"])
@@ -702,7 +706,8 @@ class PostgresCanonicalFactArchiveRepository:
         endpoints = resolve_canonical_raw_archive_refs(session, rows=[], object_store=self.object_store,
             byte_verifier=objects, limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
-            book_prefix_ranges=witnesses, witness_manifest_ids=bindings)
+            book_prefix_ranges=witnesses, witness_manifest_ids=bindings,
+            identity_spool_directory=self.temporary_directory)
         for identity, reference in endpoints.items():
             if references.setdefault(identity, reference) != reference:
                 raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")

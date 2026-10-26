@@ -814,6 +814,21 @@ references, overlapping witnesses and inaccessible intervening archive files.
 
 ### Exact Raw-Revision Evidence
 
+Raw-object admission validates every physical row through one shared batch
+reader. It retains the `RawStreamRecord` normalization, timestamp, source
+position, frame checksum, reconstructed identity and strict-order rules, while
+materializing complete Python records only at requested witness indexes. Schema,
+compression, row-group, row-count, decoded-byte and cancellation bounds remain
+authoritative for the complete object. The v1 content commitment is unchanged:
+all frame hashes precede all raw IDs. Validated IDs therefore use a bounded
+memory/disk spool written in batch chunks; the reader does not substitute an
+order-independent hash or retain an unbounded identity array. Archive copying,
+deep checking, and prefix preparation opt in with the repository-owned
+temporary directory. Dataset/history reads retain their established reader
+until that separate workload is qualified. Canonical lineage still checks
+exact mappings, expected scope, manifest coverage, current object bytes,
+expiration and unchanged-file evidence around either reader.
+
 #### Hot Backlog And Reference Lifetime
 
 Ordinary raw/checkpoint expiration reports `canonical_backlog_present` as well

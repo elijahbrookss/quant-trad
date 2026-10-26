@@ -67,11 +67,13 @@ def _dependencies(session, chunk, *, max_objects):
 
 
 def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limits,
-                             max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None):
+                             max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None,
+                             identity_spool_directory=None):
     return _prepare_next_prefix(session, prefixes=canonical_book_prefixes(rows),
         verifier_version=BOOK_PREFIX_VERIFIER_VERSION, object_store=object_store, byte_verifier=byte_verifier,
         limits=limits, max_mapping_rows=max_mapping_rows, max_objects=max_objects,
-        check_budget=check_budget, bound_manifest_ids=bound_manifest_ids)
+        check_budget=check_budget, bound_manifest_ids=bound_manifest_ids,
+        identity_spool_directory=identity_spool_directory)
 
 
 def prepare_next_trade_prefix(session, *, prefixes, **kwargs):
@@ -79,7 +81,8 @@ def prepare_next_trade_prefix(session, *, prefixes, **kwargs):
 
 
 def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, byte_verifier, limits,
-                          max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None):
+                          max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None,
+                          identity_spool_directory=None):
     """Commit at most one bounded interval through the caller's transaction.
 
     The caller holds the lifecycle shared fence and retains the hot page. A
@@ -112,6 +115,7 @@ def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, b
             bound_manifest_ids=bound_manifest_ids,
             book_prefix_ranges=[{**prefix, "first_receive_ordinal": first, "receive_ordinal": last,
                                  "requested_channel": _PREFIX_CHANNELS[verifier_version]}],
+            identity_spool_directory=identity_spool_directory,
         )
         if len(references) > max_objects:
             raise RuntimeError("canonical_book_prefix_object_budget_exceeded")
