@@ -5,9 +5,9 @@ while its immutable dependency holds commit. A manifest range is not a mapping.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import logging
 from time import perf_counter
@@ -20,11 +20,135 @@ from market_data.archive import (
     read_raw_archive_content_fingerprint, validate_raw_archive_parquet,
 )
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
+from market_data.fact_archive import archive_evidence_hash
 
 
 logger = logging.getLogger(__name__)
 EXACT_RAW_FACT_TYPES = frozenset({"market.trade", "market.l2_book", "market.bbo", "market.depth_observation"})
 BOOK_SCOPE_FIELDS = ("definition_id", "session_id", "connection_epoch", "provider_product_id")
+
+
+_RAW_OBJECT_IDENTITY_FIELDS = (
+    "id", "definition_id", "session_id", "connection_epoch", "spool_segment_id",
+    "object_uri", "object_key",
+    "object_sha256", "content_fingerprint", "format", "schema_version",
+    "compression", "byte_count", "record_count", "first_receive_ordinal",
+    "last_receive_ordinal", "first_received_at", "last_received_at",
+    "uploaded_at", "acknowledged_at",
+)
+
+
+@dataclass(frozen=True)
+class RawLineageImmutableEvidence:
+    """One fully decoded immutable object, never mutable placement authority."""
+
+    identity: tuple
+    record_count: int
+    first_receive_ordinal: int
+    last_receive_ordinal: int
+    decoded_logical_bytes: int
+    source_scope: tuple[str, str, int]
+    content_fingerprint: str
+
+
+@dataclass(frozen=True)
+class _RawLineageEvidenceCacheEntry:
+    """Short-lived binding between current bytes and already checked claims."""
+
+    stamp: tuple[int, ...]
+    evidence: RawLineageImmutableEvidence
+    verified_witness_claims: frozenset[tuple[int, str]]
+
+
+class RawLineageEvidenceCache:
+    """Bounded invocation-only evidence for immutable raw object contents.
+
+    Placement, expiry, page bindings and witness mappings are deliberately not
+    cached. Callers must freshly resolve those rows and freshly checksum the
+    selected file before asking whether decoded evidence can be reused.
+    """
+
+    def __init__(self, *, max_objects: int, max_witness_claims: int):
+        if (type(max_objects) is not int or max_objects <= 0
+                or type(max_witness_claims) is not int or max_witness_claims <= 0):
+            raise ValueError("canonical_raw_lineage_evidence_cache_budget_invalid")
+        self.max_objects = max_objects
+        self.max_witness_claims = max_witness_claims
+        self._entries: OrderedDict[str, _RawLineageEvidenceCacheEntry] = OrderedDict()
+        self._witness_claim_count = 0
+        self.hits = 0
+        self.misses = 0
+        self.invalidations = 0
+        self.evictions = 0
+        self.disposed = False
+
+    def _require_open(self):
+        if self.disposed:
+            raise RuntimeError("canonical_raw_lineage_evidence_cache_disposed")
+
+    def lookup(self, *, object_key: str, identity: tuple, stamp: tuple[int, ...],
+               witness_claims: frozenset[tuple[int, str]]):
+        self._require_open()
+        evidence = self._entries.get(object_key)
+        if evidence is None:
+            self.misses += 1
+            return None
+        if evidence.evidence.identity != identity or evidence.stamp != stamp:
+            # An immutable key changed identity or physical inode/stamp during
+            # one invocation. Fresh SHA verification is not permission to hide
+            # that unsupported replacement; fail loud and discard the entry.
+            self._witness_claim_count -= len(evidence.verified_witness_claims)
+            del self._entries[object_key]
+            self.invalidations += 1
+            raise RuntimeError(
+                f"canonical_raw_lineage_cached_object_changed: object_key={object_key}"
+            )
+        if not witness_claims.issubset(evidence.verified_witness_claims):
+            self.misses += 1
+            return None
+        self._entries.move_to_end(object_key)
+        self.hits += 1
+        return evidence.evidence
+
+    def store(self, *, evidence: RawLineageImmutableEvidence, stamp: tuple[int, ...],
+              witness_claims: frozenset[tuple[int, str]]):
+        self._require_open()
+        object_key = evidence.identity[_RAW_OBJECT_IDENTITY_FIELDS.index("object_key")]
+        previous = self._entries.pop(object_key, None)
+        if previous is not None:
+            self._witness_claim_count -= len(previous.verified_witness_claims)
+            if previous.evidence.identity == evidence.identity and previous.stamp == stamp:
+                witness_claims = previous.verified_witness_claims | witness_claims
+        if len(witness_claims) > self.max_witness_claims:
+            return False
+        while (self._entries and (len(self._entries) >= self.max_objects
+                or self._witness_claim_count + len(witness_claims)
+                   > self.max_witness_claims)):
+            _, evicted = self._entries.popitem(last=False)
+            self._witness_claim_count -= len(evicted.verified_witness_claims)
+            self.evictions += 1
+        if (len(self._entries) >= self.max_objects
+                or self._witness_claim_count + len(witness_claims)
+                   > self.max_witness_claims):
+            return False
+        self._entries[object_key] = _RawLineageEvidenceCacheEntry(
+            stamp=stamp, evidence=evidence, verified_witness_claims=witness_claims,
+        )
+        self._witness_claim_count += len(witness_claims)
+        return True
+
+    def dispose(self):
+        self._entries.clear()
+        self._witness_claim_count = 0
+        self.disposed = True
+
+    @property
+    def object_count(self):
+        return len(self._entries)
+
+    @property
+    def witness_claim_count(self):
+        return self._witness_claim_count
 
 
 def raw_archive_mapping_lookup_statement(*, mode: str, bound: bool,
@@ -139,7 +263,7 @@ def _witness(row):
     return key, dict(evidence)
 
 
-def _verify_witness(row, evidence, record):
+def _witness_expectation(row, evidence):
     expected = {
         "provider_product_id": evidence["provider_product_id"],
         "connection_epoch": evidence["connection_epoch"], "receive_ordinal": evidence["receive_ordinal"],
@@ -155,10 +279,34 @@ def _verify_witness(row, evidence, record):
     # A derived BBO/depth Fact is authored by QT, not by the exchange. Its
     # provider frame is bound by its declared source position; never relabel
     # the derived author or compare it with the raw transport's provider.
+    return expected
+
+
+def _verify_witness(row, evidence, record):
+    expected = _witness_expectation(row, evidence)
     for name, value in expected.items():
         if getattr(record, name) != value:
             identity = row["id"] if row is not None else evidence["root_fact_version_id"]
             raise RuntimeError(f"canonical_raw_lineage_witness_mismatch: fact_version_id={identity} field={name}")
+
+
+def _raw_object_identity(manifest):
+    return tuple(manifest.get(name) for name in _RAW_OBJECT_IDENTITY_FIELDS)
+
+
+def _witness_claim(index, mapping, witnesses):
+    mapping_claim = {name: mapping[name] for name in (
+        "raw_record_id", "object_row_index", "object_row_group", "mapped_segment_id",
+        "mapped_session_id", "mapped_epoch", "mapped_ordinal", "mapped_frame_sha256",
+    )}
+    expected_claims = sorted(
+        archive_evidence_hash({"expected": _witness_expectation(row, evidence)})
+        for row, evidence in witnesses
+    )
+    return index, archive_evidence_hash({
+        "mapping": mapping_claim,
+        "witnesses": expected_claims,
+    })
 
 
 def _raw_records(path, *, manifest_id, limits):
@@ -190,7 +338,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                                        limits: RawArchiveReadLimits = RawArchiveReadLimits(),
                                        max_mapping_rows: int = 50_000, bound_manifest_ids=None, check_budget=None,
                                        preserve_book_prefixes: bool = False, book_prefix_ranges=None,
-                                       witness_manifest_ids=None, identity_spool_directory=None):
+                                       witness_manifest_ids=None, identity_spool_directory=None,
+                                       evidence_cache: RawLineageEvidenceCache | None = None):
     """Prove exact source rows in one current acknowledged placement per witness.
 
     Compacted mappings may be used after an original object's recorded expiry.
@@ -410,19 +559,29 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     batch_validation = identity_spool_directory is not None
     timing_names = (
         "object_verify", "archive_open", "decode_envelope", "parquet_batch_read",
-        "batch_conversion", "record_validation", "fingerprint_finalize",
+        "batch_conversion", "record_validation", "fingerprint_finalize", "evidence_cache_lookup",
     )
     timing_totals = {name: 0.0 for name in timing_names}
     timing_maxima = {name: 0.0 for name in timing_names}
     batch_objects = batch_count = spilled_objects = 0
+    cache_hit_objects = cache_miss_objects = cache_reused_records = cache_reused_logical_bytes = 0
     for identity in sorted(selected):
+        if check_budget is not None:
+            check_budget()
         manifest = manifests[identity]
         if (manifest["format"], manifest["schema_version"], manifest["compression"]) != (
                 RAW_ARCHIVE_FORMAT, RAW_ARCHIVE_SCHEMA_VERSION, RAW_ARCHIVE_COMPRESSION):
             raise RuntimeError(f"canonical_raw_lineage_archive_format_invalid: manifest_id={identity}")
         verify_started = perf_counter()
-        byte_verifier.verify(manifest["object_key"], manifest["object_sha256"], expected_bytes=manifest["byte_count"])
+        verified_object = byte_verifier.verify(
+            manifest["object_key"], manifest["object_sha256"],
+            expected_bytes=manifest["byte_count"],
+        )
         object_verify_seconds = perf_counter() - verify_started
+        timing_totals["object_verify"] += object_verify_seconds
+        timing_maxima["object_verify"] = max(
+            timing_maxima["object_verify"], object_verify_seconds,
+        )
         required = defaultdict(list)
         for mapping, witnesses in selected[identity]:
             index = mapping["object_row_index"]
@@ -431,10 +590,40 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             if type(index) is not int or not 0 <= index < manifest["record_count"] or mapping["object_row_group"] != 0:
                 raise RuntimeError(f"canonical_raw_lineage_row_index_invalid: manifest_id={identity}")
             required[index].append((mapping, witnesses))
+        witness_claims = frozenset(
+            _witness_claim(index, mapping, witnesses)
+            for index, requirements in required.items()
+            for mapping, witnesses in requirements
+        )
         if decoded_count >= limits.max_rows or decoded_bytes >= limits.max_logical_bytes:
             raise RuntimeError("canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size")
         remaining = replace(limits, max_rows=limits.max_rows - decoded_count,
                             max_logical_bytes=limits.max_logical_bytes - decoded_bytes)
+
+        cached = None
+        cache_started = perf_counter()
+        if batch_validation and evidence_cache is not None:
+            cached = evidence_cache.lookup(
+                object_key=manifest["object_key"], identity=_raw_object_identity(manifest),
+                stamp=verified_object.stamp, witness_claims=witness_claims,
+            )
+        timing_totals["evidence_cache_lookup"] += perf_counter() - cache_started
+        if cached is not None:
+            cache_hit_objects += 1
+            count = cached.record_count
+            first = cached.first_receive_ordinal
+            last = cached.last_receive_ordinal
+            decoded_count += count
+            decoded_bytes += cached.decoded_logical_bytes
+            source_scope = cached.source_scope
+            fingerprint = cached.content_fingerprint
+            cache_reused_records += count
+            cache_reused_logical_bytes += cached.decoded_logical_bytes
+            if decoded_count > limits.max_rows or decoded_bytes > limits.max_logical_bytes:
+                raise RuntimeError("canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size")
+            required.clear()
+        elif batch_validation and evidence_cache is not None:
+            cache_miss_objects += 1
 
         def verify_required(index, record):
             for mapping, witnesses in required.pop(index, ()):
@@ -447,7 +636,10 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                 for row, witness in witnesses:
                     _verify_witness(row, witness, record)
 
-        if not batch_validation:
+        evidence = None
+        if cached is not None:
+            pass
+        elif not batch_validation:
             count = first = last = 0
             for index, record in enumerate(_raw_records(
                     object_store.local_path(manifest["object_key"]),
@@ -472,6 +664,10 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             fingerprint = read_raw_archive_content_fingerprint(
                 object_store.local_path(manifest["object_key"]),
                 limits=remaining, check_budget=check_budget,
+            )
+            source_scope = (
+                manifest["definition_id"], manifest["session_id"],
+                manifest["connection_epoch"],
             )
         else:
             try:
@@ -501,7 +697,6 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             for index, record in evidence.witness_records.items():
                 verify_required(index, record)
             values = {
-                "object_verify": object_verify_seconds,
                 "archive_open": evidence.archive_open_seconds,
                 "decode_envelope": evidence.decode_seconds,
                 "parquet_batch_read": evidence.parquet_batch_read_seconds,
@@ -516,18 +711,37 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             batch_count += evidence.batch_count
             spilled_objects += int(evidence.identity_spilled_to_disk)
             fingerprint = evidence.content_fingerprint
+            source_scope = evidence.source_scope
         if required or (count, first, last) != (
                 manifest["record_count"], manifest["first_receive_ordinal"],
                 manifest["last_receive_ordinal"]):
             raise RuntimeError(f"canonical_raw_lineage_archive_coverage_mismatch: manifest_id={identity}")
         if fingerprint != manifest["content_fingerprint"]:
             raise RuntimeError(f"canonical_raw_lineage_content_fingerprint_mismatch: manifest_id={identity}")
+        if source_scope != (
+                manifest["definition_id"], manifest["session_id"], manifest["connection_epoch"]):
+            raise RuntimeError(f"canonical_raw_lineage_archive_scope_mismatch: manifest_id={identity}")
+        if evidence is not None and evidence_cache is not None:
+            evidence_cache.store(
+                evidence=RawLineageImmutableEvidence(
+                    identity=_raw_object_identity(manifest),
+                    record_count=evidence.record_count,
+                    first_receive_ordinal=evidence.first_receive_ordinal,
+                    last_receive_ordinal=evidence.last_receive_ordinal,
+                    decoded_logical_bytes=evidence.decoded_logical_bytes,
+                    source_scope=evidence.source_scope,
+                    content_fingerprint=evidence.content_fingerprint,
+                ),
+                stamp=verified_object.stamp,
+                witness_claims=witness_claims,
+            )
         references[identity] = {name: manifest[name] for name in ("object_key", "object_uri", "object_sha256", "content_fingerprint")}
     byte_verifier.assert_unchanged()
-    if batch_objects:
+    if batch_objects or cache_hit_objects:
         logger.info(
             "canonical_raw_lineage_object_validation | outcome=completed objects=%s "
-            "records=%s batches=%s spilled_objects=%s "
+            "records=%s batches=%s spilled_objects=%s decoded_objects=%s cache_hit_objects=%s "
+            "cache_miss_objects=%s cache_reused_records=%s cache_reused_logical_bytes=%s "
             "object_verify_total_seconds=%.6f object_verify_max_seconds=%.6f "
             "archive_open_total_seconds=%.6f archive_open_max_seconds=%.6f "
             "decode_envelope_total_seconds=%.6f decode_envelope_max_seconds=%.6f "
@@ -535,8 +749,10 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             "batch_conversion_total_seconds=%.6f batch_conversion_max_seconds=%.6f "
             "record_validation_total_seconds=%.6f record_validation_max_seconds=%.6f "
             "fingerprint_finalize_total_seconds=%.6f fingerprint_finalize_max_seconds=%.6f "
+            "evidence_cache_lookup_total_seconds=%.6f "
             "timing_semantics=decode_envelope_includes_read_conversion_validation",
-            batch_objects, decoded_count, batch_count, spilled_objects,
+            len(selected), decoded_count, batch_count, spilled_objects, batch_objects,
+            cache_hit_objects, cache_miss_objects, cache_reused_records, cache_reused_logical_bytes,
             timing_totals["object_verify"], timing_maxima["object_verify"],
             timing_totals["archive_open"], timing_maxima["archive_open"],
             timing_totals["decode_envelope"], timing_maxima["decode_envelope"],
@@ -544,6 +760,7 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
             timing_totals["batch_conversion"], timing_maxima["batch_conversion"],
             timing_totals["record_validation"], timing_maxima["record_validation"],
             timing_totals["fingerprint_finalize"], timing_maxima["fingerprint_finalize"],
+            timing_totals["evidence_cache_lookup"],
         )
     logger.info(
         "canonical_raw_lineage_resolution | outcome=completed requested_keys=%s "

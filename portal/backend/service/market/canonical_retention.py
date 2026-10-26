@@ -64,6 +64,13 @@ class CanonicalFactRetentionExecutor:
         self._run_lock = Lock()
         self._archive = None
 
+    def _dispose_archive(self):
+        archive, self._archive = self._archive, None
+        if archive is not None:
+            dispose = getattr(archive, "dispose_dependency_evidence", None)
+            if dispose is not None:
+                dispose()
+
     def _retry_schedule(self, now):
         return [{
             "storage_day": state.storage_day.isoformat(),
@@ -122,6 +129,12 @@ class CanonicalFactRetentionExecutor:
                       storage_policy_witness=None, prerequisite_commits=None):
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
+        reusable = action in {"stage_page", "verify_page"}
+        # Evidence belongs only to consecutive page work in this invocation.
+        # Clear it before a non-page preflight too: a refused transition must
+        # not leave an old page proof available to later work.
+        if self._archive is not None and not reusable:
+            self._dispose_archive()
         self._require_archive(policy=policy, storage_root=storage_root, action=action)
 
         def guard(session, partition):
@@ -143,7 +156,7 @@ class CanonicalFactRetentionExecutor:
                 )
             return value
 
-        archive = self._archive if action == "stage_page" else None
+        archive = self._archive if reusable else None
         timeout = min(policy.execution_statement_timeout_ms,
                       max(1, int(current_remaining_seconds() * 1000)))
         if archive is None:
@@ -162,7 +175,7 @@ class CanonicalFactRetentionExecutor:
             )
         archive.partition_guard = guard
         archive.statement_timeout_ms = timeout
-        self._archive = archive if action == "stage_page" else None
+        self._archive = archive if reusable else None
         verification = ArchiveVerificationLimits(max_bytes=policy.max_verification_bytes,
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
@@ -229,7 +242,7 @@ class CanonicalFactRetentionExecutor:
                              cancelled=cancelled, storage_policy_witness=witness, progress=progress)
         finally:
             # Committed catalog progress is the only state carried across runs.
-            self._archive = None
+            self._dispose_archive()
             self._run_lock.release()
 
     def run_selected(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
@@ -293,7 +306,7 @@ class CanonicalFactRetentionExecutor:
                 storage_policy_witness=witness, progress=progress,
             )
         finally:
-            self._archive = None
+            self._dispose_archive()
             self._run_lock.release()
 
     @staticmethod
@@ -581,6 +594,7 @@ class CanonicalFactRetentionExecutor:
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
                             day, item["action"], result["status"])
             except CanonicalRetentionBudgetExceeded as exc:
+                self._dispose_archive()
                 outcomes.append(retain_prerequisite_progress(
                     {"action": item["action"], "storage_day": day.isoformat(),
                      "status": "deferred", "reason": str(exc)}
@@ -595,6 +609,7 @@ class CanonicalFactRetentionExecutor:
                 stop_reason = exc.stop_reason
                 break
             except MarketStorageLifecycleBusyError as exc:
+                self._dispose_archive()
                 outcomes.append(retain_prerequisite_progress(
                     {"action": item["action"], "storage_day": day.isoformat(),
                      "status": "deferred", "reason": str(exc)}
@@ -607,6 +622,7 @@ class CanonicalFactRetentionExecutor:
                 logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s", day, item["action"], exc)
                 cursor = day
             except Exception as exc:
+                self._dispose_archive()
                 sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
                 if sqlstate == "57014":
                     # The archive owner has already rolled back. A statement

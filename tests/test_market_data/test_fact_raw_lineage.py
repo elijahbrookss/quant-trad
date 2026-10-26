@@ -14,7 +14,9 @@ from market_data.archive import (
 )
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from market_data.structure import build_raw_record_id
-from portal.backend.service.storage.repos.fact_lineage import BOOK_SCOPE_FIELDS, resolve_canonical_raw_archive_refs
+from portal.backend.service.storage.repos.fact_lineage import (
+    BOOK_SCOPE_FIELDS, RawLineageEvidenceCache, resolve_canonical_raw_archive_refs,
+)
 from tests.test_market_data.test_market_structure_archive import _record, _segment
 
 
@@ -194,6 +196,249 @@ def test_batch_resolver_preserves_custom_stop_reason(tmp_path):
         )
     assert caught.value is requested
     assert caught.value.stop_reason == "operator_stop"
+
+
+def test_run_scoped_evidence_reuses_decode_but_freshly_checksums_each_page(
+        tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos import fact_lineage
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    validation_calls = verification_calls = 0
+    validate = fact_lineage.validate_raw_archive_parquet
+    verify = ArchiveVerificationBatch.verify
+
+    def counted_validate(*args, **kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        return validate(*args, **kwargs)
+
+    def counted_verify(self, *args, **kwargs):
+        nonlocal verification_calls
+        verification_calls += 1
+        return verify(self, *args, **kwargs)
+
+    monkeypatch.setattr(fact_lineage, "validate_raw_archive_parquet", counted_validate)
+    monkeypatch.setattr(ArchiveVerificationBatch, "verify", counted_verify)
+    first, first_bytes = _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )
+    second, second_bytes = _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )
+    assert first == second
+    assert validation_calls == 1
+    assert verification_calls == 2, "a cache hit must still checksum current bytes"
+    assert first_bytes.byte_count == second_bytes.byte_count == mappings[0]["byte_count"]
+    assert (cache.hits, cache.misses, cache.invalidations) == (1, 1, 0)
+    assert cache.object_count == 1 and cache.witness_claim_count == 2
+
+
+def test_run_scoped_evidence_refuses_same_byte_object_replacement(tmp_path):
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    path = store.local_path("fixture.parquet")
+    replacement = path.with_suffix(".replacement")
+    replacement.write_bytes(path.read_bytes())
+    replacement.replace(path)
+    with pytest.raises(RuntimeError, match="cached_object_changed"):
+        _resolve(
+            store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+    assert cache.invalidations == 1 and cache.object_count == 0
+
+
+def test_run_scoped_evidence_fresh_checksum_rejects_between_page_mutation(tmp_path):
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    path = store.local_path("fixture.parquet")
+    changed = bytearray(path.read_bytes())
+    changed[len(changed) // 2] ^= 1
+    path.write_bytes(changed)
+    with pytest.raises(RuntimeError, match="checksum_mismatch"):
+        _resolve(
+            store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+
+
+def test_run_scoped_evidence_never_reuses_changed_mapping_authority(
+        tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos import fact_lineage
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    validation_calls = 0
+    validate = fact_lineage.validate_raw_archive_parquet
+
+    def counted(*args, **kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(fact_lineage, "validate_raw_archive_parquet", counted)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    changed = [{**item, "mapped_segment_id": "changed-authority"} for item in mappings]
+    with pytest.raises(RuntimeError, match="mapping_mismatch"):
+        _resolve(
+            store, changed, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+    assert validation_calls == 2 and cache.hits == 0
+
+
+def test_run_scoped_evidence_never_reuses_changed_witness_claim(
+        tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos import fact_lineage
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    validation_calls = 0
+    validate = fact_lineage.validate_raw_archive_parquet
+
+    def counted(*args, **kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(fact_lineage, "validate_raw_archive_parquet", counted)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    changed = [dict(row) for row in rows]
+    changed[0]["provenance"] = {
+        "_qt_trade_evidence": {
+            **rows[0]["provenance"]["_qt_trade_evidence"],
+            "provider_product_id": "changed-witness-product",
+        },
+    }
+    with pytest.raises(RuntimeError, match="witness_mismatch.*provider_product_id"):
+        _resolve(
+            store, mappings, changed, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+    assert validation_calls == 2 and cache.hits == 0
+
+
+def test_run_scoped_evidence_final_fence_detects_mutation_after_cache_lookup(
+        tmp_path, monkeypatch):
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    path = store.local_path("fixture.parquet")
+    lookup = cache.lookup
+
+    def mutate_after_lookup(**kwargs):
+        evidence = lookup(**kwargs)
+        changed = bytearray(path.read_bytes())
+        changed[len(changed) // 2] ^= 1
+        path.write_bytes(changed)
+        return evidence
+
+    monkeypatch.setattr(cache, "lookup", mutate_after_lookup)
+    with pytest.raises(RuntimeError, match="archive_verification_object_changed"):
+        _resolve(
+            store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+
+
+def test_run_scoped_evidence_never_replaces_fresh_placement_authority(tmp_path):
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        _resolve(
+            store, [], rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+    assert cache.hits == 0, "missing or expired placement authority must fail before cache lookup"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["first_received_at", "last_received_at", "uploaded_at", "acknowledged_at"],
+)
+def test_run_scoped_evidence_refuses_changed_manifest_identity(tmp_path, field):
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    changed = [{**item, field: "different-catalog-version"} for item in mappings]
+    with pytest.raises(RuntimeError, match="cached_object_changed"):
+        _resolve(
+            store, changed, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+    assert cache.invalidations == 1 and cache.object_count == 0
+
+
+def test_run_scoped_evidence_is_bounded_and_disposed(tmp_path):
+    store, _, mappings, rows = _fixture(tmp_path)
+    too_small = RawLineageEvidenceCache(max_objects=1, max_witness_claims=1)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity-small",
+        evidence_cache=too_small,
+    )[0]
+    assert too_small.object_count == 0 and too_small.witness_claim_count == 0
+
+    cache = RawLineageEvidenceCache(max_objects=1, max_witness_claims=2)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+    assert cache.object_count == 1 and cache.witness_claim_count == 2
+    cache.dispose()
+    assert cache.object_count == 0 and cache.witness_claim_count == 0
+    with pytest.raises(RuntimeError, match="cache_disposed"):
+        _resolve(
+            store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache,
+        )
+
+
+def test_run_scoped_evidence_hit_still_honors_cancellation(tmp_path):
+    store, _, mappings, rows = _fixture(tmp_path)
+    cache = RawLineageEvidenceCache(max_objects=10, max_witness_claims=10)
+    assert _resolve(
+        store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+        evidence_cache=cache,
+    )[0]
+
+    class RequestedStop(RuntimeError):
+        stop_reason = "operator_stop"
+
+    requested = RequestedStop("stop before reuse")
+
+    def stop():
+        raise requested
+
+    with pytest.raises(RequestedStop) as caught:
+        _resolve(
+            store, mappings, rows, identity_spool_directory=tmp_path / "identity",
+            evidence_cache=cache, check_budget=stop,
+        )
+    assert caught.value is requested and cache.hits == 0
 
 
 def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_path):

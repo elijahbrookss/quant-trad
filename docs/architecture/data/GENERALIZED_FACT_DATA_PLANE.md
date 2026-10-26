@@ -1670,12 +1670,29 @@ around the exclusive handoff and transactional drop. Exceptions or cancellation
 cannot complete the scope or admit evidence. No cross-run cache, receipt/schema
 change or resource-limit increase is involved.
 
+Page staging and page checking may reuse fully decoded raw-object evidence across
+pages only inside one bounded retention-executor invocation. Each page still
+reloads exact mapping and page authority in its current transaction, excludes
+expired placements, checks current dependency holds, freshly verifies every
+selected object's size and SHA-256, and keeps the successful-exit file-stamp
+fence. A cache hit only skips repeated Parquet decoding and fingerprint/witness
+materialization when the complete acknowledged manifest identity, current file
+stamp, and freshly derived mapping-and-witness claim match evidence already
+proved in that invocation. Changed bytes, file identity, manifest material,
+mapping, witness, placement or expiry refuse or require a complete decode.
+Logical-row and byte budgets are charged unchanged. The executor explicitly
+disposes the object/claim-bounded cache on success, cancellation, failure, run
+exit and before a non-page action. Whole-partition verification, reclamation and
+the exclusive handoff never consume it; there is no persistent or cross-run
+proof cache. See [ADR 0084](../decisions/0084-reuse-current-byte-bound-archive-evidence-within-one-run.md).
+
 Dependency expiration checks use batches of at most 128 exact `(target_kind,
 target_id)` pairs under the existing lifecycle fence, instead of one SQL round
 trip per dependency. Publication uses this same bounded check for its collected
 raw dependencies before their final byte admission. Each page and each final
 verification/reclamation pass checks current expiration events again; there is
-no retained validation cache. The publication change is implemented locally;
+no retained expiration, placement or transaction-authority result. The
+publication change is implemented locally;
 production throughput improvement still requires deployed measurement.
 Cancellation and the run deadline are checked between batches. This changes
 query grouping only: current-byte checks, expiration refusal, receipt format,
