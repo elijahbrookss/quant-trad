@@ -17,6 +17,7 @@ from market_data.structure import build_raw_record_id
 from portal.backend.service.storage.repos.fact_lineage import (
     BOOK_SCOPE_FIELDS, RawLineageEvidenceCache, resolve_canonical_raw_archive_refs,
 )
+from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from tests.test_market_data.test_market_structure_archive import _record, _segment
 
 
@@ -233,6 +234,23 @@ def test_run_scoped_evidence_reuses_decode_but_freshly_checksums_each_page(
     assert first_bytes.byte_count == second_bytes.byte_count == mappings[0]["byte_count"]
     assert (cache.hits, cache.misses, cache.invalidations) == (1, 1, 0)
     assert cache.object_count == 1 and cache.witness_claim_count == 2
+
+
+def test_repository_requires_an_explicit_executor_scope_for_cross_call_reuse(tmp_path):
+    repository = PostgresCanonicalFactArchiveRepository(
+        database=object(), object_store=object(), temporary_directory=tmp_path,
+        max_dependency_objects=3, max_raw_mapping_rows=5,
+    )
+    first = repository._dependency_evidence_cache()
+    second = repository._dependency_evidence_cache()
+    assert first is not second
+
+    repository.enable_dependency_evidence_reuse()
+    scoped = repository._dependency_evidence_cache()
+    assert repository._dependency_evidence_cache() is scoped
+    repository.dispose_dependency_evidence()
+    assert scoped.disposed
+    assert repository._dependency_evidence_cache() is not scoped
 
 
 def test_run_scoped_evidence_refuses_same_byte_object_replacement(tmp_path):

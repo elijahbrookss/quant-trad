@@ -63,9 +63,11 @@ class CanonicalFactRetentionExecutor:
         self._retry_states = {}
         self._run_lock = Lock()
         self._archive = None
+        self._archive_action = None
 
     def _dispose_archive(self):
         archive, self._archive = self._archive, None
+        self._archive_action = None
         if archive is not None:
             dispose = getattr(archive, "dispose_dependency_evidence", None)
             if dispose is not None:
@@ -130,10 +132,10 @@ class CanonicalFactRetentionExecutor:
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         reusable = action in {"stage_page", "verify_page"}
-        # Evidence belongs only to consecutive page work in this invocation.
-        # Clear it before a non-page preflight too: a refused transition must
-        # not leave an old page proof available to later work.
-        if self._archive is not None and not reusable:
+        # Evidence belongs only to consecutive work for the same page action
+        # in this invocation. Clear it before any action transition: a refused
+        # transition must not leave an old page proof available to later work.
+        if self._archive is not None and (not reusable or self._archive_action != action):
             self._dispose_archive()
         self._require_archive(policy=policy, storage_root=storage_root, action=action)
 
@@ -175,7 +177,12 @@ class CanonicalFactRetentionExecutor:
             )
         archive.partition_guard = guard
         archive.statement_timeout_ms = timeout
+        if reusable:
+            enable_reuse = getattr(archive, "enable_dependency_evidence_reuse", None)
+            if enable_reuse is not None:
+                enable_reuse()
         self._archive = archive if reusable else None
+        self._archive_action = action if reusable else None
         verification = ArchiveVerificationLimits(max_bytes=policy.max_verification_bytes,
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":

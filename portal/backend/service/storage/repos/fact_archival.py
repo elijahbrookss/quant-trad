@@ -414,6 +414,7 @@ class PostgresCanonicalFactArchiveRepository:
         self.check_budget = check_budget
         self._prepared_page = None
         self._raw_lineage_evidence_cache = None
+        self._reuse_dependency_evidence = False
         self._current_stage_page_ordinal = None
         self._archive_generation_owner = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
         self._generation = ArchiveGenerationCoordinator(
@@ -429,6 +430,16 @@ class PostgresCanonicalFactArchiveRepository:
             self.check_budget()
 
     def _dependency_evidence_cache(self):
+        if not self._reuse_dependency_evidence:
+            # Direct repository callers do not define an invocation boundary.
+            # Give one dependency proof a local cache so its internal raw and
+            # checkpoint lookups can share evidence, but never carry that
+            # evidence into a later public repository call.
+            from .fact_lineage import RawLineageEvidenceCache
+            return RawLineageEvidenceCache(
+                max_objects=self.max_dependency_objects,
+                max_witness_claims=self.max_raw_mapping_rows,
+            )
         if self._raw_lineage_evidence_cache is None:
             from .fact_lineage import RawLineageEvidenceCache
             self._raw_lineage_evidence_cache = RawLineageEvidenceCache(
@@ -437,10 +448,15 @@ class PostgresCanonicalFactArchiveRepository:
             )
         return self._raw_lineage_evidence_cache
 
+    def enable_dependency_evidence_reuse(self):
+        """Opt into reuse for one executor-owned bounded invocation."""
+        self._reuse_dependency_evidence = True
+
     def dispose_dependency_evidence(self):
         if self._raw_lineage_evidence_cache is not None:
             self._raw_lineage_evidence_cache.dispose()
             self._raw_lineage_evidence_cache = None
+        self._reuse_dependency_evidence = False
 
     @staticmethod
     def _day(day):

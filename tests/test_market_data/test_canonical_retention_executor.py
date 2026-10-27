@@ -559,7 +559,7 @@ def test_verification_repository_and_evidence_are_reused_only_within_one_run(
     ])
     executor.repository.database = object()
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
-    instances, calls, disposed = [], [], []
+    instances, calls, enabled, disposed = [], [], [], []
 
     class Archive:
         def __init__(self, **kwargs):
@@ -569,6 +569,9 @@ def test_verification_repository_and_evidence_are_reused_only_within_one_run(
             calls.append((self, day))
             return {"status": "page_verified", "storage_day": day.isoformat(),
                     "page_ordinal": len(calls)}
+
+        def enable_dependency_evidence_reuse(self):
+            enabled.append(self)
 
         def dispose_dependency_evidence(self):
             disposed.append(self)
@@ -581,8 +584,52 @@ def test_verification_repository_and_evidence_are_reused_only_within_one_run(
     assert result["stop_reason"] == "step_budget"
     assert len(instances) == 1
     assert calls == [(instances[0], DAY), (instances[0], DAY)]
+    assert enabled == [instances[0], instances[0]]
     assert disposed == [instances[0]]
     assert executor._archive is None
+
+
+def test_dependency_evidence_is_disposed_when_the_page_action_changes(tmp_path, monkeypatch):
+    executor, _ = _executor([
+        _plan([_item("stage_page")]),
+        _plan([_item("verify_page")]),
+    ])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    instances, calls, enabled, disposed = [], [], [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            instances.append(self)
+
+        def stage_next_page(self, day):
+            calls.append((self, "stage_page", day))
+            return {"status": "page_acknowledged", "storage_day": day.isoformat()}
+
+        def verify_next_page(self, day):
+            calls.append((self, "verify_page", day))
+            return {"status": "page_verified", "storage_day": day.isoformat()}
+
+        def enable_dependency_evidence_reuse(self):
+            enabled.append(self)
+
+        def dispose_dependency_evidence(self):
+            disposed.append(self)
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
+        storage_root=tmp_path, execute=True,
+    )
+    assert result["stop_reason"] == "step_budget"
+    assert len(instances) == 2
+    assert calls == [
+        (instances[0], "stage_page", DAY),
+        (instances[1], "verify_page", DAY),
+    ]
+    assert enabled == instances
+    assert disposed == instances
+    assert executor._archive is None and executor._archive_action is None
 
 
 def test_dependency_evidence_is_disposed_after_page_failure(tmp_path, monkeypatch):
