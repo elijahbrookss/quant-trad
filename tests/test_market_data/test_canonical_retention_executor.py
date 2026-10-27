@@ -551,6 +551,169 @@ def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monk
     assert calls == [instances[0], instances[0], instances[1], instances[1]]
 
 
+def test_verification_repository_and_evidence_are_reused_only_within_one_run(
+        tmp_path, monkeypatch):
+    executor, _ = _executor([
+        _plan([_item("verify_page")]),
+        _plan([_item("verify_page")]),
+    ])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    instances, calls, enabled, disposed = [], [], [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            instances.append(self)
+
+        def verify_next_page(self, day):
+            calls.append((self, day))
+            return {"status": "page_verified", "storage_day": day.isoformat(),
+                    "page_ordinal": len(calls)}
+
+        def enable_dependency_evidence_reuse(self):
+            enabled.append(self)
+
+        def dispose_dependency_evidence(self):
+            disposed.append(self)
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
+        storage_root=tmp_path, execute=True,
+    )
+    assert result["stop_reason"] == "step_budget"
+    assert len(instances) == 1
+    assert calls == [(instances[0], DAY), (instances[0], DAY)]
+    assert enabled == [instances[0], instances[0]]
+    assert disposed == [instances[0]]
+    assert executor._archive is None
+
+
+def test_dependency_evidence_is_disposed_when_the_page_action_changes(tmp_path, monkeypatch):
+    executor, _ = _executor([
+        _plan([_item("stage_page")]),
+        _plan([_item("verify_page")]),
+    ])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    instances, calls, enabled, disposed = [], [], [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            instances.append(self)
+
+        def stage_next_page(self, day):
+            calls.append((self, "stage_page", day))
+            return {"status": "page_acknowledged", "storage_day": day.isoformat()}
+
+        def verify_next_page(self, day):
+            calls.append((self, "verify_page", day))
+            return {"status": "page_verified", "storage_day": day.isoformat()}
+
+        def enable_dependency_evidence_reuse(self):
+            enabled.append(self)
+
+        def dispose_dependency_evidence(self):
+            disposed.append(self)
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
+        storage_root=tmp_path, execute=True,
+    )
+    assert result["stop_reason"] == "step_budget"
+    assert len(instances) == 2
+    assert calls == [
+        (instances[0], "stage_page", DAY),
+        (instances[1], "verify_page", DAY),
+    ]
+    assert enabled == instances
+    assert disposed == instances
+    assert executor._archive is None and executor._archive_action is None
+
+
+def test_dependency_evidence_is_disposed_after_page_failure(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item("verify_page")])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    disposed = []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            pass
+
+        def verify_next_page(self, day):
+            raise RuntimeError("page proof failed")
+
+        def dispose_dependency_evidence(self):
+            disposed.append(self)
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+        storage_root=tmp_path, execute=True,
+    )
+    assert result["failure_count"] == 1
+    assert result["outcomes"][0]["error"] == "page proof failed"
+    assert len(disposed) == 1 and executor._archive is None
+
+
+def test_deferred_page_discards_evidence_before_later_page(tmp_path, monkeypatch):
+    later = DAY + timedelta(days=1)
+    executor, _ = _executor([
+        _plan([_item("verify_page")]),
+        _plan([_item("verify_page", day=later)]),
+    ])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    instances, disposed = [], []
+
+    class Archive:
+        def __init__(self, **kwargs):
+            instances.append(self)
+
+        def verify_next_page(self, day):
+            if self is instances[0]:
+                raise module.MarketStorageLifecycleBusyError("page busy")
+            return {"status": "page_verified", "storage_day": day.isoformat()}
+
+        def dispose_dependency_evidence(self):
+            disposed.append(self)
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
+        storage_root=tmp_path, execute=True,
+    )
+    assert [item["status"] for item in result["outcomes"]] == ["deferred", "page_verified"]
+    assert len(instances) == 2
+    assert disposed == instances
+
+
+def test_non_page_preflight_discards_page_evidence_first(tmp_path, monkeypatch):
+    executor, _ = _executor([])
+    disposed = []
+
+    class Archive:
+        def dispose_dependency_evidence(self):
+            disposed.append(self)
+
+    archive = Archive()
+    executor._archive = archive
+
+    def refuse(**kwargs):
+        assert kwargs["action"] == "seal_partition"
+        raise RuntimeError("preflight refused")
+
+    monkeypatch.setattr(executor, "_require_archive", refuse)
+    with pytest.raises(RuntimeError, match="preflight refused"):
+        executor._execute_step(
+            item=_item("seal_partition"), policy=CanonicalFactRetentionPolicy(),
+            storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=60,
+        )
+    assert disposed == [archive] and executor._archive is None
+
+
 @pytest.mark.parametrize("cause", ["time_budget", "stop_requested"])
 def test_sql_cancellation_at_run_boundary_defers_and_revisits_same_day(
     tmp_path, monkeypatch, caplog, cause,

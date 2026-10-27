@@ -413,6 +413,8 @@ class PostgresCanonicalFactArchiveRepository:
         self.partition_guard = partition_guard
         self.check_budget = check_budget
         self._prepared_page = None
+        self._raw_lineage_evidence_cache = None
+        self._reuse_dependency_evidence = False
         self._current_stage_page_ordinal = None
         self._archive_generation_owner = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
         self._generation = ArchiveGenerationCoordinator(
@@ -426,6 +428,35 @@ class PostgresCanonicalFactArchiveRepository:
     def _check_budget(self):
         if self.check_budget is not None:
             self.check_budget()
+
+    def _dependency_evidence_cache(self):
+        if not self._reuse_dependency_evidence:
+            # Direct repository callers do not define an invocation boundary.
+            # Give one dependency proof a local cache so its internal raw and
+            # checkpoint lookups can share evidence, but never carry that
+            # evidence into a later public repository call.
+            from .fact_lineage import RawLineageEvidenceCache
+            return RawLineageEvidenceCache(
+                max_objects=self.max_dependency_objects,
+                max_witness_claims=self.max_raw_mapping_rows,
+            )
+        if self._raw_lineage_evidence_cache is None:
+            from .fact_lineage import RawLineageEvidenceCache
+            self._raw_lineage_evidence_cache = RawLineageEvidenceCache(
+                max_objects=self.max_dependency_objects,
+                max_witness_claims=self.max_raw_mapping_rows,
+            )
+        return self._raw_lineage_evidence_cache
+
+    def enable_dependency_evidence_reuse(self):
+        """Opt into reuse for one executor-owned bounded invocation."""
+        self._reuse_dependency_evidence = True
+
+    def dispose_dependency_evidence(self):
+        if self._raw_lineage_evidence_cache is not None:
+            self._raw_lineage_evidence_cache.dispose()
+            self._raw_lineage_evidence_cache = None
+        self._reuse_dependency_evidence = False
 
     @staticmethod
     def _day(day):
@@ -586,6 +617,7 @@ class PostgresCanonicalFactArchiveRepository:
         objects = ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
             max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
         ), check_budget=self.check_budget)
+        evidence_cache = self._dependency_evidence_cache()
         exact_rows = [row for row in rows if row["fact_type"] in EXACT_RAW_FACT_TYPES]
         prefix_refs, root_bindings = resolve_verified_book_prefixes(
             session, rows=exact_rows, byte_verifier=objects, max_objects=self.max_dependency_objects,
@@ -598,8 +630,12 @@ class PostgresCanonicalFactArchiveRepository:
             bound_manifest_ids=bound_manifest_ids,
             check_budget=self.check_budget,
             witness_manifest_ids=root_bindings,
+            identity_spool_directory=self.temporary_directory,
+            evidence_cache=evidence_cache,
         ))
-        for identity, reference in self._flow_references(session, rows, objects, bound_manifest_ids=bound_manifest_ids).items():
+        for identity, reference in self._flow_references(
+                session, rows, objects, bound_manifest_ids=bound_manifest_ids,
+                evidence_cache=evidence_cache).items():
             if references.setdefault(identity, reference) != reference:
                 raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")
         for (series_id, fact_type), group in groups.items():
@@ -642,7 +678,9 @@ class PostgresCanonicalFactArchiveRepository:
                 session, rows=additional, object_store=self.object_store, byte_verifier=objects,
                 limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
                 bound_manifest_ids=bound_manifest_ids, witness_manifest_ids=checkpoint_bindings,
-                check_budget=self.check_budget))
+                check_budget=self.check_budget,
+                identity_spool_directory=self.temporary_directory,
+                evidence_cache=evidence_cache))
             for identity, reference in sorted(checkpoint_refs.items()):
                 if identity not in references:
                     result.append({"target_kind": "raw_manifest", "target_id": identity,
@@ -668,6 +706,7 @@ class PostgresCanonicalFactArchiveRepository:
             ), check_budget=self.check_budget), limits=self.raw_read_limits,
             max_mapping_rows=self.max_raw_mapping_rows, max_objects=self.max_dependency_objects,
             check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids,
+            identity_spool_directory=self.temporary_directory,
         )
         if progress is not None:
             # The executor logs completion only after this transaction commits.
@@ -682,14 +721,16 @@ class PostgresCanonicalFactArchiveRepository:
                 max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
             ), check_budget=self.check_budget), limits=self.raw_read_limits,
             max_mapping_rows=self.max_raw_mapping_rows, max_objects=self.max_dependency_objects,
-            check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids)
+            check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids,
+            identity_spool_directory=self.temporary_directory)
         if progress is not None:
             logger.info("canonical_archive_trade_prefix_prepared | storage_day=%s chunk_id=%s first_ordinal=%s last_ordinal=%s required_ordinal=%s",
                 day, progress["chunk_id"], progress["first_receive_ordinal"], progress["last_receive_ordinal"], progress["required_receive_ordinal"])
             return {"storage_day": day, **progress}
         return None
 
-    def _flow_references(self, session, rows, objects, *, bound_manifest_ids=None):
+    def _flow_references(self, session, rows, objects, *, bound_manifest_ids=None,
+                         evidence_cache=None):
         from .fact_book_prefix import resolve_verified_trade_prefixes
         from .fact_flow_admission import load_trade_flow_roots, trade_flow_prefix_requirements
         from .fact_lineage import resolve_canonical_raw_archive_refs
@@ -702,7 +743,9 @@ class PostgresCanonicalFactArchiveRepository:
         endpoints = resolve_canonical_raw_archive_refs(session, rows=[], object_store=self.object_store,
             byte_verifier=objects, limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
-            book_prefix_ranges=witnesses, witness_manifest_ids=bindings)
+            book_prefix_ranges=witnesses, witness_manifest_ids=bindings,
+            identity_spool_directory=self.temporary_directory,
+            evidence_cache=evidence_cache)
         for identity, reference in endpoints.items():
             if references.setdefault(identity, reference) != reference:
                 raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")
