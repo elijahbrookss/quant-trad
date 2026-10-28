@@ -649,28 +649,17 @@ class PostgresCanonicalFactArchiveRepository:
             max_file_bytes=self.limits.max_file_bytes,
             check_budget=self.check_budget)
 
-    def _source_revisions(self, session, rows, *, measurement_observer=None):
+    def _source_revisions(self, session, rows):
         from .fact_derived_admission import resolve_derived_source_revisions
-        derived = _timed_verification_detail(
-            observer=measurement_observer, phase="causal_derived_hydration",
-            operation=lambda: resolve_derived_source_revisions(
-                session, rows=rows, object_store=self.object_store,
-                max_rows=self.max_raw_mapping_rows,
-                max_logical_bytes=self.limits.max_logical_bytes,
-                max_file_bytes=self.limits.max_file_bytes,
-                check_budget=self.check_budget,
-            ),
-            summarize=lambda found: {
-                "root_count": len(rows), "row_count": len(found),
-            },
+        derived = resolve_derived_source_revisions(
+            session, rows=rows, object_store=self.object_store,
+            max_rows=self.max_raw_mapping_rows,
+            max_logical_bytes=self.limits.max_logical_bytes,
+            max_file_bytes=self.limits.max_file_bytes,
+            check_budget=self.check_budget,
         )
-        book_inputs = list({row["id"]: row for row in (*rows, *derived)}.values())
-        books = _timed_verification_detail(
-            observer=measurement_observer, phase="causal_book_hydration",
-            operation=lambda: self._book_sources(session, book_inputs),
-            summarize=lambda found: {
-                "root_count": len(book_inputs), "row_count": len(found),
-            },
+        books = self._book_sources(
+            session, list({row["id"]: row for row in (*rows, *derived)}.values()),
         )
         sources = {row["id"]: row for row in (*derived, *books)}
         if len(sources) > self.max_raw_mapping_rows:
@@ -1441,9 +1430,7 @@ class PostgresCanonicalFactArchiveRepository:
             bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
             source_rows = _timed_verification_call(
                 timings=timings, phase="causal_source_resolution", day=day, page=page,
-                operation=lambda: self._source_revisions(
-                    session, rows, measurement_observer=measurement_observer,
-                ),
+                operation=lambda: self._source_revisions(session, rows),
             )
             progress = _timed_verification_call(
                 timings=timings, phase="book_prefix", day=day, page=page,
