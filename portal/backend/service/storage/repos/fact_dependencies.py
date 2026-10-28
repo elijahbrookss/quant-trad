@@ -1,5 +1,7 @@
 """Current placement proof for immutable canonical archive source edges."""
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from copy import deepcopy
+from dataclasses import dataclass
 import json
 
 from sqlalchemy import text
@@ -31,6 +33,98 @@ class CanonicalSourceByteBudgetExceeded(RuntimeError):
             f"logical_bytes={logical_bytes} max_logical_bytes={max_logical_bytes}; "
             "reduce archive page size or raise the explicit logical-byte budget"
         )
+
+
+@dataclass
+class _CheckpointSourceEvidence:
+    manifest: object
+    rows: dict
+    retained_bytes: int
+
+
+class CheckpointSourceEvidenceCache:
+    """Run-scoped sparse checkpoint rows after full-page validation.
+
+    Current placement, manifest bytes, headers, contracts and authority are
+    rechecked by the caller for every use.  Only defensive copies of selected
+    rows survive; a new selected identity forces another full-page decode.
+    """
+
+    def __init__(self, *, max_manifests, max_rows, max_retained_bytes):
+        for name, value in (("max_manifests", max_manifests), ("max_rows", max_rows),
+                            ("max_retained_bytes", max_retained_bytes)):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"canonical_checkpoint_cache_limit_invalid: field={name}")
+        self.max_manifests = max_manifests
+        self.max_rows = max_rows
+        self.max_retained_bytes = max_retained_bytes
+        self._entries = OrderedDict()
+        self.row_count = 0
+        self.retained_bytes = 0
+        self.hit_count = 0
+        self.miss_count = 0
+        self.eviction_count = 0
+
+    @staticmethod
+    def _row_charge(row):
+        # Match the repository's conservative retained-document accounting.
+        return 6 * len(json.dumps(row, default=str).encode("utf-8"))
+
+    def get(self, manifest, identities):
+        entry = self._entries.get(manifest.manifest_id)
+        if entry is None or entry.manifest != manifest:
+            if entry is not None:
+                self._discard(manifest.manifest_id)
+            self.miss_count += 1
+            return None
+        wanted = set(identities)
+        if not wanted.issubset(entry.rows):
+            self.miss_count += 1
+            return None
+        self._entries.move_to_end(manifest.manifest_id)
+        self.hit_count += 1
+        return {identity: deepcopy(entry.rows[identity]) for identity in identities}
+
+    def remember(self, manifest, rows):
+        if not rows:
+            return
+        previous = self._entries.get(manifest.manifest_id)
+        if previous is not None and previous.manifest != manifest:
+            self._discard(manifest.manifest_id)
+            previous = None
+        merged = {} if previous is None else {key: deepcopy(value) for key, value in previous.rows.items()}
+        merged.update((identity, deepcopy(row)) for identity, row in rows.items())
+        retained_bytes = sum(self._row_charge(row) for row in merged.values())
+        if len(merged) > self.max_rows or retained_bytes > self.max_retained_bytes:
+            return
+        if previous is not None:
+            self._discard(manifest.manifest_id)
+        while self._entries and (
+                len(self._entries) >= self.max_manifests
+                or self.row_count + len(merged) > self.max_rows
+                or self.retained_bytes + retained_bytes > self.max_retained_bytes):
+            self._discard(next(iter(self._entries)))
+            self.eviction_count += 1
+        if (len(self._entries) >= self.max_manifests
+                or self.row_count + len(merged) > self.max_rows
+                or self.retained_bytes + retained_bytes > self.max_retained_bytes):
+            return
+        self._entries[manifest.manifest_id] = _CheckpointSourceEvidence(
+            manifest=manifest, rows=merged, retained_bytes=retained_bytes,
+        )
+        self.row_count += len(merged)
+        self.retained_bytes += retained_bytes
+
+    def _discard(self, manifest_id):
+        entry = self._entries.pop(manifest_id, None)
+        if entry is not None:
+            self.row_count -= len(entry.rows)
+            self.retained_bytes -= entry.retained_bytes
+
+    def dispose(self):
+        self._entries.clear()
+        self.row_count = 0
+        self.retained_bytes = 0
 
 
 def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
@@ -184,14 +278,10 @@ def collect_source_history_archive_refs(session, *, rows, object_store):
     return references
 
 
-def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
-    """Size the bounded identity set before transferring hot JSON/decoding cold.
-
-    Conservatively charge whole cold pages because hydration decodes those
-    pages. An oversized source closure fails before loading its documents.
-    """
+def _measure_canonical_dependency_rows(session, identities, *, max_logical_bytes, check_budget=None):
+    """Charge the same hot documents and complete cold pages as hydration."""
     if not identities:
-        return {}
+        return 0
     logical_bytes = 0
     cold_pages = {}
     for offset in range(0, len(identities), 1000):
@@ -221,6 +311,20 @@ def read_canonical_dependency_rows(session, identities, *, reader, max_logical_b
         if logical_bytes > max_logical_bytes:
             raise CanonicalSourceByteBudgetExceeded(
                 logical_bytes=logical_bytes, max_logical_bytes=max_logical_bytes)
+    return logical_bytes
+
+
+def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
+    """Size the bounded identity set before transferring hot JSON/decoding cold.
+
+    Conservatively charge whole cold pages because hydration decodes those
+    pages. An oversized source closure fails before loading its documents.
+    """
+    if not identities:
+        return {}
+    _measure_canonical_dependency_rows(
+        session, identities, max_logical_bytes=max_logical_bytes, check_budget=check_budget,
+    )
     return reader.read_rows_by_ids(session, identities)
 
 
@@ -268,7 +372,8 @@ def _checkpoint_source_groups(session, identities, max_objects, check_budget):
 
 
 def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifier,
-                                    max_logical_bytes, max_objects, check_budget=None):
+                                    max_logical_bytes, max_objects, check_budget=None,
+                                    evidence_cache=None):
     """Bound retained selected rows plus one cold decode, not all backing pages.
 
     Only checkpoint admission uses this path. The caller retains its exact
@@ -293,10 +398,24 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
                     max_logical_bytes=max_logical_bytes)
             byte_verifier.verify(manifest.object_key, manifest.object_sha256,
                                  expected_bytes=manifest.byte_count)
-        # Recheck current placement and its whole-page charge immediately before
-        # hydration. The common reader verifies all cold bytes and envelopes.
-        selected = read_canonical_dependency_rows(session, batch, reader=reader,
-            max_logical_bytes=remaining, check_budget=check_budget)
+        selected = None
+        if manifest_id is not None and evidence_cache is not None:
+            selected = evidence_cache.get(manifest, batch)
+            if selected is not None:
+                # Reapply the complete page charge and current header/contract
+                # proof.  Only full Parquet decode is reused.
+                _measure_canonical_dependency_rows(
+                    session, batch, max_logical_bytes=remaining, check_budget=check_budget,
+                )
+                reader.verify_cached_rows_by_ids(session, selected)
+        if selected is None:
+            # Recheck current placement and its whole-page charge immediately
+            # before hydration. The common reader validates every cold row and
+            # envelope even though only selected rows are retained.
+            selected = read_canonical_dependency_rows(
+                session, batch, reader=reader, max_logical_bytes=remaining,
+                check_budget=check_budget,
+            )
         if set(selected) != set(batch):
             raise RuntimeError("canonical_checkpoint_source_identity_coverage_invalid")
         for identity, row in selected.items():
@@ -309,6 +428,8 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
                 raise CanonicalSourceByteBudgetExceeded(
                     logical_bytes=retained_bytes, max_logical_bytes=max_logical_bytes)
             result[identity] = row
+        if manifest_id is not None and evidence_cache is not None:
+            evidence_cache.remember(manifest, selected)
     return result
 
 

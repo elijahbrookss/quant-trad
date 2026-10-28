@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.canonical_adapters import DERIVED_MARKET_STATE_SOURCE, canonicalize_basis_feature, canonicalize_bbo_feature
@@ -14,12 +15,35 @@ from portal.backend.service.market.backtest_dataset_service import validate_froz
 from portal.backend.service.storage.repos import fact_archival, fact_reclamation, market_data, market_structure
 from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
-from portal.backend.service.storage.repos.fact_derived_admission import resolve_material_source_revisions
+from portal.backend.service.storage.repos.fact_derived_admission import (
+    _transaction_local_jit_disabled, resolve_material_source_revisions,
+)
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture, _publish_book_result
 from tests.test_market_data.test_fact_reclamation_db import _physical
 
 pytestmark = pytest.mark.db
+
+
+def test_material_resolver_jit_scope_restores_actual_psycopg2_connection(storage):
+    with storage.database.session() as session:
+        original = session.execute(text("SELECT current_setting('jit')")).scalar_one()
+        session.execute(text("SELECT set_config('jit','on',true)"))
+        with _transaction_local_jit_disabled(session):
+            assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == "off"
+        assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == "on"
+
+    with storage.database.session() as session:
+        with pytest.raises(DBAPIError) as caught:
+            with _transaction_local_jit_disabled(session):
+                session.execute(text("SELECT 1 / 0"))
+        assert "division by zero" in str(caught.value).lower()
+        session.rollback()
+        assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == original
+
+    # A later checkout from the real pool inherits neither local override.
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT current_setting('jit')")).scalar_one() == original
 
 
 def _archive_day(archive, day):

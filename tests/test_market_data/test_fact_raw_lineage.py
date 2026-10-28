@@ -247,9 +247,15 @@ def test_repository_requires_an_explicit_executor_scope_for_cross_call_reuse(tmp
 
     repository.enable_dependency_evidence_reuse()
     scoped = repository._dependency_evidence_cache()
+    checkpoint_scoped = repository._checkpoint_evidence_cache()
     assert repository._dependency_evidence_cache() is scoped
+    assert repository._checkpoint_evidence_cache() is checkpoint_scoped
+    assert checkpoint_scoped.max_retained_bytes <= 16 * 1024**2
     repository.dispose_dependency_evidence()
     assert scoped.disposed
+    assert checkpoint_scoped.row_count == 0
+    assert checkpoint_scoped.retained_bytes == 0
+    assert repository._checkpoint_source_evidence_cache is None
     assert repository._dependency_evidence_cache() is not scoped
 
 

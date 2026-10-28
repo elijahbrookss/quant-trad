@@ -134,7 +134,8 @@ def resolve_book_position_revisions(session, *, requests, object_store, max_rows
 def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_verifier,
                                          max_objects, max_rows=50_000, max_logical_bytes=64 * 1024**2,
                                          max_file_bytes=128 * 1024**2,
-                                         bound_checkpoint_ids=None, check_budget=None):
+                                         bound_checkpoint_ids=None, check_budget=None,
+                                         source_evidence_cache=None):
     """Validate immutable L2 product/validity scope and existing checkpoints.
 
     Checkpoints are optional acceleration artifacts; a session with no saved
@@ -257,7 +258,8 @@ def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_ve
                                 max_file_bytes=max_file_bytes))
     additional = read_checkpoint_dependency_rows(session, sorted(requested - sources.keys()), reader=reader,
         byte_verifier=byte_verifier, max_logical_bytes=max_logical_bytes,
-        max_objects=max_objects, check_budget=check_budget)
+        max_objects=max_objects, check_budget=check_budget,
+        evidence_cache=source_evidence_cache)
     for source in additional.values():
         record_from_storage_row(source)
     sources.update(additional)

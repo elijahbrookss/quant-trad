@@ -55,6 +55,10 @@ _CATALOG_WRITE_BATCH_ROWS = 128
 _ALIAS_CATALOG_WRITE_BATCH_ROWS = 64
 # Bound expiration-key SQL independently of the number of archive dependencies.
 _EXPIRATION_QUERY_BATCH_ROWS = 128
+# Retained sparse rows are an optimization, never a reason to consume the
+# verifier's complete logical-page allowance. The conservative row charge is
+# six times serialized size, so this cap keeps actual cached JSON much smaller.
+_CHECKPOINT_EVIDENCE_CACHE_BYTES = 16 * 1024**2
 _ALIAS_CATALOG_INSERT = text("""INSERT INTO market.fact_archive_material_aliases
     (manifest_id, fact_version_id, evidence_key, series_id, material_hash)
 SELECT :manifest_id, input.fact_version_id, input.evidence_key,
@@ -474,6 +478,7 @@ class PostgresCanonicalFactArchiveRepository:
         self.check_budget = check_budget
         self._prepared_page = None
         self._raw_lineage_evidence_cache = None
+        self._checkpoint_source_evidence_cache = None
         self._reuse_dependency_evidence = False
         self._current_stage_page_ordinal = None
         self._archive_generation_owner = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
@@ -508,6 +513,20 @@ class PostgresCanonicalFactArchiveRepository:
             )
         return self._raw_lineage_evidence_cache
 
+    def _checkpoint_evidence_cache(self):
+        if not self._reuse_dependency_evidence:
+            return None
+        if self._checkpoint_source_evidence_cache is None:
+            from .fact_dependencies import CheckpointSourceEvidenceCache
+            self._checkpoint_source_evidence_cache = CheckpointSourceEvidenceCache(
+                max_manifests=self.max_dependency_objects,
+                max_rows=self.max_raw_mapping_rows,
+                max_retained_bytes=min(
+                    self.limits.max_logical_bytes, _CHECKPOINT_EVIDENCE_CACHE_BYTES,
+                ),
+            )
+        return self._checkpoint_source_evidence_cache
+
     def enable_dependency_evidence_reuse(self):
         """Opt into reuse for one executor-owned bounded invocation."""
         self._reuse_dependency_evidence = True
@@ -516,6 +535,17 @@ class PostgresCanonicalFactArchiveRepository:
         if self._raw_lineage_evidence_cache is not None:
             self._raw_lineage_evidence_cache.dispose()
             self._raw_lineage_evidence_cache = None
+        if self._checkpoint_source_evidence_cache is not None:
+            cache = self._checkpoint_source_evidence_cache
+            if cache.hit_count or cache.miss_count:
+                logger.info(
+                    "canonical_checkpoint_source_evidence_cache | hits=%s misses=%s evictions=%s "
+                    "retained_rows=%s retained_charge_bytes=%s",
+                    cache.hit_count, cache.miss_count, cache.eviction_count,
+                    cache.row_count, cache.retained_bytes,
+                )
+            self._checkpoint_source_evidence_cache.dispose()
+            self._checkpoint_source_evidence_cache = None
         self._reuse_dependency_evidence = False
 
     @staticmethod
@@ -793,6 +823,7 @@ class PostgresCanonicalFactArchiveRepository:
                 max_file_bytes=self.limits.max_file_bytes,
                 bound_checkpoint_ids=bound_checkpoint_ids,
                 check_budget=self.check_budget,
+                source_evidence_cache=self._checkpoint_evidence_cache(),
             ),
             summarize=lambda found: {
                 "root_count": len(rows), "object_count": len(found[0]),

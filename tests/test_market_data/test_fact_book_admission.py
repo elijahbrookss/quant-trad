@@ -214,7 +214,7 @@ class _CheckpointSources:
         self.page_for = {"a": "page-1", "b": "page-1", "c": "page-2"}
         self.manifests = {key: SimpleNamespace(manifest_id=key, logical_byte_count=2500,
             object_key=key + ".parquet", object_sha256=key, byte_count=100) for key in set(self.page_for.values())}
-        self.calls, self.verified = [], []
+        self.calls, self.verified, self.cached_verified = [], [], []
         self.coverage = "valid"
         self.hot = set()
 
@@ -243,6 +243,12 @@ class _CheckpointSources:
         self.calls.append(list(ids))
         return {identity: deepcopy(self.rows[identity]) for identity in ids}
 
+    def verify_cached_rows_by_ids(self, _session, rows):
+        self.cached_verified.append(sorted(rows))
+        for identity, row in rows.items():
+            if row != self.rows[identity]:
+                raise RuntimeError("canonical_archive_envelope_mismatch")
+
     def verify(self, key, digest, *, expected_bytes):
         assert expected_bytes == 100
         self.verified.append(key)
@@ -267,6 +273,83 @@ def test_checkpoint_cold_groups_preserve_all_rows_with_a_bounded_decode(monkeypa
     assert _checkpoint_reader(monkeypatch, fixture) == previous
     assert fixture.calls == [["a", "b"], ["c"]]
     assert fixture.verified == ["page-1.parquet", "page-2.parquet"]
+
+
+def test_checkpoint_sparse_cache_reuses_only_selected_rows_with_fresh_proofs(monkeypatch):
+    fixture = _CheckpointSources()
+    cache = fact_dependencies.CheckpointSourceEvidenceCache(
+        max_manifests=4, max_rows=10, max_retained_bytes=32 * 1024,
+    )
+    first = _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    assert first == fixture.rows
+    assert fixture.calls == [["a", "b"], ["c"]]
+    assert cache.miss_count == 2 and cache.hit_count == 0
+
+    # Caller mutation cannot affect retained evidence.  Current bytes are still
+    # verified and current headers/contracts are checked on every hit.
+    first["a"]["payload"]["state"] = "caller-mutated"
+    fixture.calls.clear()
+    fixture.verified.clear()
+    second = _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    assert second == fixture.rows
+    assert fixture.calls == []
+    assert fixture.verified == ["page-1.parquet", "page-2.parquet"]
+    assert fixture.cached_verified == [["a", "b"], ["c"]]
+    assert cache.hit_count == 2
+
+
+def test_checkpoint_sparse_cache_new_identity_or_manifest_change_forces_full_decode(monkeypatch):
+    fixture = _CheckpointSources()
+    cache = fact_dependencies.CheckpointSourceEvidenceCache(
+        max_manifests=4, max_rows=10, max_retained_bytes=32 * 1024,
+    )
+    _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    fixture.calls.clear()
+    fixture.manifests["page-1"] = SimpleNamespace(
+        manifest_id="page-1", logical_byte_count=2500, object_key="page-1.parquet",
+        object_sha256="changed", byte_count=100,
+    )
+    _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    assert fixture.calls == [["a", "b"]]
+
+    fixture.calls.clear()
+    fixture.rows["d"] = {"id": "d", "revision": 4, "known_at": BASE,
+                          "market_commit_seq": 8, "payload": {"state": "d"}}
+    fixture.page_for["d"] = "page-1"
+    monkeypatch.setattr(fact_dependencies, "_catalog_manifest", lambda row: fixture.manifests[row["id"]])
+    result = fact_dependencies.read_checkpoint_dependency_rows(
+        fixture, ["a", "b", "d"], reader=fixture, byte_verifier=fixture,
+        max_logical_bytes=4096, max_objects=10, evidence_cache=cache,
+    )
+    assert result == {identity: fixture.rows[identity] for identity in ("a", "b", "d")}
+    assert fixture.calls == [["a", "b", "d"]]
+
+
+def test_checkpoint_sparse_cache_hit_refuses_changed_current_header(monkeypatch):
+    fixture = _CheckpointSources()
+    cache = fact_dependencies.CheckpointSourceEvidenceCache(
+        max_manifests=4, max_rows=10, max_retained_bytes=32 * 1024,
+    )
+    _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    fixture.rows["a"]["market_commit_seq"] += 1
+    with pytest.raises(RuntimeError, match="canonical_archive_envelope_mismatch"):
+        _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+
+
+def test_checkpoint_sparse_cache_bounds_and_deterministic_disposal():
+    cache = fact_dependencies.CheckpointSourceEvidenceCache(
+        max_manifests=1, max_rows=2, max_retained_bytes=8192,
+    )
+    one = SimpleNamespace(manifest_id="one")
+    two = SimpleNamespace(manifest_id="two")
+    cache.remember(one, {"a": {"id": "a"}})
+    cache.remember(two, {"b": {"id": "b"}})
+    assert cache.get(one, ["a"]) is None
+    assert cache.get(two, ["b"]) == {"b": {"id": "b"}}
+    assert cache.eviction_count == 1 and cache.row_count == 1
+    cache.dispose()
+    assert cache.row_count == cache.retained_bytes == 0
+    assert cache.get(two, ["b"]) is None
 
 
 @pytest.mark.parametrize("coverage", ["identity", "ambiguous", "missing"])
