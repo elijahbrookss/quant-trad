@@ -81,6 +81,64 @@ def test_chunk_progress_exceeds_one_mapping_budget_and_reuses_deep_proof(tmp_pat
         _resolve(session, store, [root])
 
 
+def test_three_page_prefix_fixture_reports_sql_hash_and_traversal_without_changing_proof(
+        tmp_path):
+    store, records, mappings, rows = _fixture(
+        tmp_path, tuple(range(1, 7)), requested_channel="level2",
+    )
+    session = _PrefixSession(mappings)
+    roots = [_book_root(records[index], rows[index]) for index in (1, 3, 5)]
+    for root in roots:
+        assert _prepare(session, store, root)["status"] == "book_prefix_verified"
+
+    observed = []
+    for page, root in enumerate(roots):
+        refs, bindings = _resolve(
+            session, store, [root],
+            measurement_observer=lambda page=page, **fields: observed.append(
+                {"page": page, **fields}
+            ),
+        )
+        assert set(refs) == {"raw-manifest"}
+        assert bindings == {root["id"]: {"raw-manifest"}}
+
+    assert len(observed) == 9
+    for page in range(3):
+        events = [item for item in observed if item["page"] == page]
+        assert [item["phase"] for item in events] == [
+            "prefix_catalog_sql", "prefix_object_hash", "prefix_traversal",
+        ]
+        assert all(item["scope"] == "book" for item in events)
+        assert all(item["outcome"] == "completed" for item in events)
+        assert all(item["seconds"] >= 0 for item in events)
+        counters = events[0]["counters"]
+        assert counters == events[1]["counters"] == events[2]["counters"]
+        assert counters["prefix_count"] == counters["root_count"] == 1
+        assert counters["chunk_count"] == page + 1
+        assert counters["query_count"] == page + 2
+        assert counters["object_count"] == page + 1
+        assert counters["byte_count"] > 0
+
+
+def test_prefix_measurement_failure_never_changes_verified_result(tmp_path, caplog):
+    store, records, mappings, rows = _fixture(
+        tmp_path, (1, 2), requested_channel="level2",
+    )
+    session = _PrefixSession(mappings)
+    root = _book_root(records[-1], rows[-1])
+    assert _prepare(session, store, root)
+
+    def unavailable_observer(**_fields):
+        raise RuntimeError("measurement sink unavailable")
+
+    refs, bindings = _resolve(
+        session, store, [root], measurement_observer=unavailable_observer,
+    )
+    assert set(refs) == {"raw-manifest"}
+    assert bindings == {root["id"]: {"raw-manifest"}}
+    assert caplog.text.count("canonical_archive_verification_measurement_failed") == 3
+
+
 def test_late_interval_does_not_expand_or_query_its_earlier_history(tmp_path):
     store, records, mappings, rows = _fixture(tmp_path, (100_001, 100_002), requested_channel="level2")
     session = _PrefixSession(mappings)

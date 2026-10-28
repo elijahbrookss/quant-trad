@@ -147,6 +147,66 @@ def test_verification_phase_records_completed_and_failed_durations(monkeypatch, 
     assert "phase=archive_read outcome=completed seconds=0.250000" in caplog.text
     assert "phase=dependency_proof outcome=failed seconds=0.500000" in caplog.text
 
+
+def test_verification_detail_records_bounded_counters_and_cannot_break_proof(
+        monkeypatch, caplog):
+    clock = iter((10.0, 10.25, 20.0, 20.5, 30.0, 30.1))
+    monkeypatch.setattr(fact_archival, "perf_counter", lambda: next(clock))
+    observed = []
+
+    assert fact_archival._timed_verification_detail(
+        observer=lambda **fields: observed.append(fields),
+        phase="exact_raw_proof", scope="page",
+        operation=lambda: {"raw-a": {}, "raw-b": {}},
+        summarize=lambda found: {"root_count": 3, "object_count": len(found)},
+    ) == {"raw-a": {}, "raw-b": {}}
+    with pytest.raises(RuntimeError, match="injected"):
+        fact_archival._timed_verification_detail(
+            observer=lambda **fields: observed.append(fields),
+            phase="book_checkpoint_proof", scope="page",
+            operation=lambda: (_ for _ in ()).throw(RuntimeError("injected")),
+        )
+
+    assert observed == [
+        {
+            "phase": "exact_raw_proof", "scope": "page", "seconds": 0.25,
+            "outcome": "completed", "counters": {
+                "root_count": 3, "object_count": 2,
+            },
+        },
+        {
+            "phase": "book_checkpoint_proof", "scope": "page", "seconds": 0.5,
+            "outcome": "failed", "counters": {},
+        },
+    ]
+
+    def unavailable_observer(**_fields):
+        raise RuntimeError("diagnostic sink unavailable")
+
+    assert fact_archival._timed_verification_detail(
+        observer=unavailable_observer, phase="exact_raw_proof",
+        operation=lambda: "proof-result",
+    ) == "proof-result"
+    assert "canonical_archive_verification_measurement_failed" in caplog.text
+
+
+def test_verification_detail_log_has_fixed_low_cardinality_fields(caplog):
+    page = {"id": "manifest", "page_ordinal": 7}
+    with caplog.at_level(logging.INFO):
+        fact_archival._record_verification_detail(
+            phase="prefix_catalog_sql", scope="book", day=date(2026, 9, 8),
+            page=page, seconds=1.25, outcome="completed",
+            counters={
+                "query_count": 4, "object_count": 3, "byte_count": 2048,
+                "root_count": 2, "row_count": 10, "chunk_count": 3,
+                "prefix_count": 1,
+            },
+        )
+    assert "canonical_archive_verification_detail" in caplog.text
+    assert "phase=prefix_catalog_sql scope=book outcome=completed seconds=1.250000" in caplog.text
+    assert "query_count=4 object_count=3 byte_count=2048 root_count=2" in caplog.text
+    assert "row_count=10 chunk_count=3 prefix_count=1" in caplog.text
+
 def test_stage_phase_records_completed_and_failed_durations(monkeypatch, caplog):
     clock = iter((10.0, 10.25, 20.0, 20.5))
     monkeypatch.setattr(fact_archival, "perf_counter", lambda: next(clock))

@@ -195,6 +195,66 @@ def _record_verification_phase(*, timings, phase, day, page, seconds, outcome):
     )
 
 
+def _record_verification_detail(
+        *, phase, day, page, seconds, outcome, scope="page", counters=None):
+    """Record one bounded, non-overlapping certification subphase."""
+    counters = counters or {}
+    logger.info(
+        "canonical_archive_verification_detail | storage_day=%s page_ordinal=%s "
+        "manifest_id=%s phase=%s scope=%s outcome=%s seconds=%.6f "
+        "query_count=%s object_count=%s byte_count=%s root_count=%s "
+        "row_count=%s chunk_count=%s prefix_count=%s",
+        day, page["page_ordinal"], page["id"], phase, scope, outcome, seconds,
+        counters.get("query_count", 0), counters.get("object_count", 0),
+        counters.get("byte_count", 0), counters.get("root_count", 0),
+        counters.get("row_count", 0), counters.get("chunk_count", 0),
+        counters.get("prefix_count", 0),
+    )
+
+
+def _notify_verification_detail(observer, **fields):
+    if observer is None:
+        return
+    try:
+        observer(**fields)
+    except Exception:
+        logger.warning(
+            "canonical_archive_verification_measurement_failed | "
+            "phase=%s scope=%s outcome=%s",
+            fields["phase"], fields["scope"], fields["outcome"], exc_info=True,
+        )
+
+
+def _timed_verification_detail(
+        *, observer, phase, operation, scope="page", summarize=None):
+    """Time diagnostic work without letting observation affect certification."""
+    started = perf_counter()
+    try:
+        result = operation()
+    except BaseException:
+        _notify_verification_detail(
+            observer, phase=phase, scope=scope,
+            seconds=perf_counter() - started, outcome="failed", counters={},
+        )
+        raise
+    counters = {}
+    if summarize is not None:
+        try:
+            counters = summarize(result)
+        except Exception:
+            logger.warning(
+                "canonical_archive_verification_measurement_summary_failed | "
+                "phase=%s scope=%s",
+                phase, scope, exc_info=True,
+            )
+    _notify_verification_detail(
+        observer, phase=phase, scope=scope,
+        seconds=perf_counter() - started, outcome="completed",
+        counters=counters,
+    )
+    return result
+
+
 def _timed_verification_call(*, timings, phase, day, page, operation):
     started = perf_counter()
     try:
@@ -589,18 +649,36 @@ class PostgresCanonicalFactArchiveRepository:
             max_file_bytes=self.limits.max_file_bytes,
             check_budget=self.check_budget)
 
-    def _source_revisions(self, session, rows):
+    def _source_revisions(self, session, rows, *, measurement_observer=None):
         from .fact_derived_admission import resolve_derived_source_revisions
-        derived = resolve_derived_source_revisions(session, rows=rows, object_store=self.object_store,
-            max_rows=self.max_raw_mapping_rows, max_logical_bytes=self.limits.max_logical_bytes,
-            max_file_bytes=self.limits.max_file_bytes, check_budget=self.check_budget)
-        books = self._book_sources(session, list({row["id"]: row for row in (*rows, *derived)}.values()))
+        derived = _timed_verification_detail(
+            observer=measurement_observer, phase="causal_derived_hydration",
+            operation=lambda: resolve_derived_source_revisions(
+                session, rows=rows, object_store=self.object_store,
+                max_rows=self.max_raw_mapping_rows,
+                max_logical_bytes=self.limits.max_logical_bytes,
+                max_file_bytes=self.limits.max_file_bytes,
+                check_budget=self.check_budget,
+            ),
+            summarize=lambda found: {
+                "root_count": len(rows), "row_count": len(found),
+            },
+        )
+        book_inputs = list({row["id"]: row for row in (*rows, *derived)}.values())
+        books = _timed_verification_detail(
+            observer=measurement_observer, phase="causal_book_hydration",
+            operation=lambda: self._book_sources(session, book_inputs),
+            summarize=lambda found: {
+                "root_count": len(book_inputs), "row_count": len(found),
+            },
+        )
         sources = {row["id"]: row for row in (*derived, *books)}
         if len(sources) > self.max_raw_mapping_rows:
             raise RuntimeError("canonical_archive_source_dependency_budget_exceeded: reduce archive page size")
         return [sources[identity] for identity in sorted(sources)]
 
-    def _dependencies(self, session, rows, *, bound_manifest_ids=None, source_rows=(), bound_checkpoint_ids=None):
+    def _dependencies(self, session, rows, *, bound_manifest_ids=None, source_rows=(),
+                      bound_checkpoint_ids=None, measurement_observer=None):
         from .market_data import _collect_material_archive_refs
         from .fact_lineage import EXACT_RAW_FACT_TYPES, resolve_canonical_raw_archive_refs
         from .fact_book_prefix import resolve_verified_book_prefixes
@@ -622,65 +700,141 @@ class PostgresCanonicalFactArchiveRepository:
         prefix_refs, root_bindings = resolve_verified_book_prefixes(
             session, rows=exact_rows, byte_verifier=objects, max_objects=self.max_dependency_objects,
             bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
+            measurement_observer=measurement_observer,
         )
         references.update(prefix_refs)
-        references.update(resolve_canonical_raw_archive_refs(
-            session, rows=exact_rows, object_store=self.object_store, byte_verifier=objects,
-            limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
-            bound_manifest_ids=bound_manifest_ids,
-            check_budget=self.check_budget,
-            witness_manifest_ids=root_bindings,
-            identity_spool_directory=self.temporary_directory,
-            evidence_cache=evidence_cache,
-        ))
-        for identity, reference in self._flow_references(
+        exact_refs = _timed_verification_detail(
+            observer=measurement_observer, phase="exact_raw_proof",
+            operation=lambda: resolve_canonical_raw_archive_refs(
+                session, rows=exact_rows, object_store=self.object_store,
+                byte_verifier=objects, limits=self.raw_read_limits,
+                max_mapping_rows=self.max_raw_mapping_rows,
+                bound_manifest_ids=bound_manifest_ids,
+                check_budget=self.check_budget,
+                witness_manifest_ids=root_bindings,
+                identity_spool_directory=self.temporary_directory,
+                evidence_cache=evidence_cache,
+            ),
+            summarize=lambda found: {
+                "root_count": len(exact_rows), "object_count": len(found),
+            },
+        )
+        references.update(exact_refs)
+        flow_refs = _timed_verification_detail(
+            observer=measurement_observer, phase="flow_raw_proof",
+            operation=lambda: self._flow_references(
                 session, rows, objects, bound_manifest_ids=bound_manifest_ids,
-                evidence_cache=evidence_cache).items():
+                evidence_cache=evidence_cache,
+                measurement_observer=measurement_observer,
+            ),
+            summarize=lambda found: {
+                "root_count": len(rows), "object_count": len(found),
+            },
+        )
+        for identity, reference in flow_refs.items():
             if references.setdefault(identity, reference) != reference:
                 raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")
-        for (series_id, fact_type), group in groups.items():
-            self._check_budget()
-            if (fact_type in EXACT_RAW_FACT_TYPES or fact_type in DERIVED_FACT_TYPES or fact_type in SELF_CONTAINED_FACT_TYPES
-                    or fact_type.startswith("market.normalized.")):
-                continue
-            roots = []
-            for row in group:
-                alias = legacy_material_alias(row)
-                roots.append((series_id, alias["material_hash"] if alias else row["material_hash"]))
-            found = _collect_material_archive_refs(session, roots=roots)
-            for identity, reference in found.items():
-                if references.setdefault(identity, reference) != reference:
-                    raise RuntimeError(f"canonical_archive_dependency_conflict: target_id={identity}")
+        def collect_material_references():
+            found_references = {}
+            root_count = 0
+            for (series_id, fact_type), group in groups.items():
+                self._check_budget()
+                if (fact_type in EXACT_RAW_FACT_TYPES or fact_type in DERIVED_FACT_TYPES
+                        or fact_type in SELF_CONTAINED_FACT_TYPES
+                        or fact_type.startswith("market.normalized.")):
+                    continue
+                roots = []
+                for row in group:
+                    alias = legacy_material_alias(row)
+                    roots.append((series_id, alias["material_hash"] if alias else row["material_hash"]))
+                root_count += len(roots)
+                found = _collect_material_archive_refs(session, roots=roots)
+                for identity, reference in found.items():
+                    if found_references.setdefault(identity, reference) != reference:
+                        raise RuntimeError(f"canonical_archive_dependency_conflict: target_id={identity}")
+            return found_references, root_count
+        material_refs, _ = _timed_verification_detail(
+            observer=measurement_observer, phase="material_reference_proof",
+            operation=collect_material_references,
+            summarize=lambda result: {
+                "root_count": result[1], "object_count": len(result[0]),
+            },
+        )
+        for identity, reference in material_refs.items():
+            if references.setdefault(identity, reference) != reference:
+                raise RuntimeError(f"canonical_archive_dependency_conflict: target_id={identity}")
         result = []
         if len(references) > self.max_dependency_objects:
             raise RuntimeError("canonical_archive_dependency_object_budget_exceeded: reduce page row limit")
-        self._assert_dependencies_unexpired(session,
-            [{"target_kind": "raw_manifest", "target_id": identity} for identity in sorted(references)],
-            check_budget=self.check_budget)
-        for identity, reference in sorted(references.items()):
-            # The lifecycle shared fence remains held while bytes are read and
-            # permanent hold edges commit. Expiry cannot race this admission.
-            objects.verify(reference["object_key"], reference["object_sha256"])
-            result.append({"target_kind": "raw_manifest", "target_id": identity,
-                           "object_key": reference["object_key"], "object_sha256": reference["object_sha256"]})
-        checkpoints, checkpoint_sources = verify_book_metadata_and_checkpoints(session, rows=rows, object_store=self.object_store,
-            byte_verifier=objects, max_objects=self.max_dependency_objects,
-            max_rows=self.max_raw_mapping_rows, max_logical_bytes=self.limits.max_logical_bytes,
-            max_file_bytes=self.limits.max_file_bytes,
-            bound_checkpoint_ids=bound_checkpoint_ids, check_budget=self.check_budget)
+        expiration_rows = [
+            {"target_kind": "raw_manifest", "target_id": identity}
+            for identity in sorted(references)
+        ]
+        _timed_verification_detail(
+            observer=measurement_observer, phase="dependency_expiry_authority",
+            operation=lambda: self._assert_dependencies_unexpired(
+                session, expiration_rows, check_budget=self.check_budget,
+            ),
+            summarize=lambda _unused: {
+                "query_count": (
+                    len(expiration_rows) + _EXPIRATION_QUERY_BATCH_ROWS - 1
+                ) // _EXPIRATION_QUERY_BATCH_ROWS,
+                "object_count": len(expiration_rows),
+            },
+        )
+        def verify_current_objects():
+            for identity, reference in sorted(references.items()):
+                # The lifecycle shared fence remains held while bytes are read
+                # and permanent hold edges commit. Expiry cannot race this.
+                objects.verify(reference["object_key"], reference["object_sha256"])
+                result.append({"target_kind": "raw_manifest", "target_id": identity,
+                               "object_key": reference["object_key"],
+                               "object_sha256": reference["object_sha256"]})
+        _timed_verification_detail(
+            observer=measurement_observer, phase="dependency_current_object_hash",
+            operation=verify_current_objects,
+            summarize=lambda _unused: {"object_count": len(references)},
+        )
+        checkpoints, checkpoint_sources = _timed_verification_detail(
+            observer=measurement_observer, phase="book_checkpoint_proof",
+            operation=lambda: verify_book_metadata_and_checkpoints(
+                session, rows=rows, object_store=self.object_store,
+                byte_verifier=objects, max_objects=self.max_dependency_objects,
+                max_rows=self.max_raw_mapping_rows,
+                max_logical_bytes=self.limits.max_logical_bytes,
+                max_file_bytes=self.limits.max_file_bytes,
+                bound_checkpoint_ids=bound_checkpoint_ids,
+                check_budget=self.check_budget,
+            ),
+            summarize=lambda found: {
+                "root_count": len(rows), "object_count": len(found[0]),
+                "row_count": len(found[1]),
+            },
+        )
         exact_ids = {row["id"] for row in exact_rows}
         additional = [row for row in checkpoint_sources if row["id"] not in exact_ids]
         if additional:
             checkpoint_refs, checkpoint_bindings = resolve_verified_book_prefixes(
                 session, rows=additional, byte_verifier=objects, max_objects=self.max_dependency_objects,
-                bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget)
-            checkpoint_refs.update(resolve_canonical_raw_archive_refs(
-                session, rows=additional, object_store=self.object_store, byte_verifier=objects,
-                limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
-                bound_manifest_ids=bound_manifest_ids, witness_manifest_ids=checkpoint_bindings,
-                check_budget=self.check_budget,
-                identity_spool_directory=self.temporary_directory,
-                evidence_cache=evidence_cache))
+                bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
+                measurement_observer=measurement_observer)
+            checkpoint_exact_refs = _timed_verification_detail(
+                observer=measurement_observer, phase="checkpoint_raw_proof",
+                operation=lambda: resolve_canonical_raw_archive_refs(
+                    session, rows=additional, object_store=self.object_store,
+                    byte_verifier=objects, limits=self.raw_read_limits,
+                    max_mapping_rows=self.max_raw_mapping_rows,
+                    bound_manifest_ids=bound_manifest_ids,
+                    witness_manifest_ids=checkpoint_bindings,
+                    check_budget=self.check_budget,
+                    identity_spool_directory=self.temporary_directory,
+                    evidence_cache=evidence_cache,
+                ),
+                summarize=lambda found: {
+                    "root_count": len(additional), "object_count": len(found),
+                },
+            )
+            checkpoint_refs.update(checkpoint_exact_refs)
             for identity, reference in sorted(checkpoint_refs.items()):
                 if identity not in references:
                     result.append({"target_kind": "raw_manifest", "target_id": identity,
@@ -730,7 +884,7 @@ class PostgresCanonicalFactArchiveRepository:
         return None
 
     def _flow_references(self, session, rows, objects, *, bound_manifest_ids=None,
-                         evidence_cache=None):
+                         evidence_cache=None, measurement_observer=None):
         from .fact_book_prefix import resolve_verified_trade_prefixes
         from .fact_flow_admission import load_trade_flow_roots, trade_flow_prefix_requirements
         from .fact_lineage import resolve_canonical_raw_archive_refs
@@ -739,7 +893,8 @@ class PostgresCanonicalFactArchiveRepository:
         prefixes, witnesses = trade_flow_prefix_requirements(roots)
         references, bindings = resolve_verified_trade_prefixes(session, prefixes=prefixes, witnesses=witnesses,
             byte_verifier=objects, max_objects=self.max_dependency_objects,
-            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget)
+            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
+            measurement_observer=measurement_observer)
         endpoints = resolve_canonical_raw_archive_refs(session, rows=[], object_store=self.object_store,
             byte_verifier=objects, limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
@@ -1282,10 +1437,15 @@ class PostgresCanonicalFactArchiveRepository:
                 timings=timings, phase="catalog_read", day=day, page=page,
                 operation=lambda: self._page_catalogs(session, manifest.manifest_id),
             )
+            measurement_observer = lambda **fields: _record_verification_detail(
+                day=day, page=page, **fields,
+            )
             bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
             source_rows = _timed_verification_call(
                 timings=timings, phase="causal_source_resolution", day=day, page=page,
-                operation=lambda: self._source_revisions(session, rows),
+                operation=lambda: self._source_revisions(
+                    session, rows, measurement_observer=measurement_observer,
+                ),
             )
             progress = _timed_verification_call(
                 timings=timings, phase="book_prefix", day=day, page=page,
@@ -1301,6 +1461,7 @@ class PostgresCanonicalFactArchiveRepository:
                 operation=lambda: self._dependencies(
                     session, rows, bound_manifest_ids=bound_ids, source_rows=source_rows,
                     bound_checkpoint_ids=bound_checkpoints or None,
+                    measurement_observer=measurement_observer,
                 ),
             )
             expected = {
