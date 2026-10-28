@@ -725,7 +725,6 @@ class PostgresCanonicalFactArchiveRepository:
             operation=lambda: self._flow_references(
                 session, rows, objects, bound_manifest_ids=bound_manifest_ids,
                 evidence_cache=evidence_cache,
-                measurement_observer=measurement_observer,
             ),
             summarize=lambda found: {
                 "root_count": len(rows), "object_count": len(found),
@@ -884,7 +883,7 @@ class PostgresCanonicalFactArchiveRepository:
         return None
 
     def _flow_references(self, session, rows, objects, *, bound_manifest_ids=None,
-                         evidence_cache=None, measurement_observer=None):
+                         evidence_cache=None):
         from .fact_book_prefix import resolve_verified_trade_prefixes
         from .fact_flow_admission import load_trade_flow_roots, trade_flow_prefix_requirements
         from .fact_lineage import resolve_canonical_raw_archive_refs
@@ -893,8 +892,7 @@ class PostgresCanonicalFactArchiveRepository:
         prefixes, witnesses = trade_flow_prefix_requirements(roots)
         references, bindings = resolve_verified_trade_prefixes(session, prefixes=prefixes, witnesses=witnesses,
             byte_verifier=objects, max_objects=self.max_dependency_objects,
-            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
-            measurement_observer=measurement_observer)
+            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget)
         endpoints = resolve_canonical_raw_archive_refs(session, rows=[], object_store=self.object_store,
             byte_verifier=objects, limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
