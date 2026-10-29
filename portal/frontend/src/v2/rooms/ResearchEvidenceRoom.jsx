@@ -24,8 +24,9 @@ export function ResearchEvidenceRoom() {
   const selectedRevision = params.get('revision') ? Number(params.get('revision')) : undefined
   const summary = useResearchRead(fetchResearchSummary, [itemId, { revision: selectedRevision }])
   const requestedTab = params.get('tab') === 'summary' ? 'interpretation' : params.get('tab')
-  const tab = ['interpretation', 'report', 'evidence', 'files', 'history', 'export'].includes(requestedTab) ? requestedTab : 'interpretation'
   const item = summary.data?.item
+  const tabs = ['interpretation', ...(item?.kind === 'study' ? ['report'] : []), 'evidence', 'files', 'history']
+  const tab = [...tabs, 'export'].includes(requestedTab) ? requestedTab : 'interpretation'
   const publication = summary.data?.publication
   const latestRevision = Math.max(0, ...(summary.data?.history || []).map(version => Number(version.revision) || 0))
   const historical = Boolean(publication && Number(publication.revision) < latestRevision)
@@ -89,7 +90,7 @@ export function ResearchEvidenceRoom() {
   return <div className="qt2-room qt2-research-room">
     <Link className="qt2-research-back" to={from}>← {from === '/overview' ? 'Overview' : 'Studies / records'}</Link>
     <header className="qt2-room-head"><div><span className="qt2-kicker">{item.kind === 'study' ? 'Study' : item.kind} · read only</span><h1 className="qt2-title">{item.title}</h1><p className="qt2-sub">{[scopeNames.join(' · '), scopeFrames.join(' · ')].filter(Boolean).join(' · ') || 'Instrument not declared at this level'}</p></div><div className="qt2-head-actions"><button className="qt2-button" onClick={summary.refresh}>Refresh summary</button><button className="qt2-button" onClick={() => selectTab('export')}>Export</button></div></header>
-    <nav className="qt2-research-tabs" aria-label="Research record sections">{['interpretation', 'report', 'evidence', 'files', 'history'].map(value => <button className={tab === value ? 'is-active' : ''} key={value} onClick={() => selectTab(value)}>{value === 'interpretation' ? 'Summary' : value[0].toUpperCase() + value.slice(1)}</button>)}</nav>
+    <nav className="qt2-research-tabs" aria-label="Research record sections">{tabs.map(value => <button className={tab === value ? 'is-active' : ''} key={value} onClick={() => selectTab(value)}>{value === 'interpretation' ? 'Summary' : value[0].toUpperCase() + value.slice(1)}</button>)}</nav>
     {summary.data.history.length ? <label className="qt2-revision-picker">Summary version <select aria-label="Summary revision" value={publication?.revision || ''} onChange={event => selectRevision(event.target.value)}>{summary.data.history.map(version => <option key={version.revision} value={version.revision}>Version {version.revision}</option>)}</select></label> : null}
     {publication ? <p className="qt2-research-caption">{historical ? `Historical summary · v${publication.revision} · latest is v${latestRevision}` : `Latest summary · v${publication.revision}`}{historical ? <> <button className="qt2-button" onClick={() => selectRevision('')}>View latest</button></> : null}</p> : null}
     {tab === 'interpretation' ? <div className="qt2-study-layout"><section className="qt2-research-panel qt2-interpretation">

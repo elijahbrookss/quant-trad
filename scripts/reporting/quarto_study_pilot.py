@@ -7,17 +7,13 @@ Output stays local; publish explicitly with qt research reports attach.
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
-from html import escape
-from html.parser import HTMLParser
 import json
-import os
 from pathlib import Path
-import resource
-import subprocess
 import tempfile
 from zipfile import ZipFile
+
+from cli.study_reports import Fragment, render, source_revision
 
 import matplotlib
 matplotlib.use("Agg")
@@ -25,71 +21,6 @@ import matplotlib.pyplot as plt
 
 CLASSES = ["continuation", "failure", "neither", "unresolved"]
 COLORS = ["#147d79", "#bd6246", "#889aab", "#b08b40"]
-
-
-def limits():
-    resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (32 * 1024**2, 32 * 1024**2))
-
-
-def render(command, directory):
-    quarto_root = Path(command[0]).parent.parent
-    isolated = ["bwrap", "--unshare-all", "--die-with-parent", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
-        "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--dir", "/etc", "--ro-bind", "/etc/alternatives", "/etc/alternatives",
-        "--ro-bind", str(quarto_root), "/opt/quarto", "--bind", str(directory), "/work",
-        "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--chdir", "/work", "--clearenv",
-        "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/work", "--setenv", "TMPDIR", "/tmp",
-        "--setenv", "LANG", "C.UTF-8", "--setenv", "QUARTO_DENO_V8_OPTIONS", "--max-old-space-size=256,--max-heap-size=256",
-        "/opt/quarto/bin/quarto", *command[1:]]
-    result = subprocess.run(isolated, cwd=directory,
-        env={"PATH": "/usr/bin:/bin"},
-        capture_output=True, text=True, timeout=90, preexec_fn=limits)
-    if result.returncode:
-        raise RuntimeError(f"isolated Quarto build failed ({result.returncode}): {result.stderr[-4000:]}")
-    return result
-
-
-class Fragment(HTMLParser):
-    def __init__(self, directory):
-        super().__init__(convert_charrefs=True)
-        self.directory, self.parts, self.body, self.skip = directory, [], False, 0
-
-    def handle_starttag(self, tag, attrs):
-        from portal.backend.service.research.reports import TAGS
-        if tag == "body":
-            self.body = True
-        if not self.body:
-            return
-        if tag in {"script", "style"}:
-            self.skip += 1
-        if self.skip or tag not in TAGS:
-            return
-        attrs = dict(attrs)
-        kept = {k: v for k, v in attrs.items() if k in {"id", "alt", "colspan", "rowspan"}}
-        if tag == "img":
-            name = attrs.get("src", "")
-            if name not in {"outcomes.png", "weighting.png", "components.png"}:
-                raise ValueError("unexpected image path")
-            kept["src"] = "data:image/png;base64," + base64.b64encode((self.directory / name).read_bytes()).decode()
-        if tag == "a":
-            if not attrs.get("href", "").startswith("#"):
-                raise ValueError("unexpected report link")
-            kept["href"] = attrs["href"]
-        self.parts.append("<" + tag + "".join(f' {k}="{escape(v, quote=True)}"' for k, v in kept.items()) + ">")
-
-    def handle_endtag(self, tag):
-        from portal.backend.service.research.reports import TAGS, VOID
-        if tag in {"script", "style"} and self.skip:
-            self.skip -= 1
-            return
-        if self.body and not self.skip and tag in TAGS - VOID:
-            self.parts.append(f"</{tag}>")
-        if tag == "body":
-            self.body = False
-
-    def handle_data(self, data):
-        if self.body and not self.skip:
-            self.parts.append(escape(data))
 
 
 def main():
@@ -134,7 +65,7 @@ def main():
     if semantic_hash({k: v for k, v in result.items() if k != "result_hash"}) != args.result_hash:
         raise ValueError("result hash mismatch")
     summary = result["result"]["first_passage_summary"]
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    revision = source_revision()
     with tempfile.TemporaryDirectory(prefix="qt-quarto-pilot-") as temp:
         directory = Path(temp)
         plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 12, "axes.spines.top": False, "axes.spines.right": False, "figure.facecolor": "#faf9f6", "axes.facecolor": "#faf9f6"})

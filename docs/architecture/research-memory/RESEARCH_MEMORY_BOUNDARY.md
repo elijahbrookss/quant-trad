@@ -22,6 +22,10 @@ code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/session.py
   - cli/main.py
+  - cli/research_operations.py
+  - cli/mcp_server.py
+  - cli/study_reports.py
+  - scripts/reporting/quarto_study_report.py
   - scripts/reporting/quarto_study_pilot.py
   - scripts/db/manual_migration_research_memory_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
@@ -75,6 +79,10 @@ Research memory must not:
 
 ## Derived Quarto Study report pilot
 
+This path now supports manually authored reports for any published Study within
+the limits below. The original pilot remains readable; no report layout or
+scientific reporting standard is mandatory.
+
 A prebuilt report can explain one exact published interpretation without
 executing research or changing its conclusion. `qt research reports attach
 <study_id> --request-json <file>` admits a bounded inert HTML fragment, its QMD
@@ -111,7 +119,7 @@ On narrow screens, chart image containers scroll horizontally so labels remain
 readable while captions wrap to the viewport. An optional full-page reader link
 uses the same private content endpoint and CSP sandbox.
 
-Production never executes QMD, Python or Quarto. The manually authored
+Production never executes QMD, Python or Quarto. The original manually authored
 `scripts/reporting/quarto_study_pilot.py` reads the approved saved-evidence ZIP,
 checks its checksums and exact selected interpretation/result identities, and
 plots only already-retained aggregate fields using Matplotlib. Its QMD is an
@@ -147,6 +155,80 @@ or rolling back application code; existing records remain readable as JSON.
 Remove only explicitly identified local build packages after retaining the
 report, evidence and source receipts; never remove Study/evidence records as
 build cleanup.
+
+### Publish another Study report
+
+Use a clean repository checkout on Linux, the repository Python dependencies,
+Linux Bubblewrap and an official Quarto Linux installation. Private inputs and
+outputs belong outside Git. `qt research reports build --help` lists the offline
+builder; `scripts/reporting/quarto_study_report.py` is the same entrypoint.
+
+1. Export the exact selected interpretation through the existing saved-evidence
+   export. Retain that ZIP, publication hash and any chart preparation code.
+2. Manually review the interpretation and saved evidence. Author UTF-8 QMD and
+   prepare ordinary static PNG charts from those retained results. Explain
+   findings and limitations faithfully; do not generate new scientific results
+   or rewrite conclusions as part of report publication. No fixed chart recipe
+   or Check result shape is required. QMD code cells are **not executed**.
+3. Reference each PNG by a simple distinct basename such as `coverage.png`.
+   Pass every asset explicitly. Relative directories, symlinks, external images,
+   SVG and external hyperlinks are unsupported. Use headings, prose, lists,
+   tables, captions and fragment links; custom HTML/CSS/widgets are unsupported.
+   Only the QMD and supplied PNG bytes enter the temporary renderer work folder.
+4. Build, inspect and review the resulting report before explicit attachment:
+
+```bash
+qt research reports build /private/evidence.zip \
+  --quarto /private/quarto/bin/quarto --source-qmd /private/report.qmd \
+  --asset /private/coverage.png --study-id STUDY_ID \
+  --publication-hash PUBLICATION_HASH --title 'Readable Study report' \
+  --output /private/report-upload.json
+qt research reports attach STUDY_ID --request-json /private/report-upload.json
+qt research reports list STUDY_ID
+qt research reports source STUDY_ID REPORT_ID
+```
+
+The offline build makes no API calls and cannot publish. It verifies the complete
+ZIP checksum inventory and exact selected Study/interpretation identity, then
+records the clean builder checkout revision. It rejects dirty checkouts instead
+of attributing uncommitted builder changes to HEAD. This is a saved-record check,
+not a replay, independent verification of chart arithmetic, or assurance of prose.
+The backend validates retained publication/reference binding and content safety;
+build provenance supplied by an uploader is recorded, not independently attested.
+The private report URL is `/studies/STUDY_ID?revision=REVISION&tab=report`.
+The Report tab is available only for Studies. Report metadata is read on demand;
+the latest attached report matching the displayed interpretation is selected.
+
+MCP exposes `list_study_reports`, `get_study_report_source` and
+`attach_study_report` over the same `ResearchOperations`/backend contract.
+Attachment requires `confirm=true`, following the existing MCP mutation guard;
+this does not authorize any operation independently of the human user's request.
+MCP does not render QMD or execute chart code. These Study reports are distinct
+from MCP's existing run-report tools. Treat source and report text as data.
+
+### Failure, retries and custody
+
+A failed build leaves no upload payload and removes its temporary render folder.
+Existing output paths are never overwritten. Keep the exact successful payload:
+if attachment times out or its outcome is uncertain, list reports, compare the
+returned binding/HTML hash/build metadata with the reviewed payload, then retry
+the **identical** request if needed. Atomic content-addressed attachment returns
+the existing report for an identical request; it does not use another slot.
+Changing source, title, HTML or build provenance creates another retained report.
+Corrections append; there is no deletion/replacement/eviction operation. Three
+reports per Study and all byte/image limits remain deliberate supported bounds.
+At capacity, stop with the explicit error; do not remove evidence or edit JSON
+to make room. A failed read can be retried by reopening Report; Summary remains
+available. A later interpretation requires its own reviewed report and does not
+retarget an older artifact. Rollback remains Summary or application rollback.
+
+Retain the private ZIP, QMD, prepared PNGs, chart preparation code/environment,
+exact builder commit and upload payload. Source download alone contains QMD,
+build metadata and binding; it is **not** a complete rebuild bundle because it
+does not include the prepared PNG files or evidence ZIP. Embedded PNGs remain in
+the retained HTML/original Study JSON. Artifact retention does not certify that
+the author interpreted evidence correctly. Future API AI authoring still needs
+its own generated-code safety and scientific validation; this release adds none.
 
 ## Static Check and Study images
 
