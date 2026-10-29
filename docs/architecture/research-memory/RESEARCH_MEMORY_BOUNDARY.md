@@ -174,6 +174,9 @@ builder; `scripts/reporting/quarto_study_report.py` is the same entrypoint.
    Pass every asset explicitly. Relative directories, symlinks, external images,
    SVG and external hyperlinks are unsupported. Use headings, prose, lists,
    tables, captions and fragment links; custom HTML/CSS/widgets are unsupported.
+   Include explicit native Quarto alt text, for example
+   `![Retained coverage](coverage.png){fig-alt="Coverage by retained window"}`;
+   a figure caption alone may produce an empty image alt attribute.
    Only the QMD and supplied PNG bytes enter the temporary renderer work folder.
 4. Build, inspect and review the resulting report before explicit attachment:
 

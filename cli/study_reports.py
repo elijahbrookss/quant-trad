@@ -64,6 +64,8 @@ class Fragment(HTMLParser):
             name = attrs.get("src", "")
             if name not in self.assets:
                 raise ValueError("unexpected image path")
+            if not str(attrs.get("alt") or "").strip():
+                raise ValueError('each PNG needs descriptive alt text: use ![Caption](chart.png){fig-alt="What the chart shows"} in QMD')
             kept["src"] = "data:image/png;base64," + base64.b64encode(self.assets[name]).decode()
         if tag == "a":
             if not attrs.get("href", "").startswith("#"):

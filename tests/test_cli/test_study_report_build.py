@@ -98,6 +98,12 @@ def test_prepared_assets_reject_aliases_symlinks_and_wrong_format(tmp_path):
         builder.prepare_assets([png])
 
 
+def test_caption_is_not_silently_treated_as_image_alt(tmp_path):
+    parser = builder.Fragment(tmp_path, {"coverage.png": b"prepared"})
+    with pytest.raises(ValueError, match="fig-alt"):
+        parser.feed('<body><figure><img src="coverage.png"><figcaption>Coverage</figcaption></figure></body>')
+
+
 def test_clean_source_required_and_failed_build_does_not_publish(tmp_path, monkeypatch):
     monkeypatch.setattr(builder.subprocess, "check_output", lambda *a, **k: " M cli/study_reports.py\n")
     with pytest.raises(ValueError, match="clean committed"):
