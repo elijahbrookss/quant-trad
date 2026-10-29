@@ -1681,17 +1681,25 @@ reloads exact mapping and page authority in its current transaction, excludes
 expired placements, checks current dependency holds, freshly verifies every
 selected object's size and SHA-256, and keeps the successful-exit file-stamp
 fence. A cache hit only skips repeated Parquet decoding and fingerprint/witness
-materialization when the complete acknowledged manifest identity, current file
-stamp, and freshly derived mapping-and-witness claim match evidence already
-proved in that action scope. Changed bytes, file identity, manifest material,
-mapping, witness, placement or expiry refuse or require a complete decode.
+materialization when the complete acknowledged manifest identity, freshly
+verified current size/SHA-256, and freshly derived mapping-and-witness claim match evidence already
+proved in that action scope. Changed bytes, manifest material, mapping, witness,
+placement or expiry refuse or require a complete decode. A same-byte physical
+replacement is accepted only after its own fresh proof and read-time stamp fence.
 Logical-row and byte budgets are charged unchanged. Exact full-page read,
 dependency and retained-memory limits must match before a new repository may
-adopt the sparse cache. The executor disposes retained evidence on cancellation,
-failure, busy refusal, incompatible limits, process exit, root/day/action
+adopt the sparse cache. The executor disposes retained evidence on an explicit
+cancellation request, an early or unrelated SQL cancellation, failure, busy
+refusal, incompatible limits, process exit, root/day/action
 transition, scan completion and before any non-page action. Whole-partition verification,
 reclamation and the exclusive handoff never consume it; there is no persisted
 or multi-process proof cache. See [ADR 0084](../decisions/0084-reuse-current-byte-bound-archive-evidence-within-one-run.md).
+
+A statement timeout clipped to the run's elapsed deadline is the same planned
+routine yield as the outer time budget: its transaction rolls back, then only
+the bounded value cache may cross the invocation. The next run repeats all
+current-byte, manifest, authority and payload-contract checks. An operator stop,
+an early `57014` while budget remains, or another SQL/data error disposes it.
 
 Dependency expiration checks use batches of at most 128 exact `(target_kind,
 target_id)` pairs under the existing lifecycle fence, instead of one SQL round

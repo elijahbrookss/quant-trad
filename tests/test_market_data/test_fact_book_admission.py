@@ -213,7 +213,8 @@ class _CheckpointSources:
                      for index, identity in enumerate(("a", "b", "c"))}
         self.page_for = {"a": "page-1", "b": "page-1", "c": "page-2"}
         self.manifests = {key: SimpleNamespace(manifest_id=key, logical_byte_count=2500,
-            object_key=key + ".parquet", object_sha256=key, byte_count=100) for key in set(self.page_for.values())}
+            object_key=key + ".parquet", object_sha256=key, byte_count=100,
+            series=[]) for key in set(self.page_for.values())}
         self.calls, self.verified, self.cached_verified = [], [], []
         self.coverage = "valid"
         self.hot = set()
@@ -296,6 +297,39 @@ def test_checkpoint_sparse_cache_reuses_only_selected_rows_with_fresh_proofs(mon
     assert fixture.verified == ["page-1.parquet", "page-2.parquet"]
     assert fixture.cached_verified == [["a", "b"], ["c"]]
     assert cache.hit_count == 2
+
+
+def test_checkpoint_sparse_cache_hit_rechecks_unselected_manifest_contracts(monkeypatch):
+    fixture = _CheckpointSources()
+    fixture.manifests["page-1"].series = [SimpleNamespace(payload_contracts=[
+        ("normalized.fact.v1/unselected", "a" * 64),
+    ])]
+    cache = fact_dependencies.CheckpointSourceEvidenceCache(
+        max_manifests=4, max_rows=10, max_retained_bytes=32 * 1024,
+    )
+    checked = []
+    monkeypatch.setattr(
+        fact_dependencies, "ensure_payload_contracts",
+        lambda _session, contracts: checked.append(list(contracts)),
+    )
+    _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    assert checked == []
+
+    fixture.calls.clear()
+    fixture.verified.clear()
+    checked.clear()
+
+    def refuse(_session, contracts):
+        checked.append(list(contracts))
+        if ("normalized.fact.v1/unselected", "a" * 64) in contracts:
+            raise RuntimeError("canonical_payload_contract_mismatch: schema_id=unselected")
+
+    monkeypatch.setattr(fact_dependencies, "ensure_payload_contracts", refuse)
+    with pytest.raises(RuntimeError, match="canonical_payload_contract_mismatch"):
+        _checkpoint_reader(monkeypatch, fixture, evidence_cache=cache)
+    assert checked == [[("normalized.fact.v1/unselected", "a" * 64)]]
+    assert fixture.calls == []
+    assert fixture.verified == ["page-1.parquet"]
 
 
 def test_checkpoint_sparse_cache_detach_adopt_keeps_fresh_proofs(tmp_path, monkeypatch):

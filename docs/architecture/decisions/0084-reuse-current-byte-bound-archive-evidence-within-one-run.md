@@ -74,19 +74,24 @@ expiry, hold, page, generation, and transaction authority are never supplied by
 the cache. Mapping and witness claims are stored separately as short-lived proof
 bindings and are recomputed from current rows on every page.
 
-A changed manifest identity or file stamp invalidates the entry and fails the
-operation. Different current mapping or witness claims force a complete decode
-and exact witness comparison; missing or expired authority fails before cache
-lookup. Different bytes fail the fresh checksum. Decode and logical-byte budgets
-are charged as though cached evidence were decoded again, so reuse cannot make
-an otherwise oversized page admissible. Object, row, and retained-byte counts
-bound memory. The receiving repository must have exactly the same full-page
+A changed manifest identity invalidates the entry. Different current mapping or
+witness claims force a complete decode and exact witness comparison; missing or
+expired authority fails before cache lookup. Different bytes fail the fresh
+checksum. A same-byte physical replacement may reuse sparse values only after a
+fresh current size/SHA proof; the new invocation's read remains protected by its
+own successful-exit file-stamp fence. Decode and logical-byte budgets are charged
+as though cached evidence were decoded again, so reuse cannot make an otherwise
+oversized page admissible. Object, row, and retained-byte counts bound the cache;
+the retained-byte value is conservative selected-row accounting, not a process
+RSS ceiling. The receiving repository must have exactly the same full-page
 read and dependency limits or it disposes the cache. Cancellation remains
 active during fresh checks. A
-cancellation request, exception, busy refusal, storage-root/day/action
+explicit cancellation request, early or unrelated SQL cancellation, exception,
+busy refusal, storage-root/day/action
 transition, incompatible limit, scan completion, selected action, process exit,
 or other non-routine boundary disposes all entries deterministically. A routine
-yield logs the retained counts and charge.
+yield, including a statement timeout clipped to the elapsed run deadline, logs
+the retained counts and charge after the active transaction rolls back.
 
 Whole-partition verification, reclamation, the exclusive handoff, and their
 fresh-byte and transaction-current authority checks do not consume this cache.
@@ -101,8 +106,9 @@ authority; retained rows are an optimization that can always be discarded.
   action, including after a routine scheduler yield. Fresh object hashing,
   current SQL authority, expiry checks, and final reclamation proof remain
   mandatory.
-- Same-byte path replacement still refuses because the file identity changed.
-  Content mutation refuses through the fresh checksum. Mapping, witness,
+- Same-byte path replacement is accepted only after the replacement's current
+  size/SHA proof and within-invocation file-stamp fence. Content mutation refuses
+  through the fresh checksum. Mapping, witness,
   manifest, placement, or expiry changes cannot inherit prior authority.
 - Cache hits are diagnostic evidence, not a throughput claim. Qualification
   must compare complete dependency-proof and total page elapsed time on

@@ -7,7 +7,10 @@ import json
 from sqlalchemy import text
 
 from market_data.fact_archive import archive_evidence_hash
-from .fact_storage import _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM
+from .fact_storage import (
+    _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM,
+    ensure_payload_contracts,
+)
 
 
 # These registered source families retain their evidence in the canonical row
@@ -409,10 +412,15 @@ def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifie
             selected = evidence_cache.get(manifest, batch)
             if selected is not None:
                 # Reapply the complete page charge and current header/contract
-                # proof.  Only full Parquet decode is reused.
+                # proof. Dynamic contracts for unselected series are part of
+                # the full-page proof too; only Parquet decode is reused.
                 _measure_canonical_dependency_rows(
                     session, batch, max_logical_bytes=remaining, check_budget=check_budget,
                 )
+                ensure_payload_contracts(session, [
+                    contract for bounds in manifest.series
+                    for contract in bounds.payload_contracts
+                ])
                 reader.verify_cached_rows_by_ids(session, selected)
         if selected is None:
             # Recheck current placement and its whole-page charge immediately
