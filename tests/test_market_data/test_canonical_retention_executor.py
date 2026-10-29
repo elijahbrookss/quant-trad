@@ -1087,6 +1087,76 @@ def test_sql_or_data_failure_is_not_hidden_by_run_budget(tmp_path, monkeypatch, 
     assert "canonical_retention_step_failed" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "mode,expected_stop,expected_retained",
+    [
+        ("deadline", "time_budget", True),
+        ("stop", "stop_requested", False),
+        ("early_sql_cancel", "step_budget", False),
+    ],
+)
+def test_sql_cancellation_retains_sparse_evidence_only_at_routine_deadline(
+        tmp_path, monkeypatch, mode, expected_stop, expected_retained):
+    from sqlalchemy.exc import DBAPIError
+
+    executor, _ = _executor([_plan([_item("stage_page")])])
+    clock, stopped, disposed = [0.0], [False], []
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+
+    class Cache:
+        row_count = 1
+        retained_bytes = 1
+
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+
+    class Archive:
+        def __init__(self):
+            self.cache = cache
+
+        def take_checkpoint_source_evidence_cache(self):
+            value, self.cache = self.cache, None
+            return value
+
+        def dispose_dependency_evidence(self):
+            if self.cache is not None:
+                self.cache.dispose()
+                self.cache = None
+
+    executor._archive = Archive()
+    executor._archive_action = "stage_page"
+    executor._archive_scope = (str(tmp_path.resolve()), DAY.isoformat(), "stage_page")
+    error = RuntimeError("canceling statement due to statement timeout")
+    error.pgcode = "57014"
+
+    def fail(**kwargs):
+        if mode == "deadline":
+            clock[0] = 2.0
+        elif mode == "stop":
+            stopped[0] = True
+        else:
+            clock[0] = 0.5
+        raise DBAPIError("SELECT fixture", {}, error)
+
+    monkeypatch.setattr(executor, "_execute_step", fail)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(
+            execution_enabled=True, max_run_seconds=1, max_steps_per_run=1,
+        ),
+        storage_root=tmp_path, execute=True, cancelled=lambda: stopped[0],
+    )
+    assert result["stop_reason"] == expected_stop
+    if mode == "early_sql_cancel":
+        assert result["failure_count"] == 1
+    if expected_retained:
+        assert executor._retained_checkpoint_evidence is cache and disposed == []
+        executor._dispose_archive(reason="test_cleanup")
+    else:
+        assert executor._retained_checkpoint_evidence is None and disposed == [cache]
+
+
 @pytest.mark.parametrize("seconds", [1, 10, 60])
 def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_bound(tmp_path, monkeypatch, seconds):
     executor, _ = _executor([])

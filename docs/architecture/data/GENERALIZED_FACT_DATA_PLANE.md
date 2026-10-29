@@ -1685,11 +1685,11 @@ materialization when the complete acknowledged manifest identity, current file
 stamp, and freshly derived mapping-and-witness claim match evidence already
 proved in that action scope. Changed bytes, file identity, manifest material,
 mapping, witness, placement or expiry refuse or require a complete decode.
-Logical-row and byte budgets are charged unchanged. Exact object, row and
-retained-byte caps must match before a new repository may adopt the sparse
-cache. The executor disposes retained evidence on cancellation, failure, busy
-refusal, incompatible limits, process exit, root/day/action transition, scan
-completion and before any non-page action. Whole-partition verification,
+Logical-row and byte budgets are charged unchanged. Exact full-page read,
+dependency and retained-memory limits must match before a new repository may
+adopt the sparse cache. The executor disposes retained evidence on cancellation,
+failure, busy refusal, incompatible limits, process exit, root/day/action
+transition, scan completion and before any non-page action. Whole-partition verification,
 reclamation and the exclusive handoff never consume it; there is no persisted
 or multi-process proof cache. See [ADR 0084](../decisions/0084-reuse-current-byte-bound-archive-evidence-within-one-run.md).
 

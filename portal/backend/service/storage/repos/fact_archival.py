@@ -534,8 +534,22 @@ class PostgresCanonicalFactArchiveRepository:
                 max_retained_bytes=min(
                     self.limits.max_logical_bytes, _CHECKPOINT_EVIDENCE_CACHE_BYTES,
                 ),
+                compatibility_key=self._checkpoint_evidence_compatibility_key(),
             )
         return self._checkpoint_source_evidence_cache
+
+    def _checkpoint_evidence_compatibility_key(self):
+        # A hit skips a complete Parquet decode, so it must not outlive any
+        # policy limit that the cold reader would apply to that full page.
+        return (
+            self.limits.max_rows,
+            self.limits.max_logical_bytes,
+            self.limits.max_file_bytes,
+            self.limits.row_group_size,
+            self.max_dependency_bytes,
+            self.max_dependency_objects,
+            self.max_raw_mapping_rows,
+        )
 
     def take_checkpoint_source_evidence_cache(self):
         """Detach only bounded immutable checkpoint rows for a routine yield.
@@ -561,7 +575,9 @@ class PostgresCanonicalFactArchiveRepository:
             getattr(cache, "max_rows", None),
             getattr(cache, "max_retained_bytes", None),
         )
-        if not isinstance(cache, CheckpointSourceEvidenceCache) or actual != expected:
+        if (not isinstance(cache, CheckpointSourceEvidenceCache)
+                or actual != expected
+                or cache.compatibility_key != self._checkpoint_evidence_compatibility_key()):
             dispose = getattr(cache, "dispose", None)
             if dispose is not None:
                 dispose()

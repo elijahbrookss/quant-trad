@@ -80,8 +80,9 @@ and exact witness comparison; missing or expired authority fails before cache
 lookup. Different bytes fail the fresh checksum. Decode and logical-byte budgets
 are charged as though cached evidence were decoded again, so reuse cannot make
 an otherwise oversized page admissible. Object, row, and retained-byte counts
-bound memory. The receiving repository must have exactly the same limits or it
-disposes the cache. Cancellation remains active during fresh checks. A
+bound memory. The receiving repository must have exactly the same full-page
+read and dependency limits or it disposes the cache. Cancellation remains
+active during fresh checks. A
 cancellation request, exception, busy refusal, storage-root/day/action
 transition, incompatible limit, scan completion, selected action, process exit,
 or other non-routine boundary disposes all entries deterministically. A routine

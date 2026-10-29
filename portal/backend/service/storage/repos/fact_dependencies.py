@@ -52,14 +52,18 @@ class CheckpointSourceEvidenceCache:
     but never a database session, lock, plan, verifier or final-reclaim proof.
     """
 
-    def __init__(self, *, max_manifests, max_rows, max_retained_bytes):
+    def __init__(self, *, max_manifests, max_rows, max_retained_bytes,
+                 compatibility_key=()):
         for name, value in (("max_manifests", max_manifests), ("max_rows", max_rows),
                             ("max_retained_bytes", max_retained_bytes)):
             if type(value) is not int or value <= 0:
                 raise ValueError(f"canonical_checkpoint_cache_limit_invalid: field={name}")
+        if type(compatibility_key) is not tuple:
+            raise ValueError("canonical_checkpoint_cache_compatibility_key_invalid")
         self.max_manifests = max_manifests
         self.max_rows = max_rows
         self.max_retained_bytes = max_retained_bytes
+        self.compatibility_key = compatibility_key
         self._entries = OrderedDict()
         self.row_count = 0
         self.retained_bytes = 0

@@ -7,6 +7,7 @@ import logging
 import pytest
 
 from market_data.canonical_storage import legacy_material_alias
+from market_data.fact_archive import FactArchiveLimits
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from portal.backend.service.storage.repos import fact_archival, market_data
 from tests.test_market_data.test_canonical_fact_archive import _row
@@ -105,6 +106,28 @@ def test_sparse_checkpoint_cache_transfer_requires_identical_limits(tmp_path):
         max_dependency_objects=4999,
     )
     assert incompatible.adopt_checkpoint_source_evidence_cache(cache) is False
+    assert cache.row_count == cache.retained_bytes == 0
+
+
+def test_sparse_checkpoint_cache_refuses_changed_full_page_read_limit(tmp_path):
+    first = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "first",
+    )
+    first.enable_dependency_evidence_reuse()
+    cache = first._checkpoint_evidence_cache()
+    manifest = SimpleNamespace(manifest_id="manifest")
+    cache.remember(manifest, {"source": {"id": "source"}})
+
+    # Both repositories retain the same 16 MiB cache ceiling. The changed row
+    # limit would only be enforced by a full-page decode, so adoption must fail.
+    changed = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "changed",
+        limits=FactArchiveLimits(max_rows=9999),
+    )
+    changed.enable_dependency_evidence_reuse()
+    assert cache.max_retained_bytes == changed._checkpoint_evidence_cache().max_retained_bytes
+    changed.dispose_dependency_evidence()
+    assert changed.adopt_checkpoint_source_evidence_cache(cache) is False
     assert cache.row_count == cache.retained_bytes == 0
 
 
