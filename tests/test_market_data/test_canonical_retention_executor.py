@@ -118,6 +118,34 @@ def test_selected_action_never_uses_retry_schedule_or_runs_a_second_step(tmp_pat
     assert executor._retry_states[DAY].attempt_count == 7
 
 
+def test_selected_action_disposes_retained_routine_evidence_before_execution(tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item("stage_page")])])
+    disposed = []
+
+    class Cache:
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+    executor._retained_checkpoint_evidence = cache
+    executor._retained_checkpoint_scope = (
+        str(tmp_path.resolve()), DAY.isoformat(), "stage_page",
+    )
+
+    def execute(**kwargs):
+        assert disposed == [cache]
+        assert executor._retained_checkpoint_evidence is None
+        return {"status": "page_acknowledged"}
+
+    monkeypatch.setattr(executor, "_execute_step", execute)
+    result = executor.run_selected(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+        storage_root=tmp_path, storage_day=DAY,
+        expected_action="stage_page", execute=True,
+    )
+    assert result["outcomes"][0]["status"] == "page_acknowledged"
+
+
 def test_selected_action_records_one_failure_without_retrying(tmp_path, monkeypatch):
     executor, calls = _executor([_plan([_item("reclaim_partition")])])
     attempts = []
@@ -551,7 +579,7 @@ def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monk
     assert calls == [instances[0], instances[0], instances[1], instances[1]]
 
 
-def test_verification_repository_and_evidence_are_reused_only_within_one_run(
+def test_verification_repository_is_recreated_but_sparse_checkpoint_evidence_crosses_normal_yield(
         tmp_path, monkeypatch):
     executor, _ = _executor([
         _plan([_item("verify_page")]),
@@ -559,13 +587,26 @@ def test_verification_repository_and_evidence_are_reused_only_within_one_run(
     ])
     executor.repository.database = object()
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
-    instances, calls, enabled, disposed = [], [], [], []
+    instances, calls, enabled, adopted, archives_disposed, caches_disposed = [], [], [], [], [], []
+
+    class Cache:
+        row_count = 3
+        retained_bytes = 123
+        hit_count = 4
+        miss_count = 2
+        eviction_count = 0
+
+        def dispose(self):
+            caches_disposed.append(self)
 
     class Archive:
         def __init__(self, **kwargs):
             instances.append(self)
+            self.cache = None
 
         def verify_next_page(self, day):
+            if self.cache is None:
+                self.cache = Cache()
             calls.append((self, day))
             return {"status": "page_verified", "storage_day": day.isoformat(),
                     "page_ordinal": len(calls)}
@@ -573,20 +614,285 @@ def test_verification_repository_and_evidence_are_reused_only_within_one_run(
         def enable_dependency_evidence_reuse(self):
             enabled.append(self)
 
+        def take_checkpoint_source_evidence_cache(self):
+            cache, self.cache = self.cache, None
+            return cache
+
+        def adopt_checkpoint_source_evidence_cache(self, cache):
+            assert self.cache is None
+            self.cache = cache
+            adopted.append((self, cache))
+            return True
+
         def dispose_dependency_evidence(self):
+            archives_disposed.append(self)
+            assert self.cache is None
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1)
+    first = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    retained = executor._retained_checkpoint_evidence
+    second = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    assert first["stop_reason"] == second["stop_reason"] == "step_budget"
+    assert len(instances) == 2
+    assert calls == [(instances[0], DAY), (instances[1], DAY)]
+    assert enabled == instances and archives_disposed == instances
+    assert adopted == [(instances[1], retained)]
+    assert executor._archive is None
+    assert executor._retained_checkpoint_evidence is retained
+    assert caches_disposed == []
+
+    executor._dispose_archive(reason="test_cleanup")
+    assert caches_disposed == [retained]
+    assert executor._retained_checkpoint_evidence is None
+
+
+def test_sparse_checkpoint_evidence_is_disposed_on_scope_change(tmp_path, monkeypatch):
+    later = DAY + timedelta(days=1)
+    executor, _ = _executor([
+        _plan([_item("verify_page")]),
+        _plan([_item("verify_page", day=later)]),
+    ])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    caches, disposed = [], []
+
+    class Cache:
+        row_count = 1
+        retained_bytes = 1
+        hit_count = miss_count = eviction_count = 0
+
+        def dispose(self):
             disposed.append(self)
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.cache = None
+
+        def verify_next_page(self, day):
+            if self.cache is None:
+                self.cache = Cache()
+                caches.append(self.cache)
+            return {"status": "page_verified", "storage_day": day.isoformat()}
+
+        def enable_dependency_evidence_reuse(self):
+            pass
+
+        def take_checkpoint_source_evidence_cache(self):
+            cache, self.cache = self.cache, None
+            return cache
+
+        def dispose_dependency_evidence(self):
+            pass
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1)
+    executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    executor.run(policy=policy, storage_root=tmp_path, execute=True)
+    assert len(caches) == 2
+    assert disposed == [caches[0]]
+    assert executor._retained_checkpoint_scope[1] == later.isoformat()
+    executor._dispose_archive(reason="test_cleanup")
+    assert disposed == caches
+
+
+def test_stop_request_disposes_retained_sparse_checkpoint_evidence(tmp_path):
+    executor, _ = _executor([_plan([_item("verify_page")])])
+    disposed = []
+
+    class Cache:
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+    executor._retained_checkpoint_evidence = cache
+    executor._retained_checkpoint_scope = (str(tmp_path.resolve()), DAY.isoformat(), "verify_page")
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+        storage_root=tmp_path, execute=True, cancelled=lambda: True,
+    )
+    assert result["stop_reason"] == "stop_requested"
+    assert disposed == [cache]
+    assert executor._retained_checkpoint_evidence is None
+
+
+@pytest.mark.parametrize("cause,retained", [("time_budget", True), ("stop_requested", False)])
+def test_page_interruption_retains_sparse_checkpoint_evidence_only_for_routine_timeout(
+        tmp_path, monkeypatch, cause, retained):
+    executor, _ = _executor([_plan([_item("stage_page")])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    disposed = []
+
+    class Cache:
+        row_count = 1
+        retained_bytes = 1
+        hit_count = miss_count = eviction_count = 0
+
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.cache = cache
+            self.check_budget = kwargs["check_budget"]
+
+        def stage_next_page(self, day):
+            error = (module.CanonicalRetentionBudgetExceeded if cause == "time_budget"
+                     else module.CanonicalRetentionStopRequested)
+            raise error("bounded page interruption")
+
+        def enable_dependency_evidence_reuse(self):
+            pass
+
+        def take_checkpoint_source_evidence_cache(self):
+            value, self.cache = self.cache, None
+            return value
+
+        def dispose_dependency_evidence(self):
+            if self.cache is not None:
+                self.cache.dispose()
+                self.cache = None
 
     monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
     result = executor.run(
-        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=2),
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+        storage_root=tmp_path, execute=True,
+    )
+    assert result["stop_reason"] == cause
+    assert result["outcomes"][0]["status"] == "deferred"
+    if retained:
+        assert executor._retained_checkpoint_evidence is cache and disposed == []
+        executor._dispose_archive(reason="test_cleanup")
+    else:
+        assert executor._retained_checkpoint_evidence is None and disposed == [cache]
+
+
+def test_retained_sparse_checkpoint_evidence_is_disposed_when_adoption_refuses(
+        tmp_path, monkeypatch):
+    executor, _ = _executor([_plan([_item("verify_page")])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    disposed = []
+
+    class Cache:
+        row_count = 1
+        retained_bytes = 1
+
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+    executor._retained_checkpoint_evidence = cache
+    executor._retained_checkpoint_scope = (
+        str(tmp_path.resolve()), DAY.isoformat(), "verify_page",
+    )
+
+    class Archive:
+        def __init__(self, **kwargs):
+            pass
+
+        def adopt_checkpoint_source_evidence_cache(self, value):
+            assert value is cache
+            return False
+
+        def enable_dependency_evidence_reuse(self):
+            pass
+
+        def verify_next_page(self, day):
+            return {"status": "page_verified", "storage_day": day.isoformat()}
+
+        def take_checkpoint_source_evidence_cache(self):
+            return None
+
+        def dispose_dependency_evidence(self):
+            pass
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
         storage_root=tmp_path, execute=True,
     )
     assert result["stop_reason"] == "step_budget"
-    assert len(instances) == 1
-    assert calls == [(instances[0], DAY), (instances[0], DAY)]
-    assert enabled == [instances[0], instances[0]]
-    assert disposed == [instances[0]]
-    assert executor._archive is None
+    assert disposed == [cache]
+    assert executor._retained_checkpoint_evidence is None
+
+
+@pytest.mark.parametrize("failure", ["busy", "error"])
+def test_adopted_sparse_checkpoint_evidence_is_disposed_on_page_failure(
+        tmp_path, monkeypatch, failure):
+    executor, _ = _executor([_plan([_item("verify_page")])])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+    disposed = []
+
+    class Cache:
+        row_count = 1
+        retained_bytes = 1
+
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+    executor._retained_checkpoint_evidence = cache
+    executor._retained_checkpoint_scope = (
+        str(tmp_path.resolve()), DAY.isoformat(), "verify_page",
+    )
+
+    class Archive:
+        def __init__(self, **kwargs):
+            self.cache = None
+
+        def adopt_checkpoint_source_evidence_cache(self, value):
+            self.cache = value
+            return True
+
+        def enable_dependency_evidence_reuse(self):
+            pass
+
+        def verify_next_page(self, day):
+            if failure == "busy":
+                raise module.MarketStorageLifecycleBusyError("page busy")
+            raise RuntimeError("page proof failed")
+
+        def dispose_dependency_evidence(self):
+            if self.cache is not None:
+                self.cache.dispose()
+                self.cache = None
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository", Archive)
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
+        storage_root=tmp_path, execute=True,
+    )
+    expected = "deferred" if failure == "busy" else "failed"
+    assert result["outcomes"][0]["status"] == expected
+    assert disposed == [cache]
+    assert executor._retained_checkpoint_evidence is None
+
+
+def test_scan_completion_disposes_retained_sparse_checkpoint_evidence(tmp_path):
+    executor, _ = _executor([_plan([])])
+    disposed = []
+
+    class Cache:
+        def dispose(self):
+            disposed.append(self)
+
+    cache = Cache()
+    executor._retained_checkpoint_evidence = cache
+    executor._retained_checkpoint_scope = (
+        str(tmp_path.resolve()), DAY.isoformat(), "verify_page",
+    )
+    result = executor.run(
+        policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+        storage_root=tmp_path, execute=True,
+    )
+    assert result["stop_reason"] == "scan_complete"
+    assert disposed == [cache]
+    assert executor._retained_checkpoint_evidence is None
 
 
 def test_dependency_evidence_is_disposed_when_the_page_action_changes(tmp_path, monkeypatch):

@@ -83,6 +83,31 @@ def test_dependency_budgets_require_explicit_positive_integers(tmp_path, value):
         )
 
 
+def test_sparse_checkpoint_cache_transfer_requires_identical_limits(tmp_path):
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "first",
+    )
+    archive.enable_dependency_evidence_reuse()
+    cache = archive._checkpoint_evidence_cache()
+    manifest = SimpleNamespace(manifest_id="manifest")
+    cache.remember(manifest, {"source": {"id": "source"}})
+    detached = archive.take_checkpoint_source_evidence_cache()
+    assert detached is cache and archive._checkpoint_source_evidence_cache is None
+
+    compatible = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "compatible",
+    )
+    assert compatible.adopt_checkpoint_source_evidence_cache(detached) is True
+    assert compatible.take_checkpoint_source_evidence_cache() is cache
+
+    incompatible = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "incompatible",
+        max_dependency_objects=4999,
+    )
+    assert incompatible.adopt_checkpoint_source_evidence_cache(cache) is False
+    assert cache.row_count == cache.retained_bytes == 0
+
+
 @pytest.mark.parametrize("mode", ["valid", "expired_tail", "stop", "deadline"])
 def test_publication_batches_expiry_checks_and_stops_before_reading_bytes(tmp_path, monkeypatch, mode):
     from portal.backend.service.market.canonical_retention import (

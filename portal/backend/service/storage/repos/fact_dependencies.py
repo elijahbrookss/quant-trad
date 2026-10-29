@@ -43,11 +43,13 @@ class _CheckpointSourceEvidence:
 
 
 class CheckpointSourceEvidenceCache:
-    """Run-scoped sparse checkpoint rows after full-page validation.
+    """Bounded sparse checkpoint rows after full-page validation.
 
     Current placement, manifest bytes, headers, contracts and authority are
     rechecked by the caller for every use.  Only defensive copies of selected
     rows survive; a new selected identity forces another full-page decode.
+    The owner may carry this value-only cache across routine scheduler yields,
+    but never a database session, lock, plan, verifier or final-reclaim proof.
     """
 
     def __init__(self, *, max_manifests, max_rows, max_retained_bytes):

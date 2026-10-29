@@ -16,13 +16,15 @@ code_paths:
   - portal/backend/service/storage/repos/fact_lineage.py
   - src/market_data/archive.py
 ---
-# ADR 0084: Reuse Current-Byte-Bound Archive Evidence Within One Run
+# ADR 0084: Reuse Current-Byte-Bound Archive Evidence Across Routine Yields
 
 ## Status
 
-Accepted for implementation on 2026-10-26. Exact-path correctness tests,
-independent review, disposable PostgreSQL qualification, and representative
-complete dependency-proof timing remain required before deployment.
+Accepted for implementation on 2026-10-26 and extended on 2026-10-29 to
+retain only sparse checkpoint-source evidence across routine scheduler yields.
+Exact-path correctness tests, independent review, disposable PostgreSQL
+qualification, and representative complete dependency-proof timing remain
+required before deployment.
 
 ## Context
 
@@ -37,6 +39,14 @@ and compares exact mapping witnesses. Repeating mutable authority and current
 byte checks is required. Re-decoding the same unchanged object for the same
 already-checked witness claim inside one bounded worker invocation is not.
 
+Production COPY receipts across nine bounded invocations showed why the
+invocation boundary is sometimes also the wrong evidence boundary. Seven page
+identities were retried across a routine yield. Three heavy-manifest retries
+repeated about 164 seconds of checkpoint work each, while four later retries
+had effectively no checkpoint penalty. The directly paired excess was 493.121
+seconds, 8.59% of measured stage-call active work. This is a bounded observed
+opportunity, not evidence that every yield is expensive.
+
 ## Decision
 
 Separate three concerns:
@@ -48,11 +58,15 @@ Separate three concerns:
 2. Current bytes remain authoritative. Every selected object receives a fresh
    size and SHA-256 check for that page, followed by the existing successful-exit
    file-stamp fence.
-3. Fully decoded immutable evidence may be retained only by one bounded
-   `CanonicalFactRetentionExecutor` invocation. It is keyed by the complete
-   acknowledged manifest identity and the current file stamp. A cache hit is
-   allowed only when the freshly loaded mapping-and-witness claim is a subset of
-   claims already checked against those exact bytes.
+3. Fully decoded immutable checkpoint-source evidence may be retained by one
+   `CanonicalFactRetentionExecutor` across a routine time- or step-budget yield
+   for the same resolved storage root, storage day, and page action. Only the
+   bounded value cache transfers into a newly constructed repository. Database
+   sessions, transactions, locks, plans, statement deadlines, page buffers,
+   byte-verifier state, and raw-lineage evidence never cross the yield. The
+   entry is keyed by the complete acknowledged manifest identity. A cache hit
+   is allowed only when the freshly loaded mapping-and-witness claim is a subset
+   of claims already checked against those exact bytes.
 
 The cached immutable evidence contains record count, ordinal coverage, decoded
 logical-byte charge, source scope, and content fingerprint. Current placement,
@@ -65,30 +79,36 @@ operation. Different current mapping or witness claims force a complete decode
 and exact witness comparison; missing or expired authority fails before cache
 lookup. Different bytes fail the fresh checksum. Decode and logical-byte budgets
 are charged as though cached evidence were decoded again, so reuse cannot make
-an otherwise oversized page admissible. Object and claim counts bound retained
-memory, cancellation remains active during fresh checks, and disposal clears all
-entries at every executor exit, exception, stop, or action-boundary handoff.
+an otherwise oversized page admissible. Object, row, and retained-byte counts
+bound memory. The receiving repository must have exactly the same limits or it
+disposes the cache. Cancellation remains active during fresh checks. A
+cancellation request, exception, busy refusal, storage-root/day/action
+transition, incompatible limit, scan completion, selected action, process exit,
+or other non-routine boundary disposes all entries deterministically. A routine
+yield logs the retained counts and charge.
 
 Whole-partition verification, reclamation, the exclusive handoff, and their
 fresh-byte and transaction-current authority checks do not consume this cache.
-There is no persisted or cross-run verified cache and no receipt, schema,
-retention, timeout, or resource-limit change.
+There is no persisted verified cache and no receipt, schema, retention, timeout,
+or resource-limit change. Durable catalog progress remains the only resume
+authority; retained rows are an optimization that can always be discarded.
 
 ## Consequences
 
 - Repeated Parquet decoding and content-fingerprint reconstruction can be
-  skipped for an exact unchanged object/claim pair within one run. Fresh object
-  hashing, current SQL authority, expiry checks, and final reclamation proof
-  remain mandatory.
+  skipped for an exact unchanged object/claim pair within one compatible page
+  action, including after a routine scheduler yield. Fresh object hashing,
+  current SQL authority, expiry checks, and final reclamation proof remain
+  mandatory.
 - Same-byte path replacement still refuses because the file identity changed.
   Content mutation refuses through the fresh checksum. Mapping, witness,
   manifest, placement, or expiry changes cannot inherit prior authority.
 - Cache hits are diagnostic evidence, not a throughput claim. Qualification
   must compare complete dependency-proof and total page elapsed time on
   identical inputs, including fresh SQL and checksums.
-- The cache is deliberately narrow. A future persistent proof cache, reuse
-  across worker runs, weaker byte checks, or broader reclamation reuse requires
-  a separate decision and proof contract.
+- The cache is deliberately narrow. A future persistent or multi-process proof
+  cache, weaker byte checks, raw-lineage retention across yields, or broader
+  reclamation reuse requires a separate decision and proof contract.
 
 ## References
 

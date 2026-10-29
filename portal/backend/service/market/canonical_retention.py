@@ -64,14 +64,52 @@ class CanonicalFactRetentionExecutor:
         self._run_lock = Lock()
         self._archive = None
         self._archive_action = None
+        self._archive_scope = None
+        self._retained_checkpoint_evidence = None
+        self._retained_checkpoint_scope = None
 
-    def _dispose_archive(self):
+    def _dispose_retained_checkpoint_evidence(self, *, reason):
+        cache, self._retained_checkpoint_evidence = self._retained_checkpoint_evidence, None
+        scope, self._retained_checkpoint_scope = self._retained_checkpoint_scope, None
+        if cache is None:
+            return
+        logger.info(
+            "canonical_checkpoint_source_evidence_retention_disposed | reason=%s "
+            "scope=%s hits=%s misses=%s evictions=%s retained_rows=%s "
+            "retained_charge_bytes=%s",
+            reason, scope, getattr(cache, "hit_count", 0),
+            getattr(cache, "miss_count", 0), getattr(cache, "eviction_count", 0),
+            getattr(cache, "row_count", 0), getattr(cache, "retained_bytes", 0),
+        )
+        cache.dispose()
+
+    def _dispose_archive(self, *, preserve_checkpoint=False, reason="archive_disposed"):
         archive, self._archive = self._archive, None
         self._archive_action = None
+        scope, self._archive_scope = self._archive_scope, None
         if archive is not None:
+            if preserve_checkpoint and scope is not None:
+                take = getattr(archive, "take_checkpoint_source_evidence_cache", None)
+                cache = take() if take is not None else None
+                if cache is not None and getattr(cache, "row_count", 0) > 0:
+                    self._dispose_retained_checkpoint_evidence(reason="retention_replaced")
+                    self._retained_checkpoint_evidence = cache
+                    self._retained_checkpoint_scope = scope
+                    logger.info(
+                        "canonical_checkpoint_source_evidence_retained | scope=%s "
+                        "hits=%s misses=%s evictions=%s retained_rows=%s "
+                        "retained_charge_bytes=%s",
+                        scope, getattr(cache, "hit_count", 0),
+                        getattr(cache, "miss_count", 0), getattr(cache, "eviction_count", 0),
+                        getattr(cache, "row_count", 0), getattr(cache, "retained_bytes", 0),
+                    )
+                elif cache is not None:
+                    cache.dispose()
             dispose = getattr(archive, "dispose_dependency_evidence", None)
             if dispose is not None:
                 dispose()
+        if not preserve_checkpoint:
+            self._dispose_retained_checkpoint_evidence(reason=reason)
 
     def _retry_schedule(self, now):
         return [{
@@ -132,11 +170,17 @@ class CanonicalFactRetentionExecutor:
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         reusable = action in {"stage_page", "verify_page"}
+        resolved_storage_root = Path(storage_root).expanduser().resolve()
+        scope = (str(resolved_storage_root), day.isoformat(), action) if reusable else None
         # Evidence belongs only to consecutive work for the same page action
-        # in this invocation. Clear it before any action transition: a refused
+        # and day. Clear it before any incompatible transition: a refused
         # transition must not leave an old page proof available to later work.
-        if self._archive is not None and (not reusable or self._archive_action != action):
-            self._dispose_archive()
+        if self._archive is not None and (
+                not reusable or self._archive_action != action or self._archive_scope != scope):
+            self._dispose_archive(reason="action_or_scope_changed")
+        if (self._retained_checkpoint_evidence is not None
+                and self._retained_checkpoint_scope != scope):
+            self._dispose_retained_checkpoint_evidence(reason="action_or_scope_changed")
         self._require_archive(policy=policy, storage_root=storage_root, action=action)
 
         def guard(session, partition):
@@ -150,6 +194,8 @@ class CanonicalFactRetentionExecutor:
 
         # Reuse only the current run's staging repository. Its one-page buffer
         # avoids repeating hot hydration for each committed prefix interval.
+        # A separate bounded sparse checkpoint cache may be adopted by the new
+        # repository after a normal scheduler yield.
         def current_remaining_seconds():
             value = remaining_seconds() if callable(remaining_seconds) else remaining_seconds
             if type(value) not in {int, float} or not isfinite(value) or value <= 0:
@@ -164,8 +210,8 @@ class CanonicalFactRetentionExecutor:
         if archive is None:
             archive = PostgresCanonicalFactArchiveRepository(
                 database=self.repository.database,
-                object_store=FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects"),
-                temporary_directory=Path(storage_root).expanduser().resolve() / "canonical-staging",
+                object_store=FilesystemRawArchiveObjectStore(resolved_storage_root / "objects"),
+                temporary_directory=resolved_storage_root / "canonical-staging",
                 limits=FactArchiveLimits(max_rows=policy.max_page_rows,
                     row_group_size=min(512, policy.max_page_rows),
                     max_logical_bytes=policy.max_page_logical_bytes,
@@ -175,6 +221,28 @@ class CanonicalFactRetentionExecutor:
                 statement_timeout_ms=timeout,
                 partition_guard=guard, check_budget=check_budget,
             )
+            if self._retained_checkpoint_evidence is not None:
+                cache, self._retained_checkpoint_evidence = self._retained_checkpoint_evidence, None
+                self._retained_checkpoint_scope = None
+                adopt = getattr(archive, "adopt_checkpoint_source_evidence_cache", None)
+                adopted = False
+                if adopt is None:
+                    cache.dispose()
+                else:
+                    try:
+                        adopted = adopt(cache)
+                    except BaseException:
+                        cache.dispose()
+                        raise
+                if not adopted:
+                    # Refusal owns no evidence. Dispose here even when the
+                    # repository already did so; cache disposal is idempotent.
+                    cache.dispose()
+                    logger.info(
+                        "canonical_checkpoint_source_evidence_retention_disposed | "
+                        "reason=incompatible_repository_limits scope=%s",
+                        scope,
+                    )
         archive.partition_guard = guard
         archive.statement_timeout_ms = timeout
         if reusable:
@@ -183,6 +251,7 @@ class CanonicalFactRetentionExecutor:
                 enable_reuse()
         self._archive = archive if reusable else None
         self._archive_action = action if reusable else None
+        self._archive_scope = scope if reusable else None
         verification = ArchiveVerificationLimits(max_bytes=policy.max_verification_bytes,
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
@@ -244,12 +313,30 @@ class CanonicalFactRetentionExecutor:
                                                  after_storage_day=after_storage_day)}
         if not self._run_lock.acquire(blocking=False):
             raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
+        result = None
         try:
-            return self._run(policy=policy, storage_root=storage_root, after_storage_day=after_storage_day,
-                             cancelled=cancelled, storage_policy_witness=witness, progress=progress)
+            result = self._run(
+                policy=policy, storage_root=storage_root,
+                after_storage_day=after_storage_day, cancelled=cancelled,
+                storage_policy_witness=witness, progress=progress,
+            )
+            return result
         finally:
-            # Committed catalog progress is the only state carried across runs.
-            self._dispose_archive()
+            normal_page_yield = (
+                result is not None
+                and result.get("stop_reason") in {"time_budget", "step_budget"}
+                and any(
+                    item.get("action") in {"stage_page", "verify_page"}
+                    for item in result.get("outcomes", ())
+                )
+            )
+            # Durable catalog rows remain the only resume authority. A normal
+            # scheduler yield may retain bounded immutable checkpoint rows; no
+            # transaction, lock, plan, page buffer or raw evidence crosses it.
+            self._dispose_archive(
+                preserve_checkpoint=normal_page_yield,
+                reason="run_exit",
+            )
             self._run_lock.release()
 
     def run_selected(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
@@ -307,6 +394,9 @@ class CanonicalFactRetentionExecutor:
         if not self._run_lock.acquire(blocking=False):
             raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
         try:
+            # Selected canaries are an explicit operator boundary, not a
+            # routine scheduler yield. They always start with fresh evidence.
+            self._dispose_archive(reason="selected_action")
             return self._run_selected(
                 policy=policy, storage_root=storage_root, storage_day=storage_day,
                 expected_action=expected_action, cancelled=cancelled,
@@ -601,7 +691,6 @@ class CanonicalFactRetentionExecutor:
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
                             day, item["action"], result["status"])
             except CanonicalRetentionBudgetExceeded as exc:
-                self._dispose_archive()
                 outcomes.append(retain_prerequisite_progress(
                     {"action": item["action"], "storage_day": day.isoformat(),
                      "status": "deferred", "reason": str(exc)}
@@ -629,7 +718,6 @@ class CanonicalFactRetentionExecutor:
                 logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s", day, item["action"], exc)
                 cursor = day
             except Exception as exc:
-                self._dispose_archive()
                 sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
                 if sqlstate == "57014":
                     # The archive owner has already rolled back. A statement
@@ -655,6 +743,7 @@ class CanonicalFactRetentionExecutor:
                                     day, item["action"], stop_reason)
                         break
                 if sqlstate == "55P03":
+                    self._dispose_archive(reason="relation_busy")
                     outcomes.append(retain_prerequisite_progress(
                         {"action": item["action"], "storage_day": day.isoformat(),
                          "status": "deferred", "reason": "canonical_retention_relation_busy"}
@@ -666,6 +755,7 @@ class CanonicalFactRetentionExecutor:
                         retry_followthrough = False
                     logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=relation_busy", day, item["action"])
                 else:
+                    self._dispose_archive(reason="step_failed")
                     outcomes.append(retain_prerequisite_progress(
                         {"action": item["action"], "storage_day": day.isoformat(),
                          "status": "failed", "error": str(exc)}

@@ -537,8 +537,42 @@ class PostgresCanonicalFactArchiveRepository:
             )
         return self._checkpoint_source_evidence_cache
 
+    def take_checkpoint_source_evidence_cache(self):
+        """Detach only bounded immutable checkpoint rows for a routine yield.
+
+        Database sessions, page buffers, raw-lineage evidence and byte-verifier
+        state remain owned by this repository and are never transferred.
+        """
+        cache, self._checkpoint_source_evidence_cache = (
+            self._checkpoint_source_evidence_cache, None,
+        )
+        return cache
+
+    def adopt_checkpoint_source_evidence_cache(self, cache):
+        """Adopt compatible sparse evidence without weakening current limits."""
+        from .fact_dependencies import CheckpointSourceEvidenceCache
+        expected = (
+            self.max_dependency_objects,
+            self.max_raw_mapping_rows,
+            min(self.limits.max_logical_bytes, _CHECKPOINT_EVIDENCE_CACHE_BYTES),
+        )
+        actual = (
+            getattr(cache, "max_manifests", None),
+            getattr(cache, "max_rows", None),
+            getattr(cache, "max_retained_bytes", None),
+        )
+        if not isinstance(cache, CheckpointSourceEvidenceCache) or actual != expected:
+            dispose = getattr(cache, "dispose", None)
+            if dispose is not None:
+                dispose()
+            return False
+        if self._checkpoint_source_evidence_cache is not None:
+            raise RuntimeError("canonical_checkpoint_cache_already_attached")
+        self._checkpoint_source_evidence_cache = cache
+        return True
+
     def enable_dependency_evidence_reuse(self):
-        """Opt into reuse for one executor-owned bounded invocation."""
+        """Opt into reuse for one executor-owned page-action scope."""
         self._reuse_dependency_evidence = True
 
     def dispose_dependency_evidence(self):

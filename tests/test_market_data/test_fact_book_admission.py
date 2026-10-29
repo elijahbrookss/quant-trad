@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from portal.backend.service.storage.repos import fact_book_admission as admission
-from portal.backend.service.storage.repos import fact_dependencies
+from portal.backend.service.storage.repos import fact_archival, fact_dependencies
 
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -296,6 +296,34 @@ def test_checkpoint_sparse_cache_reuses_only_selected_rows_with_fresh_proofs(mon
     assert fixture.verified == ["page-1.parquet", "page-2.parquet"]
     assert fixture.cached_verified == [["a", "b"], ["c"]]
     assert cache.hit_count == 2
+
+
+def test_checkpoint_sparse_cache_detach_adopt_keeps_fresh_proofs(tmp_path, monkeypatch):
+    fixture = _CheckpointSources()
+    first = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "first",
+        max_dependency_objects=4, max_raw_mapping_rows=10,
+    )
+    first.enable_dependency_evidence_reuse()
+    _checkpoint_reader(monkeypatch, fixture, evidence_cache=first._checkpoint_evidence_cache())
+    cache = first.take_checkpoint_source_evidence_cache()
+
+    second = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path / "second",
+        max_dependency_objects=4, max_raw_mapping_rows=10,
+    )
+    assert second.adopt_checkpoint_source_evidence_cache(cache) is True
+    second.enable_dependency_evidence_reuse()
+    fixture.calls.clear()
+    fixture.verified.clear()
+    fixture.cached_verified.clear()
+    rows = _checkpoint_reader(
+        monkeypatch, fixture, evidence_cache=second._checkpoint_evidence_cache(),
+    )
+    assert rows == fixture.rows
+    assert fixture.calls == []
+    assert fixture.verified == ["page-1.parquet", "page-2.parquet"]
+    assert fixture.cached_verified == [["a", "b"], ["c"]]
 
 
 def test_checkpoint_sparse_cache_new_identity_or_manifest_change_forces_full_decode(monkeypatch):
