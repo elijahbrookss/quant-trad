@@ -107,6 +107,9 @@ selection matches the exact displayed interpretation hash; another revision's
 report never silently substitutes. Summary remains the default view and the
 reader can return to it at any time. A report read failure leaves Summary and
 the other independently loaded sections available.
+On narrow screens, chart image containers scroll horizontally so labels remain
+readable while captions wrap to the viewport. An optional full-page reader link
+uses the same private content endpoint and CSP sandbox.
 
 Production never executes QMD, Python or Quarto. The manually authored
 `scripts/reporting/quarto_study_pilot.py` reads the approved saved-evidence ZIP,

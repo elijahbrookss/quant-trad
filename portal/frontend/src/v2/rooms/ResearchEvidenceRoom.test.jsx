@@ -30,6 +30,8 @@ describe('Generic Study inspection', () => {
     const frame = await screen.findByTitle('Readable pilot')
     expect(frame).toHaveAttribute('sandbox', '')
     expect(frame).toHaveAttribute('src', '/reports/question/report/content')
+    expect(screen.getByRole('link', { name: 'Read report in full page' })).toHaveAttribute('href', '/reports/question/report/content')
+    expect(screen.getByRole('link', { name: 'Read report in full page' })).toHaveAttribute('rel', 'noopener noreferrer')
     fireEvent.click(screen.getByRole('button', { name: 'Read original summary' }))
     expect(await screen.findByText('Inconclusive finding')).toBeVisible()
     expect(screen.queryByTitle('Readable pilot')).not.toBeInTheDocument()
