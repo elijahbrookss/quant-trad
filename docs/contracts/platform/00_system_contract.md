@@ -111,3 +111,11 @@ its database boundary, separately from scientific payloads and immutable
 publication history. Images are presentation evidence; attachment does not
 execute research, revise results or establish scientific certification. V2
 displays them through read-only contracts.
+
+A derived Study report may explain an exact interpretation revision through a
+bounded prebuilt inert HTML attachment on the existing Study persistence
+boundary. It retains source/build/evidence provenance, does not execute source
+in production or alter scientific results, and remains separate from the static
+image contract. The private read-only Report view is sandboxed, revision-bound,
+and reversible to the original Summary; later interpretations visibly stale
+earlier reports. See the [report pilot boundary](../../architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md#derived-quarto-study-report-pilot).

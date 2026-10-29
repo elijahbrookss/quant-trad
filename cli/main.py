@@ -1951,6 +1951,19 @@ def _cmd_research_question(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_research_reports(args: argparse.Namespace) -> int:
+    from urllib.parse import quote
+    path = f"/api/research/items/{quote(args.item_id, safe='')}/reports"
+    client = _client(args)
+    if args.report_action == "list":
+        result = client.request_json("GET", path)
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        result = client.request_json("POST", path, payload=request)
+    _print_json(result)
+    return 0
+
+
 def _cmd_research_items_create(args: argparse.Namespace) -> int:
     _print_json(_client(args).request_json("POST", "/api/research/items", payload=_research_item_payload(args)))
     return 0
@@ -4374,6 +4387,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
+    report_sub = research_sub.add_parser("reports", help="Attach prebuilt inert Quarto Study reports; never execute source.").add_subparsers(dest="report_action", required=True)
+    for action in ("attach", "list"):
+        command = report_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action == "attach":
+            command.add_argument("--request-json", required=True)
+        command.set_defaults(func=_cmd_research_reports)
     research_images = research_sub.add_parser("images", help="Attach and inspect static Check/Study presentation images on QT.")
     image_sub = research_images.add_subparsers(dest="image_action", required=True)
     for action in ("attach", "list", "download"):

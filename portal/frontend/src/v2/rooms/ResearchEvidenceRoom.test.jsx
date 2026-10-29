@@ -5,6 +5,7 @@ import { ResearchEvidenceRoom } from './ResearchEvidenceRoom.jsx'
 import * as api from '../../adapters/research.adapter.js'
 
 vi.mock('../../adapters/research.adapter.js', () => ({ fetchResearchSummary: vi.fn(), fetchResearchRelationships: vi.fn(),
+  fetchStudyReports: vi.fn(), studyReportUrl: (id, report, source) => '/reports/' + id + '/' + report + (source ? '/source' : '/content'),
   fetchResearchImages: vi.fn(), fetchResearchComparison: vi.fn(), fetchResearchRecord: vi.fn(), fetchResearchExportPreflight: vi.fn(), downloadResearchExport: vi.fn(),
   researchRecordUrl: id => '/record/' + id, researchImageContentUrl: (id, image) => '/images/' + id + '/' + image }))
 const summary = (id = 'question', publication = true) => ({ item: { id, kind: 'study', title: 'Question ' + id, status: 'active' },
@@ -17,8 +18,28 @@ beforeEach(() => {
   api.fetchResearchSummary.mockImplementation(id => Promise.resolve(summary(id)))
   api.fetchResearchRelationships.mockResolvedValue({ items: [], truncated: false })
   api.fetchResearchImages.mockResolvedValue({ items: [] })
+  api.fetchStudyReports.mockResolvedValue({ items: [] })
 })
 describe('Generic Study inspection', () => {
+  it('loads an isolated report only on demand and preserves the original summary', async () => {
+    api.fetchStudyReports.mockResolvedValue({ items: [{ report_id: 'report', title: 'Readable pilot', binding: { publication_hash: 'old-hash', revision: 1 }, stale: false }] })
+    mount()
+    await screen.findByText('Inconclusive finding')
+    expect(api.fetchStudyReports).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Report', exact: true }))
+    const frame = await screen.findByTitle('Readable pilot')
+    expect(frame).toHaveAttribute('sandbox', '')
+    expect(frame).toHaveAttribute('src', '/reports/question/report/content')
+    fireEvent.click(screen.getByRole('button', { name: 'Read original summary' }))
+    expect(await screen.findByText('Inconclusive finding')).toBeVisible()
+    expect(screen.queryByTitle('Readable pilot')).not.toBeInTheDocument()
+  })
+  it('does not show a report from another interpretation revision', async () => {
+    api.fetchStudyReports.mockResolvedValue({ items: [{ report_id: 'report', title: 'Other revision', binding: { publication_hash: 'different', revision: 2 } }] })
+    mount('/studies/question?tab=report')
+    expect(await screen.findByText(/No report attached to this summary version/)).toBeVisible()
+    expect(screen.queryByTitle('Other revision')).not.toBeInTheDocument()
+  })
   it('keeps legacy deep links, separates conclusion from lifecycle, and defers evidence/images', async () => {
     mount()
     expect(await screen.findByText('Inconclusive finding')).toBeVisible()
