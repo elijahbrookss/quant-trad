@@ -21,6 +21,15 @@ beforeEach(() => {
   api.fetchStudyReports.mockResolvedValue({ items: [] })
 })
 describe('Generic Study inspection', () => {
+  it('keeps the report tab and request off non-Study records, including deep links', async () => {
+    const data = summary()
+    data.item.kind = 'research_check'
+    api.fetchResearchSummary.mockResolvedValue(data)
+    mount('/studies/question?tab=report')
+    await screen.findByText('Inconclusive finding')
+    expect(screen.queryByRole('button', { name: 'Report', exact: true })).not.toBeInTheDocument()
+    expect(api.fetchStudyReports).not.toHaveBeenCalled()
+  })
   it('loads an isolated report only on demand and preserves the original summary', async () => {
     api.fetchStudyReports.mockResolvedValue({ items: [{ report_id: 'report', title: 'Readable pilot', binding: { publication_hash: 'old-hash', revision: 1 }, stale: false }] })
     mount()

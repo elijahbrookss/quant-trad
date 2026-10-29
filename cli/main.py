@@ -1952,14 +1952,19 @@ def _cmd_research_question(args: argparse.Namespace) -> int:
 
 
 def _cmd_research_reports(args: argparse.Namespace) -> int:
-    from urllib.parse import quote
-    path = f"/api/research/items/{quote(args.item_id, safe='')}/reports"
-    client = _client(args)
+    if args.report_action == "build":
+        from cli.study_reports import write_report
+
+        write_report(args)
+        return 0
+    operations = ResearchOperations(_client(args))
     if args.report_action == "list":
-        result = client.request_json("GET", path)
+        result = operations.study_reports(args.item_id)
+    elif args.report_action == "source":
+        result = operations.study_report_source(args.item_id, args.report_id)
     else:
         request = _read_json_object_arg(args.request_json, label="--request-json")
-        result = client.request_json("POST", path, payload=request)
+        result = operations.attach_study_report(args.item_id, request)
     _print_json(result)
     return 0
 
@@ -4388,9 +4393,16 @@ def build_parser() -> argparse.ArgumentParser:
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
     report_sub = research_sub.add_parser("reports", help="Attach prebuilt inert Quarto Study reports; never execute source.").add_subparsers(dest="report_action", required=True)
-    for action in ("attach", "list"):
+    from cli.study_reports import add_build_arguments
+
+    build_report = report_sub.add_parser("build", help="Offline Linux build from reviewed QMD and explicit prepared PNGs. No API calls or research execution.")
+    add_build_arguments(build_report)
+    build_report.set_defaults(func=_cmd_research_reports)
+    for action in ("attach", "list", "source"):
         command = report_sub.add_parser(action)
         command.add_argument("item_id")
+        if action == "source":
+            command.add_argument("report_id")
         if action == "attach":
             command.add_argument("--request-json", required=True)
         command.set_defaults(func=_cmd_research_reports)
