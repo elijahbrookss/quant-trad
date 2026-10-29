@@ -671,6 +671,12 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
             raise error("injected stop after an alias write")
 
     fixture.archive.check_budget = check_budget
+    # The generation coordinator captures the production budget callback when
+    # the archive repository is constructed.  This test replaces that callback
+    # after construction, so replace the coordinator's captured callback too;
+    # otherwise the injected stop is first observed only after the whole group
+    # commits and does not exercise the group rollback contract.
+    fixture.archive._generation.check_budget = check_budget
     event.listen(storage.database._engine, "after_cursor_execute", inserted)
     try:
         with pytest.raises(error, match="injected stop after an alias write"):
@@ -678,6 +684,7 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", inserted)
         fixture.archive.check_budget = None
+        fixture.archive._generation.check_budget = None
     assert wrote_aliases
     assert fixture.archive.inspect_partition(fixture.day)["page_count"] == 0
     with storage.database.session() as session:
@@ -691,7 +698,7 @@ def test_catalogue_mid_write_stop_rolls_back_page_and_reuses_immutable_object(
         assert session.execute(text(
             "SELECT count(*) FROM market.fact_archive_prepared_material_aliases "
             "WHERE preparation_id=:id"
-        ), {"id": preparation["id"]}).scalar_one() == fact_archival._ALIAS_CATALOG_WRITE_BATCH_ROWS
+        ), {"id": preparation["id"]}).scalar_one() == 0
         assert session.execute(text(
             "SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"
         ), {"day": fixture.day}).scalar_one() == fixture.count
