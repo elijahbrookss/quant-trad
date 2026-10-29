@@ -203,9 +203,45 @@ def test_verification_detail_log_has_fixed_low_cardinality_fields(caplog):
             },
         )
     assert "canonical_archive_verification_detail" in caplog.text
+    assert "action=verify storage_day=2026-09-08 page_ordinal=7 manifest_id=manifest" in caplog.text
     assert "phase=prefix_catalog_sql scope=book outcome=completed seconds=1.250000" in caplog.text
     assert "query_count=4 object_count=3 byte_count=2048 root_count=2" in caplog.text
     assert "row_count=10 chunk_count=3 prefix_count=1" in caplog.text
+
+
+def test_dependency_measurement_observer_labels_copy_and_cannot_change_proof(
+        monkeypatch, caplog):
+    page = {"id": "unpublished", "page_ordinal": 4}
+    observer = fact_archival._dependency_measurement_observer(
+        action="copy", day=date(2026, 9, 9), page=page,
+    )
+    with caplog.at_level(logging.INFO):
+        assert fact_archival._timed_verification_detail(
+            observer=observer, phase="exact_raw_proof", scope="page",
+            operation=lambda: {"raw-a": {}},
+            summarize=lambda found: {"object_count": len(found)},
+        ) == {"raw-a": {}}
+    assert "action=copy storage_day=2026-09-09 page_ordinal=4 manifest_id=unpublished" in caplog.text
+    assert "phase=exact_raw_proof scope=page outcome=completed" in caplog.text
+    assert "object_count=1" in caplog.text
+
+    def unavailable_recorder(**_fields):
+        raise RuntimeError("copy diagnostic sink unavailable")
+
+    monkeypatch.setattr(fact_archival, "_record_verification_detail", unavailable_recorder)
+    assert fact_archival._timed_verification_detail(
+        observer=observer, phase="book_checkpoint_proof", scope="page",
+        operation=lambda: "proof-result",
+    ) == "proof-result"
+    assert "canonical_archive_verification_measurement_failed" in caplog.text
+
+
+def test_dependency_measurement_observer_rejects_unbounded_action_label():
+    with pytest.raises(ValueError, match="canonical_archive_measurement_action_invalid"):
+        fact_archival._dependency_measurement_observer(
+            action="other", day=date(2026, 9, 9),
+            page={"id": "manifest", "page_ordinal": 4},
+        )
 
 def test_stage_phase_records_completed_and_failed_durations(monkeypatch, caplog):
     clock = iter((10.0, 10.25, 20.0, 20.5))

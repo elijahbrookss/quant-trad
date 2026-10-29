@@ -200,19 +200,29 @@ def _record_verification_phase(*, timings, phase, day, page, seconds, outcome):
 
 
 def _record_verification_detail(
-        *, phase, day, page, seconds, outcome, scope="page", counters=None):
+        *, phase, day, page, seconds, outcome, scope="page", counters=None,
+        action="verify"):
     """Record one bounded, non-overlapping certification subphase."""
     counters = counters or {}
     logger.info(
-        "canonical_archive_verification_detail | storage_day=%s page_ordinal=%s "
+        "canonical_archive_verification_detail | action=%s storage_day=%s page_ordinal=%s "
         "manifest_id=%s phase=%s scope=%s outcome=%s seconds=%.6f "
         "query_count=%s object_count=%s byte_count=%s root_count=%s "
         "row_count=%s chunk_count=%s prefix_count=%s",
-        day, page["page_ordinal"], page["id"], phase, scope, outcome, seconds,
+        action, day, page["page_ordinal"], page["id"], phase, scope, outcome, seconds,
         counters.get("query_count", 0), counters.get("object_count", 0),
         counters.get("byte_count", 0), counters.get("root_count", 0),
         counters.get("row_count", 0), counters.get("chunk_count", 0),
         counters.get("prefix_count", 0),
+    )
+
+
+def _dependency_measurement_observer(*, action, day, page):
+    """Bind diagnostic dependency measurements to one archive action/page."""
+    if action not in {"copy", "verify"}:
+        raise ValueError(f"canonical_archive_measurement_action_invalid: action={action}")
+    return lambda **fields: _record_verification_detail(
+        action=action, day=day, page=page, **fields,
     )
 
 
@@ -1278,9 +1288,16 @@ class PostgresCanonicalFactArchiveRepository:
                 return progress
             # Publication/verification never retain a second prepared page.
             self._prepared_page = None
+            measurement_observer = _dependency_measurement_observer(
+                action="copy", day=day,
+                page={"id": "unpublished", "page_ordinal": ordinal},
+            )
             dependencies, source_rows = _timed_stage_call(
                 phase="dependency_proof", day=day, page_ordinal=ordinal,
-                operation=lambda: self._dependencies(session, rows, source_rows=source_rows),
+                operation=lambda: self._dependencies(
+                    session, rows, source_rows=source_rows,
+                    measurement_observer=measurement_observer,
+                ),
             )
             observer = lambda phase, seconds, outcome: _record_stage_phase(
                 phase=phase, day=day, page_ordinal=ordinal,
@@ -1455,8 +1472,8 @@ class PostgresCanonicalFactArchiveRepository:
                 timings=timings, phase="catalog_read", day=day, page=page,
                 operation=lambda: self._page_catalogs(session, manifest.manifest_id),
             )
-            measurement_observer = lambda **fields: _record_verification_detail(
-                day=day, page=page, **fields,
+            measurement_observer = _dependency_measurement_observer(
+                action="verify", day=day, page=page,
             )
             bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
             source_rows = _timed_verification_call(
