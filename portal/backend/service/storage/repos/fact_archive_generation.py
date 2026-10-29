@@ -29,6 +29,11 @@ LEGACY_CATALOG_TABLES = {
 logger = logging.getLogger(__name__)
 
 
+# Retain the established receipt granularity while amortizing the session/day-lock
+# boundary. A failed group rolls back at most this many original receipt batches.
+DEFAULT_CATALOG_TRANSACTION_GROUP_BATCHES = 4
+
+
 def canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -144,9 +149,14 @@ class ArchiveGenerationCoordinator:
     """
 
     def __init__(self, *, database, lock_day, release_day, check_budget, statement_timeout_ms,
-                 owner_token_hash: str, verifier_version: str, lease_seconds: int = 120):
+                 owner_token_hash: str, verifier_version: str, lease_seconds: int = 120,
+                 catalog_transaction_group_batches: int = DEFAULT_CATALOG_TRANSACTION_GROUP_BATCHES):
         if type(lease_seconds) is not int or lease_seconds < 30:
             raise ValueError("canonical_archive_preparation_lease_invalid")
+        if (type(catalog_transaction_group_batches) is not int
+                or catalog_transaction_group_batches < 1
+                or catalog_transaction_group_batches > 8):
+            raise ValueError("canonical_archive_catalog_transaction_group_invalid")
         self.database = database
         self.lock_day = lock_day
         self.release_day = release_day
@@ -155,6 +165,7 @@ class ArchiveGenerationCoordinator:
         self.owner_token_hash = owner_token_hash
         self.verifier_version = verifier_version
         self.lease_seconds = lease_seconds
+        self.catalog_transaction_group_batches = catalog_transaction_group_batches
 
     def _budget(self):
         if self.check_budget is not None:
@@ -291,78 +302,115 @@ class ArchiveGenerationCoordinator:
             return {"preparation": dict(row), "aliases": aliases,
                     "canonical_dependencies": canonical_dependencies}
 
-    def _stage_batch(self, *, day, preparation, catalog_kind: str, ordinal: int, rows):
+    @staticmethod
+    def _batch_expected(*, preparation_id: str, catalog_kind: str, ordinal: int, rows):
         rows = tuple(rows)
-        digest = catalog_batch_hash(preparation_id=preparation["id"],
+        digest = catalog_batch_hash(preparation_id=preparation_id,
                                     catalog_kind=catalog_kind, ordinal=ordinal, rows=rows)
+        keys = ([rows[0]["fact_version_id"], rows[0].get("evidence_key")]
+                if catalog_kind == "aliases" else [rows[0]["fact_version_id"]],
+                [rows[-1]["fact_version_id"], rows[-1].get("evidence_key")]
+                if catalog_kind == "aliases" else [rows[-1]["fact_version_id"]])
+        return rows, digest, keys, {
+            "row_count": len(rows), "first_key": keys[0],
+            "last_key": keys[1], "content_hash": digest,
+        }
+
+    def _stage_batch_in_session(self, *, session, row, catalog_kind: str,
+                                ordinal: int, rows):
+        rows, digest, keys, expected = self._batch_expected(
+            preparation_id=row["id"], catalog_kind=catalog_kind,
+            ordinal=ordinal, rows=rows,
+        )
+        existing = session.execute(text("""
+            SELECT row_count,first_key,last_key,content_hash
+            FROM market.fact_archive_catalog_batches
+            WHERE preparation_id=:id AND catalog_kind=:kind AND batch_ordinal=:ordinal
+        """), {"id": row["id"], "kind": catalog_kind,
+                "ordinal": ordinal}).mappings().one_or_none()
+        if existing is not None:
+            if json_document(dict(existing)) != json_document(expected):
+                raise RuntimeError("canonical_archive_catalog_batch_receipt_changed")
+            return False
+        if catalog_kind == "aliases":
+            result = session.execute(text("""
+                INSERT INTO market.fact_archive_prepared_material_aliases
+                    (preparation_id,fact_version_id,evidence_key,batch_ordinal,series_id,material_hash)
+                SELECT :id,input.fact_version_id,input.evidence_key,:ordinal,
+                       input.series_id,input.material_hash
+                FROM unnest(CAST(:fact_ids AS text[]),CAST(:keys AS text[]),
+                            CAST(:series_ids AS bigint[]),CAST(:hashes AS text[]))
+                     WITH ORDINALITY input(fact_version_id,evidence_key,series_id,material_hash,position)
+                ORDER BY input.position
+            """), {"id": row["id"], "ordinal": ordinal,
+                   "fact_ids": [item["fact_version_id"] for item in rows],
+                   "keys": [item["evidence_key"] for item in rows],
+                   "series_ids": [item["series_id"] for item in rows],
+                   "hashes": [item["material_hash"] for item in rows]})
+        else:
+            result = session.execute(text("""
+                INSERT INTO market.fact_archive_prepared_canonical_dependencies
+                    (preparation_id,fact_version_id,batch_ordinal,row_hash)
+                SELECT :id,input.fact_version_id,:ordinal,input.row_hash
+                FROM unnest(CAST(:fact_ids AS text[]),CAST(:hashes AS text[]))
+                     WITH ORDINALITY input(fact_version_id,row_hash,position)
+                ORDER BY input.position
+            """), {"id": row["id"], "ordinal": ordinal,
+                   "fact_ids": [item["fact_version_id"] for item in rows],
+                   "hashes": [item["row_hash"] for item in rows]})
+        if result.rowcount != len(rows):
+            raise RuntimeError("canonical_archive_prepared_insert_count_mismatch")
+        session.execute(text("""
+            INSERT INTO market.fact_archive_catalog_batches
+                (preparation_id,catalog_kind,batch_ordinal,row_count,first_key,last_key,content_hash)
+            VALUES (:id,:kind,:ordinal,:count,CAST(:first_key AS jsonb),CAST(:last_key AS jsonb),:digest)
+        """), {"id": row["id"], "kind": catalog_kind, "ordinal": ordinal,
+               "count": len(rows), "first_key": canonical_json(keys[0]),
+               "last_key": canonical_json(keys[1]), "digest": digest})
+        return True
+
+    def _stage_batch_group(self, *, day, preparation, catalog_kind: str, batches):
+        batches = tuple((ordinal, tuple(rows)) for ordinal, rows in batches)
+        if not batches or len(batches) > self.catalog_transaction_group_batches:
+            raise ValueError("canonical_archive_catalog_transaction_group_invalid")
         with self.database.session() as session:
             self.lock_day(session, day)
             row = session.execute(text(
                 "SELECT * FROM market.fact_archive_preparations WHERE id=:id FOR UPDATE"
             ), {"id": preparation["id"]}).mappings().one()
             self._require_day(row, day)
-            now = session.execute(text("SELECT clock_timestamp()")).scalar_one()
             if (row["state"] != "building" or row["fence"] != preparation["fence"]
-                    or row["owner_token_hash"] != self.owner_token_hash
-                    or row["lease_expires_at"] <= now):
+                    or row["owner_token_hash"] != self.owner_token_hash):
                 raise RuntimeError("canonical_archive_preparation_fence_lost")
-            existing = session.execute(text("""
-                SELECT row_count,first_key,last_key,content_hash
-                FROM market.fact_archive_catalog_batches
-                WHERE preparation_id=:id AND catalog_kind=:kind AND batch_ordinal=:ordinal
-            """), {"id": row["id"], "kind": catalog_kind, "ordinal": ordinal}).mappings().one_or_none()
-            keys = ([rows[0]["fact_version_id"], rows[0].get("evidence_key")]
-                    if catalog_kind == "aliases" else [rows[0]["fact_version_id"]],
-                    [rows[-1]["fact_version_id"], rows[-1].get("evidence_key")]
-                    if catalog_kind == "aliases" else [rows[-1]["fact_version_id"]])
-            expected = {"row_count": len(rows), "first_key": keys[0],
-                        "last_key": keys[1], "content_hash": digest}
-            if existing is not None:
-                if json_document(dict(existing)) != json_document(expected):
-                    raise RuntimeError("canonical_archive_catalog_batch_receipt_changed")
-                return False
             self._owner_settings(session, row["id"], row["fence"])
-            if catalog_kind == "aliases":
-                result = session.execute(text("""
-                    INSERT INTO market.fact_archive_prepared_material_aliases
-                        (preparation_id,fact_version_id,evidence_key,batch_ordinal,series_id,material_hash)
-                    SELECT :id,input.fact_version_id,input.evidence_key,:ordinal,
-                           input.series_id,input.material_hash
-                    FROM unnest(CAST(:fact_ids AS text[]),CAST(:keys AS text[]),
-                                CAST(:series_ids AS bigint[]),CAST(:hashes AS text[]))
-                         WITH ORDINALITY input(fact_version_id,evidence_key,series_id,material_hash,position)
-                    ORDER BY input.position
-                """), {"id": row["id"], "ordinal": ordinal,
-                       "fact_ids": [item["fact_version_id"] for item in rows],
-                       "keys": [item["evidence_key"] for item in rows],
-                       "series_ids": [item["series_id"] for item in rows],
-                       "hashes": [item["material_hash"] for item in rows]})
-            else:
-                result = session.execute(text("""
-                    INSERT INTO market.fact_archive_prepared_canonical_dependencies
-                        (preparation_id,fact_version_id,batch_ordinal,row_hash)
-                    SELECT :id,input.fact_version_id,:ordinal,input.row_hash
-                    FROM unnest(CAST(:fact_ids AS text[]),CAST(:hashes AS text[]))
-                         WITH ORDINALITY input(fact_version_id,row_hash,position)
-                    ORDER BY input.position
-                """), {"id": row["id"], "ordinal": ordinal,
-                       "fact_ids": [item["fact_version_id"] for item in rows],
-                       "hashes": [item["row_hash"] for item in rows]})
-            if result.rowcount != len(rows):
-                raise RuntimeError("canonical_archive_prepared_insert_count_mismatch")
-            session.execute(text("""
-                INSERT INTO market.fact_archive_catalog_batches
-                    (preparation_id,catalog_kind,batch_ordinal,row_count,first_key,last_key,content_hash)
-                VALUES (:id,:kind,:ordinal,:count,CAST(:first_key AS jsonb),CAST(:last_key AS jsonb),:digest)
-            """), {"id": row["id"], "kind": catalog_kind, "ordinal": ordinal,
-                   "count": len(rows), "first_key": canonical_json(keys[0]),
-                   "last_key": canonical_json(keys[1]), "digest": digest})
-            session.execute(text("""
-                UPDATE market.fact_archive_preparations
-                SET lease_expires_at=clock_timestamp()+(:lease || ' seconds')::interval,
-                    updated_at=clock_timestamp() WHERE id=:id
-            """), {"id": row["id"], "lease": str(self.lease_seconds)})
-            return True
+            outcomes = []
+            for ordinal, rows in batches:
+                self._budget()
+                now = session.execute(text("SELECT clock_timestamp()")).scalar_one()
+                if row["lease_expires_at"] <= now:
+                    raise RuntimeError("canonical_archive_preparation_fence_lost")
+                started = perf_counter()
+                inserted = self._stage_batch_in_session(
+                    session=session, row=row, catalog_kind=catalog_kind,
+                    ordinal=ordinal, rows=rows,
+                )
+                if inserted:
+                    refreshed = session.execute(text("""
+                        UPDATE market.fact_archive_preparations
+                        SET lease_expires_at=clock_timestamp()+(:lease || ' seconds')::interval,
+                            updated_at=clock_timestamp() WHERE id=:id
+                        RETURNING lease_expires_at
+                    """), {"id": row["id"], "lease": str(self.lease_seconds)}).scalar_one()
+                    row = dict(row)
+                    row["lease_expires_at"] = refreshed
+                outcomes.append((ordinal, len(rows), inserted, perf_counter() - started))
+            return tuple(outcomes)
+
+    def _stage_batch(self, *, day, preparation, catalog_kind: str, ordinal: int, rows):
+        return self._stage_batch_group(
+            day=day, preparation=preparation, catalog_kind=catalog_kind,
+            batches=((ordinal, rows),),
+        )[0][2]
 
     def stage(self, *, day, claim, alias_batch_rows: int, dependency_batch_rows: int):
         preparation = claim["preparation"]
@@ -372,29 +420,45 @@ class ArchiveGenerationCoordinator:
             ("aliases", claim["aliases"], alias_batch_rows),
             ("canonical_dependencies", claim["canonical_dependencies"], dependency_batch_rows),
         ):
-            for ordinal, offset in enumerate(range(0, len(rows), size)):
+            pending = tuple(
+                (ordinal, rows[offset:offset + size])
+                for ordinal, offset in enumerate(range(0, len(rows), size))
+            )
+            group_size = self.catalog_transaction_group_batches
+            for group_offset in range(0, len(pending), group_size):
                 self._budget()
-                batch = rows[offset:offset + size]
+                group = pending[group_offset:group_offset + group_size]
                 started = perf_counter()
                 try:
-                    inserted = self._stage_batch(
+                    outcomes = self._stage_batch_group(
                         day=day, preparation=preparation, catalog_kind=kind,
-                        ordinal=ordinal, rows=batch,
+                        batches=group,
                     )
                 except BaseException:
                     logger.info(
-                        "canonical_archive_prepared_catalog_batch | preparation_id=%s "
-                        "catalog=%s batch_ordinal=%s rows=%s outcome=failed seconds=%.6f",
-                        preparation["id"], kind, ordinal, len(batch),
+                        "canonical_archive_prepared_catalog_group | preparation_id=%s "
+                        "catalog=%s first_batch_ordinal=%s batches=%s rows=%s "
+                        "outcome=failed seconds=%.6f",
+                        preparation["id"], kind, group[0][0], len(group),
+                        sum(len(batch) for _ordinal, batch in group),
                         perf_counter() - started,
                     )
                     raise
+                total_seconds = perf_counter() - started
                 logger.info(
-                    "canonical_archive_prepared_catalog_batch | preparation_id=%s "
-                    "catalog=%s batch_ordinal=%s rows=%s outcome=%s seconds=%.6f",
-                    preparation["id"], kind, ordinal, len(batch),
-                    "committed" if inserted else "resumed", perf_counter() - started,
+                    "canonical_archive_prepared_catalog_group | preparation_id=%s "
+                    "catalog=%s first_batch_ordinal=%s batches=%s rows=%s "
+                    "outcome=committed seconds=%.6f",
+                    preparation["id"], kind, group[0][0], len(group),
+                    sum(len(batch) for _ordinal, batch in group), total_seconds,
                 )
+                for ordinal, row_count, inserted, batch_seconds in outcomes:
+                    logger.info(
+                        "canonical_archive_prepared_catalog_batch | preparation_id=%s "
+                        "catalog=%s batch_ordinal=%s rows=%s outcome=%s seconds=%.6f",
+                        preparation["id"], kind, ordinal, row_count,
+                        "committed" if inserted else "resumed", batch_seconds,
+                    )
         return self.mark_ready(day=day, preparation=preparation)
 
     def mark_ready(self, *, day, preparation):

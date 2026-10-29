@@ -364,6 +364,12 @@ number of distinct requested keys, witness count, optional bound-manifest
 cardinality, result cardinality, elapsed time and outcome. They never log record
 identities, bound values, payloads or object paths.
 
+Prepared archive catalogs also record one transaction-group event around the
+existing per-batch events. The group event is the non-overlapping transaction
+duration; inner batch durations exclude the shared session, lock and commit
+boundary and must not be added to it. Each group contains at most four original
+receipt batches. A failed group persists no batch from that transaction.
+
 One small PostgreSQL statistics snapshot is read after page admission and a
 second immediately before commit. The paired receipt names the archive
 backend PID and PostgreSQL version so an operator can correlate a separately

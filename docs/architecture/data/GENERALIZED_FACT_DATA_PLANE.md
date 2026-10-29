@@ -728,6 +728,14 @@ receipts. A retry claims the same compatible generation after its lease expires,
 increments the fence, and skips batches whose stored receipt matches exactly.
 Stale owners cannot append, mark ready, activate or clean the generation.
 
+The writer may commit up to four adjacent receipt batches in one database
+transaction. This changes only the transaction boundary: every original batch
+keeps its ordinal, row count, key range and content hash. The day lock, owner,
+fence and live lease are checked before the group, the work budget is checked
+between batches and the lease is refreshed as rows are staged. Cancellation or
+failure rolls back the whole bounded group; retry resumes from the first absent
+per-batch receipt. Readiness still recomputes every receipt and both full roots.
+
 Readiness is a proof, not a row-count shortcut. The writer rereads both hidden
 catalogs in canonical order, recomputes every batch receipt and both full content
 roots, and requires the saved cardinalities and monotone key ranges. Prepared

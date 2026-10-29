@@ -262,6 +262,79 @@ def test_ready_validation_rejects_count_preserving_catalog_change(
 
 
 @pytest.mark.db
+def test_catalog_transaction_group_keeps_per_batch_receipts_and_resumes(
+        storage, tmp_path, monkeypatch):
+    archive, day, _plan, claim = _unfinished_generation(
+        storage, tmp_path, monkeypatch,
+    )
+    template = claim["aliases"][0]
+    batches = tuple((ordinal, ({
+        **template,
+        "evidence_key": f"grouped-catalog-{ordinal}",
+    },)) for ordinal in range(4))
+
+    outcomes = archive._generation._stage_batch_group(
+        day=day, preparation=claim["preparation"],
+        catalog_kind="aliases", batches=batches,
+    )
+    assert [(ordinal, inserted) for ordinal, _rows, inserted, _seconds in outcomes] == [
+        (0, True), (1, True), (2, True), (3, True),
+    ]
+    resumed = archive._generation._stage_batch_group(
+        day=day, preparation=claim["preparation"],
+        catalog_kind="aliases", batches=batches,
+    )
+    assert [(ordinal, inserted) for ordinal, _rows, inserted, _seconds in resumed] == [
+        (0, False), (1, False), (2, False), (3, False),
+    ]
+    with storage.database.session() as session:
+        assert session.execute(text("""
+            SELECT count(*) FROM market.fact_archive_catalog_batches
+            WHERE preparation_id=:id AND catalog_kind='aliases'
+        """), {"id": claim["preparation"]["id"]}).scalar_one() == 4
+        assert session.execute(text("""
+            SELECT count(*) FROM market.fact_archive_prepared_material_aliases
+            WHERE preparation_id=:id
+        """), {"id": claim["preparation"]["id"]}).scalar_one() == 4
+
+
+@pytest.mark.db
+def test_catalog_transaction_group_cancellation_rolls_back_whole_group(
+        storage, tmp_path, monkeypatch):
+    archive, day, _plan, claim = _unfinished_generation(
+        storage, tmp_path, monkeypatch,
+    )
+    template = claim["aliases"][0]
+    batches = tuple((ordinal, ({
+        **template,
+        "evidence_key": f"cancelled-group-{ordinal}",
+    },)) for ordinal in range(4))
+    calls = 0
+
+    def cancel_during_group():
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("fixture_group_cancelled")
+
+    archive._generation.check_budget = cancel_during_group
+    with pytest.raises(RuntimeError, match="fixture_group_cancelled"):
+        archive._generation._stage_batch_group(
+            day=day, preparation=claim["preparation"],
+            catalog_kind="aliases", batches=batches,
+        )
+    with storage.database.session() as session:
+        assert session.execute(text("""
+            SELECT count(*) FROM market.fact_archive_catalog_batches
+            WHERE preparation_id=:id AND catalog_kind='aliases'
+        """), {"id": claim["preparation"]["id"]}).scalar_one() == 0
+        assert session.execute(text("""
+            SELECT count(*) FROM market.fact_archive_prepared_material_aliases
+            WHERE preparation_id=:id
+        """), {"id": claim["preparation"]["id"]}).scalar_one() == 0
+
+
+@pytest.mark.db
 def test_generation_migration_from_legacy_layout_is_idempotent_and_sets_reader_floor(storage):
     old_reader_body = COLD_FACT_READ_BODY.replace(
         "-- archive-generation-reader-floor-v1: older binaries must refuse this layout.\n",
@@ -343,10 +416,10 @@ def test_interrupted_catalog_batch_is_resumed_then_activated_without_legacy_copy
         "series_id": row["series_id"],
         "material_hash": row["material_hash"],
     })
-    original = archive._generation._stage_batch
+    original = archive._generation._stage_batch_group
     failed = False
 
-    def fail_after_committed_batch(**kwargs):
+    def fail_after_committed_group(**kwargs):
         nonlocal failed
         result = original(**kwargs)
         if not failed:
@@ -354,7 +427,7 @@ def test_interrupted_catalog_batch_is_resumed_then_activated_without_legacy_copy
             raise RuntimeError("fixture_interrupt_after_commit")
         return result
 
-    monkeypatch.setattr(archive._generation, "_stage_batch", fail_after_committed_batch)
+    monkeypatch.setattr(archive._generation, "_stage_batch_group", fail_after_committed_group)
     with pytest.raises(RuntimeError, match="fixture_interrupt_after_commit"):
         archive.stage_next_page(day)
     with storage.database.session() as session:
@@ -369,7 +442,7 @@ def test_interrupted_catalog_batch_is_resumed_then_activated_without_legacy_copy
             "SELECT count(*) FROM market.fact_archive_manifests WHERE storage_day=:day"
         ), {"day": day}).scalar_one() == 0
 
-    monkeypatch.setattr(archive._generation, "_stage_batch", original)
+    monkeypatch.setattr(archive._generation, "_stage_batch_group", original)
     result = archive.stage_next_page(day)
     assert result["status"] == "page_acknowledged" and result["catalog_generation"] == 1
     with storage.database.session() as session:
