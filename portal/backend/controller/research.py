@@ -19,6 +19,7 @@ from ..service.research import pass_gates as research_pass_gates
 from ..service.research import catalog as research_catalog
 from ..service.research import publication as research_publication
 from ..service.research import images as research_images
+from ..service.research import reports as research_reports
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -114,6 +115,42 @@ class ResearchImageRequest(BaseModel):
     alt_text: str = Field(min_length=1, max_length=2048)
     binding: Dict[str, str]
     content_base64: str = Field(min_length=1, max_length=research_images.MAX_ENCODED_BYTES)
+
+
+class StudyReportRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    title: str = Field(min_length=1, max_length=255)
+    publication_hash: str = Field(min_length=64, max_length=64)
+    html: str = Field(min_length=1, max_length=research_reports.MAX_BYTES)
+    source_qmd: str = Field(min_length=1, max_length=128 * 1024)
+    build: Dict[str, str]
+
+
+@router.post("/items/{item_id}/reports", status_code=201)
+def attach_study_report(item_id: str, body: StudyReportRequest):
+    return _read_call(research_reports.attach, item_id, body.model_dump())
+
+
+@router.get("/items/{item_id}/reports")
+def list_study_reports(item_id: str):
+    return _read_call(research_reports.list_reports, item_id)
+
+
+@router.get("/items/{item_id}/reports/{report_id}/content")
+def study_report_content(item_id: str, report_id: str):
+    content = _read_call(research_reports.get_content, item_id, report_id)
+    return Response(content, media_type="text/html", headers={
+        "Content-Security-Policy": "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer"})
+
+
+@router.get("/items/{item_id}/reports/{report_id}/source")
+def study_report_source(item_id: str, report_id: str):
+    content = _read_call(research_reports.get_content, item_id, report_id, source=True)
+    return Response(content, media_type="application/json", headers={
+        "Content-Disposition": 'attachment; filename="study-report-source.json"',
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
 
 
 def _image_call(handler, *args):

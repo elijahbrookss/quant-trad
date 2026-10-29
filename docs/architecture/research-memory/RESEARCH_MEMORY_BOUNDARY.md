@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/session.py
   - cli/main.py
+  - scripts/reporting/quarto_study_pilot.py
   - scripts/db/manual_migration_research_memory_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
 ---
@@ -71,6 +72,81 @@ Research memory must not:
 - treat overlays or debug details as strategy evidence,
 - fetch provider data outside existing data-boundary services,
 - reconstruct report truth or runtime truth.
+
+## Derived Quarto Study report pilot
+
+A prebuilt report can explain one exact published interpretation without
+executing research or changing its conclusion. `qt research reports attach
+<study_id> --request-json <file>` admits a bounded inert HTML fragment, its QMD
+source and build provenance into the reserved `study_reports_v1` extension of
+the existing Study JSON payload. This uses the existing PostgreSQL boundary
+without new tables, migrations, filesystem custody or an additional DSN.
+Generic item creation rejects this reserved extension. The service locks the
+Study row, validates its publication history and evidence access, and retains
+the same exact publication/reference binding used by Study images. It appends
+at most three content-addressed reports; identical retries are idempotent.
+The original body, interpretation history and scientific evidence stay intact.
+
+HTML is reconstructed through a small element/attribute allowlist. Scripts,
+SVG, forms, embeds, inline styles, external URLs and path-bearing resources
+are rejected. Only validated embedded static PNGs and fragment links are
+admitted, with at most eight images and 24 megapixels total. HTML is limited to
+2 MiB, QMD to 128 KiB, and the resulting Study
+payload to 7 MiB. Readers verify the content-addressed report and retained
+binding again. No request parameter becomes a local path. List reads omit
+HTML/source bytes; original record export continues retaining the exact JSON.
+
+`GET /api/research/items/{id}/reports` supplies metadata and a server-owned stale
+flag when a later interpretation exists. Content and source endpoints use the
+existing private API/proxy boundary; they create no new public hosting route.
+Content has `text/html`, `nosniff`, `no-store`, no-referrer and a CSP sandbox
+with default network access denied, embedded PNGs and server-owned inline CSS
+only. The V2 Report tab additionally uses an empty iframe sandbox, preserving
+an opaque origin and denying scripts, forms, popups and top navigation. Report
+selection matches the exact displayed interpretation hash; another revision's
+report never silently substitutes. Summary remains the default view and the
+reader can return to it at any time. A report read failure leaves Summary and
+the other independently loaded sections available.
+On narrow screens, chart image containers scroll horizontally so labels remain
+readable while captions wrap to the viewport. An optional full-page reader link
+uses the same private content endpoint and CSP sandbox.
+
+Production never executes QMD, Python or Quarto. The manually authored
+`scripts/reporting/quarto_study_pilot.py` reads the approved saved-evidence ZIP,
+checks its checksums and exact selected interpretation/result identities, and
+plots only already-retained aggregate fields using Matplotlib. Its QMD is an
+experience pilot, not a standard or an AI authoring format. Official Quarto
+renders with execution disabled inside Bubblewrap namespaces: no network, no
+host home/credentials, a temporary writable work directory, read-only system
+tools, a 256 MiB V8 heap, 60 seconds CPU, 90 seconds wall time and a 32 MiB
+output-file limit. Temporary render directories are removed on success/failure.
+The output records the Quarto version, source commit and evidence ZIP SHA-256.
+No generation task runs in the production backend, and no API provider is added.
+
+The narrative, exact Study identities and private evidence stay outside Git.
+To reproduce the privately selected pilot, use the repo Python environment (including Matplotlib),
+Linux Bubblewrap and the official Quarto Linux tarball, then run:
+
+```bash
+PYTHONPATH=.:src .venv/bin/python scripts/reporting/quarto_study_pilot.py \
+  /private/evidence.zip --quarto /private/quarto/bin/quarto \
+  --source-qmd /private/report.qmd --study-id STUDY_ID \
+  --publication-hash PUBLICATION_HASH --check-id CHECK_ID --result-hash RESULT_HASH \
+  --output /private/report-upload.json
+qt research reports attach STUDY_ID \
+  --request-json /private/report-upload.json
+```
+
+Retain the exact evidence ZIP and source commit for reproducibility. The source
+download includes QMD, build provenance and binding; chart generation remains
+in that source commit. Upload does not prove authorship correctness, replay,
+causality or profitability. Future AI authorship would need separate generated
+code safety and scientific validation. No report deletion or replacement is
+exposed: corrections append within the bound. Rollback is selecting Summary
+or rolling back application code; existing records remain readable as JSON.
+Remove only explicitly identified local build packages after retaining the
+report, evidence and source receipts; never remove Study/evidence records as
+build cleanup.
 
 ## Static Check and Study images
 

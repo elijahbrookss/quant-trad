@@ -56,6 +56,10 @@ export function researchImageContentUrl(itemId, imageId) {
   return `${BASE}${itemPath(itemId)}/images/${encodeURIComponent(imageId)}/content`
 }
 export function researchRecordUrl(itemId) { return `${BASE}${itemPath(itemId)}/record` }
+export function fetchStudyReports(itemId, options = {}) { return request(`${itemPath(itemId)}/reports`, options) }
+export function studyReportUrl(itemId, reportId, source = false) {
+  return `${BASE}${itemPath(itemId)}/reports/${encodeURIComponent(reportId)}/${source ? 'source' : 'content'}`
+}
 export function fetchResearchExportPreflight(itemId, params = {}, options = {}) {
   return request(`${itemPath(itemId)}/export/preflight${buildQuery(params)}`, options)
 }

@@ -101,6 +101,9 @@ _RESEARCH_ACTIVITY_MAX_DAYS = 366
 
 def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
     from .publication import KEY
+    from .reports import KEY as REPORT_KEY
+    if REPORT_KEY in _mapping_or_empty(payload.get("payload")):
+        raise ValueError("study_report_write_reserved: use explicit report attachment")
     if KEY in _mapping_or_empty(payload.get("payload")):
         raise ValueError("question_contract_write_reserved: use explicit question adoption/publication")
     kind = _normalize_choice(payload.get("kind"), "kind", RESEARCH_ITEM_KINDS)
