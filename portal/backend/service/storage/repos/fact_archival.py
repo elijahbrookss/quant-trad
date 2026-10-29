@@ -21,7 +21,8 @@ from market_data.archive import RawArchiveObjectStore, RawArchiveReadLimits
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from market_data.canonical_storage import legacy_material_alias, record_from_storage_row, verify_archived_envelope
 from market_data.fact_archive import (
-    FactArchiveLimits, publish_canonical_fact_archive, read_canonical_fact_archive,
+    CanonicalArchiveReadPage, FactArchiveLimits,
+    publish_canonical_fact_archive, read_canonical_fact_archive,
     verify_canonical_fact_archive_rows, archive_evidence_hash,
 )
 from portal.backend.db import (
@@ -1353,27 +1354,33 @@ class PostgresCanonicalFactArchiveRepository:
                 phase=phase, day=day, page_ordinal=ordinal,
                 seconds=seconds, outcome=outcome,
             )
-            manifest = _timed_stage_call(
-                phase="archive_publish_total", day=day, page_ordinal=ordinal,
-                operation=lambda: publish_canonical_fact_archive(
-                    rows, object_store=self.object_store,
-                    temporary_directory=self.temporary_directory, limits=self.limits,
-                    phase_observer=observer,
-                ),
-            )
-            _timed_stage_call(
-                phase="archive_page_readback", day=day, page_ordinal=ordinal,
-                operation=lambda: read_canonical_fact_archive(
-                    self.object_store.local_path(manifest.object_key),
-                    expected=manifest, limits=self.limits,
-                ),
-            )
-            _timed_stage_call(
-                phase="source_row_verification", day=day, page_ordinal=ordinal,
-                operation=lambda: verify_canonical_fact_archive_rows(
-                    rows, expected=manifest, limits=self.limits,
-                ),
-            )
+            decoded_page = CanonicalArchiveReadPage()
+            try:
+                manifest = _timed_stage_call(
+                    phase="archive_publish_total", day=day, page_ordinal=ordinal,
+                    operation=lambda: publish_canonical_fact_archive(
+                        rows, object_store=self.object_store,
+                        temporary_directory=self.temporary_directory, limits=self.limits,
+                        phase_observer=observer, decoded_page=decoded_page,
+                    ),
+                )
+                archived_rows = _timed_stage_call(
+                    phase="archive_page_readback", day=day, page_ordinal=ordinal,
+                    operation=lambda: read_canonical_fact_archive(
+                        self.object_store.local_path(manifest.object_key),
+                        expected=manifest, limits=self.limits,
+                        decoded_page=decoded_page,
+                    ),
+                )
+                _timed_stage_call(
+                    phase="source_row_verification", day=day, page_ordinal=ordinal,
+                    operation=lambda: verify_canonical_fact_archive_rows(
+                        rows, expected=manifest, limits=self.limits,
+                        archived_rows=archived_rows,
+                    ),
+                )
+            finally:
+                decoded_page.clear()
             self._check_budget()
 
             aliases = tuple(

@@ -116,12 +116,22 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
     assert archive.inspect_partition(day)["page_count"] == 0
     assert list(store.root.rglob("*.parquet")) == []
 
+    decoded_pages = []
+    actual_decoded_page = fact_archival.CanonicalArchiveReadPage
+
+    class TrackingDecodedPage(actual_decoded_page):
+        def __init__(self):
+            super().__init__()
+            decoded_pages.append(self)
+
     def interrupted(*_, **__):
         raise RuntimeError("injected interruption before catalog commit")
     with monkeypatch.context() as patch:
+        patch.setattr(fact_archival, "CanonicalArchiveReadPage", TrackingDecodedPage)
         patch.setattr(fact_archival, "verify_canonical_fact_archive_rows", interrupted)
         with pytest.raises(RuntimeError, match="injected interruption"):
             archive.stage_next_page(day)
+    assert len(decoded_pages) == 1 and decoded_pages[0]._entry is None
     assert archive.inspect_partition(day)["page_count"] == 0
     assert len(list(store.root.rglob("*.parquet"))) == 1
 

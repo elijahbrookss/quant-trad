@@ -326,12 +326,41 @@ def _timed_archive_phase(phase_observer, phase, operation):
 def verify_canonical_fact_archive_rows(
     rows: Iterable[Mapping[str, Any]], *, expected: FactArchiveManifest,
     limits: FactArchiveLimits = FactArchiveLimits(),
+    archived_rows: Iterable[Mapping[str, Any]] | None = None,
 ) -> None:
     """Prove a source page equals a separately verified object's full contents.
 
     This checks completeness and exact fields, not the object's bytes. Callers
     must also use read_canonical_fact_archive before committing admission.
     """
+    if archived_rows is not None:
+        missing = object()
+        source_count = 0
+        source = iter(rows)
+        archived = iter(archived_rows)
+        while True:
+            execution_checkpoint()
+            source_row = next(source, missing)
+            archived_row = next(archived, missing)
+            if source_row is missing or archived_row is missing:
+                if source_row is archived_row is missing:
+                    break
+                raise RuntimeError(
+                    f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}"
+                )
+            if source_row != archived_row:
+                raise RuntimeError(
+                    f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}"
+                )
+            source_count += 1
+            if source_count > limits.max_rows:
+                raise ValueError("canonical_archive_limit_exceeded: source row count")
+        if source_count != expected.row_count:
+            raise RuntimeError(
+                f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}"
+            )
+        return
+
     contents = _Contents(limits)
     for row in rows:
         contents.add(row)
@@ -492,6 +521,7 @@ def encode_canonical_fact_archive(
     rows: Iterable[Mapping[str, Any]], *, temporary_directory: Path,
     limits: FactArchiveLimits = FactArchiveLimits(),
     phase_observer: Callable[[str, float, str], None] | None = None,
+    decoded_page: CanonicalArchiveReadPage | None = None,
 ) -> EncodedFactArchive:
     """Encode a strictly commit/ID-ordered bounded page; never truncate a page."""
     root = Path(temporary_directory)
@@ -527,7 +557,9 @@ def encode_canonical_fact_archive(
         manifest = _timed_archive_phase(phase_observer, "archive_staging_fsync_hash", fsync_hash)
         _timed_archive_phase(
             phase_observer, "archive_staging_readback",
-            lambda: read_canonical_fact_archive(path, expected=manifest, limits=limits),
+            lambda: read_canonical_fact_archive(
+                path, expected=manifest, limits=limits, decoded_page=decoded_page,
+            ),
         )
         return EncodedFactArchive(path=path, manifest=manifest)
     except BaseException:
@@ -538,11 +570,12 @@ def publish_canonical_fact_archive(
     rows: Iterable[Mapping[str, Any]], *, object_store: RawArchiveObjectStore,
     temporary_directory: Path, limits: FactArchiveLimits = FactArchiveLimits(),
     phase_observer: Callable[[str, float, str], None] | None = None,
+    decoded_page: CanonicalArchiveReadPage | None = None,
 ) -> FactArchiveManifest:
     """Acknowledge verified bytes only; the caller must commit the manifest before retention."""
     encoded = encode_canonical_fact_archive(
         rows, temporary_directory=temporary_directory, limits=limits,
-        phase_observer=phase_observer,
+        phase_observer=phase_observer, decoded_page=decoded_page,
     )
     try:
         manifest = encoded.manifest
@@ -561,6 +594,7 @@ def publish_canonical_fact_archive(
             phase_observer, "archive_publish_readback",
             lambda: read_canonical_fact_archive(
                 object_store.local_path(manifest.object_key), expected=manifest, limits=limits,
+                decoded_page=decoded_page,
             ),
         )
         return manifest

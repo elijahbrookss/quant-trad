@@ -323,8 +323,14 @@ isolate mutable consumer payloads, and completion, early exit and cancellation
 release the retained page. Separate reads do not share this memory. This is one
 bounded page in addition to normal working data, not an RSS ceiling or a new
 persisted cache. Lifecycle and recovery verification do not opt into reuse.
-This change is locally implemented on the request-scoped archive decode branch;
-it is not part of the already-staged `a6586558` release.
+
+Canonical COPY publication applies the same bounded evidence only within one
+page operation. The staging readback decodes and validates the page once;
+published-object and outer page readbacks still hash their currently selected
+files before reusing defensive decoded rows. Source rows must then equal those
+verified decoded rows exactly. Completion, cancellation and failure clear the
+page in `finally`. Partition verification and final reclamation do not consume
+this evidence and continue to perform their independent fresh-byte proofs.
 
 The shared filesystem implementation bounds cache bytes (including allocation
 rounding), entries (8,192), fill time (30 seconds) and per-operation fill bytes.
