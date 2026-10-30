@@ -58,6 +58,7 @@ code_paths:
   - portal/backend/service/research/directional_model.py
   - portal/backend/service/research/candle_state_comparison_evaluator.py
   - portal/backend/service/research/candle_state_comparison_v2_evaluator.py
+  - portal/backend/service/research/candle_state_comparison_v3_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/first_return_evaluator.py
@@ -1344,6 +1345,16 @@ episode, candle, feature, missingness, and exclusion context. Future endpoints,
 labels, returns, and paths remain outside selection admission. Feature bindings,
 selection rows, paired population, predictions, definition, request, plan, and
 result stay hashed under the canonical Check envelope.
+
+`raw_forward_outcome@23` explicitly selects
+`candle_state_paired_comparison.v3`. It preserves versions 21 and 22 and adds
+the existing identity and `times_return_sign` transforms to typed candle
+features on either side. Historical sign uses only exact contiguous native
+candles known by the decision close; every intermediate candle through the
+configured sign lookback is required, and an exact flat change maps to zero.
+Transform parameters remain in the configured definition, feature-binding hash,
+selection audit, and canonical evidence lineage. No provider, Fact, persistence,
+model, target, fold, buffer, or execution contract changes.
 It composes the existing sequential retreat-inclusive recognizer, the shared
 call-scoped `CompletedEventContext`, reversal-owned inclusive recovery duration,
 and unchanged `first_passage_path`. The matched selector also uses this context

@@ -97,7 +97,12 @@ def _timestamp(value: Any, *, field: str) -> str:
     return _iso(_clock(value, field))
 
 
-def _normalize_feature(spec: Any, *, side: str) -> dict[str, Any]:
+def _normalize_feature(
+    spec: Any,
+    *,
+    side: str,
+    allow_ordinary_transforms: bool = False,
+) -> dict[str, Any]:
     row = _mapping(spec, field="statistics.features")
     name = str(row.get("name") or "").strip()
     operator = str(row.get("operator") or "").strip()
@@ -115,6 +120,25 @@ def _normalize_feature(spec: Any, *, side: str) -> dict[str, Any]:
                 row.get("period"), field=f"feature.{name}.period", minimum=1, maximum=10_000
             )
             allowed.add("period")
+        if allow_ordinary_transforms:
+            transform = str(row.get("transform") or "identity").strip()
+            if transform not in TRANSFORMS:
+                raise ValueError("candle_state_comparison_invalid: unsupported candle feature transform")
+            row["transform"] = transform
+            allowed.add("transform")
+            if transform == "times_return_sign":
+                row["sign_lookback_bars"] = _integer(
+                    row.get("sign_lookback_bars"),
+                    field=f"feature.{name}.sign_lookback_bars",
+                    minimum=1,
+                    maximum=10_000,
+                )
+                if str(row.get("zero_sign") or "zero") != "zero":
+                    raise ValueError(
+                        "candle_state_comparison_invalid: exact flat historical return must map to zero"
+                    )
+                row["zero_sign"] = "zero"
+                allowed.update({"sign_lookback_bars", "zero_sign"})
         if set(row) - allowed:
             raise ValueError(f"candle_state_comparison_invalid: unsupported fields for feature {name}")
         return {key: row[key] for key in sorted(allowed)}
@@ -168,17 +192,30 @@ def _normalize_feature(spec: Any, *, side: str) -> dict[str, Any]:
     return result
 
 
-def _normalize_statistics(value: Any, *, timeframe_seconds: int) -> dict[str, Any]:
+def _normalize_statistics(
+    value: Any,
+    *,
+    timeframe_seconds: int,
+    allow_ordinary_transforms: bool = False,
+) -> dict[str, Any]:
     config = _mapping(value, field="statistics")
     if set(config) - {"features", "folds", "model", "purge_bars", "embargo_bars", "bootstrap", "eligibility", "criteria", "elapsed_buffer_seconds"}:
         raise ValueError("candle_state_comparison_invalid: unsupported statistics fields")
     features = _mapping(config.get("features"), field="statistics.features")
     baseline = [
-        _normalize_feature(row, side="baseline")
+        _normalize_feature(
+            row,
+            side="baseline",
+            allow_ordinary_transforms=allow_ordinary_transforms,
+        )
         for row in _list(features.get("baseline"), field="features.baseline")
     ]
     enriched = [
-        _normalize_feature(row, side="enriched")
+        _normalize_feature(
+            row,
+            side="enriched",
+            allow_ordinary_transforms=allow_ordinary_transforms,
+        )
         for row in _list(features.get("enriched"), field="features.enriched")
     ]
     names = [row["name"] for row in baseline + enriched]
@@ -271,7 +308,17 @@ def _normalize_statistics(value: Any, *, timeframe_seconds: int) -> dict[str, An
     }
 
 
-def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy):
+def _normalize_configuration(
+    *,
+    detector,
+    outcomes,
+    statistics,
+    inputs,
+    scope,
+    gap_policy,
+    schema_version: str,
+    allow_ordinary_transforms: bool,
+):
     detector = _mapping(detector, field="detector")
     if detector != {"type": "candle_close", "sampling": "ordinary_native_close"}:
         raise ValueError("candle_state_comparison_invalid: ordinary native candle-close sampling required")
@@ -286,7 +333,7 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
         raise ValueError("candle_state_comparison_invalid: positive native timeframe required")
     config = _mapping(outcomes, field="outcomes")
     allowed = {"schema_version", "horizon_seconds", "horizon_bars", "primary", "continuation", "magnitude", "outcome_boundary"}
-    if set(config) - allowed or config.get("schema_version") != SCHEMA:
+    if set(config) - allowed or config.get("schema_version") != schema_version:
         raise ValueError("candle_state_comparison_invalid: explicit candle-state schema required")
     horizon = _integer(config.get("horizon_seconds"), field="outcomes.horizon_seconds", minimum=seconds, maximum=86400 * 30)
     if horizon % seconds:
@@ -312,7 +359,7 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
     if str(config.get("outcome_boundary")) != "evaluation_end_exclusive":
         raise ValueError("candle_state_comparison_invalid: strict evaluation boundary required")
     normalized_outcomes = {
-        "schema_version": SCHEMA,
+        "schema_version": schema_version,
         "horizon_seconds": horizon,
         "horizon_bars": horizon // seconds,
         "primary": {"type": "forward_close_gt_current", "flat": "class_zero"},
@@ -320,7 +367,24 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
         "magnitude": {"endpoint": "absolute_log_return", "path": "sum_squared_native_log_returns"},
         "outcome_boundary": "evaluation_end_exclusive",
     }
-    return normalized_outcomes, _normalize_statistics(statistics, timeframe_seconds=seconds)
+    return normalized_outcomes, _normalize_statistics(
+        statistics,
+        timeframe_seconds=seconds,
+        allow_ordinary_transforms=allow_ordinary_transforms,
+    )
+
+
+def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, gap_policy):
+    return _normalize_configuration(
+        detector=detector,
+        outcomes=outcomes,
+        statistics=statistics,
+        inputs=inputs,
+        scope=scope,
+        gap_policy=gap_policy,
+        schema_version=SCHEMA,
+        allow_ordinary_transforms=False,
+    )
 
 
 def _cluster_ci(rows: Sequence[Mapping[str, Any]], *, cluster_days: int, anchor: str,
@@ -463,6 +527,21 @@ def _ordinary_feature_values(
                 )
         elif operator == "atr_fraction":
             causal = episode_known_at <= decision
+        transform = str(spec.get("transform") or "identity")
+        if causal and value is not None and transform == "times_return_sign":
+            sign_lookback = int(spec["sign_lookback_bars"])
+            sign_sources = [
+                by_open.get(current["open_time"] - step * offset)
+                for offset in range(0, sign_lookback + 1)
+            ]
+            causal = all(
+                row is not None and row["known_at"] <= decision
+                for row in sign_sources
+            )
+            if causal:
+                prior = sign_sources[-1]
+                delta = float(current["close"]) - float(prior["close"])
+                value *= 1.0 if delta > 0 else -1.0 if delta < 0 else 0.0
         if not causal or value is None:
             values[name] = None
             unavailable.append(name)
@@ -492,7 +571,7 @@ class CandleStateComparisonV2Evaluator:
             for row in all_features
         ] + [
             int(row.get("sign_lookback_bars") or 0)
-            for row in indicator_features
+            for row in all_features
         ] + [
             int(row["indicator"]["params"]["warmup_bars"])
             for row in indicator_features
@@ -930,7 +1009,7 @@ class CandleStateComparisonV2Evaluator:
             }
 
         result = {
-            "schema_version": RESULT_SCHEMA, "check_family": checks.RAW_FORWARD_OUTCOME,
+            "schema_version": self.result_schema_version, "check_family": checks.RAW_FORWARD_OUTCOME,
             "status": "completed", "event_ownership": "check", "method_version": self.version,
             "population": "ordinary_native_candle_closes", "sample_count": len(complete_rows),
             "opportunities": dict(opportunities), "exclusions": dict(exclusions),
