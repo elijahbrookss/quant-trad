@@ -87,6 +87,7 @@ services:
     env_file:
       - ../secrets.env
     environment:
+      QT_STORAGE_GRAFANA_DASHBOARD_URL: ${QT_STORAGE_GRAFANA_DASHBOARD_URL:-}
       <<: *market-data-lifecycle-environment
       PYTHONPATH: /app/src:/app
       QT_CONFIG_PROFILE: ${QT_CONFIG_PROFILE:-dev}
@@ -294,6 +295,9 @@ services:
       - "3000:3000"
     env_file:
       - ../secrets.env
+      # Metrics credentials belong only to Grafana, not the shared service env.
+      - path: ${QT_GRAFANA_STORAGE_ENV_FILE:-../../grafana-storage-metrics.env}
+        required: false
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -303,6 +307,20 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Disabled by default; selecting the restricted datasource requires an
+      # explicit operator-reviewed access/configuration installation.
+      - type: bind
+        source: ${QT_GRAFANA_STORAGE_DATASOURCE_FILE:-./grafana/provisioning/datasources/storage-metrics.yml}
+        target: /etc/grafana/provisioning/datasources/storage-metrics.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QT_GRAFANA_STORAGE_DASHBOARD_FILE:-./grafana/provisioning/dashboards/capacity-database-growth.json}
+        target: /etc/grafana/provisioning/dashboards/capacity-database-growth.json
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - quanttrad
 

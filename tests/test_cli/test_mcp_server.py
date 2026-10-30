@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from cli.api import ApiError
+from cli.main import main as cli_main
 from cli.mcp_server import McpError, QuantTradMcpServer
 from cli.experiments.state_store import ExperimentStateStore
 
@@ -15,6 +17,10 @@ class _FakeClient:
 
     def request_json(self, method: str, path: str, *, params=None, payload=None):
         self.calls.append((method, path, params, payload))
+        if method == "GET" and path == "/api/research/checks/definitions":
+            return {"definitions": []}
+        if method == "GET" and path.startswith("/api/research/checks/definitions/"):
+            return {"definition": {"id": "synthetic"}}
         if method == "GET" and path == "/api/health":
             return {"status": "ok"}
         if (
@@ -334,7 +340,7 @@ def test_mcp_research_tools_share_api_contract_and_guard_writes(tmp_path):
 
     assert requirements["path"] == "/api/research/checks/requirements"
     assert preview["payload"]["mode"] == "preview"
-    assert prepared["payload"]["preparation"] == {"freeze": False}
+    assert prepared["payload"]["preparation"] == {"freeze": False, "acquire_missing": False}
     assert evidence["payload"]["mode"] == "evidence"
     assert evidence["payload"]["dataset_id"] == "mds-1"
     assert dispatched["path"] == "/api/research/jobs/checks/run"
@@ -667,3 +673,170 @@ def test_series_resource_delegates_to_metadata_api_without_local_counts():
     server = QuantTradMcpServer(client_factory=Client)
     result = server.read_resource("quanttrad://data/series?instrument_id=btc")
     assert result == {"schema_version": "market_series_metadata.v1", "series": [{"id": 1}]}
+
+
+class _DispatchClient:
+    def __init__(self, receipt=None, error=None):
+        self.receipt = receipt
+        self.error = error
+        self.calls = []
+
+    def request_json(self, method, path, *, payload=None):
+        self.calls.append((method, path, payload))
+        if self.error is not None:
+            raise self.error
+        return dict(self.receipt)
+
+
+def _dispatch_message(arguments):
+    return {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "dispatch_research_check_evidence", "arguments": arguments},
+    }
+
+
+@pytest.mark.parametrize("single_attempt", [None, False, True])
+@pytest.mark.parametrize("dataset_override", [None, "mds-override"])
+def test_cli_mcp_dispatch_preserve_route_payload_and_complete_receipt(
+    tmp_path, monkeypatch, capsys, single_attempt, dataset_override,
+):
+    receipt = {
+        "schema_version": "research_job_dispatch.v1", "job_id": "job-1",
+        "job_type": "research_check_run", "status": "running", "reused": True,
+        "attempts": 1, "max_attempts": 1 if single_attempt else 2,
+        "request_fingerprint": "scientific-request-fingerprint",
+        "status_url": "/api/research/jobs/job-1",
+        "result_url": "/api/research/jobs/job-1/result",
+    }
+    client = _DispatchClient(receipt=receipt)
+    monkeypatch.setattr("cli.main._client", lambda _args: client)
+    server = _server(tmp_path, client=client)
+    request = {
+        "mode": "preview", "scope": {"instrument_id": "inst-1"},
+        "detector": {"type": "raw_condition", "field": "close"},
+        "dataset_id": "mds-in-request", "tags": ["fixture"],
+    }
+    original = json.loads(json.dumps(request))
+    argv = ["--no-audit-log", "research", "check", "run", "--request-json",
+            json.dumps(request), "--dispatch", "--format", "json"]
+    arguments = {"request": request, "confirm": True}
+    if single_attempt is not None:
+        arguments["single_attempt"] = single_attempt
+    if single_attempt:
+        argv.append("--single-attempt")
+    if dataset_override:
+        argv.extend(["--dataset-id", dataset_override])
+        arguments["dataset_id"] = dataset_override
+    assert cli_main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == receipt
+    response = server.handle(_dispatch_message(arguments))
+    assert response["result"]["isError"] is False
+    assert json.loads(response["result"]["content"][0]["text"]) == receipt
+    expected = {**original, "mode": "evidence"}
+    if dataset_override:
+        expected["dataset_id"] = dataset_override
+    path = "/api/research/jobs/checks/run-once" if single_attempt else "/api/research/jobs/checks/run"
+    assert client.calls == [("POST", path, expected), ("POST", path, expected)]
+    assert request == original
+
+
+@pytest.mark.parametrize("status,body", [
+    (400, '{"detail":"research_job_attempt_policy_mismatch: job_id=existing; reconcile existing job, do not redispatch"}'),
+    (503, '{"detail":"research_job_dispatch_receipt_unavailable: job_id=reconcile-me; reconcile before retry"}'),
+    (404, '{"detail":"Not Found"}'),
+    (None, None),
+])
+def test_cli_mcp_dispatch_failures_preserve_reconciliation_detail_without_retry(
+    tmp_path, monkeypatch, capsys, status, body,
+):
+    error = ApiError("dispatch failed; outcome may be unknown", status=status, body=body)
+    client = _DispatchClient(error=error)
+    monkeypatch.setattr("cli.main._client", lambda _args: client)
+    server = _server(tmp_path, client=client)
+    request = {"scope": {}, "detector": {}, "dataset_id": "mds-1"}
+    assert cli_main([
+        "--no-audit-log", "research", "check", "run", "--request-json",
+        json.dumps(request), "--dispatch", "--single-attempt", "--format", "json",
+    ]) == 1
+    expected = {"error": str(error)}
+    if status is not None:
+        expected["status"] = status
+    if body:
+        expected["body"] = body
+    assert json.loads(capsys.readouterr().out) == expected
+    response = server.handle(_dispatch_message({
+        "request": request, "confirm": True, "single_attempt": True,
+    }))
+    assert response["error"]["code"] == -32000
+    assert response["error"]["message"] == str(error)
+    data = {key: value for key, value in expected.items() if key != "error"}
+    assert response["error"].get("data") == (data or None)
+    expected_call = ("POST", "/api/research/jobs/checks/run-once", {**request, "mode": "evidence"})
+    # Exactly one request per interface, including route absence and unknown outcome.
+    assert client.calls == [expected_call, expected_call]
+
+
+@pytest.mark.parametrize("value", [None, "false", 0, 1, {}, []])
+def test_mcp_single_attempt_requires_declared_boolean_before_dispatch(tmp_path, value):
+    client = _DispatchClient()
+    response = _server(tmp_path, client=client).handle(_dispatch_message({
+        "request": {"scope": {}, "detector": {}}, "confirm": True,
+        "single_attempt": value,
+    }))
+    assert response["error"]["code"] == -32602
+    assert response["error"]["message"] == "single_attempt must be a boolean"
+    assert client.calls == []
+
+
+def test_mcp_single_attempt_schema_and_confirmation_guard(tmp_path):
+    client = _DispatchClient()
+    server = _server(tmp_path, client=client)
+    listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    spec = next(t for t in listed["result"]["tools"] if t["name"] == "dispatch_research_check_evidence")
+    assert spec["inputSchema"]["properties"]["single_attempt"] == {"type": "boolean", "default": False}
+    response = server.handle(_dispatch_message({
+        "request": {"scope": {}, "detector": {}}, "single_attempt": True,
+    }))
+    assert response["error"]["code"] == -32602
+    assert "confirm=true" in response["error"]["message"]
+    assert client.calls == []
+
+
+def test_research_catalog_tools_use_existing_readonly_api_contract(tmp_path):
+    client=_FakeClient();server=_server(tmp_path,client=client)
+    before=len(client.calls)
+    server.call_tool('list_research_check_definitions',{})
+    server.call_tool('get_research_check_definition',{'definition_id':'raw_forward_outcome','version':'17'})
+    calls=client.calls[before:]
+    assert len(calls)==2 and all(call[0]=='GET' for call in calls)
+    assert calls[0][1]=='/api/research/checks/definitions'
+    assert calls[1][1]=='/api/research/checks/definitions/raw_forward_outcome/17'
+    with pytest.raises(McpError):server.call_tool('get_research_check_definition',{'definition_id':'raw_forward_outcome'})
+
+
+def test_saved_selection_and_execution_snapshot_mcp_use_shared_operations(tmp_path):
+    client=_FakeClient();server=_server(tmp_path,client=client)
+    server.call_tool('prepare_saved_selection_measurement_request',{'source_check_id':'saved','expected_hashes':{'result_hash':'a'*64}})
+    server.call_tool('get_research_execution_snapshot',{'request':{'scope':{},'detector':{}},'job_id':'known','limit':2})
+    assert client.calls==[
+        ('POST','/api/research/checks/saved-selection/request',None,{'source_check_id':'saved','measurement_profile':'18','expected_hashes':{'result_hash':'a'*64}}),
+        ('POST','/api/research/jobs/snapshot',None,{'limit':2,'request':{'scope':{},'detector':{},'mode':'evidence'},'job_id':'known'})]
+    listed=server.handle({'jsonrpc':'2.0','id':1,'method':'tools/list'})['result']['tools']
+    tools={t['name']:t for t in listed}
+    assert tools['get_research_execution_snapshot']['inputSchema']['properties']['limit']['maximum']==100
+    assert 'confirm' not in tools['prepare_saved_selection_measurement_request']['inputSchema']['properties']
+    with pytest.raises(McpError):
+        server.call_tool('prepare_saved_selection_measurement_request',{'source_check_id':'saved','expected_hashes':'not-an-object'})
+
+
+def test_mcp_preparation_acquisition_is_explicit_and_confirmed(tmp_path):
+    server = _server(tmp_path, client=_FakeClient())
+    request = {"scope": {}, "preparation": {"acquire_missing": True, "freeze": True}, "acquire_missing": True}
+    inspected = server.call_tool("prepare_research_check_evidence", {"request": request})
+    assert inspected["payload"]["preparation"] == {"freeze": False, "acquire_missing": False}
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool("prepare_research_check_evidence", {"request": request, "acquire_missing": True})
+    acquired = server.call_tool("prepare_research_check_evidence",
+        {"request": request, "acquire_missing": True, "freeze": True, "confirm": True})
+    assert acquired["path"] == "/api/research/checks/prepare"
+    assert acquired["payload"]["preparation"] == {"freeze": True, "acquire_missing": True}

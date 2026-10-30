@@ -143,10 +143,12 @@ def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archi
     prefixes += [{**scope, "root_fact_version_id": f"overlap-{index}"}
                  for index, scope in enumerate(prefixes[:6])]
     bound = {identity for fixture in fixtures for identity in fixture.manifests}
-    returned = []
+    returned, queries = [], []
     def observe(conn, cursor, statement, parameters, context, executemany):
-        if "raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement:
+        if ("raw_archive_record_mappings AS mappings" in statement and "AS prefixes(" in statement
+                and not statement.startswith("EXPLAIN")):
             returned.append(cursor.rowcount)
+            queries.append((statement, parameters))
     event.listen(storage.database._engine, "after_cursor_execute", observe)
     try:
         with storage.database.session() as session:
@@ -156,6 +158,22 @@ def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archi
                 book_prefix_ranges=prefixes, max_mapping_rows=len(prefixes), bound_manifest_ids=bound)
         assert set(references) == expected
         assert returned == [len(expected)], "overlapping sparse witnesses must not duplicate placements"
+        # Check actual PostgreSQL execution, not just the returned references:
+        # intervening manifests must be removed before mapping expansion. A
+        # flattened semijoin can return the same references after wasted reads.
+        statement, parameters = queries[0]
+        with storage.database.session() as session:
+            plan = session.connection().exec_driver_sql(
+                "EXPLAIN (ANALYZE, FORMAT JSON) " + statement, parameters).scalar_one()[0]["Plan"]
+        pending, manifest_plans = [plan], []
+        while pending:
+            node = pending.pop()
+            if node.get("Subplan Name") == "CTE candidate_manifests":
+                manifest_plans.append(node)
+            pending.extend(node.get("Plans", []))
+        assert len(manifest_plans) == 1
+        assert manifest_plans[0]["Actual Rows"] == len(expected)
+        assert manifest_plans[0]["Actual Loops"] == 1
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", observe)
 
@@ -509,7 +527,7 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
             with monkeypatch.context() as old_verifier:
                 old_verifier.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", "market.canonical_archive_verification.v1")
                 assert archive.verify_next_page(day)["page_ordinal"] == 0
-            with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+            with pytest.raises(RuntimeError, match="verification_generation_changed"):
                 archive.verify_partition(day)
         assert archive.verify_next_page(day)["status"] == "page_verified"
     assert archive.verify_partition(day)["row_count"] == 2
@@ -574,7 +592,7 @@ def test_older_verified_partitions_restart_without_reusing_deletion_authority(st
         raw_key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
                                   {"id": fixture.manifests[0]}).scalar_one()
     reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
-    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+    with pytest.raises(RuntimeError, match="verification_generation_changed"):
         reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert _physical(storage, day)["hot_rows"] == 2
     policy = CanonicalFactRetentionPolicy(execution_enabled=True, hot_days=1, max_steps_per_run=1,

@@ -24,3 +24,9 @@ export const reviewStorageChange = (policy, revision, requestId) => storageReque
 export const applyStorageChange = (plan) => storageRequest(`/plans/${encodeURIComponent(plan.id)}/apply`, {
   body: { policy_hash: plan.policy_hash },
 })
+
+// Trends are an independent read boundary; graph actions never write policy.
+export const readStorageMetrics = ({ from, to, resolution = 'auto' }, signal) => {
+  const query = new URLSearchParams({ from, to, resolution })
+  return storageRequest(`/metrics?${query}`, { signal })
+}

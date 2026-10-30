@@ -19,6 +19,8 @@ from core.execution_control import execution_checkpoint, consume_execution_json,
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
 from market_data.fact_archive import CanonicalArchiveReadPage, FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
+from .fact_archive_generation import material_alias_projection
+
 from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION, build_normalized_fact_payload_schema,
     get_fact_payload_schema, register_fact_payload_schema,
@@ -221,26 +223,26 @@ class PostgresCanonicalFactStorageRepository:
             """), params).scalar_one_or_none()
         if selected is None:
             selected = session.execute(text(f"""
-            SELECT DISTINCT id FROM (
-                {direct}
-                SELECT versions.id FROM market.fact_versions AS versions
-                JOIN market.fact_hot_payloads AS hot ON hot.storage_day=versions.storage_day AND hot.id=versions.id
-                WHERE versions.series_id=ANY(:series_ids) AND EXISTS (
-                    SELECT 1 FROM jsonb_each(hot.provenance) AS evidence
-                    WHERE jsonb_typeof(evidence.value)='object'
-                      AND evidence.value->>'legacy_material_hash'=:material_hash {key_predicate})
-                UNION ALL
-                SELECT versions.id FROM market.fact_archive_material_aliases AS aliases
-                JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
-                JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
-                  AND manifest.storage_day=versions.storage_day
-                JOIN market.fact_retention_partitions AS partition ON partition.storage_day=versions.storage_day
-                  AND partition.state IN ('verified','reclaimed')
-                WHERE versions.series_id=ANY(:series_ids) AND aliases.series_id=versions.series_id
-                  AND aliases.material_hash=:material_hash {alias_predicate}
-                  AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
-                                  WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
-            ) AS candidates ORDER BY id LIMIT 1
+                SELECT DISTINCT id FROM (
+                    {direct}
+                    SELECT versions.id FROM market.fact_versions AS versions
+                    JOIN market.fact_hot_payloads AS hot ON hot.storage_day=versions.storage_day AND hot.id=versions.id
+                    WHERE versions.series_id=ANY(:series_ids) AND EXISTS (
+                        SELECT 1 FROM jsonb_each(hot.provenance) AS evidence
+                        WHERE jsonb_typeof(evidence.value)='object'
+                          AND evidence.value->>'legacy_material_hash'=:material_hash {key_predicate})
+                    UNION ALL
+                    SELECT versions.id FROM {material_alias_projection("aliases")}
+                    JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
+                    JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
+                      AND manifest.storage_day=versions.storage_day
+                    JOIN market.fact_retention_partitions AS partition ON partition.storage_day=versions.storage_day
+                      AND partition.state IN ('verified','reclaimed')
+                    WHERE versions.series_id=ANY(:series_ids) AND aliases.series_id=versions.series_id
+                      AND aliases.material_hash=:material_hash {alias_predicate}
+                      AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                                      WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
+                ) AS candidates ORDER BY id LIMIT 1
             """), params).scalar_one_or_none()
 
         def matches(row):
@@ -294,6 +296,45 @@ class PostgresCanonicalFactStorageRepository:
             return self._read_rows_by_ids(session, fact_ids, decoded_page)
         finally:
             decoded_page.clear()
+
+    def verify_cached_rows_by_ids(self, session, expected_rows: Mapping[str, Mapping[str, Any]]) -> None:
+        """Recheck current headers/contracts for sparse, already-decoded evidence.
+
+        The caller separately verifies the freshly selected backing object bytes
+        and current manifest.  This method prevents retained payload rows from
+        bypassing current identity placement, envelope, source/series or payload
+        contract checks.
+        """
+        identities = sorted(expected_rows)
+        if not identities:
+            return
+        for offset in range(0, len(identities), 1000):
+            batch = identities[offset:offset + 1000]
+            locations = session.execute(text(
+                "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:fact_ids)"
+            ), {"fact_ids": batch}).mappings().all()
+            if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+                raise RuntimeError("canonical_checkpoint_cached_identity_coverage_invalid")
+            headers = session.execute(text(f"""
+                SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
+                JOIN market.fact_retention_partitions AS partition
+                  ON partition.storage_day=versions.storage_day
+                 AND partition.state IN ('verified','reclaimed')
+                WHERE versions.id=ANY(:fact_ids) AND versions.storage_day=ANY(:storage_days)
+            """), {"fact_ids": batch,
+                    "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all()
+            found = {row["id"] for row in headers}
+            if found != set(batch) or len(headers) != len(found):
+                raise RuntimeError("canonical_checkpoint_cached_identity_coverage_invalid")
+            ensure_payload_contracts(session, [
+                (row["payload_schema_id"], row["payload_contract_hash"]) for row in headers
+            ])
+            for header in headers:
+                if any(header.get(name) is not None for name in _DOCUMENTS):
+                    raise RuntimeError(
+                        f"canonical_checkpoint_cached_placement_changed: fact_version_id={header['id']}"
+                    )
+                verify_archived_envelope(header, expected_rows[header["id"]])
 
     def _read_rows_by_ids(self, session, fact_ids, decoded_page):
         identities = sorted(set(fact_ids))

@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Protocol
 
 from core.settings import get_settings
@@ -29,7 +30,9 @@ from core.storage_mounts import (
     require_configured_staging_mount,
 )
 from .archive_namespace import archive_namespace
-from .structure import RawStreamRecord, build_spool_segment_id
+from .structure import (
+    RawStreamRecord, _validated_raw_stream_record_values, build_spool_segment_id,
+)
 
 
 SPOOL_SCHEMA_VERSION = "market.raw_spool.v1"
@@ -1285,6 +1288,202 @@ def read_raw_archive_content_fingerprint(path: Path, *, limits: RawArchiveReadLi
                                                check_budget=check_budget)
 
 
+@dataclass(frozen=True)
+class ValidatedRawArchiveEvidence:
+    """Bounded full-object validation plus exact witness rows."""
+
+    record_count: int
+    first_receive_ordinal: int
+    last_receive_ordinal: int
+    decoded_logical_bytes: int
+    source_scope: tuple[str, str, int]
+    content_fingerprint: str
+    witness_records: Mapping[int, RawStreamRecord]
+    batch_count: int
+    identity_spilled_to_disk: bool
+    decode_seconds: float
+    archive_open_seconds: float
+    parquet_batch_read_seconds: float
+    batch_conversion_seconds: float
+    record_validation_seconds: float
+    fingerprint_finalize_seconds: float
+
+
+def validate_raw_archive_parquet(
+    path: Path,
+    *,
+    limits: RawArchiveReadLimits,
+    witness_indices: Iterable[int] = (),
+    identity_spool_directory: Path | None = None,
+    identity_memory_spool_bytes: int = 1024 * 1024,
+    check_budget=None,
+) -> ValidatedRawArchiveEvidence:
+    """Validate every physical row while materializing exact witnesses only.
+
+    The unchanged v1 fingerprint orders every frame hash before every record
+    ID. Frame hashes stream into the digest while validated IDs are written in
+    bounded batches to a spooled file. This preserves the exact commitment
+    without retaining a page's identity arrays in memory or issuing two narrow
+    Parquet scans.
+    """
+    requested = set(witness_indices)
+    if any(type(index) is not int or index < 0 or index >= limits.max_rows
+           for index in requested):
+        raise ValueError("market_archive_witness_index_invalid")
+    if type(identity_memory_spool_bytes) is not int or identity_memory_spool_bytes <= 0:
+        raise ValueError("market_archive_content_identity_budget_invalid")
+    spool_root = None if identity_spool_directory is None else Path(identity_spool_directory)
+    if spool_root is not None:
+        spool_root.mkdir(parents=True, exist_ok=True)
+    max_spool_bytes = 71 * limits.max_rows
+    digest = hashlib.sha256()
+    digest.update(b'{"raw_frame_sha256":[')
+    witnesses = {}
+    prior_ordinal = count = decoded_bytes = batch_count = 0
+    parquet_logical_bytes = spool_bytes = 0
+    first_ordinal = last_ordinal = 0
+    source_scope = None
+    decode_seconds = parquet_read_seconds = conversion_seconds = 0.0
+    validation_seconds = finalize_seconds = 0.0
+    with tempfile.SpooledTemporaryFile(
+        max_size=min(identity_memory_spool_bytes, max_spool_bytes),
+        mode="w+b", dir=spool_root,
+    ) as record_ids:
+        open_started = perf_counter()
+        with _open_raw_archive_parquet(
+            path, limits=limits, check_budget=check_budget,
+        ) as parquet:
+            archive_open_seconds = perf_counter() - open_started
+            decode_started = perf_counter()
+            fields = tuple(RawStreamRecord.__dataclass_fields__)
+            batches = iter(parquet.iter_batches(
+                batch_size=limits.batch_rows, use_threads=False,
+            ))
+            while True:
+                phase_started = perf_counter()
+                try:
+                    batch = next(batches)
+                except StopIteration:
+                    break
+                parquet_read_seconds += perf_counter() - phase_started
+                if check_budget is not None:
+                    check_budget()
+                batch_count += 1
+                parquet_logical_bytes += batch.nbytes
+                if (batch.nbytes > limits.max_row_group_bytes
+                        or parquet_logical_bytes > limits.max_logical_bytes):
+                    raise RuntimeError("market_archive_read_logical_budget_exceeded")
+                phase_started = perf_counter()
+                columns = batch.to_pydict()
+                conversion_seconds += perf_counter() - phase_started
+                phase_started = perf_counter()
+                frame_tokens = []
+                id_tokens = []
+                for offset in range(batch.num_rows):
+                    if check_budget is not None:
+                        check_budget()
+                    normalized = _validated_raw_stream_record_values(
+                        *(columns[name][offset] for name in fields)
+                    )
+                    ordinal = normalized[5]
+                    if ordinal <= prior_ordinal:
+                        raise RuntimeError(
+                            "market_archive_replay_invalid: record order mismatch"
+                        )
+                    scope = (normalized[2], normalized[3], normalized[4])
+                    if source_scope is None:
+                        source_scope = scope
+                    elif source_scope != scope:
+                        raise RuntimeError(
+                            "market_archive_replay_invalid: source scope differs"
+                        )
+                    index = count
+                    count += 1
+                    if count > limits.max_rows:
+                        raise RuntimeError("market_archive_read_row_budget_exceeded")
+                    prior_ordinal = last_ordinal = ordinal
+                    first_ordinal = first_ordinal or ordinal
+                    # Match canonical lineage's existing decoded-byte budget:
+                    # int64 epoch/ordinal, timestamp, eleven variable offsets,
+                    # raw bytes, and every normalized string value.
+                    decoded_bytes += len(normalized[12]) + 68 + sum(
+                        len(value.encode("utf-8"))
+                        for value in (*normalized[:4], *normalized[7:12], normalized[13])
+                    )
+                    if decoded_bytes > limits.max_logical_bytes:
+                        raise RuntimeError(
+                            "canonical_raw_lineage_decode_budget_exceeded: reduce canonical page size"
+                        )
+                    if index in requested:
+                        witnesses[index] = RawStreamRecord(*normalized)
+                    # Commit the exact physical identity columns, not their
+                    # normalized record values. RawStreamRecord historically
+                    # accepts case/whitespace normalization, while the v1
+                    # content fingerprint detects those byte-level changes.
+                    frame_tokens.append(json.dumps(
+                        columns["raw_frame_sha256"][offset], ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"))
+                    id_tokens.append(json.dumps(
+                        columns["raw_record_id"][offset], ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"))
+                if frame_tokens:
+                    if count > len(frame_tokens):
+                        digest.update(b",")
+                    digest.update(b",".join(frame_tokens))
+                    encoded_ids = b",".join(id_tokens)
+                    prefix = b"," if spool_bytes else b""
+                    next_spool_bytes = spool_bytes + len(prefix) + len(encoded_ids)
+                    if next_spool_bytes > max_spool_bytes:
+                        raise RuntimeError(
+                            "market_archive_content_identity_budget_exceeded"
+                        )
+                    record_ids.write(prefix)
+                    record_ids.write(encoded_ids)
+                    spool_bytes = next_spool_bytes
+                validation_seconds += perf_counter() - phase_started
+            decode_seconds = perf_counter() - decode_started
+            if count != parquet.metadata.num_rows:
+                raise RuntimeError(
+                    "market_archive_replay_invalid: record count mismatch"
+                )
+        if not count:
+            raise RuntimeError("market_archive_content_identity_count_mismatch")
+        assert source_scope is not None
+        missing = requested.difference(witnesses)
+        if missing:
+            raise RuntimeError("market_archive_replay_invalid: witness index missing")
+        started = perf_counter()
+        digest.update(b'],"raw_record_ids":[')
+        record_ids.seek(0)
+        while block := record_ids.read(1024 * 1024):
+            if check_budget is not None:
+                check_budget()
+            digest.update(block)
+        digest.update(b'],"schema_version":"market.raw_archive_content.v1"}')
+        fingerprint = digest.hexdigest()
+        finalize_seconds = perf_counter() - started
+        spilled = bool(getattr(record_ids, "_rolled", False))
+    return ValidatedRawArchiveEvidence(
+        record_count=count,
+        first_receive_ordinal=first_ordinal,
+        last_receive_ordinal=last_ordinal,
+        decoded_logical_bytes=decoded_bytes,
+        source_scope=source_scope,
+        content_fingerprint=fingerprint,
+        witness_records=witnesses,
+        batch_count=batch_count,
+        identity_spilled_to_disk=spilled,
+        decode_seconds=decode_seconds,
+        archive_open_seconds=archive_open_seconds,
+        parquet_batch_read_seconds=parquet_read_seconds,
+        batch_conversion_seconds=conversion_seconds,
+        record_validation_seconds=validation_seconds,
+        fingerprint_finalize_seconds=finalize_seconds,
+    )
+
+
 def _iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None = None) -> Iterator[RawStreamRecord]:
     with _open_raw_archive_parquet(path, limits=limits) as parquet:
         prior = 0
@@ -1374,6 +1573,7 @@ __all__ = [
     "RAW_ARCHIVE_SCHEMA_VERSION",
     "RawArchiveObjectStore",
     "RawArchiveReadLimits",
+    "ValidatedRawArchiveEvidence",
     "SPOOL_SCHEMA_VERSION",
     "SpoolBackpressureError",
     "SpoolBacklogReconciliation",
@@ -1389,6 +1589,7 @@ __all__ = [
     "raw_archive_content_fingerprint",
     "read_raw_archive_content_fingerprint",
     "iter_raw_archive_parquet",
+    "validate_raw_archive_parquet",
     "require_spool_capacity",
     "spool_backlog_bytes",
 ]

@@ -804,3 +804,120 @@ routine movement remains capped at one hour even when the original migration
 attempt has a longer budget. Activation binds the validated file hash and
 refuses later drift. Migration and routine growth/resource allowances need not
 match, since collection is held for the former and running for the latter.
+
+
+## Qualified routine promotion
+
+The existing locked controller also offers:
+
+```bash
+bash scripts/automation/server_deploy.sh promote-routine <candidate-full-sha> --package <downloaded-Actions-artifact.zip>
+```
+
+This is a capability for a later explicitly approved trigger. No unattended
+trigger, credential, host runner, GitHub rule or Docker setting is installed.
+The initial controller installation remains an explicitly reviewed deployment;
+an older installed helper cannot invoke the new path. Coordinate its integration
+base after the active release. Do not insert this component into a source already
+being qualified.
+
+Routine eligibility is deliberately narrower than CI selection: only documented
+static assets and the exact six reviewed presentation files in
+`ci_impact.PRESENTATION`. Credential dialogs, mixed chart containers, application
+roots, new frontend files and API/adapters/services/auth/security paths are excluded. Backend, registry/catalog, durable request/results,
+serialization, dependencies, configuration, deployment/security scripts, storage
+and migrations must be byte-identical to the current release. Renames include
+both paths. Unknown changes refuse routine promotion and need manually reviewed
+compatibility. Optional Compose profiles are excluded. Existing storage holds,
+alert previews and unresolved promotion markers remain blockers.
+
+The candidate must be on develop and have the latest successful exact push
+qualification. Download the complete `routine-release-package` Actions artifact
+ZIP, preserving its bytes. The helper validates the GitHub artifact digest,
+source identity, producing attempt/time and export steps; then validates manifest
+and archive checksums, loads only those application images and checks image IDs
+and backend attestation. It renders the candidate configuration privately and
+pins application images by immutable local ID. Infrastructure remains pinned to
+running image IDs. No build or pull occurs during routine activation. Rebuilding
+from the same source is insufficient for this path.
+
+A successful deployment using the new controller records a private
+`routine-configuration.json` baseline. Legacy releases without that baseline
+refuse routine admission; do not manufacture one from an edited environment.
+Install the controller through reviewed manual promotion first. The baseline
+contains hashes, not resolved secret values: effective Compose settings, private
+environment bytes, mounted configuration bytes and permissions/ownership, and
+actual container identities/configuration. Only the expected source revision,
+source hash, application image references and build metadata may differ.
+Configuration-directory traversal is bounded; data/system mount contents are
+excluded while their paths and root permissions remain bound. Unknown or
+unavailable configuration disables routine admission.
+
+Admission checks this baseline before package loading, again before creating the
+recovery snapshot, and immediately before replacement. Private-file edits,
+caller overrides, changed bind configuration or unexpected runtime replacement
+require reviewed manual reconciliation. Activated recovery checks settings and
+bindings again; it permits partially replaced container identities but refuses
+configuration drift and preserves the marker. No resolved environment or Docker
+inspection is printed or uploaded. These checks do not authorize privileged
+out-of-band host changes during deployment; use the existing environment lock.
+
+Before promotion, the approved backup/restore procedure must produce a private
+(mode 0600, regular file) `routine-recovery.json` in the existing state directory:
+
+```json
+{
+  "schema_version": "qt.routine_recovery.v1",
+  "revision": "<currently deployed full SHA>",
+  "restore_result": "passed",
+  "verified_at": "<UTC ISO time>",
+  "expires_at": "<UTC ISO time, no more than 24 hours after verification>",
+  "backup_manifest": "<absolute path to approved backup manifest>",
+  "backup_manifest_sha256": "<SHA-256>",
+  "restore_receipt": "<absolute path to actual isolated restore evidence>",
+  "restore_receipt_sha256": "<SHA-256>",
+  "schema_sha256": "<qualified live schema fingerprint>",
+  "cluster_identifier": "<qualified source PostgreSQL system identifier>"
+}
+```
+
+This is an operator qualification record consuming the existing backup procedure,
+not a new backup implementation. Never write `passed` without actual restore
+proof. The helper hashes the referenced evidence, checks expiry/current revision,
+and compares a read-only live schema/cluster probe with the qualification. Hashes
+protect evidence identity; they do not independently prove its scientific or
+restore claims. A missing record blocks the operation. No credentials or resolved
+Compose secrets belong in the record or CI artifacts.
+
+`capture_routine_schema` sends a fixed read-only SQL script to PostgreSQL's
+existing local psql identity inside tsdb, then fingerprints the bounded JSON on
+the host with stdlib Python. It does not copy credentials, add a DSN, import the
+runtime Database/bootstrap boundary or depend on candidate application health.
+The transaction is read-only repeatable-read, with connection and SQL timeouts.
+Docker exec additionally has a 30-second host timeout and five-second kill grace;
+timeout is unknown compatibility and preserves the activated recovery marker.
+The fingerprint covers public application parent-table columns, defaults,
+constraints and indexes; physical partitions and TimescaleDB internal schemas
+are excluded. Registry, serialization and archive compatibility additionally
+rely on unchanged source; this does not generalize to backend or migration
+changes. Changed logical schema invalidates admission. Physical storage remains
+protected by unchanged source/configuration and existing storage holds.
+
+The controller retains current images/configuration before replacing services,
+persists the routine identity and hashed preflight baseline before activation,
+marks activation before `compose up`, runs existing health/initializer/source/fleet
+checks and confirms the schema/cluster fingerprint is unchanged before recording
+success. Ordinary rollout failure invokes the existing compatible pinned-image recovery;
+it never rewrites the database. A failed post-activation probe or schema/cluster drift records
+`compatibility_lost=true`. Activated routine recovery always re-probes the DB
+and compares the persisted, integrity-checked baseline before changing the
+checkout or restarting old images, including recovery after interruption. Unknown
+or changed compatibility retains the marker. Once actual state is reconciled to
+the qualified baseline, a successful matching probe can admit explicit recovery. Failed/interrupted recovery retains its marker and blocks
+new updates. This path does not claim provider acquisition progress or scientific
+Check interpretation; retain the release owner's bounded acquisition checks and
+scientific owner's serial checks where applicable. The hosted `test_server_promotion.py --routine` step now exercises actual
+routine success/refusal/recovery with tiny images and real disposable PostgreSQL,
+including a genuine tiny restore before fixture admission. GitHub CI metadata
+there is synthetic and cannot admit production. This new step and real artifact
+provenance must pass before activation; unit tests are insufficient.

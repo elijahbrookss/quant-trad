@@ -15,7 +15,10 @@ RECOVERY_JOBS = {
     "committed-recovery (current)": "committed-recovery-current",
     f"committed-recovery ({FIRST_RELEASE_RUNTIME})": f"committed-recovery-{FIRST_RELEASE_RUNTIME}",
 }
-REQUIRED_JOBS = {"pr-suite", "frontend", "deployment-contract", "clean-database-bootstrap", "deployment-rehearsal", *RECOVERY_JOBS}
+PROOF_JOBS = {'deployment-proof-build', 'deployment-proof-alerts', 'deployment-proof-lifecycle',
+              'deployment-proof-restore', 'deployment-proof-core',
+              *(f'deployment-proof-online ({i})' for i in range(6))}
+REQUIRED_JOBS = {"pr-suite", "frontend", "deployment-contract", "clean-database-bootstrap", "deployment-rehearsal", *RECOVERY_JOBS, *PROOF_JOBS}
 ATTESTATION_STEP = "Attest and pack disposable qualification evidence"
 
 
@@ -56,6 +59,10 @@ def qualify(revision: str, *, handoff_branch: str | None = None) -> dict:
                 or matches[0].get("run_attempt") != run["run_attempt"]):
             raise ValueError(f"required CI job did not succeed in this exact attempt: {name}")
         selected[name] = matches[0]
+    aggregate_steps = [step for step in selected['deployment-contract'].get('steps', [])
+                       if step.get('name') == 'Attest complete deployment proof coverage']
+    if len(aggregate_steps) != 1 or aggregate_steps[0].get('conclusion') != 'success':
+        raise ValueError('complete deployment proof source attestation did not succeed')
     artifacts_response = api(f"actions/runs/{run['id']}/artifacts?per_page=100")
     if artifacts_response["total_count"] > 100 or artifacts_response["total_count"] != len(artifacts_response["artifacts"]):
         raise ValueError("CI artifact response is incomplete or exceeds the bounded admission query")

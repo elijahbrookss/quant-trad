@@ -160,24 +160,26 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
     physical = _physical(storage, day)
     clock = [0.0]
     monkeypatch.setattr(module, "monotonic", lambda: clock[0])
-    original = PostgresCanonicalFactArchiveRepository._stage_catalog_rows
+    from portal.backend.service.storage.repos.fact_archive_generation import ArchiveGenerationCoordinator
     cancellations = []
 
-    def cancel_after_catalog_write(archive, session, record_type, manifest_id, rows):
-        original(archive, session, record_type, manifest_id, rows)
-        # Apply the artificial timeout only to the intended statement. Source
-        # selection and catalog setup retain the ordinary SQL policy.
-        session.execute(text("SET LOCAL statement_timeout='25ms'"))
-        try:
-            session.execute(text("SELECT pg_sleep(0.2)"))
-        except DBAPIError as exc:
-            cancellations.append(exc.orig.pgcode)
-            clock[0] = 60.0 if deadline_elapsed else 1.0
-            raise
+    def cancel_before_activation(coordinator, **kwargs):
+        # Hidden catalog batches may already be committed. Cancellation before
+        # activation must leave them invisible and resumable without publishing
+        # a manifest, cursor, or authoritative generation.
+        with coordinator.database.session() as session:
+            coordinator.lock_day(session, kwargs["day"])
+            session.execute(text("SET LOCAL statement_timeout='25ms'"))
+            try:
+                session.execute(text("SELECT pg_sleep(0.2)"))
+            except DBAPIError as exc:
+                cancellations.append(exc.orig.pgcode)
+                clock[0] = 60.0 if deadline_elapsed else 1.0
+                raise
         pytest.fail("The disposable PostgreSQL statement must time out")
 
     with monkeypatch.context() as patch:
-        patch.setattr(PostgresCanonicalFactArchiveRepository, "_stage_catalog_rows", cancel_after_catalog_write)
+        patch.setattr(ArchiveGenerationCoordinator, "activate", cancel_before_activation)
         failed = executor.run(policy=policy, storage_root=tmp_path, execute=True)
     assert cancellations == ["57014"]
     assert failed["outcomes"][0]["status"] == ("deferred" if deadline_elapsed else "failed")

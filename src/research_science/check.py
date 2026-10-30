@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from market_data.frozen import normalize_frozen_market_data_read_binding
 
-from .study import stable_hash
+from .hashing import stable_hash
 
 
 CHECK_DEFINITION_SCHEMA_VERSION = "research.check_definition.v1"

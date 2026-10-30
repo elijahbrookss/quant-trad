@@ -30,6 +30,14 @@ A missing input is unresolved evidence, not an invented timestamp or value.
 Outcome price observations must be at or after the decision; they cannot imply
 an earlier execution. Historical definition versions retain their pinned rules.
 
+Explicit retrospective Checks may compare completed historical observations using
+later-received frozen revisions at a declared analysis cutoff. Such a method
+must preserve actual publication, receipt and known-at provenance, label sample
+time independently of historical decision time, and prohibit point-in-time
+predictive, backtest-certified or scientific-certification claims. This is
+descriptive conditional association only; causal consumer selectors and trading
+timelines retain the known-at invariant above. Historical versions remain fixed.
+
 ## Layer Ownership
 
 - QuantLab: research and indicator exploration.
@@ -43,7 +51,9 @@ research, report, strategy, and execution truth. Operator and browser surfaces
 own presentation, browser-local interaction state, and composition of typed read
 models only.
 
-The Frontend V2 primary rooms, Overview and Operations, are read-only. Their
+The Frontend V2 primary rooms, Overview and Studies, are read-only.
+Bot runs and Collectors are directly named secondary read views; existing
+Operations deep links remain compatibility routes. Their
 adapters use GET, SSE, or equivalent read contracts and must not start runs,
 mutate research or strategies, operate collectors, or write lifecycle state. A
 displayed command remains copy-only unless an independently owned operator
@@ -52,7 +62,11 @@ surface explicitly executes it.
 The separately owned V2 Settings > Storage surface may enroll prepared drives
 and review storage policy through the backend storage-management contract.
 Role selection is a request, not evidence of physical placement or completed
-migration. Overview and Operations remain read-only.
+migration. Overview, Studies and secondary inventories remain read-only.
+Storage and Appearance are reached through the bottom Settings area on desktop
+and narrow screens. Navigating away or cancelling a page read never cancels a
+scientific job. Read-only saved-record exports disclose excluded raw inputs and
+do not acquire source data, replay research or grant redistribution rights.
 
 Frontend code must render lifecycle, health, readiness, coverage, and diagnostic
 states emitted by their owning backend contracts. It must not infer those states
@@ -90,3 +104,18 @@ JSON writes cannot claim publication. Corrections append revisions, preserving
 prior citations. Complete references do not certify statistical validity,
 causality, profitability, trading permission or actual replay/recovery.
 See [Research Memory Boundary](../../architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md#question-owned-interpretation-publication).
+
+Bounded static images may be attached to exact durable Check evidence or a
+published Study interpretation. QT retains image bytes and source identities on
+its database boundary, separately from scientific payloads and immutable
+publication history. Images are presentation evidence; attachment does not
+execute research, revise results or establish scientific certification. V2
+displays them through read-only contracts.
+
+A derived Study report may explain an exact interpretation revision through a
+bounded prebuilt inert HTML attachment on the existing Study persistence
+boundary. It retains source/build/evidence provenance, does not execute source
+in production or alter scientific results, and remains separate from the static
+image contract. The private read-only Report view is sandboxed, revision-bound,
+and reversible to the original Summary; later interpretations visibly stale
+earlier reports. See the [report pilot boundary](../../architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md#derived-quarto-study-report-pilot).

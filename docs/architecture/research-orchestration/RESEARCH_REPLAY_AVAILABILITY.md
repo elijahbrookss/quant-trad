@@ -11,15 +11,23 @@ tags:
   - datasets
   - holdout
 code_paths:
-  - src/research_science/study.py
   - src/research_science/temporal.py
+  - src/research_science/hashing.py
   - src/research_science/replay_availability.py
   - portal/backend/service/storage/repos/market_structure.py
-  - tests/test_research_science/test_study.py
   - tests/test_research_science/test_temporal.py
   - tests/test_research_science/test_replay_availability.py
 ---
 # Research Replay Availability
+
+## Current execution and historical custody
+
+[ADR 0082](../decisions/0082-separate-historical-custody-from-active-research.md)
+defines the current Indicator/Check/Study boundary and current-only execution
+catalog. Earlier version-specific descriptions below are historical method
+meaning, not promises that retired factories remain executable. Original
+records remain integrity-checked and readable through data-only custody.
+
 
 ## Purpose
 
@@ -29,15 +37,10 @@ able to derive the same material earlier than a bounded-session finalizer. A
 study may make that separate counterfactual claim only through an immutable
 `AvailabilityTransform` and exact frozen evidence.
 
-```text
-StudyDefinition
-  -> FactRequirement[]
-  -> AvailabilityTransform[]
-  -> TemporalJoinSpec[]
-  -> exact registered resolvers
-  -> provider-free frozen input derivation
-  -> availability binding hashes pinned by ResearchRun
-```
+The pure AvailabilityTransform, TemporalJoinSpec and replay-availability
+helpers describe explicit causal derivations. They are not a generic runnable
+study orchestration path. A Check must explicitly admit any such derivation and
+pin its frozen evidence before making a claim.
 
 Availability is not a timestamp rewrite, provider event-time shortcut, or
 permission to fetch missing history.
@@ -45,8 +48,7 @@ permission to fetch missing history.
 ## Trade-flow receipt replay
 
 `research.trade_flow_replay.v1` is an implemented pure derivation helper for
-60-second trade-flow facts. The generic registry supports availability resolvers,
-but this helper is not currently wired into runnable Check execution. It pins:
+60-second trade-flow facts. This helper is not currently wired into runnable Check execution. It pins:
 
 - frozen receipt time as the delivery clock;
 - `market.trade_flow.receipt_replay.v1` as the transform;

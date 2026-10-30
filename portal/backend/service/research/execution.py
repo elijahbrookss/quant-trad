@@ -1,7 +1,8 @@
 """Canonical preview and frozen-evidence execution for registered Checks."""
 
 from __future__ import annotations
-from core.execution_control import measured_execution
+from core.execution_control import measured_execution, measure_execution_stage, observe_execution_size
+from pandas import DataFrame
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -144,6 +145,7 @@ def _filter_indicator_evidence(
     }
 
 
+@measured_execution("input_preparation")
 def _load_market_inputs(
     definition: CheckDefinition,
     request: CheckRequest,
@@ -279,7 +281,13 @@ def _load_market_inputs(
                 primary_instrument_id=instrument_id,
                 start=_utc(requirement["required_start"]),
                 end=_utc(requirement["required_end"]),
-                evaluation_time=_utc(plan.materialization_range["end_exclusive"]),
+                evaluation_time=_utc(
+                    request.parameters["outcomes"]["retrospective"]["analysis_as_of"]
+                    if request.definition_id == "event_fact_analysis" and request.definition_version.split("+", 1)[0] == "13"
+                    else request.parameters["outcomes"]["analysis_as_of"]
+                    if request.definition_id == "event_fact_analysis" and request.definition_version.split("+", 1)[0] == "14"
+                    else plan.materialization_range["end_exclusive"]
+                ),
             )
         inputs["fact_requirements_by_alias"] = requirements
         inputs["fact_records_by_alias"] = histories
@@ -293,8 +301,15 @@ def _evaluate(
     plan: ResolvedCheckPlan,
     inputs: Mapping[str, Any],
 ) -> dict[str, Any]:
+    observe_execution_size("check_evaluator_result_fields", None)
+    candles = inputs.get("candles")
+    observe_execution_size("check_input_candle_rows", len(candles) if isinstance(candles, (DataFrame, list, tuple)) else None)
+    histories = inputs.get("fact_records_by_alias")
+    observe_execution_size("check_input_fact_aliases", len(histories) if isinstance(histories, dict) else None)
+    # Never enumerate lazy histories or candle generators just to obtain a metric.
     evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
     result = dict(evaluator.evaluate(plan=plan, inputs=inputs))
+    observe_execution_size("check_evaluator_result_fields", len(result))
     assertion_result = evaluate_scalar_assertions(result, _assertions(request))
     return {
         **result,
@@ -417,23 +432,6 @@ def _immutable_run_binding(
     }
 
 
-def _verified_run_evidence(
-    request: CheckRequest,
-    supplied: Mapping[str, Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    expected = dict(request.immutable_run_evidence or {})
-    run_id = str(expected.get("run_id") or request.scope.get("run_id") or "").strip()
-    if not run_id:
-        raise ValueError("check_run_evidence_invalid: run_id is required")
-    run_evidence = dict(
-        supplied or reports_contract.get_run_research_dataset(run_id)
-    )
-    actual = _immutable_run_binding(run_evidence)
-    if actual != expected:
-        raise ValueError(
-            "check_run_evidence_invalid: immutable run binding changed before execution"
-        )
-    return run_evidence, actual
 
 
 def execute_check_preview(
@@ -461,26 +459,9 @@ def execute_check_preview(
         as_of_commit_seq=watermark,
         source_revision=revision,
     ):
-        if definition.definition_id in {
-            checks.RUN_SIGNAL_SUMMARY,
-            checks.RUN_DECISION_TRADE_COMPARISON,
-        }:
-            resolved_run_evidence, run_binding = _verified_run_evidence(
-                request, run_evidence
-            )
-            inputs = {
-                "run_evidence": resolved_run_evidence,
-                "detector": dict(request.parameters.get("detector") or {}),
-                "outcomes": dict(request.parameters.get("outcomes") or {}),
-                "data_quality": {
-                    "status": "best_effort_current",
-                    "run_binding": run_binding,
-                },
-            }
-        else:
-            inputs = _load_market_inputs(
-                definition, request, plan, resolver=resolver
-            )
+        inputs = _load_market_inputs(
+            definition, request, plan, resolver=resolver
+        )
         result = _evaluate(definition, request, plan, inputs)
     semantic = {
         "definition_hash": definition.definition_hash,
@@ -524,36 +505,24 @@ def execute_check_evidence(
 
     if request.mode != CHECK_MODE_EVIDENCE:
         raise ValueError("check_evidence_mode_required")
-    is_run_check = definition.definition_id in {
-        checks.RUN_SIGNAL_SUMMARY,
-        checks.RUN_DECISION_TRADE_COMPARISON,
+    if not request.dataset_id:
+        raise ValueError("check_evidence_dataset_required")
+    expected_binding = (
+        normalize_frozen_market_data_read_binding(expected_input_binding)
+        if expected_input_binding is not None
+        else None
+    )
+    if expected_binding is not None and str(expected_binding["dataset_id"]) != str(
+        request.dataset_id
+    ):
+        raise ValueError(
+            "check_replay_input_binding_mismatch: request Dataset differs"
+        )
+    subject_snapshots = {
+        str(row["instrument_id"]): dict(row.get("snapshot") or {})
+        for row in (expected_binding or {}).get("subjects") or []
     }
-    if is_run_check:
-        resolved_run_evidence, binding = _verified_run_evidence(
-            request, run_evidence
-        )
-        if expected_input_binding is not None and dict(expected_input_binding) != binding:
-            raise ValueError(
-                "check_replay_input_binding_mismatch: immutable run binding changed"
-            )
-    else:
-        if not request.dataset_id:
-            raise ValueError("check_evidence_dataset_required")
-        expected_binding = (
-            normalize_frozen_market_data_read_binding(expected_input_binding)
-            if expected_input_binding is not None
-            else None
-        )
-        if expected_binding is not None and str(expected_binding["dataset_id"]) != str(
-            request.dataset_id
-        ):
-            raise ValueError(
-                "check_replay_input_binding_mismatch: request Dataset differs"
-            )
-        subject_snapshots = {
-            str(row["instrument_id"]): dict(row.get("snapshot") or {})
-            for row in (expected_binding or {}).get("subjects") or []
-        }
+    with measure_execution_stage("input_binding"):
         binding = resolve_frozen_dataset_read_binding(
             dataset_id=request.dataset_id,
             requirements=plan.market_data_requirements,
@@ -570,66 +539,45 @@ def execute_check_evidence(
             if expected_binding is not None
             else None,
         )
-        if expected_binding is not None and binding != expected_binding:
-            raise ValueError(
-                "check_replay_input_binding_mismatch: frozen input binding changed"
-            )
+    if expected_binding is not None and binding != expected_binding:
+        raise ValueError(
+            "check_replay_input_binding_mismatch: frozen input binding changed"
+        )
     bound_plan_payload = plan.to_dict()
     bound_plan_payload.pop("plan_hash", None)
     bound_plan_payload["materialization_range"] = dict(
         plan.materialization_range
     )
-    if not is_run_check:
-        bound_plan_payload["materialization_range"]["as_of_commit_seq"] = int(
-            binding["max_commit_seq"]
-        )
+    bound_plan_payload["materialization_range"]["as_of_commit_seq"] = int(
+        binding["max_commit_seq"]
+    )
     bound_plan_payload["missing_coverage"] = []
     bound_plan_payload["quality_evidence"] = list(
         binding.get("recorded_gaps") or []
     )
     bound_plan = ResolvedCheckPlan.from_dict(bound_plan_payload)
     revision = evidence_source_revision()
-    if is_run_check:
-        inputs = {
-            "run_evidence": resolved_run_evidence,
-            "detector": dict(request.parameters.get("detector") or {}),
-            "outcomes": dict(request.parameters.get("outcomes") or {}),
-            "data_quality": dict(
-                resolved_run_evidence.get("readiness") or {}
-            ),
-        }
-        result_payload = _evaluate(definition, request, bound_plan, inputs)
-    else:
-        resolver = RuntimeMarketDataResolver(
-            store=market_data_repo,
-            dataset_binding=binding,
-            instrument_bindings=dict(request.scope.get("market_data_bindings") or {}),
+    resolver = RuntimeMarketDataResolver(
+        store=market_data_repo,
+        dataset_binding=binding,
+        instrument_bindings=dict(request.scope.get("market_data_bindings") or {}),
+    )
+    with candle_service.market_data_read_scope(dataset_binding=binding):
+        inputs = _load_market_inputs(
+            definition, request, bound_plan, resolver=resolver
         )
-        with candle_service.market_data_read_scope(dataset_binding=binding):
-            inputs = _load_market_inputs(
-                definition, request, bound_plan, resolver=resolver
-            )
-            result_payload = _evaluate(definition, request, bound_plan, inputs)
+        inputs["frozen_input_binding"] = binding
+        result_payload = _evaluate(definition, request, bound_plan, inputs)
     input_hashes = _execution_input_hashes(bound_plan, inputs)
-    run_quality = (
-        dict(resolved_run_evidence.get("readiness") or {})
-        if is_run_check
-        else dict(binding.get("quality") or {})
-    )
-    run_gaps = (
-        dict(resolved_run_evidence.get("candle_gaps") or {})
-        if is_run_check
-        else {"recorded_gaps": binding.get("recorded_gaps") or []}
-    )
+    run_quality = dict(binding.get("quality") or {})
+    run_gaps = {"recorded_gaps": binding.get("recorded_gaps") or []}
     evidence = CheckEvidenceBinding(
         schema_version=CHECK_EVIDENCE_BINDING_SCHEMA_VERSION,
         definition_hash=definition.definition_hash,
         request_hash=request.request_hash,
         plan_hash=bound_plan.plan_hash,
         code_revision=revision,
-        evidence_kind=(
-            "immutable_run_evidence" if is_run_check else "frozen_market_data"
-        ),
+        evidence_kind="frozen_market_data",
         input_binding=binding,
         indicator_graph_hash=input_hashes["indicator_graph_hash"],
         indicator_output_hash=input_hashes["indicator_output_hash"],

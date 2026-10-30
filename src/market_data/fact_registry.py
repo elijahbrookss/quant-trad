@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from functools import cached_property
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 NORMALIZED_FACT_PREFIX = "market.normalized."
@@ -426,6 +426,7 @@ class FactContract:
     minimum_value: Decimal | None = None
     minimum_inclusive: bool = True
     range_evidence_owner: str | None = None
+    dimension_validator: Callable[[dict[str, str]], None] | None = None
 
     def validate(
         self, *, contract_version: str, timeframe_seconds: int | None
@@ -508,6 +509,8 @@ class FactContract:
             if key in self.uppercase_dimensions:
                 value = value.upper()
             normalized[str(key)] = value
+        if self.dimension_validator is not None:
+            self.dimension_validator(normalized)
         return normalized
 
     def validate_numeric_value(
@@ -553,6 +556,15 @@ class FactContract:
                     f"fact_type={self.fact_type} value must be {operator} {self.minimum_value}"
                 )
         return normalized_unit, normalized_dimensions
+
+
+def _validate_liquidation_dimensions(dimensions: dict[str, str]) -> None:
+    if dimensions["liquidated_side"] not in {"long", "short"}:
+        raise ValueError("market_fact_dimensions_invalid: liquidated_side must be long or short")
+    duration = dimensions["bucket_seconds"]
+    if not duration.isascii() or not duration.isdecimal() or int(duration) <= 0:
+        raise ValueError("market_fact_dimensions_invalid: bucket_seconds must be positive integer")
+    dimensions["bucket_seconds"] = str(int(duration))
 
 
 _CONTRACTS = {
@@ -619,6 +631,21 @@ _CONTRACTS = {
         "forbidden",
         "none",
         "effective_at",
+    ),
+    "derivatives.liquidation_volume": FactContract(
+        "derivatives.liquidation_volume",
+        "derivatives.liquidation_volume.v1",
+        "forbidden",
+        "none",
+        "effective_at",
+        storage_shape="exact_numeric",
+        numeric_type="decimal",
+        required_dimensions=("liquidated_side", "bucket_seconds", "volume_unit", "exchange", "product"),
+        series_identity_dimensions=("liquidated_side", "bucket_seconds", "volume_unit", "exchange", "product"),
+        uppercase_dimensions=("volume_unit",),
+        unit_dimension="volume_unit",
+        minimum_value=Decimal("0"),
+        dimension_validator=_validate_liquidation_dimensions,
     ),
     "market.reference_price": FactContract(
         "market.reference_price",
@@ -782,6 +809,19 @@ _STATIC_PAYLOAD_SCHEMAS = {
             material_hash_version="market.fact_material.v1",
             row_hash_version="market.fact_row.v1",
             query_fields=("rate", "funding_time", "interval_seconds"),
+        ),
+        FactPayloadSchema(
+            schema_id="derivatives.liquidation_volume.v1",
+            fact_type="derivatives.liquidation_volume",
+            fields=(
+                FactPayloadField("value", FactPayloadKind.DECIMAL, minimum=Decimal("0")),
+                FactPayloadField("raw_value", FactPayloadKind.STRING),
+                FactPayloadField("unit", FactPayloadKind.STRING),
+            ),
+            observation_time_field="effective_at",
+            material_hash_version="numeric_fact_material_hash.v1",
+            row_hash_version="derivatives.liquidation_volume.v1",
+            query_fields=("value",),
         ),
         FactPayloadSchema(
             schema_id="market.reference_price.v1",
