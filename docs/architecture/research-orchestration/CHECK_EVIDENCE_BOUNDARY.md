@@ -1316,6 +1316,21 @@ the complete pair observations, not only truncated display examples.
 ## All-completed reversal description
 
 `raw_forward_outcome@20` explicitly selects `reversal_completed_recovery.v1`.
+
+### Ordinary-close candle-state comparison
+
+`raw_forward_outcome@21` explicitly selects
+`candle_state_paired_comparison.v1`. It samples every ordinary native candle
+close, binds causal public Indicator metrics through the registered runtime,
+and compares baseline and enriched logistic forecasts on identical complete
+rows. Exact elapsed endpoints, gap resets, train-only standardization,
+configured fold buffers, fixed UTC-calendar cluster intervals, opportunity
+counts, exclusions, and dependence limitations are canonical Check material.
+
+This method does not reinterpret Indicator events as ordinary closes, fabricate
+Facts, bridge missing candles, or grant trading/scientific authority. See
+[Candle-State Paired Comparison](../../guides/candle-state-paired-comparison.md)
+for the request and result contract.
 It composes the existing sequential retreat-inclusive recognizer, the shared
 call-scoped `CompletedEventContext`, reversal-owned inclusive recovery duration,
 and unchanged `first_passage_path`. The matched selector also uses this context

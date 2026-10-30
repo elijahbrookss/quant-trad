@@ -506,6 +506,71 @@ _EXAMPLES = {'event_fact_analysis@4': {'check_family': 'event_fact_analysis',
 
 _EXAMPLES['event_fact_analysis@15'] = {'check_family': 'event_fact_analysis', 'mode': 'evidence', 'scope': {'instrument_id': 'authorized-instrument-id', 'indicator_id': 'existing-breakout-indicator-id', 'timeframe': '15m', 'start': '2024-01-01T01:00:00Z', 'end': '2024-01-02T00:00:00Z'}, 'detector': {'type': 'indicator_event', 'output_name': 'breakouts', 'event_keys': [{'key': 'breakout_long', 'direction': 'long'}]}, 'outcomes': {'schema_version': 'indicator_event_barriers.v1', 'input_origin': '2024-01-01T00:00:00Z', 'horizon_bars': 12, 'reference': {'operator': 'event_close'}, 'failure': {'operator': 'event_metadata_number', 'path': 'metadata.failure_price'}, 'target': {'operator': 'event_metadata_number', 'path': 'metadata.target_price'}, 'support_lookback_bars': 4}, 'statistics': {'features': [{'name': 'strength', 'operator': 'event_metadata_number', 'path': 'metadata.strength', 'units': 'ratio'}]}, 'gap_policy': 'reject', 'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
 
+_EXAMPLES['raw_forward_outcome@21'] = {
+    'check_family': 'raw_forward_outcome', 'mode': 'evidence',
+    'dataset_id': 'mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'scope': {'instrument_id': 'instrument-1', 'timeframe': '15m',
+              'start': '2024-01-10T00:00:00Z', 'end': '2024-03-01T00:00:00Z'},
+    'detector': {'type': 'candle_close', 'sampling': 'ordinary_native_close'},
+    'outcomes': {'schema_version': 'candle_state_paired_comparison.v1',
+                 'horizon_seconds': 3600,
+                 'primary': {'type': 'forward_close_gt_current', 'flat': 'class_zero'},
+                 'continuation': {'lookback_bars': 20, 'zero_prior': 'undefined_prior_direction',
+                                  'future_flat': 'separate'},
+                 'magnitude': {'endpoint': 'absolute_log_return',
+                               'path': 'sum_squared_native_log_returns'},
+                 'outcome_boundary': 'evaluation_end_exclusive'},
+    'statistics': {
+        'features': {
+            'baseline': [
+                {'name': 'return_1', 'operator': 'lagged_return', 'lookback_bars': 1},
+                {'name': 'return_4', 'operator': 'lagged_return', 'lookback_bars': 4},
+                {'name': 'return_20', 'operator': 'lagged_return', 'lookback_bars': 20},
+                {'name': 'atr_fraction_14', 'operator': 'atr_fraction', 'period': 14},
+                {'name': 'volume_ratio_50', 'operator': 'volume_ratio', 'lookback_bars': 50}],
+            'enriched': [
+                {'name': 'efficiency_20', 'operator': 'indicator_metric',
+                 'indicator': {'type': 'candle_stats', 'version': 'v1',
+                               'output': 'candle_stats', 'field': 'directional_efficiency',
+                               'params': {'atr_short_window': 14, 'atr_long_window': 50,
+                                          'atr_z_window': 100, 'directional_efficiency_window': 20,
+                                          'slope_window': 20, 'range_window': 20,
+                                          'expansion_window': 20, 'volume_window': 50,
+                                          'overlap_window': 8, 'slope_stability_lookback': 150,
+                                          'warmup_bars': 200,
+                                          'atr_expansion_signal_threshold': 2.0}},
+                 'transform': 'identity'},
+                {'name': 'signed_efficiency_20', 'operator': 'indicator_metric',
+                 'indicator': {'type': 'candle_stats', 'version': 'v1',
+                               'output': 'candle_stats', 'field': 'directional_efficiency',
+                               'params': {'atr_short_window': 14, 'atr_long_window': 50,
+                                          'atr_z_window': 100, 'directional_efficiency_window': 20,
+                                          'slope_window': 20, 'range_window': 20,
+                                          'expansion_window': 20, 'volume_window': 50,
+                                          'overlap_window': 8, 'slope_stability_lookback': 150,
+                                          'warmup_bars': 200,
+                                          'atr_expansion_signal_threshold': 2.0}},
+                 'transform': 'times_return_sign', 'sign_lookback_bars': 20,
+                 'zero_sign': 'zero'}]},
+        'folds': [
+            {'id': 'F1', 'train': {'start': '2024-01-10T00:00:00Z', 'end': '2024-01-24T00:00:00Z'},
+             'validation': {'start': '2024-01-24T00:00:00Z', 'end': '2024-02-07T00:00:00Z'}},
+            {'id': 'F2', 'train': {'start': '2024-01-10T00:00:00Z', 'end': '2024-02-07T00:00:00Z'},
+             'validation': {'start': '2024-02-07T00:00:00Z', 'end': '2024-02-21T00:00:00Z'}}],
+        'model': {'type': 'standardized_l2_logistic', 'c': 1.0, 'seed': 0,
+                  'fit_intercept': True, 'tolerance': 1e-9, 'max_iterations': 1000},
+        'purge_bars': 200, 'embargo_bars': 200,
+        'bootstrap': {'cluster_days': 3, 'sensitivity_cluster_days': [1],
+                      'anchor': '1970-01-01T00:00:00Z', 'replicates': 5000,
+                      'confidence': .95, 'seed': 20261030},
+        'eligibility': {'min_train_rows': 500, 'min_validation_rows': 180,
+                        'min_train_each_class': 20, 'min_validation_each_class': 20,
+                        'min_validation_utc_days': 8, 'min_valid_folds': 2,
+                        'min_nonempty_clusters': 8},
+        'criteria': {'min_delta_log_loss': .005, 'require_interval_above_zero': True,
+                     'min_positive_folds': 2, 'interpretation': 'forecast_screen_only'}},
+    'gap_policy': 'reset_rewarm'}
+
 _PURPOSES = {'raw_forward_outcome@20': 'Compose all completed reversals,causal context,inclusive recovery duration and '
                            'unchanged12bar first passage;separate full-population label distributions with '
                            'original all-case clock weights;no matching or adjusted inference.',
@@ -547,6 +612,8 @@ _PURPOSES = {'raw_forward_outcome@20': 'Compose all completed reversals,causal c
                            'before outcomes.'}
 
 _PURPOSES['event_fact_analysis@15'] = 'Measure public Indicator events against locked high/low barriers, original-clock weighted feature profiles and strictly-later target observations; no recognition, rematching or trading claim.'
+_PURPOSES['raw_forward_outcome@21'] = ('Compare paired baseline and enriched directional forecasts at every ordinary native candle close, '
+    'using causal public Indicator metrics, exact elapsed outcomes, gap resets and configured walk-forward inference; no trading claim.')
 
 
 def _discovery(family: str, version: str) -> dict[str, Any]:
@@ -561,6 +628,18 @@ def _discovery(family: str, version: str) -> dict[str, Any]:
 
 
 def _settings_fields(family: str, version: str) -> dict[str, Any]:
+    if family == "raw_forward_outcome" and version == "21":
+        return {
+            "scope": "Authorized instrument, native timeframe and bounded UTC range; method limit 19,104 candles.",
+            "detector": "Fixed ordinary_native_close sampling; no event or threshold selection.",
+            "outcomes": "Configured exact elapsed horizon, up-versus-non-up label, continuation lookback and separate magnitude diagnostics.",
+            "statistics.features": "Named lagged return, Wilder ATR fraction and prior-volume ratio baseline features; enriched public candle_stats metric bindings with identity or historical-sign transform.",
+            "statistics.folds": "Configured expanding/walk-forward train and validation UTC ranges; target endpoints stay inside their nominal ranges.",
+            "statistics.model": "Training-only standardized L2 logistic baseline and enriched fits on identical complete rows.",
+            "statistics.purge_bars/embargo_bars": "Elapsed native-bar buffers; not an independence guarantee for recursive state.",
+            "statistics.bootstrap": "Fixed epoch-anchored UTC calendar clusters plus configured sensitivity spans.",
+            "statistics.eligibility/criteria": "Configured support screens and forecast-effect criteria; never execution or profitability authority.",
+        }
     if family == "event_fact_analysis" and version == "15":
         return {"scope":"Existing Indicator/instrument IDs,native15m,explicit bounded UTC range.",
                 "detector":"Public long signal output_name/event_keys, no detection algorithm.",
@@ -729,6 +808,16 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
     if family == "raw_forward_outcome" and version == "6":
         fields["events[]"] = {"type":"array","meaning":"Every event with volume cohort, context and overlap IDs; no truncation."}
         fields["distribution"] = {"type":"object","meaning":"Fixed quantiles, full-denominator tail contributions, daily sums and influence diagnostics. Returns are fractions."}
+        return fields
+    if family == "raw_forward_outcome" and version == "21":
+        fields.update({
+            "opportunities": {"type": "object", "meaning": "Nominal slots, observed closes, readiness, feature, exact future-path and paired-row counts."},
+            "exclusions": {"type": "object", "meaning": "Explicit causal/readiness/feature/path exclusion counts; no truncation."},
+            "comparison": {"type": "object or null", "meaning": "Paired fold and pooled baseline-versus-enriched forecast scores, fixed calendar-cluster intervals and support screen."},
+            "diagnostics": {"type": "object", "meaning": "Direction, continuation, endpoint magnitude and path variation remain separate from the primary label."},
+            "provenance": {"type": "object", "meaning": "Typed Indicator binding, population/prediction hashes and exact elapsed label contract."},
+            "dependence": {"type": "object", "meaning": "Overlapping outcomes and recursive shared history remain explicit; buffers do not certify independence."},
+        })
         return fields
     if family == "event_fact_analysis" and version in {"11", "12"}:
         summary = {
@@ -933,7 +1022,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         "definition": definition.to_dict(),
         "purpose": _PURPOSES[key],
         "eligibility": {"request_selectable": example is not None,
-                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version=="15" else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
+                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version=="15" else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20", "21"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
                         "execution_authority": False, "promotion_authority": False,
                         **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
@@ -950,7 +1039,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                         "analysis_field": "summary" if definition.definition_id=="event_fact_analysis" and version=="15" else "populations" if definition.definition_id == "raw_forward_outcome" and version == "20" else "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5", "19"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                         "analysis_field": "summary" if definition.definition_id=="event_fact_analysis" and version=="15" else "comparison" if definition.definition_id=="raw_forward_outcome" and version=="21" else "populations" if definition.definition_id == "raw_forward_outcome" and version == "20" else "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5", "19"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),
