@@ -107,7 +107,7 @@ def _l2_payload() -> dict:
 
 
 def test_only_current_check_definitions_are_executable():
-    expected = {("raw_forward_outcome", str(v)) for v in (3,6,7,8,17,18,19,20)} | {
+    expected = {("raw_forward_outcome", str(v)) for v in (3,6,7,8,17,18,19,20,21)} | {
         (EVENT_FACT_ANALYSIS,str(v)) for v in range(4,16)}
     assert {(d.definition_id,d.definition_version) for d in CHECK_REGISTRY.definitions()} == expected
     for family in ("indicator_forward_outcome","signal_audit","candidate_lifecycle","run_signal_summary","run_decision_trade_comparison"):
