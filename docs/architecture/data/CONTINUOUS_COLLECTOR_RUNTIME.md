@@ -192,6 +192,24 @@ is nonterminal. Its closing evidence records `projection_invalidated`; it does
 not invent a transport-disconnect event. The epoch state stays until its terminal
 segment, so a later valid batch cannot erase the earlier invalidation.
 
+Coinbase may also publish a schema-valid Level 2 `snapshot` whose `updates`
+array is empty. The runtime archives that frame and records an exact
+`book_invalid` quality boundary at the provider message clock, but it does not
+create a snapshot Fact, BBO, depth, response feature, checkpoint, or valid
+coverage. The reconstructed book remains unavailable until a later complete
+snapshot opens a new validity interval. Retained-spool recovery applies the
+same deterministic rule, so the empty frame cannot permanently block reconnect.
+Malformed Level 2 update arrays and empty update events remain explicit
+`decode_error` evidence rather than being silently reinterpreted as snapshots
+or no-ops.
+
+Operator telemetry joins each Level 2 definition to its disposable current
+reconstruction lifecycle. Fresh provider heartbeats therefore cannot make an
+invalid book projection appear healthy: the individual feed remains delayed
+until a complete snapshot restores `valid`. Container liveness remains a
+separate process/supervisor signal so one delayed feed does not restart healthy
+sibling collectors.
+
 After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's
 projection state. Memory is therefore bounded by active/finalizing epochs, not
