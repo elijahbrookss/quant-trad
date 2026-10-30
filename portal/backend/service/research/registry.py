@@ -51,6 +51,12 @@ from .candle_state_comparison_v3_evaluator import (
     RULES as CANDLE_STATE_COMPARISON_V3_RULES,
     normalize_configuration as normalize_candle_state_comparison_v3,
 )
+from .candle_target_benchmark_evaluator import (
+    CandleTargetBenchmarkEvaluator,
+    SCHEMA as CANDLE_TARGET_BENCHMARK_SCHEMA,
+    RULES as CANDLE_TARGET_BENCHMARK_RULES,
+    normalize_configuration as normalize_candle_target_benchmark,
+)
 from .reversal_completed_recovery_evaluator import (ReversalCompletedRecoveryEvaluator, SCHEMA as COMPLETED_RECOVERY_SCHEMA, RULES as COMPLETED_RECOVERY_RULES, normalize_configuration as normalize_completed_recovery_configuration)
 from .reversal_population_evaluator import (ReversalPopulationEvaluator, SCHEMA as POPULATION_SCHEMA, RULES as POPULATION_RULES, normalize_configuration as normalize_population_configuration)
 from .saved_selection_measurements_evaluator import (ReusableSelectionMeasurementsEvaluator,
@@ -266,6 +272,27 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
         "outcome_schema": CANDLE_STATE_COMPARISON_V3_SCHEMA,
         "outcome_boundary": "evaluation_end_exclusive",
         "comparison_rules": CANDLE_STATE_COMPARISON_V3_RULES,
+    },
+))
+
+
+_candle_target_benchmark = CandleTargetBenchmarkEvaluator()
+CHECK_REGISTRY.register_evaluator(_candle_target_benchmark)
+CHECK_REGISTRY.register_definition(CheckDefinition(
+    schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+    definition_id=checks.RAW_FORWARD_OUTCOME,
+    definition_version="24",
+    evaluator_id=_candle_target_benchmark.evaluator_id,
+    evaluator_version=_candle_target_benchmark.version,
+    request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+    result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+    material_rules={
+        "family": checks.RAW_FORWARD_OUTCOME,
+        "event_ownership": "check",
+        "input_policy": "canonical_candle_clock_path.v1",
+        "outcome_schema": CANDLE_TARGET_BENCHMARK_SCHEMA,
+        "outcome_boundary": "evaluation_end_exclusive",
+        "comparison_rules": CANDLE_TARGET_BENCHMARK_RULES,
     },
 ))
 
@@ -856,7 +883,8 @@ def _resolve_definition_version(payload, *, family, base_version):
             PATH_SCHEMA: "19", COMPLETED_RECOVERY_SCHEMA: "20",
             CANDLE_STATE_COMPARISON_SCHEMA: "21",
             CANDLE_STATE_COMPARISON_V2_SCHEMA: "22",
-            CANDLE_STATE_COMPARISON_V3_SCHEMA: "23"}
+            CANDLE_STATE_COMPARISON_V3_SCHEMA: "23",
+            CANDLE_TARGET_BENCHMARK_SCHEMA: "24"}
         selected = schemas.get(_mapping(payload.get("outcomes"), field="outcomes").get("schema_version"))
         if selected is None or (base_version is not None and str(base_version) != selected):
             raise ValueError("check_definition_retired: select an explicit current outcome schema")
@@ -907,7 +935,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "6", "7", "8", "17", "18", "19", "20", "21", "22", "23"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "6", "7", "8", "17", "18", "19", "20", "21", "22", "23", "24"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -993,6 +1021,13 @@ def materialize_check_definition(
         )
         if gap_rewarm_bars or assertions:
             raise ValueError("candle_state_comparison_invalid: readiness is owned by typed configuration")
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "24":
+        outcomes, statistics = normalize_candle_target_benchmark(
+            detector=detector, outcomes=outcomes, statistics=statistics,
+            inputs=inputs, scope=scope, gap_policy=gap_policy,
+        )
+        if gap_rewarm_bars or assertions:
+            raise ValueError("candle_target_benchmark_invalid: readiness is owned by typed configuration")
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "17":
         outcomes = normalize_population_configuration(detector=detector, outcomes=outcomes,
             statistics=statistics, inputs=inputs, scope=scope, gap_policy=gap_policy)

@@ -59,6 +59,7 @@ code_paths:
   - portal/backend/service/research/candle_state_comparison_evaluator.py
   - portal/backend/service/research/candle_state_comparison_v2_evaluator.py
   - portal/backend/service/research/candle_state_comparison_v3_evaluator.py
+  - portal/backend/service/research/candle_target_benchmark_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/first_return_evaluator.py
@@ -1355,6 +1356,31 @@ configured sign lookback is required, and an exact flat change maps to zero.
 Transform parameters remain in the configured definition, feature-binding hash,
 selection audit, and canonical evidence lineage. No provider, Fact, persistence,
 model, target, fold, buffer, or execution contract changes.
+
+`raw_forward_outcome@24` explicitly selects
+`candle_target_benchmark_comparison.v1`. It preserves versions 21 through 23
+and scores one declared candle target with a target-specific fold-frozen
+forecaster against rolling-global and rolling-calendar forecasts. Rolling
+history uses historical decision clocks from the configured elapsed window and
+admits a label only after its complete outcome is known strictly before the new
+prediction. Realized earlier validation labels may update later benchmarks;
+model coefficients, standardization, and calibration remain frozen by fold.
+
+The admitted targets are terminal up versus non-up and the sum of squared
+native log returns over the complete configured future path. Direction uses the
+existing standardized logistic fit and Bernoulli log loss. Sampled variance
+uses a train-only nonnegative scaled candle feature and squared error. Both
+benchmarks score the same retained rows as the forecaster. Fixed UTC-calendar
+cluster draws retain paired losses, and results retain target, forecasts,
+losses, rolling-history membership receipts, support exclusions, common clock
+and label manifests, and fixed concentration diagnostics. This is forecast
+evidence, not profitability, execution, intrinsic target-difficulty, or
+scientific-confirmation authority.
+
+### All-completed reversal details
+
+The following continues the version 20 description above.
+
 It composes the existing sequential retreat-inclusive recognizer, the shared
 call-scoped `CompletedEventContext`, reversal-owned inclusive recovery duration,
 and unchanged `first_passage_path`. The matched selector also uses this context

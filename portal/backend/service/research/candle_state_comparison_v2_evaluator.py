@@ -550,11 +550,143 @@ def _ordinary_feature_values(
     return values, unavailable
 
 
+def _legacy_directional_scoring(
+    *,
+    complete_rows: Sequence[Mapping[str, Any]],
+    statistics: Mapping[str, Any],
+    seconds: int,
+    checkpoint,
+) -> dict[str, Any]:
+    """Preserve the v21-v23 paired directional result contract verbatim."""
+    baseline_specs = statistics["features"]["baseline"]
+    enriched_specs = statistics["features"]["enriched"]
+    baseline_names = [row["name"] for row in baseline_specs]
+    enriched_names = baseline_names + [row["name"] for row in enriched_specs]
+    fold_results: list[dict[str, Any]] = []
+    paired_predictions: list[dict[str, Any]] = []
+    eligibility = statistics["eligibility"]
+    buffer_seconds = statistics["purge_bars"] * seconds
+    embargo_seconds = statistics["embargo_bars"] * seconds
+    for fold in statistics["folds"]:
+        checkpoint()
+        train_start = _clock(fold["train"]["start"], "fold.train.start")
+        train_end = _clock(fold["train"]["end"], "fold.train.end")
+        validation_start = _clock(fold["validation"]["start"], "fold.validation.start")
+        validation_end = _clock(fold["validation"]["end"], "fold.validation.end")
+        effective_train_end = train_end - timedelta(seconds=buffer_seconds)
+        effective_validation_start = validation_start + timedelta(seconds=embargo_seconds)
+        train_rows = [row for row in complete_rows
+            if train_start <= _clock(row["decision_time"], "decision_time") < effective_train_end
+            and _clock(row["target_time"], "target_time") < train_end]
+        validation_rows = [row for row in complete_rows
+            if effective_validation_start <= _clock(row["decision_time"], "decision_time") < validation_end
+            and _clock(row["target_time"], "target_time") < validation_end]
+        train_classes = _class_counts(train_rows)
+        validation_classes = _class_counts(validation_rows)
+        validation_days = len({row["decision_time"][:10] for row in validation_rows})
+        reasons = []
+        if len(train_rows) < eligibility["min_train_rows"]: reasons.append("minimum_train_rows_not_met")
+        if len(validation_rows) < eligibility["min_validation_rows"]: reasons.append("minimum_validation_rows_not_met")
+        if min(train_classes.values(), default=0) < eligibility["min_train_each_class"]: reasons.append("minimum_train_class_not_met")
+        if min(validation_classes.values(), default=0) < eligibility["min_validation_each_class"]: reasons.append("minimum_validation_class_not_met")
+        if validation_days < eligibility["min_validation_utc_days"]: reasons.append("minimum_validation_days_not_met")
+        result = {
+            "id": fold["id"], "status": "unsupported" if reasons else "valid", "reasons": reasons,
+            "train_count": len(train_rows), "validation_count": len(validation_rows),
+            "train_classes": train_classes, "validation_classes": validation_classes,
+            "validation_utc_days": validation_days,
+            "effective_train_end": _iso(effective_train_end),
+            "effective_validation_start": _iso(effective_validation_start),
+            "train_target_boundary": _iso(train_end), "validation_target_boundary": _iso(validation_end),
+        }
+        if not reasons:
+            metrics, predictions = fit_paired_fold(
+                train_rows=train_rows, validation_rows=validation_rows,
+                baseline_names=baseline_names, enriched_names=enriched_names,
+                primary_key="primary", model=statistics["model"],
+            )
+            result.update(metrics)
+            for row in predictions:
+                row["fold_id"] = fold["id"]
+            paired_predictions.extend(predictions)
+        fold_results.append(result)
+
+    valid_folds = [row for row in fold_results if row["status"] == "valid"]
+    bootstrap = statistics["bootstrap"]
+    primary_ci = _cluster_ci(
+        paired_predictions, cluster_days=bootstrap["cluster_days"], anchor=bootstrap["anchor"],
+        replicates=bootstrap["replicates"], confidence=bootstrap["confidence"], seed=bootstrap["seed"],
+    ) if paired_predictions else {"status": "indeterminate", "reason": "no_paired_predictions"}
+    sensitivity = [
+        _cluster_ci(
+            paired_predictions, cluster_days=days, anchor=bootstrap["anchor"],
+            replicates=bootstrap["replicates"], confidence=bootstrap["confidence"], seed=bootstrap["seed"],
+        )
+        for days in bootstrap["sensitivity_cluster_days"]
+    ] if paired_predictions else []
+    support_reasons = []
+    if len(valid_folds) < eligibility["min_valid_folds"]:
+        support_reasons.append("minimum_valid_folds_not_met")
+    if primary_ci.get("cluster_count", 0) < eligibility["min_nonempty_clusters"]:
+        support_reasons.append("minimum_nonempty_clusters_not_met")
+    comparison = None
+    criteria = statistics["criteria"]
+    if paired_predictions:
+        actual = np.asarray([row["actual"] for row in paired_predictions], dtype=float)
+        baseline_probability = np.asarray([row["baseline_probability"] for row in paired_predictions], dtype=float)
+        enriched_probability = np.asarray([row["enriched_probability"] for row in paired_predictions], dtype=float)
+        delta = float(np.mean([row["paired_log_loss_delta"] for row in paired_predictions]))
+        comparison = {
+            "paired_row_count": len(paired_predictions),
+            "baseline_features": baseline_names, "enriched_features": enriched_names,
+            "baseline": {"log_loss": _log_loss(actual, baseline_probability), "roc_auc": _auc(actual, baseline_probability)},
+            "enriched": {"log_loss": _log_loss(actual, enriched_probability), "roc_auc": _auc(actual, enriched_probability)},
+            "delta_log_loss": delta,
+            "positive_delta_fold_count": sum(float(row.get("delta_log_loss") or 0.0) > 0 for row in valid_folds),
+            "bootstrap": primary_ci, "bootstrap_sensitivity": sensitivity,
+            "prediction_hash": semantic_hash({"paired_predictions": paired_predictions}),
+            "screen": {
+                "status": "unsupported" if support_reasons else "completed",
+                "support_reasons": support_reasons,
+                "effect_floor_met": delta >= criteria["min_delta_log_loss"],
+                "interval_above_zero": primary_ci.get("lower") is not None and float(primary_ci["lower"]) > 0.0,
+                "positive_fold_gate_met": sum(float(row.get("delta_log_loss") or 0.0) > 0 for row in valid_folds) >= criteria["min_positive_folds"],
+                "interpretation": criteria["interpretation"],
+            },
+        }
+    return {"folds": fold_results, "comparison": comparison}
+
+
 @dataclass(frozen=True)
 class CandleStateComparisonV2Evaluator:
     evaluator_id: str = checks.RAW_FORWARD_OUTCOME
     version: str = "22"
     result_schema_version: str = RESULT_SCHEMA
+
+    def _complete_row_extensions(
+        self,
+        *,
+        current: Mapping[str, Any],
+        future: Sequence[Mapping[str, Any]],
+        target: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        del current, future, target
+        return {}
+
+    def _score_complete_rows(
+        self,
+        *,
+        complete_rows: Sequence[Mapping[str, Any]],
+        statistics: Mapping[str, Any],
+        seconds: int,
+        checkpoint,
+    ) -> dict[str, Any]:
+        return _legacy_directional_scoring(
+            complete_rows=complete_rows,
+            statistics=statistics,
+            seconds=seconds,
+            checkpoint=checkpoint,
+        )
 
     def declare_requirements(self, *, definition: CheckDefinition, request: CheckRequest):
         del definition
@@ -691,7 +823,8 @@ class CandleStateComparisonV2Evaluator:
             bars_since_reset += 1
 
         horizon_bars = int(outcomes["horizon_bars"])
-        continuation_lookback = int(outcomes["continuation"]["lookback_bars"])
+        continuation = outcomes.get("continuation")
+        continuation_lookback = int(continuation["lookback_bars"]) if continuation else 0
         opportunities = Counter()
         exclusions = Counter()
         complete_rows: list[dict[str, Any]] = []
@@ -842,8 +975,14 @@ class CandleStateComparisonV2Evaluator:
             current_close, target_close = float(current["close"]), float(target["close"])
             forward_change = target_close - current_close
             forward_log_return = math.log(target_close / current_close)
-            prior = by_open.get(current["open_time"] - step * continuation_lookback)
-            if prior is None:
+            prior = (
+                by_open.get(current["open_time"] - step * continuation_lookback)
+                if continuation_lookback
+                else None
+            )
+            if not continuation_lookback:
+                continuation = "not_configured"
+            elif prior is None:
                 continuation = "prior_path_unavailable"
             else:
                 past_change = current_close - float(prior["close"])
@@ -866,14 +1005,20 @@ class CandleStateComparisonV2Evaluator:
             variation = sum(math.log(path_closes[i] / path_closes[i - 1]) ** 2 for i in range(1, len(path_closes)))
             magnitudes.append(abs(forward_log_return))
             path_variations.append(variation)
-            complete_rows.append({
+            complete_row = {
                 "event_time": _iso(current["open_time"]), "decision_time": _iso(decision),
                 "target_time": _iso(target["close_time"]),
                 "features": features,
                 "outcomes": {"primary": {"positive": forward_change > 0, "flat": forward_change == 0,
                     "log_return": forward_log_return, "magnitude": abs(forward_log_return),
                     "path_variation": variation, "continuation": continuation}},
-            })
+            }
+            complete_row.update(self._complete_row_extensions(
+                current=current,
+                future=future,
+                target=target,
+            ))
+            complete_rows.append(complete_row)
 
         for offset in range(nominal_slots):
             decision = start + pd.Timedelta(step) * offset
@@ -913,100 +1058,14 @@ class CandleStateComparisonV2Evaluator:
             "row_hash": semantic_hash({"rows": selection_audit_rows}),
         }
 
-        baseline_names = [row["name"] for row in baseline_specs]
-        enriched_names = baseline_names + [row["name"] for row in enriched_specs]
-        fold_results: list[dict[str, Any]] = []
-        paired_predictions: list[dict[str, Any]] = []
-        eligibility = statistics["eligibility"]
-        buffer_seconds = statistics["purge_bars"] * seconds
-        embargo_seconds = statistics["embargo_bars"] * seconds
-        for fold in statistics["folds"]:
-            checkpoint()
-            train_start = _clock(fold["train"]["start"], "fold.train.start")
-            train_end = _clock(fold["train"]["end"], "fold.train.end")
-            validation_start = _clock(fold["validation"]["start"], "fold.validation.start")
-            validation_end = _clock(fold["validation"]["end"], "fold.validation.end")
-            effective_train_end = train_end - timedelta(seconds=buffer_seconds)
-            effective_validation_start = validation_start + timedelta(seconds=embargo_seconds)
-            train_rows = [row for row in complete_rows
-                if train_start <= _clock(row["decision_time"], "decision_time") < effective_train_end
-                and _clock(row["target_time"], "target_time") < train_end]
-            validation_rows = [row for row in complete_rows
-                if effective_validation_start <= _clock(row["decision_time"], "decision_time") < validation_end
-                and _clock(row["target_time"], "target_time") < validation_end]
-            train_classes = _class_counts(train_rows)
-            validation_classes = _class_counts(validation_rows)
-            validation_days = len({row["decision_time"][:10] for row in validation_rows})
-            reasons = []
-            if len(train_rows) < eligibility["min_train_rows"]: reasons.append("minimum_train_rows_not_met")
-            if len(validation_rows) < eligibility["min_validation_rows"]: reasons.append("minimum_validation_rows_not_met")
-            if min(train_classes.values(), default=0) < eligibility["min_train_each_class"]: reasons.append("minimum_train_class_not_met")
-            if min(validation_classes.values(), default=0) < eligibility["min_validation_each_class"]: reasons.append("minimum_validation_class_not_met")
-            if validation_days < eligibility["min_validation_utc_days"]: reasons.append("minimum_validation_days_not_met")
-            result = {
-                "id": fold["id"], "status": "unsupported" if reasons else "valid", "reasons": reasons,
-                "train_count": len(train_rows), "validation_count": len(validation_rows),
-                "train_classes": train_classes, "validation_classes": validation_classes,
-                "validation_utc_days": validation_days,
-                "effective_train_end": _iso(effective_train_end),
-                "effective_validation_start": _iso(effective_validation_start),
-                "train_target_boundary": _iso(train_end), "validation_target_boundary": _iso(validation_end),
-            }
-            if not reasons:
-                metrics, predictions = fit_paired_fold(
-                    train_rows=train_rows, validation_rows=validation_rows,
-                    baseline_names=baseline_names, enriched_names=enriched_names,
-                    primary_key="primary", model=statistics["model"],
-                )
-                result.update(metrics)
-                for row in predictions:
-                    row["fold_id"] = fold["id"]
-                paired_predictions.extend(predictions)
-            fold_results.append(result)
-
-        valid_folds = [row for row in fold_results if row["status"] == "valid"]
-        bootstrap = statistics["bootstrap"]
-        primary_ci = _cluster_ci(
-            paired_predictions, cluster_days=bootstrap["cluster_days"], anchor=bootstrap["anchor"],
-            replicates=bootstrap["replicates"], confidence=bootstrap["confidence"], seed=bootstrap["seed"],
-        ) if paired_predictions else {"status": "indeterminate", "reason": "no_paired_predictions"}
-        sensitivity = [
-            _cluster_ci(
-                paired_predictions, cluster_days=days, anchor=bootstrap["anchor"],
-                replicates=bootstrap["replicates"], confidence=bootstrap["confidence"], seed=bootstrap["seed"],
-            )
-            for days in bootstrap["sensitivity_cluster_days"]
-        ] if paired_predictions else []
-        support_reasons = []
-        if len(valid_folds) < eligibility["min_valid_folds"]:
-            support_reasons.append("minimum_valid_folds_not_met")
-        if primary_ci.get("cluster_count", 0) < eligibility["min_nonempty_clusters"]:
-            support_reasons.append("minimum_nonempty_clusters_not_met")
-        comparison = None
-        criteria = statistics["criteria"]
-        if paired_predictions:
-            actual = np.asarray([row["actual"] for row in paired_predictions], dtype=float)
-            baseline_probability = np.asarray([row["baseline_probability"] for row in paired_predictions], dtype=float)
-            enriched_probability = np.asarray([row["enriched_probability"] for row in paired_predictions], dtype=float)
-            delta = float(np.mean([row["paired_log_loss_delta"] for row in paired_predictions]))
-            comparison = {
-                "paired_row_count": len(paired_predictions),
-                "baseline_features": baseline_names, "enriched_features": enriched_names,
-                "baseline": {"log_loss": _log_loss(actual, baseline_probability), "roc_auc": _auc(actual, baseline_probability)},
-                "enriched": {"log_loss": _log_loss(actual, enriched_probability), "roc_auc": _auc(actual, enriched_probability)},
-                "delta_log_loss": delta,
-                "positive_delta_fold_count": sum(float(row.get("delta_log_loss") or 0.0) > 0 for row in valid_folds),
-                "bootstrap": primary_ci, "bootstrap_sensitivity": sensitivity,
-                "prediction_hash": semantic_hash({"paired_predictions": paired_predictions}),
-                "screen": {
-                    "status": "unsupported" if support_reasons else "completed",
-                    "support_reasons": support_reasons,
-                    "effect_floor_met": delta >= criteria["min_delta_log_loss"],
-                    "interval_above_zero": primary_ci.get("lower") is not None and float(primary_ci["lower"]) > 0.0,
-                    "positive_fold_gate_met": sum(float(row.get("delta_log_loss") or 0.0) > 0 for row in valid_folds) >= criteria["min_positive_folds"],
-                    "interpretation": criteria["interpretation"],
-                },
-            }
+        scoring = self._score_complete_rows(
+            complete_rows=complete_rows,
+            statistics=statistics,
+            seconds=seconds,
+            checkpoint=checkpoint,
+        )
+        fold_results = scoring["folds"]
+        comparison = scoring["comparison"]
 
         result = {
             "schema_version": self.result_schema_version, "check_family": checks.RAW_FORWARD_OUTCOME,
@@ -1057,6 +1116,9 @@ class CandleStateComparisonV2Evaluator:
                 "Selection-audit context is causal and outcome-blind; missing native slots do not imply market closure.",
             ],
         }
+        extensions = dict(scoring.get("result_extensions") or {})
+        result["caveats"].extend(extensions.pop("additional_caveats", []))
+        result.update(extensions)
         encoded = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
         if len(encoded) > MAX_RESULT_BYTES:
             raise RuntimeError("candle_state_comparison_limit: 16 MiB result budget exceeded")

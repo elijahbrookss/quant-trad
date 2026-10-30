@@ -1,20 +1,29 @@
 # Candle-State Paired Comparison
 
-`raw_forward_outcome@21`, `raw_forward_outcome@22`, and
-`raw_forward_outcome@23` are versioned candle-only
+`raw_forward_outcome@21`, `raw_forward_outcome@22`,
+`raw_forward_outcome@23`, and `raw_forward_outcome@24` are versioned candle-only
 Research Checks for paired forecast comparisons at ordinary native candle
 closes. Version 21 asks whether causal public Indicator metrics add information
 beyond a typed candle baseline. Version 22 also admits the existing typed candle
 features on either side, including an Indicator-free enriched side, and retains
 an outcome-blind causal selection audit. Version 23 adds the existing identity
-and historical-return-sign transforms to those typed candle features. Versions
-21 and 22 remain unchanged and executable for their recorded requests and
+and historical-return-sign transforms to those typed candle features. Version
+24 scores one declared candle target and a fold-frozen forecaster against both
+strictly historical rolling-global and rolling-calendar forecasts. Versions
+21 through 23 remain unchanged and executable for their recorded requests and
 evidence.
 
 The procedure is generic. Instrument identity, timeframe, date ranges, elapsed
 outcome horizon, baseline windows, public metric parameters, historical-sign
 transform, folds, buffers, support screens, effect criteria, and bootstrap
 settings are request material. They are not source constants.
+
+Version 24 additionally makes the target, target-specific forecaster, rolling
+history window and support, calendar bins, benchmark priors, loss, and criteria
+request material. Its current target operators are terminal up versus non-up
+and the sum of squared native log returns over a complete configured future
+path. The latter is sampled variance at the source interval; it is neither the
+absolute endpoint return nor the square root of that sum.
 
 ## Population and outcomes
 
@@ -75,6 +84,32 @@ to a configured epoch. Sensitivity cluster spans are separate fixed results;
 the implementation does not choose the narrower interval. Overlapping outcomes,
 shared causal history, and recursive Indicator state remain explicit dependence
 limitations. Buffers and cluster intervals do not certify independent trials.
+
+## Target and rolling-benchmark scoring
+
+Version 24 fits its forecaster on the declared training rows only. Direction
+uses the existing standardized L2 logistic fit. Sampled variance uses a
+nonnegative train-only coefficient multiplying a declared raw candle feature
+raised to its configured power. Coefficients, standardization, and calibration
+remain frozen for each validation fold.
+
+The two benchmarks are forecasts made independently at every scoring decision.
+Their history is selected by historical decision time from the configured
+elapsed window, and a historical label is admitted only when its entire outcome
+was known strictly before the new prediction. Realized earlier validation
+labels may therefore update a later benchmark, while the fold model remains
+frozen. The calendar benchmark uses the declared UTC bin and shrinkage and falls
+back to the current rolling-global forecast when its own support is insufficient.
+It never uses a full-dataset average or a label known exactly at the prediction
+clock.
+
+Direction is scored with paired Bernoulli log loss and sampled variance with
+paired squared error. Pooled gain and ratio skill use equal scoring-row weight;
+fold ratios are not averaged in their place. Fixed UTC-calendar cluster draws
+resample the model and both benchmark losses together. Results retain the typed
+scoring rows, history membership receipts, shared clock and label manifests,
+support exclusions, and fixed concentration diagnostics. Statistical skill is
+not an economic or profitability claim.
 
 ## Execution and evidence
 

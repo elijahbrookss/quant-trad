@@ -32,6 +32,8 @@ def _fit_logistic(
     y_train: np.ndarray,
     x_validation: np.ndarray,
     model: Mapping[str, Any],
+    *,
+    include_parameters: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     means = np.mean(x_train, axis=0)
     scales = np.std(x_train, axis=0, ddof=0)
@@ -86,11 +88,18 @@ def _fit_logistic(
         )
     logits = np.clip(validation_design @ optimized.x, -40.0, 40.0)
     probabilities = 1.0 / (1.0 + np.exp(-logits))
-    return probabilities, {
+    fit = {
         "iterations": int(optimized.nit),
         "objective": float(optimized.fun),
         "converged": True,
     }
+    if include_parameters:
+        fit.update({
+            "feature_means": [float(value) for value in means],
+            "feature_scales": [float(value) for value in scales],
+            "coefficients": [float(value) for value in optimized.x],
+        })
+    return probabilities, fit
 
 
 def _log_loss(y: np.ndarray, probability: np.ndarray) -> float:
