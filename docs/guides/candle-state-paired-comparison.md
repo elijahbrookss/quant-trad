@@ -1,8 +1,12 @@
 # Candle-State Paired Comparison
 
-`raw_forward_outcome@21` is a versioned candle-only Research Check for asking
-whether one or more causal public Indicator metrics add forecast information
-beyond a configured baseline at ordinary native candle closes.
+`raw_forward_outcome@21` and `raw_forward_outcome@22` are versioned candle-only
+Research Checks for paired forecast comparisons at ordinary native candle
+closes. Version 21 asks whether causal public Indicator metrics add information
+beyond a typed candle baseline. Version 22 also admits the existing typed candle
+features on either side, including an Indicator-free enriched side, and retains
+an outcome-blind causal selection audit. Version 21 remains unchanged and
+executable for its recorded requests and evidence.
 
 The procedure is generic. Instrument identity, timeframe, date ranges, elapsed
 outcome horizon, baseline windows, public metric parameters, historical-sign
@@ -26,8 +30,11 @@ settings are request material. They are not source constants.
 ## Features and public Indicator binding
 
 Baseline features use the existing lagged-return, Wilder ATR-fraction, and
-prior-volume-ratio helpers. Enriched features use a typed public Indicator
-binding. Version 21 currently admits the public Candle Stats
+prior-volume-ratio helpers. Version 22 permits those same typed features in the
+enriched arm, so volume or another declared candle-state feature can be compared
+without fabricating a market Fact or requiring an Indicator. It also permits a
+typed public Indicator binding in the enriched arm. Version 21 currently admits
+the public Candle Stats
 `candle_stats.directional_efficiency` metric with either identity or a sign
 transform derived from a configured historical return. The evaluator executes
 the registered Candle Stats runtime; it does not duplicate the metric formula.
@@ -36,6 +43,17 @@ At input origin and after each missing or invalid native interval, Indicator and
 rolling feature state reset and rewarm. Fold boundaries do not reset causal
 state. Delayed source rows cannot contribute until their retained `known_at`
 clock is no later than the decision close.
+
+## Causal selection audit
+
+Version 22 records one selection-audit row for every nominal close slot. An
+observed row carries only information available at that decision close:
+retained source identity and known-at state, gap episode identity, causal close
+and volume, typed feature values, missingness, and exclusion reasons. Missing
+native slots remain explicit with unavailable context. The audit never stores
+the future target, primary label, return, or path outcome, so it can inspect
+selection and exclusion patterns without leaking the response into admission.
+Its rows and typed feature bindings are hashed in the result provenance.
 
 ## Paired model and dependence
 
@@ -55,9 +73,10 @@ limitations. Buffers and cluster intervals do not certify independent trials.
 Evidence mode uses the existing requirements, prepare/freeze, Check job, and
 replay boundaries. A request must bind exactly one frozen Dataset. The evaluator
 fails instead of truncating when it exceeds 19,104 candles, 256 MiB input, 120
-seconds, or 16 MiB result output. Configuration, typed Indicator binding,
-population, predictions, definition, request, plan, and evidence remain hashed
-by the existing canonical Check envelope.
+seconds, or 16 MiB result output. Configuration, typed feature and optional
+Indicator bindings, population, selection audit, predictions, definition,
+request, plan, and evidence remain hashed by the existing canonical Check
+envelope.
 
 Completion is a forecast screen. It does not grant execution, promotion,
 profitability, causal, or scientific-confirmation authority.

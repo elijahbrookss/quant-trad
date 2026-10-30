@@ -56,6 +56,8 @@ code_paths:
   - portal/backend/service/research/event_outcomes.py
   - portal/backend/service/research/event_statistics.py
   - portal/backend/service/research/directional_model.py
+  - portal/backend/service/research/candle_state_comparison_evaluator.py
+  - portal/backend/service/research/candle_state_comparison_v2_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/first_return_evaluator.py
@@ -1331,6 +1333,17 @@ This method does not reinterpret Indicator events as ordinary closes, fabricate
 Facts, bridge missing candles, or grant trading/scientific authority. See
 [Candle-State Paired Comparison](../../guides/candle-state-paired-comparison.md)
 for the request and result contract.
+
+`raw_forward_outcome@22` explicitly selects
+`candle_state_paired_comparison.v2`. It preserves version 21 and its evidence,
+while permitting the existing typed causal candle features on either comparison
+side. The enriched side may be Indicator-free or may retain the versioned public
+Indicator binding. Its additional `candle_state_selection_audit.v1` evidence is
+outcome-blind: every nominal close slot retains only causal source/known-at,
+episode, candle, feature, missingness, and exclusion context. Future endpoints,
+labels, returns, and paths remain outside selection admission. Feature bindings,
+selection rows, paired population, predictions, definition, request, plan, and
+result stay hashed under the canonical Check envelope.
 It composes the existing sequential retreat-inclusive recognizer, the shared
 call-scoped `CompletedEventContext`, reversal-owned inclusive recovery duration,
 and unchanged `first_passage_path`. The matched selector also uses this context
