@@ -1,7 +1,10 @@
 from copy import deepcopy
+from contextlib import nullcontext
 
 import pytest
 
+from portal.backend.service.async_jobs import ClaimedJob
+from portal.backend.service.research import async_dispatch
 from portal.backend.service.research import catalog
 from portal.backend.service.research.candle_target_benchmark_evaluator import (
     RESULT_SCHEMA,
@@ -16,7 +19,10 @@ from portal.backend.service.research.registry import (
     CHECK_REGISTRY,
     definition_allows_evidence,
     materialize_check_definition,
+    pin_check_definition_to_plan,
+    reconstruct_pinned_check_definition,
 )
+from portal.backend.workers import research_worker
 from tests.test_portal.test_candle_state_comparison_v2 import (
     BASE,
     STEP,
@@ -134,6 +140,116 @@ def test_v24_registers_without_changing_historical_contracts():
     assert CHECK_REGISTRY.resolve_definition("raw_forward_outcome", "21").definition_hash == "b6a2a10f1ae19edb7636bcdee13e0fe3cf229c9e99e82673f369d0e0a5efff97"
     assert CHECK_REGISTRY.resolve_definition("raw_forward_outcome", "22").definition_hash == "41f489e72c0a3d52da338b9e4d16296188c64786f6bccba581f450fb8b63570b"
     assert CHECK_REGISTRY.resolve_definition("raw_forward_outcome", "23").definition_hash == "36df82b862d58aa7f645727347557387b679314436603091f9e084f0c3b7aba8"
+
+
+@pytest.mark.parametrize("target", [TARGET_DIRECTION, TARGET_VARIANCE])
+def test_v24_pinned_request_and_plan_round_trip_through_canonical_worker_contract(target):
+    definition, request, plan = contract(payload(target=target))
+    definition, request, plan = pin_check_definition_to_plan(definition, request, plan)
+
+    serialized_request = type(request).from_dict(request.to_dict())
+    serialized_plan = type(plan).from_dict(plan.to_dict())
+    reconstructed = reconstruct_pinned_check_definition(
+        serialized_request,
+        serialized_plan,
+    )
+
+    assert reconstructed.to_dict() == definition.to_dict()
+    assert reconstructed.material_rules["statistics"] == request.parameters["statistics"]
+
+
+@pytest.mark.parametrize(
+    "mutation, error",
+    [
+        (
+            lambda statistics: statistics.update(target_operator=TARGET_VARIANCE),
+            "canonical target operator mismatch",
+        ),
+        (
+            lambda statistics: statistics.update(elapsed_buffer_seconds=1),
+            "canonical statistics disagree",
+        ),
+        (
+            lambda statistics: statistics["features"]["enriched"].append(
+                statistics["features"]["baseline"][0]
+            ),
+            "canonical candle-only feature groups required",
+        ),
+    ],
+)
+def test_v24_canonical_worker_contract_remains_fail_closed(mutation, error):
+    _definition, request, _plan = contract(payload(target=TARGET_DIRECTION))
+    statistics = deepcopy(request.parameters["statistics"])
+    mutation(statistics)
+
+    with pytest.raises(ValueError, match=error):
+        materialize_check_definition(
+            {
+                "check_family": "raw_forward_outcome",
+                "scope": dict(request.scope),
+                **{key: deepcopy(value) for key, value in request.parameters.items()},
+                "statistics": statistics,
+            },
+            mode="evidence",
+            base_version="24",
+        )
+
+
+def test_v24_serialized_contract_survives_supported_research_job_dispatch(monkeypatch):
+    definition, request, plan = contract(payload(target=TARGET_DIRECTION))
+    definition, request, plan = pin_check_definition_to_plan(definition, request, plan)
+    job = ClaimedJob(
+        id="job-v24-roundtrip",
+        job_type=async_dispatch.JOB_TYPE_RESEARCH_CHECK_RUN,
+        payload={"request": {"request": request.to_dict(), "plan": plan.to_dict()}},
+        attempts=1,
+        max_attempts=1,
+        partition_key=None,
+        partition_hash=0,
+        lock_owner="worker-v24",
+        claim_token="claim-v24",
+        claim_generation=1,
+    )
+    observed = {}
+
+    def build(serialized):
+        serialized_request = type(request).from_dict(serialized["request"])
+        serialized_plan = type(plan).from_dict(serialized["plan"])
+        reconstructed = reconstruct_pinned_check_definition(
+            serialized_request,
+            serialized_plan,
+        )
+        observed["definition"] = reconstructed.to_dict()
+        return {"schema_version": "research_check_evidence_build.v1"}
+
+    monkeypatch.setattr(
+        research_worker,
+        "maintain_job_heartbeat",
+        lambda claimed, **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        research_worker.research_service,
+        "build_research_check_evidence",
+        build,
+    )
+    monkeypatch.setattr(
+        research_worker.research_service,
+        "persist_built_research_check_evidence",
+        lambda built, *, session: {
+            "schema_version": "research_check_run.v2",
+            "status": "completed",
+        },
+    )
+    monkeypatch.setattr(
+        research_worker,
+        "complete_job_with_owned_effect",
+        lambda claimed, effect: dict(effect("owned-session")),
+    )
+
+    result = research_worker.execute_claimed_research_job(job)
+
+    assert result["status"] == "completed"
+    assert observed["definition"] == definition.to_dict()
 
 
 @pytest.mark.parametrize("target", [TARGET_DIRECTION, TARGET_VARIANCE])

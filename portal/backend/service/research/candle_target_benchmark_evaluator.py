@@ -154,13 +154,42 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
         "target": target,
     }
 
+    required = {
+        "features",
+        "forecaster",
+        "rolling_history",
+        "benchmarks",
+        "folds",
+        "purge_bars",
+        "embargo_bars",
+        "eligibility",
+        "bootstrap",
+        "loss",
+        "criteria",
+    }
+    canonical_required = required | {"target_operator", "elapsed_buffer_seconds"}
     config = v2._mapping(statistics, field="statistics")
-    required = {"features", "forecaster", "rolling_history", "benchmarks", "folds", "purge_bars", "embargo_bars", "eligibility", "bootstrap", "loss", "criteria"}
-    if set(config) != required:
+    config_fields = frozenset(config)
+    canonical_input = config_fields == frozenset(canonical_required)
+    if config_fields not in {
+        frozenset(required),
+        frozenset(canonical_required),
+    }:
         raise ValueError("candle_target_benchmark_invalid: exact statistics fields required")
+    feature_input = config.get("features")
+    if canonical_input:
+        if str(config.get("target_operator") or "") != operator:
+            raise ValueError("candle_target_benchmark_invalid: canonical target operator mismatch")
+        feature_groups = v2._mapping(feature_input, field="statistics.features")
+        if (
+            set(feature_groups) != {"baseline", "enriched"}
+            or feature_groups.get("enriched") != []
+        ):
+            raise ValueError("candle_target_benchmark_invalid: canonical candle-only feature groups required")
+        feature_input = feature_groups.get("baseline")
     features = [
         v2._normalize_feature(row, side="baseline", allow_ordinary_transforms=True)
-        for row in v2._list(config.get("features"), field="statistics.features", maximum=32)
+        for row in v2._list(feature_input, field="statistics.features", maximum=32)
     ]
     names = [row["name"] for row in features]
     if len(names) != len(set(names)):
@@ -309,7 +338,12 @@ def normalize_configuration(*, detector, outcomes, statistics, inputs, scope, ga
         "loss": normalized_loss,
         "criteria": normalized_criteria,
     }
-    normalized_statistics["elapsed_buffer_seconds"] = max(normalized_statistics["purge_bars"], normalized_statistics["embargo_bars"]) * seconds
+    normalized_statistics["elapsed_buffer_seconds"] = max(
+        normalized_statistics["purge_bars"],
+        normalized_statistics["embargo_bars"],
+    ) * seconds
+    if canonical_input and config != normalized_statistics:
+        raise ValueError("candle_target_benchmark_invalid: canonical statistics disagree")
     return normalized_outcome, normalized_statistics
 
 
