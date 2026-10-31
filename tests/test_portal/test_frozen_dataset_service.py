@@ -256,3 +256,39 @@ def test_candle_calendar_expansion_stops_before_unbounded_allocation(stop):
             with pytest.raises(ExecutionCancelledError):
                 for _ in range(512):
                     next(times)
+
+
+@pytest.mark.parametrize("status,policy,accepted", [
+    ("partial", None, False), ("partial", "recorded_partial", True),
+    ("failed", "recorded_partial", False), ("complete", None, True),
+])
+def test_frozen_partial_custody_requires_explicit_consumer_policy(monkeypatch, status, policy, accepted):
+    store = _Store()
+    original = store.list_source_acquisition_coverage
+    def coverage(**kwargs):
+        rows = original(**kwargs)
+        for row in rows:
+            row["status"] = status
+            material = {k: row[k] for k in ("schema_version", "series_id", "source_id",
+                "binding_id", "manifest_hash", "interface_version", "confirmation_depth",
+                "range_start", "range_end", "source_positions", "status", "evidence")}
+            row["identity_key"] = semantic_hash(material)
+        return rows
+    store.list_source_acquisition_coverage = coverage
+    gap = {"classification": "provider_completeness_unverified", "start": "2026-01-01T00:00:00Z",
+           "end": "2026-02-01T00:00:00Z", "source_identity_key": "source-a"}
+    monkeypatch.setattr(frozen_dataset_service, "validate_frozen_dataset_series",
+        lambda **kw: ({**kw["entry"], "quality_evidence": [gap]}, [], [object()]))
+    req = _requirement("reference", "source-a")
+    if policy:
+        req["coverage_policy"] = policy
+    options = dict(dataset_id=store.dataset.dataset_id, requirements=[req], store=store,
+                   instrument_loader=lambda key: {"id": key})
+    if not accepted:
+        with pytest.raises(ValueError, match="acquisition_coverage_missing"):
+            frozen_dataset_service.resolve_frozen_dataset_read_binding(**options)
+    else:
+        binding = frozen_dataset_service.resolve_frozen_dataset_read_binding(**options)
+        assert binding["series"][0]["acquisition_coverage"][0]["status"] == status
+        assert binding["recorded_gaps"][0]["classification"] == gap["classification"]
+        assert binding["provider_access"] == "disabled"

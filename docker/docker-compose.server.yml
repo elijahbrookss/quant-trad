@@ -106,6 +106,7 @@ services:
     env_file:
       - ${QT_SERVER_ENV_FILE:-../secrets.env}
     environment:
+      QT_STORAGE_GRAFANA_DASHBOARD_URL: ${QT_STORAGE_GRAFANA_DASHBOARD_URL:-}
       <<: *runtime-environment
       QT_BOT_RUNTIME_IMAGE: quanttrad-backend:${QT_RELEASE_REVISION}
       QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
@@ -440,6 +441,9 @@ services:
       loki.service: grafana
     env_file:
       - ${QT_SERVER_ENV_FILE:-../secrets.env}
+      # Metrics credentials belong only to Grafana, not the shared service env.
+      - path: ${QT_GRAFANA_STORAGE_ENV_FILE:-../../grafana-storage-metrics.env}
+        required: false
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -468,6 +472,20 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Disabled by default; selecting the restricted datasource requires an
+      # explicit operator-reviewed access/configuration installation.
+      - type: bind
+        source: ${QT_GRAFANA_STORAGE_DATASOURCE_FILE:-./grafana/provisioning/datasources/storage-metrics.yml}
+        target: /etc/grafana/provisioning/datasources/storage-metrics.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QT_GRAFANA_STORAGE_DASHBOARD_FILE:-./grafana/provisioning/dashboards/capacity-database-growth.json}
+        target: /etc/grafana/provisioning/dashboards/capacity-database-growth.json
+        read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: ./grafana/provisioning/dashboards
         target: /etc/grafana/provisioning/dashboards
@@ -489,6 +507,12 @@ services:
       - type: bind
         source: ./grafana/provisioning/alerting/storage-safety.yml
         target: /etc/grafana/provisioning/alerting/storage-safety.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./grafana/server-alerting/clock-disabled.yml
+        target: /etc/grafana/provisioning/alerting/clock-safety.yml
         read_only: true
         bind:
           create_host_path: false

@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from market_data.canonical import CanonicalFactRecord
 from market_data.canonical_adapters import canonicalize_basis_feature, canonicalize_bbo_feature
@@ -13,6 +14,34 @@ from market_data.market_state import derive_basis_features, derive_book_features
 from portal.backend.service.storage.repos import fact_derived_admission as admission
 from portal.backend.service.storage.repos.market_data import _preserves_canonical_revision_history
 from tests.test_market_data.test_market_state_phase3 import BASE, SOURCE, _state, _contract
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one(self):
+        return self.value
+
+
+class _JitAwareSession:
+    def __init__(self, execute, prior="on"):
+        self._execute = execute
+        self.prior = prior
+        self.jit_calls = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "current_setting('jit')" in sql:
+            self.jit_calls.append(("read", None))
+            return _ScalarResult(self.prior)
+        if "set_config('jit','off'" in sql:
+            self.jit_calls.append(("off", None))
+            return _ScalarResult(None)
+        if "set_config('jit',:value" in sql:
+            self.jit_calls.append(("restore", params["value"]))
+            return _ScalarResult(None)
+        return self._execute(statement, params)
 
 
 def _row(fact, series_id, commit=1):
@@ -31,6 +60,36 @@ def _pair():
 
 def test_basis_freeze_binds_canonical_history_without_removing_typed_readers():
     assert _preserves_canonical_revision_history("market.futures_spot_basis.v1")
+
+
+def test_material_resolver_jit_scope_restores_success_and_python_cancellation():
+    session = _JitAwareSession(lambda statement, params: pytest.fail(str(statement)))
+    with admission._transaction_local_jit_disabled(session):
+        pass
+    assert session.jit_calls == [("read", None), ("off", None), ("restore", "on")]
+
+    session = _JitAwareSession(lambda statement, params: pytest.fail(str(statement)))
+    cancellation = RuntimeError("budget cancelled")
+    with pytest.raises(RuntimeError) as caught:
+        with admission._transaction_local_jit_disabled(session):
+            raise cancellation
+    assert caught.value is cancellation
+    assert session.jit_calls == [("read", None), ("off", None), ("restore", "on")]
+
+    session = _JitAwareSession(lambda statement, params: pytest.fail(str(statement)), prior="off")
+    with admission._transaction_local_jit_disabled(session):
+        pass
+    assert session.jit_calls == [("read", None)]
+
+
+def test_material_resolver_jit_scope_preserves_database_failure_for_rollback():
+    failure = DBAPIError("SELECT broken", {}, RuntimeError("database rejected statement"), False)
+    session = _JitAwareSession(lambda statement, params: pytest.fail(str(statement)))
+    with pytest.raises(DBAPIError) as caught:
+        with admission._transaction_local_jit_disabled(session):
+            raise failure
+    assert caught.value is failure
+    assert session.jit_calls == [("read", None), ("off", None)]
 
 
 @pytest.mark.parametrize("mode", ["valid", "canonical_hash", "missing", "wrong_alias", "wrong_series", "wrong_type",
@@ -57,8 +116,18 @@ def test_material_sources_revalidate_every_candidate_and_causal_clock(monkeypatc
         second["observation_key"] = "other"
     def execute(statement, params):
         sql = str(statement)
-        assert sql.count("source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at") == 3
-        assert "fact_archive_material_aliases" in sql and "DISTINCT ON" not in sql
+        assert sql.count("source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at") == 4
+        assert "DISTINCT ON" not in sql
+        assert "JOIN market.fact_archive_material_aliases AS aliases" in sql
+        assert "JOIN market.fact_archive_prepared_material_aliases AS prepared" in sql
+        assert sql.count("series_id=requested.series_id") >= 4
+        assert sql.count("evidence_key=requested.evidence_key") == 2
+        assert sql.count("material_hash=requested.material_hash") >= 3
+        assert "LEFT JOIN market.fact_archive_active_generations AS legacy_authority" in sql
+        assert "legacy_authority.manifest_id IS NULL" in sql
+        assert "JOIN market.fact_archive_active_generations AS prepared_authority" in sql
+        assert "prepared_authority.preparation_id=prepared.preparation_id" in sql
+        assert "manifest.id=prepared_authority.manifest_id" in sql
         parsed = json.loads(params["requests"])
         assert parsed[0]["evidence_key"] == "_qt_bbo_evidence"
         return SimpleNamespace(all=lambda: [] if mode == "missing" else [("root", "futures", identity) for identity in rows])
@@ -68,12 +137,56 @@ def test_material_sources_revalidate_every_candidate_and_causal_clock(monkeypatc
     monkeypatch.setattr(admission, "record_from_storage_row", lambda row: checked.append(row["id"]))
     kwargs = dict(requests=[request], reader=None, max_rows=1 if mode == "budget" else 10, max_logical_bytes=1024)
     if mode in {"valid", "canonical_hash"}:
-        sources, selections = admission.resolve_material_source_revisions(SimpleNamespace(execute=execute), **kwargs)
+        session = _JitAwareSession(execute)
+        sources, selections = admission.resolve_material_source_revisions(session, **kwargs)
         assert sources == rows and selections == {("root", "futures"): list(rows)}
         assert checked == list(rows)
+        assert session.jit_calls == [("read", None), ("off", None), ("restore", "on")]
     else:
         with pytest.raises(RuntimeError, match="canonical_material_source_"):
-            admission.resolve_material_source_revisions(SimpleNamespace(execute=execute), **kwargs)
+            admission.resolve_material_source_revisions(_JitAwareSession(execute), **kwargs)
+
+
+def test_material_witness_groups_preserve_edges_clocks_and_budget(monkeypatch):
+    requests, rows = [], {}
+    for index in range(300):
+        legacy = index % 4 != 0
+        material = f"{index % 7:064x}"
+        family = "market.bbo" if legacy else "market.trade"
+        source_id = f"{family}-{material}"
+        rows[source_id] = dict(id=source_id, series_id=20, fact_type=family,
+            material_hash=material, provenance={}, known_at=BASE, market_commit_seq=1,
+            observation_key=source_id)
+        requests.append(dict(root_id=str(index), role="input", series_id=20,
+            fact_type=family, material_hash=material, known_at=BASE, commit_seq=2))
+    batches = []
+    def execute(statement, params):
+        batch = json.loads(params["requests"])
+        batches.append(batch)
+        return SimpleNamespace(all=lambda: [(r["root_id"], r["role"],
+            f"{r['fact_type']}-{r['material_hash']}") for r in batch])
+    monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda session, ids, **kw:
+                        {identity: rows[identity] for identity in ids})
+    monkeypatch.setattr(admission, "record_from_storage_row", lambda row: None)
+    kwargs = dict(requests=requests, reader=None, max_rows=300, max_logical_bytes=1024)
+    actual = admission.resolve_material_source_revisions(_JitAwareSession(execute), **kwargs)
+    assert sum(map(len, batches)) == len(requests)
+    assert all(len(batch) <= 128 for batch in batches)
+    assert all(len({(r["evidence_key"], r["material_hash"]) for r in batch
+                    if r["evidence_key"] is not None}) <= 1 for batch in batches)
+    assert len(actual[1]) == 300  # Repeated edges are not collapsed to unique documents.
+    with monkeypatch.context() as previous:
+        previous.setattr(admission, "_material_source_batches",
+            lambda rs: (rs[offset:offset + 128] for offset in range(0, len(rs), 128)))
+        assert admission.resolve_material_source_revisions(_JitAwareSession(execute), **kwargs) == actual
+    def overflowing_execute(statement, params):
+        result = execute(statement, params).all()
+        # A second distinct candidate per request crosses the edge ceiling even
+        # though the number of requests itself is admitted.
+        return SimpleNamespace(all=lambda: result + [(root, role, source_id + "-revision")
+                                                     for root, role, source_id in result])
+    with pytest.raises(RuntimeError, match="canonical_material_source_budget_exceeded"):
+        admission.resolve_material_source_revisions(_JitAwareSession(overflowing_execute), **kwargs)
 
 
 @pytest.mark.parametrize("field,value", [("series_id", True), ("series_id", None), ("commit_seq", 0),
@@ -97,7 +210,7 @@ def test_material_selection_bounds_each_query_and_the_total_edge_count(monkeypat
         return SimpleNamespace(all=lambda: [(item["root_id"], "input", "source") for item in batch])
     monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda *args, **kwargs: {"source": source})
     monkeypatch.setattr(admission, "record_from_storage_row", lambda row: None)
-    sources, edges = admission.resolve_material_source_revisions(SimpleNamespace(execute=execute), requests=requests,
+    sources, edges = admission.resolve_material_source_revisions(_JitAwareSession(execute), requests=requests,
         reader=None, max_rows=300, max_logical_bytes=1024)
     assert batches == [128, 128, 44] and len(edges) == 300 and len(sources) == 1
 
@@ -113,26 +226,41 @@ def test_material_selection_omits_only_impossible_legacy_joins(monkeypatch, fami
     requests = [dict(root_id=name, role="input", series_id=selected[name]["series_id"],
         fact_type=selected[name]["fact_type"], material_hash=selected[name]["material_hash"],
         known_at=selected[name]["known_at"], commit_seq=selected[name]["market_commit_seq"]) for name in families]
+    matched = 0
     def execute(statement, params):
+        nonlocal matched
         sql = str(statement)
         # The non-applicable branches caused a measured production plan to scan
         # the historical header table before its false legacy-key filter.
-        assert ("fact_hot_payloads" in sql) is ("legacy" in families)
-        assert ("fact_archive_material_aliases" in sql) is ("legacy" in families)
+        names = [item["root_id"] for item in json.loads(params["requests"])]
+        assert ("fact_hot_payloads" in sql) is ("legacy" in names)
+        assert ("fact_archive_material_aliases" in sql) is ("legacy" in names)
         assert "source.material_hash=requested.material_hash" in sql
         assert "SELECT DISTINCT root_id,role,id" in sql
-        assert params["limit"] == 11
+        if "legacy" in names:
+            assert "legacy_authority.manifest_id IS NULL" in sql
+            assert "prepared_authority.preparation_id=prepared.preparation_id" in sql
+            assert sql.count("evidence_key=requested.evidence_key") == 2
+        else:
+            assert "fact_archive_active_generations" not in sql
+            assert "fact_archive_prepared_material_aliases" not in sql
+        assert params["limit"] == 11 - matched
+        matched += len(names)
         assert [json.loads(value) for value in params["legacy_witnesses"]] == (
             [{"_qt_bbo_evidence": {"legacy_material_hash": legacy["material_hash"]}}]
-            if "legacy" in families else [])
-        assert ("hot.provenance @> ANY" in sql) is ("legacy" in families)
-        return SimpleNamespace(all=lambda:[(name, "input", selected[name]["id"]) for name in families])
+            if "legacy" in names else [])
+        assert ("hot.provenance @> ANY" in sql) is ("legacy" in names)
+        return SimpleNamespace(all=lambda:[(name, "input", selected[name]["id"]) for name in names])
     monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda *a, **kw:rows)
     monkeypatch.setattr(admission, "record_from_storage_row", lambda row:None)
-    sources, edges = admission.resolve_material_source_revisions(SimpleNamespace(execute=execute),
+    session = _JitAwareSession(execute)
+    sources, edges = admission.resolve_material_source_revisions(session,
         requests=requests, reader=None, max_rows=10, max_logical_bytes=1024)
     assert sources == rows
     assert edges == {(name, "input"):[selected[name]["id"]] for name in families}
+    assert session.jit_calls == (
+        [("read", None), ("off", None), ("restore", "on")] if "legacy" in families else []
+    )
 
 
 @pytest.mark.parametrize("mode", ["valid", "missing_mapping", "role", "root_instrument", "futures_instrument",

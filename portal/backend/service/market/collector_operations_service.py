@@ -597,6 +597,16 @@ class CollectorOperationsService:
         worker_projection = self._worker_projection(worker, now=now)
         last_accepted = telemetry.get("last_accepted_at")
         last_provider_activity = stream_telemetry.get("last_provider_activity_at")
+        is_level2 = (
+            str(definition.get("contract_version") or "")
+            == "market.l2_book.v1"
+        )
+        projection_lifecycle = stream_telemetry.get("projection_lifecycle")
+        projection_ready = (
+            str(projection_lifecycle or "") == "valid"
+            if is_level2 and last_provider_activity is not None
+            else None
+        )
         runtime_policy = ContinuousStreamPolicy.from_mapping(
             dict(definition.get("config") or {}).get("runtime_policy")
         )
@@ -607,6 +617,8 @@ class CollectorOperationsService:
             if freshness_seconds is not None
             else None
         )
+        if projection_ready is False:
+            freshness_ok = False
         active = bool(task) or bool(definition.get("lease_current"))
         retrying = bool(error and not task and desired_state == CollectorDesiredState.RUNNING)
         actual_state = self._actual_state(
@@ -666,6 +678,11 @@ class CollectorOperationsService:
                 "freshness_ok": freshness_ok,
                 "freshness_basis": "provider_activity",
                 "freshness_threshold_seconds": freshness_threshold,
+                "projection_lifecycle": projection_lifecycle,
+                "projection_updated_at": _iso(
+                    stream_telemetry.get("projection_updated_at")
+                ),
+                "projection_ready": projection_ready,
             },
             "throughput": {
                 "accepted_last_minute": int(

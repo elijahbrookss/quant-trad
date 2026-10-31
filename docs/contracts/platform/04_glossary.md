@@ -30,14 +30,14 @@ definition needs more detail.
 | [Observation key](#observation-key) | Stable logical observation identity inside a series; revisions share it. |
 | [Fact type, payload schema version, and revision](#fact-type-payload-schema-version-and-revision) | Three independent axes: meaning, historical interpretation, and correction sequence. |
 | [Runtime fact, qualified](#runtime-fact-qualified) | `Runtime fact` is qualified vocabulary for a fact owned by a named runtime boundary, such as a lifecycle event or Wallet Ledger fact. |
-| [Research Observation](#research-observation) | A Research Observation is a durable research-memory item. The Check-to-Observation path is a separate explicit operation and admits only completed, frozen, replayable, eligible Check evidence. |
+| [Research Observation](#research-observation) | Durable research finding; active Check admission requires eligible frozen replayable evidence; retired originals retain eligibility only through verified original-ID/hash custody. |
 | [Frozen Dataset](#frozen-dataset) | Immutable `market_dataset.v1` manifest over exact Fact revisions, ranges, sources, hashes, gaps, and watermark. |
 | [Frozen Market Data Read Binding](#frozen-market-data-read-binding) | Exact consumer binding to a Frozen Dataset and its subjects/ranges/revisions/hashes/gaps. |
 | [RunResearchDataset](#runresearchdataset) | Canonical reporting/read-model product derived from durable run truth. |
 | [Reporting dataset readiness](#reporting-dataset-readiness) | Materialization status/readiness of RunResearchDataset. |
-| [Check](#check) | Bounded analytical operation over declared inputs. |
+| [Check](#check) | Bounded analytical operation; CheckDefinition/evaluator pins the procedure and a saved Check retains execution evidence. |
 | [Check preview](#check-preview) | A Check preview is ephemeral analysis. It persists no Check evidence and cannot create, link, or support a Research Observation. |
-| [Frozen Check evidence](#frozen-check-evidence) | Frozen Check evidence is a completed Check execution bound to immutable, provider-free, replayable inputs. |
+| [Frozen Check evidence](#frozen-check-evidence) | Completed execution bound to immutable provider-free inputs and exact hashes; current execution/replay availability is separate from historical integrity. |
 | [Known-at](#known-at) | Causal availability clock used at an evaluation boundary. |
 | [Gap Evidence](#gap-evidence) | Explicit source-data range-quality evidence separate from a Fact. |
 | [Candle continuity gap](#candle-continuity-gap) | One exact candle-continuity classification. |
@@ -136,7 +136,11 @@ Three independent axes: meaning, historical interpretation, and correction seque
 <a id="research-observation"></a>
 ### Research Observation
 
-A Research Observation is a durable research-memory item. The Check-to-Observation path is a separate explicit operation and admits only completed, frozen, replayable, eligible Check evidence.
+A Research Observation is a durable research-memory item. Active
+Check-to-Observation admission requires completed, frozen, replayable, eligible
+evidence. An exact original retired Check may retain its original eligibility
+only through verified original-ID/hash custody. This does not make that Check
+executable or replayable.
 
 **Use:** Manual Observation creation remains a separately owned and admitted path. Ordinary market observations and durable Research Observations are distinct; legacy V1 Check/Observation records remain readable and are not upgraded by this definition.
 
@@ -189,7 +193,18 @@ Materialization status/readiness of RunResearchDataset.
 <a id="check"></a>
 ### Check
 
-Bounded analytical operation over declared inputs.
+Bounded analytical operation over declared inputs. A saved Check is its execution evidence;
+a CheckDefinition and its evaluator describe how to produce that evidence.
+
+A CheckDefinition identifies the versioned analytical method and admitted settings;
+its evaluator is ordinary Python code. Different questions can configure the same
+method, while genuinely different procedures may share calculations.
+
+Common Indicator/Check timing, known sizes and operational status belong to the
+shared execution harness, not individual component trackers. Component-specific
+diagnostics use existing structured reports; operational observations do not
+become scientific evidence or per-component CPU/memory attribution. See
+[shared execution observability](../../architecture/decisions/0082-separate-historical-custody-from-active-research.md#shared-execution-observability).
 
 **Use:** Not acquisition, Indicator evaluation, Strategy decision, or promotion authority.
 
@@ -211,11 +226,17 @@ A Check preview is ephemeral analysis. It persists no Check evidence and cannot 
 <a id="frozen-check-evidence"></a>
 ### Frozen Check evidence
 
-Frozen Check evidence is a completed Check execution bound to immutable, provider-free, replayable inputs.
+Frozen Check evidence is a completed Check execution bound to immutable,
+provider-free inputs and exact definition, plan, result and evidence hashes.
+Current execution availability is separate from retained evidence integrity.
+Retired evidence may remain hash-verified and readable while its evaluator is
+unavailable; this is not a claim of current deterministic replay.
 
-**Use:** Not a scientific verdict.
+**Use:** Not a scientific verdict. Historical custody cannot substitute for an
+authority operation that explicitly requires actual deterministic replay.
 
 **Defined by:**
+- [0082-separate-historical-custody-from-active-research.md — Decision](../../architecture/decisions/0082-separate-historical-custody-from-active-research.md#decision)
 - [0062-use-frozen-bindings-for-durable-check-evidence.md — Decision](../../architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md#decision)
 - [0065-use-explicit-frozen-check-admission-for-new-research-observations.md — Decision](../../architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md#decision)
 
@@ -458,6 +479,20 @@ Book state is disposable current reconstruction; checkpoint accelerates determin
 ### Typed Indicator Output / output catalog / output readiness
 
 Catalog declares every public output; each bar returns every declared typed output; `ready=false` means present but not yet usable.
+
+Signal is an existing Indicator output type with value `{"events": [...]}`.
+Each event has a key and may carry direction, pattern ID, known-at, confidence
+and metadata/reference; execution timing fields are forbidden. Causal
+Indicator outputs and candidate signal rules can be built first, then Checks
+test their usefulness. A Check is not a prerequisite to creating an Indicator.
+Strategy owns decisions, actions and risk; a signal is not an order.
+
+These are development choices, not a compulsory linear runtime pipeline.
+Indicators can be implemented directly once causal rules are defined. An
+exploratory Check may reveal reusable calculations worth extracting into an
+Indicator. Checks test and help develop candidate signals; a signal can exist
+before validation and does not imply proven profitability.
+
 
 **Use:** Output preference or visibility must not rewrite Indicator truth.
 

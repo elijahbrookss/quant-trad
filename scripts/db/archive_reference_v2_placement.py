@@ -25,7 +25,12 @@ from scripts.db import fact_header_v2_references as references
 from scripts.db.fact_header_v2_admission import _columns, _constraints, _secondary_indexes
 from scripts.db.fact_header_v2_capture import SCHEMA, inspect_capture
 
-RELATIONS = ("market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies")
+RELATIONS = (
+    "market.fact_archive_material_aliases",
+    "market.fact_archive_canonical_dependencies",
+    "market.fact_archive_prepared_material_aliases",
+    "market.fact_archive_prepared_canonical_dependencies",
+)
 RETAINED_LEGACY = "qt_fact_storage_cutover_v1.fact_versions"
 logger = logging.getLogger(__name__)
 

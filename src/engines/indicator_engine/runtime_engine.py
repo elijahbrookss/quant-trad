@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 import time
 from typing import Any, Deque, Dict, Iterable, Mapping
-from core.execution_control import execution_checkpoint, measured_execution
+from core.execution_control import execution_checkpoint, measured_execution, observe_execution_size
 
 from .contracts import (
     DetailDefinition,
@@ -131,6 +131,9 @@ class IndicatorExecutionEngine:
         market_data_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> EngineFrame:
         execution_checkpoint()
+        observe_execution_size("indicator_frame_components", len(self._order))
+        for name in ("indicator_frame_outputs", "indicator_frame_details", "indicator_frame_overlays"):
+            observe_execution_size(name, None)
         resolved_market_inputs = dict(market_data_inputs or {})
         unknown_consumers = sorted(
             set(resolved_market_inputs) - set(self._indicators_by_id)
@@ -327,6 +330,9 @@ class IndicatorExecutionEngine:
                 )
             self._indicator_commit_seq_by_id[indicator_id] = indicator_commit_seq
         self._last_outputs_by_ref = dict(by_ref)
+        observe_execution_size("indicator_frame_outputs", len(flat))
+        observe_execution_size("indicator_frame_details", len(flat_details))
+        observe_execution_size("indicator_frame_overlays", len(flat_overlays))
         return EngineFrame(
             outputs=flat,
             overlays=flat_overlays,

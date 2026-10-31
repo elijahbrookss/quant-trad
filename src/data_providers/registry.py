@@ -307,6 +307,38 @@ _REGISTRY.register_provider(
     )
 )
 
+_REGISTRY.register_provider(
+    ProviderConfig(
+        id="COINALYZE",
+        label="Coinalyze liquidation history",
+        supported_venues=["COINALYZE_AGGREGATE"],
+        capabilities={
+            "supportsHistorical": False,  # This is not a candle provider.
+            "supportsLive": False,
+            "supportsOrders": False,
+            "supportsLiquidationHistory": True,
+            "numericFactAdapter": "coinalyze_liquidation_history.v1",
+            "numericFactEndpointRef": "coinalyze.v1",
+            "assetClasses": ["crypto"],
+        },
+        required_secrets=["COINALYZE_API_KEY"],
+        implementation_module="data_providers.providers.coinalyze",
+        implementation_class="CoinalyzeProvider",
+    )
+)
+_REGISTRY.register_venue(
+    VenueConfig(
+        id="COINALYZE_AGGREGATE",
+        label="Coinalyze source catalogue (not a trading venue)",
+        provider_id="COINALYZE",
+        asset_class="crypto",
+        features={
+            name: _feature(FeatureAuth.CREDENTIALS, "Coinalyze API key required")
+            for name in ("market_catalogue", "liquidation_history")
+        },
+    )
+)
+
 _ALPACA_FEATURES = {
     "instrument_metadata": _feature(
         FeatureAuth.CREDENTIALS,

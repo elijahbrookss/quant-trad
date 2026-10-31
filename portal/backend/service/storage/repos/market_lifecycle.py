@@ -182,6 +182,10 @@ class PostgresMarketStorageLifecycleRepository:
         exact_count = int(session.execute(text(
             "SELECT (SELECT count(*) FROM market.fact_archive_dependencies "
             "WHERE target_kind=:target_kind AND target_id=:target_id) + "
+            "(SELECT count(*) FROM market.fact_archive_preparation_dependencies AS pending "
+            "JOIN market.fact_archive_preparations AS preparation ON preparation.id=pending.preparation_id "
+            "WHERE pending.target_kind=:target_kind AND pending.target_id=:target_id "
+            "AND preparation.state IN ('building','ready')) + "
             "(SELECT count(*) FROM market.fact_book_prefix_dependencies "
             "WHERE :target_kind='raw_manifest' AND target_id=:target_id)"
         ), {"target_kind": str(target_kind), "target_id": str(target_id)}).scalar_one())
@@ -294,7 +298,17 @@ class PostgresMarketStorageLifecycleRepository:
     @staticmethod
     def acquire_dataset_pin_lock(session) -> None:
         """Block lifecycle expiry while a frozen or explicit pin is committed."""
+        PostgresMarketStorageLifecycleRepository.acquire_publication_lock(session)
 
+    @staticmethod
+    def acquire_publication_lock(session) -> None:
+        """Admit a publication before source/holder reads or lease-row locks.
+
+        Hold the shared transaction fence through commit. Final reclamation
+        takes the exclusive counterpart; incoming writers wait without holding
+        the hot parents it needs. Caller timeouts/cancellation still apply.
+        Lease heartbeats deliberately do not acquire this fence.
+        """
         session.execute(
             text(
                 "SELECT pg_advisory_xact_lock_shared(hashtextextended(:name, 0))"
@@ -540,7 +554,11 @@ class PostgresMarketStorageLifecycleRepository:
                             WHERE dependencies.target_kind='raw_manifest'
                               AND dependencies.target_id=manifests.id) +
                            (SELECT count(*) FROM market.fact_book_prefix_dependencies AS prefixes
-                            WHERE prefixes.target_id=manifests.id) AS canonical_dependency_count
+                            WHERE prefixes.target_id=manifests.id) +
+                           (SELECT count(*) FROM market.fact_archive_preparation_dependencies AS pending
+                            JOIN market.fact_archive_preparations AS preparation ON preparation.id=pending.preparation_id
+                            WHERE pending.target_kind='raw_manifest' AND pending.target_id=manifests.id
+                              AND preparation.state IN ('building','ready')) AS canonical_dependency_count
                     FROM market.raw_archive_manifests AS manifests
                     JOIN market.stream_definitions AS definitions
                       ON definitions.id = manifests.definition_id
@@ -602,7 +620,11 @@ class PostgresMarketStorageLifecycleRepository:
                                0::bigint AS dataset_pin_count,
                                (SELECT count(*) FROM market.fact_archive_dependencies AS dependencies
                                 WHERE dependencies.target_kind='book_checkpoint'
-                                  AND dependencies.target_id=checkpoints.id) AS canonical_dependency_count
+                                  AND dependencies.target_id=checkpoints.id) +
+                               (SELECT count(*) FROM market.fact_archive_preparation_dependencies AS pending
+                                JOIN market.fact_archive_preparations AS preparation ON preparation.id=pending.preparation_id
+                                WHERE pending.target_kind='book_checkpoint' AND pending.target_id=checkpoints.id
+                                  AND preparation.state IN ('building','ready')) AS canonical_dependency_count
                         FROM market.book_checkpoint_manifests AS checkpoints
                         LEFT JOIN explicit_pins
                           ON explicit_pins.target_kind = 'book_checkpoint'

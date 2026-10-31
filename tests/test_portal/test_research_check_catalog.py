@@ -43,10 +43,8 @@ def test_list_detail_complete_exact_and_read_only():
 
 
 def test_historical_preview_and_fixed_settings_are_honest():
-    historical = catalog.get_check_definition("event_fact_analysis", "3")
-    assert not historical["eligibility"]["request_selectable"]
-    assert historical["examples"] == []
-    assert catalog.get_check_definition("raw_forward_outcome", "2")["eligibility"]["modes"] == ["preview"]
+    for family,version in (("event_fact_analysis","3"),("raw_forward_outcome","2")):
+        with pytest.raises(KeyError): catalog.get_check_definition(family,version)
     paired = catalog.get_check_definition("event_fact_analysis", "11")
     assert paired["definition"]["evaluator_version"] == "10"
     assert paired["settings"]["fixed"]["matching"]["z_caliper"] == .25
@@ -110,11 +108,10 @@ def test_descriptive_metadata_covers_settings_and_analytical_results():
     assert typed["statistics.features"]["baseline_operators"] == sorted(event_fact_evaluator._BASELINE_OPERATORS)
     assert typed["statistics.features"]["enriched_operators"] == sorted(event_fact_evaluator._FACT_OPERATORS | event_fact_evaluator._STRUCTURED_FACT_OPERATORS)
     assert "strictly between 0 and 1" in typed["statistics.bootstrap"]["constraints"]
-    raw = catalog.get_check_definition("raw_forward_outcome", "2")
+    raw = catalog.get_check_definition("raw_forward_outcome", "3")
     assert raw["settings"]["configurable"]["detector"]["field_choices"] == sorted(checks._RAW_DETECTOR_FIELDS)
-    assert raw["settings"]["configurable"]["outcomes"]["defaults"]["forward_bars"] == checks._forward_bars({})
-    assert catalog.get_check_definition("signal_audit", "2")["result_shape"]["payload_schema"] == checks.SIGNAL_AUDIT_SCHEMA_VERSION
-    assert catalog.get_check_definition("candidate_lifecycle", "2")["result_shape"]["payload_schema"] == checks.CANDIDATE_LIFECYCLE_SCHEMA_VERSION
+    for version in ("17","18","20"):
+        assert catalog.get_check_definition("raw_forward_outcome",version)["eligibility"]["modes"] == ["evidence"]
 
 
 def test_paired_metadata_explains_real_support_missingness_and_units():
@@ -160,3 +157,22 @@ def test_model_metadata_labels_configurable_defaults():
     description = catalog.get_check_definition("event_fact_analysis", "4")["settings"]["configurable"]["statistics.model"]["constraints"]
     assert "default true, false allowed" in description
     assert "seed any integer (default 0)" in description
+
+
+def test_all_retained_definitions_and_configured_examples_match_source309():
+    import json
+    from pathlib import Path
+    expected=json.loads((Path(__file__).parent/"fixtures/active_check_definitions_309ed1fe.json").read_text())
+    assert len(expected)==19
+    for key,stored in expected.items():
+        family,version=key.split("@")
+        actual=catalog.get_check_definition(family,version)
+        assert actual["definition"]==stored["definition"], key
+        assert actual["examples"]==stored["examples"], key
+
+
+def test_current_comparison_discovery_does_not_fall_through_to_raw_predicate_fields():
+    fields=catalog.get_check_definition("raw_forward_outcome","19")["settings"]["configurable"]
+    assert fields["detector"]["fixed"] == {"type":"controlled_bullish_reversal"}
+    assert fields["outcomes"]["schema_version"] == "controlled_reversal_comparison.v3"
+    assert "matching_policy" in fields["outcomes"]["fields"]

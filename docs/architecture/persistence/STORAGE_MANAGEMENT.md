@@ -129,6 +129,16 @@ code_paths:
   - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/maintenance_runtime.py
+  - portal/backend/service/storage/retention_observability.py
+  - portal/backend/service/storage/repos/query_diagnostic.py
+  - portal/backend/service/market/canonical_retention.py
+  - portal/backend/service/market/market_storage_lifecycle.py
+  - tests/test_portal/test_storage_retention_observability.py
+  - tests/test_portal/test_storage_retention_observability_db.py
+  - tests/test_market_data/test_canonical_retention_executor.py
+  - tests/test_market_data/test_recovery_supervisor.py
+  - portal/frontend/src/v2/rooms/StorageRoom.test.jsx
+  - docker/grafana/provisioning/dashboards/capacity-database-growth.json
   - portal/backend/service/storage/history_policy.py
   - portal/backend/Dockerfile
   - scripts/provenance/source_tree_hash.py
@@ -145,6 +155,16 @@ code_paths:
   - scripts/automation/storage_device_audit.py
   - scripts/automation/storage_host_prepare.py
   - scripts/ci/test_storage_runtime_directories.py
+  - scripts/reporting/canonical_storage_query_diagnostic.py
+  - portal/backend/db/storage_metrics_schema.py
+  - portal/backend/service/storage/metrics.py
+  - scripts/db/manual_migration_storage_metrics_v1.sql
+  - scripts/db/manual_add_storage_metrics_indexes_v1.sql
+  - scripts/db/manual_grant_storage_metrics_v1.sql
+  - portal/frontend/src/v2/rooms/StorageTrends.jsx
+  - portal/frontend/src/v2/rooms/storageTrends.js
+  - docker/grafana/storage-metrics/enabled.yml
+  - docker/grafana/storage-metrics/capacity-database-growth.json
 ---
 # Storage Management
 
@@ -184,6 +204,222 @@ including initialization, restart, gap catch-up and warmup beyond that window,
 against their existing latency/resource limits and competing collection I/O.
 Observe-only paper support does not establish live readiness. Passing storage
 checks does not start research or clear an operational hold.
+
+## Bounded lifecycle observation
+
+`GET /api/storage` includes `qt.storage_retention_observability.v1`. The
+projection is read-only and metadata-only: it projects at most 2,048 retention
+partition rows after reading at most 2,049, and projects at most 10,000 archive
+manifest rows after reading at most 10,001. The manifest page is bounded before
+verification expansion. Verification versions for those selected manifests use
+their primary-key scope plus the five-second statement timeout as the backstop;
+they do not have a separate per-manifest row cap. A 250 ms lock timeout also
+applies. The projection does not call the retention planner, read Fact payloads,
+open archive objects, hydrate history or acquire lifecycle ownership. A failed
+or timed-out projection becomes `unknown`; storage settings remain available.
+
+The projection identifies the sampled runtime source, saved policy revision and
+fingerprint, default effective hot window, scan bounds, completeness and any
+truncation. The maintenance runtime's saved-policy adapter replaces the base hot
+window and clears base fact-family overrides; the projection reports both that
+effective empty override map and the inactive configured base values. An eligible
+open partition has no sealed source-byte estimate, so its presence makes the
+result `partial`.
+
+Physical hot source bytes, compressed archive bytes, estimated rows and
+cumulative reclaimed bytes are separate measures. The 6-hour, 24-hour and
+7-day windows also keep four event domains separate: source bytes first measured
+at partition sealing (an intake estimate), compressed bytes acknowledged to the
+archive, compressed bytes verified and physical hot bytes reclaimed. A single
+sample cannot establish filesystem deltas or permanent metadata growth. The API
+therefore reports those fields as unavailable, and it does not provide an ETA
+until aligned physical intake and reclaim samples demonstrate positive net
+drain.
+
+The maintenance supervisor reports the current phase, its start and boundary
+progress, plus completed phase durations. Canonical progress is observed only at
+the existing plan/action/result boundaries. Observer failure is caught and
+cannot change retention, recovery, scheduling, admission or retry behavior.
+Last durable advancement in the API is reconstructed from committed partition,
+manifest and verification timestamps rather than from process-local callbacks.
+
+The Storage room presents this current bounded evidence separately from the
+selected-range trends below. Neither surface grants execution authority.
+
+## Shared storage trends
+
+`GET /api/storage/metrics` returns `qt.storage_metrics.v1` for an absolute UTC
+half-open range, `from <= time < to`. The only query parameters are `from`,
+`to` and `resolution`; repeated or unknown parameters refuse. Ranges are at
+most 30 days and 720 buckets. Resolution is `auto`, `5m`, `30m` or `2h`;
+auto selects an admitted bucket rather than silently truncating the range.
+
+The API and enabled Grafana dashboard use the same versioned SQL owners in
+`observability_metrics`: `storage_series_v1`, `storage_growth_v1` and
+`storage_metric_status_v1`. The schema module owns their definitions and bounds;
+consumers do not reconstruct archive or retention formulas from operational
+catalogs.
+
+Database and market-schema allocation are sampled stocks. Their net change uses
+observed endpoints and actual elapsed time; it is not filesystem used space or
+reclaim throughput. A market-schema sample requires agreement with its companion
+database sample's relation count. Raw sample gaps retain explicit incompleteness.
+The three completion flows have different bases: acknowledged compressed archive
+bytes, compressed bytes at the first qualifying manifest-bound verification, and
+physical hot bytes recorded at completed reclamation. Attempts and subsequent
+reverification do not inflate completion totals. These flows cannot be subtracted
+to manufacture net physical growth or an ETA.
+
+Current eligible backlog, verified source awaiting fresh reclaim guards and
+oldest eligible day are current metadata, not historical samples. Applied-policy
+absence, unknown open/unsealed sizes, missing required indexes and source caps
+produce explicit reasons and unavailable or partial values. A verified stage is
+not current deletion permission.
+
+Responses retain readiness, reason, observed time and coverage/truncation.
+Unavailable observations and empty event buckets remain null, not measured zero.
+Partial known observations keep their flags; the native UI separates gapped
+segments, while Grafana conservatively masks non-ready/incomplete values. Missing
+history must not become a connected line or an inferred zero-completion interval.
+A failed trends query leaves Storage status/settings available.
+
+## Optional Grafana access
+
+The native Storage room works without Grafana. The legacy-compatible dashboard
+remains the default and keeps its working capacity/relation/insert/WAL/filesystem
+diagnostics. Its four canonical placeholders remain unavailable until the
+restricted shared-query path is explicitly selected.
+
+Shared-metric activation selects both templates:
+`docker/grafana/storage-metrics/enabled.yml` through
+`QT_GRAFANA_STORAGE_DATASOURCE_FILE`, and
+`docker/grafana/storage-metrics/capacity-database-growth.json` through
+`QT_GRAFANA_STORAGE_DASHBOARD_FILE`. They replace the corresponding provisioning
+files at the existing dashboard UID `quanttrad-capacity-growth`; they are
+deployment alternatives, not competing metric definitions. The default datasource
+file contains no new datasource. The enabled `quanttrad-storage-metrics` uses
+the installed PostgreSQL plugin, at most two open/idle connections and dedicated
+credentials, with a role-level limit of two sessions. Keep the generated password in the private Grafana-only runtime
+file selected by `QT_GRAFANA_STORAGE_ENV_FILE`, never the shared application
+`secrets.env`. Set an absolute path outside the checkout and build context,
+with private owner-only permissions. The default `../../grafana-storage-metrics.env`
+is relative to `docker/`: the standard `/srv/quanttrad/app` checkout resolves it
+at `/srv/quanttrad/grafana-storage-metrics.env`. Only Grafana loads the full optional
+file; this requires Compose 2.24 or newer. The server deployment helper reads
+only its two activation paths and public dashboard URL, with explicit process
+environment values taking precedence. It passes the URL only to the backend;
+credentials remain exclusive to Grafana. Keep these new settings out of shared
+`secrets.env` so activation does not change PostgreSQL's container environment. It never falls back to the broad legacy `quanttrad-postgres` login.
+Missing datasource/configuration or query failure is visibly unavailable, not a
+successful empty result. Activation configures only `quanttrad-storage-metrics`;
+it does not replace authentication on the legacy datasource used by other
+dashboards.
+
+Function/index installation and restricted-role authorization are explicit
+operator procedures; source files do not establish deployed qualification.
+Clean bootstrap installs invoker functions with PUBLIC execution revoked.
+The reviewed grant procedure transfers only the admitted functions to a NOLOGIN
+owner with required source-column reads, grants the reader execution, and admits
+the dedicated `qt_storage_metrics_grafana` login. It refuses existing conflicting
+authority, ambient source/schema privileges and database TEMP inherited through
+PUBLIC. Its source-access check admits SELECT only on the two standard
+`public.pg_stat_statements` / `public.pg_stat_statements_info` views belonging to
+extension 1.10, after checking their ownership and native function definitions.
+This preserves PostgreSQL's existing PUBLIC monitoring interface: workload
+counters, user/database IDs and timings remain visible, while other users' SQL
+text and query IDs are masked. No statistics-reader/monitor membership, reset
+privilege, raw application-table read or application write is granted. The login
+is therefore not literally limited to function execution; normal PostgreSQL
+catalog visibility also remains.
+
+The procedure does not revoke PUBLIC privileges on an operator's behalf. Any
+database-wide hardening, compensating grants, login/credential creation or
+persistent access change requires its own approval.
+
+The calling session must already be read-only with a positive statement timeout
+no greater than five seconds and lock timeout no greater than 250 ms. The SQL
+admission helper checks those effective settings before source reads; setting a
+timeout inside the data function is not the safety mechanism. Verify these
+defaults on newly opened and reused Grafana pool connections before activation.
+The API establishes its own bounded read transaction. These constraints limit
+diagnostic work, not privileged SQL clients or maintenance authorization.
+
+`QT_STORAGE_GRAFANA_DASHBOARD_URL` configures the optional HTTP(S) dashboard
+base URL without embedded credentials, query or fragment. The UI opens that URL
+with the exact displayed absolute range and UTC timezone. An absent or invalid
+URL disables the link while native trends remain usable.
+
+Implementation owners are
+[the versioned SQL module](../../../portal/backend/db/storage_metrics_schema.py),
+[the API adapter](../../../portal/backend/service/storage/metrics.py) and the
+explicit migration/index/grant scripts under `scripts/db/`. Use exact-source
+disposable qualification and operator admission before installing or activating
+them; the existence of this interface is not a claim about a live database.
+
+## Canonical archive stage attribution
+
+Each canonical archive stage records its existing phase duration and catalog
+batch counts. Raw-lineage lookups additionally record the lookup mode, exact
+number of distinct requested keys, witness count, optional bound-manifest
+cardinality, result cardinality, elapsed time and outcome. They never log record
+identities, bound values, payloads or object paths.
+
+Prepared archive catalogs also record one transaction-group event around the
+existing per-batch events. The group event is the non-overlapping transaction
+duration; inner batch durations exclude the shared session, lock and commit
+boundary and must not be added to it. Each group contains at most four original
+receipt batches. A failed group persists no batch from that transaction.
+
+One small PostgreSQL statistics snapshot is read after page admission and a
+second immediately before commit. The paired receipt names the archive
+backend PID and PostgreSQL version so an operator can correlate a separately
+bounded `pg_stat_activity` wait sample. It reports changes in PostgreSQL 15's
+cluster-wide WAL and background-writer counters as `scope=cluster_overlap`.
+Those changes include other concurrent database activity and are not
+page-exclusive WAL, statement cost or device attribution. A statistics reset or
+rolled-back page reports the delta as unavailable. `track_io_timing` is recorded,
+but PostgreSQL 15 does not expose `pg_stat_io`; this instrumentation therefore
+does not claim a relation, index or physical device caused a wait. The two
+catalog-view reads run inside a SQL savepoint, do not scan application rows and
+fail open as unavailable observations; they cannot alter archive admission,
+timeouts, atomicity or recovery behavior.
+
+## Canonical query diagnostic
+
+`scripts/reporting/canonical_storage_query_diagnostic.py` is an inert,
+server-only operator command for a closed inventory of canonical retention SQL
+builders. It is not an API, MCP tool, scheduler task or maintenance trigger. A
+run names one already verified UTC storage day and writes one private JSON
+receipt:
+
+```bash
+python scripts/reporting/canonical_storage_query_diagnostic.py \
+  --storage-day 2026-09-02 \
+  --receipt /private/operator-evidence/canonical-query-diagnostic.json
+```
+
+The command refuses an active lifecycle owner, a non-verified partition, a
+missing committed page, over-limit evidence or an unattested image.
+It opens an isolated connection whose server-side default is read-only before
+the first statement, so it never enters the application's schema-bootstrap
+session path. Every transaction is repeatable-read and read-only. Statement and
+lock bounds remain 5 seconds and 250 milliseconds. The admitted work budget is
+60 seconds, including scope selection: connection and pool waits are clamped to
+one second, cases retain cleanup time, and an elapsed overrun can never produce
+a passing receipt.
+Representative read-only cases may use `EXPLAIN ANALYZE`; maximum supported
+shapes are plan-only unless explicitly admitted. The receipt contains SQL
+fingerprints and summarized plan, buffer, WAL and sampled wait evidence without
+retaining bound record values or arbitrary query text.
+
+Coverage is explicit. The inventory includes retention admission, archive page
+selection, exact record-ID and receive-position lineage, bounded verification
+catalogs, dependency expiry, relation identity/size and frozen-Dataset pin
+admission. Production catalog writes, file decoding, the exclusive handoff and
+the partition drop are reported as untested or unsupported in live mode. Their
+write, duplicate/FK, timeout, cancellation and full-rollback contracts remain
+in the ordinary disposable PostgreSQL CI suite. A diagnostic success is neither
+maintenance authority nor a worst-case cache guarantee.
 
 ## Proposed forward-only transition
 
@@ -1236,6 +1472,19 @@ revision/hash, movement enablement and destination. A changed policy rejects the
 old plan; it does not authorize a step under stale settings. The reclaimer repeats
 this guard at its final exclusive handoff. Committed archive pages remain the
 existing resume authority.
+
+The frozen-Dataset pin audit has its own bounded PostgreSQL statement timeout,
+`pinned_ranges_statement_timeout_ms`, expressed in milliseconds. Its default is
+1,000 ms and the environment override is
+`QT_MARKET_DATA_LIFECYCLE_CANONICAL_PINNED_RANGES_STATEMENT_TIMEOUT_MS`. The
+effective value is the minimum of that setting, the general canonical execution
+statement timeout and the remaining maintenance-run budget. Plans expose the
+configured policy value; reclamation results and structured start/finish logs
+expose the effective value. The audit materializes exact Dataset binding envelopes,
+deduplicates equal search envelopes, and stops each indexed series/time seek at
+the first header satisfying the original range and frozen-commit bounds. The
+final count still preserves every distinct Dataset binding. Changing this timeout
+does not weaken pin checks or expand the handoff/run budget.
 
 The disposable real-process scenario changes the saved recent window, pauses
 movement, resumes payload archival and header movement, and reads the same frozen
@@ -2729,6 +2978,13 @@ checks. Only a cleanly stopped original container may be removed, without volume
 The same source hold and host deployment lock stay live. A lost request/reply,
 changed binding or expired deadline leaves the action unresolved; local CLI reaping
 does not cancel the daemon request and this transition has no replay/reentry path.
+
+A quiescence refusal retains the actual target-backend and prepared-transaction
+counts from one maintenance query, plus at most sixteen backend identities and
+an explicit truncation flag. The bounded sample includes backend type, state,
+application name and lifecycle/wait timestamps; it excludes SQL text, users,
+transaction GIDs and connection secrets. This evidence does not grant a retry,
+terminate sessions or relax the zero-backend/zero-prepared-transaction guard.
 
 Database mount readiness grants no collection or runtime activation authority.
 The internal continuation below prepares repositories and confirms native WAL
