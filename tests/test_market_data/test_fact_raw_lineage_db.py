@@ -6,7 +6,8 @@ import json
 import pytest
 from sqlalchemy import text
 
-from market_data.archive import DurableRawSpoolSegment, FilesystemRawArchiveObjectStore, publish_spool_archive
+from market_data.archive import (DurableRawSpoolSegment, FilesystemRawArchiveObjectStore,
+                                 encode_raw_records_to_parquet, publish_spool_archive)
 from market_data.canonical_adapters import canonicalize_market_trade
 from market_data.contracts import SourceIdentity
 from market_data.structure import MarketSide
@@ -44,13 +45,23 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch, *, definition_id="exact-l
         group = ordinals[offset:offset + records_per_manifest]
         segment = DurableRawSpoolSegment(root=tmp_path / "spool", definition_id=claim.definition_id,
                                         session_id=claim.session_id, connection_epoch=0, segment_ordinal=group[0] - 1)
-        for ordinal in group:
-            raw = _record(segment, ordinal)
-            segment.append(raw)
-            raws.append(raw)
-        segment.seal()
-        encoded, ack, records = publish_spool_archive(segment, object_store=store, temporary_directory=tmp_path / "raw-staging")
+        records = [_record(segment, ordinal) for ordinal in group]
+        if records_per_manifest == 1:
+            segment.append(records[0])
+            segment.seal()
+            encoded, ack, records = publish_spool_archive(segment, object_store=store,
+                temporary_directory=tmp_path / "raw-staging")
+        else:
+            # This fixture qualifies lineage SQL, not per-frame spool fsync.
+            # Retain the real encoder, verified object store, commit owner,
+            # record identities, and database mappings for all generated frames.
+            segment.close()
+            encoded = encode_raw_records_to_parquet(records, archive_segment_id=segment.spool_segment_id,
+                temporary_directory=tmp_path / "raw-staging")
+            ack = store.put_verified(object_key=f"fixture/{group[0]}.parquet",
+                source_path=encoded.path, expected_sha256=encoded.sha256)
         manifests.append(structures.commit_archive(claim, encoded=encoded, acknowledgement=ack, records=records).manifest_id)
+        raws.extend(records)
     return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id,
                            store=store, raws=raws, manifests=manifests, structures=structures, claim=claim)
 
