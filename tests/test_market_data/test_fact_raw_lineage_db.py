@@ -159,7 +159,7 @@ def test_sequential_prefix_intervals_commit_atomically_and_resume_with_full_budg
                 byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()),
                 limits=RawArchiveReadLimits(), max_mapping_rows=50_000, max_objects=1000)
 
-    event.listen(storage.database.engine, "before_cursor_execute", observe)
+    event.listen(storage.database._engine, "before_cursor_execute", observe)
     try:
         assert advance()["last_receive_ordinal"] == 2000
         dependencies = fact_book_prefix._dependencies
@@ -186,7 +186,7 @@ def test_sequential_prefix_intervals_commit_atomically_and_resume_with_full_budg
                 byte_verifier=ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits()), max_objects=1000)
             assert set(refs) == set(fixture.manifests)
     finally:
-        event.remove(storage.database.engine, "before_cursor_execute", observe)
+        event.remove(storage.database._engine, "before_cursor_execute", observe)
 
 
 def test_sparse_prefix_endpoints_keep_paired_scopes_and_ignore_intervening_archives(storage, tmp_path, monkeypatch):
