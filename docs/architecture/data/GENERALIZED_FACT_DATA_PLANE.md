@@ -1099,8 +1099,8 @@ permanent cold dependency holds; rechecking cannot silently switch placements.
 `fact_book_prefix_chunks` records immutable, hash-bound verification progress;
 `fact_book_prefix_dependencies` keeps each chunk's chosen raw objects alive even
 before a canonical page is published. A staging call verifies at most one next
-dense interval (by default 12,500 positions, leaving room within the 50,000-row
-mapping budget for alternate placements), returns `book_prefix_verified`, and
+dense interval (at most 2,000 positions, further reduced to one quarter of the
+mapping-row budget when smaller, leaving room for alternate placements), returns `book_prefix_verified`, and
 commits that interval and its holds together. A per-scope transaction lock
 serializes extensions from different days. Restarted workers resume at the
 last committed ordinal; no in-memory cursor or partially written proof counts.
@@ -2133,6 +2133,16 @@ they do not change Fact identity, causal selection or frozen Dataset binding.
 Unconfigured/manual canonical retention retains its existing explicit policy.
 
 ### Bounded same-page prerequisite scheduling
+
+Book and trade source-prefix preparation cap each newly committed proof at
+2,000 contiguous receive ordinals. A longer prefix resumes from the last
+committed ordinal; it is never treated as complete after one interval. Existing
+larger certificates remain valid under their original verifier and descriptor
+schema. The smaller interval bounds each lineage lookup while preserving
+complete coverage, placement and byte checks, transaction rollback, dependency
+holds, and the existing mapping/object/byte and five-second SQL limits. A timeout
+still fails the current interval and retains earlier committed prerequisites.
+This is a work bound, not a guarantee that every query fits its time budget.
 
 A planner-selected `stage_page` action may commit at most 64 missing book or
 trade prefix intervals for that same prepared page before returning to the

@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 BOOK_PREFIX_VERIFIER_VERSION = "market.book_prefix_verification.v1"
 TRADE_PREFIX_VERIFIER_VERSION = "market.trade_prefix_verification.v1"
+# Bound each independently committed source proof, not the complete prefix.
+# Larger histories resume at the next ordinal through the existing receipt chain.
+_MAX_PREFIX_PROOF_POSITIONS = 2_000
 _PREFIX_CHANNELS = {BOOK_PREFIX_VERIFIER_VERSION: "level2", TRADE_PREFIX_VERIFIER_VERSION: "market_trades"}
 _SCOPE_WHERE = " AND ".join(f"{name}=:{name}" for name in (*BOOK_SCOPE_FIELDS, "verifier_version"))
 _REFERENCE_FIELDS = ("object_key", "object_uri", "object_sha256", "content_fingerprint")
@@ -130,7 +133,8 @@ def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, b
             continue
         # Leave room for multiple acknowledged placements of the same raw
         # positions. A pathological alias fan-out still fails the hard budget.
-        last = min(prefix["receive_ordinal"], first + max(1, max_mapping_rows // 4) - 1)
+        interval_positions = min(_MAX_PREFIX_PROOF_POSITIONS, max(1, max_mapping_rows // 4))
+        last = min(prefix["receive_ordinal"], first + interval_positions - 1)
         references = resolve_canonical_raw_archive_refs(
             session, rows=[], object_store=object_store, byte_verifier=byte_verifier,
             limits=limits, max_mapping_rows=max_mapping_rows, check_budget=check_budget,
