@@ -328,7 +328,7 @@ class CheckEvidenceBinding:
                 ),
             )
         evidence_kind = str(self.evidence_kind or "").strip().lower()
-        if evidence_kind not in {"frozen_market_data", "immutable_run_evidence"}:
+        if evidence_kind not in {"frozen_market_data", "immutable_run_evidence", "saved_check_evidence"}:
             raise ValueError("check_evidence.evidence_kind is invalid")
         object.__setattr__(self, "evidence_kind", evidence_kind)
         input_binding = _mapping(

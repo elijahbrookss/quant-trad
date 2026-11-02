@@ -714,6 +714,22 @@ _PURPOSES['raw_forward_outcome@24'] = ('Score one versioned candle target with a
     'global and UTC-calendar forecasts on identical ordinary native closes; retain label availability, full scoring rows and no profitability claim.')
 
 
+_EXAMPLES['raw_forward_outcome@25'] = deepcopy(_EXAMPLES['raw_forward_outcome@24'])
+_EXAMPLES['raw_forward_outcome@25']['outcomes'].update(schema_version='candle_training_exceedance.v1',target={
+    'operator':'training_quantile_exceedance','base_target':'native_log_return_sum_squares',
+    'quantile':.9,'quantile_method':'linear','threshold_fit':'fold_training_only',
+    'comparison':'strict_gt','tie':'class_zero','freeze':'validation'})
+_PURPOSES['raw_forward_outcome@25'] = 'Forecast exceedance of a fold-training-only native movement threshold against strictly matured rolling benchmarks; no trading claim.'
+_EXAMPLES['raw_forward_outcome@26'] = {
+    'check_family':'raw_forward_outcome','mode':'evidence','dataset_id':'mds_'+'a'*32,
+    'scope':{'instrument_id':'authorized-instrument-id','timeframe':'15m','start':'2024-01-01T00:00:00Z','end':'2024-03-01T00:00:00Z'},
+    'detector':{'type':'saved_scoring_rows'},'outcomes':{'schema_version':'saved_score_attribution.v1',
+        'sources':[{'check_id':'11111111-1111-4111-8111-111111111111','result_hash':'a'*64,'evidence_hash':'b'*64}]},
+    'statistics':{'causal_strata':[{'feature':'atr_fraction_14','quantiles':[.5,.9],'quantile_method':'linear'}],
+        'minimum_interval_rows':100,'minimum_interval_clusters':6},'gap_policy':'reject'}
+_PURPOSES['raw_forward_outcome@26'] = 'Attribute exact saved paired scoring losses and training-defined causal feature strata; no market replay, refit or tail removal.'
+
+
 def _discovery(family: str, version: str) -> dict[str, Any]:
     result = {"new_requests": True,
         "meaning": "Only current registered procedures are executable; recorded historical evidence is read independently."}
@@ -726,7 +742,18 @@ def _discovery(family: str, version: str) -> dict[str, Any]:
 
 
 def _settings_fields(family: str, version: str) -> dict[str, Any]:
-    if family == "raw_forward_outcome" and version == "24":
+    if family == 'raw_forward_outcome' and version == '25':
+        fields=_settings_fields(family,'24')
+        fields['outcomes.target']='Explicit training-quantile exceedance of native-log-return sum of squares; linear quantile, strict greater-than, ties class zero, per-fold training-only freeze.'
+        fields['statistics.features/forecaster']='Typed causal candle features and the existing train-standardized fold-frozen L2 logistic model.'
+        return fields
+    if family == 'raw_forward_outcome' and version == '26':
+        return {'outcomes.sources':'Exact persisted Check ID, result hash and evidence hash; eligible native variance method24 sources only.',
+                'scope':'Same instrument/timeframe, enclosing original saved scopes; retain first source Dataset ID.',
+                'statistics.causal_strata':'Declared original causal features and training-only linear quantiles; exact count/hash-guarded training membership.',
+                'statistics.minimum_interval_rows/minimum_interval_clusters':'At least100rows and6nonempty original clusters; otherwise descriptive only.',
+                'cost':'Zero market materialization; finite saved-source, row and8MiB result limits. No replay/refit or truncation.'}
+    if family == "raw_forward_outcome" and version in {"24", "25"}:
         return {
             "scope": "Authorized instrument, native timeframe and bounded UTC range; existing finite candle/input/result/time limits.",
             "outcomes.target": "Terminal direction or native-log-return sum of squares over a complete exact elapsed path.",
@@ -914,6 +941,10 @@ _PAIRED_SUPPORT = {
 
 
 def _analytical_fields(family: str, version: str) -> dict[str, Any]:
+    if family == 'raw_forward_outcome' and version == '26':
+        return {'sources[]':{'type':'array','meaning':'Separate exact source references, unchanged original comparisons, full-population paired loss reconciliation, training membership/quantiles, complete stratum assignments and signed contribution tables; no pooled independence.'},
+                'sources[].tables[].interval':{'type':'object','meaning':'Original paired calendar-cluster conditional interval, or explicit unsupported support/undefined draws.'},
+                'market_replay_performed':{'type':'boolean','fixed':False},'model_refit_performed':{'type':'boolean','fixed':False}}
     if family == "event_fact_analysis" and version == "15":
         return {"cases":"Original public event IDs,geometry,features,weights,first passage and later-target observation.","population_hash":"Prelabel population/dependence digest.","summary":"Four label masses,weighted feature ECDF/quantiles and two descriptive contrasts.","later_target_summary":"Original failure mass and fixed first-failure opportunity/status rows.","dependence":"Direct support and conservative common-origin ancestry;not independent N."}
     fields = {
@@ -935,7 +966,7 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
         fields["events[]"] = {"type":"array","meaning":"Every event with volume cohort, context and overlap IDs; no truncation."}
         fields["distribution"] = {"type":"object","meaning":"Fixed quantiles, full-denominator tail contributions, daily sums and influence diagnostics. Returns are fractions."}
         return fields
-    if family == "raw_forward_outcome" and version in {"21", "22", "23", "24"}:
+    if family == "raw_forward_outcome" and version in {"21", "22", "23", "24", "25", "26"}:
         fields.update({
             "opportunities": {"type": "object", "meaning": "Nominal slots, observed closes, readiness, feature, exact future-path and paired-row counts."},
             "exclusions": {"type": "object", "meaning": "Explicit causal/readiness/feature/path exclusion counts; no truncation."},
@@ -944,9 +975,9 @@ def _analytical_fields(family: str, version: str) -> dict[str, Any]:
             "provenance": {"type": "object", "meaning": "Typed feature/optional Indicator bindings, population/prediction hashes and exact elapsed label contract."},
             "dependence": {"type": "object", "meaning": "Overlapping outcomes and recursive shared history remain explicit; buffers do not certify independence."},
         })
-        if version in {"22", "23", "24"}:
+        if version in {"22", "23", "24", "25"}:
             fields["selection_audit"] = {"type": "object", "meaning": "Outcome-blind causal context, missingness and exclusion reasons for every nominal close slot."}
-        if version == "24":
+        if version in {"24", "25"}:
             fields["comparison"] = {"type": "object", "meaning": "Fold-frozen target forecaster versus causal rolling global and UTC-calendar benchmarks on identical retained scoring rows."}
             fields["scoring_rows"] = {"type": "array", "meaning": "Typed per-clock target, forecast, loss and strictly historical benchmark-membership receipts."}
             fields["scoring_exclusions"] = {"type": "object", "meaning": "Target-scoring support exclusions, including insufficient causal rolling history."}
@@ -1116,7 +1147,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
             "statistics": "Only statistics accepted by the existing method normalizer.",
             "assertions": "Existing scalar assertions; no trading or execution permission.",
         },
-        "defaults": {"mode": "evidence" if definition.definition_id == "event_fact_analysis" and version == "15" else "preview",
+        "defaults": {"mode": "evidence" if (definition.definition_id == "event_fact_analysis" and version == "15") or (definition.definition_id == 'raw_forward_outcome' and version in {'25','26'}) else "preview",
                      "gap_rewarm_bars": 0},
         "constraints": ["Existing request normalizers and requirements/prepare are authoritative.",
                         "Examples are templates, not existing datasets or execution approval."],
@@ -1157,14 +1188,14 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         "definition": definition.to_dict(),
         "purpose": _PURPOSES[key],
         "eligibility": {"request_selectable": example is not None,
-                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version=="15" else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20", "21", "22", "23", "24"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
+                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version=="15" else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20", "21", "22", "23", "24", "25", "26"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
                         "execution_authority": False, "promotion_authority": False,
                         **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
                            if (definition.definition_id == "event_fact_analysis" and version in {"13", "14"})
                            or (definition.definition_id == "raw_forward_outcome" and version in {"9", "10", "11", "12"}) else {})},
         "required_inputs": {"declaration": declarations,
-                            "evidence_binding": "Exactly one frozen Dataset; use existing requirements/prepare.",
+                            "evidence_binding": "Exact saved eligible Check references; no market replay." if definition.definition_id=="raw_forward_outcome" and version=="26" else "Exactly one frozen Dataset; use existing requirements/prepare.",
                             "resource_bindings": {"scope.instrument_id": "Authorized server instrument ID.",
                                                   "scope.indicator_id": "Existing server indicator ID when declared.",
                                                   "inputs[].source_policy": "Authorized source identity/policy for typed inputs."}},
@@ -1174,7 +1205,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
                          "analytical_fields": _analytical_fields(definition.definition_id, version),
                          "envelope_fields": ["definition_hash", "request_hash", "plan_hash", "evidence_hash",
                                              "evaluator_id", "evaluator_version", "result", "result_hash"],
-                          "analysis_field": "summary" if definition.definition_id=="event_fact_analysis" and version=="15" else "comparison" if definition.definition_id=="raw_forward_outcome" and version in {"21", "22", "23", "24"} else "populations" if definition.definition_id == "raw_forward_outcome" and version == "20" else "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5", "19"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
+                          "analysis_field": "sources" if definition.definition_id=="raw_forward_outcome" and version=="26" else "summary" if definition.definition_id=="event_fact_analysis" and version=="15" else "comparison" if definition.definition_id=="raw_forward_outcome" and version in {"21", "22", "23", "24", "25", "26"} else "populations" if definition.definition_id == "raw_forward_outcome" and version == "20" else "measurements" if definition.definition_id == "raw_forward_outcome" and version in {"16", "18"} else "progress_comparison" if definition.definition_id == "raw_forward_outcome" and version == "15" else "matched_outcome_comparison" if definition.definition_id == "raw_forward_outcome" and version == "13" else "selection_summary" if definition.definition_id == "raw_forward_outcome" and version in {"11", "12", "14", "17"} else "first_passage_summary" if definition.definition_id == "raw_forward_outcome" and version == "10" else "volume_cohort_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"7", "8"} else "controlled_reversal_comparison" if definition.definition_id == "raw_forward_outcome" and version in {"4", "5", "19"} else "crossing_state_comparison" if fixed_risk and version in {"11", "12"} else "forward_risk_comparison" if fixed_risk else None,
                          "meaning": "Bounded analytical output; completed does not certify scientific validity."},
         "examples": [] if example is None else [{"request": example,
                         "configured_definition": configured.to_dict(),

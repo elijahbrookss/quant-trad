@@ -271,6 +271,7 @@ def _validate_research_check_evidence_payload(
     expected_evidence_kind = {
         "market_data": "frozen_market_data",
         "immutable_run_evidence": "immutable_run_evidence",
+        "saved_check_evidence": "saved_check_evidence",
     }.get(input_kind)
     if expected_evidence_kind is None or evidence.evidence_kind != expected_evidence_kind:
         raise ValueError(
@@ -359,6 +360,19 @@ def _validate_research_check_evidence_payload(
                 "check_evidence_payload_invalid: plan/Dataset quality evidence disagreement"
             )
         _validate_plan_binding_alignment(plan, evidence.input_binding)
+    elif evidence.evidence_kind == 'saved_check_evidence':
+        from .saved_score_attribution_evaluator import binding_for
+        expected_binding = binding_for(request, load=False)
+        if (dict(evidence.input_binding) != expected_binding
+            or dict(plan.execution.get('source_binding') or {}) != expected_binding
+            or evidence.fact_input_hash != semantic_hash(expected_binding)
+            or evidence.quality_hash != semantic_hash({})
+            or evidence.gaps_hash != semantic_hash({'recorded_gaps':[]})):
+            raise ValueError('check_evidence_payload_invalid: saved source binding differs')
+        rederived_plan = rederive_research_check_plan_from_pinned_inputs(
+            definition, request, plan, subject_snapshots={})
+        if rederived_plan.to_dict() != plan.to_dict():
+            raise ValueError('check_evidence_payload_invalid: saved source request/plan differs')
     else:
         if dict(request.immutable_run_evidence or {}) != dict(evidence.input_binding):
             raise ValueError(
@@ -1185,13 +1199,14 @@ def persist_research_check_evidence(
         **create_args,
     )
     target_type = (
-        "run"
+        "research_item" if normalized_evidence.evidence_kind == 'saved_check_evidence' else "run"
         if normalized_evidence.evidence_kind
         == "immutable_run_evidence"
         else "market_dataset"
     )
     target_id = (
-        str(normalized_evidence.input_binding.get("run_id") or "")
+        str(normalized_evidence.input_binding['sources'][0]['check_id'])
+        if target_type == 'research_item' else str(normalized_evidence.input_binding.get("run_id") or "")
         if target_type == "run"
         else str(request.dataset_id)
     )
@@ -1201,7 +1216,7 @@ def persist_research_check_evidence(
             target_type=target_type,
             target_id=target_id,
             relation="uses_evidence",
-            metadata={
+            metadata=dict(normalized_evidence.input_binding['sources'][0]) if normalized_evidence.evidence_kind == 'saved_check_evidence' else {
                 "dataset_hash": normalized_evidence.input_binding.get(
                     "dataset_hash"
                 ),
@@ -1213,6 +1228,10 @@ def persist_research_check_evidence(
             **create_args,
         )
     ]
+    if normalized_evidence.evidence_kind == 'saved_check_evidence':
+        for source in normalized_evidence.input_binding['sources'][1:]:
+            links.append(repository.create_link(source_item_id=item['id'],target_type='research_item',
+                target_id=source['check_id'],relation='uses_evidence',metadata=source,**create_args))
     projected_item = _project_evidence_classification(item)
     return {
         "schema_version": "research_check_run.v2",

@@ -505,6 +505,28 @@ def execute_check_evidence(
 
     if request.mode != CHECK_MODE_EVIDENCE:
         raise ValueError("check_evidence_mode_required")
+    if plan.execution.get('input_kind') == 'saved_check_evidence':
+        from .saved_score_attribution_evaluator import binding_for
+        binding = binding_for(request)
+        if expected_input_binding is not None and dict(expected_input_binding) != binding:
+            raise ValueError('check_replay_input_binding_mismatch: saved Check sources differ')
+        if dict(plan.execution['source_binding']) != binding:
+            raise ValueError('check_evidence_payload_invalid: saved source plan differs')
+        inputs = dict(request.parameters)
+        result_payload = _evaluate(definition, request, plan, inputs)
+        hashes = _execution_input_hashes(plan, inputs)
+        hashes['fact_input_hash'] = semantic_hash(binding)
+        evidence = CheckEvidenceBinding(schema_version=CHECK_EVIDENCE_BINDING_SCHEMA_VERSION,
+            definition_hash=definition.definition_hash, request_hash=request.request_hash,
+            plan_hash=plan.plan_hash, code_revision=evidence_source_revision(),
+            evidence_kind='saved_check_evidence', input_binding=binding, **hashes,
+            quality_hash=semantic_hash({}), gaps_hash=semantic_hash({'recorded_gaps':[]}))
+        result = CheckResult(schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            definition_hash=definition.definition_hash, request_hash=request.request_hash,
+            plan_hash=plan.plan_hash, evidence_hash=evidence.evidence_hash,
+            evaluator_id=definition.evaluator_id, evaluator_version=definition.evaluator_version,
+            result=result_payload)
+        return plan, evidence, result
     if not request.dataset_id:
         raise ValueError("check_evidence_dataset_required")
     expected_binding = (

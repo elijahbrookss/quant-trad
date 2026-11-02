@@ -492,7 +492,10 @@ def _plan_research_check_from_declaration(
     durable_sources = request.mode == CHECK_MODE_EVIDENCE or bool(
         require_durable_sources
     )
-    if str(declaration.get("input_kind") or "") == "immutable_run_evidence":
+    if str(declaration.get("input_kind") or "") in {"immutable_run_evidence", "saved_check_evidence"}:
+        if declaration.get('input_kind') == 'saved_check_evidence' and inspect_coverage:
+            from .saved_score_attribution_evaluator import binding_for
+            binding_for(request)
         run_window = dict(scope.get("window") or {})
         start = _utc(
             scope.get("start") or run_window.get("start"), field="scope.start"

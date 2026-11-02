@@ -60,6 +60,8 @@ code_paths:
   - portal/backend/service/research/candle_state_comparison_v2_evaluator.py
   - portal/backend/service/research/candle_state_comparison_v3_evaluator.py
   - portal/backend/service/research/candle_target_benchmark_evaluator.py
+  - portal/backend/service/research/training_exceedance_evaluator.py
+  - portal/backend/service/research/saved_score_attribution_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/first_return_evaluator.py
@@ -88,6 +90,44 @@ records remain integrity-checked and readable through data-only custody.
 
 
 ## Bounded input delivery
+
+### Saved-score attribution and training-defined exceedance
+
+`raw_forward_outcome@25` (`candle_training_exceedance.v1`) extends the existing
+native candle target scorer with an explicit training-quantile transform.
+Each fold fits a linear `(n-1)q` quantile only from eligible purged labels known
+strictly before its nominal training cutoff. Strict exceedance assigns equality
+to class zero. The threshold, scaler and logistic model remain frozen throughout
+validation. The unchanged rolling history admits labels strictly before each
+prediction and reclassifies their underlying continuous targets against the
+current fold threshold, which is not claimed known at those historical anchors.
+Result rows retain underlying target, threshold, event, forecasts, paired losses
+and history custody. Diagnostics never replace configured primary loss criteria.
+
+`raw_forward_outcome@26` (`saved_score_attribution.v1`) declares zero market
+materialization and consumes exact eligible method24 native-variance scores.
+Catalog declarations expose only source references, scope and finite cost bounds;
+actual requirements inspection and execution verify saved sources. Execution
+binds `saved_check_evidence` through the existing Check evidence and persistence
+boundary, links every source Check, and bypasses market input loading entirely.
+It never uses the retired immutable-run execution route or a synthetic Dataset.
+The request retains its first source's real Dataset identity; all source Datasets
+and provenance remain independently verified through the referenced envelopes.
+
+Training feature quantiles require exact original fold membership reconstructed
+from selected audit clocks and original fold bounds, validated against both the
+original ordered training-clock hash and count. Retained native-close availability
+must also prove the complete training-label path known before freeze. Missing
+custody blocks the method; it never infers membership from all audit rows or
+falls back to candle replay. Retrospective target ranks are descriptive only.
+Source-specific full populations remain primary. Tables retain signed sums and
+means, positive/negative and absolute masses, missingness and unclipped shares;
+zero signed denominators remain undefined. Partition identities and loss sums
+reconcile to the saved paired rows. Conditional intervals use original fixed
+calendar clusters, common source draws, frozen thresholds and fitted models;
+unsupported support and undefined resamples remain explicit. The whole result
+must fit8MiB with no truncation, and existing native export limits remain intact.
+
 
 Indicator Checks consume candle windows through the existing candle service,
 with at most 2,048 nominal bars per window. Sparse ranges stay sparse. A single

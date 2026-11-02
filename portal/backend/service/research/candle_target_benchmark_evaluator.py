@@ -728,6 +728,7 @@ def score_target_benchmarks(
     target: str,
     seconds: int,
     checkpoint,
+    fold_transform=None,
 ) -> dict[str, Any]:
     eligibility = statistics["eligibility"]
     folds: list[dict[str, Any]] = []
@@ -739,17 +740,23 @@ def score_target_benchmarks(
         statistics=statistics,
         target=target,
         checkpoint=checkpoint,
-    )
+    ) if fold_transform is None else None
     for fold in statistics["folds"]:
         checkpoint()
+        fold_rows, transform_receipt = (fold_transform(complete_rows, fold)
+                                       if fold_transform is not None else (complete_rows, None))
+        if fold_transform is not None:
+            rolling_by_decision = _rolling_predictions(rows=fold_rows, population=fold_rows,
+                statistics=statistics, target=target, checkpoint=checkpoint)
         train_start = v2._clock(fold["train"]["start"], "fold.train.start")
         train_end = v2._clock(fold["train"]["end"], "fold.train.end")
         validation_start = v2._clock(fold["validation"]["start"], "fold.validation.start")
         validation_end = v2._clock(fold["validation"]["end"], "fold.validation.end")
         effective_train_end = train_end - timedelta(seconds=statistics["purge_bars"] * seconds)
         effective_validation_start = validation_start + timedelta(seconds=statistics["embargo_bars"] * seconds)
-        train = [row for row in complete_rows if train_start <= v2._clock(row["decision_time"], "decision_time") < effective_train_end and v2._clock(row["target_time"], "target_time") < train_end]
-        validation = [row for row in complete_rows if effective_validation_start <= v2._clock(row["decision_time"], "decision_time") < validation_end and v2._clock(row["target_time"], "target_time") < validation_end]
+        train = [row for row in fold_rows if train_start <= v2._clock(row["decision_time"], "decision_time") < effective_train_end and v2._clock(row["target_time"], "target_time") < train_end
+                 and (fold_transform is None or v2._clock(row["outcome_known_at"], "outcome_known_at") < train_end)]
+        validation = [row for row in fold_rows if effective_validation_start <= v2._clock(row["decision_time"], "decision_time") < validation_end and v2._clock(row["target_time"], "target_time") < validation_end]
         train_classes = _classes(train)
         validation_classes = _classes(validation)
         base_reasons = []
@@ -811,6 +818,10 @@ def score_target_benchmarks(
                     "model_training_digest": model_receipt["training_digest"],
                     **rolling,
                 }
+                if transform_receipt is not None:
+                    scored.update(raw_continuous_target=source["outcomes"]["primary"]["path_variation"],
+                                  target_threshold=transform_receipt["threshold"],
+                                  threshold_training_clock_hash=transform_receipt["training_clock_hash"])
                 scored["forecaster_loss"] = _loss(actual, prediction, target=target, epsilon=epsilon)
                 for name in ("rolling_global", "rolling_calendar"):
                     scored[f"{name}_loss"] = _loss(actual, scored[f"{name}_prediction"], target=target, epsilon=epsilon)
@@ -836,6 +847,8 @@ def score_target_benchmarks(
             "training_clock_hash": semantic_hash({"clocks": [row["decision_time"] for row in train]}),
             "validation_clock_hash": semantic_hash({"clocks": [row["decision_time"] for row in fold_scoring]}),
         }
+        if transform_receipt is not None:
+            fold_result["target_transform"] = transform_receipt
         if fold_scoring:
             fold_result["scores"] = {name: _score_summary(fold_scoring, name=name) for name in ("rolling_global", "rolling_calendar")}
             train_mean = float(np.mean([_target_value(row, target) for row in train])) if train else None

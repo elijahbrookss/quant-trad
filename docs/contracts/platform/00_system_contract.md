@@ -40,6 +40,16 @@ timelines retain the known-at invariant above. Historical versions remain fixed.
 
 ## Layer Ownership
 
+An explicit saved-score Check may consume exact persisted eligible Check
+result/evidence references through the existing research repository boundary.
+It binds the complete source identities in `saved_check_evidence`, validates
+their original definitions, scopes, provenance and integrity, and loads no
+market inputs or providers. Original fold training membership requires its
+ordered clock hash and count plus retained availability custody; audit rows
+alone are insufficient. Such attribution retains all saved losses and missingness,
+does not refit models, and grants no prediction, promotion or execution authority.
+Historical Check definitions and evidence hashes remain unchanged.
+
 - QuantLab: research and indicator exploration.
 - Strategy: decision logic from indicator outputs.
 - Bot: execution realism, fills, risk, costs, and lifecycle outcomes.

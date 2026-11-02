@@ -26,6 +26,8 @@ from research_science.check import (
 )
 
 from . import checks
+from .training_exceedance_evaluator import TrainingExceedanceEvaluator, normalize_configuration as normalize_training_exceedance, SCHEMA as EXCEEDANCE_SCHEMA, RULES as EXCEEDANCE_RULES
+from .saved_score_attribution_evaluator import SavedScoreAttributionEvaluator, normalize_configuration as normalize_saved_score_attribution, SCHEMA as ATTRIBUTION_SCHEMA, RULES as ATTRIBUTION_RULES
 from .liquidity_episode_evaluator import (LiquidityEpisodeEvaluator, SCHEMA as EPISODE_SCHEMA, RULES as EPISODE_RULES, normalize_configuration as normalize_episode_configuration)
 from .volume_cohort_evaluator import (NearbyDateVolumeCohortEvaluator,
     NEARBY_SCHEMA as NEARBY_VOLUME_SCHEMA, NEARBY_RULES as NEARBY_VOLUME_RULES,
@@ -295,6 +297,21 @@ CHECK_REGISTRY.register_definition(CheckDefinition(
         "comparison_rules": CANDLE_TARGET_BENCHMARK_RULES,
     },
 ))
+
+
+for _evaluator, _schema, _rules, _policy in (
+    (TrainingExceedanceEvaluator(), EXCEEDANCE_SCHEMA, EXCEEDANCE_RULES, 'canonical_candle_clock_path.v1'),
+    (SavedScoreAttributionEvaluator(), ATTRIBUTION_SCHEMA, ATTRIBUTION_RULES, 'saved_check_scores.v1'),
+):
+    CHECK_REGISTRY.register_evaluator(_evaluator)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=checks.RAW_FORWARD_OUTCOME,
+        definition_version=_evaluator.version, evaluator_id=_evaluator.evaluator_id,
+        evaluator_version=_evaluator.version, request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+        result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={'family':checks.RAW_FORWARD_OUTCOME,'event_ownership':'check',
+                        'input_policy':_policy,'outcome_schema':_schema,
+                        'outcome_boundary':'evaluation_end_exclusive','comparison_rules':_rules}))
 
 
 def definition_allows_evidence(definition: CheckDefinition) -> bool:
@@ -884,7 +901,7 @@ def _resolve_definition_version(payload, *, family, base_version):
             CANDLE_STATE_COMPARISON_SCHEMA: "21",
             CANDLE_STATE_COMPARISON_V2_SCHEMA: "22",
             CANDLE_STATE_COMPARISON_V3_SCHEMA: "23",
-            CANDLE_TARGET_BENCHMARK_SCHEMA: "24"}
+            CANDLE_TARGET_BENCHMARK_SCHEMA: "24", EXCEEDANCE_SCHEMA: "25", ATTRIBUTION_SCHEMA: "26"}
         selected = schemas.get(_mapping(payload.get("outcomes"), field="outcomes").get("schema_version"))
         if selected is None or (base_version is not None and str(base_version) != selected):
             raise ValueError("check_definition_retired: select an explicit current outcome schema")
@@ -935,7 +952,7 @@ def materialize_check_definition(
             outcomes=outcomes,
             statistics=statistics,
         )
-    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "6", "7", "8", "17", "18", "19", "20", "21", "22", "23", "24"}):
+    elif family != EVENT_FACT_ANALYSIS and not (family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"3", "6", "7", "8", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26"}):
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
@@ -1021,6 +1038,12 @@ def materialize_check_definition(
         )
         if gap_rewarm_bars or assertions:
             raise ValueError("candle_state_comparison_invalid: readiness is owned by typed configuration")
+    if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version in {"25", "26"}:
+        normalize = normalize_training_exceedance if resolved_base_version == '25' else normalize_saved_score_attribution
+        outcomes, statistics = normalize(detector=detector, outcomes=outcomes, statistics=statistics,
+            inputs=inputs, scope=scope, gap_policy=gap_policy)
+        if gap_rewarm_bars or assertions:
+            raise ValueError('movement_capability_invalid: no readiness overrides or scientific assertions')
     if family == checks.RAW_FORWARD_OUTCOME and resolved_base_version == "24":
         outcomes, statistics = normalize_candle_target_benchmark(
             detector=detector, outcomes=outcomes, statistics=statistics,
