@@ -223,7 +223,8 @@ def test_one_current_native_episode_evaluation_fits_only_saved_development(monke
     later["outcomes"]["input_origin"] = later_config["validation_episodes"][1]["origin"]
     later["scope"]["start"] = plain(utc(later["outcomes"]["input_origin"]) + timedelta(minutes=1470))
     later["scope"]["end"] = later_config["validation_episodes"][1]["end_exclusive"]
-    frozen = {"reference": later_config["frozen_model_source"], "result": result, "bytes": 1, "cases": 1,
+    from research_science.check import _semantic_result
+    frozen = {"reference": later_config["frozen_model_source"], "result": _semantic_result(result), "request": request, "bytes": 1, "cases": 1,
               "input_identity": {"synthetic": "distinct-first-validation-dataset"},
               "binding_hash": "different-real-validation-input", "source": SOURCE}
     monkeypatch.setattr(adapter, "dependencies", lambda config: [saved, frozen])

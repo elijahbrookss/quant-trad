@@ -12,7 +12,7 @@ from uuid import UUID
 
 from core.execution_control import execution_checkpoint, consume_execution_json
 from market_data.frozen import semantic_hash
-from research_science.check import CheckDefinition, CheckRequest, CheckEvidenceBinding, CheckResult
+from research_science.check import CheckDefinition, CheckRequest, CheckEvidenceBinding, CheckResult, _semantic_result
 from research_science.event_barriers import population_projection, path_value
 from research_science.recognition import RecognitionCandle, plain, utc
 from research_science import saved_case_comparison as math
@@ -241,6 +241,7 @@ def _load_source(ref, *, kind, item_loader=None):
         if semantic_hash(population_projection(result["cases"], result["dependence"])) != ref["population_hash"] or result["population_hash"] != ref["population_hash"]:
             invalid("saved population hash differs")
     else:
+        saved_comparison_configuration(result, request)
         math.validate_model(result["model"], training_manifest_hash=result["training_manifest"]["manifest_hash"])
         scored = result["scored_evidence"]
         if semantic_hash(scored) != result["scored_evidence_hash"]:
@@ -299,6 +300,22 @@ def _load_source(ref, *, kind, item_loader=None):
                                "material_hash": primary["material_hash"], "provenance_hash": primary["provenance_hash"],
                                "quality_hash": primary["quality_hash"], "indicator_graph_hash": evidence.indicator_graph_hash,
                                "input_origin": result["input_origin"], "evaluation_range": result["evaluation_range"]}}
+
+
+def saved_comparison_configuration(result, request):
+    """Keep custody IDs on the validated immutable request, never amend results.
+
+    CheckResult intentionally projects check_id out at every depth. Comparing
+    that projection to a live full request is invalid; comparing its scientific
+    fields to the canonical projection still detects a conflicting saved result.
+    The caller has already validated the request/definition/plan/evidence/result
+    envelope. Full reference IDs remain bound by those hashes and are compared
+    against the live configuration by frozen reuse and aggregation below.
+    """
+    configuration = deepcopy(request.parameters["statistics"]["comparison"])
+    if result.get("comparison_configuration") != _semantic_result(configuration):
+        invalid("saved result/configuration projection differs from immutable request")
+    return configuration
 
 
 def dependency_inventory(loaded):
@@ -389,8 +406,9 @@ def evaluate(*, plan, inputs):
     if config["frozen_model_source"] is None:
         model = math.fit_models(eligible, training_manifest_hash=manifest_hash, checkpoint=checkpoint)
     else:
-        saved = loaded[len(config["training_sources"])]["result"]
-        if saved["comparison_configuration"] != {**config, "frozen_model_source": None, "prior_scoring_sources": []}:
+        saved_source = loaded[len(config["training_sources"])]
+        saved = saved_source["result"]
+        if saved_comparison_configuration(saved, saved_source["request"]) != {**config, "frozen_model_source": None, "prior_scoring_sources": []}:
             invalid("frozen training/configuration differs")
         model = deepcopy(saved["model"])
     math.validate_model(model, training_manifest_hash=manifest_hash)
@@ -398,9 +416,12 @@ def evaluate(*, plan, inputs):
     episodes = []
     for saved in prior:
         r = saved["result"]
-        other = r["comparison_configuration"]
+        other = saved_comparison_configuration(r, saved["request"])
         if r["model"] != model or any(other[k] != config[k] for k in ("training_sources", "training_cutoff", "comparison_recipe", "validation_episodes")) or other["prior_scoring_sources"]:
             invalid("saved validation model/recipe differs")
+        expected_model_source = None if r["scored_evidence"]["episode"] == schedule[0]["origin"] else config["frozen_model_source"]
+        if other["frozen_model_source"] != expected_model_source:
+            invalid("saved validation frozen-model source identity differs")
         episodes.append(r["scored_evidence"])
     if prior and ([e["episode"] for e in episodes] != [e["origin"] for e in schedule[:3]]
                   or prior[0]["reference"]["check_id"] != config["frozen_model_source"]["check_id"]):

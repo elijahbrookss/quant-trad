@@ -109,6 +109,17 @@ envelope. Shared execution guards may impose lower limits. Oversize inputs fail
 without truncation. Immutable source validation is memoized only within one
 dependency-loading call; there is no persistent source or computation cache.
 
+Saved configuration custody belongs to the immutable saved request, whose full
+references are bound by the definition/request/plan/evidence/result envelope.
+The existing `CheckResult` projection intentionally removes nested `check_id`
+fields. The loader checks that the retained scientific configuration equals the
+canonical result projection of that saved request, then compares complete request
+references for frozen-model continuation and final aggregation. It never restores
+IDs into old results, changes their hashes, refits the first model or changes the
+global result projection. Changed scientific settings or authoritative source
+identities still fail closed. Version16 and earlier persisted evidence retain
+their original definition and result identities.
+
 Only the first scheduled validation episode fits the three-class multinomial
 L2 models. Later episodes validate and reuse numeric class-ordered coefficients,
 intercepts, training-only weighted population scalers and the training manifest
