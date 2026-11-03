@@ -99,10 +99,11 @@ def requirements(request):
         'feature_lookback_bars':0,'fact_history_required':False}
 
 
-def evaluate(*,plan,inputs):
+def evaluate(*,plan,inputs,external_checkpoint=None):
     began=monotonic()
     def checkpoint():
         execution_checkpoint()
+        if external_checkpoint is not None:external_checkpoint()
         if monotonic()-began>=120:raise ValueError('event_barriers_limit:120second cooperative evaluator budget exceeded')
     if inputs.get('indicator_gap_rejection'):invalid('Indicator rejected input discontinuity')
     if not plan.indicator_graph or plan.gap_policy!='reject' or plan.outcome_tail['seconds']!=0:invalid('typed Indicator graph,reject gaps,no tail required')

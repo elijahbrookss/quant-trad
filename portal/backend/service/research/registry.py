@@ -326,6 +326,15 @@ def definition_allows_evidence(definition: CheckDefinition) -> bool:
 
 
 def _register_event_fact_family() -> None:
+    from .saved_case_comparison_evaluator import SavedCaseComparisonEvaluator, RULES as COMPARISON_RULES
+    comparison = SavedCaseComparisonEvaluator()
+    CHECK_REGISTRY.register_evaluator(comparison)
+    CHECK_REGISTRY.register_definition(CheckDefinition(
+        schema_version=CHECK_DEFINITION_SCHEMA_VERSION, definition_id=EVENT_FACT_ANALYSIS,
+        definition_version="16", evaluator_id=comparison.evaluator_id, evaluator_version=comparison.version,
+        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION, result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+        material_rules={"family": EVENT_FACT_ANALYSIS, "operator_model": "reversal_saved_case_comparison.v1",
+                        "composition_rules": COMPARISON_RULES}))
     from .event_barrier_check import RULES as BARRIER_RULES
     barrier = EventFactEvaluator(version="15",result_schema_version="indicator_event_barriers_result.v1",barrier_profiles_enabled=True)
     CHECK_REGISTRY.register_evaluator(barrier)
@@ -872,7 +881,10 @@ def _resolve_definition_version(payload, *, family, base_version):
         risk_version = "10"
     retrospective = _mapping(payload.get("outcomes"), field="outcomes").get("retrospective")
     barrier_schema = family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"),field="outcomes").get("schema_version") == "indicator_event_barriers.v1"
-    if barrier_schema:
+    comparison_schema = family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == "reversal_saved_case_comparison.v1"
+    if comparison_schema:
+        default_version = "16"
+    elif barrier_schema:
         default_version = "15"
     elif family == EVENT_FACT_ANALYSIS and _mapping(payload.get("outcomes"), field="outcomes").get("schema_version") == EPISODE_SCHEMA:
         default_version = "14"
@@ -910,6 +922,8 @@ def _resolve_definition_version(payload, *, family, base_version):
         resolved_base_version = str(base_version or default_version)
     if family == EVENT_FACT_ANALYSIS and (barrier_schema != (resolved_base_version == "15") or barrier_schema and any(v is not None for v in (retrospective,matched_origin,shared_landmark,first_return,forward_risk))):
         raise ValueError("event_barriers_invalid: explicit standalone version15schema required")
+    if family == EVENT_FACT_ANALYSIS and comparison_schema != (resolved_base_version == "16"):
+        raise ValueError("saved_case_comparison_invalid: explicit standalone version16schema required")
     if retrospective is not None and (family != EVENT_FACT_ANALYSIS or resolved_base_version != "13"
             or any(v is not None for v in (matched_origin, shared_landmark, first_return, forward_risk))):
         raise ValueError("retrospective_invalid: requires standalone event_fact_analysis version 13")
@@ -946,7 +960,7 @@ def materialize_check_definition(
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")
     statistics = _mapping(payload.get("statistics"), field="statistics")
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version not in {"14", "15"}:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version not in {"14", "15", "16"}:
         detector, outcomes, statistics = normalize_event_fact_configuration(
             detector=detector,
             outcomes=outcomes,
@@ -956,7 +970,7 @@ def materialize_check_definition(
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10", "11", "12", "15"} and (
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version in {"6", "7", "8", "9", "10", "11", "12", "15", "16"} and (
         inputs or detector.get("type") != "indicator_event"
     ):
         raise ValueError(
@@ -977,9 +991,9 @@ def materialize_check_definition(
     if family == EVENT_FACT_ANALYSIS and resolved_base_version == "9":
         outcomes["first_return"] = normalize_first_return(first_return, outcomes=outcomes,
             detector=detector, statistics=statistics, gap_policy=str(payload.get("gap_policy") or ""))
-    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11", "12", "15"}:
+    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version not in {"6", "7", "8", "9", "10", "11", "12", "15", "16"}:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
-    if family == EVENT_FACT_ANALYSIS and resolved_base_version not in {"14", "15"}:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version not in {"14", "15", "16"}:
         detector, statistics, inputs = _validate_event_fact_bindings(
             detector=detector,
             statistics=statistics,
@@ -1094,6 +1108,12 @@ def materialize_check_definition(
             statistics=statistics,scope=scope,inputs=inputs,gap_policy=gap_policy)
         if gap_rewarm_bars or assertions:
             raise ValueError("event_barriers_invalid: no rewarm or scientific assertions")
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "16":
+        from .saved_case_comparison_evaluator import normalize_configuration as normalize_comparison
+        if mode != CHECK_MODE_EVIDENCE or gap_rewarm_bars or assertions:
+            raise ValueError("saved_case_comparison_invalid: evidence only;no rewarm or assertions")
+        detector, outcomes, statistics = normalize_comparison(detector=detector, outcomes=outcomes,
+            statistics=statistics, scope=scope, inputs=inputs, gap_policy=gap_policy)
     material_rules = {
         **dict(base.material_rules),
         "registered_definition": {

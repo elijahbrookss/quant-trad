@@ -20,6 +20,8 @@ code_paths:
   - src/research_science/reversal_recognition.py
   - src/research_science/reversal_outcomes.py
   - src/research_science/event_barriers.py
+  - src/research_science/saved_case_comparison.py
+  - portal/backend/service/research/saved_case_comparison_evaluator.py
   - portal/backend/service/research/event_barrier_check.py
   - src/research_science/reversal_matched_progress.py
   - portal/backend/service/research/saved_selection_binding.py
@@ -90,6 +92,44 @@ records remain integrity-checked and readable through data-only custody.
 
 
 ## Bounded input delivery
+
+### Saved-development case comparison
+
+`event_fact_analysis@16` (`reversal_saved_case_comparison.v1`) keeps one current
+native episode and one public `reversal@v1` graph. Exact eligible version15
+development Check envelopes supply retained cases; their independent Dataset,
+watermark, graph and material identities remain intact. Earlier candles are
+never loaded or replayed. The normalized request declares every training,
+frozen-model and prior-scoring reference. Requirements validate their custody
+and expose finite case/byte inventories before current outcomes. The method
+retains a 60,000 saved-case cap, 96MiB saved-envelope cap, existing 19,104 current
+bar cap, 16MiB result cap and 120second cooperative wall limit. The pretty-printed
+result also fits 7MiB, reserving 1MiB for the existing 8MiB native record export
+envelope. Shared execution guards may impose lower limits. Oversize inputs fail
+without truncation. Immutable source validation is memoized only within one
+dependency-loading call; there is no persistent source or computation cache.
+
+Only the first scheduled validation episode fits the three-class multinomial
+L2 models. Later episodes validate and reuse numeric class-ordered coefficients,
+intercepts, training-only weighted population scalers and the training manifest
+hash. The deterministic zero-initialized scipy L-BFGS-B solver minimizes summed
+original-clock-weighted negative log likelihood plus coefficient L2/(2C), with
+an unpenalized intercept. Nonconvergence fails explicitly. Base and enriched
+arms share the same rows, weights and base scalers. Zero-variance training
+columns map to zero with an explicit reason. No pickle crosses this boundary.
+
+The current native path also measures every eligible up-close alternative with
+its own trailing12candle low and locked1R barriers using shared context and
+first-passage math. Deterministic matching reads only clocks, IDs and causal
+features. All original simultaneous-chain mass, missingness, unmatched cases
+and all four outcome classes remain visible. Unknown and unmatched directional
+contributions retain bounds; they are not executable returns. Exact saved score
+references enable the final four-episode aggregation without an additional
+replay or hidden Check. Shared origins, overlapping supports and public ancestry
+join conservative resampling groups; undefined or degenerate draws are unsupported.
+These are exploratory conditional diagnostics, not independent-N, causality,
+generalization or profitability certificates. Existing method versions and
+their hashes keep their original behavior.
 
 ### Saved-score attribution and training-defined exceedance
 

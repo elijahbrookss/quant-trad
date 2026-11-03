@@ -1232,6 +1232,14 @@ def persist_research_check_evidence(
         for source in normalized_evidence.input_binding['sources'][1:]:
             links.append(repository.create_link(source_item_id=item['id'],target_type='research_item',
                 target_id=source['check_id'],relation='uses_evidence',metadata=source,**create_args))
+    if definition.evaluator_id == 'event_fact_analysis' and definition.evaluator_version == '16':
+        dependency_refs = {}
+        for source in plan.execution['saved_dependencies']:
+            ref = dict(source['reference'])
+            dependency_refs.setdefault(ref['check_id'], []).append(ref)
+        for check_id, refs in dependency_refs.items():
+            links.append(repository.create_link(source_item_id=item['id'], target_type='research_item',
+                target_id=check_id, relation='uses_evidence', metadata={'references': refs}, **create_args))
     projected_item = _project_evidence_classification(item)
     return {
         "schema_version": "research_check_run.v2",

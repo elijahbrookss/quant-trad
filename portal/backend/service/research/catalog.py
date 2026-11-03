@@ -703,6 +703,30 @@ _PURPOSES = {'raw_forward_outcome@20': 'Compose all completed reversals,causal c
                            'before outcomes.'}
 
 _PURPOSES['event_fact_analysis@15'] = 'Measure public Indicator events against locked high/low barriers, original-clock weighted feature profiles and strictly-later target observations; no recognition, rematching or trading claim.'
+_PURPOSES['event_fact_analysis@16'] = 'Compare frozen saved-development duration models and outcome-blind matched alternatives on one current native reversal episode; no prior replay or trading claim.'
+
+def _saved_case_comparison_example():
+    from .saved_case_comparison_evaluator import SCHEMA, DETECTOR, FEATURE_SPECS, RECIPE
+    return {"check_family": "event_fact_analysis", "mode": "evidence",
+            "scope": {"instrument_id": "authorized-instrument-id", "indicator_id": "existing-reversal-indicator-id",
+                      "timeframe": "15m", "start": "2024-01-02T00:30:00Z", "end": "2024-01-08T00:00:00Z"},
+            "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "detector": deepcopy(DETECTOR),
+            "outcomes": {"schema_version": SCHEMA, "input_origin": "2024-01-01T00:00:00Z", "horizon_bars": 12,
+                         "reference": {"operator": "event_close"}, "failure": {"operator": "window_low"},
+                         "target": {"operator": "risk_multiple", "multiple": 1.0}, "support_lookback_bars": 97,
+                         "window_start_path": "metadata.recognition.formation_start", "identity_path": "metadata.recognition.event_id",
+                         "source_path": "metadata.recognition.context.source_identity_key", "known_at_path": "metadata.recognition.known_at"},
+            "statistics": {"features": deepcopy(FEATURE_SPECS), "illustrations": [], "comparison": {
+                "training_sources": [{"check_id": "00000000-0000-0000-0000-000000000001", "result_hash": "a" * 64,
+                                      "evidence_hash": "b" * 64, "population_hash": "c" * 64}],
+                "training_cutoff": "2023-12-31T00:00:00Z", "frozen_model_source": None, "prior_scoring_sources": [],
+                "comparison_recipe": deepcopy(RECIPE), "validation_episodes": [
+                    {"origin": "2024-01-01T00:00:00Z", "end_exclusive": "2024-01-08T00:00:00Z"},
+                    {"origin": "2024-01-08T00:00:00Z", "end_exclusive": "2024-01-15T00:00:00Z"},
+                    {"origin": "2024-01-15T00:00:00Z", "end_exclusive": "2024-01-22T00:00:00Z"},
+                    {"origin": "2024-01-22T00:00:00Z", "end_exclusive": "2024-01-29T00:00:00Z"}]}}, "gap_policy": "reject"}
+
+_EXAMPLES['event_fact_analysis@16'] = _saved_case_comparison_example()
 _PURPOSES['raw_forward_outcome@21'] = ('Compare paired baseline and enriched directional forecasts at every ordinary native candle close, '
     'using causal public Indicator metrics, exact elapsed outcomes, gap resets and configured walk-forward inference; no trading claim.')
 _PURPOSES['raw_forward_outcome@22'] = ('Compare paired directional forecasts at ordinary native candle closes with typed causal candle features on '
@@ -941,6 +965,11 @@ _PAIRED_SUPPORT = {
 
 
 def _analytical_fields(family: str, version: str) -> dict[str, Any]:
+    if family == "event_fact_analysis" and version == "16":
+        return {"model": "Class-ordered numeric coefficients/scalers frozen from exact saved development cases.",
+                "scored_evidence": "Current native episode, all four classes, original root units, alternatives, outcome-blind pairs and paired losses.",
+                "comparison": "Root-mass aggregation, support/balance gates, unknown bounds and conditional linked-origin intervals.",
+                "saved_dependency_inventory": "Exact immutable references, original inputs, finite counts and bytes; no prior replay."}
     if family == 'raw_forward_outcome' and version == '26':
         return {'sources[]':{'type':'array','meaning':'Separate exact source references, unchanged original comparisons, full-population paired loss reconciliation, training membership/quantiles, complete stratum assignments and signed contribution tables; no pooled independence.'},
                 'sources[].tables[].interval':{'type':'object','meaning':'Original paired calendar-cluster conditional interval, or explicit unsupported support/undefined draws.'},
@@ -1136,7 +1165,8 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         if (configured.definition_id != definition.definition_id
                 or configured.definition_version.split("+", 1)[0] != definition.definition_version):
             raise ValueError(f"check_catalog_example_version_mismatch: {key}")
-        declarations = dict(evaluator.declare_requirements(definition=configured, request=request))
+        declaration_options = {"inspect_saved": False} if definition.definition_id == "event_fact_analysis" and version == "16" else {}
+        declarations = dict(evaluator.declare_requirements(definition=configured, request=request, **declaration_options))
     fixed_risk = definition.definition_id == "event_fact_analysis" and version in {"10", "11", "12"}
     settings = {
         "fixed": deepcopy(dict(definition.material_rules)),
@@ -1147,7 +1177,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
             "statistics": "Only statistics accepted by the existing method normalizer.",
             "assertions": "Existing scalar assertions; no trading or execution permission.",
         },
-        "defaults": {"mode": "evidence" if (definition.definition_id == "event_fact_analysis" and version == "15") or (definition.definition_id == 'raw_forward_outcome' and version in {'25','26'}) else "preview",
+        "defaults": {"mode": "evidence" if (definition.definition_id == "event_fact_analysis" and version in {"15", "16"}) or (definition.definition_id == 'raw_forward_outcome' and version in {'25','26'}) else "preview",
                      "gap_rewarm_bars": 0},
         "constraints": ["Existing request normalizers and requirements/prepare are authoritative.",
                         "Examples are templates, not existing datasets or execution approval."],
@@ -1188,7 +1218,7 @@ def get_check_definition(definition_id: str, version: str) -> dict[str, Any]:
         "definition": definition.to_dict(),
         "purpose": _PURPOSES[key],
         "eligibility": {"request_selectable": example is not None,
-                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version=="15" else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20", "21", "22", "23", "24", "25", "26"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
+                        "modes": ["evidence"] if definition.definition_id=="event_fact_analysis" and version in {"15", "16"} else ["evidence"] if definition.definition_id=="raw_forward_outcome" and version in {"17", "18", "20", "21", "22", "23", "24", "25", "26"} else ["preview", "evidence"] if durable and example is not None else ["preview"] if example is not None else [],
                         "observation": "Requires completed, replayable durable evidence and explicit admission; never automatic." if durable else "Preview only; cannot create new durable evidence or Observations.",
                         "execution_authority": False, "promotion_authority": False,
                         **({"point_in_time_predictive":False,"scientific_certification_eligible":False,"backtest_certified":False}
