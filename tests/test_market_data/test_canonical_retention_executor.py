@@ -388,6 +388,62 @@ def test_worker_restart_discards_retry_hint_and_resumes_from_committed_oldest_pr
     assert result["retry_schedule"] == []
 
 
+@pytest.mark.parametrize("oldest_outcome", ["failed", "busy", "progress"])
+def test_due_retries_receive_service_despite_an_older_day_consuming_each_run(
+        tmp_path, monkeypatch, oldest_outcome):
+    """A full bounded run must not repeatedly exclude the other due days."""
+    days = [DAY + timedelta(days=index) for index in range(3)]
+    clock = [30.0]
+    def plan(**kwargs):
+        after = kwargs["after_storage_day"]
+        return _plan([_item(day=day) for day in days if after is None or day > after])
+    executor = CanonicalFactRetentionExecutor(repository=SimpleNamespace(plan=plan))
+    executor._retry_states = {
+        day: module._RetryState(day, 0.0, 0.0, 10.0, 1, "original failure")
+        for day in days
+    }
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    served = []
+    def step(**kwargs):
+        day = date.fromisoformat(kwargs["item"]["storage_day"])
+        served.append(day)
+        # The oldest day is already due again at the next natural invocation.
+        clock[0] += 10.0
+        if day == days[0] and oldest_outcome == "failed":
+            raise RuntimeError("persistent catalog query failure")
+        if day == days[0] and oldest_outcome == "busy":
+            raise module.MarketStorageLifecycleBusyError("busy lifecycle")
+        return {"status": "page_acknowledged"}
+    monkeypatch.setattr(executor, "_execute_step", step)
+    policy = CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=1, max_run_seconds=10,
+    )
+    for _ in range(4):
+        result = executor.run(policy=policy, storage_root=tmp_path, execute=True)
+        assert len(result["outcomes"]) == 1
+        clock[0] += 11.0
+    assert served == [days[0], days[1], days[2], days[0]]
+    assert all(state.first_failure_at == 0.0 for state in executor._retry_states.values())
+
+
+def test_retry_fairness_preserves_cooldown_and_fresh_plan_refusal(tmp_path, monkeypatch):
+    later = DAY + timedelta(days=1)
+    clock = [20.0]
+    executor, _ = _executor([_plan([_item(eligible=False), _item(day=later)])])
+    executor._retry_states = {
+        DAY: module._RetryState(DAY, 0.0, 0.0, 10.0, 3, "original failure"),
+        later: module._RetryState(later, 0.0, 0.0, 100.0, 1, "cooling failure"),
+    }
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(executor, "_execute_step", lambda **_: pytest.fail("no admitted due step"))
+    executor.run(policy=CanonicalFactRetentionPolicy(
+        execution_enabled=True, max_steps_per_run=1, max_run_seconds=10,
+    ), storage_root=tmp_path, execute=True)
+    assert executor._retry_states[DAY].attempt_count == 3
+    assert executor._retry_states[DAY].reason == "fresh_plan_not_eligible"
+    assert executor._retry_states[later].next_eligible_at == 100.0
+
+
 def test_time_budget_after_planning_prevents_starting_a_mutation(tmp_path, monkeypatch):
     executor, _ = _executor([_plan([_item()])])
     clock = iter([0, 0, 0, 2, 2])

@@ -710,16 +710,18 @@ class FactHandoffProof:
                 offset = 0
                 while offset < len(requested):
                     check_budget()
-                    batch, chars = [], 0
+                    batch, chars, tuples = [], 0, 0
                     # Bound round trips and parameter volume without rejecting a
                     # single previously admissible large page. Its witness already
                     # passed the unchanged retained-memory refusal.
                     while offset < len(requested) and len(batch) < 16:
                         identity, witness = requested[offset]
-                        if batch and chars + len(witness.tids) > 256 * 1024:
+                        if batch and (chars + len(witness.tids) > 256 * 1024
+                                      or tuples + witness.count > 4096):
                             break
                         batch.append((identity, witness))
                         chars += len(witness.tids)
+                        tuples += witness.count
                         offset += 1
                     columns = batch[0][1].columns
                     if any(witness.columns != columns for _, witness in batch):

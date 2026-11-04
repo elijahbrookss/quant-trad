@@ -559,7 +559,14 @@ class CanonicalFactRetentionExecutor:
             due = [state for state in self._retry_states.values()
                    if state.next_eligible_at <= started]
             if due:
-                retry_day = min(due, key=lambda item: item.storage_day).storage_day
+                # Service the retry that has waited longest past its cooldown.
+                # Sorting only by storage day lets an older failing partition
+                # win every bounded run while later due failures never retry.
+                # The existing cooldown, fresh-plan admission and one selected
+                # retry per run remain unchanged; storage day breaks ties.
+                retry_day = min(due, key=lambda item: (
+                    item.next_eligible_at, item.storage_day,
+                )).storage_day
                 cursor = retry_day - timedelta(days=1)
             elif cursor is None:
                 # Skip cooling failures while still allowing later work. The

@@ -598,9 +598,12 @@ reused safely on retry; acknowledged pages/receipts survive worker restarts.
 The worker retains only in-process **scheduling hints**, never an executable
 plan. It revisits a partially processed day and advances beyond a failed/busy
 day or fully blocked candidate page so later days are not starved. A failed or
-busy day enters a queue bounded by `max_candidate_partitions`; the oldest due
-entry gets one priority bounded run after the existing `max_run_seconds`
-interval. A successful nonterminal retry keeps a follow-through hint for that
+busy day enters a queue bounded by `max_candidate_partitions`; the entry with
+the earliest cooldown-expiry time gets one priority bounded run after the existing
+`max_run_seconds` interval, with storage day breaking ties. Rescheduling moves
+that entry behind retries already eligible, including when its failed, busy or
+nonterminal attempt consumes the whole run. An old storage day cannot repeatedly
+jump ahead of a later retry that has been waiting longer past its cooldown. A successful nonterminal retry keeps a follow-through hint for that
 partition and cools for another `max_run_seconds` interval before its next
 priority run. Unrelated eligible days continue during every cooling interval,
 while the recovered partition cannot disappear behind a later cursor after a
@@ -1820,14 +1823,23 @@ re-admitted relations and catalogs stable through DROP.
 
 Final receipt reads use the existing bounded manifest batch (at most100 pages).
 Catalog revalidation transports at most16 manifests per SQL statement, further
-splitting at256KiB of tuple-hint text; a larger single page retains the prior
+splitting at256KiB of tuple-hint text or4096 witnessed rows; a larger single page retains the prior
 one-page path under the unchanged witness-memory bound. Each manifest still has
 its own fresh full-field digest, hinted-row count and total logical count in
 that statement's snapshot. Results must contain exactly the requested IDs,
 including empty catalogs. No page is marked current until all its batch's
 catalogs match; changed receipts, additions, moved/reused tuples, deadline and
 cancellation failures still refuse. This replaces repeated query transport,
-not any fresh proof. Phase progress logs expose final admission, header checks,
+not any fresh proof. Catalog capture reads at most1000 rows per statement,
+continuing by the existing unique, non-null ordered catalog key rather than an
+OFFSET. It still reads the complete catalog in canonical order and one excess
+row to enforce the original per-catalog limit. Deadline/stop checks bracket each
+chunk. Prepared and legacy catalogs retain their exact projections and physical
+witnesses; the final locked transaction still freshly counts the complete logical
+catalog and compares each complete typed physical fingerprint. Neither transport
+bound raises the statement or whole-handoff deadline. A large single page remains
+subject to its original complete proof and can still time out safely; these bounds
+do not promise recovery from arbitrary disk stalls. Phase progress logs expose final admission, header checks,
 catalog batches and completed evidence for whole-cycle observation.
 
 The October18 normal-worker600-second trial reached shared preparation but

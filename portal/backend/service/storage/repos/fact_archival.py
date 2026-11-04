@@ -174,7 +174,7 @@ ARCHIVE_PAGE_CATALOG_SPECS = (
 
 
 def archive_page_catalog_statement(*, table: str, columns: str, order: str,
-                                   handoff: bool = False):
+                                   handoff: bool = False, after: bool = False):
     """Return the exact bounded catalog statement used by verification."""
     permitted = {(item[1], item[2], item[3]) for item in ARCHIVE_PAGE_CATALOG_SPECS}
     permitted.update({
@@ -185,9 +185,13 @@ def archive_page_catalog_statement(*, table: str, columns: str, order: str,
         raise ValueError("canonical_archive_catalog_statement_invalid")
     physical = ",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff else ""
     identity_column = "preparation_id" if table.startswith("fact_archive_prepared_") else "manifest_id"
+    keys = order.split(", ")
+    continuation = (" AND (" + ",".join(keys) + ") > ("
+                    + ",".join(f":after_{index}" for index in range(len(keys))) + ")"
+                    if after else "")
     return text(
         f"SELECT {columns}{physical} FROM market.{table} "
-        f"WHERE {identity_column}=:id ORDER BY {order} LIMIT :limit"
+        f"WHERE {identity_column}=:id{continuation} ORDER BY {order} LIMIT :limit"
     )
 
 
@@ -1421,11 +1425,30 @@ class PostgresCanonicalFactArchiveRepository:
             table = tables.get(name, legacy_table)
             catalog_id = active_preparation_id if table.startswith("fact_archive_prepared_") else manifest_id
             limit = limits[name]
-            rows = session.execute(archive_page_catalog_statement(
-                table=table, columns=columns, order=order, handoff=handoff is not None,
-            ), {"id": catalog_id, "limit": limit + 1}).mappings().all()
-            if len(rows) > limit:
-                raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
+            rows, cursor = [], None
+            # Bound heap/index work per statement. Keyset continuation follows
+            # the existing unique, non-null catalog order; OFFSET would rescan
+            # earlier rows and cannot bound that work. Keep the original total
+            # limit plus one excess-row proof and complete canonical ordering.
+            keys = order.split(", ")
+            while True:
+                self._check_budget()
+                chunk_limit = min(1000, limit + 1 - len(rows))
+                parameters = {"id": catalog_id, "limit": chunk_limit}
+                if cursor is not None:
+                    parameters.update({f"after_{index}": value
+                                       for index, value in enumerate(cursor)})
+                chunk = session.execute(archive_page_catalog_statement(
+                    table=table, columns=columns, order=order,
+                    handoff=handoff is not None, after=cursor is not None,
+                ), parameters).mappings().all()
+                self._check_budget()
+                rows.extend(chunk)
+                if len(rows) > limit:
+                    raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
+                if len(chunk) < chunk_limit:
+                    break
+                cursor = tuple(chunk[-1][key] for key in keys)
             if handoff is not None:
                 physical[name] = handoff.catalog_rows(session, name, manifest_id, rows, table=table, relation_identity=catalog_id)
                 catalogs[name] = [{key: value for key, value in row.items()

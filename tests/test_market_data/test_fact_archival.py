@@ -529,3 +529,65 @@ def test_alias_catalog_writer_rejects_incomplete_insert_count(tmp_path):
             "fact_version_id": "mfv_1", "series_id": 1,
             "evidence_key": "legacy", "material_hash": "b" * 64,
         }])
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("count,limit", [(0, 2500), (1000, 2500), (2500, 2500), (2501, 2500)])
+def test_catalog_keyset_reads_preserve_every_row_and_total_refusal(tmp_path, monkeypatch, prepared, count, limit):
+    archive = PostgresCanonicalFactArchiveRepository(
+        database=None, object_store=None, temporary_directory=tmp_path,
+        limits=FactArchiveLimits(max_rows=limit),
+        max_dependency_objects=limit, max_raw_mapping_rows=limit)
+    checks, calls = [], []
+    monkeypatch.setattr(archive, "_check_budget", lambda: checks.append(True))
+    generation = ({"manifest_id": "page", "preparation_id": "prep", "generation": 1,
+                   "catalog_commitment": "hash"} if prepared else None)
+    expected = {}
+    for name, _, columns, order in fact_archival.ARCHIVE_PAGE_CATALOG_SPECS:
+        expected[name] = [{column: f"{index:06d}" for column in columns.split(", ")}
+                          for index in range(count)]
+    def execute(statement, params):
+        sql = str(statement)
+        if "fact_archive_active_generations" in sql:
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: generation))
+        name, _, _, order = next(spec for spec in fact_archival.ARCHIVE_PAGE_CATALOG_SPECS
+                                if ("market." + (fact_archival.PREPARED_CATALOG_TABLES if prepared
+                                    else fact_archival.LEGACY_CATALOG_TABLES).get(spec[0], spec[1]) + " ") in sql)
+        keys = order.split(", ")
+        after = tuple(params[f"after_{i}"] for i in range(len(keys))) if "after_0" in params else None
+        assert params["limit"] <= 1000 and "OFFSET" not in sql
+        if after is not None:
+            assert ") > (" in sql
+        rows = [row for row in expected[name] if after is None or tuple(row[k] for k in keys) > after]
+        calls.append((name, params))
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: rows[:params["limit"]]))
+    session = SimpleNamespace(execute=execute)
+    if count > limit:
+        with pytest.raises(RuntimeError, match="catalog_budget_exceeded"):
+            archive._page_catalogs(session, "page")
+    else:
+        assert archive._page_catalogs(session, "page") == expected
+        assert len(checks) == 2 * len(calls)
+        if count >= 1000:
+            assert any("after_0" in params for _, params in calls)
+
+
+def test_catalog_keyset_respects_cancellation_between_chunks(tmp_path, monkeypatch):
+    archive = PostgresCanonicalFactArchiveRepository(database=None, object_store=None,
+        temporary_directory=tmp_path)
+    calls = []
+    def execute(statement, params):
+        if "fact_archive_active_generations" in str(statement):
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: None))
+        calls.append(params)
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(
+            all=lambda: [{"series_id": index} for index in range(1000)]))
+    checks = []
+    def check():
+        checks.append(True)
+        if len(checks) == 3:
+            raise RuntimeError("stopped")
+    monkeypatch.setattr(archive, "_check_budget", check)
+    with pytest.raises(RuntimeError, match="stopped"):
+        archive._page_catalogs(SimpleNamespace(execute=execute), "page")
+    assert len(calls) == 1 and len(checks) == 3

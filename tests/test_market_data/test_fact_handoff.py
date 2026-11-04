@@ -470,3 +470,25 @@ def test_batch_scope_is_exact_before_sql(change):
     with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
         proof.verify_catalog_batch(session, pages, lambda: None)
     assert not calls and not proof.fresh_catalogs
+
+
+def test_catalog_row_work_is_bounded_without_splitting_a_page_proof():
+    from dataclasses import replace
+    proof, pages = _catalog_batch_fixture(9)
+    for identity in proof.catalogs:
+        proof.catalogs[identity] = {name: replace(witness, count=1500)
+                                   for name, witness in proof.catalogs[identity].items()}
+    session, calls = _batch_session(proof)
+    proof.verify_catalog_batch(session, pages, lambda: None)
+    assert len(calls) == 20  # Four catalogs, batches 2+2+2+2+1.
+    assert all(len(params["ids"]) <= 2 for _, params in calls)
+    assert proof.fresh_catalogs == set(proof.pages)
+    # A single historically admissible page retains its entire fingerprint;
+    # the transport cap cannot silently truncate or change its commitment.
+    proof, pages = _catalog_batch_fixture(1)
+    for identity in proof.catalogs:
+        proof.catalogs[identity] = {name: replace(witness, count=10000)
+                                   for name, witness in proof.catalogs[identity].items()}
+    session, calls = _batch_session(proof)
+    proof.verify_catalog_batch(session, pages, lambda: None)
+    assert len(calls) == 4 and proof.fresh_catalogs == set(proof.pages)
