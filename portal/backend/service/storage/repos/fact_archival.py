@@ -186,7 +186,11 @@ def archive_page_catalog_statement(*, table: str, columns: str, order: str,
     physical = ",ctid::text AS _handoff_tid,tableoid AS _handoff_oid" if handoff else ""
     identity_column = "preparation_id" if table.startswith("fact_archive_prepared_") else "manifest_id"
     keys = order.split(", ")
-    continuation = (" AND (" + ",".join(keys) + ") > ("
+    # Keep the scope in the row comparison as well as the equality. A
+    # target-only cursor can pick a global target index and filter the scope
+    # afterward; including the leading primary-key column makes that same
+    # continuation usable as a manifest/preparation-scoped index condition.
+    continuation = (" AND (" + ",".join([identity_column, *keys]) + ") > (:id,"
                     + ",".join(f":after_{index}" for index in range(len(keys))) + ")"
                     if after else "")
     return text(
@@ -1426,8 +1430,8 @@ class PostgresCanonicalFactArchiveRepository:
             catalog_id = active_preparation_id if table.startswith("fact_archive_prepared_") else manifest_id
             limit = limits[name]
             rows, cursor = [], None
-            # Bound heap/index work per statement. Keyset continuation follows
-            # the existing unique, non-null catalog order; OFFSET would rescan
+            # Bound returned rows per statement. Keyset continuation follows
+            # the scope-leading unique, non-null catalog key; OFFSET would rescan
             # earlier rows and cannot bound that work. Keep the original total
             # limit plus one excess-row proof and complete canonical ordering.
             keys = order.split(", ")

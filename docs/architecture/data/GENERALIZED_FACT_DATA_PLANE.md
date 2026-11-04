@@ -1847,7 +1847,13 @@ catalogs match; changed receipts, additions, moved/reused tuples, deadline and
 cancellation failures still refuse. This replaces repeated query transport,
 not any fresh proof. Catalog capture reads at most1000 rows per statement,
 continuing by the existing unique, non-null ordered catalog key rather than an
-OFFSET. It still reads the complete catalog in canonical order and one excess
+OFFSET. Continuation includes the manifest/preparation identity as the leading
+component of the composite-key comparison, retaining its separate equality.
+Within that fixed scope this selects exactly the prior ordered suffix, while
+making the continuation usable by the scope-leading primary index rather than
+encouraging a global target-index scan with a late identity filter. The returned
+row cap does not itself cap scanned rows or guarantee a particular planner choice.
+It still reads the complete catalog in canonical order and one excess
 row to enforce the original per-catalog limit. Deadline/stop checks bracket each
 chunk. Prepared and legacy catalogs retain their exact projections and physical
 witnesses; the final locked transaction still freshly counts the complete logical
