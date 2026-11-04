@@ -611,6 +611,21 @@ single page. The automatic follow-through hint clears only when a fresh exact
 plan shows the partition has gone or the partition reaches
 `partition_reclaimed`/`already_reclaimed`; an explicit manual-cursor run keeps
 its prior semantics and can clear the hint after successful nonterminal work.
+An automatic fresh scan that yields unfinished work at a step/time budget also
+retains a follow-through hint, including a safely cancelled first page with no
+acknowledgement yet. A new progress hint starts with zero failed attempts. The
+scan advances past represented yielded days so later days can be discovered;
+the hint's next attempt still replans from committed PostgreSQL state. A genuine
+failure/busy hint keeps its reason, original age and failure count rather than
+being replaced by a progress hint. If the existing bounded queue cannot represent
+a yielded day, the scan stays before that day. Stop requests and explicit manual
+cursors retain their prior resume behavior.
+
+Ordinary in-run page batching is unchanged. A yielded automatic partition now
+shares the existing `max_run_seconds` cooldown even when it is the only remaining
+partition; this may leave an idle interval at the tail of a backlog. Follow-through
+hints remain volatile and share `max_candidate_partitions`; discovery fairness is
+bounded by that admitted queue capacity, not an unlimited backlog guarantee.
 Every retry starts from a fresh plan, and a changed blocker delays rather than
 bypasses admission. The run result and supervisor snapshot expose retry age,
 failure-attempt count, reason and next-eligibility delay.

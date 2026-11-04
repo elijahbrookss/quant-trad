@@ -555,6 +555,7 @@ class CanonicalFactRetentionExecutor:
         retry_day = None
         retry_attempted = False
         retry_followthrough = False
+        budget_followthrough = {}
         if not explicit_cursor and self._retry_states:
             due = [state for state in self._retry_states.values()
                    if state.next_eligible_at <= started]
@@ -689,12 +690,15 @@ class CanonicalFactRetentionExecutor:
                 if result["status"] in {"partition_reclaimed", "already_reclaimed"}:
                     cursor = day
                     self._clear_retry(day)
+                    budget_followthrough.pop(day, None)
                     if day == retry_day:
                         retry_followthrough = False
                 elif day == retry_day and day in self._retry_states:
                     retry_followthrough = True
                 else:
                     self._clear_retry(day)
+                    if not explicit_cursor:
+                        budget_followthrough[day] = "partition_followthrough"
                 logger.info("canonical_retention_step_finished | storage_day=%s action=%s status=%s",
                             day, item["action"], result["status"])
             except CanonicalRetentionBudgetExceeded as exc:
@@ -709,6 +713,8 @@ class CanonicalFactRetentionExecutor:
                     )
                     if day == retry_day:
                         retry_followthrough = False
+                if not explicit_cursor and day != retry_day and exc.stop_reason == "time_budget":
+                    budget_followthrough.setdefault(day, exc.stop_reason)
                 stop_reason = exc.stop_reason
                 break
             except MarketStorageLifecycleBusyError as exc:
@@ -745,6 +751,8 @@ class CanonicalFactRetentionExecutor:
                             )
                             if day == retry_day:
                                 retry_followthrough = False
+                        if not explicit_cursor and day != retry_day and budget.stop_reason == "time_budget":
+                            budget_followthrough.setdefault(day, budget.stop_reason)
                         stop_reason = budget.stop_reason
                         logger.info("canonical_retention_step_deferred | storage_day=%s action=%s reason=%s sqlstate=57014",
                                     day, item["action"], stop_reason)
@@ -780,6 +788,24 @@ class CanonicalFactRetentionExecutor:
                 day=retry_day, reason="partition_followthrough", policy=policy,
                 now=monotonic(), count_attempt=False,
             )
+        if not explicit_cursor and stop_reason in {"step_budget", "time_budget"}:
+            queued, unrepresented = [], []
+            for resume_day, reason in sorted(budget_followthrough.items()):
+                # A later genuine failure/busy refusal already owns this hint.
+                # Never replace its reason, age or failure-attempt accounting.
+                if resume_day in self._retry_states:
+                    continue
+                self._schedule_retry(day=resume_day, reason=reason, policy=policy,
+                                     now=monotonic(), count_attempt=False)
+                (queued if resume_day in self._retry_states else unrepresented).append(resume_day)
+            if unrepresented:
+                # A full queue cannot leave unfinished work behind the scan.
+                before = min(unrepresented) - timedelta(days=1)
+                cursor = min(cursor, before) if cursor is not None else before
+            elif queued:
+                # Durable state still owns the actual resume point. This hint
+                # lets fresh discovery advance while unfinished work cools.
+                cursor = max(cursor, max(queued)) if cursor is not None else max(queued)
         self._cursor = cursor
         failures = sum(item["status"] == "failed" for item in outcomes)
         prerequisite_commits = sum(item.get("prerequisite_commit_count", 0) for item in outcomes)

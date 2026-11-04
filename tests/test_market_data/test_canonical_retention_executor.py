@@ -41,6 +41,8 @@ def test_dry_run_and_separate_enablement_never_construct_a_writer(tmp_path, monk
 
 
 def test_step_budget_and_next_phase_are_driven_by_replanned_progress(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
     executor, calls = _executor([_plan([_item("seal_partition")]), _plan([_item("stage_page")]),
                                  _plan([_item("verify_page")])])
     seen = []
@@ -54,7 +56,9 @@ def test_step_budget_and_next_phase_are_driven_by_replanned_progress(tmp_path, m
                           storage_root=tmp_path, execute=True)
     assert seen == ["seal_partition", "stage_page"]
     assert result["status"] == "bounded" and result["stop_reason"] == "step_budget"
-    assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
+    assert result["next_after_storage_day"] == DAY.isoformat()
+    assert result["retry_schedule"][0]["attempt_count"] == 0
+    clock[0] = 61.0
     executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1),
                  storage_root=tmp_path, execute=True)
     assert seen[-1] == "verify_page" and calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
@@ -267,6 +271,7 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
         _plan([_item(day=DAY + timedelta(days=2))]),
         _plan([_item()]),
         _plan([_item(day=DAY + timedelta(days=1))]),
+        _plan([_item("reclaim_partition", day=DAY + timedelta(days=2))]),
         _plan([_item("reclaim_partition")]),
     ])
     clock = [0.0]
@@ -278,7 +283,7 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
         attempts.append(day)
         if day == DAY and attempts.count(DAY) == 1:
             raise RuntimeError("dependency batch timeout")
-        if day == DAY and attempts.count(DAY) == 3:
+        if kwargs["item"]["action"] == "reclaim_partition":
             return {"status": "partition_reclaimed", "reclaimed_bytes": 4096}
         return {"status": "page_acknowledged"}
 
@@ -301,29 +306,35 @@ def test_failed_oldest_retry_is_delayed_then_selected_without_starving_later_day
             policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
         )
         clock[0] = 20.0
+        later_completed = executor.run(
+            policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
+        )
+        clock[0] = 21.0
         completed = executor.run(
             policy=replace(policy, max_steps_per_run=1), storage_root=tmp_path, execute=True,
         )
 
-    assert failed["retry_schedule"] == [{
+    assert [row for row in failed["retry_schedule"] if row["storage_day"] == DAY.isoformat()] == [{
         "storage_day": DAY.isoformat(), "attempt_count": 1,
         "reason": "RuntimeError:none",
         "age_seconds": 0.0, "next_eligible_in_seconds": 10.0,
     }]
     assert cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=2)).isoformat()
     assert retried["outcomes"][0]["storage_day"] == DAY.isoformat()
-    assert retried["retry_schedule"] == [{
+    assert [row for row in retried["retry_schedule"] if row["storage_day"] == DAY.isoformat()] == [{
         "storage_day": DAY.isoformat(), "attempt_count": 1,
         "reason": "partition_followthrough",
         "age_seconds": 10.0, "next_eligible_in_seconds": 10.0,
     }]
     assert followthrough_cooling["outcomes"][0]["storage_day"] == (DAY + timedelta(days=1)).isoformat()
     assert completed["outcomes"][0]["status"] == "partition_reclaimed"
-    assert completed["retry_schedule"] == []
+    assert later_completed["outcomes"][0]["storage_day"] == (DAY + timedelta(days=2)).isoformat()
+    assert all(row["storage_day"] != DAY.isoformat() for row in completed["retry_schedule"])
+    assert all(row["attempt_count"] == 0 for row in completed["retry_schedule"])
     assert attempts == [DAY, DAY + timedelta(days=1), DAY + timedelta(days=2), DAY,
-                        DAY + timedelta(days=1), DAY]
+                        DAY + timedelta(days=1), DAY + timedelta(days=2), DAY]
     assert calls[-1]["after_storage_day"] == DAY - timedelta(days=1)
-    assert caplog.text.count("canonical_retention_retry_selected") == 2
+    assert caplog.text.count("canonical_retention_retry_selected") == 4
     assert "canonical_retention_retry_cleared" in caplog.text
 
 
@@ -354,7 +365,7 @@ def test_due_retry_keeps_partition_for_one_bounded_run_before_cooling(tmp_path, 
     retried = executor.run(policy=policy, storage_root=tmp_path, execute=True)
 
     assert [item["storage_day"] for item in retried["outcomes"]] == [DAY.isoformat()] * 2
-    assert retried["retry_schedule"] == [{
+    assert [row for row in retried["retry_schedule"] if row["storage_day"] == DAY.isoformat()] == [{
         "storage_day": DAY.isoformat(), "attempt_count": 1,
         "reason": "partition_followthrough",
         "age_seconds": 10.0, "next_eligible_in_seconds": 10.0,
@@ -385,7 +396,9 @@ def test_worker_restart_discards_retry_hint_and_resumes_from_committed_oldest_pr
     )
     assert calls[0]["after_storage_day"] is None
     assert result["outcomes"][0]["status"] == "page_acknowledged"
-    assert result["retry_schedule"] == []
+    assert len(result["retry_schedule"]) == 1
+    assert result["retry_schedule"][0]["attempt_count"] == 0
+    assert result["retry_schedule"][0]["reason"] == "partition_followthrough"
 
 
 @pytest.mark.parametrize("oldest_outcome", ["failed", "busy", "progress"])
@@ -607,6 +620,8 @@ def test_stage_page_retains_committed_prerequisites_when_later_inner_call_stops(
 
 
 def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
     executor, _ = _executor([_plan([_item()])])
     executor.repository.database = object()
     monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
@@ -631,12 +646,15 @@ def test_staging_repository_is_reused_only_within_one_bounded_run(tmp_path, monk
         assert result["outcomes"][0]["status"] == "page_prerequisite_budget"
         assert result["outcomes"][0]["prerequisite_commit_count"] == 2
         assert executor._archive is None
+        clock[0] += policy.max_run_seconds + 1
     assert len(instances) == 2
     assert calls == [instances[0], instances[0], instances[1], instances[1]]
 
 
 def test_verification_repository_is_recreated_but_sparse_checkpoint_evidence_crosses_normal_yield(
         tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
     executor, _ = _executor([
         _plan([_item("verify_page")]),
         _plan([_item("verify_page")]),
@@ -688,6 +706,7 @@ def test_verification_repository_is_recreated_but_sparse_checkpoint_evidence_cro
     policy = CanonicalFactRetentionPolicy(execution_enabled=True, max_steps_per_run=1)
     first = executor.run(policy=policy, storage_root=tmp_path, execute=True)
     retained = executor._retained_checkpoint_evidence
+    clock[0] += policy.max_run_seconds + 1
     second = executor.run(policy=policy, storage_root=tmp_path, execute=True)
     assert first["stop_reason"] == second["stop_reason"] == "step_budget"
     assert len(instances) == 2
@@ -1103,7 +1122,12 @@ def test_sql_cancellation_at_run_boundary_defers_and_revisits_same_day(
                               cancelled=lambda: stopped[0])
     assert result["stop_reason"] == cause and result["failure_count"] == 0
     assert result["outcomes"][0]["status"] == "deferred"
-    assert result["next_after_storage_day"] == (DAY - timedelta(days=1)).isoformat()
+    expected_cursor = DAY if cause == "time_budget" else DAY - timedelta(days=1)
+    assert result["next_after_storage_day"] == expected_cursor.isoformat()
+    if cause == "time_budget":
+        assert result["retry_schedule"][0]["attempt_count"] == 0
+    else:
+        assert result["retry_schedule"] == []
     assert "canonical_retention_step_deferred" in caplog.text
     assert "sqlstate=57014" in caplog.text
     assert "canonical_retention_step_failed" not in caplog.text
