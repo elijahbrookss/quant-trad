@@ -13,6 +13,7 @@ artifacts/
 !.env.example
 !.env.*.example
 secrets.env
+/grafana-storage-metrics.env
 
 # Local runtime state
 *.db

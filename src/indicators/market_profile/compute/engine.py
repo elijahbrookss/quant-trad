@@ -6,6 +6,7 @@ No dependencies on visualization libraries, signal decorators, or UI concerns.
 """
 
 import logging
+from math import isfinite
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
@@ -337,8 +338,11 @@ class MarketProfileIndicator(ComputeIndicator):
         symbol: Optional[str] = None,
         chart_timeframe: Optional[str] = None,
         source_candle_continuity: Optional[Mapping[str, Any]] = None,
+        causal_availability: bool = False,
     ) -> Dict[str, Any]:
         """Return immutable runtime source facts for walk-forward execution."""
+        if causal_availability and (not self._bin_size_locked or not isfinite(self.bin_size)):
+            raise ValueError("market_profile_source_contract_invalid: v3 requires a fixed positive bin_size")
         profile_params = dict(params or {})
         profile_params.setdefault("use_merged_value_areas", bool(self.use_merged_value_areas))
         profile_params.setdefault("merge_threshold", float(self.merge_threshold))
@@ -352,20 +356,34 @@ class MarketProfileIndicator(ComputeIndicator):
         profile_params["profiles_premerged"] = False
         profile_params["strategy_timeframe"] = resolved_chart_timeframe
         payload_profiles: List[Dict[str, Any]] = []
+        availability = {}
+        withheld = []
+        if causal_availability:
+            from .internal.availability import daily_source_availability
+
+            availability, withheld = daily_source_availability(self.df)
         for profile in base_profiles:
-            payload_profiles.append(
-                self._serialize_runtime_profile_for_strategy_timeframe(
-                    profile,
-                    chart_timeframe=resolved_chart_timeframe,
-                )
+            serialized = self._serialize_runtime_profile_for_strategy_timeframe(
+                profile,
+                chart_timeframe=resolved_chart_timeframe,
             )
-        return {
+            if causal_availability:
+                source_clock = availability.get(_to_utc_timestamp(profile.start).normalize())
+                if source_clock is None:
+                    continue
+                serialized.update(source_clock)
+                serialized["known_at"] = int(self._project_profile_end_to_strategy_timeframe(
+                    pd.Timestamp(source_clock["source_known_at"], unit="s", tz="UTC"),
+                    chart_timeframe=resolved_chart_timeframe,
+                ).timestamp())
+            payload_profiles.append(serialized)
+        payload = {
             "symbol": str(symbol or self.symbol or ""),
             "profiles": payload_profiles,
             "profile_params": profile_params,
             "profile_chart_timeframe": resolved_chart_timeframe,
             "profile_source_timeframe": "30m",
-            "profile_boundary_semantics": "strategy_timeframe_projection",
+            "profile_boundary_semantics": "source_availability.v3" if causal_availability else "strategy_timeframe_projection",
             "source_candle_continuity": (
                 dict(source_candle_continuity)
                 if isinstance(source_candle_continuity, Mapping)
@@ -375,6 +393,15 @@ class MarketProfileIndicator(ComputeIndicator):
                 )
             ),
         }
+        if causal_availability:
+            payload["profile_availability"] = {
+                "contract": "source_availability.v3",
+                "withheld_sessions": withheld,
+                "available_sessions": len(payload_profiles),
+            }
+            if withheld:
+                logger.warning("event=market_profile_sessions_withheld symbol=%s count=%s reason=incomplete_native_day", symbol or self.symbol, len(withheld))
+        return payload
 
     def build_runtime_signal_payload(
         self,

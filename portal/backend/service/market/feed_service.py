@@ -8,8 +8,9 @@ from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
 
+from core.execution_control import execution_checkpoint
 from core.settings import get_settings
-from data_providers.providers.factory import get_provider
+from data_providers.providers.factory import get_provider, get_provider_class
 from data_providers.utils.ohlcv import interval_to_timedelta, split_history_range
 from engines.bot_runtime.live_market import ClosedLiveCandle
 from market_data.contracts import (
@@ -130,6 +131,23 @@ class HistoricalCandleIngestor:
                 "market_data_acquisition_invalid: max_segment_points must be positive"
             )
 
+    def native_request(self, instrument: Mapping[str, Any], *, timeframe_seconds: int) -> tuple[str, SourceIdentity]:
+        """Inspect a native request without fetching or registering source facts."""
+        provider_name = str(instrument.get("datasource") or "").strip()
+        venue = str(instrument.get("exchange") or "").strip()
+        provider_class = get_provider_class(provider_name, exchange=venue or None)
+        return provider_class.native_candle_interval(timeframe_seconds), self.source_identity(instrument, provider_class)
+
+    @staticmethod
+    def source_identity(instrument: Mapping[str, Any], provider: Any) -> SourceIdentity:
+        provider_class = provider if isinstance(provider, type) else type(provider)
+        return SourceIdentity(
+            provider=str(instrument.get("datasource") or "").strip(),
+            venue=str(instrument.get("exchange") or "").strip(),
+            source_kind="historical_api",
+            adapter_version=f"{provider_class.__module__}.{provider_class.__name__}:candle.ohlcv.v1",
+        )
+
     def ingest_by_instrument(
         self,
         instrument: Mapping[str, Any],
@@ -153,15 +171,7 @@ class HistoricalCandleIngestor:
             raise ValueError("market_data_acquisition_invalid: end must be after start")
         timeframe_seconds = _timeframe_seconds(interval)
         provider = get_provider(provider_name, exchange=venue or None)
-        adapter_version = (
-            f"{type(provider).__module__}.{type(provider).__name__}:candle.ohlcv.v1"
-        )
-        source_identity = SourceIdentity(
-            provider=provider_name,
-            venue=venue,
-            source_kind="historical_api",
-            adapter_version=adapter_version,
-        )
+        source_identity = self.source_identity(instrument, provider)
         source_id = self.store.register_source(
             source_identity,
             lineage={
@@ -184,6 +194,7 @@ class HistoricalCandleIngestor:
         )
         frames: list[pd.DataFrame] = []
         for segment_start, segment_end in segments:
+            execution_checkpoint()
             try:
                 frame = provider.fetch_from_api(
                     symbol,
@@ -192,6 +203,7 @@ class HistoricalCandleIngestor:
                     interval,
                 )
             except Exception as exc:
+                execution_checkpoint()
                 self.store.record_gap_evidence(
                     series_id=series_id,
                     source_id=source_id,
@@ -219,6 +231,7 @@ class HistoricalCandleIngestor:
                     "ingestion failure evidence was recorded"
                 ) from exc
             if frame is None or frame.empty:
+                execution_checkpoint()
                 self.store.record_gap_evidence(
                     series_id=series_id,
                     source_id=source_id,
@@ -292,6 +305,7 @@ class HistoricalCandleIngestor:
                     known_at_method=known_at_method,
                 )
             )
+        execution_checkpoint()
         outcome = self.store.ingest_candles(
             series_id=series_id,
             source_id=source_id,
@@ -307,7 +321,7 @@ class HistoricalCandleIngestor:
                 "start": start_at.isoformat(),
                 "end": end_at.isoformat(),
             },
-            source_revision=source_revision or adapter_version,
+            source_revision=source_revision or source_identity.adapter_version,
         )
         gaps = self._record_gaps(
             series_id=series_id,

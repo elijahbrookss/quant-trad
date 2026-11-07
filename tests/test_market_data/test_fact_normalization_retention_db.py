@@ -14,6 +14,7 @@ from market_data.contracts import DatasetSeriesRequest
 from market_data.normalization import NormalizationInput, NormalizationSpec, evaluate_normalization
 from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
 from portal.backend.service.storage.repos import fact_archival, market_data, normalization
+from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from tests.test_market_data.test_fact_derived_retention_db import _archive_day
@@ -111,8 +112,8 @@ def test_normalized_nested_history_survives_source_and_root_reclamation(storage,
             session.execute(text("UPDATE market.normalization_specs SET units='corrupt' WHERE id=:id"), {"id": spec.spec_id})
     _archive_day(archive, outer_day)
     with storage.database.session() as session:
-        edges = session.execute(text("""
-            SELECT source.* FROM market.fact_archive_canonical_dependencies AS edge
+        edges = session.execute(text(f"""
+            SELECT source.* FROM {canonical_dependency_projection("edge")}
             JOIN market.fact_versions AS source ON source.id=edge.fact_version_id
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=edge.manifest_id
             WHERE manifest.storage_day=:day
@@ -282,8 +283,11 @@ def test_source_sized_pages_preserve_mixed_sizes_corrections_and_atomic_resume(
             archive.stage_next_page(day)
     assert attempts == [4]
 
+    interrupted = []
     def interrupt(_conn, _cursor, statement, *_):
-        if statement.startswith("INSERT INTO market.fact_archive_canonical_dependencies"):
+        if statement.lstrip().startswith(
+                "INSERT INTO market.fact_archive_prepared_canonical_dependencies"):
+            interrupted.append(True)
             raise RuntimeError("interrupted reduced-page catalog commit")
     event.listen(storage.database._engine, "after_cursor_execute", interrupt)
     attempts.clear()
@@ -292,6 +296,7 @@ def test_source_sized_pages_preserve_mixed_sizes_corrections_and_atomic_resume(
             archive.stage_next_page(day)
     finally:
         event.remove(storage.database._engine, "after_cursor_execute", interrupt)
+    assert interrupted == [True]
     assert attempts == [4, 2, 1]
     assert archive.inspect_partition(day)["archived_rows"] == 4
     interrupted_files = {p: p.read_bytes() for p in store.root.rglob("*.parquet")}
@@ -308,9 +313,9 @@ def test_source_sized_pages_preserve_mixed_sizes_corrections_and_atomic_resume(
     with storage.database.session() as session:
         pages = session.execute(text("SELECT row_count FROM market.fact_archive_manifests "
             "WHERE storage_day=:day ORDER BY page_ordinal"), {"day": day}).scalars().all()
-        edges = session.execute(text("SELECT DISTINCT source.id,source.known_at FROM market.fact_archive_canonical_dependencies edge "
-            "JOIN market.fact_versions source ON source.id=edge.fact_version_id "
-            "JOIN market.fact_archive_manifests page ON page.id=edge.manifest_id WHERE page.storage_day=:day"),
+        edges = session.execute(text(f"SELECT DISTINCT source.id,source.known_at FROM {canonical_dependency_projection()} "
+            "JOIN market.fact_versions source ON source.id=dependencies.fact_version_id "
+            "JOIN market.fact_archive_manifests page ON page.id=dependencies.manifest_id WHERE page.storage_day=:day"),
             {"day": day}).all()
     assert pages[0] == 4 and all(size < 4 for size in pages[1:]) and sum(pages) == 9
     assert len(edges) == 5 and all(known_at <= BASE + timedelta(seconds=30) for _, known_at in edges)

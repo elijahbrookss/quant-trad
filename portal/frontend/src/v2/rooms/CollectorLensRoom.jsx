@@ -13,7 +13,7 @@ import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErr
 const DETAIL_LIMIT = 100
 
 function safeOrigin(value) {
-  if (value === '/overview') return value
+  if (value === '/overview' || value === '/collectors') return value
   if (String(value || '').startsWith('/operations')) return value
   return '/operations?tab=market'
 }

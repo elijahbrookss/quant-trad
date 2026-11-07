@@ -1,0 +1,42 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Host clock safety
+    folder: Quant Trad
+    interval: 1m
+    rules:
+      - uid: qt-host-clock-unhealthy
+        title: Quant-Trad host clock unhealthy or unavailable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: quanttrad-loki
+            model:
+              datasource: {type: loki, uid: quanttrad-loki}
+              editorMode: code
+              queryType: instant
+              instant: true
+              expr: 'min by (resource_id) (min_over_time({service="clock-health"} | json | sample_kind="clock_health" | resource_id="host-clock" | keep resource_id, healthy | unwrap healthy | __error__="" [2m]))'
+              refId: A
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              type: math
+              expression: '$A < 1'
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Host chrony evidence is unhealthy or missing. Clock-dependent timestamps need investigation.
+          first_action: Inspect clock-health reasons, timer, chronyc tracking/activity/sources and Alloy/Loki. Do not automatically correct clocks or rewrite research timestamps.
+          recovery: Require fresh healthy samples throughout the two-minute query window. This is an operational alert, not historical calibration or scientific admission.
+        labels:
+          component: clock
+          owner: qt-infra
+          severity: critical
+        isPaused: false

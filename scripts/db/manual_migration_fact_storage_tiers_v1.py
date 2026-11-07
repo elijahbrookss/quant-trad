@@ -194,6 +194,10 @@ def _prepare(conn):
             f"CREATE TRIGGER trg_reject_mutation_{name} BEFORE UPDATE OR DELETE ON market.{name} "
             "FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()"
         ))
+    conn.execute(text(
+        "ALTER TABLE market.fact_archive_verification_generations ENABLE ALWAYS TRIGGER "
+        "trg_reject_mutation_fact_archive_verification_generations"
+    ))
     evidence = {"source_rows": int(count), "copied_rows": 0, "after_seq": 0, "after_id": "",
                 "source_relation": SOURCE, "source_retained": True}
     conn.execute(text(

@@ -1,12 +1,14 @@
 """System storage controls; independent from V2's read-only primary rooms."""
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
 
 from core.settings import get_settings
 from core.storage_mounts import StorageMountError
 from ..service.storage_management import StorageConflict, storage_management_service
+
+from ..service.storage.metrics import storage_metrics
 
 router = APIRouter()
 
@@ -76,3 +78,16 @@ def read_plan(plan_id: str) -> dict[str, Any]:
 def apply_plan(plan_id: str, body: ApplyRequest, request: Request) -> dict[str, Any]:
     _mutation_origin(request)
     return _call(lambda: storage_management_service.queue_plan(plan_id, policy_hash=body.policy_hash))
+
+
+@router.get("/metrics")
+def storage_metric_history(
+    request: Request,
+    from_time: str = Query(alias="from"),
+    to_time: str = Query(alias="to"),
+    resolution: str = Query(default="auto"),
+) -> dict[str, Any]:
+    allowed = {"from", "to", "resolution"}
+    if any(key not in allowed or len(request.query_params.getlist(key)) != 1 for key in request.query_params):
+        raise HTTPException(422, "storage_metrics_query_parameter_invalid")
+    return _call(lambda: storage_metrics.snapshot(start=from_time,end=to_time,resolution=resolution))

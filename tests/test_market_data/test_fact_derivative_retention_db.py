@@ -11,6 +11,9 @@ from market_data.contracts import DatasetSeriesRequest
 from market_data.market_state import derive_derivative_state_features
 from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
 from portal.backend.service.storage.repos import fact_archival, fact_reclamation, market_data, market_structure
+from portal.backend.service.storage.repos.fact_archive_generation import (
+    canonical_dependency_projection, material_alias_projection,
+)
 from portal.backend.service.storage.repos.fact_derived_admission import resolve_material_source_revisions
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement
@@ -113,7 +116,7 @@ def test_derivative_reclaims_with_exact_previous_commit_and_frozen_history(stora
             for table in ("fact_archive_material_aliases", "fact_archive_canonical_dependencies"):
                 assert session.execute(text(f"SELECT count(*) FROM market.{table} WHERE manifest_id=:id"),
                                        {"id": old_page["id"]}).scalar_one() == 0
-        with pytest.raises(RuntimeError, match="canonical_archive_verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="canonical_archive_verification_generation_changed"):
             reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
         assert _physical(storage, day)["relation"] is not None
         archive.restart_partition_verification(day)
@@ -126,15 +129,15 @@ def test_derivative_reclaims_with_exact_previous_commit_and_frozen_history(stora
                 "WHERE manifest_id=:id AND verifier_version=:version"),
                 {"id": old_page["id"], "version": old_receipt["verifier_version"]}).mappings().one()) == old_receipt
     with storage.database.session() as session:
-        edges = session.execute(text("""
-            SELECT source.market_commit_seq FROM market.fact_archive_canonical_dependencies AS edge
+        edges = session.execute(text(f"""
+            SELECT source.market_commit_seq FROM {canonical_dependency_projection("edge")}
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=edge.manifest_id
             JOIN market.fact_versions AS source ON source.id=edge.fact_version_id
             WHERE manifest.storage_day=:day
         """), {"day": day}).scalars().all()
         assert len(edges) == 3 and set(edges) == expected_commits
-        assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases AS alias "
-            "JOIN market.fact_archive_manifests AS manifest ON manifest.id=alias.manifest_id WHERE manifest.storage_day=:day"),
+        assert session.execute(text(f"SELECT count(*) FROM {material_alias_projection()} "
+            "JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id WHERE manifest.storage_day=:day"),
             {"day": day}).scalar_one() == 3
     if not source_cold:
         # Placement may change after verification without rewriting the proof.

@@ -12,10 +12,12 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
 from core.storage_targets import StoragePolicy
+from portal.backend.db.fact_storage_schema import FACT_ARCHIVE_GENERATION_TABLES
 from portal.backend.db.session import Database
 from scripts.db import archive_reference_v2_placement as move
 from scripts.db import fact_header_v2_copy as headers
 from scripts.db.fact_header_v2_capture import SCHEMA
+from scripts.db.manual_migration_fact_archive_generations_v1 import migrate
 from tests.test_market_data.test_fact_header_copy_db import _finish, _insert, source
 from tests.test_market_data.test_fact_header_copy_placement_db import placed, _configure_placement, _assert_disk
 from tests.test_market_data.test_fact_header_references_db import _stage_all
@@ -68,6 +70,75 @@ def _nodes(conn,relation):
           (SELECT indexrelid FROM pg_index WHERE indrelid=to_regclass(:relation))
         ORDER BY oid
     """), {"relation":relation}).all()
+
+
+def _move_relation_with_indexes(conn, relation, tablespace):
+    quote = conn.dialect.identifier_preparer.quote
+    conn.exec_driver_sql(f"ALTER TABLE {relation} SET TABLESPACE {quote(tablespace)}")
+    indexes = conn.execute(text("""
+        SELECT n.nspname,i.relname FROM pg_index x
+        JOIN pg_class i ON i.oid=x.indexrelid
+        JOIN pg_namespace n ON n.oid=i.relnamespace
+        WHERE x.indrelid=to_regclass(:relation)
+        ORDER BY i.oid
+    """), {"relation": relation}).all()
+    assert indexes
+    for schema, index in indexes:
+        conn.exec_driver_sql(
+            f"ALTER INDEX {quote(schema)}.{quote(index)} SET TABLESPACE {quote(tablespace)}"
+        )
+
+
+def _member_tablespaces(conn, relation):
+    return conn.execute(text("""
+        WITH root AS (
+            SELECT oid,reltoastrelid FROM pg_class WHERE oid=to_regclass(:relation)
+        ), heaps AS (
+            SELECT oid,'heap'::text AS role FROM root
+            UNION ALL SELECT reltoastrelid,'toast' FROM root WHERE reltoastrelid<>0
+        ), members AS (
+            SELECT oid,role FROM heaps
+            UNION ALL
+            SELECT x.indexrelid,'index' FROM pg_index x JOIN heaps h ON h.oid=x.indrelid
+        )
+        SELECT m.role,t.spcname FROM members m
+        JOIN pg_class c ON c.oid=m.oid
+        JOIN pg_database d ON d.datname=current_database()
+        JOIN pg_tablespace t ON t.oid=COALESCE(NULLIF(c.reltablespace,0),d.dattablespace)
+        ORDER BY m.role,c.oid
+    """), {"relation": relation}).all()
+
+
+def test_generation_migration_inherits_named_reference_tablespace(storage, tmp_path, monkeypatch):
+    """Every actual prepared heap, TOAST table and index inherits HDD placement."""
+    storage.open_day = storage.today
+    placed = _configure_placement(storage, tmp_path, monkeypatch)
+    engine = placed.database._engine
+    legacy = (
+        "market.fact_archive_material_aliases",
+        "market.fact_archive_canonical_dependencies",
+    )
+    prepared = (
+        "market.fact_archive_prepared_material_aliases",
+        "market.fact_archive_prepared_canonical_dependencies",
+    )
+    with engine.begin() as conn:
+        for name in reversed(FACT_ARCHIVE_GENERATION_TABLES):
+            conn.exec_driver_sql(f"DROP TABLE market.{name}")
+        for relation in legacy:
+            _move_relation_with_indexes(conn, relation, placed.copy_history_name)
+            observed = _member_tablespaces(conn, relation)
+            assert {role for role, _ in observed} >= {"heap", "index"}
+            assert {name for _, name in observed} == {placed.copy_history_name}
+
+    receipt = migrate(placed.database)
+    assert receipt["historical_rows_rewritten"] is False
+    with engine.connect() as conn:
+        for relation in prepared:
+            observed = _member_tablespaces(conn, relation)
+            assert {role for role, _ in observed} >= {"heap", "index"}
+            assert {name for _, name in observed} == {placed.copy_history_name}
+            _assert_disk(conn, relation, Path("/qt-history"))
 
 
 def test_reference_move_retains_rows_and_new_collection_through_interruption_and_handoff(storage,tmp_path,monkeypatch):

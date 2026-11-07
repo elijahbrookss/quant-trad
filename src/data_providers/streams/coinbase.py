@@ -271,8 +271,35 @@ class CoinbaseMessageParser:
         for event_ordinal, event in enumerate(_iter_event_objects(message)):
             event_type = str(event.get("type") or "").strip().lower()
             product_id = _str_or_none(event.get("product_id"))
+            raw_updates = event.get("updates")
+            if not isinstance(raw_updates, list) or any(
+                not isinstance(update, Mapping) for update in raw_updates
+            ):
+                results.append(
+                    self._event(
+                        "provider_malformed_message",
+                        symbol=self._symbol_for_product(product_id),
+                        product_id=product_id,
+                        provider_sequence_num=sequence_num,
+                        provider_message_time=message_time,
+                        payload={
+                            "channel": "level2",
+                            "event_type": event_type or None,
+                            "event_ordinal": event_ordinal,
+                            "error": (
+                                "Coinbase Level 2 updates must be an array of "
+                                "objects."
+                            ),
+                        },
+                        raw_ref={
+                            "channel": "level2",
+                            "event_ordinal": event_ordinal,
+                        },
+                    )
+                )
+                continue
             updates: list[dict[str, Any]] = []
-            for mutation_ordinal, update in enumerate(_iter_child_objects(event, "updates")):
+            for mutation_ordinal, update in enumerate(raw_updates):
                 updates.append(
                     {
                         "mutation_ordinal": mutation_ordinal,
@@ -297,6 +324,30 @@ class CoinbaseMessageParser:
                             "updates": updates,
                         },
                         raw_ref={"channel": "level2", "event_ordinal": event_ordinal},
+                    )
+                )
+                continue
+            if event_type == "update" and not updates:
+                results.append(
+                    self._event(
+                        "provider_malformed_message",
+                        symbol=self._symbol_for_product(product_id),
+                        product_id=product_id,
+                        provider_sequence_num=sequence_num,
+                        provider_message_time=message_time,
+                        payload={
+                            "channel": "level2",
+                            "event_type": event_type,
+                            "event_ordinal": event_ordinal,
+                            "error": (
+                                "Coinbase Level 2 update contained no book "
+                                "mutations."
+                            ),
+                        },
+                        raw_ref={
+                            "channel": "level2",
+                            "event_ordinal": event_ordinal,
+                        },
                     )
                 )
                 continue

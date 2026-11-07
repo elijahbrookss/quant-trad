@@ -61,6 +61,37 @@ FACT_STORAGE_FAMILIES_SQL = """
     SELECT fact_type FROM families ORDER BY fact_type
 """
 
+RETENTION_SIZE_INVENTORY_QUERY = text("""
+    SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date AS database_day,
+           pg_database_size(current_database()) AS database_bytes,
+           pg_total_relation_size('market.fact_identities') AS global_identity_bytes,
+           pg_total_relation_size('market.fact_header_series_days') AS series_day_directory_bytes,
+           pg_total_relation_size('market.raw_archive_record_mappings') AS raw_mapping_bytes
+""")
+RETENTION_PARTITION_TREE_QUERY = text("""
+    SELECT tree.relid, pg_total_relation_size(tree.relid) AS bytes
+    FROM pg_partition_tree('market.fact_versions'::regclass) AS tree
+    LIMIT :limit
+""")
+RETENTION_PROGRESS_QUERY = text("""
+    SELECT storage_day,state,expected_rows,manifest_set_hash FROM market.fact_retention_partitions
+    WHERE state <> 'reclaimed' ORDER BY storage_day LIMIT :limit
+""")
+RETENTION_PHYSICAL_CHILDREN_QUERY = text("""
+    SELECT child.relname,pg_total_relation_size(child.oid) AS bytes
+    FROM pg_inherits JOIN pg_class AS child ON child.oid=inhrelid
+    WHERE inhparent='market.fact_hot_payloads'::regclass
+    ORDER BY child.relname LIMIT :limit
+""")
+RETENTION_PAGE_COUNTS_QUERY = text("""
+    SELECT count(*) AS page_count,coalesce(sum(pages.row_count),0) AS archived_rows,
+           count(receipts.manifest_id) AS verified_page_count
+    FROM market.fact_archive_manifests AS pages
+    LEFT JOIN market.fact_archive_verifications AS receipts
+      ON receipts.manifest_id=pages.id AND receipts.verifier_version=:version
+    WHERE pages.storage_day=:day
+""")
+
 
 class PostgresCanonicalFactRetentionRepository:
     def __init__(self, *, database=db):
@@ -81,35 +112,23 @@ class PostgresCanonicalFactRetentionRepository:
                                 {"timeout": str(min(policy.plan_statement_timeout_ms, remaining_ms))})
                 return session.execute(statement, params or {})
 
-            sizes = dict(query(text("""
-                SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date AS database_day,
-                       pg_database_size(current_database()) AS database_bytes,
-                       pg_total_relation_size('market.fact_identities') AS global_identity_bytes,
-                       pg_total_relation_size('market.fact_header_series_days') AS series_day_directory_bytes,
-                       pg_total_relation_size('market.raw_archive_record_mappings') AS raw_mapping_bytes
-            """)).mappings().one())
+            sizes = dict(query(RETENTION_SIZE_INVENTORY_QUERY).mappings().one())
             # A partitioned parent has no heap or index storage of its own.
             # Include every node once; each physical relation total includes its
             # indexes and TOAST. Header history survives hot-payload reclamation.
-            headers = list(query(text("""
-                SELECT tree.relid, pg_total_relation_size(tree.relid) AS bytes
-                FROM pg_partition_tree('market.fact_versions'::regclass) AS tree
-                LIMIT :limit
-            """), {"limit": policy.max_inventory_partitions + 2}).mappings())
+            headers = list(query(RETENTION_PARTITION_TREE_QUERY, {
+                "limit": policy.max_inventory_partitions + 2,
+            }).mappings())
             # The tree includes its root in addition to the configured children.
             if len(headers) > policy.max_inventory_partitions + 1:
                 raise RuntimeError("canonical_retention_inventory_budget_exceeded: no partial storage total is reported")
             sizes["canonical_header_bytes"] = sum(int(row["bytes"]) for row in headers)
-            partitions = [dict(row) for row in query(text("""
-                SELECT storage_day,state,expected_rows,manifest_set_hash FROM market.fact_retention_partitions
-                WHERE state <> 'reclaimed' ORDER BY storage_day LIMIT :limit
-            """), {"limit": policy.max_inventory_partitions + 1}).mappings()]
-            physical = list(query(text("""
-                SELECT child.relname,pg_total_relation_size(child.oid) AS bytes
-                FROM pg_inherits JOIN pg_class AS child ON child.oid=inhrelid
-                WHERE inhparent='market.fact_hot_payloads'::regclass
-                ORDER BY child.relname LIMIT :limit
-            """), {"limit": policy.max_inventory_partitions + 1}).mappings())
+            partitions = [dict(row) for row in query(RETENTION_PROGRESS_QUERY, {
+                "limit": policy.max_inventory_partitions + 1,
+            }).mappings()]
+            physical = list(query(RETENTION_PHYSICAL_CHILDREN_QUERY, {
+                "limit": policy.max_inventory_partitions + 1,
+            }).mappings())
             if max(len(partitions), len(physical)) > policy.max_inventory_partitions:
                 raise RuntimeError("canonical_retention_inventory_budget_exceeded: no partial storage total is reported")
             by_name = {row["relname"]: int(row["bytes"]) for row in physical}
@@ -129,14 +148,9 @@ class PostgresCanonicalFactRetentionRepository:
                 ).scalars())
                 if len(row["fact_types"]) > 256:
                     raise RuntimeError(f"canonical_retention_family_budget_exceeded: storage_day={row['storage_day']}")
-                row.update(query(text("""
-                    SELECT count(*) AS page_count,coalesce(sum(pages.row_count),0) AS archived_rows,
-                           count(receipts.manifest_id) AS verified_page_count
-                    FROM market.fact_archive_manifests AS pages
-                    LEFT JOIN market.fact_archive_verifications AS receipts
-                      ON receipts.manifest_id=pages.id AND receipts.verifier_version=:version
-                    WHERE pages.storage_day=:day
-                """), {"day": row["storage_day"], "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one())
+                row.update(query(RETENTION_PAGE_COUNTS_QUERY, {
+                    "day": row["storage_day"], "version": FACT_ARCHIVE_VERIFIER_VERSION,
+                }).mappings().one())
             return {**sizes, "partitions": candidates,
                     "next_after_storage_day": candidates[-1]["storage_day"] if deferred else None}
 

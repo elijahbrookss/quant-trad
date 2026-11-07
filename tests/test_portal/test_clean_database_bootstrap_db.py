@@ -109,6 +109,21 @@ def test_empty_timescale_database_bootstraps_current_schema_atomically(
                 "trg_reject_mutation_fact_acquisition_coverage",
                 "trg_assert_fact_version_valid",
             } <= triggers
+            verification_guard = conn.execute(text("""
+                SELECT t.tgtype,t.tgenabled,n.nspname,p.proname
+                FROM pg_trigger t
+                JOIN pg_proc p ON p.oid=t.tgfoid
+                JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE t.tgrelid=to_regclass(
+                    'market.fact_archive_verification_generations'
+                )
+                  AND t.tgname=(
+                    'trg_reject_mutation_fact_archive_verification_generations'
+                  )
+            """)).one()
+            assert tuple(verification_guard) == (
+                27, "A", "market", "reject_immutable_mutation",
+            )
 
         root = Path(__file__).parents[2]
         monkeypatch.setenv("PG_DSN", dsn)

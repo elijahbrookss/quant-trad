@@ -22,7 +22,9 @@ from market_data.archive import (
     publish_spool_archive,
 )
 from market_data.book_archive import publish_book_checkpoint
-from market_data.canonical_adapters import canonicalize_l2_snapshot
+from market_data.canonical_adapters import (
+    canonicalize_l2_snapshot, canonicalize_market_trade, canonicalize_trade_flow,
+)
 from market_data.contracts import DatasetSeriesRequest, SourceIdentity
 from market_data.market_state import (
     BBO_FACT_TYPE,
@@ -621,6 +623,25 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
         end=bucket + timedelta(seconds=1),
     )
     assert stored_aggregate[0].fact.material_hash == aggregate.material_hash
+    # Native dispatch must retain exact source scope and both visibility clocks.
+    source_key = market_data_repo.get_source_identity(source_id).identity_key
+    for series in (trade_series_id, aggregate_series_id):
+        unfiltered = market_data_repo.read_series_records(
+            series_id=series, start=bucket, end=bucket + timedelta(seconds=1),
+        )
+        assert len(unfiltered) == 1
+        retained = unfiltered[0]
+        arguments = dict(series_id=series, start=bucket,
+            end=bucket + timedelta(seconds=1), source_identity_keys=(source_key,),
+            as_of_commit_seq=retained.market_commit_seq,
+            known_at_lte=retained.fact.known_at)
+        assert market_data_repo.read_series_records(**arguments) == unfiltered
+        assert market_data_repo.read_series_records(
+            **{**arguments, 'source_identity_keys': ('f' * 64,)}) == []
+        assert market_data_repo.read_series_records(
+            **{**arguments, 'as_of_commit_seq': retained.market_commit_seq - 1}) == []
+        assert market_data_repo.read_series_records(
+            **{**arguments, 'known_at_lte': retained.fact.known_at - timedelta(microseconds=1)}) == []
     with db.session() as session:
         canonical_counts = dict(
             session.execute(
@@ -880,9 +901,124 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
     assert retention["pinned"] is True
     assert retention["ordinary_retention_eligible"] is False
 
+    # A later revision from another source must not hide the requested source.
+    alternate_source = SourceIdentity(
+        provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream",
+        adapter_version=f"native-source-selection-alternate.{token}",
+    )
+    alternate_id = market_data_repo.register_source(alternate_source)
+    for series, native_fact, canonicalize in (
+        (trade_series_id, fact, canonicalize_market_trade),
+        (aggregate_series_id, aggregate, canonicalize_trade_flow),
+    ):
+        bounds = dict(series_id=series, start=bucket, end=bucket + timedelta(seconds=1))
+        original = market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(source_key,))
+        market_data_repo.ingest_facts(
+            series_id=series, source_id=alternate_id,
+            facts=[canonicalize(
+                replace(native_fact, known_at=native_fact.known_at + timedelta(microseconds=1)),
+                source=alternate_source,
+            )],
+            request={"fixture": "native-source-before-latest"},
+        )
+        latest = market_data_repo.read_series_records(**bounds)
+        assert len(latest) == 1 and latest[0].revision > original[0].revision
+        assert market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(source_key,)) == original
+        assert market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(alternate_source.identity_key,)) == latest
+        assert market_data_repo.read_series_records(
+            **bounds, source_identity_keys=(source_key,),
+            as_of_commit_seq=original[0].market_commit_seq,
+            known_at_lte=original[0].fact.known_at) == original
+        # Existing frozen history remains pinned despite the later source revision.
+        assert market_data_repo.read_dataset_series(
+            dataset_id=frozen.dataset_id, series_id=series)[0].revision == original[0].revision
+
     market_structure_repository.release(claim)
     with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
         market_structure_repository.heartbeat(claim, lease_seconds=120)
+    _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_series_id, source_key, bucket, frozen)
+
+
+def _assert_native_episode_admission(instrument_id, trade_series_id, aggregate_series_id, source_key, bucket, frozen):
+    """Real PG native selection/preparation plus the public requirements route.
+
+    The archived fixture is sparse: API gaps remain explicit, never filled.
+    Full five-alias positive admission is separately exercised over disposable
+    canonical records by test_native_episode_admission.py.
+    """
+    from copy import deepcopy
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from portal.backend.controller.research import router
+    from portal.backend.service.research import catalog
+    from portal.backend.service.market.frozen_dataset_service import prepare_frozen_dataset_from_requirements
+    from portal.backend.service.market.runtime_market_data import RuntimeMarketDataResolver
+    from market_data.canonical import CanonicalFactRecord
+    from portal.backend.service.market.frozen_dataset_service import resolve_frozen_dataset_read_binding
+
+    start = bucket.replace(second=0, microsecond=0)
+    end = start + timedelta(minutes=5)
+    payload = deepcopy(catalog._EXAMPLES['event_fact_analysis@14'])
+    payload['scope'].update(instrument_id=instrument_id, start=start.isoformat(), end=end.isoformat())
+    payload['outcomes']['analysis_as_of'] = max(datetime.now(UTC), end+timedelta(days=1)).isoformat()
+    for item in payload['inputs']:
+        item['source_policy'] = {'mode':'exact', 'source_identity_key':source_key}
+    app = FastAPI(); app.include_router(router, prefix='/api/research')
+    response = TestClient(app).post('/api/research/checks/requirements', json=payload)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['provider_call_performed'] is False and result['preparation_authorized'] is False
+    assert len(result['plan']['market_data_requirements'])==5
+    assert result['plan']['warmup']['bars']==0 and result['plan']['outcome_tail']['seconds']==0
+    assert all(datetime.fromisoformat(r['required_start'].replace('Z','+00:00'))==start
+               and datetime.fromisoformat(r['required_end'].replace('Z','+00:00'))==end
+               for r in result['plan']['market_data_requirements'])
+    # Sparse/absent inputs remain acquisition requirements, not false readiness.
+    assert result['plan']['missing_coverage']
+    assert any(r['alias']=='flow' and r['reason']=='source_bound_interval_unrecorded'
+               for r in result['plan']['missing_coverage'])
+    requirements = [dict(r, required_start=bucket.isoformat(),
+                         required_end=(bucket+timedelta(seconds=1)).isoformat())
+                    for r in result['plan']['market_data_requirements'] if r['alias'] in {'flow','trades'}]
+    assert {r['alias'] for r in requirements} == {'flow','trades'}
+    prepared = prepare_frozen_dataset_from_requirements(requirements=requirements, freeze=False)
+    assert prepared['status']=='ready_to_freeze', prepared
+    assert not prepared['unresolved_requirements'] and prepared['dataset'] is None
+    assert all(r['resolved_source_identity_keys']==[source_key] and r['record_count_at_watermark']==1
+               for r in prepared['resolved_requirements'])
+    watermark = prepared['as_of_commit_seq']
+    resolver = RuntimeMarketDataResolver(store=market_data_repo, as_of_commit_seq=watermark)
+    for requirement in requirements:
+        sid = trade_series_id if requirement['alias']=='trades' else aggregate_series_id
+        original = market_data_repo.read_facts(series_id=sid, start=bucket,
+            end=bucket+timedelta(seconds=1), as_of_commit_seq=watermark,
+            source_identity_keys=(source_key,))
+        assert len(original)==1
+        cutoff = original[0].fact.known_at
+        arguments = dict(consumer_id='check', requirement=requirement, primary_instrument_id=instrument_id,
+            start=bucket, end=bucket+timedelta(seconds=1), evaluation_time=cutoff)
+        retained = resolver.causal_history(**arguments)
+        assert len(retained)==1 and isinstance(retained[0], CanonicalFactRecord)
+        assert retained[0].source_identity_key==source_key and retained[0].market_commit_seq<=watermark
+        assert retained[0].fact.known_at==cutoff and retained[0].fact_version_id==original[0].fact_version_id
+        assert resolver.causal_history(**{**arguments,'evaluation_time':cutoff-timedelta(microseconds=1)})==()
+        older = RuntimeMarketDataResolver(store=market_data_repo, as_of_commit_seq=original[0].market_commit_seq-1)
+        assert older.causal_history(**arguments)==()
+        entry = next(row for row in frozen.series if int(row['series_id'])==sid)
+        frozen_requirement = {**requirement, 'required_start':entry['range_start'], 'required_end':entry['range_end']}
+        binding = resolve_frozen_dataset_read_binding(dataset_id=frozen.dataset_id, requirements=[frozen_requirement])
+        frozen_resolver = RuntimeMarketDataResolver(store=market_data_repo, dataset_binding=binding)
+        frozen_arguments = {**arguments, 'requirement':frozen_requirement,
+            'start':datetime.fromisoformat(str(entry['range_start']).replace('Z','+00:00')),
+            'end':datetime.fromisoformat(str(entry['range_end']).replace('Z','+00:00'))}
+        frozen_records = frozen_resolver.causal_history(**frozen_arguments)
+        assert len(frozen_records)==1 and isinstance(frozen_records[0], CanonicalFactRecord)
+        assert frozen_records[0].fact_version_id==original[0].fact_version_id
+        assert frozen_records[0].source_identity_key==source_key
+        assert frozen_resolver.causal_history(**{**frozen_arguments,'evaluation_time':cutoff-timedelta(microseconds=1)})==()
 
 
 def test_book_archive_validity_checkpoint_and_replay_are_atomic(

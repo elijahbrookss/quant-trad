@@ -9,21 +9,19 @@ from indicators.definition_contract import validate_indicator_definition
 from indicators.manifest import IndicatorManifest, validate_indicator_manifest
 
 from .candle_stats.definition import CandleStatsIndicator
+from .candle_vwap.definition import CandleVWAPIndicator
 from .market_profile.definition import MarketProfileIndicator
-from .pivot_level.definition import PivotLevelIndicatorDefinition
 from .regime.definition import RegimeIndicator
 from .reserve_state.definition import ReserveStateIndicator
-from .trendline.definition import TrendlineIndicatorDefinition
-from .vwap.definition import VWAPIndicatorDefinition
+from .reversal.definition import ReversalIndicator
 
 
 INDICATOR_MAP: dict[str, Any] = {
     "candle_stats": CandleStatsIndicator,
+    "candle_vwap": CandleVWAPIndicator,
     "regime": RegimeIndicator,
     "reserve_state": ReserveStateIndicator,
-    "vwap": VWAPIndicatorDefinition,
-    "pivot_level": PivotLevelIndicatorDefinition,
-    "trendline": TrendlineIndicatorDefinition,
+    "reversal": ReversalIndicator,
     "market_profile": MarketProfileIndicator,
 }
 

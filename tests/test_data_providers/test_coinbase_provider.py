@@ -595,3 +595,10 @@ def test_fetch_funding_rate_rejects_missing_invalid_and_conflicting_fields():
     )
     with pytest.raises(ValueError, match="funding_rate_conflict"):
         conflict.fetch_funding_rate("BIP-20DEC30-CDE")
+
+
+def test_native_interval_declaration_uses_existing_granularity_without_transport():
+    provider = object.__new__(coinbase_module.CoinbaseProvider)
+    assert provider.native_candle_interval(900) == "15m"
+    with pytest.raises(ValueError, match="native_candle_acquisition_unsupported"):
+        provider.native_candle_interval(180)

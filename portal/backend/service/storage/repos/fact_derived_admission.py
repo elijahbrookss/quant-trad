@@ -5,10 +5,13 @@ every matching revision available at the derived fact's clocks. Hot provenance
 and cold aliases only locate candidates; the canonical reader proves them.
 """
 from collections import defaultdict
+from contextlib import contextmanager, nullcontext
 import json
+import logging
 import re
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from market_data.canonical_adapters import canonicalize_basis_feature, decode_bbo_feature_record
 from market_data.canonical_storage import legacy_material_evidence_key, legacy_material_alias, record_from_storage_row
@@ -20,6 +23,35 @@ from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
 DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state", "market.trade_flow", "market.trade_flow_feature", "market.market_response"})
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _transaction_local_jit_disabled(session):
+    """Disable JIT only for the measured material-candidate query scope.
+
+    PostgreSQL applies ``SET LOCAL`` to the transaction, so restore the exact
+    caller value before any other statement can reuse this pooled connection.
+    A database error aborts the transaction; rollback is then the only valid
+    restoration and another SQL statement would mask the original failure.
+    """
+    prior = session.execute(text("SELECT current_setting('jit')")).scalar_one()
+    if prior == "off":
+        yield
+        return
+    session.execute(text("SELECT set_config('jit','off',true)"))
+    try:
+        yield
+    except DBAPIError:
+        raise
+    except BaseException:
+        try:
+            session.execute(text("SELECT set_config('jit',:value,true)"), {"value": prior})
+        except BaseException:
+            logger.exception("canonical_material_jit_restore_failed | outcome=original_error_preserved")
+        raise
+    else:
+        session.execute(text("SELECT set_config('jit',:value,true)"), {"value": prior})
 
 
 _LEGACY_MATERIAL_CANDIDATES = """
@@ -40,10 +72,15 @@ _LEGACY_MATERIAL_CANDIDATES = """
                   AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
                 WHERE hot.provenance @> ANY(CAST(:legacy_witnesses AS jsonb[]))
                 UNION
+                -- Keep requested lookup predicates inside both authority branches.
+                -- The shared union projection made PostgreSQL scan the full alias
+                -- catalog before applying this request's selective lookup.
                 SELECT requested.root_id,requested.role,source.id
                 FROM requested JOIN market.fact_archive_material_aliases AS aliases
                   ON aliases.series_id=requested.series_id AND aliases.evidence_key=requested.evidence_key
                   AND aliases.material_hash=requested.material_hash
+                LEFT JOIN market.fact_archive_active_generations AS legacy_authority
+                  ON legacy_authority.manifest_id=aliases.manifest_id
                 JOIN market.fact_versions AS source ON source.id=aliases.fact_version_id
                   AND source.series_id=requested.series_id AND source.fact_type=requested.fact_type
                   AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
@@ -51,9 +88,42 @@ _LEGACY_MATERIAL_CANDIDATES = """
                   AND manifest.storage_day=source.storage_day
                 JOIN market.fact_retention_partitions AS partition ON partition.storage_day=source.storage_day
                   AND partition.state IN ('verified','reclaimed')
+                WHERE legacy_authority.manifest_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                    WHERE hot.storage_day=source.storage_day AND hot.id=source.id)
+                UNION
+                SELECT requested.root_id,requested.role,source.id
+                FROM requested JOIN market.fact_archive_prepared_material_aliases AS prepared
+                  ON prepared.series_id=requested.series_id AND prepared.evidence_key=requested.evidence_key
+                  AND prepared.material_hash=requested.material_hash
+                JOIN market.fact_archive_active_generations AS prepared_authority
+                  ON prepared_authority.preparation_id=prepared.preparation_id
+                JOIN market.fact_versions AS source ON source.id=prepared.fact_version_id
+                  AND source.series_id=requested.series_id AND source.fact_type=requested.fact_type
+                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
+                JOIN market.fact_archive_manifests AS manifest ON manifest.id=prepared_authority.manifest_id
+                  AND manifest.storage_day=source.storage_day
+                JOIN market.fact_retention_partitions AS partition ON partition.storage_day=source.storage_day
+                  AND partition.state IN ('verified','reclaimed')
                 WHERE NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
                     WHERE hot.storage_day=source.storage_day AND hot.id=source.id)
 """
+
+def _material_source_batches(requests):
+    # A large ANY-of-JSON-witnesses probe across every hot partition inflated
+    # cardinality enough to enable hundreds of optimized JIT functions before
+    # returning a source. Keep one distinct legacy GIN witness per statement;
+    # repeated roots/roles still share a probe, with their own causal clocks.
+    # Canonical-only families retain the existing 128-request batches.
+    groups = defaultdict(list)
+    for request in requests:
+        key = legacy_material_evidence_key(request["fact_type"])
+        witness = (key, request["material_hash"]) if key is not None else None
+        groups[witness].append(request)
+    for group in groups.values():
+        for offset in range(0, len(group), 128):
+            yield group[offset:offset + 128]
+
 
 def resolve_material_source_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
     """Resolve bounded (root, role) witnesses without selecting latest aliases.
@@ -75,46 +145,54 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         indexed[identity] = request
     selections = defaultdict(list)
     count = 0
-    for offset in range(0, len(requests), 128):
-        if check_budget is not None:
-            check_budget()
-        batch = [{**request, "known_at": request["known_at"].isoformat(),
-                  "evidence_key": legacy_material_evidence_key(request["fact_type"])}
-                 for request in requests[offset:offset + 128]]
-        # Families without a legacy material hash cannot match either alias
-        # branch. Omit those joins before planning; a CASE filter can otherwise
-        # cause a full historical header scan even when every key is null.
-        legacy_witnesses = sorted({json.dumps({item["evidence_key"]: {
-            "legacy_material_hash": item["material_hash"],
-        }}) for item in batch if item["evidence_key"] is not None})
-        # Bound constant witnesses expose the existing provenance GIN path.
-        # The exact per-request predicate still owns series, family and clocks;
-        # joining it alone can make PostgreSQL scan all historical headers.
-        # LATERAL with OFFSET 0 keeps each hot match's header lookup parameterized
-        # by id/day instead of a merge against the whole header history. OFFSET
-        # does not truncate matches or choose one correction revision.
-        legacy_candidates = _LEGACY_MATERIAL_CANDIDATES if legacy_witnesses else ""
-        found = session.execute(text(f"""
-            WITH requested AS (
-                SELECT * FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS item(
-                    root_id text,role text,series_id bigint,fact_type text,material_hash text,
-                    commit_seq bigint,known_at timestamptz,evidence_key text)
-            ), candidates AS (
-                SELECT requested.root_id,requested.role,source.id
-                FROM requested JOIN market.fact_versions AS source
-                  ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
-                  AND source.material_hash=requested.material_hash
-                  AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
+    # The selected-ID SQL and all causal/ambiguity checks remain unchanged.
+    # Only its transaction-local planner setting changes; restore before the
+    # hydration and validation statements below share the same connection.
+    jit_scope = (_transaction_local_jit_disabled(session)
+                 if any(legacy_material_evidence_key(request["fact_type"]) is not None
+                        for request in requests)
+                 else nullcontext())
+    with jit_scope:
+        for request_batch in _material_source_batches(requests):
+            if check_budget is not None:
+                check_budget()
+            batch = [{**request, "known_at": request["known_at"].isoformat(),
+                      "evidence_key": legacy_material_evidence_key(request["fact_type"])}
+                     for request in request_batch]
+            # Families without a legacy material hash cannot match either alias
+            # branch. Omit those joins before planning; a CASE filter can otherwise
+            # cause a full historical header scan even when every key is null.
+            legacy_witnesses = sorted({json.dumps({item["evidence_key"]: {
+                "legacy_material_hash": item["material_hash"],
+            }}) for item in batch if item["evidence_key"] is not None})
+            # Bound constant witnesses expose the existing provenance GIN path.
+            # The exact per-request predicate still owns series, family and clocks;
+            # joining it alone can make PostgreSQL scan all historical headers.
+            # LATERAL with OFFSET 0 keeps each hot match's header lookup parameterized
+            # by id/day instead of a merge against the whole header history. OFFSET
+            # does not truncate matches or choose one correction revision.
+            legacy_candidates = _LEGACY_MATERIAL_CANDIDATES if legacy_witnesses else ""
+            found = session.execute(text(f"""
+                WITH requested AS (
+                    SELECT * FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS item(
+                        root_id text,role text,series_id bigint,fact_type text,material_hash text,
+                        commit_seq bigint,known_at timestamptz,evidence_key text)
+                ), candidates AS (
+                    SELECT requested.root_id,requested.role,source.id
+                    FROM requested JOIN market.fact_versions AS source
+                      ON source.series_id=requested.series_id AND source.fact_type=requested.fact_type
+                      AND source.material_hash=requested.material_hash
+                      AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
 {legacy_candidates}
-            )
-            SELECT DISTINCT root_id,role,id FROM candidates ORDER BY root_id,role,id LIMIT :limit
-        """), {"requests": json.dumps(batch), "legacy_witnesses": legacy_witnesses,
-               "limit": max_rows - count + 1}).all()
-        count += len(found)
-        if count > max_rows:
-            raise RuntimeError("canonical_material_source_budget_exceeded: reduce archive page size")
-        for root, role, identity in found:
-            selections[(root, role)].append(identity)
+                )
+                SELECT DISTINCT root_id,role,id FROM candidates ORDER BY root_id,role,id LIMIT :limit
+            """), {"requests": json.dumps(batch), "legacy_witnesses": legacy_witnesses,
+                   "limit": max_rows - count + 1}).all()
+            count += len(found)
+            if count > max_rows:
+                raise RuntimeError("canonical_material_source_budget_exceeded: reduce archive page size")
+            for root, role, identity in found:
+                selections[(root, role)].append(identity)
     identities = sorted({identity for ids in selections.values() for identity in ids})
     sources = read_canonical_dependency_rows(session, identities, reader=reader,
         max_logical_bytes=max_logical_bytes, check_budget=check_budget)

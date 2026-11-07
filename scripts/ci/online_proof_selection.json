@@ -1,0 +1,19 @@
+[
+  "tests/test_market_data/test_storage_end_to_end_db.py",
+  "tests/test_market_data/test_fact_header_copy_placement_db.py",
+  "tests/test_market_data/test_raw_mapping_copy_db.py",
+  "tests/test_market_data/test_fact_header_forward_adoption_db.py",
+  "tests/test_market_data/test_fact_header_online_prepare_db.py",
+  "tests/test_market_data/test_fact_header_online_db.py",
+  "tests/test_market_data/test_fact_header_online_proof_db.py",
+  "tests/test_market_data/test_archive_online_copy_db.py",
+  "tests/test_market_data/test_fact_header_online_references_db.py",
+  "tests/test_market_data/test_fact_header_cancel_db.py",
+  "tests/test_market_data/test_storage_online_controller_db.py",
+  "tests/test_market_data/test_storage_online_collector_drain_db.py",
+  "tests/test_market_data/test_archive_forward_copy_db.py::test_forward_worker_initialization_owns_clock_and_atomic_commit",
+  "tests/test_market_data/test_fact_header_forward_handoff_db.py",
+  "tests/test_market_data/test_archive_forward_copy_db.py::test_forward_archives_preserve_canceled_work_and_fence_final_switch[retain_raw]",
+  "tests/test_market_data/test_raw_mapping_history_placement_db.py",
+  "tests/test_market_data/test_archive_reference_placement_db.py::test_generation_migration_inherits_named_reference_tablespace"
+]

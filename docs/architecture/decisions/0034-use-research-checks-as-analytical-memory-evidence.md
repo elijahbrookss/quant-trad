@@ -120,6 +120,23 @@ This keeps table count small while allowing observations, checks, hypotheses,
 studies, strategies, variants, experiments, reports, and runs to form one
 auditable research graph.
 
+## Bounded version extensions (2026-10-13)
+
+The existing method versions now distinguish configurable controlled reversal
+(`raw_forward_outcome@5`) from explicit retrospective numeric association
+(`event_fact_analysis@13`). V4 controlled-reversal semantics and historical
+definitions remain pinned. Research choices belong in the configured definition,
+so supported interval changes do not require a new evaluator for each interval.
+
+Retrospective association is a deliberate analytical exception to historical
+decision availability, never an exception for runtime consumers. Real source
+clocks and frozen revision provenance remain immutable; the result uses sample
+time, admits late receipts only at a declared analysis cutoff, and labels itself
+ineligible for PIT predictive, backtest or scientific-certification claims.
+Existing causal selectors remain unchanged. The Check evidence boundary owns
+the exact narrow settings, limits and missingness rules. No new data authority,
+provider, storage framework, scientific allocation or concurrency change follows.
+
 ## Consequences
 
 - Observations can be checked quickly before a formal strategy/experiment

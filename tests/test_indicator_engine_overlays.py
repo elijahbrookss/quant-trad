@@ -940,3 +940,26 @@ def test_strategy_decisions_match_across_overlay_detail_modes() -> None:
     assert "source.debug" in frames["overlays_off_details_on"].details
     assert frames["overlays_on_details_off"].details == {}
     assert frames["output_only"].details == {}
+
+
+def test_shared_engine_observations_count_structures_and_reset_failed_frame(monkeypatch):
+    from core.execution_control import ExecutionControl, controlled_execution
+    source = _SourceIndicator()
+    engine = IndicatorExecutionEngine([source])
+    control = ExecutionControl()
+    with controlled_execution(control):
+        frame = engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)
+        metrics = control.snapshot()
+        assert metrics["observed_sizes"]["indicator_frame_components"] == 1
+        assert metrics["observed_sizes"]["indicator_frame_outputs"] == len(frame.outputs) == 1
+        assert metrics["observed_sizes"]["indicator_frame_overlays"] == 0
+        def failed(*args, **kwargs):
+            raise ValueError("component failed")
+        monkeypatch.setattr(source, "apply_bar", failed)
+        with pytest.raises(ValueError, match="component failed"):
+            engine.step(bar=object(), bar_time=BAR_TIME, include_overlays=False)
+    metrics = control.snapshot()
+    assert metrics["stage_outcomes"]["engine"]["completed"] == 1
+    assert metrics["stage_outcomes"]["engine"]["failed"] == 1
+    assert metrics["observed_sizes"]["indicator_frame_outputs"] is None
+    assert len(frame.guard_metrics) == 1  # Existing component reporting remains intact.

@@ -339,6 +339,8 @@ class PostgresNormalizationRepository:
             },
         )
         with db.session() as session:
+            from .market_lifecycle import market_storage_lifecycle_repository
+            market_storage_lifecycle_repository.acquire_publication_lock(session)
             spec_row = session.execute(
                 text("SELECT * FROM market.normalization_specs WHERE id = :id"),
                 {"id": normalized[0].spec_id},

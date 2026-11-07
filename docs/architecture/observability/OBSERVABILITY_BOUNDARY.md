@@ -48,6 +48,10 @@ code_paths:
   - docker/grafana/server-alerting/operator-email.yml
   - scripts/reporting/docker_capacity_sampler.sh
   - scripts/reporting/server_filesystem_capacity.py
+  - scripts/reporting/server_clock_health.py
+  - scripts/reporting/qt-clock-health.service
+  - scripts/reporting/qt-clock-health.timer
+  - docker/docker-compose.clock-health.yml
   - src/core/storage_mounts.py
   - scripts/ci/test_storage_alerts.py
   - docker/test/storage-alerting.compose.yml
@@ -257,6 +261,29 @@ proof. See [storage capacity and workload admission](../persistence/STORAGE_MANA
 for physical capacity accounting and preservation rules, and
 [ADR 0078](../decisions/0078-evolve-research-within-existing-data-boundaries.md)
 for the migration-scope decision.
+
+## Host Clock Health
+
+An optional native-host timer performs bounded read-only chronyc status probes
+and writes at most two 1 MiB non-secret JSONL files. The existing Alloy shipper
+reads that owned export directory via a read-only bind, retaining sample UTC time;
+no clock control socket, host journal or private chrony logs are exposed. The
+optional server overlay provisions one critical Grafana rule, with unhealthy,
+missing-data and query-error states routed through existing operator alerting.
+Default deployment mounts an exact deletion entry for the optional persisted
+clock rule. Enablement replaces that same target with the live rule and requires
+a recorded clock-disabled cleanup baseline so pinned recovery can remove it.
+The existing `apply-alerts` operation recreates only Alloy/Grafana for reviewed
+monitoring activation after that baseline release is installed; application and
+collector services remain untouched by this operation.
+
+Source availability, reference age and conditional chrony uncertainty are
+operational diagnostics. They do not calibrate historical time, rewrite accepted
+facts, certify research timing, or modify admission. The probe never corrects the
+clock or configures host networking/security. Host-owner timer installation and
+a separately coordinated reviewed monitoring deployment are activation
+prerequisites. See [operator alerting](../../operators/alerting.md#optional-native-host-clock-health-alert)
+for thresholds, failure timing, exact installation requirements and blind spots.
 
 ## Grafana Dashboard Lifecycle
 

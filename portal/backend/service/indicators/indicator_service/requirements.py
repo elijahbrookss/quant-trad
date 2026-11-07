@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from data_providers.utils.ohlcv import interval_to_timedelta
+from indicators.config import IndicatorExecutionContext
 from indicators.manifest import serialize_indicator_manifest
 from indicators.registry import get_indicator_definition, get_indicator_manifest
 from market_data.fact_registry import get_fact_contract
@@ -51,6 +52,7 @@ def plan_runtime_requirements_for_indicators(
     param_overrides_by_id: Mapping[str, Mapping[str, Any]] | None = None,
     preloaded_metas: Mapping[str, Mapping[str, Any]] | None = None,
     ctx: IndicatorServiceContext = _context,
+    execution_context: IndicatorExecutionContext | None = None,
 ) -> dict[str, Any]:
     """Resolve exact direct/transitive manifests and their typed market inputs."""
 
@@ -112,6 +114,31 @@ def plan_runtime_requirements_for_indicators(
         ).strip()
         source_seconds = _seconds(source_timeframe)
         required_bars = int(params.get("warmup_bars") or 0)
+        if getattr(definition, "RUNTIME_REPLAY_FROM_ORIGIN", False):
+            # Opt-in producer semantics only. Existing whole-frame data hooks
+            # (for example MarketProfile) are not timeline replay declarations.
+            if not isinstance(execution_context, IndicatorExecutionContext):
+                raise ValueError("indicator_requirement_plan_invalid: actual execution context required for origin replay")
+            if (_iso_utc(execution_context.start, field="context.start") != normalized_start
+                    or _iso_utc(execution_context.end, field="context.end") != normalized_end
+                    or execution_context.interval != timeframe):
+                raise ValueError("indicator_requirement_plan_invalid: execution context differs from planned window")
+            request_builder = getattr(definition, "build_runtime_data_request", None)
+            if not callable(request_builder):
+                raise ValueError("indicator_requirement_plan_invalid: origin replay requires producer data-request hook")
+            source_request = request_builder(resolved_params=params, execution_context=execution_context)
+            source_start = _iso_utc(source_request.start, field="origin.start")
+            source_end = _iso_utc(source_request.end, field="origin.end")
+            if (source_start > normalized_start or source_end != normalized_end
+                    or source_request.interval != source_timeframe or source_seconds != interval_seconds
+                    or source_request.instrument_id != execution_context.instrument_id):
+                raise ValueError("indicator_requirement_plan_invalid: origin replay request differs from native primary input")
+            elapsed = (datetime.fromisoformat(normalized_start.replace("Z", "+00:00"))
+                       - datetime.fromisoformat(source_start.replace("Z", "+00:00"))).total_seconds()
+            if elapsed % interval_seconds:
+                raise ValueError("indicator_requirement_plan_invalid: origin replay must align with native bars")
+            required_bars = max(required_bars, int(elapsed // interval_seconds))
+            runtime_plan = {**runtime_plan, "start": source_start}
         warmup_bars = max(warmup_bars, required_bars)
         manifest_payload = serialize_indicator_manifest(manifest)
         indicator_material = {

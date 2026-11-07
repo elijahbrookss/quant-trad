@@ -60,7 +60,9 @@ Market Data Read Binding** records the exact slice a durable consumer used.
 
 An **Indicator** turns known market evidence into a typed measurement, state, or
 signal. A **Check** asks a bounded analytical question. A Check preview is only
-exploration; durable Check evidence is frozen and replayable. A promising result
+exploration; durable Check evidence is frozen and hash-verified. Current methods support
+provider-free replay; retired evidence remains readable with execution and replay
+availability reported separately. A promising result
 can be admitted deliberately as a **Research Observation**, which is research
 memory rather than market truth.
 
@@ -107,9 +109,10 @@ QT protects six high-consequence outcomes:
 1. **Causal and canonical truth.** Historical results use only information that
    was knowable at the time, and canonical observations are not silently
    rewritten.
-2. **Frozen research authority.** Durable research identifies and can replay the
-   exact market evidence it used; exploratory previews do not silently become
-   durable evidence.
+2. **Frozen research authority.** Durable research identifies the exact market
+   evidence it used. Current methods support provider-free replay; retired
+   evidence retains verified custody with execution/replay availability stated
+   separately. Exploratory previews do not silently become durable evidence.
 3. **Decision and execution authority.** Indicators and Strategies can explain
    a decision, while the runtime alone owns execution and accounting truth.
 4. **Capital, order, and accounting integrity.** Order history, settlement,

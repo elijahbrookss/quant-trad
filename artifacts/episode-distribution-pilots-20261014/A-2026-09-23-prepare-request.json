@@ -1,0 +1,72 @@
+{
+  "check_family": "event_fact_analysis",
+  "mode": "preview",
+  "gap_policy": "continue_degraded",
+  "scope": {
+    "instrument_id": "b2deb0a0-f292-408a-876d-3dadd8e3819b",
+    "timeframe": "1m",
+    "start": "2026-09-23T00:00:00Z",
+    "end": "2026-09-23T00:30:00Z"
+  },
+  "detector": {
+    "type": "liquidity_episode"
+  },
+  "outcomes": {
+    "schema_version": "liquidity_episode.v1",
+    "analysis_as_of": "2026-10-15T00:00:00Z"
+  },
+  "inputs": [
+    {
+      "alias": "bbo",
+      "fact_type": "market.bbo",
+      "contract_version": "market.bbo.v1",
+      "timeframe_seconds": 1,
+      "alignment": "exact_interval",
+      "max_staleness_seconds": 1,
+      "allow_gaps": true,
+      "source_policy": {
+        "mode": "exact",
+        "source_identity_key": "2cddebbf40bb9befe9cc8fef8341243b8b8a7756889827bcf2ddb3062d3adcb7"
+      }
+    },
+    {
+      "alias": "depth",
+      "fact_type": "market.depth_observation",
+      "contract_version": "market.depth_band.v1",
+      "timeframe_seconds": 1,
+      "alignment": "exact_interval",
+      "max_staleness_seconds": 1,
+      "allow_gaps": true,
+      "source_policy": {
+        "mode": "exact",
+        "source_identity_key": "2cddebbf40bb9befe9cc8fef8341243b8b8a7756889827bcf2ddb3062d3adcb7"
+      }
+    },
+    {
+      "alias": "flow",
+      "fact_type": "market.trade_flow",
+      "contract_version": "market.trade_flow.v1",
+      "timeframe_seconds": 1,
+      "alignment": "exact_interval",
+      "max_staleness_seconds": 1,
+      "allow_gaps": true,
+      "source_policy": {
+        "mode": "exact",
+        "source_identity_key": "f874ce62dc830d2e3e31080c1dc11bbd81682f3e9582133922968ed69c65c3a2"
+      }
+    },
+    {
+      "alias": "trades",
+      "fact_type": "market.trade",
+      "contract_version": "market.trade.v1",
+      "alignment": "latest_known",
+      "max_staleness_seconds": 1,
+      "allow_gaps": true,
+      "source_policy": {
+        "mode": "exact",
+        "source_identity_key": "f874ce62dc830d2e3e31080c1dc11bbd81682f3e9582133922968ed69c65c3a2"
+      }
+    }
+  ],
+  "title": "BIP liquidity support feasibility and bounded examples 2026-09-23"
+}

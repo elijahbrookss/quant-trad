@@ -284,43 +284,59 @@ class RawStreamRecord:
         )
 
     def __post_init__(self) -> None:
-        required = (
-            "raw_record_id",
-            "spool_segment_id",
-            "definition_id",
-            "session_id",
-            "provider",
-            "venue",
-            "provider_product_id",
-            "requested_channel",
-            "observed_channel",
+        normalized = _validated_raw_stream_record_values(
+            *(getattr(self, name) for name in self.__dataclass_fields__)
         )
-        for name in required:
-            normalized = str(getattr(self, name) or "").strip()
-            if not normalized:
-                raise ValueError(f"market_raw_record_invalid: {name} is required")
-            object.__setattr__(self, name, normalized)
-        if int(self.connection_epoch) < 0 or int(self.receive_ordinal) <= 0:
-            raise ValueError("market_raw_record_invalid: invalid source position")
-        received_at = _utc(self.received_at, field_name="received_at")
-        frame = bytes(self.raw_frame)
-        digest = hashlib.sha256(frame).hexdigest()
-        if digest != str(self.raw_frame_sha256).lower():
-            raise ValueError("market_raw_record_invalid: frame checksum mismatch")
-        expected = build_raw_record_id(
-            definition_id=self.definition_id,
-            session_id=self.session_id,
-            connection_epoch=self.connection_epoch,
-            receive_ordinal=self.receive_ordinal,
-            raw_frame_sha256=digest,
-        )
-        if expected != self.raw_record_id:
-            raise ValueError("market_raw_record_invalid: raw_record_id mismatch")
-        object.__setattr__(self, "connection_epoch", int(self.connection_epoch))
-        object.__setattr__(self, "receive_ordinal", int(self.receive_ordinal))
-        object.__setattr__(self, "received_at", received_at)
-        object.__setattr__(self, "raw_frame", frame)
-        object.__setattr__(self, "raw_frame_sha256", digest)
+        for name, value in zip(self.__dataclass_fields__, normalized):
+            object.__setattr__(self, name, value)
+
+
+def _validated_raw_stream_record_values(
+    raw_record_id, spool_segment_id, definition_id, session_id,
+    connection_epoch, receive_ordinal, received_at, provider, venue,
+    provider_product_id, requested_channel, observed_channel, raw_frame,
+    raw_frame_sha256,
+):
+    """Return the exact normalized values owned by ``RawStreamRecord``.
+
+    Archive validation uses this boundary for every physical row while only
+    constructing complete records at witness positions. Keeping one validator
+    prevents the batch reader from weakening the canonical record contract.
+    """
+    names = (
+        "raw_record_id", "spool_segment_id", "definition_id", "session_id",
+        "provider", "venue", "provider_product_id", "requested_channel",
+        "observed_channel",
+    )
+    strings = tuple(str(value or "").strip() for value in (
+        raw_record_id, spool_segment_id, definition_id, session_id, provider,
+        venue, provider_product_id, requested_channel, observed_channel,
+    ))
+    for name, value in zip(names, strings):
+        if not value:
+            raise ValueError(f"market_raw_record_invalid: {name} is required")
+    epoch = int(connection_epoch)
+    ordinal = int(receive_ordinal)
+    if epoch < 0 or ordinal <= 0:
+        raise ValueError("market_raw_record_invalid: invalid source position")
+    normalized_received_at = _utc(received_at, field_name="received_at")
+    frame = bytes(raw_frame)
+    digest = hashlib.sha256(frame).hexdigest()
+    if digest != str(raw_frame_sha256).lower():
+        raise ValueError("market_raw_record_invalid: frame checksum mismatch")
+    expected = build_raw_record_id(
+        definition_id=strings[2],
+        session_id=strings[3],
+        connection_epoch=epoch,
+        receive_ordinal=ordinal,
+        raw_frame_sha256=digest,
+    )
+    if expected != strings[0]:
+        raise ValueError("market_raw_record_invalid: raw_record_id mismatch")
+    return (
+        *strings[:4], epoch, ordinal, normalized_received_at, *strings[4:],
+        frame, digest,
+    )
 
 
 @dataclass(frozen=True)

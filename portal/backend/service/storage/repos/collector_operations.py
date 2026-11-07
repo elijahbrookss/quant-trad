@@ -439,7 +439,9 @@ class PostgresCollectorOperationsRepository:
                 text(
                     """
                     SELECT definitions.id AS definition_id,
-                           latest.last_provider_activity_at
+                           latest.last_provider_activity_at,
+                           book_state.lifecycle AS projection_lifecycle,
+                           book_state.updated_at AS projection_updated_at
                     FROM market.stream_definitions AS definitions
                     LEFT JOIN LATERAL (
                         SELECT ranges.max_received_at AS last_provider_activity_at
@@ -452,6 +454,9 @@ class PostgresCollectorOperationsRepository:
                                  ranges.max_received_at DESC
                         LIMIT 1
                     ) AS latest ON TRUE
+                    LEFT JOIN market.book_reconstruction_state AS book_state
+                      ON book_state.series_id = definitions.series_id
+                     AND book_state.definition_id = definitions.id
                     WHERE definitions.id = ANY(:definition_ids)
                     """
                 ),

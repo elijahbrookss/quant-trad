@@ -62,6 +62,18 @@ def docker_deadline(deadline):
         _DOCKER_DEADLINE.reset(token)
 
 
+class MissingInventoryContainer(RuntimeError):
+    """Only a fixed inventory inspection explicitly reported missing full IDs.
+
+    Private Docker diagnostics never escape. Callers still need fresh complete
+    observations; this exception alone grants no transition authority.
+    """
+    def __init__(self, output, missing_ids):
+        super().__init__("storage_pause_docker_failed: operation=inspect exit=1")
+        self.output = output
+        self.missing_ids = frozenset(missing_ids)
+
+
 def docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
     deadline = _DOCKER_DEADLINE.get()
     if deadline is not None:
@@ -74,23 +86,28 @@ def docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
         raise RuntimeError("storage_pause_host_deadline_expired")
     # Do not expose Docker diagnostics or inspected configuration: these may
     # include credentials. Private database settings are hashed by the caller.
-    if result.returncode:
-        raise RuntimeError(f"storage_pause_docker_failed: operation={args[0]} exit={result.returncode}")
     if len(result.stdout) > 524288:
         raise RuntimeError("storage_pause_inventory_too_large")
+    if result.returncode:
+        # A generic daemon/inspect failure is never evidence of disappearance.
+        # Recognize only explicit full-ID absence for this fixed public-state
+        # expression, with no mixed diagnostics or unexpected requested objects.
+        requested = args[3:]
+        if (result.returncode == 1 and args[:3] == ("inspect", "--format", INSPECT)
+                and 1 <= len(requested) <= 64 and len(set(requested)) == len(requested)
+                and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in requested)
+                and 0 < len(result.stderr) <= 16384):
+            missing = [re.fullmatch(r"Error: No such (?:object|container): ([0-9a-f]{64})", line)
+                       for line in result.stderr.splitlines()]
+            if missing and all(missing):
+                identities = [match.group(1) for match in missing]
+                if len(set(identities)) == len(identities) and set(identities) <= set(requested):
+                    raise MissingInventoryContainer(result.stdout, identities)
+        raise RuntimeError(f"storage_pause_docker_failed: operation={args[0]} exit={result.returncode}")
     return result.stdout
 
 
-def inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None,
-              activating: bool = False, removing_database_id: str | None = None,
-              runtime_maintenance: bool = False, removing_client_id: str | None = None) -> dict[str, dict]:
-    if removing_database_id is not None and (not database_preparing or activating
-            or not re.fullmatch(r"[0-9a-f]{64}", removing_database_id)):
-        raise ValueError("storage_pause_invalid_removing_database")
-    if (runtime_maintenance and not activating or removing_client_id is not None and
-            (not activating or not runtime_maintenance or not re.fullmatch(r"[0-9a-f]{64}",removing_client_id))):
-        raise ValueError("storage_runtime_invalid_client_transition")
-    allowed_services=STOP+PASSIVE+(("storage-maintenance",) if runtime_maintenance else ())
+def _inventory_ids(project, operator_id):
     ids = set()
     for selector in (f"label=com.docker.compose.project={project}", f"network={project}_quanttrad"):
         ids.update(docker("ps", "--all", "--quiet", "--no-trunc", "--filter", selector).split())
@@ -100,9 +117,19 @@ def inventory(project: str, *, database_preparing: bool = False, operator_id: st
         if not re.fullmatch(r"[0-9a-f]{64}", operator_id):
             raise ValueError("storage_pause_invalid_operator_identity")
         ids.discard(operator_id)
-    rows = [json.loads(line) for line in docker("inspect", "--format", INSPECT, *sorted(ids)).splitlines()]
+    return ids
+
+
+def _inspection_rows(output, ids):
+    rows = [json.loads(line) for line in output.splitlines()]
     if {x["id"] for x in rows} != ids or len(rows) != len(ids):
         raise RuntimeError("storage_pause_incomplete_inspection")
+    return rows
+
+
+def _admit_inventory_rows(rows, project, *, database_preparing, activating,
+                          removing_database_id, runtime_maintenance, removing_client_id):
+    allowed_services=STOP+PASSIVE+(("storage-maintenance",) if runtime_maintenance else ())
     result = {}
     for row in rows:
         service = row["service"]
@@ -141,6 +168,40 @@ def inventory(project: str, *, database_preparing: bool = False, operator_id: st
     if not set(required) <= result.keys() or (not database_preparing and not result["tsdb"]["running"]):
         raise RuntimeError("storage_pause_required_service_missing_or_database_stopped")
     return result
+
+
+def inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None,
+              activating: bool = False, removing_database_id: str | None = None,
+              runtime_maintenance: bool = False, removing_client_id: str | None = None) -> dict[str, dict]:
+    if removing_database_id is not None and (not database_preparing or activating
+            or not re.fullmatch(r"[0-9a-f]{64}", removing_database_id)):
+        raise ValueError("storage_pause_invalid_removing_database")
+    if (runtime_maintenance and not activating or removing_client_id is not None and
+            (not activating or not runtime_maintenance or not re.fullmatch(r"[0-9a-f]{64}",removing_client_id))):
+        raise ValueError("storage_runtime_invalid_client_transition")
+    options = dict(database_preparing=database_preparing, activating=activating,
+                   removing_database_id=removing_database_id,
+                   runtime_maintenance=runtime_maintenance, removing_client_id=removing_client_id)
+    ids = _inventory_ids(project, operator_id)
+    try:
+        rows = _inspection_rows(docker("inspect", "--format", INSPECT, *sorted(ids)), ids)
+    except MissingInventoryContainer as exc:
+        if removing_database_id is None or exc.missing_ids != {removing_database_id}:
+            raise
+        remaining = ids - {removing_database_id}
+        # All other rows must already be complete, unique and safe. Then require
+        # fresh selectors to agree exactly and freshly inspect every survivor.
+        # No recursive reconciliation, ignored row, replay or renewed deadline.
+        partial = _inspection_rows(exc.output, remaining)
+        _admit_inventory_rows(partial, project, **options)
+        if _inventory_ids(project, operator_id) != remaining:
+            raise RuntimeError("storage_pause_removal_inventory_changed") from None
+        rows = _inspection_rows(docker("inspect", "--format", INSPECT, *sorted(remaining)), remaining)
+        result = _admit_inventory_rows(rows, project, **options)
+        logging.getLogger(__name__).warning(
+            "storage_pause_journaled_database_disappearance_observed | database_id=%s", removing_database_id)
+        return result
+    return _admit_inventory_rows(rows, project, **options)
 
 
 def source_clients_serving(rows):

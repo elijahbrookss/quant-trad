@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from portal.backend.db.fact_storage_schema import _view_signature
 from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, inspect_capture, inspect_identity_capture
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
 
 logger = logging.getLogger(__name__)
 MAX_CATALOG_ROWS = 8192
@@ -95,6 +96,12 @@ BEGIN
 END;
 """
 
+V2_COLD_FACT_READ_BODY = V1_COLD_FACT_READ_BODY.replace(
+    "\nBEGIN\n",
+    "\n-- archive-generation-reader-floor-v1: older binaries must refuse this layout.\nBEGIN\n",
+    1,
+)
+
 V1_FACT_ROWS_VIEW_SELECT = """
     SELECT versions.*,
            CASE WHEN hot.id IS NULL THEN market.cold_fact_read_required(versions.id, 'payload')
@@ -159,7 +166,7 @@ def _assert_guard_functions(conn, owner):
         "reject_immutable_mutation()":(V1_IMMUTABLE_GUARD_BODY,0,"trigger"),
         "assert_fact_hot_payload_valid()":(V1_HOT_PAYLOAD_VALIDATION_BODY,0,"trigger"),
         "require_fact_hot_payload()":(V1_FACT_PAYLOAD_REQUIRED_BODY,0,"trigger"),
-        "cold_fact_read_required(text,text)":(V1_COLD_FACT_READ_BODY,2,"jsonb"),
+        "cold_fact_read_required(text,text)":((V1_COLD_FACT_READ_BODY,V2_COLD_FACT_READ_BODY),2,"jsonb"),
     }
     for signature,(body,args,returns) in expected.items():
         row=conn.execute(text("""
@@ -168,8 +175,10 @@ def _assert_guard_functions(conn, owner):
             FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang
             WHERE p.oid=to_regprocedure(:name)
         """),{"name":"market."+signature}).mappings().one_or_none()
+        bodies = body if isinstance(body, tuple) else (body,)
         if row is None or (
-            row["prosrc"].strip()!=body.strip() or row["provolatile"]!="v" or row["prosecdef"]
+            row["prosrc"].strip() not in {item.strip() for item in bodies}
+            or row["provolatile"]!="v" or row["prosecdef"]
             or row["proretset"] or row["pronargs"]!=args or row["pronargdefaults"]!=0
             or row["returns"]!=returns or row["proconfig"] is not None
             or row["lanname"]!="plpgsql" or row["owner"]!=owner):
@@ -259,11 +268,7 @@ def _incoming_references(conn):
            for row in children):
         raise RuntimeError("fact_header_source_payload_partition_changed")
     _assert_payload_guards(conn,children)
-    parent_owners={
-        "market.fact_hot_payloads":"id",
-        "market.fact_archive_material_aliases":"fact_version_id",
-        "market.fact_archive_canonical_dependencies":"fact_version_id",
-    }
+    parent_owners = SOURCE_REFERENCE_COLUMNS
     child_owners={row["relation"]:"id" for row in children}
     rows=_rows(conn,"""
         SELECT con.oid::bigint AS oid,con.conparentid::bigint AS parent_oid,

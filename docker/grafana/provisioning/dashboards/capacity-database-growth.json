@@ -1214,6 +1214,178 @@
       ],
       "title": "Capacity authority and discovery status",
       "type": "logs"
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Canonical backlog: eligible source bytes",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time,NULL::bigint AS value WHERE false /* bounded_storage_projection_unavailable */;"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "Verified source awaiting fresh reclaim guards",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time,NULL::bigint AS value WHERE false /* bounded_storage_projection_unavailable */;"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Canonical lifecycle byte events",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          },
+          "noValue": "Unavailable: Grafana pre-query deadline unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT now() AS time,NULL::text AS metric,NULL::double precision AS value WHERE false /* bounded_storage_projection_unavailable */;"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "table",
+      "title": "Oldest canonical pipeline days",
+      "description": "Unavailable in Grafana because this PostgreSQL datasource cannot establish the required statement and lock deadlines before the metadata statement. Use the bounded Storage API/UI projection for canonical retention progress.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT NULL::date AS storage_day,NULL::text AS state,NULL::bigint AS expected_rows,NULL::bigint AS source_bytes,NULL::timestamptz AS sealed_at,NULL::timestamptz AS verified_at,NULL::timestamptz AS reclaimed_at,NULL::text AS next_stage WHERE false /* bounded_storage_projection_unavailable */;"
+        }
+      ]
     }
   ],
   "refresh": "15s",
@@ -1309,6 +1481,6 @@
   "timezone": "browser",
   "title": "QuantTrad Capacity & Database Growth",
   "uid": "quanttrad-capacity-growth",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }
