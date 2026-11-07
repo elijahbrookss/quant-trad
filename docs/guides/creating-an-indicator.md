@@ -10,6 +10,8 @@ Indicator code lives under `src/indicators/`. Existing examples:
 - [regime runtime](../../src/indicators/regime/runtime.py)
 - [market profile typed runtime](../../src/indicators/market_profile/runtime/typed_indicator.py)
 - [indicator manifests](../../src/indicators/manifest.py)
+- [candle VWAP runtime](../../src/indicators/candle_vwap/runtime.py) and its
+  [session/source contract](../architecture/indicator-runtime/CANDLE_VWAP_CONTRACT.md)
 
 ## Expected Shape
 
