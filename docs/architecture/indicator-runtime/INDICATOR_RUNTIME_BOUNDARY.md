@@ -211,6 +211,8 @@ or unordered mapping iteration.
 - [Decision layer boundary](../decision-layer/DECISION_LAYER_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Market Profile timing contract](../../../src/indicators/market_profile/docs/timing_contract.md)
+- [Candle VWAP contract](CANDLE_VWAP_CONTRACT.md): native-candle HLC3 approximation,
+  UTC session readiness, volume and gap semantics, and existing Check consumption.
 
 ## Known Gaps
 
