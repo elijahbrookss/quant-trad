@@ -121,6 +121,13 @@ strategy/instrument/series identity, and stores it in series metadata before
 artifact creation. The runtime dependency is required: missing, malformed, or
 unattributed source diagnostics fail loudly rather than disappearing.
 
+Source preparation may explicitly accept a `version` keyword. The graph passes
+the same pinned manifest version used by runtime construction; older builders
+without that keyword keep their calling contract. Market Profile uses this seam
+to preserve v1/v2 replay while v3 prepares source-close availability. Whole-input
+diagnostics remain build evidence, outside v3's causal per-bar overlays. See
+[ADR 0085](../decisions/0085-version-market-profile-source-availability.md).
+
 ## Runtime Validation Surface
 
 The backend indicator runtime validation endpoint and output evidence collector

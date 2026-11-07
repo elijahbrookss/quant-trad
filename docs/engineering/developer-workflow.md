@@ -379,7 +379,10 @@ Review before cleanup:
 ### Explicit Market Profile first-return research
 
 Create a separate `market_profile` instance through `qt indicators create
---payload-json <file> --apply --confirm` with top-level `"version": "v2"`.
+--payload-json <file> --apply --confirm` with top-level `"version": "v3"` for
+new causal research. V1/v2 retain historical source-open timing and evidence;
+do not use them for new point-in-time predictive claims. V3 requires complete
+native UTC days; incomplete days are withheld with source diagnostics.
 `qt indicators validate-config --payload-json <file>` validates the same request.
 Omitting version retains v1. Do not edit a historical instance to change versions.
 
