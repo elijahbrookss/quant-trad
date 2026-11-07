@@ -102,6 +102,14 @@ def test_crosses_are_current_bar_events_with_source_availability():
     assert runtime.snapshot()["vwap_cross"].value["events"] == []
 
 
+def test_constant_price_with_fractional_volume_never_emits_roundoff_crosses():
+    runtime = build("1m")
+    for index in range(1440):
+        runtime.apply_bar(candle(index, 100.1, .1+(index%11)*.03, step=timedelta(minutes=1)), {})
+        assert runtime.snapshot()["vwap_context"].value["state_key"] == "at"
+        assert runtime.snapshot()["vwap_cross"].value["events"] == []
+
+
 def test_prefix_invariance_including_session_reset_and_snapshot_isolation():
     bars = [candle(i, 100+i%7, i%4) for i in range(100)]
     whole = build()

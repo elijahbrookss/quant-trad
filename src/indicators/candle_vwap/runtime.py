@@ -9,6 +9,8 @@ from indicators.manifest import build_runtime_spec
 
 from .manifest import MANIFEST, NATIVE_TIMEFRAMES
 
+PRICE_COMPARISON_REL_TOL = 1e-12
+
 
 class TypedCandleVWAPIndicator(Indicator):
     def __init__(self, *, indicator_id, version, params):
@@ -89,12 +91,14 @@ class TypedCandleVWAPIndicator(Indicator):
         distance_bps = (distance/vwap)*10000 if ready else None
         if ready and not math.isfinite(distance_bps):
             self._invalid("distance precision overflow", bar)
+        comparison_distance = (0.0 if ready and math.isclose(close, vwap, rel_tol=PRICE_COMPARISON_REL_TOL)
+                               else distance)
         state = ("warming_session" if not self._complete else "awaiting_volume" if not ready
-                 else "above" if distance > 0 else "below" if distance < 0 else "at")
+                 else "above" if comparison_distance > 0 else "below" if comparison_distance < 0 else "at")
         events = []
         if ready and volume > 0 and self._previous_distance is not None:
-            crossing = ("above" if self._previous_distance <= 0 < distance else
-                        "below" if self._previous_distance >= 0 > distance else None)
+            crossing = ("above" if self._previous_distance <= 0 < comparison_distance else
+                        "below" if self._previous_distance >= 0 > comparison_distance else None)
             if crossing:
                 events.append({"key": f"close_cross_{crossing}_vwap",
                     "direction": "long" if crossing == "above" else "short",
@@ -106,11 +110,12 @@ class TypedCandleVWAPIndicator(Indicator):
                         "reference": {"kind": "session_vwap", "price": vwap,
                                       "known_at": known_at.isoformat()}}})
         # No cross is inferred across an unready or zero-volume bar.
-        self._previous_distance = distance if ready and volume > 0 else None
+        self._previous_distance = comparison_distance if ready and volume > 0 else None
         self._previous_end, self._previous_known_at = end, known_at
         fields = {"session_start": session.isoformat(),
                   "session_end": (session+timedelta(days=1)).isoformat(), "session_timezone": "UTC",
                   "price_basis": "hlc3", "source_timeframe": self._timeframe,
+                  "price_comparison_rel_tol": PRICE_COMPARISON_REL_TOL,
                   "volume_semantics": "provider_reported_candle_volume",
                   "session_complete_from_anchor": self._complete, "observed_bars": self._observed_bars,
                   "positive_volume_bars": self._positive_bars, "zero_volume_bar": volume == 0,

@@ -91,7 +91,11 @@ history. A new execution may start later and wait for a complete new UTC anchor.
 A cross compares consecutive ready, positive-volume bars in the same session:
 previous distance `<= 0` and current distance `> 0` emits above; previous distance
 `>= 0` and current distance `< 0` emits below. This compares each close with its
-own contemporaneous session VWAP. Equality itself emits nothing. The first ready
+own contemporaneous session VWAP. State and crossing comparisons treat relative
+price differences within `1e-12` as equality, exposed as
+`price_comparison_rel_tol`; metrics retain their unrounded numerical distances.
+This fixed v1 numerical tolerance prevents accumulated floating-point roundoff
+from turning a constant-price session into crosses. Equality itself emits nothing. The first ready
 bar, session reset and zero-volume boundary do not create crosses. Event
 directions `long` / `short` are the existing signal-contract labels for above /
 below, not recommendations or evidence of profitability.

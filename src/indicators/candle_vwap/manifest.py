@@ -21,7 +21,7 @@ MANIFEST = IndicatorManifest(
                         fields=("session_start", "session_end", "session_timezone", "price_basis",
                                 "source_timeframe", "volume_semantics", "session_complete_from_anchor",
                                 "observed_bars", "positive_volume_bars", "zero_volume_bar",
-                                "close_time", "known_at", "gap_contract")),
+                                "close_time", "known_at", "gap_contract", "price_comparison_rel_tol")),
         IndicatorOutput(name="vwap_metrics", type="metric", label="Session VWAP Metrics",
                         fields=("vwap", "close_distance", "close_distance_bps", "cumulative_volume")),
         IndicatorOutput(name="vwap_cross", type="signal", label="Close Crosses Session VWAP",
