@@ -25,10 +25,12 @@ from market_data.contracts import (
 from indicators.manifest import IndicatorManifest, IndicatorMarketInput
 from market_data.store import FrozenDataset
 from portal.backend.service.market.backtest_dataset_service import (
+    _gap_is_disclosed,
     derive_backtest_dataset_plan,
     prepare_backtest_dataset,
     resolve_backtest_strategy_identity,
     validate_backtest_dataset,
+    validate_frozen_dataset_series,
 )
 
 
@@ -310,6 +312,132 @@ def test_admission_rejects_undisclosed_gap_but_preserves_disclosed_closure() -> 
     binding = _validate(_Store(records, quality=evidence))
     assert binding["quality"]["status"] == "ready_with_caveats"
     assert binding["quality"]["classifications"] == {"provider_closure": 1}
+
+
+@pytest.mark.parametrize(
+    ("intervals", "covered"),
+    [
+        ([(0, 60)], True),
+        ([(0, 30), (30, 60)], True),
+        ([(0, 40), (20, 60)], True),
+        ([(30, 60), (0, 30)], True),
+        ([(40, 70), (-10, 25), (20, 45), (5, 10)], True),
+        ([], False),
+        ([(0, 30)], False),
+        ([(30, 60)], False),
+        ([(0, 20), (30, 60)], False),
+        ([(-60, 0), (60, 90)], False),
+        ([(0, 20), (30, 20), (30, 60)], False),
+    ],
+    ids=[
+        "single", "adjacent", "overlap", "unordered", "nested-chain",
+        "empty", "missing-tail", "missing-head", "hole", "outside", "reversed",
+    ],
+)
+def test_disclosed_gap_requires_complete_receipt_union(
+    intervals: list[tuple[int, int]], covered: bool,
+) -> None:
+    start = datetime(2026, 10, 16, 21, tzinfo=UTC)
+    quality = [
+        {
+            "start": start + timedelta(minutes=left),
+            "end": start + timedelta(minutes=right),
+            "classification": "provider_closure",
+        }
+        for left, right in intervals
+    ]
+    assert _gap_is_disclosed(start, start + timedelta(hours=1), quality) is covered
+
+
+def test_disclosed_gap_rejects_even_a_microsecond_hole() -> None:
+    start = datetime(2026, 10, 16, 21, tzinfo=UTC)
+    middle = start + timedelta(minutes=30)
+    end = start + timedelta(hours=1)
+    quality = [
+        {"start": start, "end": middle, "classification": "provider_closure"},
+        {
+            "start": middle + timedelta(microseconds=1), "end": end,
+            "classification": "provider_closure",
+        },
+    ]
+    assert not _gap_is_disclosed(start, end, quality)
+
+
+@pytest.mark.parametrize("skip", [0, 3, 15], ids=["leading", "interior", "trailing"])
+@pytest.mark.parametrize("classification", ["provider_closure", "provider_missing_data"])
+def test_frozen_gap_union_preserves_classification_policy_and_pinned_evidence(
+    skip: int, classification: str,
+) -> None:
+    records = _records(skip=skip)
+    start = MATERIALIZATION_START + timedelta(hours=skip)
+    quality = [
+        {
+            "start": start + timedelta(minutes=offset),
+            "end": start + timedelta(minutes=offset + 30),
+            "classification": classification,
+            "ingestion_run_id": f"ingest-{offset}",
+            "source_identity_key": records[0].source_identity_key,
+            "evidence_hash": f"receipt-{offset}",
+        }
+        for offset in (30, 0)
+    ]
+    store = _Store(records, quality=quality)
+    entry = {**store.dataset.series[0], "dataset_id": store.dataset.dataset_id}
+    if classification == "provider_missing_data":
+        with pytest.raises(RuntimeError, match="unacceptable_gap"):
+            validate_frozen_dataset_series(store=store, entry=entry)
+    else:
+        binding = _validate(store)
+        assert binding["quality"]["status"] == "ready_with_caveats"
+        assert binding["quality"]["classifications"] == {classification: 2}
+
+    verified, pinned_quality, loaded = validate_frozen_dataset_series(
+        store=store, entry=entry, allow_any_recorded_gap=True,
+    )
+    assert pinned_quality == quality
+    assert verified["quality_evidence"] == quality
+    assert verified["quality_hash"] == entry["quality_hash"]
+    assert verified["provenance_hash"] == entry["provenance_hash"]
+    assert loaded == records
+
+
+def test_disallowed_receipt_cannot_bridge_an_admissible_gap() -> None:
+    start = MATERIALIZATION_START + timedelta(hours=3)
+    quality = [
+        {
+            "start": start, "end": start + timedelta(minutes=30),
+            "classification": "provider_closure",
+        },
+        {
+            "start": start + timedelta(minutes=30), "end": start + timedelta(hours=1),
+            "classification": "provider_missing_data",
+        },
+    ]
+    with pytest.raises(RuntimeError, match="unacceptable_gap"):
+        _validate(_Store(_records(skip=3), quality=quality))
+
+
+@pytest.mark.parametrize("skip", [0, 3, 15], ids=["leading", "interior", "trailing"])
+@pytest.mark.parametrize("intervals", [[(0, 30)], [(30, 60)], [(0, 20), (30, 60)]])
+def test_freeze_gap_union_rejects_partial_receipts_and_holes(
+    skip: int, intervals: list[tuple[int, int]],
+) -> None:
+    start = MATERIALIZATION_START + timedelta(hours=skip)
+    quality = [
+        {
+            "start": start + timedelta(minutes=left),
+            "end": start + timedelta(minutes=right),
+            "classification": "provider_missing_data",
+        }
+        for left, right in intervals
+    ]
+    store = _Store(_records(skip=skip), quality=quality)
+    with pytest.raises(RuntimeError, match="unacceptable_gap"):
+        validate_frozen_dataset_series(
+            store=store,
+            entry={**store.dataset.series[0], "dataset_id": store.dataset.dataset_id},
+            allow_any_recorded_gap=True,
+        )
 
 
 def test_admission_uses_only_quality_evidence_pinned_at_freeze() -> None:
