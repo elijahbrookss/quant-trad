@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from math import isfinite
 from typing import Any, Mapping
 
 from indicators.config import DataContext, IndicatorExecutionContext
 from indicators.manifest import resolve_manifest_params
 
-from .manifest import MANIFEST, FIRST_RETURN_MANIFEST
+from .manifest import MANIFEST, FIRST_RETURN_MANIFEST, CAUSAL_MANIFEST
 
 
 class MarketProfileIndicator:
     NAME = MANIFEST.type
     MANIFEST = MANIFEST
-    MANIFEST_VERSIONS = {"v1": MANIFEST, "v2": FIRST_RETURN_MANIFEST}
+    MANIFEST_VERSIONS = {"v1": MANIFEST, "v2": FIRST_RETURN_MANIFEST, "v3": CAUSAL_MANIFEST}
 
     @classmethod
     def resolve_config(
@@ -89,8 +90,16 @@ class MarketProfileIndicator:
         execution_context: IndicatorExecutionContext,
         source_frame: Any,
         source_diagnostics: Any = None,
+        version: str = "v1",
     ) -> Any:
         from .compute.engine import MarketProfileIndicator as ComputeMarketProfileIndicator
+        from indicators.registry import get_indicator_manifest
+
+        get_indicator_manifest(cls.NAME, version)
+        if version == "v3":
+            bin_size = float(resolved_params.get("bin_size") or 0)
+            if not isfinite(bin_size) or bin_size <= 0:
+                raise ValueError("market_profile_source_contract_invalid: v3 requires a fixed positive bin_size")
 
         if source_frame is None:
             raise RuntimeError(
@@ -110,6 +119,7 @@ class MarketProfileIndicator:
             params=dict(resolved_params),
             symbol=execution_context.symbol,
             chart_timeframe=execution_context.interval,
+            causal_availability=version == "v3",
             source_candle_continuity=(
                 source_diagnostics.get("source_candle_continuity")
                 if isinstance(source_diagnostics, Mapping)

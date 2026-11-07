@@ -277,3 +277,11 @@ legacy v1 behavior. Adding a new manifest must not mutate a retained version's
 outputs, parameters or replay meaning. Version selection is not an output
 visibility preference. Market Profile v2 adds original-range first-return
 outputs; v1 remains the default.
+
+Market Profile v3 retains the v2 output schema and profile arithmetic while
+correcting source availability: complete native UTC daily inputs become usable
+only after their session close and all included source availability, projected
+to the chart close grid. Runtime compares that watermark with completed chart
+candle availability. Incomplete native days are explicitly withheld. V1/v2
+remain historical replay versions and cannot establish new predictive causal
+claims. See the [Market Profile timing contract](../../../src/indicators/market_profile/docs/timing_contract.md).

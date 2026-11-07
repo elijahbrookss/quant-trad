@@ -97,3 +97,4 @@ respect.
 | [0078](0078-evolve-research-within-existing-data-boundaries.md) | Bound migrations and preserve compatible research | Accepted direction; implementation and qualification in progress |
 
 | [0080](0080-use-ephemeral-fresh-row-handoff-witnesses.md) | Use ephemeral fresh-row handoff witnesses | Draft; qualification pending |
+| [0085](0085-version-market-profile-source-availability.md) | Version Market Profile source availability | Accepted |
