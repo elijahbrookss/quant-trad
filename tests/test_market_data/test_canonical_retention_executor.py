@@ -30,6 +30,54 @@ def _executor(plans):
     return CanonicalFactRetentionExecutor(repository=SimpleNamespace(plan=plan)), calls
 
 
+def test_only_sealing_counts_receive_separate_timeout_and_live_run_budget(tmp_path, monkeypatch):
+    executor, _ = _executor([])
+    executor.repository.database = object()
+    remaining = [600]
+    seen = {}
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+
+    class Archive(SimpleNamespace):
+        def seal_partition(self, day, **kwargs):
+            seen.update(kwargs)
+            assert day == DAY and self.statement_timeout_ms == 5000
+            assert kwargs["remaining_run_seconds"]() == 600
+            remaining[0] = 3
+            assert kwargs["remaining_run_seconds"]() == 3
+            return {"expected_rows": 17}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
+                        lambda **kwargs: Archive(**kwargs))
+    result = executor._execute_step(
+        item=_item("seal_partition"), policy=CanonicalFactRetentionPolicy(),
+        storage_root=tmp_path, check_budget=lambda: None,
+        remaining_seconds=lambda: remaining[0],
+    )
+    assert seen["count_statement_timeout_ms"] == 60_000
+    assert result["status"] == "partition_sealed"
+
+
+@pytest.mark.parametrize("action", ["stage_page", "verify_page"])
+def test_page_work_keeps_default_statement_timeout(tmp_path, monkeypatch, action):
+    executor, _ = _executor([])
+    executor.repository.database = object()
+    monkeypatch.setattr(executor, "_require_archive", lambda **_: None)
+
+    class Archive(SimpleNamespace):
+        def stage_next_page(self, day):
+            assert self.statement_timeout_ms == 5000
+            return {"status": "page_staged"}
+
+        def verify_next_page(self, day):
+            assert self.statement_timeout_ms == 5000
+            return {"status": "page_verified"}
+
+    monkeypatch.setattr(module, "PostgresCanonicalFactArchiveRepository",
+                        lambda **kwargs: Archive(**kwargs))
+    executor._execute_step(item=_item(action), policy=CanonicalFactRetentionPolicy(),
+        storage_root=tmp_path, check_budget=lambda: None, remaining_seconds=600)
+
+
 @pytest.mark.parametrize("execute,enabled,status", [(False, False, "dry_run"), (False, True, "dry_run"), (True, False, "disabled")])
 def test_dry_run_and_separate_enablement_never_construct_a_writer(tmp_path, monkeypatch, execute, enabled, status):
     executor, calls = _executor([_plan([_item()])])

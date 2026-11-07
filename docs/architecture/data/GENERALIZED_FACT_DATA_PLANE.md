@@ -52,6 +52,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_normalization_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
+  - tests/test_market_data/test_fact_seal_timeout_db.py
   - portal/backend/service/storage/repos/fact_handoff.py
   - portal/backend/service/storage/repos/fact_lineage.py
   - portal/backend/service/storage/repos/fact_references.py
@@ -465,6 +466,12 @@ in pressure/budget reporting. This design does not promise a hard cap on all
 PostgreSQL bytes.
 
 ### Canonical Retention Planning
+
+Only the executor's exact per-day header/hot sealing counts receive the
+[scoped sealing-count allowance](../persistence/STORAGE_MANAGEMENT.md#canonical-archive-stage-attribution).
+The owner recalculates the remaining run budget for each count and restores
+ordinary limits before later statements; exact equality, writer fencing,
+rollback and immutable custody remain required.
 
 Storage totals include all dated header relations and their indexes/TOAST,
 including headers whose hot payloads have already been reclaimed. The global

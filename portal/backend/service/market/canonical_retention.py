@@ -27,6 +27,9 @@ from ..storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
 from ..storage.history_policy import saved_canonical_policy, require_saved_history_policy
 
 logger = logging.getLogger(__name__)
+# Exact full-partition counts are the only sealing statements with this larger
+# allowance. Each count remains bounded by the current run's remaining time.
+_SEAL_COUNT_STATEMENT_TIMEOUT_MS = 60_000
 
 _PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_verified"})
 _MAX_PAGE_PREREQUISITE_COMMITS = 64
@@ -255,7 +258,10 @@ class CanonicalFactRetentionExecutor:
         verification = ArchiveVerificationLimits(max_bytes=policy.max_verification_bytes,
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
-            return {**archive.seal_partition(day), "status": "partition_sealed"}
+            return {**archive.seal_partition(
+                day, count_statement_timeout_ms=_SEAL_COUNT_STATEMENT_TIMEOUT_MS,
+                remaining_run_seconds=current_remaining_seconds,
+            ), "status": "partition_sealed"}
         if action == "stage_page":
             prerequisites = prerequisite_commits if prerequisite_commits is not None else []
             for _ in range(_MAX_PAGE_PREREQUISITE_COMMITS):

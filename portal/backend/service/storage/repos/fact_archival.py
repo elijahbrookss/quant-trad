@@ -12,6 +12,7 @@ import uuid
 from dataclasses import asdict
 from datetime import date
 import logging
+from math import isfinite
 from pathlib import Path
 from time import perf_counter
 
@@ -708,7 +709,57 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError(f"canonical_archive_partition_unknown: storage_day={day}")
             return dict(row)
 
-    def seal_partition(self, day: date) -> dict:
+    def _set_seal_timeout(self, session, timeout_ms, remaining_run_seconds):
+        self._check_budget()
+        if remaining_run_seconds is not None:
+            remaining = remaining_run_seconds()
+            if (type(remaining) not in {int, float} or not isfinite(remaining)
+                    or int(remaining * 1000) <= 0):
+                raise RuntimeError("canonical_archive_seal_run_budget_exceeded")
+            timeout_ms = min(timeout_ms, int(remaining * 1000))
+        session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                        {"timeout": str(timeout_ms)})
+        return timeout_ms
+
+    def _seal_source_count(self, session, day, *, relation, timeout_ms,
+                           remaining_run_seconds):
+        # Relation names are fixed by seal_partition, never supplied by a caller.
+        query = text(f"SELECT count(*) FROM market.{relation} WHERE storage_day=:day")
+        if timeout_ms is None:
+            return session.execute(query, {"day": day}).scalar_one()
+        started = perf_counter()
+        effective_timeout = None
+        try:
+            # Savepoint rollback restores SET LOCAL after SQL cancellation or a
+            # Python budget/cancellation error. Success restores it explicitly
+            # before releasing the savepoint or running any other statement.
+            with session.begin_nested():
+                previous = session.execute(text("SHOW statement_timeout")).scalar_one()
+                effective_timeout = self._set_seal_timeout(
+                    session, timeout_ms, remaining_run_seconds,
+                )
+                count = session.execute(query, {"day": day}).scalar_one()
+                self._check_budget()
+                session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                                {"timeout": previous})
+            logger.info("canonical_archive_seal_count | storage_day=%s source=%s "
+                        "outcome=completed rows=%s timeout_ms=%s seconds=%.6f",
+                        day, relation, count, effective_timeout, perf_counter() - started)
+            return count
+        except BaseException:
+            logger.info("canonical_archive_seal_count | storage_day=%s source=%s "
+                        "outcome=failed timeout_ms=%s seconds=%.6f",
+                        day, relation, effective_timeout, perf_counter() - started)
+            raise
+
+    def seal_partition(self, day: date, *, count_statement_timeout_ms: int | None = None,
+                       remaining_run_seconds=None) -> dict:
+        if (count_statement_timeout_ms is not None
+                and (type(count_statement_timeout_ms) is not int
+                     or not 1 <= count_statement_timeout_ms <= 60_000)):
+            raise ValueError("canonical_archive_seal_count_timeout_invalid")
+        if remaining_run_seconds is not None and not callable(remaining_run_seconds):
+            raise ValueError("canonical_archive_seal_remaining_budget_invalid")
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] != "open":
@@ -723,21 +774,28 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"relation": relation}).scalar_one()
             if not attached:
                 raise RuntimeError(f"canonical_archive_partition_not_attached: storage_day={day}")
-            count = session.execute(text(
-                "SELECT count(*) FROM market.fact_versions WHERE storage_day=:day"
-            ), {"day": day}).scalar_one()
-            hot_count = session.execute(text(
-                "SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"
-            ), {"day": day}).scalar_one()
+            count = self._seal_source_count(
+                session, day, relation="fact_versions", timeout_ms=count_statement_timeout_ms,
+                remaining_run_seconds=remaining_run_seconds,
+            )
+            hot_count = self._seal_source_count(
+                session, day, relation="fact_hot_payloads", timeout_ms=count_statement_timeout_ms,
+                remaining_run_seconds=remaining_run_seconds,
+            )
             if count != hot_count:
                 raise RuntimeError(f"canonical_archive_source_incomplete: storage_day={day} expected={count} hot={hot_count}")
+            if self.statement_timeout_ms is not None:
+                self._set_seal_timeout(session, self.statement_timeout_ms, remaining_run_seconds)
             source_bytes = session.execute(text("SELECT pg_total_relation_size(to_regclass(:relation))"),
                                            {"relation": relation}).scalar_one()
+            if self.statement_timeout_ms is not None:
+                self._set_seal_timeout(session, self.statement_timeout_ms, remaining_run_seconds)
             result = session.execute(text("""
                 UPDATE market.fact_retention_partitions
                 SET state='sealed', sealed_at=clock_timestamp(), expected_rows=:count, source_bytes=:bytes
                 WHERE storage_day=:day RETURNING *
             """), {"day": day, "count": count, "bytes": source_bytes}).mappings().one()
+            self._check_budget()
         logger.info("canonical_archive_partition_sealed | storage_day=%s rows=%s source_bytes=%s", day, count, source_bytes)
         return dict(result)
 

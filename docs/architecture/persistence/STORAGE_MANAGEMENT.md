@@ -358,6 +358,21 @@ them; the existence of this interface is not a claim about a live database.
 
 ## Canonical archive stage attribution
 
+The maintenance executor gives only the two exact sealing counts (per-day
+`fact_versions` headers and `fact_hot_payloads`) a 60,000 ms statement allowance.
+Ordinary execution statements retain their configured limit (5,000 ms by
+default); locks, page copying, verification, guards and reclamation do not
+inherit the larger count allowance. Before each count the owner narrows it to
+the current remaining run time, preserving the original 600-second run bound.
+Each count uses a SQL savepoint and transaction-local timeout: success restores
+the prior setting before subsequent SQL, while cancellation or failure rolls
+the savepoint back. The enclosing seal transaction still rolls back on error.
+Post-count work refreshes its ordinary timeout against remaining run time.
+Count logs retain source, effective allowance, elapsed duration and outcome.
+Exact header/hot equality, writer fences and immutable source clocks are
+unchanged; a longer count allowance cannot bypass a custody guard. This is an
+operational ceiling, not evidence that production counts finish within it.
+
 Each canonical archive stage records its existing phase duration and catalog
 batch counts. Raw-lineage lookups additionally record the lookup mode, exact
 number of distinct requested keys, witness count, optional bound-manifest
