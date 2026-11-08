@@ -98,3 +98,4 @@ respect.
 
 | [0080](0080-use-ephemeral-fresh-row-handoff-witnesses.md) | Use ephemeral fresh-row handoff witnesses | Draft; qualification pending |
 | [0085](0085-version-market-profile-source-availability.md) | Version Market Profile source availability | Accepted |
+| [0086](0086-retain-observed-incomplete-market-profile-sessions.md) | Retain observed incomplete Market Profile sessions | Accepted |

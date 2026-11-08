@@ -285,3 +285,11 @@ to the chart close grid. Runtime compares that watermark with completed chart
 candle availability. Incomplete native days are explicitly withheld. V1/v2
 remain historical replay versions and cannot establish new predictive causal
 claims. See the [Market Profile timing contract](../../../src/indicators/market_profile/docs/timing_contract.md).
+
+Market Profile v4 is a separate observed-data contract. A closed UTC session may
+retain an explicitly incomplete subset of native candles with truthful source
+availability. Its typed quality context discloses missingness, lineage and
+availability assumptions, without claiming verified closure or predictive
+qualification. Available late rows create new daily revisions and subsequent
+merge state; they never revise earlier snapshots or count as extra sessions.
+Unknown availability remains fail-closed. V1-v3 and frozen evidence stay fixed.

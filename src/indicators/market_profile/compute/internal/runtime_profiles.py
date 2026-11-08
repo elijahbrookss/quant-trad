@@ -95,6 +95,19 @@ class IncrementalRuntimeProfileResolver:
         self._effective_profiles: List[Profile] = []
         self._summary: Dict[str, int] = {"known_profiles": 0, "merged_profiles": 0}
 
+    @classmethod
+    def from_known_sessions(cls, *, profiles_payload, profile_params, current_epoch, symbol=None):
+        """Merge revised daily facts in session order after real availability gating.
+
+        This opt-in surface is for v4 daily replacement. Legacy arrival ordering
+        is unchanged; no synthetic availability timestamps are introduced.
+        """
+        resolver = cls(profiles_payload=profiles_payload, profile_params=profile_params, symbol=symbol)
+        if any(entry.known_at_epoch > current_epoch for entry in resolver._entries):
+            raise RuntimeError("market_profile_source_contract_invalid: session replacement precedes availability")
+        resolver._entries.sort(key=lambda entry: (entry.profile.start, entry.profile.end))
+        return resolver
+
     def resolve(self, *, current_epoch: int) -> Tuple[List[Profile], Dict[str, int]]:
         started = perf_counter()
         epoch = int(current_epoch)
@@ -375,7 +388,9 @@ def resolve_effective_profiles(
 def profile_identity(profile: Profile) -> str:
     start = profile.start.isoformat() if hasattr(profile.start, "isoformat") else str(profile.start)
     end = profile.end.isoformat() if hasattr(profile.end, "isoformat") else str(profile.end)
-    return f"{start}:{end}:{int(getattr(profile, 'session_count', 1) or 1)}"
+    identity = f"{start}:{end}:{int(getattr(profile, 'session_count', 1) or 1)}"
+    revision = getattr(profile, "runtime_revision_key", None)
+    return f"{identity}:{revision}" if revision is not None else identity
 
 
 def _parse_runtime_profile_entries(profiles_payload: Sequence[Any]) -> List[RuntimeProfileEntry]:

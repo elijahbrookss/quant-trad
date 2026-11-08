@@ -171,13 +171,15 @@ def test_validate_config_returns_nested_whole_indicator_contract(monkeypatch) ->
     }
 
 
-def test_v2_config_validation_selects_complete_manifest_and_rejects_unknown_version():
+@pytest.mark.parametrize("version", ["v2", "v3", "v4"])
+def test_versioned_config_validation_selects_complete_manifest_and_rejects_unknown_version(version):
     client = _client()
-    response = client.post("/api/indicators/validate-config", json={"type":"market_profile","version":"v2","params":{}})
+    response = client.post("/api/indicators/validate-config", json={"type":"market_profile","version":version,"params":{}})
     assert response.status_code == 200, response.text
-    assert response.json()["manifest"]["version"] == "v2"
-    assert response.json()["instance"]["version"] == "v2"
+    assert response.json()["manifest"]["version"] == version
+    assert response.json()["instance"]["version"] == version
     assert "first_value_return" in {o["name"] for o in response.json()["outputs"]["typed"]}
+    assert ("profile_quality" in {o["name"] for o in response.json()["outputs"]["typed"]}) == (version == "v4")
     rejected = client.post("/api/indicators/validate-config",json={"type":"market_profile","version":"v999","params":{}})
     assert rejected.status_code == 400
 

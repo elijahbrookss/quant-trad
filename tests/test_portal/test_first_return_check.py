@@ -133,7 +133,7 @@ def test_later_return_does_not_relabel_complete_cutoff_outside_state():
     assert run(inputs,plan)["first_return_comparison"]["origins"][1]["classification"]==OUTSIDE
 
 
-@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3", "v4"])
 def test_rederived_frozen_plan_retains_pinned_indicator_version(version):
     from portal.backend.service.research.planning import plan_research_check, rederive_research_check_plan_from_pinned_inputs
     from portal.backend.service.indicators.indicator_service.requirements import plan_runtime_requirements_for_indicators

@@ -128,6 +128,12 @@ to preserve v1/v2 replay while v3 prepares source-close availability. Whole-inpu
 diagnostics remain build evidence, outside v3's causal per-bar overlays. See
 [ADR 0085](../decisions/0085-version-market-profile-source-availability.md).
 
+MP v4 adds a distinct observed-session contract and typed quality context.
+Available daily revisions replace their prior session in subsequent engine
+state using the existing merge owner, while retaining past snapshots and all
+older versions. Sparse observations do not become closure proof; see
+[ADR 0086](../decisions/0086-retain-observed-incomplete-market-profile-sessions.md).
+
 ## Runtime Validation Surface
 
 The backend indicator runtime validation endpoint and output evidence collector

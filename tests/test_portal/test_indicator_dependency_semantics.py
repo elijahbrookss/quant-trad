@@ -185,18 +185,19 @@ def test_delete_allows_closure_delete_when_dependent_is_in_same_batch() -> None:
     )
 
 
-def test_explicit_runtime_version_roundtrips_in_reserved_metadata_without_public_params():
+@pytest.mark.parametrize("version", ["v2", "v3", "v4"])
+def test_explicit_runtime_version_roundtrips_in_reserved_metadata_without_public_params(version):
     from portal.backend.service.indicators.persistence_payload import indicator_payload_version
     old = merge_indicator_payload({"days_back":180}, [])
     assert old == {"days_back":180} and indicator_payload_version(old)=="v1"
-    stored = merge_indicator_payload({"days_back":180}, [], version="v2")
-    assert indicator_payload_version(stored)=="v2"
+    stored = merge_indicator_payload({"days_back":180}, [], version=version)
+    assert indicator_payload_version(stored)==version
     assert split_indicator_payload(stored)==({"days_back":180}, [])
     from portal.backend.service.storage.repos.indicators import _record_to_indicator_payload
     record=SimpleNamespace(id="profile",name="Profile",type="market_profile",params=stored,color=None,enabled=True,created_at=None,updated_at=None)
     payload=_record_to_indicator_payload(record)
-    assert payload["version"]=="v2"
+    assert payload["version"]==version
     from portal.backend.service.indicators.indicator_factory import IndicatorFactory
     meta=IndicatorFactory().build_meta_from_record(payload)
-    assert meta["manifest"]["version"]=="v2"
+    assert meta["manifest"]["version"]==version
     assert "first_value_return" in {o["name"] for o in meta["typed_outputs"]}
