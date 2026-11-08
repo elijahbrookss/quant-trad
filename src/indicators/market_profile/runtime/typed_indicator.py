@@ -78,16 +78,18 @@ class TypedMarketProfileIndicator(Indicator):
         self._first_return = (FirstReturnState(
             atr_period=int(params.get("retest_atr_period", DEFAULT_RETEST_ATR_PERIOD)),
             lifetime_bars=int(params.get("reclaim_max_bars", DEFAULT_RECLAIM_MAX_BARS)),
-        ) if version in {"v2", "v3"} else None)
+        ) if version in {"v2", "v3", "v4"} else None)
         self.runtime_spec = build_runtime_spec(
             get_indicator_manifest("market_profile", version),
             instance_id=indicator_id,
             version=version,
         )
         self._indicator_id = str(indicator_id or "").strip()
-        self._causal_timing = version == "v3"
-        if self._causal_timing and source_facts.get("profile_boundary_semantics") != "source_availability.v3":
-            raise RuntimeError("market_profile_source_contract_invalid: v3 requires source_availability.v3")
+        self._observed_sessions = version == "v4"
+        self._causal_timing = version in {"v3", "v4"}
+        expected_contract = "observed_sessions.v4" if self._observed_sessions else "source_availability.v3"
+        if self._causal_timing and source_facts.get("profile_boundary_semantics") != expected_contract:
+            raise RuntimeError(f"market_profile_source_contract_invalid: {version} requires {expected_contract}")
         self._profile_availability = dict(source_facts.get("profile_availability") or {})
         self._bin_size = _as_float(params.get("bin_size"), "bin_size")
         self._price_precision = _as_int(params.get("price_precision"), "price_precision")
@@ -110,7 +112,12 @@ class TypedMarketProfileIndicator(Indicator):
         )
         self._source_continuity_warning_logged = False
         self._extend_to_end = bool(self._profile_params.get("extend_value_area_to_chart_end"))
-        self._profile_resolver = IncrementalRuntimeProfileResolver(
+        resolver_type = IncrementalRuntimeProfileResolver
+        if self._observed_sessions:
+            from ..compute.internal.observed_runtime import ObservedSessionResolver
+
+            resolver_type = ObservedSessionResolver
+        self._profile_resolver = resolver_type(
             profiles_payload=self._profiles_payload,
             profile_params=self._profile_params,
             symbol=self._symbol or None,
@@ -272,6 +279,11 @@ class TypedMarketProfileIndicator(Indicator):
             events, context = first_return
             self._outputs["first_value_return"] = RuntimeOutput(bar_time=bar.time, ready=True, value={"events": events})
             self._outputs["first_return_state"] = RuntimeOutput(bar_time=bar.time, ready=True, value=context)
+        if self._observed_sessions:
+            from copy import deepcopy
+
+            self._outputs["profile_quality"] = RuntimeOutput(
+                bar_time=bar.time, ready=True, value=deepcopy(self._profile_resolver.quality))
         self._log_signal_events(bar_state=bar_state)
 
     def _not_ready_outputs(self, bar_time: datetime) -> dict[str, RuntimeOutput]:
@@ -279,6 +291,8 @@ class TypedMarketProfileIndicator(Indicator):
         if self._first_return is not None:
             outputs["first_value_return"] = RuntimeOutput(bar_time=bar_time, ready=False, value={"events": []})
             outputs["first_return_state"] = RuntimeOutput(bar_time=bar_time, ready=False, value={"state_key": None, "fields": {}})
+        if self._observed_sessions:
+            outputs["profile_quality"] = RuntimeOutput(bar_time=bar_time, ready=False, value={"state_key": None, "fields": {}})
         return outputs
 
     def _reset_outputs(self, bar_time: datetime) -> None:

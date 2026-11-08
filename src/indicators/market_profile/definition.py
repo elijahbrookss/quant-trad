@@ -9,13 +9,13 @@ from typing import Any, Mapping
 from indicators.config import DataContext, IndicatorExecutionContext
 from indicators.manifest import resolve_manifest_params
 
-from .manifest import MANIFEST, FIRST_RETURN_MANIFEST, CAUSAL_MANIFEST
+from .manifest import MANIFEST, FIRST_RETURN_MANIFEST, CAUSAL_MANIFEST, OBSERVED_MANIFEST
 
 
 class MarketProfileIndicator:
     NAME = MANIFEST.type
     MANIFEST = MANIFEST
-    MANIFEST_VERSIONS = {"v1": MANIFEST, "v2": FIRST_RETURN_MANIFEST, "v3": CAUSAL_MANIFEST}
+    MANIFEST_VERSIONS = {"v1": MANIFEST, "v2": FIRST_RETURN_MANIFEST, "v3": CAUSAL_MANIFEST, "v4": OBSERVED_MANIFEST}
 
     @classmethod
     def resolve_config(
@@ -96,10 +96,10 @@ class MarketProfileIndicator:
         from indicators.registry import get_indicator_manifest
 
         get_indicator_manifest(cls.NAME, version)
-        if version == "v3":
+        if version in {"v3", "v4"}:
             bin_size = float(resolved_params.get("bin_size") or 0)
             if not isfinite(bin_size) or bin_size <= 0:
-                raise ValueError("market_profile_source_contract_invalid: v3 requires a fixed positive bin_size")
+                raise ValueError(f"market_profile_source_contract_invalid: {version} requires a fixed positive bin_size")
 
         if source_frame is None:
             raise RuntimeError(
@@ -115,7 +115,7 @@ class MarketProfileIndicator:
             days_back=int(resolved_params.get("days_back")),
             symbol=execution_context.symbol,
         )
-        return compute_indicator.build_runtime_source_facts(
+        source_facts = compute_indicator.build_runtime_source_facts(
             params=dict(resolved_params),
             symbol=execution_context.symbol,
             chart_timeframe=execution_context.interval,
@@ -126,6 +126,23 @@ class MarketProfileIndicator:
                 else None
             ),
         )
+        if version == "v4":
+            from .compute.internal.observed_sessions import observed_session_events
+
+            source_facts["profiles"] = observed_session_events(
+                source_frame,
+                bin_size=compute_indicator.bin_size,
+                precision=compute_indicator.price_precision,
+                chart_timeframe=execution_context.interval,
+            )
+            source_facts["profile_boundary_semantics"] = "observed_sessions.v4"
+            source_facts["profile_availability"] = {
+                "contract": "observed_sessions.v4",
+                "policy": "closed_session_observed_subset",
+                "closure_evidence_consumed": False,
+                "predictive_qualification": False,
+            }
+        return source_facts
 
 
 __all__ = ["MarketProfileIndicator"]

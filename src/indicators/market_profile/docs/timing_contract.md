@@ -19,9 +19,30 @@ A profile influences output when `known_at <= evaluation_time`.
 
 ## Strategy-Timeframe Projection Rule
 
+### V4 observed closed sessions
+
+V4 is an explicit alternative to v3's complete-native-day requirement. It admits
+the observed subset of a closed UTC day, without claiming missing bars were
+quiet or closure-verified. Native source clocks and one source identity are
+required. Unknown availability fails preparation; explicit inferred-close
+availability remains labeled as an assumption.
+
+`profile_quality` distinguishes `complete_observed_slots` from
+`observed_incomplete`, retains exact missing slots and per-session lineage, and
+always reports `predictive_qualification=false`. Ready output is usable observed
+context, not predictive certification. Missing-bar price impact is unknown.
+Leave-one-session-out POC sensitivity describes observed member influence only.
+
+Late-known source rows, when present in the selected source input, create later
+daily revisions at their real availability projected to the chart grid. A
+revision replaces its day in the current merge set, never adds another day or
+changes past snapshots. Revised lineage is part of profile identity. Unfinished
+days remain unavailable; no gaps are filled. The canonical frozen-reader revision
+selection remains unchanged. See [ADR 0086](../../../../docs/architecture/decisions/0086-retain-observed-incomplete-market-profile-sessions.md).
+
 ### V3 source availability
 
-New causal research selects an explicit `market_profile` v3 instance. V1 and v2
+Research requiring complete native UTC days selects an explicit `market_profile` v3 instance. V1 and v2
 retain the historical source-open timing for reproducibility; they must not be
 used to support new point-in-time predictive claims.
 

@@ -307,3 +307,20 @@ CAUSAL_MANIFEST = replace(
     version="v3",
     description="Daily native 30m profiles admitted at source availability and completed chart-bar availability, with original-range first returns.",
 )
+
+OBSERVED_MANIFEST = replace(
+    CAUSAL_MANIFEST,
+    version="v4",
+    description="Closed UTC session profiles from causally available observed native bars; incomplete coverage and availability assumptions remain explicit.",
+    outputs=CAUSAL_MANIFEST.outputs + (
+        IndicatorOutput(
+            name="profile_quality", type="context", label="Observed Profile Quality",
+            state_keys=("complete_observed_slots", "observed_incomplete"),
+            fields=("active_profile_key", "sessions", "observed_bars", "expected_bars",
+                    "missing_bars", "availability_inferred", "availability_methods",
+                    "predictive_qualification", "missing_bar_price_impact",
+                    "leave_one_session_out_poc_min", "leave_one_session_out_poc_max",
+                    "max_leave_one_session_out_poc_shift"),
+        ),
+    ),
+)

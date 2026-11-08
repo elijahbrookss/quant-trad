@@ -383,6 +383,12 @@ Create a separate `market_profile` instance through `qt indicators create
 new causal research. V1/v2 retain historical source-open timing and evidence;
 do not use them for new point-in-time predictive claims. V3 requires complete
 native UTC days; incomplete days are withheld with source diagnostics.
+
+For observed incomplete closed-day context, create a separate instance with
+`"version": "v4"`. Consume its `profile_quality` alongside levels and signals.
+Missing bars remain missing; incomplete quality and inferred availability must
+be retained in interpretation. V4 readiness grants no predictive qualification.
+No canonical closure evidence is inferred from a `disclosed_closure` read label.
 `qt indicators validate-config --payload-json <file>` validates the same request.
 Omitting version retains v1. Do not edit a historical instance to change versions.
 
