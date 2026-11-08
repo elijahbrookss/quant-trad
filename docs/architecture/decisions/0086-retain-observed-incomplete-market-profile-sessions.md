@@ -58,6 +58,9 @@ rows' availability, projected onto the chart close grid. At each later source
 availability, preparation may supply a new immutable revision computed only
 from rows available by that cutoff. An unfinished day supplies no profile.
 There are no synthesized missing bars or all-empty synthetic sessions.
+Whole unobserved days between active member sessions are disclosed as compact
+`unobserved_session_ranges` and included in that cluster span's missing-slot
+count. They are not inserted as profile members or treated as quiet sessions.
 There is no minimum coverage fraction beyond at least one observed bar. The
 existing equal weighting of member daily POCs is retained even when a member is
 incomplete; missingness and member-deletion influence must accompany interpretation.

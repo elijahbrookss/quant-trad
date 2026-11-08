@@ -316,7 +316,7 @@ OBSERVED_MANIFEST = replace(
         IndicatorOutput(
             name="profile_quality", type="context", label="Observed Profile Quality",
             state_keys=("complete_observed_slots", "observed_incomplete"),
-            fields=("active_profile_key", "sessions", "observed_bars", "expected_bars",
+            fields=("active_profile_key", "sessions", "unobserved_session_ranges", "observed_bars", "expected_bars",
                     "missing_bars", "availability_inferred", "availability_methods",
                     "predictive_qualification", "missing_bar_price_impact",
                     "leave_one_session_out_poc_min", "leave_one_session_out_poc_max",

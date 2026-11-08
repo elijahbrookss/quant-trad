@@ -64,6 +64,7 @@ def test_observed_session_is_published_at_utc_close_across_chart_timeframes(time
 def test_late_row_replaces_day_once_with_new_identity_and_preserves_saved_snapshot():
     source = source_frame(1)
     source.loc[source.index[10], "known_at"] = pd.Timestamp("2025-01-02T02:00:00Z")
+    source.loc[source.index[10], "known_at_method"] = "platform_acceptance"
     indicator, facts = build(source, version="v4")
     assert [event["quality"]["observed_bars"] for event in facts["profiles"]] == [47,48]
     indicator.apply_bar(candle("2025-01-01T23:45:00Z"), {})
@@ -79,6 +80,7 @@ def test_late_row_replaces_day_once_with_new_identity_and_preserves_saved_snapsh
 def test_late_older_day_remerges_in_session_order_without_counting_an_extra_session():
     source = source_frame(2)
     source.loc[source.index[10], "known_at"] = pd.Timestamp("2025-01-03T02:00:00Z")
+    source.loc[source.index[10], "known_at_method"] = "platform_acceptance"
     indicator, _ = build(source, version="v4", merged=True)
     indicator.apply_bar(candle("2025-01-02T23:45:00Z"), {})
     assert quality(indicator)["fields"]["observed_bars"] == 95
@@ -96,6 +98,7 @@ def test_late_older_day_remerges_in_session_order_without_counting_an_extra_sess
 def test_typed_quality_signals_and_overlays_preserve_prefix_under_late_and_changed_future_rows(merged, cutoff):
     source = source_frame(3)
     source.loc[source.index[10], "known_at"] = pd.Timestamp("2025-01-03T02:00:00Z")
+    source.loc[source.index[10], "known_at_method"] = "platform_acceptance"
     source = source.drop(source.index[42])
     boundary = pd.Timestamp(cutoff)
     prefix = source.loc[source.known_at <= boundary]
@@ -165,3 +168,52 @@ def test_mixed_source_identity_cannot_be_hidden_by_a_daily_aggregate():
     source.loc[source.index[4], "source_identity_key"] = "another-source"
     with pytest.raises(ValueError, match="one explicit source identity"):
         build(source, version="v4")
+
+
+def test_whole_unobserved_day_inside_cluster_is_disclosed_without_inventing_a_member():
+    source = source_frame(3).drop(source_frame(3).index[48:96])
+    indicator, _ = build(source, version="v4", merged=True)
+    indicator.apply_bar(candle("2025-01-03T23:45:00Z"), {})
+    value = quality(indicator)
+    assert value["state_key"] == "observed_incomplete"
+    fields = value["fields"]
+    assert len(fields["sessions"]) == 2
+    assert fields["observed_bars"] == 96 and fields["expected_bars"] == 144
+    assert fields["missing_bars"] == 48
+    assert fields["unobserved_session_ranges"] == [{"start": "2025-01-02T00:00:00+00:00",
+        "end_exclusive": "2025-01-03T00:00:00+00:00", "missing_days": 1}]
+
+
+def test_subsecond_late_row_stays_missing_until_projected_availability():
+    source = source_frame(1)
+    source.loc[source.index[-1], "known_at"] = pd.Timestamp("2025-01-02T00:00:00.001Z")
+    source.loc[source.index[-1], "known_at_method"] = "platform_acceptance"
+    indicator, facts = build(source, version="v4")
+    assert [entry["known_at"] for entry in facts["profiles"]] == [
+        int(pd.Timestamp("2025-01-02T00:00:00Z").timestamp()), int(pd.Timestamp("2025-01-02T00:15:00Z").timestamp())]
+    indicator.apply_bar(candle("2025-01-01T23:45:00Z"), {})
+    assert quality(indicator)["fields"]["observed_bars"] == 47
+    indicator.apply_bar(candle("2025-01-02T00:00:00Z"), {})
+    assert quality(indicator)["fields"]["observed_bars"] == 48
+
+
+def test_unretained_revision_history_cannot_be_guessed_from_duplicate_source_opens():
+    source = source_frame(1)
+    correction = source.iloc[[4]].copy()
+    correction["known_at"] = pd.Timestamp("2025-01-02T02:00:00Z")
+    correction["known_at_method"] = "platform_acceptance"
+    correction["revision"] = 2
+    with pytest.raises(ValueError, match="unique aligned native 30m opens"):
+        build(pd.concat([source, correction]), version="v4")
+
+
+def test_future_nullable_metadata_cannot_change_visible_prefix_lineage():
+    prefix = source_frame(1)
+    full = source_frame(2)
+    full.loc[full.index[60], "market_commit_seq"] = None
+    left, _ = build(prefix, version="v4")
+    right, _ = build(full, version="v4")
+    bar = candle("2025-01-01T23:45:00Z")
+    left.apply_bar(bar, {})
+    right.apply_bar(bar, {})
+    assert left.snapshot() == right.snapshot()

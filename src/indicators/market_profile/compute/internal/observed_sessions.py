@@ -14,6 +14,19 @@ from .computation import build_tpo_histogram, extract_value_area
 STEP = pd.Timedelta(minutes=30)
 
 
+def _lineage_value(row, field):
+    value = row.get(field)
+    if pd.isna(value):
+        return None
+    if field in {"revision", "market_commit_seq"}:
+        # A future nullable row may change pandas' dtype for the whole column.
+        # That must not change the identity of already visible integer metadata.
+        if isinstance(value, bool) or not isfinite(float(value)) or float(value) != int(value):
+            raise ValueError(f"market_profile_source_invalid: integer {field} required")
+        return int(value)
+    return str(value)
+
+
 def observed_session_events(frame, *, bin_size, precision, chart_timeframe):
     """Each event contains only rows available by its publication cutoff.
 
@@ -81,7 +94,7 @@ def observed_session_events(frame, *, bin_size, precision, chart_timeframe):
                     "open_time": timestamp.isoformat(), "close_time": row.close_time.isoformat(),
                     "known_at": row.known_at.isoformat(),
                     **{field: float(row[field]) for field in ("open", "high", "low", "close")},
-                    **{field: None if pd.isna(row.get(field)) else str(row.get(field))
+                    **{field: _lineage_value(row, field)
                        for field in ("source_identity_key", "revision", "market_commit_seq", "known_at_method")},
                 })
             missing = expected.difference(visible.index)

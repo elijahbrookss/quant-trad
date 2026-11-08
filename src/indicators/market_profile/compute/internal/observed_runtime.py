@@ -2,6 +2,8 @@
 from copy import deepcopy
 from dataclasses import dataclass
 
+import pandas as pd
+
 from market_data.frozen import semantic_hash
 
 from .runtime_profiles import IncrementalRuntimeProfileResolver, profile_identity
@@ -65,13 +67,19 @@ class ObservedSessionResolver:
     def _quality(profile, members):
         sessions = [deepcopy(entry["quality"]) for entry in members]
         observed = sum(session["observed_bars"] for session in sessions)
-        expected = 48 * len(sessions)
+        dates = [pd.Timestamp(session["session"]) for session in sessions]
+        day = pd.Timedelta(days=1)
+        expected = 48 * ((dates[-1]-dates[0]).days+1)
+        absent = [{"start": (left+day).isoformat(), "end_exclusive": right.isoformat(),
+                   "missing_days": (right-left).days-1}
+                  for left, right in zip(dates, dates[1:]) if right-left > day]
         pocs = [entry["POC"] for entry in members]
         deletions = [(sum(pocs)-value)/(len(pocs)-1) for value in pocs] if len(pocs) > 1 else []
         return {
             "state_key": "complete_observed_slots" if observed == expected else "observed_incomplete",
             "fields": {
                 "active_profile_key": profile_identity(profile), "sessions": sessions,
+                "unobserved_session_ranges": absent,
                 "observed_bars": observed, "expected_bars": expected,
                 "missing_bars": expected-observed,
                 "availability_inferred": any(session["availability_inferred"] for session in sessions),
