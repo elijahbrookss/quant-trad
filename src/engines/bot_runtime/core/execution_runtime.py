@@ -73,8 +73,17 @@ class DeterministicExecutionModel(ExecutionModel):
             metadata["slippage_price"] = float(fill_price) - float(requested_price)
         return metadata
 
+    def _timestamp(self, intent: ExecutionIntent) -> str:
+        if not self.assumptions.uses_causal_bar_clock:
+            return _utc_now()
+        raw = intent.metadata.get("evaluation_at") or intent.metadata.get("decision_known_at")
+        clock = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if clock.tzinfo is None:
+            raise ValueError("causal_execution_clock_requires_timezone")
+        return clock.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
     def submit(self, intent: ExecutionIntent) -> ExecutionOutcome:
-        timestamp = _utc_now()
+        timestamp = self._timestamp(intent)
         limit_price = intent.limit_params.limit_price if intent.limit_params else None
         validity_window = intent.limit_params.validity_window if intent.limit_params else None
         return ExecutionOutcome(
@@ -130,7 +139,7 @@ class DeterministicExecutionModel(ExecutionModel):
                     metadata=dict(conformance.metadata),
                 )
                 outcome = self.submit(intent)
-                return replace(outcome, status="rejected", updated_at=_utc_now()), rejection
+                return replace(outcome, status="rejected", updated_at=self._timestamp(intent)), rejection
             normalized_limit = intent.limit_params
             if normalized_limit is not None and conformance.normalized_price is not None:
                 normalized_limit = replace(
@@ -148,7 +157,7 @@ class DeterministicExecutionModel(ExecutionModel):
                 metadata={"requested_qty": intent.qty},
             )
             outcome = self.submit(intent)
-            return replace(outcome, status="rejected", updated_at=_utc_now()), rejection
+            return replace(outcome, status="rejected", updated_at=self._timestamp(intent)), rejection
 
         order_type = intent.order_type
         if order_type == "market":
@@ -173,7 +182,7 @@ class DeterministicExecutionModel(ExecutionModel):
                         replace(
                             outcome,
                             status="rejected",
-                            updated_at=_utc_now(),
+                            updated_at=self._timestamp(intent),
                             metadata={**dict(outcome.metadata), **dict(protection.metadata)},
                         ),
                         rejection,
@@ -188,7 +197,7 @@ class DeterministicExecutionModel(ExecutionModel):
                 quantity=float(intent.qty),
                 contract_size=float(intent.contract_size),
             )
-            timestamp = _utc_now()
+            timestamp = self._timestamp(intent)
             return (
                 ExecutionOutcome(
                     order_id=intent.order_id,
@@ -224,7 +233,7 @@ class DeterministicExecutionModel(ExecutionModel):
                 metadata={"order_type": order_type},
             )
             outcome = self.submit(intent)
-            return replace(outcome, status="rejected", updated_at=_utc_now()), rejection
+            return replace(outcome, status="rejected", updated_at=self._timestamp(intent)), rejection
 
         limit_price = float(intent.limit_params.limit_price or intent.requested_price)
         side = str(intent.side).lower()
@@ -253,7 +262,7 @@ class DeterministicExecutionModel(ExecutionModel):
             return replace(
                 outcome,
                 status=rejected_status,
-                updated_at=_utc_now(),
+                updated_at=self._timestamp(intent),
                 limit_price=limit_price,
                 validity_window=intent.limit_params.validity_window,
             ), rejection
@@ -269,7 +278,7 @@ class DeterministicExecutionModel(ExecutionModel):
             return replace(
                 outcome,
                 status="open",
-                updated_at=_utc_now(),
+                updated_at=self._timestamp(intent),
                 remaining_qty=float(intent.qty),
                 limit_price=limit_price,
                 validity_window=intent.limit_params.validity_window,
@@ -285,7 +294,7 @@ class DeterministicExecutionModel(ExecutionModel):
             quantity=float(intent.qty),
             contract_size=float(intent.contract_size),
         )
-        timestamp = _utc_now()
+        timestamp = self._timestamp(intent)
         return (
             ExecutionOutcome(
                 order_id=intent.order_id,

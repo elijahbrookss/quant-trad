@@ -13,6 +13,8 @@ tags:
   - autonomy
 code_paths:
   - src/engines/bot_runtime/core/execution_assumptions.py
+  - src/engines/bot_runtime/core/bar_execution_clock.py
+  - tests/integration/runtime/test_causal_resting_bar.py
   - src/engines/bot_runtime/core/execution_runtime.py
   - src/engines/bot_runtime/core/execution.py
   - src/engines/bot_runtime/core/execution_profile.py
@@ -103,6 +105,7 @@ at least one genuinely adverse scenario.
 | `legacy_bar_touch.v1` | Historical touch/full-fill compatibility with explicit-zero exploratory economics. | X0 |
 | `costed_bar.v1` | Explicit fees and adverse market/stop BPS; passive touch behavior remains. | X1 |
 | `conservative_bar.v1` | X1 economics plus strict passive penetration and disclosed full fills. | X2 |
+| `causal_spot_resting_bar.v1` | Explicit cash-spot resting/FAST backtest policy with strict whole-bar eligibility, availability clocks and immutable entry facts. | X2 |
 
 Version pinning is the compatibility mechanism. Historical behavior is not
 changed in place. Direct legacy constructors receive
@@ -193,3 +196,56 @@ lifecycle supplies durable order state. Replay-certified book execution may
 consume L2 only through those implemented boundaries and must use atomic
 per-fill entry settlement for book-driven partial entries. None of these
 contracts may reinterpret X2 as book-level execution evidence.
+
+## Opt-in causal cash-spot resting bars
+
+`causal_spot_resting_bar.v1` is an explicit development backtest model. It is
+limited to cash spot, FAST bar execution, resting limit-maker entry, cancel
+fallback and the declared full-fill assumption. It rejects paper/live, book
+inputs, market entry and selection/promotion intent. Existing model versions
+and defaults are preserved, including their recorded limitations; old immutable
+runs are not rewritten or re-certified by this model.
+
+The source bar-open label, typed event availability, decision time and execution
+evaluation time remain distinct. Decision artifacts retain their bar identity
+and record the completed bar's availability as decision time. Future or missing
+signal clocks fail closed without rewriting or truncating the source outputs.
+Delayed candle receipt remains unsupported by the historical close-price model.
+
+A pending order may use only a whole bar whose open is **strictly later** than
+the immutable decision availability. Equality at the next open is an ineligible
+guard interval, not an invented positive epsilon. With interval-close inferred
+availability, this deliberately skips the immediately following bar. Validity
+counts eligible completed bars only. Repeated/ineligible evaluation does not
+charge, fill, decrement validity or emit lifecycle changes. A missing interval
+while pending fails closed; terminal pending orders expire without a fill.
+
+An eligible range fill is acknowledged at that bar's availability, with the
+whole eligible interval retained in raw outcome evidence. This clock is a
+conservative completed-bar simulation convention, not an observed sub-bar venue
+fill time. The eligible interval itself begins after recognition availability.
+On the entry-fill bar, only adverse stop risk is admitted: no favorable target,
+trailing movement or excursion credit, and no completed holding-bar count.
+Subsequent bars resolve the existing stop before favorable targets; stop
+tightening learned at a close becomes effective on a later bar. Targets and
+stops still use canonical fee, slippage, wallet and settlement owners.
+
+Entry event quantity, price, notional, fees, source/version and wallet evidence
+come from an immutable entry-fill snapshot, not legs or cumulative position
+fees after exits. Partial entry outcomes are unsupported and rejected before
+entry settlement by this full-fill-only model. Multiple exit legs retain their
+separate canonical fills and must reconcile with wallet and total trade fees.
+
+The model and assumption hashes are part of immutable run identity. Its X2
+ceiling does not certify attained execution quality, scientific validity or
+venue-realized performance. Research must separately freeze its changed passive
+entry price, guard interval, missed/cancelled opportunities and maker-entry cost
+assumption before outcomes. Shared candidate recognition is not shared realized
+fills or independent portfolio opportunity counts.
+
+For the opt-in causal policy, execution availability must equal the interval
+close. A delayed eligible fill bar is rejected before order/position mutation;
+a following normal bar cannot create an exit before a delayed entry. Missing
+intervals while pending or holding also fail closed. MFE/MAE are labeled
+`coarse_bar_bounds_not_realized_path`, not realized intra-trade excursions;
+a stop-first coarse bar does not prove the favorable range occurred while held.

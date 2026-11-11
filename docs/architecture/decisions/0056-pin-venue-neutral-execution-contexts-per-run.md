@@ -68,6 +68,17 @@ governed by ADR 0049.
   ownership.
 - A resolved profile cannot authorize external order submission.
 
+## Historical-clock policy extension
+
+The opt-in `causal_spot_resting_bar.v1` model keeps source bar labels separate
+from availability and completed-bar execution clocks. Its strict whole-bar
+entry eligibility and immutable entry-fill snapshot are pinned by model and
+assumption hashes. It reuses canonical fill, wallet and reporting owners; it
+adds no second executor or ledger. Earlier models remain available for truthful
+legacy replay and are not silently repaired or certified in place. The
+[bar-execution contract](../execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md#opt-in-causal-cash-spot-resting-bars)
+defines the restricted development backtest scope and adverse-path assumptions.
+
 ## Consequences
 
 - A second venue can supply different rules and fees without changing the

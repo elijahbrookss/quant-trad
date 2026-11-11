@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, replace
 from typing import Optional, TYPE_CHECKING
+from datetime import datetime
+from .bar_execution_clock import execution_clock, bar_availability
 
 from utils.log_context import build_log_context, with_log_context
 from .execution_intent import ExecutionIntent, ExecutionOutcome
@@ -46,6 +48,10 @@ class PendingEntry:
     remaining_qty: float = 0.0
     order_lifecycle: Optional[CanonicalOrderLifecycle] = None
     applied_fill_ids: tuple[str, ...] = ()
+    submitted_bar_time: Optional[datetime] = None
+    decision_known_at: Optional[datetime] = None
+    last_observed_bar_time: Optional[datetime] = None
+    next_bar_open: Optional[datetime] = None
 
 
 class EntryExecutionCoordinator:
@@ -54,6 +60,17 @@ class EntryExecutionCoordinator:
     def __init__(self, engine: "LadderRiskEngine") -> None:
         self._engine = engine
         self.pending_entry: Optional[PendingEntry] = None
+
+    def _clock(self, candle: "Candle") -> datetime:
+        return execution_clock(candle, self._engine.execution_assumptions)
+
+    def _validate_causal_outcome(self, outcome: ExecutionOutcome, requested: float) -> None:
+        if not self._engine.execution_assumptions.uses_causal_bar_clock:
+            return
+        if outcome.status == "partially_filled" or (
+            outcome.filled_qty and (outcome.status != "filled" or abs(float(outcome.filled_qty) - requested) > 1e-12)
+        ):
+            raise RuntimeError("causal_spot_resting_bar_partial_fill_unsupported")
 
     @property
     def has_pending(self) -> bool:
@@ -97,7 +114,7 @@ class EntryExecutionCoordinator:
             price_source=("limit_price" if intent.limit_params is not None else "requested_price"),
             execution_context_hash=context.context_hash,
             execution_policy_hash=policy_hash,
-            known_at=candle.time,
+            known_at=self._clock(candle),
             signal_id=getattr(engine, "last_signal_id", None),
             decision_id=getattr(engine, "last_decision_id", None),
             trade_id=request.trade_id,
@@ -355,13 +372,16 @@ class EntryExecutionCoordinator:
         execution_context = engine.execution_context
         intent_metadata = {
             **dict(intent.metadata),
-            "known_at": candle.time,
+            "known_at": self._clock(candle),
         }
+        if engine.execution_assumptions.uses_causal_bar_clock:
+            intent_metadata.update(decision_known_at=self._clock(candle),
+                submitted_bar_time=candle.time, submitted_bar_end=candle.end_time)
         if execution_context.model.supports_latency:
             intent_metadata.pop("arrival_at", None)
-            intent_metadata["decision_known_at"] = candle.time
+            intent_metadata["decision_known_at"] = self._clock(candle)
         else:
-            intent_metadata["arrival_at"] = candle.time
+            intent_metadata["arrival_at"] = self._clock(candle)
         intent = replace(intent, metadata=intent_metadata)
         request = replace(request, intent=intent)
 
@@ -388,7 +408,7 @@ class EntryExecutionCoordinator:
             lifecycle.transition(
                 attempt_id=lifecycle.snapshot().active_attempt_id or lifecycle.attempts[-1].attempt_id,
                 state=CanonicalOrderState.REJECTED,
-                known_at=candle.time,
+                known_at=self._clock(candle),
                 reason=str(conformance.reason or "ORDER_CONFORMANCE_FAILED"),
                 venue_event_name=venue_lifecycle_event_name(
                     execution_context,
@@ -410,7 +430,7 @@ class EntryExecutionCoordinator:
         lifecycle.transition(
             attempt_id=lifecycle.snapshot().active_attempt_id or lifecycle.attempts[-1].attempt_id,
             state=CanonicalOrderState.VALIDATED,
-            known_at=candle.time,
+            known_at=self._clock(candle),
             venue_event_name=venue_lifecycle_event_name(
                 execution_context,
                 CanonicalOrderState.VALIDATED,
@@ -434,6 +454,7 @@ class EntryExecutionCoordinator:
                 candle_close=candle.close,
                 candle_open=candle.open,
             )
+        self._validate_causal_outcome(outcome, float(intent.qty))
         outcome = self._apply_evaluated_outcome(
             lifecycle=lifecycle,
             outcome=outcome,
@@ -441,7 +462,7 @@ class EntryExecutionCoordinator:
             known_at=(
                 outcome.updated_at
                 if execution_context.model.supports_latency
-                else candle.time
+                else self._clock(candle)
             ),
         )
         self._record_lifecycle(lifecycle, after_seq=lifecycle_start_seq)
@@ -483,6 +504,10 @@ class EntryExecutionCoordinator:
                 fallback=request.limit_params.fallback if request.limit_params else "cancel",
                 remaining_qty=remaining_qty,
                 order_lifecycle=lifecycle,
+                submitted_bar_time=(candle.time if engine.execution_assumptions.uses_causal_bar_clock else None),
+                decision_known_at=(self._clock(candle) if engine.execution_assumptions.uses_causal_bar_clock else None),
+                last_observed_bar_time=(candle.time if engine.execution_assumptions.uses_causal_bar_clock else None),
+                next_bar_open=(candle.end_time if engine.execution_assumptions.uses_causal_bar_clock else None),
             )
 
         if outcome.status in {"open", "partially_filled"}:
@@ -552,6 +577,18 @@ class EntryExecutionCoordinator:
         lifecycle = pending.order_lifecycle
         if lifecycle is None:
             raise RuntimeError("pending entry is missing its canonical order lifecycle")
+        if engine.execution_assumptions.uses_causal_bar_clock:
+            if pending.decision_known_at is None or pending.last_observed_bar_time is None:
+                raise RuntimeError("causal_pending_entry_clock_missing")
+            if candle.time <= pending.last_observed_bar_time:
+                return None
+            if pending.next_bar_open != candle.time:
+                raise RuntimeError("causal_pending_entry_data_gap")
+            available = bar_availability(candle)
+            if candle.time <= pending.decision_known_at or available <= pending.decision_known_at:
+                pending.last_observed_bar_time = candle.time
+                pending.next_bar_open = candle.end_time
+                return None
         lifecycle_start_seq = len(lifecycle.events)
         execution_model = engine._resolve_execution_model()
         pending_metadata = {
@@ -570,14 +607,18 @@ class EntryExecutionCoordinator:
             pending_metadata.pop("arrival_at", None)
             pending_metadata.update(
                 {
-                    "evaluation_at": candle.time,
+                    "evaluation_at": self._clock(candle),
                     "order_request_id": lifecycle.request.request_id,
                     "order_original_requested_qty": float(lifecycle.request.requested_qty),
                     "order_cumulative_filled_qty": float(active_snapshot.cumulative_filled_qty),
                 }
             )
+        elif engine.execution_assumptions.uses_causal_bar_clock:
+            # Original source/order availability is immutable; only evaluation advances.
+            pending_metadata.update(evaluation_at=self._clock(candle),
+                eligible_bar_start=candle.time, eligible_bar_end=candle.end_time)
         else:
-            pending_metadata.update({"known_at": candle.time, "arrival_at": candle.time})
+            pending_metadata.update({"known_at": self._clock(candle), "arrival_at": self._clock(candle)})
         pending_intent = replace(
             pending.intent,
             qty=float(pending.remaining_qty or pending.intent.qty),
@@ -600,6 +641,10 @@ class EntryExecutionCoordinator:
                     else normalized_status
                 ),
             )
+        self._validate_causal_outcome(outcome, float(pending_intent.qty))
+        if engine.execution_assumptions.uses_causal_bar_clock:
+            pending.last_observed_bar_time = candle.time
+            pending.next_bar_open = candle.end_time
         outcome = self._apply_evaluated_outcome(
             lifecycle=lifecycle,
             outcome=outcome,
@@ -607,7 +652,7 @@ class EntryExecutionCoordinator:
             known_at=(
                 outcome.updated_at
                 if engine.execution_context.model.supports_latency
-                else candle.time
+                else self._clock(candle)
             ),
         )
         self._record_lifecycle(lifecycle, after_seq=lifecycle_start_seq)
@@ -673,6 +718,18 @@ class EntryExecutionCoordinator:
         )
         logger.warning(with_log_context("entry_rejected", context))
         return None
+
+    def expire_pending_at_end(self, candle: "Candle") -> None:
+        pending = self.pending_entry
+        if pending is None or not self._engine.execution_assumptions.uses_causal_bar_clock:
+            return
+        if self._clock(candle) < pending.decision_known_at:
+            raise RuntimeError("causal_terminal_precedes_order_availability")
+        intent = replace(pending.intent, metadata={**dict(pending.intent.metadata), "evaluation_at": self._clock(candle)})
+        outcome = self._engine._resolve_execution_model().submit(intent)
+        pending.fallback = "backtest_end_cancel"
+        self.pending_entry = None
+        self._apply_entry_fallback(candle, pending, outcome)
 
     def _build_entry_fill(
         self,
@@ -807,7 +864,7 @@ class EntryExecutionCoordinator:
                 lifecycle,
                 predecessor_attempt_id=predecessor_attempt_id,
                 requested_price=float(candle.close),
-                known_at=candle.time,
+                known_at=self._clock(candle),
                 order_type="market",
                 time_in_force="gtc",
                 post_only=False,
@@ -827,14 +884,14 @@ class EntryExecutionCoordinator:
                 limit_params=None,
                 metadata={
                     **dict(pending.intent.metadata),
-                    "known_at": candle.time,
-                    "arrival_at": candle.time,
+                    "known_at": self._clock(candle),
+                    "arrival_at": self._clock(candle),
                 },
             )
             lifecycle.replace(
                 attempt_id=predecessor_attempt_id,
                 replacement_attempt=replacement_attempt,
-                known_at=candle.time,
+                known_at=self._clock(candle),
                 reason="convert_to_market",
                 venue_event_name=venue_lifecycle_event_name(
                     engine.execution_context,
@@ -844,7 +901,7 @@ class EntryExecutionCoordinator:
             lifecycle.transition(
                 attempt_id=replacement_attempt.attempt_id,
                 state=CanonicalOrderState.VALIDATED,
-                known_at=candle.time,
+                known_at=self._clock(candle),
                 venue_event_name=venue_lifecycle_event_name(
                     engine.execution_context,
                     CanonicalOrderState.VALIDATED,
@@ -872,7 +929,7 @@ class EntryExecutionCoordinator:
                 lifecycle=lifecycle,
                 outcome=market_outcome,
                 rejection=rejection,
-                known_at=candle.time,
+                known_at=self._clock(candle),
             )
             self._record_lifecycle(lifecycle, after_seq=lifecycle_start_seq)
             if rejection:
@@ -923,7 +980,7 @@ class EntryExecutionCoordinator:
         lifecycle.transition(
             attempt_id=attempt_id,
             state=CanonicalOrderState.EXPIRED,
-            known_at=candle.time,
+            known_at=self._clock(candle),
             reason=fallback,
             venue_event_name=venue_lifecycle_event_name(
                 engine.execution_context,

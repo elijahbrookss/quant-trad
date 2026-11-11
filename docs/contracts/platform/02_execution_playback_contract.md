@@ -64,6 +64,32 @@ instrument metadata or apply to paper/live execution, selection or promotion.
 Their rates and provenance are simulation assumptions, not a claim of actual
 account fees. Missing configuration is not permission to assume zero costs.
 
+### Opt-in causal resting backtests
+
+`causal_spot_resting_bar.v1` is restricted to cash-spot FAST backtests with
+resting limit-maker entry, cancel fallback and full-fill assumptions. It uses
+only whole execution bars starting strictly after immutable decision
+availability; an equal-time open is ineligible and consumes no validity. This
+explicit guard interval changes the economic entry question and must be frozen
+in the research specification. It does not alter legacy defaults or paper/live.
+
+The model distinguishes source bar labels from decision and fill clocks. Range
+fills are acknowledged at the eligible bar's availability, without claiming
+sub-bar precision. The recognizing range cannot fill an order. Entry-fill-bar
+risk is adverse-only; favorable targets/trails and holding-bar count start
+later. Subsequent stop tightening applies from a later bar. Per-entry events
+use immutable fill quantity/notional/fee/wallet evidence. Future source clocks,
+pending data gaps and partial entry outcomes fail closed. Full policy and
+compatibility details are in the
+[bar-execution contract](../../architecture/execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md#opt-in-causal-cash-spot-resting-bars).
+
+For the opt-in causal policy, execution availability must equal the interval
+close. A delayed eligible fill bar is rejected before order/position mutation;
+a following normal bar cannot create an exit before a delayed entry. Missing
+intervals while pending or holding also fail closed. MFE/MAE are labeled
+`coarse_bar_bounds_not_realized_path`, not realized intra-trade excursions;
+a stop-first coarse bar does not prove the favorable range occurred while held.
+
 ## Execution-Quality Class Contract
 
 QT uses one execution-quality ladder: X0 through X5. No other X-class value is

@@ -1050,7 +1050,7 @@ def execution_model_artifact_from_assumptions(
     assumptions: ResolvedExecutionAssumptions,
 ) -> ExecutionModelArtifact:
     return ExecutionModelArtifact(
-        schema_version=EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION,
+        schema_version=(EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION_V2 if assumptions.uses_causal_bar_clock else EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION),
         artifact_id="deterministic_bar_execution",
         version=assumptions.model_version,
         assumption_manifest_hash=assumptions.manifest_hash,
@@ -1061,7 +1061,13 @@ def execution_model_artifact_from_assumptions(
         supports_latency=False,
         calibration_artifact_hash=None,
         source="execution_assumptions_manifest",
-        parameters={},
+        parameters=({
+            "eligibility": "whole_bar_open_strictly_after_decision_availability",
+            "execution_availability": "interval_close_only_delayed_receipt_unsupported",
+            "fill_clock": "eligible_completed_bar_availability_not_observed_intrabar_time",
+            "excursion_measurement": "coarse_bar_bounds_not_realized_path",
+            "entry_bar_favorable_range_excluded": True,
+        } if assumptions.uses_causal_bar_clock else {}),
         artifact_hash="",
     )
 

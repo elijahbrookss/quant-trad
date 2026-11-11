@@ -303,6 +303,13 @@ class SeriesBuilderConstructionMixin:
         Returns:
             StrategySeries ready for runtime execution
         """
+        raw_causal_assumptions = self.config.get("execution_assumptions")
+        if isinstance(raw_causal_assumptions, Mapping) and raw_causal_assumptions.get("model_version") == "causal_spot_resting_bar.v1":
+            from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
+            validate_causal_run_mode(resolve_execution_assumptions(
+                self.config.get("economic_claim_intent"), raw_causal_assumptions,
+                source=str(raw_causal_assumptions.get("source") or "run_start_request")),
+                self.run_type, str(self.config.get("execution_mode") or "fast"))
         # Step 1: Resolve strategy metadata from the canonical instrument link.
         instrument_id = instrument_link.instrument_id
         if not instrument_id:
@@ -426,6 +433,8 @@ class SeriesBuilderConstructionMixin:
             if "economic_claim_intent" in self.config
             else legacy_execution_assumptions()
         )
+        from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
+        validate_causal_run_mode(execution_assumptions, self.run_type, str(self.config.get("execution_mode") or "fast"))
         pinned_manifest_hash = str(raw_execution_assumptions.get("manifest_hash") or "").strip()
         if pinned_manifest_hash and pinned_manifest_hash != execution_assumptions.manifest_hash:
             raise RuntimeError("execution_assumption_manifest_hash_mismatch")

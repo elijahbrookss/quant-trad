@@ -19,6 +19,7 @@ EXECUTION_ASSUMPTIONS_SCHEMA_VERSION = "execution_assumptions.v1"
 LEGACY_BAR_MODEL_VERSION = "legacy_bar_touch.v1"
 COSTED_BAR_MODEL_VERSION = "costed_bar.v1"
 CONSERVATIVE_BAR_MODEL_VERSION = "conservative_bar.v1"
+CAUSAL_SPOT_BAR_MODEL_VERSION = "causal_spot_resting_bar.v1"
 
 
 class EconomicClaimIntent(str, Enum):
@@ -46,6 +47,7 @@ _SUPPORTED_MODELS = {
     LEGACY_BAR_MODEL_VERSION,
     COSTED_BAR_MODEL_VERSION,
     CONSERVATIVE_BAR_MODEL_VERSION,
+    CAUSAL_SPOT_BAR_MODEL_VERSION,
 }
 _SUPPORTED_PASSIVE_POLICIES = {"touch", "strict_penetration"}
 _SUPPORTED_FEE_POLICIES = {"instrument_resolved", "explicit_zero"}
@@ -85,6 +87,10 @@ class ResolvedExecutionAssumptions:
     @property
     def uses_strict_penetration(self) -> bool:
         return self.passive_fill_policy == "strict_penetration"
+
+    @property
+    def uses_causal_bar_clock(self) -> bool:
+        return self.model_version == CAUSAL_SPOT_BAR_MODEL_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -224,7 +230,7 @@ def _quality_ceiling(
     )
     if not costed:
         return ExecutionQualityClass.X0.value
-    if model_version == CONSERVATIVE_BAR_MODEL_VERSION and passive_fill_policy == "strict_penetration" and full_fill_assumption:
+    if model_version in {CONSERVATIVE_BAR_MODEL_VERSION, CAUSAL_SPOT_BAR_MODEL_VERSION} and passive_fill_policy == "strict_penetration" and full_fill_assumption:
         return ExecutionQualityClass.X2.value
     if model_version == COSTED_BAR_MODEL_VERSION:
         return ExecutionQualityClass.X1.value
@@ -253,11 +259,11 @@ def resolve_execution_assumptions(
     if model_version not in _SUPPORTED_MODELS:
         raise ValueError(f"unsupported execution_assumptions.model_version: {model_version}")
 
-    default_passive = "strict_penetration" if model_version == CONSERVATIVE_BAR_MODEL_VERSION else "touch"
+    default_passive = "strict_penetration" if model_version in {CONSERVATIVE_BAR_MODEL_VERSION, CAUSAL_SPOT_BAR_MODEL_VERSION} else "touch"
     passive_fill_policy = str(payload.get("passive_fill_policy") or default_passive).strip().lower()
     if passive_fill_policy not in _SUPPORTED_PASSIVE_POLICIES:
         raise ValueError(f"unsupported execution_assumptions.passive_fill_policy: {passive_fill_policy}")
-    if model_version == CONSERVATIVE_BAR_MODEL_VERSION and passive_fill_policy != "strict_penetration":
+    if model_version in {CONSERVATIVE_BAR_MODEL_VERSION, CAUSAL_SPOT_BAR_MODEL_VERSION} and passive_fill_policy != "strict_penetration":
         raise ValueError("conservative_bar.v1 requires passive_fill_policy=strict_penetration")
 
     fee_policy = str(payload.get("fee_policy") or ("" if economic else "explicit_zero")).strip().lower()
@@ -271,6 +277,8 @@ def resolve_execution_assumptions(
         field="full_fill_assumption",
         default=not economic,
     )
+    if model_version == CAUSAL_SPOT_BAR_MODEL_VERSION and not full_fill:
+        raise ValueError("causal_spot_resting_bar.v1 requires full_fill_assumption=true")
     explicit_zero = _boolean(
         payload.get("explicit_zero_cost_override"),
         field="explicit_zero_cost_override",
@@ -341,6 +349,7 @@ def apply_adverse_slippage(price: float, side: Any, bps: float | None) -> float:
 
 __all__ = [
     "CONSERVATIVE_BAR_MODEL_VERSION",
+    "CAUSAL_SPOT_BAR_MODEL_VERSION",
     "COSTED_BAR_MODEL_VERSION",
     "EXECUTION_ASSUMPTIONS_SCHEMA_VERSION",
     "EconomicClaimIntent",

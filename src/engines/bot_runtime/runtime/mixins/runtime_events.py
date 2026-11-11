@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections import deque
 import logging
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from engines.bot_runtime.core.domain import StrategySignal
+from engines.bot_runtime.core.bar_execution_clock import execution_clock
 from engines.bot_runtime.core.order_lifecycle import (
     CanonicalOrderLifecycle,
     CanonicalOrderLifecycleEvent,
@@ -714,7 +716,7 @@ class RuntimeEventsMixin:
                 ),
                 reason_code=ReasonCode.SIGNAL_STRATEGY_SIGNAL,
             ),
-            event_ts=candle.time,
+            event_ts=execution_clock(candle, getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)),
         )
 
     def _emit_decision_event(
@@ -857,7 +859,7 @@ class RuntimeEventsMixin:
             context=context,
             root_id=resolved_root_id,
             parent_id=resolved_parent_id,
-            event_ts=candle.time,
+            event_ts=execution_clock(candle, getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)),
         )
 
     def _emit_order_lifecycle_event(
@@ -998,6 +1000,12 @@ class RuntimeEventsMixin:
             if isinstance(getattr(trade, "entry_outcome", None), Mapping)
             else {}
         )
+        causal = bool(getattr(getattr(getattr(series, "risk_engine", None), "execution_assumptions", None), "uses_causal_bar_clock", False))
+        facts = getattr(trade, "entry_fill_facts", None) if causal else None
+        if causal and facts is None:
+            raise RuntimeError("causal_immutable_entry_fill_facts_missing")
+        if facts is not None:
+            qty, price, notional, fee_paid = facts.quantity, facts.price, facts.notional, facts.fee_paid
         fee_rate = _coerce_float(entry_outcome.get("fee_rate"), None)
         if fee_rate is None and notional > 0.0:
             fee_rate = float(fee_paid) / float(notional)
@@ -1006,6 +1014,9 @@ class RuntimeEventsMixin:
             fee_type = "taker"
         fee_source = str(entry_outcome.get("fee_source") or "template_or_instrument")
         fee_version = entry_outcome.get("fee_version")
+        if facts is not None:
+            fee_rate, fee_type = facts.fee_rate, facts.fee_type
+            fee_source, fee_version = facts.fee_source, facts.fee_version
         accounting_mode = _fill_accounting_mode(series)
         collateral_reserved = 0.0
         if accounting_mode == "margin":
@@ -1031,7 +1042,10 @@ class RuntimeEventsMixin:
             if isinstance(getattr(trade, "wallet_fill_metadata", None), Mapping)
             else {}
         )
-        if getattr(trade, "position_commit_seq", None) is not None:
+        if facts is not None:
+            wallet_fill_metadata = json.loads(facts.wallet_metadata_json)
+            wallet_fill_metadata.setdefault("position_commit_seq", facts.position_commit_seq)
+        elif getattr(trade, "position_commit_seq", None) is not None:
             wallet_fill_metadata.setdefault("position_commit_seq", int(getattr(trade, "position_commit_seq") or 0))
         base_currency, quote_currency = _fill_currency_pair(
             series,

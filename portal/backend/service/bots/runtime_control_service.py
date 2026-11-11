@@ -129,6 +129,8 @@ def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] 
     )
     if supplied_manifest_hash and supplied_manifest_hash != resolved_assumptions.manifest_hash:
         raise ValueError("execution_assumption_manifest_hash_mismatch")
+    from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
+    validate_causal_run_mode(resolved_assumptions, str(payload.get("run_type") or "backtest"), str(payload.get("execution_mode") or "fast"))
     payload["economic_claim_intent"] = intent
     payload["execution_assumptions"] = resolved_assumptions.to_dict()
     if "execution_behavior" not in payload:
