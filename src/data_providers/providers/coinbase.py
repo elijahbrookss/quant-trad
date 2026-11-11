@@ -734,7 +734,9 @@ class CoinbaseProvider(BaseDataProvider):
         product_type = str(product.product_type or "").upper()
         is_future = product_type == "FUTURE"
 
-        contract_size = None
+        # Spot quantities are base units, matching canonical CCXT normalization.
+        # Derivatives still require their explicit provider contract size.
+        contract_size = Decimal(1) if product_type == "SPOT" else None
         if is_future:
             raw_contract_size = future_details.get("contract_size")
             if raw_contract_size is None:

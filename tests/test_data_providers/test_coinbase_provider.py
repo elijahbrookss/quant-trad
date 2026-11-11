@@ -602,3 +602,49 @@ def test_native_interval_declaration_uses_existing_granularity_without_transport
     assert provider.native_candle_interval(900) == "15m"
     with pytest.raises(ValueError, match="native_candle_acquisition_unsupported"):
         provider.native_candle_interval(180)
+
+@pytest.mark.parametrize("symbol,base", [("BTC-USD", "BTC"), ("ETH-USD", "ETH")])
+def test_coinbase_spot_metadata_compiles_as_base_unit_cash_execution(symbol, base):
+    """Provider spot quantities are coins, not missing derivative contracts."""
+    from dataclasses import asdict
+    from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
+
+    product = {
+        "product_id": symbol,
+        "product_type": "SPOT",
+        "price_increment": "0.01",
+        "base_increment": "0.00000001",
+        "base_currency_id": base,
+        "quote_currency_id": "USD",
+        "base_min_size": "0.00000001",
+    }
+    client = FakeClient(product=product)
+    metadata = _make_provider(client).get_instrument_metadata("COINBASE_DIRECT", symbol)
+    assert metadata.contract_size == 1.0
+    assert metadata.tick_value == 0.01
+    profile = compile_series_execution_profile(
+        {**asdict(metadata), "id": "test-" + base, "symbol": symbol,
+         "instrument_type": "spot", "datasource": "COINBASE", "exchange": "COINBASE_DIRECT"},
+        execution_semantics="spot",
+    )
+    assert profile.instrument.source_instrument_type == "spot"
+    assert profile.instrument.execution_semantics == "spot"
+    assert profile.constraints.contract_size == 1.0
+    assert profile.constraints.tick_value == profile.constraints.tick_size
+    assert profile.capabilities.supports_margin is False
+    assert profile.capabilities.supports_short is False
+    assert profile.capabilities.has_funding is False
+    assert profile.fees.configured is False
+    assert profile.fees.source == "default_zero"
+    assert all(call["url_path"] != "/transaction_summary" for call in client.calls)
+
+
+def test_coinbase_future_contract_size_is_still_required():
+    provider = _make_provider(FakeClient(product={
+        "product_id": "BTC-FUTURE", "product_type": "FUTURE",
+        "price_increment": "0.01", "base_min_size": "1",
+        "base_currency_id": "BTC", "quote_currency_id": "USD",
+        "future_product_details": {},
+    }))
+    with pytest.raises(ValueError, match="contract_size"):
+        provider.get_instrument_metadata("COINBASE_DIRECT", "BTC-FUTURE")
