@@ -51,6 +51,7 @@ from engines.bot_runtime.core.passive_execution import (
 )
 from market_data.backtest import resolve_backtest_warmup_bars
 from atm import normalise_template
+from engines.bot_runtime.core.simulation_fees import apply_simulation_fee_schedule
 from risk import normalise_risk_config
 from strategies.compiler import compile_strategy
 from utils.log_context import build_log_context, with_log_context
@@ -309,6 +310,7 @@ class SeriesBuilderConstructionMixin:
         instrument = self._instrument_for_link(strategy, instrument_link)
         if instrument and instrument.get("instrument_snapshot"):
             instrument = instrument.get("instrument_snapshot")
+        instrument = apply_simulation_fee_schedule(instrument or {}, {**self.config, "run_type": self.run_type})
         symbol = str((instrument or {}).get("symbol") or instrument_link.symbol or "").strip()
         if not symbol:
             raise RuntimeError(f"Instrument link for strategy {strategy.id} missing symbol")

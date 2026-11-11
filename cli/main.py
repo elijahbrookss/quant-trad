@@ -501,6 +501,9 @@ def _cmd_bots_start(args: argparse.Namespace) -> int:
             args.market_data_stream_policy_json,
             label="--market-data-stream-policy-json",
         )
+    if getattr(args, "simulation_fee_schedules_json", None):
+        body["simulation_fee_schedules"] = _read_json_object_arg(
+            args.simulation_fee_schedules_json, label="--simulation-fee-schedules-json")
     if getattr(args, "execution_assumptions_json", None):
         body["execution_assumptions"] = _read_json_object_arg(
             args.execution_assumptions_json,
@@ -1315,6 +1318,9 @@ def _cmd_data_prepare_backtest_dataset(args: argparse.Namespace) -> int:
     }
     if numeric_acquisition:
         payload["numeric_acquisition"] = numeric_acquisition
+    if getattr(args, "simulation_fee_schedules_json", None):
+        payload["simulation_fee_schedules"] = _read_json_object_arg(
+            args.simulation_fee_schedules_json, label="--simulation-fee-schedules-json")
     _print_json(
         _client(args).request_json(
             "POST",
@@ -3547,6 +3553,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--market-data-stream-policy-json",
         help="market_data_stream_policy JSON object path, inline object, or '-'.",
     )
+    bots_start.add_argument("--simulation-fee-schedules-json", help="Explicit versioned per-instrument simulation fees; backtest only.")
     bots_start.set_defaults(func=_cmd_bots_start)
     bots_stop = bots_sub.add_parser("stop", help="Stop a bot run through the backend API.")
     bots_stop.add_argument("bot_id")
@@ -3951,6 +3958,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     data_prepare.add_argument("--created-by")
+    data_prepare.add_argument("--simulation-fee-schedules-json", help="Pin the same simulation fee schedules used at backtest start.")
     data_prepare.set_defaults(func=_cmd_data_prepare_backtest_dataset)
 
     data_freeze = data_sub.add_parser(

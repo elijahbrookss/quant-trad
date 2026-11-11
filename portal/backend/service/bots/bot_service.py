@@ -660,6 +660,7 @@ def prepare_backtest_dataset(
     acquire_missing: bool,
     created_by: str | None = None,
     numeric_acquisition: Mapping[str, Any] | None = None,
+    simulation_fee_schedules: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Resolve strategy requirements and freeze data without starting a run."""
 
@@ -670,6 +671,16 @@ def prepare_backtest_dataset(
         "backtest_start": evaluation_start,
         "backtest_end": evaluation_end,
     }
+    if simulation_fee_schedules is not None:
+        from engines.bot_runtime.core.simulation_fees import normalize_simulation_fee_schedules
+        from .execution_behavior import execution_behavior_from_bot
+
+        windowed_bot["economic_claim_intent"] = str(bot.get("economic_claim_intent") or "exploration")
+        windowed_bot["simulation_fee_schedules"] = normalize_simulation_fee_schedules(
+            simulation_fee_schedules, run_type="backtest",
+            execution_behavior=execution_behavior_from_bot(windowed_bot),
+            economic_claim_intent=windowed_bot["economic_claim_intent"],
+        )
     artifacts = _composition().config_service.prepare_startup_artifacts(windowed_bot)
     return prepare_backtest_dataset_material(
         bot=windowed_bot,

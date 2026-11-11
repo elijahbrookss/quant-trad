@@ -17,6 +17,8 @@ from engines.bot_runtime.core.execution_assumptions import (
     resolve_execution_assumptions,
 )
 
+from engines.bot_runtime.core.simulation_fees import normalize_simulation_fee_schedules
+
 from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .bot_state_projection import project_bot_state
 from .bot_stream import BotStreamManager
@@ -133,6 +135,10 @@ def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] 
         payload["execution_behavior"] = execution_behavior_from_bot(payload)
     if bool(payload.get("profile")) and str(payload.get("run_type") or "").strip().lower() != "backtest":
         raise ValueError("runtime_profile_invalid: profiling is supported only for backtest runs")
+    if payload.get("simulation_fee_schedules") is not None:
+        payload["simulation_fee_schedules"] = normalize_simulation_fee_schedules(
+            payload["simulation_fee_schedules"], run_type=str(payload.get("run_type") or "backtest"),
+            execution_behavior=str(payload["execution_behavior"]), economic_claim_intent=intent)
     return payload
 
 

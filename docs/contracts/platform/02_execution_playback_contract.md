@@ -58,6 +58,12 @@ Slippage remains an explicit modeling gap until paper/live fill evidence is
 available for calibration. Runtime must not hide unvalidated slippage
 assumptions inside fee or exit summaries.
 
+Explicit per-instrument simulation fee scenarios may be pinned at backtest start
+and replayed through the resolved execution context. They must not mutate shared
+instrument metadata or apply to paper/live execution, selection or promotion.
+Their rates and provenance are simulation assumptions, not a claim of actual
+account fees. Missing configuration is not permission to assume zero costs.
+
 ## Execution-Quality Class Contract
 
 QT uses one execution-quality ladder: X0 through X5. No other X-class value is
