@@ -9,6 +9,22 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_lifecycle_operator_venv_uses_supported_pinned_host_python():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/test.yaml').read_text())
+    steps = workflow['jobs']['deployment-proof-lifecycle']['steps']
+    setup = next(i for i, step in enumerate(steps)
+                 if step.get('uses', '').startswith('actions/setup-python@'))
+    run = next(i for i, step in enumerate(steps)
+               if step.get('name') == 'Run complete isolated proof group')
+    assert steps[setup]['with']['python-version'] == '3.12'
+    assert setup < run
+    script = (ROOT / 'scripts/ci/proof_lifecycle.sh').read_text()
+    assert 'python3 -m venv' in script
+    assert 'pip install --no-deps -r requirements.lock' in script
+
+
 spec = importlib.util.spec_from_file_location('deployment_proofs', ROOT / 'scripts/ci/deployment_proofs.py')
 proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
