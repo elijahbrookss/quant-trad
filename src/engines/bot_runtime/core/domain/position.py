@@ -7,6 +7,7 @@ import math
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
@@ -280,6 +281,8 @@ class LadderPosition:
                 "symbol": (self.instrument or {}).get("symbol"),
                 "trade_id": self.trade_id,
                 "leg_id": leg_id,
+                **({"signal_id": self.signal_id, "decision_id": self.decision_id}
+                   if self.execution_assumptions and self.execution_assumptions.uses_causal_bar_clock else {}),
                 "direction": self.direction,
                 "known_at": isoformat(known_at),
                 "order_request_id": request_id,
@@ -609,6 +612,10 @@ class LadderPosition:
             return
         self.trailing_active = True
         candidate = self.best_price - distance_price if self.direction == "long" else self.best_price + distance_price
+        if self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_trailing:
+            tick = Decimal(str(self.tick_size))
+            rounding = ROUND_FLOOR if self.direction == "long" else ROUND_CEILING
+            candidate = float((Decimal(str(candidate)) / tick).to_integral_value(rounding=rounding) * tick)
         self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
 
     def _apply_stop(self, candle: Candle) -> List[Dict[str, Any]]:
@@ -917,7 +924,14 @@ class LadderPosition:
             if stop_was_touched and self.is_active():
                 raise RuntimeError("causal_stop_not_fully_settled")
             if not stop_was_touched and not entry_fill_bar:
-                events.extend(self._apply_leg_fills(candle))
+                leg_events = self._apply_leg_fills(candle)
+                events.extend(leg_events)
+                if (self.execution_assumptions.finalizes_last_target_at_fill
+                        and leg_events and all(leg.status != "open" for leg in self.legs)):
+                    # The last target already settled. Do not keep a phantom
+                    # position until the next bar's stop/finalization path.
+                    self.closed_at = candle.time
+                    self._set_terminal_reason_from_legs()
                 if self.is_active():
                     events.extend(self._maybe_apply_fixed_horizon_exit(candle))
                 # Tightening is learned at close and applies only to a later bar.
@@ -1224,6 +1238,11 @@ class LadderPosition:
             "position_commit_seq": int(self.position_commit_seq),
             "position_commit_seq_status": "position_scoped",
         }
+        if self.entry_fill_facts is not None:
+            # Remaining legs are mutable and may already be zero at publication.
+            # The opt-in full-fill model retains the actual entry quantity.
+            payload["quantity"] = self.entry_fill_facts.quantity
+            payload["qty"] = self.entry_fill_facts.quantity
         if self.closed_at is not None:
             if not self.close_reason or not self.reason_code:
                 raise RuntimeError(
@@ -1327,6 +1346,20 @@ class LadderPosition:
             "full_fill_assumption",
             "market_slippage_bps",
             "stop_slippage_bps",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_precision",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
         )
         return {key: metadata.get(key) for key in keys if key in metadata}
 

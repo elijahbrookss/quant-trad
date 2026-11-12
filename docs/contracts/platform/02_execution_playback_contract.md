@@ -90,6 +90,16 @@ intervals while pending or holding also fail closed. MFE/MAE are labeled
 `coarse_bar_bounds_not_realized_path`, not realized intra-trade excursions;
 a stop-first coarse bar does not prove the favorable range occurred while held.
 
+`causal_spot_resting_bar.v2` retains those restrictions and adds instrument-tick
+alignment of newly learned trailing stops: round long candidates down and short
+candidates up, then apply the existing monotonic clamp. The rounding policy is
+pinned in the model artifact. V2 also finalizes the position on the execution
+bar of its last settled target fill, without waiting for another bar. Both
+changes have explicit artifact parameters. It does not change v1 price/closure replay,
+default execution, paper/live behavior, or permit an invalid order or unsettled
+stop to pass. A new model identity is not evidence that report/lifecycle quality
+has been qualified.
+
 ## Execution-Quality Class Contract
 
 QT uses one execution-quality ladder: X0 through X5. No other X-class value is

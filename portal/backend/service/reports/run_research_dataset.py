@@ -2846,7 +2846,7 @@ def _execution_section(
                     "event_id": row.get("event_id") or _payload(row).get("event_id"),
                     "event_name": name,
                     "event_time": _payload(row).get("event_ts"),
-                    "known_at": context.get("bar_time") or row.get("known_at"),
+                    "known_at": row.get("known_at") or context.get("known_at") or context.get("bar_time"),
                     "series_key": context.get("series_key"),
                     "instrument_id": context.get("instrument_id"),
                     "symbol": context.get("symbol"),

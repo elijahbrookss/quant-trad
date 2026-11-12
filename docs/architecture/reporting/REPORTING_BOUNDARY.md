@@ -56,6 +56,17 @@ research-performance sections while keeping raw rows available only as
 referenced/debug data.
 
 Terminal report artifacts are materialized separately from run lifecycle truth.
+Report-artifact persistence also preserves an existing admitted run envelope
+(`bot` and `start_request`) and its configuration/material hashes. A reduced
+report configuration is a projection, not replacement execution authority.
+Legacy records without an admitted envelope retain their existing projection
+behavior. This does not repair or enrich previously stored runs.
+
+Fill availability in the report uses the canonical event row's `known_at`
+before context availability or legacy source-bar fallback. A source-bar label
+must not replace an available canonical clock. The projection does not rewrite
+its input events or certify a legacy fallback as observed availability.
+
 When a run reaches a terminal status, the backend enqueues a
 `RunReportDTO` build that persists the artifact/status in
 `portal_report_materializations`. Report states (`not_started`, `building`,

@@ -52,6 +52,11 @@ code_paths:
 ---
 # Persistence Boundary
 
+Report-artifact writes preserve an existing admitted run envelope and its
+configuration/material hashes. Their reduced configuration projection cannot
+replace startup custody. Records without an admitted `bot`/`start_request`
+envelope retain legacy projection behavior; no historical repair is implicit.
+
 ## Offline scientific authority and governance
 
 Phase 4-6 records remain inside the primary PostgreSQL boundary. The schema

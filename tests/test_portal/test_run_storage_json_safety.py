@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from typing import Iterator
 
 import pytest
+import uuid
 
 from portal.backend.service.storage.repos import runs
+from portal.backend.service.reports import artifacts
 
 
 class _FakeSession:
@@ -69,3 +71,67 @@ def test_upsert_bot_run_rejects_lifecycle_owned_fields(monkeypatch) -> None:
                 "ended_at": "2026-05-17T07:46:00Z",
             }
         )
+
+
+def test_report_gateway_preserves_admitted_execution_identity(monkeypatch) -> None:
+    """Finalization must not replace admission with its reduced report projection."""
+    fake_db = _FakeDb()
+    monkeypatch.setattr(runs, "db", fake_db)
+    admitted = {
+        "bot": {"id": "bot-1", "execution_mode": "backtest"},
+        "start_request": {"dataset_id": "mds_frozen"},
+        "execution_assumptions": {"execution_model": "causal_spot_resting_bar.v1"},
+        "simulation_fee_schedules": {"ETH-USD": {"maker": 0.005}},
+        "resolved_execution_context_bundle": {"bundle_hash": "original-context"},
+    }
+    before = runs.upsert_bot_run({"run_id": "run-1", "config_snapshot": admitted})
+    result = artifacts.RepositoryArtifactStorage().upsert_bot_run({
+        "run_id": "run-1",
+        "summary": {"net_pnl": -293.3532},
+        "config_snapshot": {"strategies": [], "wallet_start": {"USD": 10000}},
+        "config_hash": "projection-hash-must-not-replace-admission",
+        "material_config_hash": "projection-material-hash",
+    })
+    assert result["config_snapshot"] == admitted
+    assert result["config_hash"] == before["config_hash"]
+    assert result["material_config_hash"] == before["material_config_hash"]
+    assert result["summary"] == {"net_pnl": -293.3532}
+
+
+def test_report_gateway_retains_legacy_projection_behavior(monkeypatch) -> None:
+    monkeypatch.setattr(runs, "db", _FakeDb())
+    before = runs.upsert_bot_run({"run_id": "legacy", "config_snapshot": {"strategies": []}})
+    projection = {"strategies": [{"id": "strategy-1"}], "wallet_start": {"USD": 10000}}
+    result = artifacts.RepositoryArtifactStorage().upsert_bot_run({
+        "run_id": "legacy", "config_snapshot": projection,
+    })
+    assert result["config_snapshot"] == projection
+    assert result["config_hash"] != before["config_hash"]
+
+
+@pytest.mark.db
+def test_report_finalization_preserves_admission_in_disposable_database():
+    from sqlalchemy import delete
+    from portal.backend.db.models import BotRunRecord
+    run_id = str(uuid.uuid4())
+    admitted = {
+        'bot': {'id': str(uuid.uuid4()), 'execution_mode': 'backtest'},
+        'start_request': {'dataset_id': 'disposable-frozen-fixture'},
+        'execution_assumptions': {'model_version': 'causal_spot_resting_bar.v2'},
+        'simulation_fee_schedules': {'ETH-USD': {'maker_rate': .005, 'taker_rate': .009}},
+        'resolved_execution_context_bundle': {'bundle_hash': 'fixture-context-identity'},
+    }
+    try:
+        before = runs.upsert_bot_run({'run_id': run_id, 'config_snapshot': admitted})
+        artifacts.RepositoryArtifactStorage().upsert_bot_run({
+            'run_id': run_id, 'summary': {'net_pnl': -1.25},
+            'config_snapshot': {'strategies': [], 'wallet_start': {'USD': 1000}},
+        })
+        actual = runs.get_bot_run(run_id)
+        assert actual['config_snapshot'] == admitted
+        assert actual['config_hash'] == before['config_hash']
+        assert actual['material_config_hash'] == before['material_config_hash']
+        assert actual['summary'] == {'net_pnl': -1.25}
+    finally:
+        with runs.db.session() as session:
+            session.execute(delete(BotRunRecord).where(BotRunRecord.run_id == run_id))

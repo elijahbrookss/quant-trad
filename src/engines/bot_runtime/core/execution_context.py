@@ -1067,6 +1067,10 @@ def execution_model_artifact_from_assumptions(
             "fill_clock": "eligible_completed_bar_availability_not_observed_intrabar_time",
             "excursion_measurement": "coarse_bar_bounds_not_realized_path",
             "entry_bar_favorable_range_excluded": True,
+            **({"trailing_stop_rounding": "long_floor_short_ceiling_to_instrument_tick_then_monotonic_clamp"}
+               if assumptions.uses_tick_aligned_trailing else {}),
+            **({"target_finalization": "same_execution_bar_as_last_target_fill"}
+               if assumptions.finalizes_last_target_at_fill else {}),
         } if assumptions.uses_causal_bar_clock else {}),
         artifact_hash="",
     )

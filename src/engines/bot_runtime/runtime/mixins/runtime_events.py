@@ -754,6 +754,12 @@ class RuntimeEventsMixin:
         if decision == "accepted":
             evidence = dict(wallet_evidence or {})
             wallet_snapshot = evidence.get("wallet_snapshot") or evidence.get("wallet_before")
+            assumptions = getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)
+            if not wallet_snapshot and getattr(assumptions, "uses_causal_bar_clock", False):
+                # A resting intent is accepted before any cash mutation. Record
+                # the actual locked read at acceptance, not a later fill's state
+                # and not an invented reservation or wallet commit sequence.
+                wallet_snapshot = self._current_wallet_state_snapshot()
             margin_requirement = evidence.get("margin_requirement") or evidence.get("required_delta")
             context = DecisionAcceptedContext(
                 **base_kwargs,
@@ -882,14 +888,35 @@ class RuntimeEventsMixin:
         request_time = _parse_runtime_iso(request.known_at)
         if event_time is None or request_time is None:
             raise ValueError("order lifecycle known_at values must be canonical timestamps")
-        correlation_id = self._bar_correlation_id(series, request_time)
+        decision_bar_time = request_time
+        assumptions = getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)
+        causal = getattr(assumptions, "uses_causal_bar_clock", False)
+        if causal and request.metadata.get("entry_request_id"):
+            decision_bar_time = _parse_runtime_iso(request.metadata.get("submitted_bar_time"))
+            if decision_bar_time is None:
+                raise ValueError("causal order lifecycle requires immutable submitted_bar_time")
+        correlation_id = self._bar_correlation_id(series, decision_bar_time)
         decision_event = self._find_decision_event(
             series=series,
             correlation_id=correlation_id,
             trade_id=request.trade_id,
         )
+        if causal:
+            # Exit requests have their own availability clock, not a new
+            # strategy decision. Link only the exact trade's retained decision.
+            original = next((candidate for candidate in self._runtime_events_reverse()
+                if candidate.event_name == RuntimeEventName.DECISION_ACCEPTED
+                and candidate.context.strategy_id == series.strategy_id
+                and str(getattr(candidate.context, "trade_id", "") or "") == str(request.trade_id or "")
+                and request.decision_id
+                and getattr(candidate.context, "decision_id", None) == request.decision_id), None)
+            decision_event = original
+            if original is not None:
+                correlation_id = original.correlation_id
         signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
-        parent_event = decision_event or signal_event
+        # A source signal alone cannot certify a causal request's missing or
+        # different decision identity. Keep the unresolved lineage explicit.
+        parent_event = decision_event if causal else decision_event or signal_event
         missing_parent_hint = None
         if parent_event is None:
             missing_parent_hint = (

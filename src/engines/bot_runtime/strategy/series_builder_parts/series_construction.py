@@ -304,7 +304,7 @@ class SeriesBuilderConstructionMixin:
             StrategySeries ready for runtime execution
         """
         raw_causal_assumptions = self.config.get("execution_assumptions")
-        if isinstance(raw_causal_assumptions, Mapping) and raw_causal_assumptions.get("model_version") == "causal_spot_resting_bar.v1":
+        if isinstance(raw_causal_assumptions, Mapping) and raw_causal_assumptions.get("model_version") in {"causal_spot_resting_bar.v1", "causal_spot_resting_bar.v2"}:
             from engines.bot_runtime.core.bar_execution_clock import validate_causal_run_mode
             validate_causal_run_mode(resolve_execution_assumptions(
                 self.config.get("economic_claim_intent"), raw_causal_assumptions,

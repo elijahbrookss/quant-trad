@@ -121,6 +121,7 @@ class PersistedRuntimeResult:
     trades: tuple[dict[str, Any], ...]
     step_rollups: tuple[dict[str, Any], ...]
     run_upsert: dict[str, Any]
+    canonical_fact_batches: tuple[dict[str, Any], ...]
 
 
 def reference_frame(*, include_future_suffix: bool) -> pd.DataFrame:
@@ -258,6 +259,7 @@ def run_persisted_reference(
         ),
         step_rollups=tuple(storage.step_rollups),
         run_upsert=dict(storage.run_upserts[-1]),
+        canonical_fact_batches=tuple(storage.canonical_fact_batches),
     )
 
 

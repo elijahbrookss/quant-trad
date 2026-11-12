@@ -106,6 +106,7 @@ at least one genuinely adverse scenario.
 | `costed_bar.v1` | Explicit fees and adverse market/stop BPS; passive touch behavior remains. | X1 |
 | `conservative_bar.v1` | X1 economics plus strict passive penetration and disclosed full fills. | X2 |
 | `causal_spot_resting_bar.v1` | Explicit cash-spot resting/FAST backtest policy with strict whole-bar eligibility, availability clocks and immutable entry facts. | X2 |
+| `causal_spot_resting_bar.v2` | Same restricted causal policy with pinned conservative trailing tick alignment and finalization on the last target-fill bar. | X2 |
 
 Version pinning is the compatibility mechanism. Historical behavior is not
 changed in place. Direct legacy constructors receive
@@ -198,6 +199,34 @@ per-fill entry settlement for book-driven partial entries. None of these
 contracts may reinterpret X2 as book-level execution evidence.
 
 ## Opt-in causal cash-spot resting bars
+
+The v2 model rounds a newly learned long trailing-stop candidate down to the
+instrument tick (short candidates up) before the existing monotonic clamp. It
+does not loosen the current stop, move a stop during the entry-fill bar, waive
+conformance, or convert an unsettled stop into success. Its manifest and model
+artifact have distinct identities; v1 trailing calculations remain unchanged.
+The signed rounding rule is explicit even though current admission supports
+cash-spot long execution only.
+
+V2 finalizes a position when its last target leg settles, on that execution
+bar rather than the next bar's stop-processing path. This affects occupancy and
+later entry eligibility; it is an execution correction, not a timestamp-only
+report adjustment. The artifact pins this rule and v1 replay keeps its original
+closure behavior. No target is filled again to finalize the position.
+
+For causal full-fill positions, canonical trade snapshots retain immutable
+entry quantity rather than recomputing it from consumed legs. Exit events
+preserve the resolved fill's fee/context identities. Lifecycle transitions link
+the exact retained decision identity and submitted source bar, rather than
+assuming request availability is the decision's source-bar label. These evidence
+repairs apply to newly emitted records; no old run is enriched or re-certified.
+
+Causal entry and adverse same-bar close commit distinct position states before
+publication. Accepted pending intents retain a contemporaneous locked wallet
+read, without claiming cash reservation, affordability or a wallet mutation.
+Lifecycle parentage requires the exact request decision identity; a different
+decision sharing its correlation/trade key cannot substitute. Missing identity
+remains explicitly unresolved.
 
 `causal_spot_resting_bar.v1` is an explicit development backtest model. It is
 limited to cash spot, FAST bar execution, resting limit-maker entry, cancel

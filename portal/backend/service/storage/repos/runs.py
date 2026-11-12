@@ -59,7 +59,9 @@ def _material_config_payload(value: Any) -> Any:
     return _json_safe(value)
 
 
-def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
+def upsert_bot_run(
+    payload: Dict[str, Any], *, preserve_admitted_config: bool = False
+) -> Dict[str, Any]:
     """Insert or update non-lifecycle run identity, provenance, and report data."""
 
     if not db.available:
@@ -99,7 +101,18 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
         if payload.get("summary") is not None:
             record.summary = dict(_json_safe(payload.get("summary") or {}))
-        if payload.get("config_snapshot") is not None:
+        # A report projection is not a replacement for the admitted start request.
+        # Keep the original configuration and both identity hashes together. This
+        # applies only at the explicitly marked report gateway; startup and legacy
+        # records without an admitted envelope retain their existing behavior.
+        admitted = record.config_snapshot or {}
+        preserve_config = (
+            preserve_admitted_config
+            and isinstance(admitted, dict)
+            and isinstance(admitted.get("bot"), dict)
+            and isinstance(admitted.get("start_request"), dict)
+        )
+        if payload.get("config_snapshot") is not None and not preserve_config:
             record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
             record.config_hash = (
                 str(payload.get("config_hash") or "").strip()
@@ -119,6 +132,8 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             "runtime_image",
             "storage_schema_version",
         ):
+            if preserve_config and field in {"config_hash", "material_config_hash"}:
+                continue
             if payload.get(field) not in (None, ""):
                 setattr(record, field, str(payload.get(field)).strip())
         record.updated_at = now

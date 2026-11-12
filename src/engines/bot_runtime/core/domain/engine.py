@@ -2116,6 +2116,14 @@ class LadderRiskEngine:
                     raise RuntimeError("pending entry fill targeted a different active trade")
                 self._pending_entry_fills.append(new_trade)
                 touched_trade = new_trade
+                if causal:
+                    # Entry and an adverse exit on this bar are distinct states.
+                    # Commit the opened state before protection can consume legs;
+                    # the existing end-of-step comparison commits any exit next.
+                    self._bump_trade_revision_if_material_changed(
+                        previous_signature, touched_trades=(new_trade,),
+                    )
+                    previous_signature = self._cached_trade_material_signatures((new_trade,))
         if self.active_trade is None:
             if causal:
                 self._last_causal_step_bar_time = candle.time
