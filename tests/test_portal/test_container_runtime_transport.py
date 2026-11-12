@@ -1857,3 +1857,100 @@ def test_paper_market_data_scope_does_not_pin_live_reads() -> None:
         is None
     )
     assert "market_data_as_of_commit_seq" not in config
+
+@pytest.mark.parametrize("top_level_empty", [{}, None])
+def test_backtest_startup_snapshot_does_not_invent_absent_book_bundle(
+    monkeypatch: pytest.MonkeyPatch, top_level_empty: object,
+) -> None:
+    from portal.backend.service.bots.startup_service import _bot_run_config_snapshot
+
+    binding = _runtime_dataset_binding()
+    admitted_bot = {
+        "id": "bot-1", "run_type": "backtest",
+        "dataset_id": binding["dataset_id"], "dataset_binding": binding,
+    }
+    snapshot = {
+        "bot": _bot_run_config_snapshot(admitted_bot),
+        "execution_book_tape_bundle": top_level_empty,
+    }
+    persisted: list[dict] = []
+    monkeypatch.setattr(runtime_mod, "get_bot_run", lambda _: {"config_snapshot": snapshot})
+    monkeypatch.setattr(runtime_mod, "upsert_bot_run", lambda payload: persisted.append(payload))
+
+    restored, _ = runtime_mod._load_runtime_bot_snapshot("bot-1", "run-1")
+    assert "execution_book_tape_bundle" not in restored
+    assert runtime_mod._bind_backtest_market_data_scope(restored, run_id="run-1")
+    assert len(persisted) == 1
+    assert "execution_book_tape_bundle" not in snapshot["bot"]
+
+
+@pytest.mark.parametrize("admitted_bundle", [{}, {"bundle_hash": "admitted-book"}])
+def test_backtest_startup_preserves_explicit_book_bundle_identity(
+    monkeypatch: pytest.MonkeyPatch, admitted_bundle: dict,
+) -> None:
+    from market_data.backtest import build_backtest_execution_config_hash
+    from portal.backend.service.bots.startup_service import _bot_run_config_snapshot
+
+    binding = _runtime_dataset_binding()
+    admitted_bot = {
+        "id": "bot-1", "run_type": "backtest",
+        "dataset_id": binding["dataset_id"], "dataset_binding": binding,
+        "execution_book_tape_bundle": admitted_bundle,
+    }
+    binding["execution_config_hash"] = build_backtest_execution_config_hash(
+        bot=admitted_bot, strategy_identity=binding,
+        instrument_config_hash=binding["instrument_config_hash"],
+    )
+    snapshot = {"bot": _bot_run_config_snapshot(admitted_bot),
+                "execution_book_tape_bundle": dict(admitted_bundle)}
+    monkeypatch.setattr(runtime_mod, "get_bot_run", lambda _: {"config_snapshot": snapshot})
+    monkeypatch.setattr(runtime_mod, "upsert_bot_run", lambda _: None)
+    restored, _ = runtime_mod._load_runtime_bot_snapshot("bot-1", "run-1")
+    assert restored["execution_book_tape_bundle"] == admitted_bundle
+    assert runtime_mod._bind_backtest_market_data_scope(restored, run_id="run-1")
+
+
+@pytest.mark.parametrize("substitution", [{"bundle_hash": "unadmitted-book"}, [], "invalid"])
+def test_backtest_startup_still_rejects_unadmitted_book_bundle(
+    monkeypatch: pytest.MonkeyPatch, substitution: object,
+) -> None:
+    binding = _runtime_dataset_binding()
+    snapshot = {"bot": {"id": "bot-1", "run_type": "backtest",
+                       "dataset_id": binding["dataset_id"], "dataset_binding": binding},
+                "execution_book_tape_bundle": substitution}
+    monkeypatch.setattr(runtime_mod, "get_bot_run", lambda _: {"config_snapshot": snapshot})
+    monkeypatch.setattr(runtime_mod, "upsert_bot_run", lambda _: pytest.fail("Rejected substitution persisted"))
+    restored, _ = runtime_mod._load_runtime_bot_snapshot("bot-1", "run-1")
+    with pytest.raises(RuntimeError, match="execution_config_substitution_forbidden"):
+        runtime_mod._bind_backtest_market_data_scope(restored, run_id="run-1")
+
+
+@pytest.mark.parametrize("run_type", ["paper", "live", "sim_trade"])
+def test_non_backtest_startup_optional_book_overlay_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, run_type: str,
+) -> None:
+    snapshot = {"bot": {"id": "bot-1", "run_type": run_type},
+                "execution_book_tape_bundle": {}}
+    monkeypatch.setattr(runtime_mod, "get_bot_run", lambda _: {"config_snapshot": snapshot})
+    restored, _ = runtime_mod._load_runtime_bot_snapshot("bot-1", "run-1")
+    assert restored["execution_book_tape_bundle"] == {}
+@pytest.mark.parametrize("replacement", [{}, None])
+def test_backtest_startup_rejects_removal_of_admitted_book_bundle(
+    monkeypatch: pytest.MonkeyPatch, replacement: object,
+) -> None:
+    from market_data.backtest import build_backtest_execution_config_hash
+
+    binding = _runtime_dataset_binding()
+    admitted_bot = {"id": "bot-1", "run_type": "backtest",
+                    "dataset_id": binding["dataset_id"], "dataset_binding": binding,
+                    "execution_book_tape_bundle": {"bundle_hash": "admitted-book"}}
+    binding["execution_config_hash"] = build_backtest_execution_config_hash(
+        bot=admitted_bot, strategy_identity=binding,
+        instrument_config_hash=binding["instrument_config_hash"],
+    )
+    snapshot = {"bot": admitted_bot, "execution_book_tape_bundle": replacement}
+    monkeypatch.setattr(runtime_mod, "get_bot_run", lambda _: {"config_snapshot": snapshot})
+    monkeypatch.setattr(runtime_mod, "upsert_bot_run", lambda _: pytest.fail("Rejected removal persisted"))
+    restored, _ = runtime_mod._load_runtime_bot_snapshot("bot-1", "run-1")
+    with pytest.raises(RuntimeError, match="execution_config_substitution_forbidden"):
+        runtime_mod._bind_backtest_market_data_scope(restored, run_id="run-1")
