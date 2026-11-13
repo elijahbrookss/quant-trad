@@ -1366,6 +1366,9 @@ class LadderPosition:
             "fee_tier",
             "execution_model_artifact_hash",
             "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+            "post_only",
         )
         return {key: metadata.get(key) for key in keys if key in metadata}
 

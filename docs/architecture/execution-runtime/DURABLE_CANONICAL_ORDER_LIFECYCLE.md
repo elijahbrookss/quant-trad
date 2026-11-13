@@ -20,11 +20,15 @@ code_paths:
   - src/engines/bot_runtime/core/domain/position.py
   - src/engines/bot_runtime/core/runtime_events.py
   - src/engines/bot_runtime/runtime/mixins/runtime_events.py
+  - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_event_retention.py
   - portal/backend/service/reports/run_research_dataset.py
+  - portal/backend/service/reports/report_data.py
+  - portal/backend/service/reports/unfilled_order_evidence.py
   - tests/integration/runtime/test_canonical_order_lifecycle.py
   - tests/integration/runtime/test_persisted_runtime_correctness.py
+  - tests/integration/runtime/test_canonical_execution_evidence_boundary.py
 ---
 # Durable Canonical Order Lifecycle
 
@@ -157,6 +161,24 @@ The lifecycle is authoritative in these current paths:
 The runtime event ledger remains canonical. BotLens and reporting are typed
 projections. Fill events use the exact filled lifecycle event as their parent,
 while the original signal remains the causal root.
+
+The producer's canonical fact filter must retain `ORDER_LIFECYCLE_CHANGED`,
+including zero-fill entry expiry, cancellation and rejection. A worker artifact
+alone does not prove durable publication. Exit-fill projection must carry the
+actual fill's execution-context metadata, including book capability, time in
+force and post-only status; missing execution facts are never defaulted from a
+later configuration or copied from an entry fill.
+
+An accepted decision need not open a trade if its entry request terminates
+without a fill. Report readiness can recognize that disposition only from a
+complete contiguous, single-request/single-attempt canonical lifecycle linked
+to the exact accepted decision, root, correlation, run and trade identity. All
+quantities must prove zero cumulative fill and the full requested remainder;
+terminal state must be expired, canceled or rejected. Replacement, partial,
+missing, contradictory or unlinked evidence remains incomplete. This narrow
+read projection does not manufacture `TRADE_OPENED`/`TRADE_CLOSED` events or
+repair historical runs. It is independent of the pinned execution model:
+execution clocks, fill generation, validity and accounting remain unchanged.
 
 ## Partial-entry safety boundary
 

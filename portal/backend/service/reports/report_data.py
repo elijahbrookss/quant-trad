@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence
 
+from .unfilled_order_evidence import terminal_unfilled_trade_ids
+
 from ..storage.repos.instruments import find_instrument as find_instrument_record
 from ..storage.repos.observability import (
     list_observability_events as list_observability_event_rows,
@@ -410,8 +412,20 @@ def get_result_readiness(
     }
     opened_trade_ids = {_trade_id(row) for row in opened_rows if _trade_id(row)}
     closed_trade_ids = {_trade_id(row) for row in closed_rows if _trade_id(row)}
-    missing_open = sorted(accepted_trade_ids - opened_trade_ids)
-    missing_close = sorted(accepted_trade_ids - closed_trade_ids)
+    unfilled_terminal_ids: set[str] = set()
+    if accepted_trade_ids - (opened_trade_ids | closed_trade_ids):
+        execution_names = {"ORDER_LIFECYCLE_CHANGED", "ENTRY_FILLED", "EXIT_FILLED"}
+        execution_rows = (
+            list_run_events(run_id, event_types=[
+                f"{BOTLENS_DOMAIN_PREFIX}{name.lower()}" for name in sorted(execution_names)
+            ]) if runtime_events is None else
+            [row for row in runtime_events if _event_name(row) in execution_names]
+        )
+        unfilled_terminal_ids = terminal_unfilled_trade_ids(
+            run_id=run_id, decision_rows=decision_rows, execution_rows=execution_rows,
+        ) - (opened_trade_ids | closed_trade_ids)
+    missing_open = sorted(accepted_trade_ids - opened_trade_ids - unfilled_terminal_ids)
+    missing_close = sorted(accepted_trade_ids - closed_trade_ids - unfilled_terminal_ids)
     terminal_open_trade_ids = sorted(
         str(row.get("trade_id") or row.get("id") or "").strip()
         for row in resolved_stored_trades
@@ -497,6 +511,7 @@ def get_result_readiness(
         "export_status": "available" if dataset_ready else "partial" if completed else "unavailable",
         "report_available": report_available,
         "accepted_trade_count": len(accepted_trade_ids),
+        "accepted_unfilled_terminal_count": len(unfilled_terminal_ids),
         "missing_trade_opened": missing_open,
         "missing_trade_closed": missing_close,
         "terminal_open_trades": terminal_open_trade_ids,
