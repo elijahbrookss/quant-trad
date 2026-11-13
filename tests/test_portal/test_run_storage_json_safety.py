@@ -8,7 +8,7 @@ import pytest
 import uuid
 
 from portal.backend.service.storage.repos import runs
-from portal.backend.service.reports import artifacts
+from portal.backend.service.reports import artifacts, run_research_dataset
 
 
 class _FakeSession:
@@ -85,17 +85,36 @@ def test_report_gateway_preserves_admitted_execution_identity(monkeypatch) -> No
         "resolved_execution_context_bundle": {"bundle_hash": "original-context"},
     }
     before = runs.upsert_bot_run({"run_id": "run-1", "config_snapshot": admitted})
+    projection = {
+        "strategies": [{"id": "strategy-1", "atm_template": {"execution_mode": "market"}}],
+        "wallet_start": {"balances": {"USD": 10000}},
+        "backtest_warmup_evidence": [{"loaded_bars": 100}],
+        "indicator_source_diagnostics": [],
+        "runtime_warnings": [{"code": "fixture_warning"}],
+    }
     result = artifacts.RepositoryArtifactStorage().upsert_bot_run({
         "run_id": "run-1",
         "summary": {"net_pnl": -293.3532},
-        "config_snapshot": {"strategies": [], "wallet_start": {"USD": 10000}},
+        "config_snapshot": {
+            **projection,
+            "execution_assumptions": {"execution_model": "must-not-replace-admission"},
+            "dataset_binding": {"dataset_id": "must-not-add-execution-authority"},
+        },
         "config_hash": "projection-hash-must-not-replace-admission",
         "material_config_hash": "projection-material-hash",
     })
-    assert result["config_snapshot"] == admitted
+    assert result["config_snapshot"] == {**admitted, **projection}
     assert result["config_hash"] == before["config_hash"]
     assert result["material_config_hash"] == before["material_config_hash"]
     assert result["summary"] == {"net_pnl": -293.3532}
+    metadata = run_research_dataset._metadata(result)
+    assert metadata.starting_capital == 10000
+    assert metadata.configuration["atm"]["template"]["execution_mode"] == "market"
+    assert metadata.configuration["data"]["backtest_warmup_evidence"] == projection["backtest_warmup_evidence"]
+    assert metadata.configuration["config_hash"] == metadata.config_hash == before["config_hash"]
+    assert metadata.configuration["material_config_hash"] == before["material_config_hash"]
+    assert run_research_dataset._indicator_source_diagnostics_dataset(result)["available"] is True
+    assert run_research_dataset._execution_assumption_manifest(result) == admitted["execution_assumptions"]
 
 
 def test_report_gateway_retains_legacy_projection_behavior(monkeypatch) -> None:
@@ -123,12 +142,14 @@ def test_report_finalization_preserves_admission_in_disposable_database():
     }
     try:
         before = runs.upsert_bot_run({'run_id': run_id, 'config_snapshot': admitted})
+        projection = {'strategies': [], 'wallet_start': {'balances': {'USD': 1000}},
+                      'indicator_source_diagnostics': [], 'backtest_warmup_evidence': []}
         artifacts.RepositoryArtifactStorage().upsert_bot_run({
             'run_id': run_id, 'summary': {'net_pnl': -1.25},
-            'config_snapshot': {'strategies': [], 'wallet_start': {'USD': 1000}},
+            'config_snapshot': projection,
         })
         actual = runs.get_bot_run(run_id)
-        assert actual['config_snapshot'] == admitted
+        assert actual['config_snapshot'] == {**admitted, **projection}
         assert actual['config_hash'] == before['config_hash']
         assert actual['material_config_hash'] == before['material_config_hash']
         assert actual['summary'] == {'net_pnl': -1.25}

@@ -535,6 +535,17 @@ def _observer_gap(
     }
 
 
+def test_cost_stress_counts_closed_trade_entry_when_remaining_quantity_is_zero():
+    assert run_research_dataset._trade_turnover_notional({
+        "quantity": 0,
+        "entry_price": 100,
+        "legs": [
+            {"contracts": 1, "exit_price": 105},
+            {"contracts": 2, "exit_price": 110},
+        ],
+    }) == pytest.approx(625)
+
+
 def _trades(extra: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     rows = [
         {

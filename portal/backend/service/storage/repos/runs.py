@@ -21,6 +21,18 @@ _NON_MATERIAL_CONFIG_KEYS = {
     "warnings",
 }
 _LIFECYCLE_OWNED_RUN_FIELDS = frozenset({"status", "started_at", "ended_at"})
+_REPORT_PROJECTION_KEYS = (
+    "backtest_warmup_bars",
+    "backtest_warmup_evidence",
+    "date_range",
+    "expected_candle_series",
+    "indicator_source_diagnostics",
+    "report_warnings",
+    "risk_settings",
+    "runtime_warnings",
+    "strategies",
+    "wallet_start",
+)
 
 
 def _timestamp_iso(value: Any) -> Optional[str]:
@@ -112,7 +124,16 @@ def upsert_bot_run(
             and isinstance(admitted.get("bot"), dict)
             and isinstance(admitted.get("start_request"), dict)
         )
-        if payload.get("config_snapshot") is not None and not preserve_config:
+        projection = payload.get("config_snapshot")
+        if preserve_config and isinstance(projection, dict):
+            additions = {
+                key: projection[key]
+                for key in _REPORT_PROJECTION_KEYS
+                if key in projection and key not in admitted
+            }
+            if additions:
+                record.config_snapshot = {**admitted, **_json_safe(additions)}
+        elif projection is not None and not preserve_config:
             record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
             record.config_hash = (
                 str(payload.get("config_hash") or "").strip()

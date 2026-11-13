@@ -59,6 +59,9 @@ Terminal report artifacts are materialized separately from run lifecycle truth.
 Report-artifact persistence also preserves an existing admitted run envelope
 (`bot` and `start_request`) and its configuration/material hashes. A reduced
 report configuration is a projection, not replacement execution authority.
+Finalization adds only missing report fields, including warmup, source diagnostics,
+warnings, and the strategy and wallet display sections. These additions do not
+change the configuration identity shown in the report.
 Legacy records without an admitted envelope retain their existing projection
 behavior. This does not repair or enrich previously stored runs.
 
