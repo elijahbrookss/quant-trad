@@ -7,7 +7,6 @@ import math
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
@@ -21,7 +20,7 @@ from ..execution_order import build_fill_order, execute_fill_order_with_lifecycl
 from ..execution_plan import RuntimeStopAdjustment
 from ..execution_policy import ExitExecutionPolicy, exit_policy_for, fee_rate_for_role, normalize_liquidity_role
 from ..execution_profile import SeriesExecutionProfile
-from ..execution_assumptions import ResolvedExecutionAssumptions
+from ..execution_assumptions import ResolvedExecutionAssumptions, align_order_price
 from ..bar_execution_clock import execution_candle
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import executed_fee, executed_notional
@@ -556,7 +555,9 @@ class LadderPosition:
         if self.moved_to_breakeven or self.trailing_active:
             return
         if self.breakeven_trigger_ticks and self.mfe_ticks >= self.breakeven_trigger_ticks:
-            self.stop_price = risk_math.clamp_stop(self.stop_price, self.entry_price, self.direction)
+            self._tighten_stop(self.entry_price, align=bool(
+                self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_protection
+            ))
             self.moved_to_breakeven = True
 
     def _maybe_apply_stop_adjustments(self) -> None:
@@ -597,7 +598,9 @@ class LadderPosition:
             if candidate is None:
                 continue
 
-            self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
+            self._tighten_stop(candidate, align=bool(
+                self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_protection
+            ))
             rule.fired = True
             if candidate == self.entry_price:
                 self.moved_to_breakeven = True
@@ -612,10 +615,13 @@ class LadderPosition:
             return
         self.trailing_active = True
         candidate = self.best_price - distance_price if self.direction == "long" else self.best_price + distance_price
-        if self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_trailing:
-            tick = Decimal(str(self.tick_size))
-            rounding = ROUND_FLOOR if self.direction == "long" else ROUND_CEILING
-            candidate = float((Decimal(str(candidate)) / tick).to_integral_value(rounding=rounding) * tick)
+        self._tighten_stop(candidate, align=bool(
+            self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_trailing
+        ))
+
+    def _tighten_stop(self, candidate: float, *, align: bool) -> None:
+        if align:
+            candidate = align_order_price(candidate, self.tick_size, round_up=self.direction == "short")
         self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
 
     def _apply_stop(self, candle: Candle) -> List[Dict[str, Any]]:

@@ -18,7 +18,7 @@ from ..amount_constraints import normalize_qty_with_constraints
 from ..entry_execution import EntryExecutionCoordinator, PendingEntry
 from ..entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
 from ..execution_adapter import ExecutionAdapter
-from ..execution_assumptions import ResolvedExecutionAssumptions, legacy_execution_assumptions
+from ..execution_assumptions import ResolvedExecutionAssumptions, align_order_price, legacy_execution_assumptions
 from ..bar_execution_clock import execution_clock, validate_causal_execution_policy
 from .position import EntryFillFacts
 from ..execution_context import ResolvedExecutionContext, resolve_execution_context
@@ -1644,9 +1644,10 @@ class LadderRiskEngine:
             raise ValueError(f"r_ticks must be > 0, got {r_ticks}")
 
         stop_distance = r_ticks * self.tick_size
-        if direction == "long":
-            return entry_price - stop_distance
-        return entry_price + stop_distance
+        price = risk_math.price_from_r(entry_price, direction, stop_distance, -1.0)
+        if self.execution_assumptions.uses_tick_aligned_protection:
+            return align_order_price(price, self.tick_size, round_up=direction == "short")
+        return price
 
     def _floor_to_step(self, qty: float, step: float) -> float:
         if step in (None, 0):
@@ -1955,6 +1956,8 @@ class LadderRiskEngine:
                 raise RuntimeError(
                     f"compiled take-profit target {order.get('id')!r} has no executable price"
                 )
+            if self.execution_assumptions.uses_tick_aligned_protection:
+                target_price = align_order_price(target_price, self.tick_size, round_up=direction == "long")
 
             leg_specs.append(
                 {

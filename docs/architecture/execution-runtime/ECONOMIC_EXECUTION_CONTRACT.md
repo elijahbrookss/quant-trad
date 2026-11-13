@@ -105,6 +105,7 @@ at least one genuinely adverse scenario.
 | `legacy_bar_touch.v1` | Historical touch/full-fill compatibility with explicit-zero exploratory economics. | X0 |
 | `costed_bar.v1` | Explicit fees and adverse market/stop BPS; passive touch behavior remains. | X1 |
 | `conservative_bar.v1` | X1 economics plus strict passive penetration and disclosed full fills. | X2 |
+| `conservative_bar.v2` | Exploratory FAST cash-spot market entry with full fills. Initial and updated stops and targets round away from the entry to executable ticks. Same-bar close entry and legacy clocks are retained to isolate the change in protection. | X2 |
 | `causal_spot_resting_bar.v1` | Explicit cash-spot resting/FAST backtest policy with strict whole-bar eligibility, availability clocks and immutable entry facts. | X2 |
 | `causal_spot_resting_bar.v2` | Same restricted causal policy with pinned conservative trailing tick alignment and finalization on the last target-fill bar. | X2 |
 

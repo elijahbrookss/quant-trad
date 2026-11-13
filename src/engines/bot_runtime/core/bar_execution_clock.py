@@ -26,6 +26,13 @@ def execution_candle(candle: Any, assumptions: Any) -> Any:
 
 
 def validate_causal_run_mode(assumptions: Any, run_type: str, execution_mode: str = "fast") -> None:
+    if assumptions.uses_tick_aligned_protection and (
+        assumptions.economic_claim_intent != "exploration"
+        or str(run_type).lower() != "backtest"
+        or str(execution_mode).lower() != "fast"
+        or not assumptions.full_fill_assumption
+    ):
+        raise ValueError("conservative_bar.v2 requires an exploratory fast full-fill backtest")
     if assumptions.uses_causal_bar_clock and assumptions.economic_claim_intent not in {"exploration", "economic"}:
         raise ValueError("causal_spot_resting_bar.v1 is development-only")
     if assumptions.uses_causal_bar_clock and str(run_type).lower() != "backtest":
@@ -65,6 +72,12 @@ def validate_output_availability(outputs: Any, clock: datetime) -> None:
 
 
 def validate_causal_execution_policy(assumptions: Any, profile: Any, plan: Any, input_capability: str) -> None:
+    if assumptions.uses_tick_aligned_protection and (
+        profile.instrument.execution_semantics != "spot"
+        or plan.entry.order_type != "market"
+        or input_capability != "bars"
+    ):
+        raise ValueError("conservative_bar.v2 requires cash spot market entries and bar inputs")
     if not assumptions.uses_causal_bar_clock:
         return
     if profile.instrument.execution_semantics != "spot":

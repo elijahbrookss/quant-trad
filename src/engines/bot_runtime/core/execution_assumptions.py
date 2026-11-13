@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -19,6 +20,7 @@ EXECUTION_ASSUMPTIONS_SCHEMA_VERSION = "execution_assumptions.v1"
 LEGACY_BAR_MODEL_VERSION = "legacy_bar_touch.v1"
 COSTED_BAR_MODEL_VERSION = "costed_bar.v1"
 CONSERVATIVE_BAR_MODEL_VERSION = "conservative_bar.v1"
+TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION = "conservative_bar.v2"
 CAUSAL_SPOT_BAR_MODEL_VERSION = "causal_spot_resting_bar.v1"
 TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION = "causal_spot_resting_bar.v2"
 
@@ -48,11 +50,20 @@ _SUPPORTED_MODELS = {
     LEGACY_BAR_MODEL_VERSION,
     COSTED_BAR_MODEL_VERSION,
     CONSERVATIVE_BAR_MODEL_VERSION,
+    TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION,
     CAUSAL_SPOT_BAR_MODEL_VERSION,
     TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION,
 }
+_STRICT_PENETRATION_MODELS = _SUPPORTED_MODELS - {LEGACY_BAR_MODEL_VERSION, COSTED_BAR_MODEL_VERSION}
 _SUPPORTED_PASSIVE_POLICIES = {"touch", "strict_penetration"}
 _SUPPORTED_FEE_POLICIES = {"instrument_resolved", "explicit_zero"}
+
+
+def align_order_price(price: float, tick_size: float, *, round_up: bool) -> float:
+    """Round an internally generated order threshold to an executable tick."""
+    tick = Decimal(str(tick_size))
+    rounding = ROUND_CEILING if round_up else ROUND_FLOOR
+    return float((Decimal(str(price)) / tick).to_integral_value(rounding=rounding) * tick)
 
 
 @dataclass(frozen=True)
@@ -96,7 +107,11 @@ class ResolvedExecutionAssumptions:
 
     @property
     def uses_tick_aligned_trailing(self) -> bool:
-        return self.model_version == TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION
+        return self.uses_tick_aligned_protection or self.model_version == TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION
+
+    @property
+    def uses_tick_aligned_protection(self) -> bool:
+        return self.model_version == TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION
 
     @property
     def finalizes_last_target_at_fill(self) -> bool:
@@ -240,7 +255,7 @@ def _quality_ceiling(
     )
     if not costed:
         return ExecutionQualityClass.X0.value
-    if model_version in {CONSERVATIVE_BAR_MODEL_VERSION, CAUSAL_SPOT_BAR_MODEL_VERSION, TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION} and passive_fill_policy == "strict_penetration" and full_fill_assumption:
+    if model_version in _STRICT_PENETRATION_MODELS and passive_fill_policy == "strict_penetration" and full_fill_assumption:
         return ExecutionQualityClass.X2.value
     if model_version == COSTED_BAR_MODEL_VERSION:
         return ExecutionQualityClass.X1.value
@@ -269,12 +284,12 @@ def resolve_execution_assumptions(
     if model_version not in _SUPPORTED_MODELS:
         raise ValueError(f"unsupported execution_assumptions.model_version: {model_version}")
 
-    default_passive = "strict_penetration" if model_version in {CONSERVATIVE_BAR_MODEL_VERSION, CAUSAL_SPOT_BAR_MODEL_VERSION, TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION} else "touch"
+    default_passive = "strict_penetration" if model_version in _STRICT_PENETRATION_MODELS else "touch"
     passive_fill_policy = str(payload.get("passive_fill_policy") or default_passive).strip().lower()
     if passive_fill_policy not in _SUPPORTED_PASSIVE_POLICIES:
         raise ValueError(f"unsupported execution_assumptions.passive_fill_policy: {passive_fill_policy}")
-    if model_version in {CONSERVATIVE_BAR_MODEL_VERSION, CAUSAL_SPOT_BAR_MODEL_VERSION, TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION} and passive_fill_policy != "strict_penetration":
-        raise ValueError("conservative_bar.v1 requires passive_fill_policy=strict_penetration")
+    if model_version in _STRICT_PENETRATION_MODELS and passive_fill_policy != "strict_penetration":
+        raise ValueError(f"{model_version} requires passive_fill_policy=strict_penetration")
 
     fee_policy = str(payload.get("fee_policy") or ("" if economic else "explicit_zero")).strip().lower()
     if fee_policy not in _SUPPORTED_FEE_POLICIES:
@@ -359,6 +374,7 @@ def apply_adverse_slippage(price: float, side: Any, bps: float | None) -> float:
 
 __all__ = [
     "CONSERVATIVE_BAR_MODEL_VERSION",
+    "TICK_ALIGNED_CONSERVATIVE_BAR_MODEL_VERSION",
     "CAUSAL_SPOT_BAR_MODEL_VERSION",
     "TICK_ALIGNED_CAUSAL_SPOT_BAR_MODEL_VERSION",
     "COSTED_BAR_MODEL_VERSION",
