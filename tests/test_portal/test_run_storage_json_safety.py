@@ -116,6 +116,17 @@ def test_report_gateway_preserves_admitted_execution_identity(monkeypatch) -> No
     assert run_research_dataset._indicator_source_diagnostics_dataset(result)["available"] is True
     assert run_research_dataset._execution_assumption_manifest(result) == admitted["execution_assumptions"]
 
+    # Repeated finalization cannot replace either admitted keys or the first
+    # accepted report projection, and must preserve the admission hashes.
+    repeated = artifacts.RepositoryArtifactStorage().upsert_bot_run({
+        "run_id": "run-1", "config_hash": "wrong", "material_config_hash": "wrong",
+        "config_snapshot": {**projection, "wallet_start": {"balances": {"USD": 1}},
+            "execution_assumptions": {"model_version": "wrong"}},
+    })
+    assert repeated["config_snapshot"] == result["config_snapshot"]
+    assert repeated["config_hash"] == before["config_hash"]
+    assert repeated["material_config_hash"] == before["material_config_hash"]
+
 
 def test_report_gateway_retains_legacy_projection_behavior(monkeypatch) -> None:
     monkeypatch.setattr(runs, "db", _FakeDb())
@@ -153,6 +164,16 @@ def test_report_finalization_preserves_admission_in_disposable_database():
         assert actual['config_hash'] == before['config_hash']
         assert actual['material_config_hash'] == before['material_config_hash']
         assert actual['summary'] == {'net_pnl': -1.25}
+        artifacts.RepositoryArtifactStorage().upsert_bot_run({
+            'run_id': run_id, 'config_hash': 'must-not-change',
+            'material_config_hash': 'must-not-change',
+            'config_snapshot': {**projection, 'wallet_start': {'balances': {'USD': 1}},
+                'execution_assumptions': {'model_version': 'must-not-change'}},
+        })
+        repeated = runs.get_bot_run(run_id)
+        assert repeated['config_snapshot'] == actual['config_snapshot']
+        assert repeated['config_hash'] == before['config_hash']
+        assert repeated['material_config_hash'] == before['material_config_hash']
     finally:
         with runs.db.session() as session:
             session.execute(delete(BotRunRecord).where(BotRunRecord.run_id == run_id))
