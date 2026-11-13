@@ -412,6 +412,11 @@ def get_result_readiness(
     }
     opened_trade_ids = {_trade_id(row) for row in opened_rows if _trade_id(row)}
     closed_trade_ids = {_trade_id(row) for row in closed_rows if _trade_id(row)}
+    stored_trade_ids = {
+        str(row.get("trade_id") or row.get("id") or "").strip()
+        for row in resolved_stored_trades
+        if str(row.get("trade_id") or row.get("id") or "").strip()
+    }
     unfilled_terminal_ids: set[str] = set()
     if accepted_trade_ids - (opened_trade_ids | closed_trade_ids):
         execution_names = {"ORDER_LIFECYCLE_CHANGED", "ENTRY_FILLED", "EXIT_FILLED"}
@@ -423,7 +428,7 @@ def get_result_readiness(
         )
         unfilled_terminal_ids = terminal_unfilled_trade_ids(
             run_id=run_id, decision_rows=decision_rows, execution_rows=execution_rows,
-        ) - (opened_trade_ids | closed_trade_ids)
+        ) - (opened_trade_ids | closed_trade_ids | stored_trade_ids)
     missing_open = sorted(accepted_trade_ids - opened_trade_ids - unfilled_terminal_ids)
     missing_close = sorted(accepted_trade_ids - closed_trade_ids - unfilled_terminal_ids)
     terminal_open_trade_ids = sorted(

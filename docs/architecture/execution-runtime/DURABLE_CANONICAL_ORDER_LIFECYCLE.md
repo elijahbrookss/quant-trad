@@ -175,8 +175,13 @@ complete contiguous, single-request/single-attempt canonical lifecycle linked
 to the exact accepted decision, root, correlation, run and trade identity. All
 quantities must prove zero cumulative fill and the full requested remainder;
 terminal state must be expired, canceled or rejected. Replacement, partial,
-missing, contradictory or unlinked evidence remains incomplete. This narrow
-read projection does not manufacture `TRADE_OPENED`/`TRADE_CLOSED` events or
+missing, contradictory or unlinked evidence remains incomplete. The zero-fill
+alternative is unavailable whenever any corresponding stored trade exists,
+including a closed trade without canonical open/close events. Required request
+identity (instrument, strategy, symbol) and required series identity must be
+present, not merely absent on both sides. The optional signal ID may be absent
+on both sides; exact decision, event, root and correlation linkage still apply.
+The read projection does not manufacture `TRADE_OPENED`/`TRADE_CLOSED` events or
 repair historical runs. It is independent of the pinned execution model:
 execution clocks, fill generation, validity and accounting remain unchanged.
 

@@ -40,6 +40,10 @@ def _time(value: Any):
         return None
 
 
+def _present(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def terminal_unfilled_trade_ids(
     *, run_id: str, decision_rows: Sequence[Mapping[str, Any]],
     execution_rows: Sequence[Mapping[str, Any]],
@@ -65,10 +69,15 @@ def terminal_unfilled_trade_ids(
         decision_id = pc.get('decision_id')
         decision_time = _time(pp.get('event_ts'))
         expected_side = {'enter_long': 'buy', 'enter_short': 'sell'}.get(pc.get('intent'))
-        if (not decision_id or not decision_time or not expected_side
+        # Request contracts require instrument, strategy and symbol; the typed
+        # decision and lifecycle contracts require series_key. signal_id is
+        # explicitly optional in both, so absence on both sides is legitimate.
+        required_identity = ('instrument_id', 'strategy_id', 'symbol', 'series_key')
+        if (not _present(decision_id) or not decision_time or not expected_side
                 or parent.get('run_id') != run_id or pc.get('run_id') != run_id
-                or not pc.get('bot_id')
-                or not all(pp.get(key) for key in ('event_id', 'root_id', 'correlation_id'))):
+                or not _present(pc.get('bot_id'))
+                or not all(_present(pc.get(key)) for key in required_identity)
+                or not all(_present(pp.get(key)) for key in ('event_id', 'root_id', 'correlation_id'))):
             continue
         # Include contradictory identities linked to this decision, rather
         # than hiding them by filtering solely on the expected trade ID.
@@ -86,7 +95,7 @@ def terminal_unfilled_trade_ids(
         first = _context(ordered[0])
         stable = ('order_request_id', 'order_request_manifest_hash', 'attempt_id',
                   'order_attempt_manifest_hash', 'execution_context_hash', 'execution_policy_hash')
-        if not all(first.get(key) for key in stable):
+        if not all(_present(first.get(key)) for key in stable):
             continue
         quantity = _number(first.get('requested_qty'))
         if quantity is None or quantity <= 0:
@@ -104,11 +113,11 @@ def terminal_unfilled_trade_ids(
             p, c = _payload(row), _context(row)
             at = _time(c.get('known_at'))
             event_id = p.get('event_id')
-            if (not event_id or event_id in seen
+            if (not _present(event_id) or event_id in seen
                     or row.get('run_id') != run_id or c.get('run_id') != run_id
                     or c.get('bot_id') != pc.get('bot_id')
                     or any(c.get(key) != pc.get(key) for key in
-                           ('instrument_id', 'series_key', 'signal_id', 'strategy_id'))
+                           (*required_identity, 'signal_id', 'timeframe'))
                     or c.get('decision_id') != decision_id
                     or c.get('trade_id') != trade_id
                     or p.get('parent_id') != pp['event_id']
@@ -122,7 +131,7 @@ def terminal_unfilled_trade_ids(
                     or c.get('side') != expected_side
                     or at is None or at < previous_time
                     or _time(p.get('event_ts')) != at
-                    or not c.get('order_lifecycle_replay_hash')
+                    or not _present(c.get('order_lifecycle_replay_hash'))
                     or c.get('replacement_attempt_id') is not None
                     or any(c.get(key) is not None for key in ('fill_id', 'fill_qty', 'fill_price', 'fill_fee'))
                     or any(_number(c.get(key)) != quantity for key in

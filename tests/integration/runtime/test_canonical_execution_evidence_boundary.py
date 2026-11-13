@@ -21,11 +21,11 @@ def canonical_rows(result):
     return rows
 
 
-def readiness(rows):
+def readiness(rows, *, stored_trades=None):
     return report_data.get_result_readiness('persisted-reference-run',
         run_row={'run_id': 'persisted-reference-run', 'status': 'completed',
                  'summary': {'net_pnl': 0, 'total_trades': 0}},
-        runtime_events=rows, stored_trades=[])
+        runtime_events=rows, stored_trades=stored_trades or [])
 
 
 def test_exit_fill_retains_actual_execution_context_across_canonical_projection(monkeypatch, tmp_path):
@@ -73,6 +73,35 @@ def test_fill_evidence_missing_at_execution_is_not_invented():
     assert evidence == {'post_only': False}
 
 
+def test_closed_stored_trade_cannot_be_explained_as_unfilled(monkeypatch, tmp_path):
+    rows = canonical_rows(_full_runtime(monkeypatch, tmp_path, never_fill=True))
+    decision = next(r for r in rows if r['payload']['event_name'] == 'DECISION_EMITTED')
+    trade_id = decision['payload']['context']['trade_id']
+    result = readiness(rows, stored_trades=[{'id': trade_id, 'status': 'closed'}])
+    assert result['safe_to_compare'] is False
+    assert result['missing_trade_opened'] == [trade_id]
+    assert result['missing_trade_closed'] == [trade_id]
+    assert result['accepted_unfilled_terminal_count'] == 0
+
+
+@pytest.mark.parametrize('field', ['instrument_id', 'strategy_id', 'series_key', 'symbol'])
+@pytest.mark.parametrize('absent', [None, '', '   '])
+def test_required_identity_missing_on_both_sides_is_not_a_match(monkeypatch, tmp_path, field, absent):
+    rows = canonical_rows(_full_runtime(monkeypatch, tmp_path, never_fill=True))
+    for row in rows:
+        row['payload']['context'][field] = absent
+    assert readiness(rows)['safe_to_compare'] is False
+
+
+def test_optional_signal_identity_can_be_absent_on_both_sides(monkeypatch, tmp_path):
+    # CanonicalOrderRequest and the typed decision/lifecycle projections declare
+    # signal_id optional. Exact decision/event/root/correlation still bind it.
+    rows = canonical_rows(_full_runtime(monkeypatch, tmp_path, never_fill=True))
+    for row in rows:
+        row['payload']['context']['signal_id'] = None
+    assert readiness(rows)['safe_to_compare'] is True
+
+
 @pytest.mark.parametrize('terminal', ['expired', 'canceled', 'rejected'])
 def test_terminal_unfilled_readiness_requires_exact_complete_lineage(monkeypatch, tmp_path, terminal):
     result = _full_runtime(monkeypatch, tmp_path, never_fill=True)
@@ -117,13 +146,13 @@ def test_terminal_unfilled_readiness_requires_exact_complete_lineage(monkeypatch
 
 
 @pytest.mark.db
-@pytest.mark.parametrize('case', ['filled', 'expired', 'wrong_decision', 'missing_terminal'])
+@pytest.mark.parametrize('case', ['filled', 'expired', 'wrong_decision', 'missing_terminal', 'closed_trade_conflict'])
 def test_runtime_evidence_roundtrips_disposable_postgres_and_report(monkeypatch, tmp_path, case):
     """The normal isolated CI database runs this; no production or mocked DB."""
     from uuid import uuid4
     from sqlalchemy import delete
     from portal.backend.db import db
-    from portal.backend.db.models import BotRecord, BotRunRecord, BotRunEventRecord, BotRunEventSeqAllocatorRecord
+    from portal.backend.db.models import BotRecord, BotRunRecord, BotTradeRecord, BotRunEventRecord, BotRunEventSeqAllocatorRecord
     from portal.backend.service.bots.botlens_canonical_facts import append_botlens_canonical_fact_batch
     from portal.backend.service.storage.repos import runs
     from portal.backend.service.storage.repos.runtime_events import list_bot_runtime_events
@@ -153,6 +182,13 @@ def test_runtime_evidence_roundtrips_disposable_postgres_and_report(monkeypatch,
             append_botlens_canonical_fact_batch(**batch)
         persisted = list_bot_runtime_events(bot_id=bot_id, run_id=run_id, limit=5000)
         assert persisted
+        if case == 'closed_trade_conflict':
+            decision = next(r for r in persisted if r['payload']['event_name'] == 'DECISION_EMITTED')
+            # Deliberately contradictory disposable evidence: a stored closed
+            # trade may not be waved away by the zero-fill alternative.
+            with db.session() as session:
+                session.add(BotTradeRecord(id=decision['payload']['context']['trade_id'],
+                    bot_id=bot_id, run_id=run_id, direction='long', status='closed'))
         if case != 'filled':
             assert report_data.get_result_readiness(run_id)['safe_to_compare'] is (case == 'expired')
             terminal = [r for r in persisted if r['payload']['event_name'] == 'ORDER_LIFECYCLE_CHANGED'
@@ -176,5 +212,6 @@ def test_runtime_evidence_roundtrips_disposable_postgres_and_report(monkeypatch,
         with db.session() as session:
             session.execute(delete(BotRunEventRecord).where(BotRunEventRecord.run_id == run_id))
             session.execute(delete(BotRunEventSeqAllocatorRecord).where(BotRunEventSeqAllocatorRecord.run_id == run_id))
+            session.execute(delete(BotTradeRecord).where(BotTradeRecord.run_id == run_id))
             session.execute(delete(BotRunRecord).where(BotRunRecord.run_id == run_id))
             session.execute(delete(BotRecord).where(BotRecord.id == bot_id))
