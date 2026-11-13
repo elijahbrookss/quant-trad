@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
+from engines.bot_runtime.core.bar_execution_clock import execution_clock, validate_output_availability
 from engines.bot_runtime.core.series_identity import canonical_series_key
 from engines.bot_runtime.live_market import LiveCandleStore, append_closed_live_candles_to_series
 from strategies.evaluator import (
@@ -439,6 +440,13 @@ class RuntimeExecutionLoopMixin:
             series = state.series
             engine = getattr(series, "risk_engine", None)
             active_trade = getattr(engine, "active_trade", None) if engine is not None else None
+            if engine is not None and getattr(getattr(engine, "execution_assumptions", None), "uses_causal_bar_clock", False) and engine.entry_execution.has_pending:
+                terminal_candles = list(getattr(series, "candles", []) or [])
+                count = int(getattr(state, "total_bars", len(terminal_candles)) or len(terminal_candles))
+                if not terminal_candles or count <= 0:
+                    raise RuntimeError("causal_terminal_pending_candle_missing")
+                engine.entry_execution.expire_pending_at_end(terminal_candles[min(count, len(terminal_candles)) - 1])
+                self._drain_order_lifecycle_events(series=series)
             if active_trade is None:
                 continue
             candles = list(getattr(series, "candles", []) or [])
@@ -1521,6 +1529,11 @@ class RuntimeExecutionLoopMixin:
         compiled_strategy = (series.meta or {}).get("compiled_strategy")
         if compiled_strategy is None:
             raise RuntimeError("strategy_runtime_missing: compiled strategy is not initialized")
+        assumptions = getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)
+        causal = bool(getattr(assumptions, "uses_causal_bar_clock", False))
+        decision_clock = execution_clock(candle, assumptions)
+        if causal:
+            validate_output_availability(outputs, decision_clock)
         decision_result = evaluate_strategy_bar(
             compiled_strategy=compiled_strategy,
             state=state.decision_evaluation_state,
@@ -1533,6 +1546,8 @@ class RuntimeExecutionLoopMixin:
             minimal_decision_details=True,
         )
         for artifact in decision_result.artifacts:
+            if causal:
+                artifact["decision_time"] = _isoformat(decision_clock)
             state.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))
             if self._run_context is not None:
                 self._run_context.decision_artifacts.append(self._copy_decision_artifact_for_runtime(artifact))

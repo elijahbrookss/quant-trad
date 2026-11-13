@@ -96,6 +96,20 @@ Nothing “snaps into existence” retroactively.
 
 If an artifact would not exist yet in live trading, it must not exist yet in the system.
 
+## Candle Source Policy
+
+For new candle inputs, use provider-supplied candles at the requested timeframe
+and freeze that exact canonical input. Do not aggregate lower-timeframe candles,
+split or upsample higher-timeframe candles, synthesize intervals, or fill missing
+provider bars from another timeframe. Provider request pagination is transport;
+it must still request native candles at the same timeframe.
+
+Preserve historical internally derived candles, their accurate provenance and
+all existing results/replay definitions. Do not relabel them as provider-native
+or rewrite/delete historical evidence. Existing derivation code is historical
+compatibility, not the preparation route for new research. A missing native
+provider timeframe or coverage is an explicit blocker, not permission to derive.
+
 ## Engine Consistency Rule
 
 All derived outputs must come from one runtime state-engine timeline:
@@ -212,6 +226,12 @@ Do not refactor blindly.
 Refactor with logs, tests, or concrete pressure.
 
 ---
+
+For analytical Checks, inspect existing preparation and calculations before adding
+an evaluator. Configure or reuse where semantics already fit; keep genuinely new
+procedures explicit. Review cohesion and duplication as agent responsibilities,
+not through a new architecture scanner. Preserve fixed scientific choices,
+versioned behavior and historical replay during computation-only refactors.
 
 ## Non-Negotiable Rule
 

@@ -1,0 +1,3 @@
+# Safe default; the operator explicitly selects the enabled template.
+apiVersion: 1
+datasources: []

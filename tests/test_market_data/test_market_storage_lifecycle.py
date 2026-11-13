@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import json
 from types import SimpleNamespace
 
@@ -309,6 +309,43 @@ def test_canonical_execution_runs_after_raw_exclusive_fence_is_released(tmp_path
         canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
     result = service.run(policy=policy, execute=True, storage_root=tmp_path)
     assert observed[0]["execute"] is True and result["outcomes"][0]["reclaimed_bytes"] == 4096
+
+
+def test_exact_canonical_action_invokes_only_selected_canonical_executor(tmp_path):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+
+    repository = _LifecycleRepository()
+    service = _service(repository)
+    repository.list_compaction_manifests = lambda **_: pytest.fail("no raw planning")
+    repository.list_archive_expiration_candidates = lambda **_: pytest.fail("no raw planning")
+    observed = []
+
+    def execute(**kwargs):
+        observed.append(kwargs)
+        return {"schema_version": "market.canonical_retention_selected_run.v1",
+                "status": "completed", "outcomes": [{"status": "page_acknowledged"}],
+                "failure_count": 0}
+
+    service.canonical_executor = SimpleNamespace(run_selected=execute)
+    policy = MarketStorageLifecyclePolicy(
+        execution_enabled=True,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True),
+    )
+    day = date(2026, 9, 3)
+    result = service.run_canonical_action(
+        policy=policy, storage_root=tmp_path, storage_day=day,
+        expected_action="stage_page", execute=True,
+    )
+    assert result["outcomes"] == [{"status": "page_acknowledged"}]
+    assert observed == [{
+        "policy": policy.canonical_retention,
+        "storage_root": tmp_path,
+        "storage_day": day,
+        "expected_action": "stage_page",
+        "execute": True,
+        "cancelled": None,
+        "progress": None,
+    }]
 
 
 def test_archive_expiration_rechecks_new_retention_pin_before_deletion() -> None:

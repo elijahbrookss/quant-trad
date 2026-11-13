@@ -21,6 +21,7 @@ from scripts.db import fact_header_v2_capture as capture
 from scripts.db import fact_header_v2_copy as headers
 from scripts.db import raw_mapping_v2_copy as raw
 from scripts.db import fact_header_v2_references as references
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
 from scripts.db.fact_header_v2_deadline import CONTROLLER_LOCK
 
 STATE = keys.SCHEMA + ".adoption"
@@ -672,8 +673,7 @@ def verified_adoption(conn, *, operation_sha256, timeout_seconds=30):
         raise RuntimeError("fact_header_forward_nested_switch")
     with _step(conn, timeout_seconds) as limit:
         relations = [relation for family in FAMILIES.values() for relation in family[:2]]
-        relations += [references.PARENT, "market.fact_archive_material_aliases",
-                      "market.fact_archive_canonical_dependencies", state_relation(conn, operation_sha256)]
+        relations += [*SOURCE_REFERENCE_COLUMNS, state_relation(conn, operation_sha256)]
         conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) + " IN ACCESS EXCLUSIVE MODE NOWAIT")
         state = _inspect(conn, operation_sha256, limit)
         if not _report(state, reused=True)["retained_targets_verified"]:

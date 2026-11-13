@@ -158,31 +158,38 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
                                          max_run_seconds=60, archive_min_free_bytes=0)
     assert executor.run(policy=policy, storage_root=tmp_path, execute=True)["outcomes"][0]["status"] == "partition_sealed"
     physical = _physical(storage, day)
+    # A fresh worker resumes from sealed PostgreSQL state, not the prior
+    # process's newly retained progress cooldown.
+    executor = module.CanonicalFactRetentionExecutor(repository=repository)
     clock = [0.0]
     monkeypatch.setattr(module, "monotonic", lambda: clock[0])
-    original = PostgresCanonicalFactArchiveRepository._stage_catalog_rows
+    from portal.backend.service.storage.repos.fact_archive_generation import ArchiveGenerationCoordinator
     cancellations = []
 
-    def cancel_after_catalog_write(archive, session, record_type, manifest_id, rows):
-        original(archive, session, record_type, manifest_id, rows)
-        # Apply the artificial timeout only to the intended statement. Source
-        # selection and catalog setup retain the ordinary SQL policy.
-        session.execute(text("SET LOCAL statement_timeout='25ms'"))
-        try:
-            session.execute(text("SELECT pg_sleep(0.2)"))
-        except DBAPIError as exc:
-            cancellations.append(exc.orig.pgcode)
-            clock[0] = 60.0 if deadline_elapsed else 1.0
-            raise
+    def cancel_before_activation(coordinator, **kwargs):
+        # Hidden catalog batches may already be committed. Cancellation before
+        # activation must leave them invisible and resumable without publishing
+        # a manifest, cursor, or authoritative generation.
+        with coordinator.database.session() as session:
+            coordinator.lock_day(session, kwargs["day"])
+            session.execute(text("SET LOCAL statement_timeout='25ms'"))
+            try:
+                session.execute(text("SELECT pg_sleep(0.2)"))
+            except DBAPIError as exc:
+                cancellations.append(exc.orig.pgcode)
+                clock[0] = 60.0 if deadline_elapsed else 1.0
+                raise
         pytest.fail("The disposable PostgreSQL statement must time out")
 
     with monkeypatch.context() as patch:
-        patch.setattr(PostgresCanonicalFactArchiveRepository, "_stage_catalog_rows", cancel_after_catalog_write)
+        patch.setattr(ArchiveGenerationCoordinator, "activate", cancel_before_activation)
         failed = executor.run(policy=policy, storage_root=tmp_path, execute=True)
     assert cancellations == ["57014"]
     assert failed["outcomes"][0]["status"] == ("deferred" if deadline_elapsed else "failed")
     assert failed["failure_count"] == (0 if deadline_elapsed else 1)
-    assert failed["next_after_storage_day"] == (day - timedelta(days=1) if deadline_elapsed else day).isoformat()
+    assert failed["next_after_storage_day"] == day.isoformat()
+    if deadline_elapsed:
+        assert failed["retry_schedule"][0]["attempt_count"] == 0
     if deadline_elapsed:
         assert failed["stop_reason"] == "time_budget"
     with storage.database.session() as session:
@@ -200,6 +207,7 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
 
     # A later bounded attempt uses only committed progress. The uncertain object
     # from the rolled-back publication cannot serve as catalog acknowledgement.
+    clock[0] += policy.max_run_seconds + 1
     retry = executor.run(policy=policy, storage_root=tmp_path, execute=True,
                          after_storage_day=None if deadline_elapsed else day - timedelta(days=1))
     assert retry["failure_count"] == 0
@@ -208,3 +216,33 @@ def test_statement_cancel_rolls_back_page_and_preserves_budget_resume(
     with storage.database.session() as session:
         assert session.scalar(text("SELECT count(*) FROM market.fact_archive_manifests WHERE storage_day=:day"),
                               {"day": day}) == 1
+
+
+def test_fresh_native_executor_discovers_later_days_and_replans_cooled_progress(storage,tmp_path,monkeypatch):
+    from portal.backend.service.market import canonical_retention as module
+    monkeypatch.setattr(market_lifecycle,"db",storage.database)
+    days=[storage.today-timedelta(days=33-index) for index in range(3)]
+    for index,day in enumerate(days):
+        _placement(monkeypatch,day)
+        _ingest(storage,replace(storage.fact,observation_key=f"fresh-discovery-{index}"))
+    clock=[0.0];monkeypatch.setattr(module,"monotonic",lambda:clock[0])
+    policy=CanonicalFactRetentionPolicy(execution_enabled=True,max_steps_per_run=1,
+        max_run_seconds=60,max_page_rows=1,archive_min_free_bytes=0)
+    executor=module.CanonicalFactRetentionExecutor(repository=PostgresCanonicalFactRetentionRepository(database=storage.database))
+    for index,day in enumerate(days):
+        clock[0]=float(index)
+        result=executor.run(policy=policy,storage_root=tmp_path,execute=True)
+        assert result["failure_count"]==0
+        assert [(item["storage_day"],item["status"]) for item in result["outcomes"]]==[(day.isoformat(),"partition_sealed")]
+        assert result["next_after_storage_day"]==day.isoformat()
+        assert all(item["attempt_count"]==0 for item in result["retry_schedule"])
+    assert len(executor._retry_states)==3
+    for index,day in enumerate(days):
+        clock[0]=61.0+index
+        result=executor.run(policy=policy,storage_root=tmp_path,execute=True)
+        assert result["failure_count"]==0
+        assert [(item["storage_day"],item["status"]) for item in result["outcomes"]]==[(day.isoformat(),"page_acknowledged")]
+    with storage.database.session() as session:
+        rows=session.execute(text("SELECT storage_day,count(*) AS pages,sum(row_count) AS rows "
+            "FROM market.fact_archive_manifests GROUP BY storage_day ORDER BY storage_day")).mappings().all()
+    assert [(item["storage_day"],item["pages"],item["rows"]) for item in rows]==[(day,1,1) for day in days]

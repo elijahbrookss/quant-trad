@@ -1,0 +1,627 @@
+{
+  "item": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "kind": "research_check",
+    "status": "tested",
+    "instrument_id": "instrument-1",
+    "timeframe": "15m",
+    "replayable": true,
+    "observation_eligible": true,
+    "payload": {
+      "replayable": true,
+      "observation_eligible": true,
+      "definition": {
+        "schema_version": "research.check_definition.v1",
+        "definition_id": "raw_forward_outcome",
+        "definition_version": "12+7622eb56d155e9b1",
+        "evaluator_id": "raw_forward_outcome",
+        "evaluator_version": "12",
+        "request_schema_version": "research.check_request.v2",
+        "result_schema_version": "research.check_result.v2",
+        "material_rules": {
+          "family": "raw_forward_outcome",
+          "event_ownership": "check",
+          "input_policy": "canonical_candle_clock_path.v1",
+          "outcome_schema": "reversal_selection_only.v2",
+          "outcome_boundary": "evaluation_end_exclusive",
+          "selection_rules": {
+            "version": "reversal_selection_only.v2",
+            "formation": "unchanged retreat-inclusive;retain all chains;no expiry or deduplication",
+            "decision": "completion parent known_at;not an executed fill",
+            "controls": "no completion at this clock;prior/pending/later formations allowed",
+            "control_low": "own minimum of n trailing candles;case n includes whole formation",
+            "features": [
+              "prior96return RMS sigma",
+              "fractional barrier distance r",
+              "strictly prior12bar z"
+            ],
+            "sigma": "RMS96 returns ending before decision candle;97 preceding closes",
+            "z_pre12": "log(C[t-1]/C[t-13])/(sigma*sqrt(12))",
+            "calipers": {
+              "sigma_ratio": 1.25,
+              "r_ratio": 1.1,
+              "z_pre12_abs": 0.25
+            },
+            "distance": "sum squared log-ratio/caliper for sigma,r and delta_z/.25",
+            "strata": "same28day block,UTC6h slot,prior12bar distinct completion count0/1/2+",
+            "radius_days": 14,
+            "order": "case clock,B2 namespace compatibility order key;distance,absolute calendar distance,control clock,source identity",
+            "reuse": "one control per chain;no control timestamp reuse across n or blocks",
+            "support": "within-pair disjoint closed direct-history to nominal+12bar-end intervals",
+            "dependence": "cross-pair overlaps and pair links;shared ancestry conservatively starts at recognition origin",
+            "weighting": "equal case completion moments;split each matched moment across its matched chains",
+            "diagnostics_only": [
+              "q=r/(sigma*sqrt(12))",
+              "prior96bar z",
+              "decision body/range",
+              "duration"
+            ],
+            "numeric_coverage_pass_gates": null,
+            "threshold_justification": "fixed design constants;no demonstrated feasibility or power",
+            "outcomes": "NOT CALCULATED;nominal support is metadata,never a first-touch scan",
+            "limits": {
+              "candles": 19104,
+              "candidate_comparisons": 20000000,
+              "wall_seconds": 120,
+              "input_bytes": 268435456,
+              "result_bytes": 16777216
+            },
+            "evaluation": "Fixed2025-02-01 through2025-07-19 exclusive;six28day blocks;origin2025-01-01;no reset",
+            "timing_representation": "reversal_stage_availability.v3;lossless shared parent clock and inferred duplicate availability fields",
+            "populations": "old first3blocks,new last3blocks,combined;each summary normalizes its own equal completion-moment weights"
+          },
+          "registered_definition": {
+            "definition_id": "raw_forward_outcome",
+            "definition_version": "12",
+            "definition_hash": "8cba887087e1157a8b38c073b70806d63ca7f975504a1db25e5bab5e01b3a204"
+          },
+          "inputs": [],
+          "indicator": {},
+          "detector": {
+            "type": "completed_reversal_candidates",
+            "computation_origin": "2025-01-01T00:00:00Z",
+            "reference_basis": "rising_leg_plus_retreat",
+            "ownership": "retain_all_provisional",
+            "max_bars": 19104,
+            "max_candidates": 10000
+          },
+          "outcomes": {
+            "schema_version": "reversal_selection_only.v2"
+          },
+          "statistics": {},
+          "assertions": [],
+          "gap_policy": "reject",
+          "gap_rewarm_bars": 0,
+          "resolved_indicator_graph": [],
+          "resolved_indicator_graph_hash": "cd1a761221a8ba1c9e91de3b7488154ff0a67dadcf4ebaabdcb16ed004357d87"
+        },
+        "definition_hash": "6cea090cdea1f5bdea03fbc8f0d236623ec1faa9134b09a1354f6826c97a15a7"
+      },
+      "request": {
+        "schema_version": "research.check_request.v2",
+        "mode": "evidence",
+        "definition_id": "raw_forward_outcome",
+        "definition_version": "12+7622eb56d155e9b1",
+        "definition_hash": "6cea090cdea1f5bdea03fbc8f0d236623ec1faa9134b09a1354f6826c97a15a7",
+        "scope": {
+          "instrument_id": "instrument-1",
+          "timeframe": "15m",
+          "start": "2025-02-01T00:00:00Z",
+          "end": "2025-07-19T00:00:00Z"
+        },
+        "parameters": {
+          "detector": {
+            "type": "completed_reversal_candidates",
+            "computation_origin": "2025-01-01T00:00:00Z",
+            "reference_basis": "rising_leg_plus_retreat",
+            "ownership": "retain_all_provisional",
+            "max_bars": 19104,
+            "max_candidates": 10000
+          },
+          "outcomes": {
+            "schema_version": "reversal_selection_only.v2"
+          },
+          "statistics": {},
+          "assertions": [],
+          "inputs": [],
+          "gap_policy": "reject",
+          "gap_rewarm_bars": 0
+        },
+        "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "immutable_run_evidence": null,
+        "request_hash": "b156b80a999cc1df4e3515d0094a36302d275d2c9bec2f14bb60c393f2c55102"
+      },
+      "plan": {
+        "schema_version": "research.check_plan.v2",
+        "request_hash": "b156b80a999cc1df4e3515d0094a36302d275d2c9bec2f14bb60c393f2c55102",
+        "market_data_requirements": [
+          {
+            "alias": "primary_bars",
+            "consumer_id": "check",
+            "instrument_id": "instrument-1",
+            "fact_type": "candle.ohlcv",
+            "contract_version": "candle.ohlcv.v1",
+            "timeframe_seconds": 900,
+            "dimensions": {},
+            "alignment": "exact_interval",
+            "max_staleness_seconds": null,
+            "known_at_required": true,
+            "required_fields": [
+              "open",
+              "high",
+              "low",
+              "close",
+              "known_at"
+            ],
+            "series_required": true,
+            "frame_missing_policy": "indicator_owned",
+            "source_policy": {
+              "mode": "exact"
+            },
+            "required_start": "2025-01-01T00:00:00.000000Z",
+            "required_end": "2025-07-19T00:00:00.000000Z"
+          }
+        ],
+        "indicator_graph": [],
+        "evaluation_range": {
+          "start": "2025-02-01T00:00:00.000000Z",
+          "end_exclusive": "2025-07-19T00:00:00.000000Z"
+        },
+        "materialization_range": {
+          "start": "2025-01-01T00:00:00.000000Z",
+          "end_exclusive": "2025-07-19T00:00:00.000000Z",
+          "as_of_commit_seq": 10
+        },
+        "warmup": {
+          "bars": 2976,
+          "seconds": 2678400,
+          "timeframe_seconds": 900
+        },
+        "outcome_tail": {
+          "horizons": [],
+          "boundary": "evaluation_end_exclusive",
+          "required_horizons": [],
+          "bars": 0,
+          "seconds": 0,
+          "horizon_kind": "bars",
+          "entry_lag_bars": 0,
+          "invalidation_max_bars": 0
+        },
+        "gap_policy": "reject",
+        "execution": {
+          "input_kind": "market_data",
+          "indicator_ids": [],
+          "warmup_floor_bars": 2976,
+          "feature_lookback_bars": 2976,
+          "feature_windows_seconds_by_alias": {},
+          "outcome_horizons": [],
+          "required_outcome_horizons": [],
+          "horizon_kind": "bars",
+          "entry_lag_bars": 0,
+          "invalidation_max_bars": 0,
+          "outcome_boundary": "evaluation_end_exclusive",
+          "primary_candle_required_fields": [
+            "open",
+            "high",
+            "low",
+            "close",
+            "known_at"
+          ]
+        },
+        "missing_coverage": [],
+        "quality_evidence": [],
+        "plan_hash": "36833f3023b1b80217a46a09bb8cfa0ecde12ea7844df17b0a369af5854df8a0"
+      },
+      "result": {
+        "schema_version": "research.check_result.v2",
+        "definition_hash": "6cea090cdea1f5bdea03fbc8f0d236623ec1faa9134b09a1354f6826c97a15a7",
+        "request_hash": "b156b80a999cc1df4e3515d0094a36302d275d2c9bec2f14bb60c393f2c55102",
+        "plan_hash": "36833f3023b1b80217a46a09bb8cfa0ecde12ea7844df17b0a369af5854df8a0",
+        "evidence_hash": "a90d470654525a054b3aa077a58541bbe307161fbde1b38cdf8001ab00d1e373",
+        "evaluator_id": "raw_forward_outcome",
+        "evaluator_version": "12",
+        "result": {
+          "candidate_count": 3,
+          "cases": [
+            {
+              "block": 0,
+              "boundary_geometry": {
+                "E": 100.0,
+                "L": 99.0,
+                "known_at": "2025-02-01T02:00:00Z",
+                "upper": 101.0
+              },
+              "decision_at": "2025-02-01T02:00:00Z",
+              "event_id": "a",
+              "formation_candles": 1,
+              "formation_start": "2025-02-01T01:45:00Z",
+              "full_population_moment_weight": 0.25,
+              "match_status": "matched",
+              "matched_population_moment_weight": 0.25,
+              "support_end": "2025-02-01T05:00:00Z",
+              "support_start": "2025-01-31T01:30:00Z"
+            },
+            {
+              "block": 0,
+              "boundary_geometry": {
+                "E": 100.0,
+                "L": 99.0,
+                "known_at": "2025-02-01T02:00:00Z",
+                "upper": 101.0
+              },
+              "decision_at": "2025-02-01T02:00:00Z",
+              "event_id": "b",
+              "formation_candles": 1,
+              "formation_start": "2025-02-01T01:45:00Z",
+              "full_population_moment_weight": 0.25,
+              "match_status": "matched",
+              "matched_population_moment_weight": 0.25,
+              "support_end": "2025-02-01T05:00:00Z",
+              "support_start": "2025-01-31T01:30:00Z"
+            },
+            {
+              "block": 3,
+              "boundary_geometry": {
+                "E": 100.0,
+                "L": 99.0,
+                "known_at": "2025-05-01T02:00:00Z",
+                "upper": 101.0
+              },
+              "decision_at": "2025-05-01T02:00:00Z",
+              "event_id": "c",
+              "formation_candles": 1,
+              "formation_start": "2025-05-01T01:45:00Z",
+              "full_population_moment_weight": 0.5,
+              "match_status": "matched",
+              "matched_population_moment_weight": 0.5,
+              "support_end": "2025-05-01T05:00:00Z",
+              "support_start": "2025-04-30T01:30:00Z"
+            }
+          ],
+          "compatibility": {
+            "synthetic": true
+          },
+          "computation_origin": "2025-01-01T00:00:00Z",
+          "dependence": {
+            "ancestry": "synthetic retained"
+          },
+          "evaluation_range": {
+            "end_exclusive": "2025-07-19T00:00:00Z",
+            "start": "2025-02-01T00:00:00Z"
+          },
+          "execution_authority": false,
+          "outcomes_calculated": false,
+          "pairs": [
+            {
+              "completion_moment_weight": 0.25,
+              "control": {
+                "boundary_geometry": {
+                  "E": 100.0,
+                  "L": 99.0,
+                  "known_at": "2025-02-01T07:00:00Z",
+                  "upper": 101.0
+                },
+                "control_id": "control-a",
+                "decision_at": "2025-02-01T07:00:00Z",
+                "support_end": "2025-02-01T10:00:00Z",
+                "support_start": "2025-01-31T06:30:00Z",
+                "trailing_candles": 1,
+                "trailing_start": "2025-02-01T06:45:00Z"
+              },
+              "decision_at": "2025-02-01T02:00:00Z",
+              "event_id": "a"
+            },
+            {
+              "completion_moment_weight": 0.25,
+              "control": {
+                "boundary_geometry": {
+                  "E": 100.0,
+                  "L": 99.0,
+                  "known_at": "2025-02-01T10:00:00Z",
+                  "upper": 101.0
+                },
+                "control_id": "control-b",
+                "decision_at": "2025-02-01T10:00:00Z",
+                "support_end": "2025-02-01T13:00:00Z",
+                "support_start": "2025-01-31T09:30:00Z",
+                "trailing_candles": 1,
+                "trailing_start": "2025-02-01T09:45:00Z"
+              },
+              "decision_at": "2025-02-01T02:00:00Z",
+              "event_id": "b"
+            },
+            {
+              "completion_moment_weight": 0.5,
+              "control": {
+                "boundary_geometry": {
+                  "E": 100.0,
+                  "L": 99.0,
+                  "known_at": "2025-05-01T10:00:00Z",
+                  "upper": 101.0
+                },
+                "control_id": "control-c",
+                "decision_at": "2025-05-01T10:00:00Z",
+                "support_end": "2025-05-01T13:00:00Z",
+                "support_start": "2025-04-30T09:30:00Z",
+                "trailing_candles": 1,
+                "trailing_start": "2025-05-01T09:45:00Z"
+              },
+              "decision_at": "2025-05-01T02:00:00Z",
+              "event_id": "c"
+            }
+          ],
+          "populations": {
+            "combined": {
+              "dependence": {
+                "matched_cases_and_controls": {
+                  "ancestry_aware_components": [
+                    {
+                      "independent_sample_size": null
+                    }
+                  ],
+                  "direct_support_and_pair_components": [
+                    {}
+                  ]
+                }
+              },
+              "evaluation_range": {
+                "end_exclusive": "2025-07-19T00:00:00Z",
+                "start": "2025-02-01T00:00:00Z"
+              },
+              "selection_summary": {
+                "chains_per_completion_clock_histogram": {
+                  "11": 1,
+                  "2": 1
+                }
+              }
+            },
+            "new": {
+              "dependence": {
+                "matched_cases_and_controls": {
+                  "ancestry_aware_components": [
+                    {
+                      "independent_sample_size": null
+                    }
+                  ],
+                  "direct_support_and_pair_components": [
+                    {}
+                  ]
+                }
+              },
+              "evaluation_range": {
+                "end_exclusive": "2025-07-19T00:00:00Z",
+                "start": "2025-04-26T00:00:00Z"
+              },
+              "selection_summary": {
+                "chains_per_completion_clock_histogram": {
+                  "11": 1,
+                  "2": 1
+                }
+              }
+            },
+            "old": {
+              "dependence": {
+                "matched_cases_and_controls": {
+                  "ancestry_aware_components": [
+                    {
+                      "independent_sample_size": null
+                    }
+                  ],
+                  "direct_support_and_pair_components": [
+                    {}
+                  ]
+                }
+              },
+              "evaluation_range": {
+                "end_exclusive": "2025-04-26T00:00:00Z",
+                "start": "2025-02-01T00:00:00Z"
+              },
+              "selection_summary": {
+                "chains_per_completion_clock_histogram": {
+                  "11": 1,
+                  "2": 1
+                }
+              }
+            }
+          },
+          "processed_bars": 19104,
+          "promotion_authority": false,
+          "rules": {
+            "calipers": {
+              "r_ratio": 1.1,
+              "sigma_ratio": 1.25,
+              "z_pre12_abs": 0.25
+            },
+            "control_low": "own minimum of n trailing candles;case n includes whole formation",
+            "controls": "no completion at this clock;prior/pending/later formations allowed",
+            "decision": "completion parent known_at;not an executed fill",
+            "dependence": "cross-pair overlaps and pair links;shared ancestry conservatively starts at recognition origin",
+            "diagnostics_only": [
+              "q=r/(sigma*sqrt(12))",
+              "prior96bar z",
+              "decision body/range",
+              "duration"
+            ],
+            "distance": "sum squared log-ratio/caliper for sigma,r and delta_z/.25",
+            "evaluation": "Fixed2025-02-01 through2025-07-19 exclusive;six28day blocks;origin2025-01-01;no reset",
+            "features": [
+              "prior96return RMS sigma",
+              "fractional barrier distance r",
+              "strictly prior12bar z"
+            ],
+            "formation": "unchanged retreat-inclusive;retain all chains;no expiry or deduplication",
+            "limits": {
+              "candidate_comparisons": 20000000,
+              "candles": 19104,
+              "input_bytes": 268435456,
+              "result_bytes": 16777216,
+              "wall_seconds": 120
+            },
+            "numeric_coverage_pass_gates": null,
+            "order": "case clock,B2 namespace compatibility order key;distance,absolute calendar distance,control clock,source identity",
+            "outcomes": "NOT CALCULATED;nominal support is metadata,never a first-touch scan",
+            "populations": "old first3blocks,new last3blocks,combined;each summary normalizes its own equal completion-moment weights",
+            "radius_days": 14,
+            "reuse": "one control per chain;no control timestamp reuse across n or blocks",
+            "sigma": "RMS96 returns ending before decision candle;97 preceding closes",
+            "strata": "same28day block,UTC6h slot,prior12bar distinct completion count0/1/2+",
+            "support": "within-pair disjoint closed direct-history to nominal+12bar-end intervals",
+            "threshold_justification": "fixed design constants;no demonstrated feasibility or power",
+            "timing_representation": "reversal_stage_availability.v3;lossless shared parent clock and inferred duplicate availability fields",
+            "version": "reversal_selection_only.v2",
+            "weighting": "equal case completion moments;split each matched moment across its matched chains",
+            "z_pre12": "log(C[t-1]/C[t-13])/(sigma*sqrt(12))"
+          },
+          "sample_count": 2,
+          "schema_version": "reversal_selection_only_result.v2",
+          "selection_manifest_hash": "5df64a126f178e7ebfccaf255e51a833a527188c204118ba6cbe287686d4403c",
+          "selection_summary": {
+            "all": {
+              "chains": 3,
+              "completion_clocks": 2
+            },
+            "case_status_counts": {
+              "matched": 3
+            },
+            "matched": {
+              "chains": 3,
+              "completion_clocks": 2
+            },
+            "retained_full_population_moment_mass": 1.0
+          },
+          "source_identity_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "status": "completed"
+        },
+        "result_hash": "e91fc4ba4dd99f32aacbf12edfc0c405a2439264c5030559f4ee31087208854c"
+      },
+      "evidence": {
+        "schema_version": "research.check_evidence_binding.v2",
+        "definition_hash": "6cea090cdea1f5bdea03fbc8f0d236623ec1faa9134b09a1354f6826c97a15a7",
+        "request_hash": "b156b80a999cc1df4e3515d0094a36302d275d2c9bec2f14bb60c393f2c55102",
+        "plan_hash": "36833f3023b1b80217a46a09bb8cfa0ecde12ea7844df17b0a369af5854df8a0",
+        "code_revision": "synthetic",
+        "evidence_kind": "frozen_market_data",
+        "input_binding": {
+          "schema_version": "frozen_market_data_read_binding.v1",
+          "dataset_contract_version": "market_dataset.v1",
+          "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dataset_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "max_commit_seq": 10,
+          "known_at_semantics": "causal_known_at_lte_decision.v1",
+          "subjects": [
+            {
+              "instrument_id": "instrument-1",
+              "snapshot": {
+                "id": "instrument-1",
+                "symbol": "SYNTHETIC"
+              },
+              "snapshot_hash": "6d65d94418b6e6983a1e9640061f0861669ff587c81c05eabdb9ad45655381db"
+            }
+          ],
+          "series": [
+            {
+              "alias": "primary_bars",
+              "series_id": 1,
+              "instrument_id": "instrument-1",
+              "fact_type": "candle.ohlcv",
+              "contract_version": "candle.ohlcv.v1",
+              "timeframe_seconds": 900,
+              "range_start": "2025-01-01T00:00:00.000000Z",
+              "range_end": "2025-07-19T00:00:00.000000Z",
+              "row_count": 19104,
+              "max_commit_seq": 10,
+              "material_hash": "material",
+              "provenance_hash": "provenance",
+              "quality_hash": "quality",
+              "source_binding": {
+                "mode": "exact",
+                "resolved_source_identity_keys": [
+                  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                ],
+                "series_id": 1,
+                "source_summary": {
+                  "counts": {
+                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": 19104
+                  }
+                },
+                "sources": {
+                  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+                    "adapter_version": "SyntheticProvider:candle.ohlcv.v1",
+                    "source_kind": "historical_api"
+                  }
+                }
+              },
+              "loaded_range": {
+                "start": "2025-01-01T00:00:00Z",
+                "end_exclusive": "2025-07-19T00:00:00Z"
+              },
+              "requirement": {
+                "alias": "primary_bars",
+                "consumer_id": "check",
+                "instrument_id": "instrument-1",
+                "fact_type": "candle.ohlcv",
+                "contract_version": "candle.ohlcv.v1",
+                "timeframe_seconds": 900,
+                "dimensions": {},
+                "alignment": "exact_interval",
+                "max_staleness_seconds": null,
+                "known_at_required": true,
+                "required_fields": [
+                  "open",
+                  "high",
+                  "low",
+                  "close",
+                  "known_at"
+                ],
+                "series_required": true,
+                "frame_missing_policy": "indicator_owned",
+                "source_policy": {
+                  "mode": "exact"
+                },
+                "required_start": "2025-01-01T00:00:00.000000Z",
+                "required_end": "2025-07-19T00:00:00.000000Z"
+              },
+              "source_binding_hash": "75ad2e4dbe6208c47fa9cebe8ce418daf31200ed7f82a3925a15ab943927af29"
+            }
+          ],
+          "recorded_gaps": [],
+          "quality": {},
+          "provider_access": "disabled",
+          "provider_call_performed": false,
+          "binding_hash": "fe0cb87114c4831853460b058a7677800a4a993e32180faf346cb613b01b06f9"
+        },
+        "indicator_graph_hash": "cd1a761221a8ba1c9e91de3b7488154ff0a67dadcf4ebaabdcb16ed004357d87",
+        "indicator_output_hash": "output",
+        "fact_input_hash": "facts",
+        "gap_transition_hash": "transitions",
+        "quality_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "gaps_hash": "f314462ab1638320e4f781aee8eb5beaad414036c33b6c3f853ed85654dd7c10",
+        "input_hash": "0249111b8d6ae0d137dbc34c9be2da720a3217d33e1369855bb8bb1a4304032f",
+        "evidence_hash": "a90d470654525a054b3aa077a58541bbe307161fbde1b38cdf8001ab00d1e373"
+      },
+      "schema_version": "research_check_payload.v2"
+    }
+  },
+  "reference": {
+    "source_check_id": "11111111-1111-4111-8111-111111111111",
+    "result_hash": "e91fc4ba4dd99f32aacbf12edfc0c405a2439264c5030559f4ee31087208854c",
+    "evidence_hash": "a90d470654525a054b3aa077a58541bbe307161fbde1b38cdf8001ab00d1e373",
+    "selection_manifest_hash": "5df64a126f178e7ebfccaf255e51a833a527188c204118ba6cbe287686d4403c"
+  },
+  "context": {
+    "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dataset_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "input_binding_hash": "fe0cb87114c4831853460b058a7677800a4a993e32180faf346cb613b01b06f9",
+    "max_commit_seq": 10,
+    "instrument_id": "instrument-1",
+    "input_start": "2025-01-01T00:00:00Z",
+    "input_end_exclusive": "2025-07-19T00:00:00Z",
+    "decision_start": "2025-02-01T00:00:00Z",
+    "decision_end_exclusive": "2025-07-19T00:00:00Z",
+    "source_identity_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "input_rows": 19104,
+    "case_count": 3,
+    "pair_count": 3,
+    "completion_clock_count": 2
+  }
+}

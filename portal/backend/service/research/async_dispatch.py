@@ -156,6 +156,8 @@ def _job_payload(job: Mapping[str, Any], *, include_result: bool = False) -> dic
 def dispatch_research_job(
     *, job_type: str, request: Mapping[str, Any], max_attempts: int = 2
 ) -> dict[str, Any]:
+    if job_type == JOB_TYPE_RESEARCH_CHECK_SWEEP:
+        raise ValueError("check_definition_retired: legacy indicator sweeps are unavailable; use an explicit current Check request")
     if job_type not in RESEARCH_JOB_TYPES:
         raise ValueError(f"unsupported research job type: {job_type}")
     if type(max_attempts) is not int or max_attempts not in {1, 2}:

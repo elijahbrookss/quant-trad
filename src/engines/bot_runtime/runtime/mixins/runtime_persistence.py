@@ -31,6 +31,9 @@ class RuntimePersistenceMixin:
             return
         run_id = self._run_context.run_id if self._run_context else None
         contracts = sum(max(leg.contracts, 0) for leg in trade.legs)
+        facts = getattr(trade, "entry_fill_facts", None)
+        if facts is not None:
+            contracts = facts.quantity
         timeframe_label = series.timeframe
         timeframe_seconds = _timeframe_to_seconds(timeframe_label)
         instrument_id = (series.instrument or {}).get("id") if isinstance(series.instrument, dict) else None

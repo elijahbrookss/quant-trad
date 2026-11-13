@@ -1,0 +1,27 @@
+# Opt in only after restricted login/grants and pooled-session budgets are verified.
+# Outside automatic provisioning; never use broad PostgreSQL credentials.
+# Select this AND the paired capacity-database-growth.json after qualification.
+# That template replaces the legacy-compatible default at the same dashboard UID;
+# the backend versioned SQL functions remain the single metric authority.
+apiVersion: 1
+datasources:
+  - name: QuantTrad Storage Metrics
+    uid: quanttrad-storage-metrics
+    type: postgres
+    access: proxy
+    orgId: 1
+    url: ${QT_STORAGE_METRICS_DB_URL}
+    user: qt_storage_metrics_grafana
+    secureJsonData:
+      password: $QT_STORAGE_METRICS_DB_PASSWORD
+    jsonData:
+      database: ${POSTGRES_DB}
+      sslmode: disable
+      postgresVersion: 1500
+      timescaledb: false
+      maxOpenConns: 2
+      maxIdleConns: 2
+      maxIdleConnsAuto: false
+      connMaxLifetime: 300
+      timeInterval: 5m
+    editable: false

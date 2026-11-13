@@ -530,7 +530,8 @@ def test_email_alerting_integration_script_proves_both_recipients() -> None:
     assert "/api/v1/provisioning/policies" in script_text
     assert "alerting cleanup proof" in script_text
     assert "down --volumes --remove-orphans" in script_text
-    assert "bash scripts/ci/test_grafana_email_alerting.sh" in workflow_text
+    assert "deployment-proof-alerts" in workflow_text
+    assert "bash scripts/ci/test_grafana_email_alerting.sh" in (ROOT / "scripts/ci/proof_alerts.sh").read_text()
 
 
 def test_disposable_email_rule_is_not_in_production_provisioning() -> None:

@@ -501,6 +501,9 @@ def _cmd_bots_start(args: argparse.Namespace) -> int:
             args.market_data_stream_policy_json,
             label="--market-data-stream-policy-json",
         )
+    if getattr(args, "simulation_fee_schedules_json", None):
+        body["simulation_fee_schedules"] = _read_json_object_arg(
+            args.simulation_fee_schedules_json, label="--simulation-fee-schedules-json")
     if getattr(args, "execution_assumptions_json", None):
         body["execution_assumptions"] = _read_json_object_arg(
             args.execution_assumptions_json,
@@ -1315,6 +1318,9 @@ def _cmd_data_prepare_backtest_dataset(args: argparse.Namespace) -> int:
     }
     if numeric_acquisition:
         payload["numeric_acquisition"] = numeric_acquisition
+    if getattr(args, "simulation_fee_schedules_json", None):
+        payload["simulation_fee_schedules"] = _read_json_object_arg(
+            args.simulation_fee_schedules_json, label="--simulation-fee-schedules-json")
     _print_json(
         _client(args).request_json(
             "POST",
@@ -1912,6 +1918,33 @@ def _research_item_payload(
     return payload
 
 
+def _cmd_research_images(args: argparse.Namespace) -> int:
+    from base64 import b64encode
+    from urllib.parse import quote
+
+    path = f"/api/research/items/{quote(args.item_id, safe='')}/images"
+    client = _client(args)
+    if args.image_action == "list":
+        result = client.request_json("GET", path)
+    elif args.image_action == "download":
+        response = client.request_bytes("GET", path + f"/{quote(args.image_id, safe='')}/content")
+        # Exclusive creation prevents accidental replacement of local evidence.
+        with Path(args.output).open("xb") as output:
+            output.write(response.body)
+        result = {"image_id": args.image_id, "output": args.output, "byte_count": len(response.body)}
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        if "content_base64" in request:
+            raise ValueError("--request-json contains metadata only; image bytes come from --file")
+        with Path(args.file).open("rb") as image:
+            content = image.read(4 * 1024 * 1024 + 1)
+        if not 0 < len(content) <= 4 * 1024 * 1024:
+            raise ValueError("image file must contain 1..4194304 bytes")
+        result = client.request_json("POST", path, payload={**request, "content_base64": b64encode(content).decode("ascii")})
+    _print_json(result)
+    return 0
+
+
 def _cmd_research_question(args: argparse.Namespace) -> int:
     operations = ResearchOperations(_client(args))
     if args.question_action == "history":
@@ -1920,6 +1953,24 @@ def _cmd_research_question(args: argparse.Namespace) -> int:
         request = _read_json_object_arg(args.request_json, label="--request-json")
         operation = operations.adopt_question if args.question_action == "adopt" else operations.publish_interpretation
         result = operation(args.item_id, request)
+    _print_json(result)
+    return 0
+
+
+def _cmd_research_reports(args: argparse.Namespace) -> int:
+    if args.report_action == "build":
+        from cli.study_reports import write_report
+
+        write_report(args)
+        return 0
+    operations = ResearchOperations(_client(args))
+    if args.report_action == "list":
+        result = operations.study_reports(args.item_id)
+    elif args.report_action == "source":
+        result = operations.study_report_source(args.item_id, args.report_id)
+    else:
+        request = _read_json_object_arg(args.request_json, label="--request-json")
+        result = operations.attach_study_report(args.item_id, request)
     _print_json(result)
     return 0
 
@@ -2052,6 +2103,22 @@ def _cmd_research_check_definition(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_research_check_from_selection(args: argparse.Namespace) -> int:
+    expected = {key: getattr(args, key) for key in
+        ("result_hash", "evidence_hash", "selection_manifest_hash") if getattr(args, key)}
+    result = ResearchOperations(_client(args)).prepare_saved_selection_measurement_request(
+        args.source_check_id, measurement_profile=args.profile, expected_hashes=expected)
+    _print_json(result["request"] if args.request_only else result)
+    return 0
+
+
+def _cmd_research_execution_snapshot(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).execution_snapshot(
+        request=_canonical_research_request(args) if args.request_json else None,
+        job_id=args.job_id, limit=args.limit))
+    return 0
+
+
 def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
     _print_json(
         ResearchOperations(_client(args)).requirements(
@@ -2075,6 +2142,7 @@ def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
         ResearchOperations(_client(args)).prepare(
             _canonical_research_request(args),
             freeze=bool(args.freeze),
+            acquire_missing=bool(args.acquire_missing),
             created_by=args.created_by,
             dataset_name=args.dataset_name,
         )
@@ -2087,11 +2155,17 @@ def _cmd_research_check_run(args: argparse.Namespace) -> int:
     request = _canonical_research_request(args)
     if args.single_attempt and not args.dispatch:
         raise ValueError("--single-attempt requires --dispatch")
+    output_format = getattr(args, "format", "auto")
+    if output_format == "text" and not args.dispatch:
+        raise ValueError("--format text requires --dispatch")
     if args.dispatch:
         result = operations.dispatch_evidence(
             request, dataset_id=args.dataset_id, single_attempt=args.single_attempt
         )
-        _print_research_job_dispatch(result)
+        if output_format == "json":
+            _print_json(result)
+        else:
+            _print_research_job_dispatch(result)
     else:
         _print_json(
             operations.run_evidence(request, dataset_id=args.dataset_id)
@@ -3479,6 +3553,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--market-data-stream-policy-json",
         help="market_data_stream_policy JSON object path, inline object, or '-'.",
     )
+    bots_start.add_argument("--simulation-fee-schedules-json", help="Explicit versioned per-instrument simulation fees; backtest only.")
     bots_start.set_defaults(func=_cmd_bots_start)
     bots_stop = bots_sub.add_parser("stop", help="Stop a bot run through the backend API.")
     bots_stop.add_argument("bot_id")
@@ -3883,6 +3958,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     data_prepare.add_argument("--created-by")
+    data_prepare.add_argument("--simulation-fee-schedules-json", help="Pin the same simulation fee schedules used at backtest start.")
     data_prepare.set_defaults(func=_cmd_data_prepare_backtest_dataset)
 
     data_freeze = data_sub.add_parser(
@@ -4324,7 +4400,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
-    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history; distinct from executable StudyDefinition.")
+    report_sub = research_sub.add_parser("reports", help="Attach prebuilt inert Quarto Study reports; never execute source.").add_subparsers(dest="report_action", required=True)
+    from cli.study_reports import add_build_arguments
+
+    build_report = report_sub.add_parser("build", help="Offline Linux build from reviewed QMD and explicit prepared PNGs. No API calls or research execution.")
+    add_build_arguments(build_report)
+    build_report.set_defaults(func=_cmd_research_reports)
+    for action in ("attach", "list", "source"):
+        command = report_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action == "source":
+            command.add_argument("report_id")
+        if action == "attach":
+            command.add_argument("--request-json", required=True)
+        command.set_defaults(func=_cmd_research_reports)
+    research_images = research_sub.add_parser("images", help="Attach and inspect static Check/Study presentation images on QT.")
+    image_sub = research_images.add_subparsers(dest="image_action", required=True)
+    for action in ("attach", "list", "download"):
+        command = image_sub.add_parser(action)
+        command.add_argument("item_id")
+        if action == "attach":
+            command.add_argument("--file", required=True, help="Local PNG/JPEG to upload to QT.")
+            command.add_argument("--request-json", required=True, help="Title, explanation, alt_text and exact evidence binding.")
+        elif action == "download":
+            command.add_argument("image_id")
+            command.add_argument("--output", required=True, help="New destination file; existing files are preserved.")
+        command.set_defaults(func=_cmd_research_images)
+    research_question = research_sub.add_parser("question", help="Research Memory questions and immutable interpretation history.")
     research_question_sub = research_question.add_subparsers(dest="question_action", required=True)
     for action in ("adopt", "publish", "history"):
         command = research_question_sub.add_parser(action)
@@ -4412,6 +4514,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_jobs = research_sub.add_parser("jobs", help="Asynchronous research check job commands.")
     research_jobs_sub = research_jobs.add_subparsers(dest="research_jobs_command", required=True)
+    research_jobs_snapshot = research_jobs_sub.add_parser("snapshot", help="Read bounded jobs/owner/exact-request matches; diagnostic only, no admission or retry grant.")
+    research_jobs_snapshot.add_argument("--request-json", help="Exact request to compare with existing dispatch fingerprints.")
+    research_jobs_snapshot.add_argument("--job-id")
+    research_jobs_snapshot.add_argument("--limit", type=int, default=25)
+    research_jobs_snapshot.set_defaults(func=_cmd_research_execution_snapshot)
     research_jobs_status = research_jobs_sub.add_parser("status", help="Show a dispatched research job status.")
     research_jobs_status.add_argument("job_id")
     research_jobs_status.add_argument("--json", action="store_true", help="Print the machine-readable status payload.")
@@ -4462,6 +4569,14 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_definition.add_argument("definition_id")
     research_check_definition.add_argument("--version", required=True)
     research_check_definition.set_defaults(func=_cmd_research_check_definition)
+    research_check_from_selection = research_check_sub.add_parser("from-selection", help="Build a validated measurement request from saved selection metadata; no science, acquisition or writes.")
+    research_check_from_selection.add_argument("source_check_id")
+    research_check_from_selection.add_argument("--profile", choices=["18"], default="18")
+    research_check_from_selection.add_argument("--result-hash")
+    research_check_from_selection.add_argument("--evidence-hash")
+    research_check_from_selection.add_argument("--selection-manifest-hash")
+    research_check_from_selection.add_argument("--request-only", action="store_true", help="Print only the request for existing requirements/dispatch commands.")
+    research_check_from_selection.set_defaults(func=_cmd_research_check_from_selection)
     research_check_requirements = research_check_sub.add_parser(
         "requirements",
         help="Resolve direct and transitive Check requirements without acquisition.",
@@ -4484,13 +4599,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_check_prepare = research_check_sub.add_parser(
         "prepare",
-        help="Resolve evidence requirements and optionally freeze known facts and gaps.",
+        help="Inspect inputs; explicitly acquire missing native candles and/or freeze a Dataset.",
     )
     research_check_prepare.add_argument(
         "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
     )
     research_check_prepare.add_argument(
         "--freeze", action="store_true", help="Create or reuse the immutable Dataset after resolution."
+    )
+    research_check_prepare.add_argument(
+        "--acquire-missing", action="store_true",
+        help="Explicitly acquire unrecorded public native candle ranges; reverify before optional --freeze. Never runs a Check."
     )
     research_check_prepare.add_argument("--created-by")
     research_check_prepare.add_argument("--dataset-name")
@@ -4510,6 +4629,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_check_run.add_argument(
         "--single-attempt", action="store_true",
         help="Require one async claim attempt, with no automatic retry; requires --dispatch."
+    )
+    research_check_run.add_argument(
+        "--format", choices=["auto", "json", "text"], default="auto",
+        help="Output format: auto preserves text dispatch receipts and JSON synchronous results; json retains the complete receipt. text requires --dispatch."
     )
     research_check_run.set_defaults(func=_cmd_research_check_run)
 

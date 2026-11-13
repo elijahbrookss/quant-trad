@@ -46,6 +46,7 @@ _BACKTEST_EXECUTION_BOT_FIELDS = (
     "bot_env",
     "execution_semantics",
     "execution_book_tape_bundle",
+    "simulation_fee_schedules",
 )
 
 

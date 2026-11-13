@@ -7,6 +7,9 @@ not a checkpoint/reconstruction proof or permission to reclaim hot data.
 """
 from __future__ import annotations
 
+import logging
+from time import perf_counter
+
 from sqlalchemy import text
 
 from market_data.fact_archive import archive_evidence_hash
@@ -14,11 +17,33 @@ from portal.backend.db import MarketFactBookPrefixChunkRecord, MarketFactBookPre
 from .fact_lineage import BOOK_SCOPE_FIELDS, _witness, canonical_book_prefixes, resolve_canonical_raw_archive_refs
 from .market_lifecycle import MarketStorageLifecycleBusyError
 
+logger = logging.getLogger(__name__)
+
 BOOK_PREFIX_VERIFIER_VERSION = "market.book_prefix_verification.v1"
 TRADE_PREFIX_VERIFIER_VERSION = "market.trade_prefix_verification.v1"
+# Bound each independently committed source proof, not the complete prefix.
+# Larger histories resume at the next ordinal through the existing receipt chain.
+_MAX_PREFIX_PROOF_POSITIONS = 2_000
 _PREFIX_CHANNELS = {BOOK_PREFIX_VERIFIER_VERSION: "level2", TRADE_PREFIX_VERIFIER_VERSION: "market_trades"}
 _SCOPE_WHERE = " AND ".join(f"{name}=:{name}" for name in (*BOOK_SCOPE_FIELDS, "verifier_version"))
 _REFERENCE_FIELDS = ("object_key", "object_uri", "object_sha256", "content_fingerprint")
+
+
+def _notify_measurement(observer, *, phase, scope, seconds, counters):
+    """Deliver bounded proof measurements without joining correctness."""
+    if observer is None:
+        return
+    try:
+        observer(
+            phase=phase, scope=scope, seconds=seconds, outcome="completed",
+            counters=dict(counters),
+        )
+    except Exception:
+        logger.warning(
+            "canonical_archive_verification_measurement_failed | "
+            "phase=%s scope=%s outcome=completed",
+            phase, scope, exc_info=True,
+        )
 
 
 def _scope(prefix, verifier_version=BOOK_PREFIX_VERIFIER_VERSION):
@@ -67,11 +92,13 @@ def _dependencies(session, chunk, *, max_objects):
 
 
 def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limits,
-                             max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None):
+                             max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None,
+                             identity_spool_directory=None):
     return _prepare_next_prefix(session, prefixes=canonical_book_prefixes(rows),
         verifier_version=BOOK_PREFIX_VERIFIER_VERSION, object_store=object_store, byte_verifier=byte_verifier,
         limits=limits, max_mapping_rows=max_mapping_rows, max_objects=max_objects,
-        check_budget=check_budget, bound_manifest_ids=bound_manifest_ids)
+        check_budget=check_budget, bound_manifest_ids=bound_manifest_ids,
+        identity_spool_directory=identity_spool_directory)
 
 
 def prepare_next_trade_prefix(session, *, prefixes, **kwargs):
@@ -79,7 +106,8 @@ def prepare_next_trade_prefix(session, *, prefixes, **kwargs):
 
 
 def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, byte_verifier, limits,
-                          max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None):
+                          max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None,
+                          identity_spool_directory=None):
     """Commit at most one bounded interval through the caller's transaction.
 
     The caller holds the lifecycle shared fence and retains the hot page. A
@@ -105,13 +133,15 @@ def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, b
             continue
         # Leave room for multiple acknowledged placements of the same raw
         # positions. A pathological alias fan-out still fails the hard budget.
-        last = min(prefix["receive_ordinal"], first + max(1, max_mapping_rows // 4) - 1)
+        interval_positions = min(_MAX_PREFIX_PROOF_POSITIONS, max(1, max_mapping_rows // 4))
+        last = min(prefix["receive_ordinal"], first + interval_positions - 1)
         references = resolve_canonical_raw_archive_refs(
             session, rows=[], object_store=object_store, byte_verifier=byte_verifier,
             limits=limits, max_mapping_rows=max_mapping_rows, check_budget=check_budget,
             bound_manifest_ids=bound_manifest_ids,
             book_prefix_ranges=[{**prefix, "first_receive_ordinal": first, "receive_ordinal": last,
                                  "requested_channel": _PREFIX_CHANNELS[verifier_version]}],
+            identity_spool_directory=identity_spool_directory,
         )
         if len(references) > max_objects:
             raise RuntimeError("canonical_book_prefix_object_budget_exceeded")
@@ -141,7 +171,8 @@ def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, b
 
 
 def resolve_verified_book_prefixes(session, *, rows, byte_verifier, max_objects,
-                                    bound_manifest_ids=None, check_budget=None, max_chunks=5000):
+                                    bound_manifest_ids=None, check_budget=None, max_chunks=5000,
+                                    measurement_observer=None):
     witnesses = []
     for row in rows:
         if row["fact_type"] in {"market.l2_book", "market.bbo", "market.depth_observation"}:
@@ -149,7 +180,8 @@ def resolve_verified_book_prefixes(session, *, rows, byte_verifier, max_objects,
             witnesses.append({**evidence, "root_fact_version_id": row["id"]})
     return _resolve_verified_prefixes(session, prefixes=canonical_book_prefixes(rows), witnesses=witnesses,
         verifier_version=BOOK_PREFIX_VERIFIER_VERSION, byte_verifier=byte_verifier, max_objects=max_objects,
-        bound_manifest_ids=bound_manifest_ids, check_budget=check_budget, max_chunks=max_chunks)
+        bound_manifest_ids=bound_manifest_ids, check_budget=check_budget, max_chunks=max_chunks,
+        measurement_observer=measurement_observer)
 
 
 def resolve_verified_trade_prefixes(session, *, prefixes, witnesses, **kwargs):
@@ -205,7 +237,8 @@ def _resolve_prefixes_for_read(session, *, prefixes, witnesses, rows, verifier_v
 
 
 def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version, byte_verifier, max_objects,
-                                 bound_manifest_ids=None, check_budget=None, max_chunks=5000, unverified_ranges=None):
+                                 bound_manifest_ids=None, check_budget=None, max_chunks=5000, unverified_ranges=None,
+                                 measurement_observer=None):
     """Validate contiguous receipts and CURRENT bytes, without re-decoding history.
 
     Earlier admitted placements remain bound even after new aliases appear.
@@ -215,6 +248,16 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
     references, root_bindings = {}, {}
     tail_witness_ids = set()
     inspected = 0
+    measurement_scope = (
+        "book" if verifier_version == BOOK_PREFIX_VERIFIER_VERSION else "trade"
+    )
+    counters = {
+        "prefix_count": len(prefixes), "root_count": len(witnesses),
+        "query_count": 0, "chunk_count": 0, "object_count": 0,
+        "byte_count": 0,
+    }
+    total_started = perf_counter()
+    sql_seconds = hash_seconds = 0.0
     for prefix in prefixes:
         scope = _scope(prefix, verifier_version)
         roots = []
@@ -225,10 +268,14 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
                     raise RuntimeError(f"canonical_raw_prefix_witness_range_invalid: fact_version_id={evidence['root_fact_version_id']}")
                 roots.append((evidence["receive_ordinal"], evidence["root_fact_version_id"]))
         roots.sort(reverse=True)
+        query_started = perf_counter()
         chunks = session.execute(text(
             f"SELECT * FROM market.fact_book_prefix_chunks WHERE {_SCOPE_WHERE} "
             "AND first_receive_ordinal<=:until ORDER BY first_receive_ordinal LIMIT :limit"
         ), {**scope, "until": prefix["receive_ordinal"], "limit": max_chunks - inspected + 1}).mappings().all()
+        sql_seconds += perf_counter() - query_started
+        counters["query_count"] += 1
+        counters["chunk_count"] += len(chunks)
         inspected += len(chunks)
         if inspected > max_chunks:
             raise RuntimeError("canonical_book_prefix_chunk_budget_exceeded")
@@ -239,12 +286,19 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
             _validate_chunk(chunk, scope)
             if chunk["first_receive_ordinal"] != first or chunk["previous_chunk_id"] != previous_id:
                 raise RuntimeError(f"canonical_book_prefix_chain_incomplete: chunk_id={chunk['id']}")
+            query_started = perf_counter()
             dependencies = _dependencies(session, chunk, max_objects=max_objects)
+            sql_seconds += perf_counter() - query_started
+            counters["query_count"] += 1
+            counters["object_count"] += len(dependencies)
+            counters["byte_count"] += sum(item["byte_count"] for item in dependencies)
             for item in dependencies:
                 identity = item["target_id"]
                 if bound_manifest_ids is not None and identity not in bound_manifest_ids:
                     raise RuntimeError(f"canonical_book_prefix_bound_dependency_missing: target_id={identity}")
+                hash_started = perf_counter()
                 byte_verifier.verify(item["object_key"], item["object_sha256"], expected_bytes=item["byte_count"])
+                hash_seconds += perf_counter() - hash_started
                 # A certificate may extend past this Dataset's requested raw
                 # position. Verify the complete certificate, but do not enlarge
                 # frozen identity with wholly later objects merely because
@@ -278,4 +332,14 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
     if set(root_bindings) | tail_witness_ids != {item["root_fact_version_id"] for item in witnesses}:
         raise RuntimeError("canonical_raw_prefix_witness_scope_missing")
     byte_verifier.assert_unchanged()
+    total_seconds = perf_counter() - total_started
+    traversal_seconds = max(0.0, total_seconds - sql_seconds - hash_seconds)
+    for phase, seconds in (
+            ("prefix_catalog_sql", sql_seconds),
+            ("prefix_object_hash", hash_seconds),
+            ("prefix_traversal", traversal_seconds)):
+        _notify_measurement(
+            measurement_observer, phase=phase, scope=measurement_scope,
+            seconds=seconds, counters=counters,
+        )
     return references, root_bindings

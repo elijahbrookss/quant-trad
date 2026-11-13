@@ -29,6 +29,7 @@ _ENV_LOADED = False
 _SETTINGS_CACHE: "AppSettings | None" = None
 _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_STORAGE_INVENTORY_PATH", ("storage", "inventory_path")),
+    ("QT_STORAGE_GRAFANA_DASHBOARD_URL", ("storage", "grafana_dashboard_url")),
     ("QT_STORAGE_MAINTENANCE_LIMITS_PATH", ("storage", "maintenance_limits_path")),
     ("QT_ARCHIVE_SHARED_GROUP_ID", ("storage", "archive_shared_group_id")),
     ("QT_STORAGE_MAINTENANCE_OWNER", ("storage", "maintenance_owner")),
@@ -166,7 +167,9 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED", ("market_data_lifecycle", "canonical_retention", "execution_enabled")),
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_STEPS_PER_RUN", ("market_data_lifecycle", "canonical_retention", "max_steps_per_run")),
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_RUN_SECONDS", ("market_data_lifecycle", "canonical_retention", "max_run_seconds")),
+    ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_HANDOFF_SECONDS", ("market_data_lifecycle", "canonical_retention", "max_handoff_seconds")),
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_STATEMENT_TIMEOUT_MS", ("market_data_lifecycle", "canonical_retention", "execution_statement_timeout_ms")),
+    ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_PINNED_RANGES_STATEMENT_TIMEOUT_MS", ("market_data_lifecycle", "canonical_retention", "pinned_ranges_statement_timeout_ms")),
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_PAGE_ROWS", ("market_data_lifecycle", "canonical_retention", "max_page_rows")),
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_PAGE_LOGICAL_BYTES", ("market_data_lifecycle", "canonical_retention", "max_page_logical_bytes")),
     ("QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_VERIFICATION_BYTES", ("market_data_lifecycle", "canonical_retention", "max_verification_bytes")),
@@ -784,6 +787,7 @@ def _archive_shared_group(value):
 
 @dataclass(frozen=True)
 class StorageSettings:
+    grafana_dashboard_url: str | None = None
     inventory_path: str = "/run/quanttrad/storage-inventory.json"
     maintenance_limits_path: str | None = None
     archive_shared_group_id: int | None = None
@@ -1010,6 +1014,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
         ),
         storage=StorageSettings(
+            grafana_dashboard_url=_coerce_optional_str(_coerce_mapping(payload.get("storage")).get("grafana_dashboard_url")),
             history_cache_bytes=int(str(_coerce_mapping(payload.get("storage")).get("history_cache_bytes", 0))),
             history_cache_min_free_bytes=int(str(_coerce_mapping(payload.get("storage")).get("history_cache_min_free_bytes", 0))),
             maintenance_owner=_coerce_mapping(payload.get("storage")).get(

@@ -336,6 +336,78 @@ def test_coinbase_parser_does_not_reinterpret_unknown_level2_event_type() -> Non
     assert events[0].payload["event_type"] == "replacement"
 
 
+def test_coinbase_parser_preserves_schema_valid_empty_level2_snapshot() -> None:
+    parser = CoinbaseMessageParser()
+
+    events = parser.parse(
+        {
+            "channel": "l2_data",
+            "timestamp": "2026-10-24T11:47:22.103800729Z",
+            "sequence_num": 230,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BIP-20DEC30-CDE",
+                    "updates": [],
+                }
+            ],
+        }
+    )
+
+    assert len(events) == 1
+    assert events[0].event_kind == "market_l2_snapshot"
+    assert events[0].payload["updates"] == []
+    assert events[0].provider_message_time == (
+        "2026-10-24T11:47:22.103800729Z"
+    )
+
+
+@pytest.mark.parametrize("updates", [None, {}, ["not-an-update"]])
+def test_coinbase_parser_classifies_malformed_level2_updates(updates) -> None:
+    parser = CoinbaseMessageParser()
+
+    events = parser.parse(
+        {
+            "channel": "l2_data",
+            "timestamp": "2026-10-24T11:47:22Z",
+            "sequence_num": 230,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "product_id": "BIP-20DEC30-CDE",
+                    "updates": updates,
+                }
+            ],
+        }
+    )
+
+    assert len(events) == 1
+    assert events[0].event_kind == "provider_malformed_message"
+    assert events[0].payload["channel"] == "level2"
+    assert "array of objects" in events[0].payload["error"]
+
+
+def test_coinbase_parser_classifies_empty_level2_update_as_malformed() -> None:
+    events = CoinbaseMessageParser().parse(
+        {
+            "channel": "l2_data",
+            "timestamp": "2026-10-24T11:47:23Z",
+            "sequence_num": 231,
+            "events": [
+                {
+                    "type": "update",
+                    "product_id": "BIP-20DEC30-CDE",
+                    "updates": [],
+                }
+            ],
+        }
+    )
+
+    assert len(events) == 1
+    assert events[0].event_kind == "provider_malformed_message"
+    assert "no book mutations" in events[0].payload["error"]
+
+
 def test_coinbase_sequence_is_connection_wide_across_interleaved_channels() -> None:
     parser = CoinbaseMessageParser()
 

@@ -5,6 +5,7 @@ replace a fresh checksum in a later retention run or prove market semantics.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import os
@@ -46,6 +47,7 @@ class ArchiveVerificationBatch:
         self.objects: dict[str, VerifiedArchiveObject] = {}
         self.byte_count = 0
         self.check_budget = check_budget
+        self._distinct_references = False
 
     def _check_budget(self):
         if self.check_budget is not None:
@@ -63,7 +65,8 @@ class ArchiveVerificationBatch:
             if (previous.object_sha256 != object_sha256
                     or (expected_bytes is not None and previous.byte_count != expected_bytes)):
                 raise RuntimeError(f"archive_verification_object_conflict: object_key={object_key}")
-            self._assert_unchanged(previous)
+            if not self._distinct_references:
+                self._assert_unchanged(previous)
             return previous
         if len(self.objects) >= self.limits.max_objects:
             raise RuntimeError("archive_verification_object_budget_exceeded")
@@ -99,6 +102,24 @@ class ArchiveVerificationBatch:
         result = VerifiedArchiveObject(object_key, object_sha256, read_bytes, _stamp(before))
         self.objects[object_key] = result
         return result
+
+    @contextmanager
+    def distinct_references(self):
+        """Group repeated references inside one proof, with a mandatory final fence.
+
+        Every reference still validates its checksum/size claims and budget.
+        Only repeated path/stamp checks are deferred to successful scope exit;
+        distinct objects still receive fresh current-byte checksums. Callers
+        must retain their lifecycle fence throughout this scope and admission.
+        """
+        if self._distinct_references:
+            raise RuntimeError("archive_verification_distinct_scope_nested")
+        self._distinct_references = True
+        try:
+            yield self
+            self.assert_unchanged()
+        finally:
+            self._distinct_references = False
 
     def _assert_unchanged(self, verified: VerifiedArchiveObject):
         self._check_budget()

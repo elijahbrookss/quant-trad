@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections import deque
 import logging
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from engines.bot_runtime.core.domain import StrategySignal
+from engines.bot_runtime.core.bar_execution_clock import execution_clock
 from engines.bot_runtime.core.order_lifecycle import (
     CanonicalOrderLifecycle,
     CanonicalOrderLifecycleEvent,
@@ -714,7 +716,7 @@ class RuntimeEventsMixin:
                 ),
                 reason_code=ReasonCode.SIGNAL_STRATEGY_SIGNAL,
             ),
-            event_ts=candle.time,
+            event_ts=execution_clock(candle, getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)),
         )
 
     def _emit_decision_event(
@@ -752,6 +754,12 @@ class RuntimeEventsMixin:
         if decision == "accepted":
             evidence = dict(wallet_evidence or {})
             wallet_snapshot = evidence.get("wallet_snapshot") or evidence.get("wallet_before")
+            assumptions = getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)
+            if not wallet_snapshot and getattr(assumptions, "uses_causal_bar_clock", False):
+                # A resting intent is accepted before any cash mutation. Record
+                # the actual locked read at acceptance, not a later fill's state
+                # and not an invented reservation or wallet commit sequence.
+                wallet_snapshot = self._current_wallet_state_snapshot()
             margin_requirement = evidence.get("margin_requirement") or evidence.get("required_delta")
             context = DecisionAcceptedContext(
                 **base_kwargs,
@@ -857,7 +865,7 @@ class RuntimeEventsMixin:
             context=context,
             root_id=resolved_root_id,
             parent_id=resolved_parent_id,
-            event_ts=candle.time,
+            event_ts=execution_clock(candle, getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)),
         )
 
     def _emit_order_lifecycle_event(
@@ -880,14 +888,35 @@ class RuntimeEventsMixin:
         request_time = _parse_runtime_iso(request.known_at)
         if event_time is None or request_time is None:
             raise ValueError("order lifecycle known_at values must be canonical timestamps")
-        correlation_id = self._bar_correlation_id(series, request_time)
+        decision_bar_time = request_time
+        assumptions = getattr(getattr(series, "risk_engine", None), "execution_assumptions", None)
+        causal = getattr(assumptions, "uses_causal_bar_clock", False)
+        if causal and request.metadata.get("entry_request_id"):
+            decision_bar_time = _parse_runtime_iso(request.metadata.get("submitted_bar_time"))
+            if decision_bar_time is None:
+                raise ValueError("causal order lifecycle requires immutable submitted_bar_time")
+        correlation_id = self._bar_correlation_id(series, decision_bar_time)
         decision_event = self._find_decision_event(
             series=series,
             correlation_id=correlation_id,
             trade_id=request.trade_id,
         )
+        if causal:
+            # Exit requests have their own availability clock, not a new
+            # strategy decision. Link only the exact trade's retained decision.
+            original = next((candidate for candidate in self._runtime_events_reverse()
+                if candidate.event_name == RuntimeEventName.DECISION_ACCEPTED
+                and candidate.context.strategy_id == series.strategy_id
+                and str(getattr(candidate.context, "trade_id", "") or "") == str(request.trade_id or "")
+                and request.decision_id
+                and getattr(candidate.context, "decision_id", None) == request.decision_id), None)
+            decision_event = original
+            if original is not None:
+                correlation_id = original.correlation_id
         signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
-        parent_event = decision_event or signal_event
+        # A source signal alone cannot certify a causal request's missing or
+        # different decision identity. Keep the unresolved lineage explicit.
+        parent_event = decision_event if causal else decision_event or signal_event
         missing_parent_hint = None
         if parent_event is None:
             missing_parent_hint = (
@@ -998,6 +1027,12 @@ class RuntimeEventsMixin:
             if isinstance(getattr(trade, "entry_outcome", None), Mapping)
             else {}
         )
+        causal = bool(getattr(getattr(getattr(series, "risk_engine", None), "execution_assumptions", None), "uses_causal_bar_clock", False))
+        facts = getattr(trade, "entry_fill_facts", None) if causal else None
+        if causal and facts is None:
+            raise RuntimeError("causal_immutable_entry_fill_facts_missing")
+        if facts is not None:
+            qty, price, notional, fee_paid = facts.quantity, facts.price, facts.notional, facts.fee_paid
         fee_rate = _coerce_float(entry_outcome.get("fee_rate"), None)
         if fee_rate is None and notional > 0.0:
             fee_rate = float(fee_paid) / float(notional)
@@ -1006,6 +1041,9 @@ class RuntimeEventsMixin:
             fee_type = "taker"
         fee_source = str(entry_outcome.get("fee_source") or "template_or_instrument")
         fee_version = entry_outcome.get("fee_version")
+        if facts is not None:
+            fee_rate, fee_type = facts.fee_rate, facts.fee_type
+            fee_source, fee_version = facts.fee_source, facts.fee_version
         accounting_mode = _fill_accounting_mode(series)
         collateral_reserved = 0.0
         if accounting_mode == "margin":
@@ -1031,7 +1069,10 @@ class RuntimeEventsMixin:
             if isinstance(getattr(trade, "wallet_fill_metadata", None), Mapping)
             else {}
         )
-        if getattr(trade, "position_commit_seq", None) is not None:
+        if facts is not None:
+            wallet_fill_metadata = json.loads(facts.wallet_metadata_json)
+            wallet_fill_metadata.setdefault("position_commit_seq", facts.position_commit_seq)
+        elif getattr(trade, "position_commit_seq", None) is not None:
             wallet_fill_metadata.setdefault("position_commit_seq", int(getattr(trade, "position_commit_seq") or 0))
         base_currency, quote_currency = _fill_currency_pair(
             series,

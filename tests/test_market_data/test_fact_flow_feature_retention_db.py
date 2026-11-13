@@ -11,6 +11,7 @@ from market_data.contracts import DatasetSeriesRequest
 from market_data.market_state import derive_trade_flow_feature
 from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
 from portal.backend.service.storage.repos import fact_archival, market_data
+from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_flow_feature_admission import collect_flow_feature_history_archive_refs
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
@@ -95,7 +96,7 @@ def test_flow_feature_history_survives_three_tier_reclamation(storage, tmp_path,
                 {"day": feature_day}).mappings().one())
             receipt_before = dict(session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE manifest_id=:id"),
                 {"id": page_before["id"]}).mappings().one())
-        with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="verification_generation_changed"):
             reclaimer.reclaim_partition(feature_day, eligible_before=storage.today, execute=True)
         archive.restart_partition_verification(feature_day)
         for _ in range(32):
@@ -110,8 +111,8 @@ def test_flow_feature_history_survives_three_tier_reclamation(storage, tmp_path,
             assert dict(session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version"),
                 {"id": page_before["id"], "version": receipt_before["verifier_version"]}).mappings().one()) == receipt_before
     with storage.database.session() as session:
-        edges = session.execute(text("""
-            SELECT source.fact_type,source.known_at,source.market_commit_seq FROM market.fact_archive_canonical_dependencies AS edge
+        edges = session.execute(text(f"""
+            SELECT source.fact_type,source.known_at,source.market_commit_seq FROM {canonical_dependency_projection("edge")}
             JOIN market.fact_archive_manifests AS page ON page.id=edge.manifest_id
             JOIN market.fact_versions AS source ON source.id=edge.fact_version_id WHERE page.storage_day=:day
         """), {"day": feature_day}).mappings().all()

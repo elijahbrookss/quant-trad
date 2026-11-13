@@ -17,6 +17,7 @@ from market_data.structure import (
     aggregate_trade_bucket, translate_coinbase_market_trade,
 )
 from portal.backend.service.storage.repos import fact_archival, market_data, market_structure
+from portal.backend.service.storage.repos.fact_archive_generation import canonical_dependency_projection
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
@@ -168,7 +169,7 @@ def test_flow_archival_keeps_deduplicated_raw_delivery_and_all_causal_evidence(s
     with storage.database.session() as session:
         dependencies = session.execute(text("SELECT target_id FROM market.fact_archive_dependencies WHERE manifest_id=:id"),
             {"id": page["manifest_id"]}).scalars().all()
-        sources = session.execute(text("SELECT fact_version_id FROM market.fact_archive_canonical_dependencies WHERE manifest_id=:id"),
+        sources = session.execute(text(f"SELECT fact_version_id FROM {canonical_dependency_projection()} WHERE manifest_id=:id"),
             {"id": page["manifest_id"]}).scalars().all()
         assert set(dependencies) == set(fixture.manifests)
         assert sources == [fixture.canonical[0].fact_version_id]
@@ -252,7 +253,7 @@ def test_trade_and_flow_frozen_histories_survive_physical_reclamation(storage, t
                 {"id": page_before["id"]}).mappings().one())
             assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies WHERE manifest_id=:id"),
                 {"id": page_before["id"]}).scalar_one() == 0
-        with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        with pytest.raises(RuntimeError, match="verification_generation_changed"):
             reclaimer.reclaim_partition(fixture.flow_day, eligible_before=storage.today, execute=True)
         archive.restart_partition_verification(fixture.flow_day)
         for _ in range(16):

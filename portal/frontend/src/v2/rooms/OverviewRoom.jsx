@@ -1,171 +1,41 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { RefreshCcw } from 'lucide-react'
-import { useCollectorsFeed } from '../../features/collectors/useCollectorsFeed.js'
-import { useActiveRunsFeed } from '../../features/operations/useActiveRunsFeed.js'
-import {
-  ACTIVITY_FILTERS,
-  useOverviewBacktestActivity,
-} from '../../features/overview/hooks/useOverviewBacktestActivity.js'
-import {
-  ATTENTION_CONTRACT,
-  buildCurrentOperations,
-  rankAttentionItems,
-} from '../../features/overview/buildOverviewViewModel.js'
+import { fetchResearchOverview, fetchResearchInventory } from '../../adapters/research.adapter.js'
+import { useResearchRead } from '../../features/research/useResearchRead.js'
+import { ReadState, StudyTable } from '../../features/research/ResearchViews.jsx'
+import { ResearchActivity } from '../../features/research/ResearchActivity.jsx'
 import { AttentionRail } from '../../features/overview/components/AttentionRail.jsx'
-import { ActivityHeatmap } from '../../features/overview/components/ActivityHeatmap.jsx'
-import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErrorNotice.jsx'
-import { RoomLoadingFrame } from '../components/RoomLoadingFrame.jsx'
+import { rankAttentionItems } from '../../features/overview/buildOverviewViewModel.js'
+import { useActiveRunsFeed } from '../../features/operations/useActiveRunsFeed.js'
+import { useCollectorsFeed } from '../../features/collectors/useCollectorsFeed.js'
+import { OperatorErrorNotice } from '../components/OperatorErrorNotice.jsx'
 
-function formatTime(value) {
-  if (!value) return 'Evidence time unavailable'
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? 'Evidence time unavailable' : parsed.toLocaleString()
-}
-
-function SummaryCard({ label, value, detail, tone = 'neutral', to, loading = false, error = null, partial = false }) {
-  return (
-    <Link className={'qt2-summary-card is-' + (error || partial ? 'warning' : tone)} to={to} aria-busy={loading}>
-      <span>{label}</span>
-      {loading ? <div className="qt2-summary-skeleton qt2-skeleton" /> : <strong>{error ? 'Unavailable' : value}</strong>}
-      <small>{error ? 'Open the owning view for details' : partial ? `${detail} · Partial evidence` : detail}</small>
-    </Link>
-  )
-}
-
-function ComponentAvailability({ issues }) {
-  if (!issues.length) return null
-  return (
-    <details className="qt2-component-availability">
-      <summary>{issues.length} evidence source{issues.length === 1 ? '' : 's'} unavailable</summary>
-      <div>{issues.map(({ component, error }, index) => (
-        <section data-component={component} key={`${component}:${index}`}>
-          <span>{component}</span>
-          <OperatorErrorNotice error={error} compact />
-        </section>
-      ))}</div>
-    </details>
-  )
-}
-
-function CurrentOperations({ operations }) {
-  if (!operations.length) {
-    return <div className="qt2-dashboard-empty">No active run is currently evidenced.</div>
-  }
-  return (
-    <div className="qt2-dashboard-list">
-      {operations.slice(0, 4).map((operation) => (
-        <Link key={operation.id} to={operation.href} state={operation.state}>
-          <span className="qt2-status-dot" />
-          <span><strong>{operation.title}</strong><small>{operation.kind} · {operation.status}</small></span>
-          <time>{formatTime(operation.evidenceAt)}</time>
-        </Link>
-      ))}
-    </div>
-  )
-}
-
+const coverageLabel = (value, dimension) => dimension === 'procedure' ? value.replaceAll('Unknown', 'Definition not recorded') : value.replaceAll('Unknown', 'Not recorded at Study level')
+const DIMENSIONS = { symbol: 'Symbols', timeframe: 'Timeframes', period: 'Historical periods', procedure: 'Linked Check definitions' }
 export function OverviewRoom() {
-  const activeRunsFeed = useActiveRunsFeed()
-  const collectorFeed = useCollectorsFeed()
-  const [activityType, setActivityType] = useState('backtests_completed')
-  const researchFeed = useOverviewBacktestActivity(activityType)
-  const projectedRuns = activeRunsFeed.runs
-  const nowEpochMs = Date.now()
-
-  const attentionItems = useMemo(() => rankAttentionItems({
-    runs: projectedRuns,
-    providerSummaries: collectorFeed.providers,
-    researchItems: researchFeed.researchItems,
-    nowEpochMs,
-  }), [projectedRuns, collectorFeed.providers, researchFeed.researchItems, nowEpochMs])
-  const currentOperations = useMemo(
-    () => buildCurrentOperations({ runs: projectedRuns }),
-    [projectedRuns],
-  )
-  const activeRuns = currentOperations.filter((item) => ['run', 'backtest'].includes(item.kind)).length
-  const fleet = collectorFeed.fleet || {}
-  const states = fleet.operational_state_counts || {}
-  const runningCollectors = Number(states.RUNNING || 0)
-  const nonCollectorAttention = attentionItems.filter((item) => item.kind !== 'collector').length
-  const attentionTotal = Number(fleet.attention_count || 0) + nonCollectorAttention
-  const displayedAttentionCount = Math.min(attentionItems.length, 3)
-  const hiddenAttentionCount = Math.max(0, attentionTotal - displayedAttentionCount)
-  const marketDetail = fleet.attention_count
-    ? `${fleet.attention_count} actionable exception${fleet.attention_count === 1 ? '' : 's'}`
-    : `${fleet.accepted_last_minute || 0}/min · ${fleet.active_schema_count || 0} schemas`
-  const filter = ACTIVITY_FILTERS.find((item) => item.value === activityType)
-
-  const currentOperationIssues = [
-    { component: 'Active runs', error: activeRunsFeed.error },
-  ].filter((issue) => issue.error)
-  const attentionIssues = [
-    ...currentOperationIssues,
-    { component: 'Collector summaries', error: collectorFeed.error },
-    ...researchFeed.errors.filter((issue) => issue.component === 'Research attention'),
-  ].filter((issue) => issue.error)
-  const researchActivityIssues = researchFeed.errors.filter((issue) => issue.component === 'Research activity')
-  const operationsLoading = activeRunsFeed.loading || collectorFeed.loading
-
-  function refresh() {
-    activeRunsFeed.refresh()
-    collectorFeed.refresh()
-    researchFeed.refresh()
-  }
-
-  if (operationsLoading && !projectedRuns.length && !collectorFeed.providers.length) {
-    return <RoomLoadingFrame room="Overview" />
-  }
-
-  return (
-    <div className="qt2-room qt2-dashboard">
-      <div className="qt2-room-head qt2-overview-head">
-        <div>
-          <h1 className="qt2-title">Overview</h1>
-          <p className="qt2-sub">What needs you now, with deeper evidence one click away.</p>
-        </div>
-        <button type="button" className="qt2-icon-button" onClick={refresh}><RefreshCcw size={14} />Refresh</button>
-      </div>
-
-      <div className="qt2-summary-grid qt2-summary-grid-three">
-        <SummaryCard label="Attention" value={attentionTotal || 'Clear'} detail={attentionTotal ? `Within ${ATTENTION_CONTRACT.lookbackHours} hours` : 'No known actionable issues'} tone={attentionTotal ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionTotal} partial={attentionIssues.length > 0} />
-        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run instance' : 'Run instances currently owned'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={activeRunsFeed.loading && !projectedRuns.length} error={activeRunsFeed.error && !projectedRuns.length ? activeRunsFeed.error : null} partial={Boolean(activeRunsFeed.error)} />
-        <SummaryCard label="Market data" value={runningCollectors ? `${runningCollectors} running` : 'Idle'} detail={marketDetail} tone={fleet.attention_count ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.providers.length} error={collectorFeed.error && !collectorFeed.providers.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
-      </div>
-
-      <div className="qt2-dashboard-grid">
-        <section className="qt2-dashboard-panel">
-          <div className="qt2-dashboard-panel-head">
-            <div><h2>Needs attention</h2><p>Only current actionable evidence.</p></div>
-            <Link to="/operations">Open operations</Link>
-          </div>
-          <ComponentAvailability issues={attentionIssues} />
-          {operationsLoading && !attentionItems.length ? <OperatorSkeleton rows={3} label="Loading attention evidence" /> : <AttentionRail items={attentionItems.slice(0, 3)} lookbackHours={ATTENTION_CONTRACT.lookbackHours} />}
-          {hiddenAttentionCount ? <p className="qt2-dashboard-more">+{hiddenAttentionCount} more in Operations</p> : null}
-        </section>
-
-        <section className="qt2-dashboard-panel">
-          <div className="qt2-dashboard-panel-head">
-            <div><h2>Now</h2><p>Active run evidence, not routine collector polls.</p></div>
-            <span>{currentOperations.length}</span>
-          </div>
-          <ComponentAvailability issues={currentOperationIssues} />
-          {activeRunsFeed.loading && !currentOperations.length ? <OperatorSkeleton rows={4} label="Loading current operations" /> : <CurrentOperations operations={currentOperations} />}
-        </section>
-      </div>
-
-      <section className="qt2-dashboard-panel qt2-research-activity-panel">
-        <div className="qt2-dashboard-panel-head">
-          <div><h2>Research activity</h2><p>{researchFeed.activity?.description || 'Persisted activity by UTC day.'}</p></div>
-          <select className="qt2-select" value={activityType} onChange={(event) => setActivityType(event.target.value)}>
-            {ACTIVITY_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
-        </div>
-        <ComponentAvailability issues={researchActivityIssues} />
-        {researchFeed.activityLoading && !researchFeed.activity
-          ? <div className="qt2-deferred-shimmer" aria-label="Loading research activity"><span /><span /><span /></div>
-          : <ActivityHeatmap days={researchFeed.activity?.days || []} activityLabel={filter?.label || 'Persisted activity'} />}
-      </section>
-    </div>
-  )
+  const summary = useResearchRead(fetchResearchOverview)
+  const recent = useResearchRead(fetchResearchInventory, [{ kind: 'study', limit: 4 }])
+  const [dimension, setDimension] = useState('symbol')
+  const runs = useActiveRunsFeed()
+  const collectors = useCollectorsFeed()
+  const attention = useMemo(() => rankAttentionItems({ runs: runs.runs, providerSummaries: collectors.providers }), [runs.runs, collectors.providers])
+  const coverage = summary.data?.dimensions?.[dimension]
+  const maximum = Math.max(1, ...(coverage?.items || []).map(row => row.count))
+  const unavailable = runs.error || collectors.error || collectors.streamError
+  return <div className="qt2-room qt2-research-room">
+    <header className="qt2-room-head"><h1 className="qt2-title">Overview</h1><Link className="qt2-button" to="/studies">Browse studies</Link></header>
+    <ReadState read={summary} label="Loading research summaries" />
+    <div className="qt2-research-kpis">{[['Studies', 'studies', '/studies'], ['Published summaries', 'published', '/studies?publication_state=published'], ['Studies without summaries', 'unpublished', '/studies?publication_state=unpublished']].map(([label, key, to]) => <Link key={key} className="qt2-research-panel" to={to}><span>{label}</span><strong>{summary.data ? summary.data[key] : '—'}</strong></Link>)}</div>
+    <section className="qt2-research-panel qt2-compact-attention"><div><h2>Needs attention</h2><span className="qt2-research-caption">Bot and collector evidence · 72 hours</span></div><div className="qt2-head-actions"><Link to="/bot-runs">Bot runs</Link><Link to="/collectors">Collectors</Link></div>
+      {runs.loading || collectors.loading ? <p>Checking current evidence…</p> : attention.length ? <AttentionRail items={attention.slice(0, 3)} /> : <p>{unavailable ? 'Partial evidence; no all-clear established.' : 'No known actionable bot or collector issues.'}</p>}
+      {unavailable ? <details><summary>Some evidence sources unavailable</summary>{[runs.error, collectors.error, collectors.streamError].filter(Boolean).map((error, index) => <OperatorErrorNotice key={index} error={error} compact />)}</details> : null}
+    </section>
+    <div className="qt2-research-overview-grid"><ResearchActivity />
+      <section className="qt2-research-panel"><div className="qt2-research-panel-head"><h2>Inventory coverage</h2><select aria-label="Coverage dimension" value={dimension} onChange={event => setDimension(event.target.value)}>{Object.entries(DIMENSIONS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+        {!summary.data ? <p>Coverage unavailable until the summary read succeeds.</p> : !coverage?.items?.length ? <p>No classified Studies.</p> : coverage.items.map(row => <div className="qt2-coverage-row" key={row.label}><span title={coverageLabel(row.label, dimension)}>{coverageLabel(row.label, dimension)}</span><meter min="0" max={maximum} value={row.count} aria-label={row.label + ': ' + row.count + ' saved Studies'} /><strong>{row.count}</strong></div>)}
+        {coverage?.other ? <p className="qt2-research-caption">Other: {coverage.other}</p> : null}{coverage?.unknown_studies ? <p className="qt2-research-caption">No directly linked Check definition: {coverage.unknown_studies}</p> : null}{coverage?.other_memberships ? <p className="qt2-research-caption">Other definition memberships: {coverage.other_memberships}</p> : null}
+        <p className="qt2-research-caption">Saved Study counts. {dimension === 'procedure' ? 'A Study can belong to several linked definitions; only direct Check links are counted.' : dimension === 'period' ? 'Stored windows; continuous source coverage is not established.' : 'Root metadata only; values not recorded at Study level remain separate.'} Independent evidence is not established by inventory counts.</p>
+      </section></div>
+    <div className="qt2-research-panel-head"><h2>Recent studies</h2><Link to="/studies">View all</Link></div><ReadState read={recent} label="Loading recent Study summaries" />{recent.data ? <section className="qt2-research-panel qt2-table-panel">{recent.data.items.length ? <StudyTable items={recent.data.items} from="/overview" /> : <p>No saved Studies.</p>}</section> : null}
+  </div>
 }

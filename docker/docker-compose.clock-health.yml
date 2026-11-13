@@ -1,0 +1,18 @@
+# Explicit host-owner installation prerequisite; see docs/operators/alerting.md.
+services:
+  alloy:
+    volumes:
+      - type: bind
+        source: /srv/quanttrad/deploy-state/clock-health
+        target: /run/qt-clock-health
+        read_only: true
+        bind:
+          create_host_path: false
+  grafana:
+    volumes:
+      - type: bind
+        source: ./grafana/provisioning/alerting/clock-safety.yml
+        target: /etc/grafana/provisioning/alerting/clock-safety.yml
+        read_only: true
+        bind:
+          create_host_path: false

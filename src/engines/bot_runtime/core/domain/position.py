@@ -20,7 +20,8 @@ from ..execution_order import build_fill_order, execute_fill_order_with_lifecycl
 from ..execution_plan import RuntimeStopAdjustment
 from ..execution_policy import ExitExecutionPolicy, exit_policy_for, fee_rate_for_role, normalize_liquidity_role
 from ..execution_profile import SeriesExecutionProfile
-from ..execution_assumptions import ResolvedExecutionAssumptions
+from ..execution_assumptions import ResolvedExecutionAssumptions, align_order_price
+from ..bar_execution_clock import execution_candle
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import executed_fee, executed_notional
 from ..margin import resolve_instrument_type, InstrumentType
@@ -58,6 +59,21 @@ class SameBarResolutionPolicy(str, Enum):
                 f"same_bar_policy={normalized!r} is unsupported; "
                 "supported=['pessimistic_stop', 'target_first']"
             ) from None
+
+
+@dataclass(frozen=True)
+class EntryFillFacts:
+    quantity: float
+    price: float
+    notional: float
+    fee_paid: float
+    fee_rate: float
+    fee_type: str
+    fee_source: str
+    fee_version: Optional[str]
+    filled_at: str
+    wallet_metadata_json: str
+    position_commit_seq: int
 
 
 @dataclass
@@ -125,6 +141,8 @@ class LadderPosition:
     reason_code: Optional[str] = None
     _order_lifecycles: Dict[str, CanonicalOrderLifecycle] = field(default_factory=dict, repr=False)
     _order_lifecycle_updates: List[Tuple[CanonicalOrderLifecycle, int]] = field(default_factory=list, repr=False)
+
+    entry_fill_facts: Optional[EntryFillFacts] = None
 
     def __post_init__(self) -> None:
         self.best_price = self.entry_price
@@ -262,6 +280,8 @@ class LadderPosition:
                 "symbol": (self.instrument or {}).get("symbol"),
                 "trade_id": self.trade_id,
                 "leg_id": leg_id,
+                **({"signal_id": self.signal_id, "decision_id": self.decision_id}
+                   if self.execution_assumptions and self.execution_assumptions.uses_causal_bar_clock else {}),
                 "direction": self.direction,
                 "known_at": isoformat(known_at),
                 "order_request_id": request_id,
@@ -332,8 +352,8 @@ class LadderPosition:
             return self.exit_settlement
         return ExitSettlementService(self.wallet_gateway)
 
-    def _update_excursions(self, candle: Candle) -> None:
-        favorable_price = candle.high if self.direction == "long" else candle.low
+    def _update_excursions(self, candle: Candle, *, adverse_only: bool = False, count_bar: bool = True) -> None:
+        favorable_price = self.entry_price if adverse_only else (candle.high if self.direction == "long" else candle.low)
         adverse_price = candle.low if self.direction == "long" else candle.high
         self.best_price = max(self.best_price, favorable_price) if self.direction == "long" else min(self.best_price, favorable_price)
         self.worst_price = min(self.worst_price, adverse_price) if self.direction == "long" else max(self.worst_price, adverse_price)
@@ -341,7 +361,8 @@ class LadderPosition:
         adverse_ticks = self._ticks_from_entry(adverse_price)
         self.mfe_ticks = max(self.mfe_ticks, favorable_ticks)
         self.mae_ticks = min(self.mae_ticks, adverse_ticks)
-        self.bars_held += 1
+        if count_bar:
+            self.bars_held += 1
 
     def _uses_wallet_execution(self) -> bool:
         return bool(self.execution_adapter and self.wallet_gateway)
@@ -534,7 +555,9 @@ class LadderPosition:
         if self.moved_to_breakeven or self.trailing_active:
             return
         if self.breakeven_trigger_ticks and self.mfe_ticks >= self.breakeven_trigger_ticks:
-            self.stop_price = risk_math.clamp_stop(self.stop_price, self.entry_price, self.direction)
+            self._tighten_stop(self.entry_price, align=bool(
+                self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_protection
+            ))
             self.moved_to_breakeven = True
 
     def _maybe_apply_stop_adjustments(self) -> None:
@@ -575,7 +598,9 @@ class LadderPosition:
             if candidate is None:
                 continue
 
-            self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
+            self._tighten_stop(candidate, align=bool(
+                self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_protection
+            ))
             rule.fired = True
             if candidate == self.entry_price:
                 self.moved_to_breakeven = True
@@ -590,6 +615,13 @@ class LadderPosition:
             return
         self.trailing_active = True
         candidate = self.best_price - distance_price if self.direction == "long" else self.best_price + distance_price
+        self._tighten_stop(candidate, align=bool(
+            self.execution_assumptions and self.execution_assumptions.uses_tick_aligned_trailing
+        ))
+
+    def _tighten_stop(self, candidate: float, *, align: bool) -> None:
+        if align:
+            candidate = align_order_price(candidate, self.tick_size, round_up=self.direction == "short")
         self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
 
     def _apply_stop(self, candle: Candle) -> List[Dict[str, Any]]:
@@ -875,6 +907,7 @@ class LadderPosition:
         candle: Candle,
         *,
         same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.PESSIMISTIC_STOP,
+        entry_fill_bar: bool = False,
     ) -> List[Dict[str, Any]]:
         """Advance the position with the latest candle."""
 
@@ -883,9 +916,36 @@ class LadderPosition:
         same_bar_target_and_stop = self.hits_target_and_stop(candle)
         open_hits_stop = self.opens_at_or_beyond_stop(candle)
         open_hits_target = self.opens_at_or_beyond_target(candle)
-        self._update_excursions(candle)
+        causal = bool(self.execution_assumptions and self.execution_assumptions.uses_causal_bar_clock)
+        if causal:
+            candle = execution_candle(candle, self.execution_assumptions)
+        self._update_excursions(candle, adverse_only=causal and entry_fill_bar,
+            count_bar=not (causal and entry_fill_bar))
 
-        if open_hits_stop:
+        if causal:
+            # Resting entry may occur anywhere in this completed bar. Never credit
+            # pre-fill favorable range, target or trail; retain adverse stop risk.
+            stop_was_touched = (candle.low <= self.stop_price if self.direction == "long" else candle.high >= self.stop_price)
+            stop_events = self._apply_stop(candle)
+            if stop_was_touched and self.is_active():
+                raise RuntimeError("causal_stop_not_fully_settled")
+            if not stop_was_touched and not entry_fill_bar:
+                leg_events = self._apply_leg_fills(candle)
+                events.extend(leg_events)
+                if (self.execution_assumptions.finalizes_last_target_at_fill
+                        and leg_events and all(leg.status != "open" for leg in self.legs)):
+                    # The last target already settled. Do not keep a phantom
+                    # position until the next bar's stop/finalization path.
+                    self.closed_at = candle.time
+                    self._set_terminal_reason_from_legs()
+                if self.is_active():
+                    events.extend(self._maybe_apply_fixed_horizon_exit(candle))
+                # Tightening is learned at close and applies only to a later bar.
+                if self.is_active():
+                    self._maybe_apply_stop_adjustments()
+                    self._maybe_move_breakeven()
+                    self._maybe_trail_stop()
+        elif open_hits_stop:
             stop_events = self._apply_stop(candle)
         elif (
             policy == SameBarResolutionPolicy.PESSIMISTIC_STOP
@@ -902,7 +962,7 @@ class LadderPosition:
             stop_events = self._apply_stop(candle)
         if stop_events:
             events.extend(stop_events)
-        if self.is_active():
+        if self.is_active() and not causal:
             fixed_horizon_events = self._maybe_apply_fixed_horizon_exit(candle)
             if fixed_horizon_events:
                 events.extend(fixed_horizon_events)
@@ -958,6 +1018,8 @@ class LadderPosition:
 
         if not self.is_active():
             return []
+        if self.execution_assumptions and self.execution_assumptions.uses_causal_bar_clock:
+            candle = execution_candle(candle, self.execution_assumptions)
 
         normalized_reason = str(reason_code or "").strip().upper()
         if normalized_reason not in {"BACKTEST_END", "TERMINAL_LIQUIDATION"}:
@@ -1182,6 +1244,11 @@ class LadderPosition:
             "position_commit_seq": int(self.position_commit_seq),
             "position_commit_seq_status": "position_scoped",
         }
+        if self.entry_fill_facts is not None:
+            # Remaining legs are mutable and may already be zero at publication.
+            # The opt-in full-fill model retains the actual entry quantity.
+            payload["quantity"] = self.entry_fill_facts.quantity
+            payload["qty"] = self.entry_fill_facts.quantity
         if self.closed_at is not None:
             if not self.close_reason or not self.reason_code:
                 raise RuntimeError(
@@ -1285,6 +1352,20 @@ class LadderPosition:
             "full_fill_assumption",
             "market_slippage_bps",
             "stop_slippage_bps",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_precision",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
         )
         return {key: metadata.get(key) for key in keys if key in metadata}
 
@@ -1327,4 +1408,7 @@ class LadderPosition:
             "bars_held": self.bars_held,
             "fixed_horizon_bars": self.fixed_horizon_bars,
             "pre_entry_context": dict(self.pre_entry_context or {}),
+            **({"excursion_measurement": "coarse_bar_bounds_not_realized_path",
+                "entry_bar_favorable_range_excluded": True}
+               if self.execution_assumptions and self.execution_assumptions.uses_causal_bar_clock else {}),
         }

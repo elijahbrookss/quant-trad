@@ -21,6 +21,7 @@ build/
 .env
 .env.*
 secrets.env
+/grafana-storage-metrics.env
 *.db
 *.db-*
 *.sqlite

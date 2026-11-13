@@ -1,7 +1,7 @@
 """Fixed shared-metadata candidate for the disposable storage demonstration only.
 
 This is not a production cutover command. The four existing per-record catalogs
-are the current growth problem; no alternate placements or rebalancing are added.
+and two generation-preparation catalogs move together; no rebalancing is added.
 """
 import os
 from pathlib import Path
@@ -13,6 +13,16 @@ from sqlalchemy import text
 TABLES = (
     "fact_identities", "raw_archive_record_mappings",
     "fact_archive_material_aliases", "fact_archive_canonical_dependencies",
+    "fact_archive_prepared_material_aliases",
+    "fact_archive_prepared_canonical_dependencies",
+)
+
+# The generation writer leaves historical legacy large catalogs empty.
+# The cold-book fixture always produces canonical source dependencies; aliases
+# may legitimately be absent when no material-hash evidence exists.
+POPULATED_TABLES = (
+    "fact_identities", "raw_archive_record_mappings",
+    "fact_archive_prepared_canonical_dependencies",
 )
 
 

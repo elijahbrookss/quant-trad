@@ -1,11 +1,16 @@
 """Current placement proof for immutable canonical archive source edges."""
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from copy import deepcopy
+from dataclasses import dataclass
 import json
 
 from sqlalchemy import text
 
 from market_data.fact_archive import archive_evidence_hash
-from .fact_storage import _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM
+from .fact_storage import (
+    _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM,
+    ensure_payload_contracts,
+)
 
 
 # These registered source families retain their evidence in the canonical row
@@ -15,6 +20,9 @@ SELF_CONTAINED_FACT_TYPES = frozenset({
     "candle.ohlcv", "derivatives.funding_rate", "derivatives.open_interest",
     "market.reference_price", "market.reserve_balance", "asset.reserve_state",
 })
+# Reduce repeated causal-window round trips without changing source
+# admission, result, byte, statement-time, or page budgets.
+_CAUSAL_WINDOW_REQUEST_BATCH_ROWS = 512
 
 
 class CanonicalSourceByteBudgetExceeded(RuntimeError):
@@ -28,6 +36,104 @@ class CanonicalSourceByteBudgetExceeded(RuntimeError):
             f"logical_bytes={logical_bytes} max_logical_bytes={max_logical_bytes}; "
             "reduce archive page size or raise the explicit logical-byte budget"
         )
+
+
+@dataclass
+class _CheckpointSourceEvidence:
+    manifest: object
+    rows: dict
+    retained_bytes: int
+
+
+class CheckpointSourceEvidenceCache:
+    """Bounded sparse checkpoint rows after full-page validation.
+
+    Current placement, manifest bytes, headers, contracts and authority are
+    rechecked by the caller for every use.  Only defensive copies of selected
+    rows survive; a new selected identity forces another full-page decode.
+    The owner may carry this value-only cache across routine scheduler yields,
+    but never a database session, lock, plan, verifier or final-reclaim proof.
+    """
+
+    def __init__(self, *, max_manifests, max_rows, max_retained_bytes,
+                 compatibility_key=()):
+        for name, value in (("max_manifests", max_manifests), ("max_rows", max_rows),
+                            ("max_retained_bytes", max_retained_bytes)):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"canonical_checkpoint_cache_limit_invalid: field={name}")
+        if type(compatibility_key) is not tuple:
+            raise ValueError("canonical_checkpoint_cache_compatibility_key_invalid")
+        self.max_manifests = max_manifests
+        self.max_rows = max_rows
+        self.max_retained_bytes = max_retained_bytes
+        self.compatibility_key = compatibility_key
+        self._entries = OrderedDict()
+        self.row_count = 0
+        self.retained_bytes = 0
+        self.hit_count = 0
+        self.miss_count = 0
+        self.eviction_count = 0
+
+    @staticmethod
+    def _row_charge(row):
+        # Match the repository's conservative retained-document accounting.
+        return 6 * len(json.dumps(row, default=str).encode("utf-8"))
+
+    def get(self, manifest, identities):
+        entry = self._entries.get(manifest.manifest_id)
+        if entry is None or entry.manifest != manifest:
+            if entry is not None:
+                self._discard(manifest.manifest_id)
+            self.miss_count += 1
+            return None
+        wanted = set(identities)
+        if not wanted.issubset(entry.rows):
+            self.miss_count += 1
+            return None
+        self._entries.move_to_end(manifest.manifest_id)
+        self.hit_count += 1
+        return {identity: deepcopy(entry.rows[identity]) for identity in identities}
+
+    def remember(self, manifest, rows):
+        if not rows:
+            return
+        previous = self._entries.get(manifest.manifest_id)
+        if previous is not None and previous.manifest != manifest:
+            self._discard(manifest.manifest_id)
+            previous = None
+        merged = {} if previous is None else {key: deepcopy(value) for key, value in previous.rows.items()}
+        merged.update((identity, deepcopy(row)) for identity, row in rows.items())
+        retained_bytes = sum(self._row_charge(row) for row in merged.values())
+        if len(merged) > self.max_rows or retained_bytes > self.max_retained_bytes:
+            return
+        if previous is not None:
+            self._discard(manifest.manifest_id)
+        while self._entries and (
+                len(self._entries) >= self.max_manifests
+                or self.row_count + len(merged) > self.max_rows
+                or self.retained_bytes + retained_bytes > self.max_retained_bytes):
+            self._discard(next(iter(self._entries)))
+            self.eviction_count += 1
+        if (len(self._entries) >= self.max_manifests
+                or self.row_count + len(merged) > self.max_rows
+                or self.retained_bytes + retained_bytes > self.max_retained_bytes):
+            return
+        self._entries[manifest.manifest_id] = _CheckpointSourceEvidence(
+            manifest=manifest, rows=merged, retained_bytes=retained_bytes,
+        )
+        self.row_count += len(merged)
+        self.retained_bytes += retained_bytes
+
+    def _discard(self, manifest_id):
+        entry = self._entries.pop(manifest_id, None)
+        if entry is not None:
+            self.row_count -= len(entry.rows)
+            self.retained_bytes -= entry.retained_bytes
+
+    def dispose(self):
+        self._entries.clear()
+        self.row_count = 0
+        self.retained_bytes = 0
 
 
 def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
@@ -49,25 +155,88 @@ def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_
             raise RuntimeError(f"canonical_window_request_invalid: fact_version_id={item['root_id']}")
     selections = defaultdict(list)
     count = 0
-    for offset in range(0, len(requests), 128):
+    for offset in range(0, len(requests), _CAUSAL_WINDOW_REQUEST_BATCH_ROWS):
         if check_budget is not None:
             check_budget()
         batch = [{**item, **{name: item[name].isoformat() for name in ("known_at", "range_start", "range_end")}}
-                 for item in requests[offset:offset + 128]]
-        found = session.execute(text("""
-            SELECT requested.root_id,source.id
-            FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
-                root_id text,instrument_id text,fact_type text,series_id bigint,source_id bigint,
-                root_commit bigint,known_at timestamptz,range_start timestamptz,range_end timestamptz,include_end boolean)
-            JOIN market.series AS series ON series.instrument_id=requested.instrument_id AND series.fact_type=requested.fact_type
-              AND (requested.series_id IS NULL OR series.id=requested.series_id)
-            JOIN market.fact_versions AS source ON source.series_id=series.id AND source.fact_type=requested.fact_type
-              AND (requested.source_id IS NULL OR source.source_id=requested.source_id)
-              AND source.market_commit_seq<=requested.root_commit AND source.known_at<=requested.known_at
-              AND source.observation_time>=requested.range_start
-              AND (source.observation_time<requested.range_end OR (requested.include_end AND source.observation_time=requested.range_end))
-            ORDER BY requested.root_id,source.series_id,source.observation_key,source.revision LIMIT :limit
-        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1}).all()
+                 for item in requests[offset:offset + _CAUSAL_WINDOW_REQUEST_BATCH_ROWS]]
+        # Resolve optional series expansion once, then share an exact routed
+        # observation range across roots with the same immutable scope. The
+        # code-owned reader derives physical storage days from conservative
+        # observation bounds, retains the sealed legacy relation, and refuses
+        # a directory horizon above 4,096 days. Adding one microsecond is exact
+        # for PostgreSQL timestamptz and preserves the resolver's inclusive end,
+        # including a zero-width inclusive request, without treating event or
+        # known-at dates as physical placement.
+        #
+        # The metadata sentinel bounds optional series expansion before any
+        # routed header read. Directory lookup and header selection remain in
+        # this one statement, so both use the same READ COMMITTED snapshot.
+        routed = session.execute(text("""
+            WITH requested AS (
+                SELECT * FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS item(
+                    root_id text,instrument_id text,fact_type text,series_id bigint,source_id bigint,
+                    root_commit bigint,known_at timestamptz,range_start timestamptz,range_end timestamptz,
+                    include_end boolean)
+            ), resolved AS MATERIALIZED (
+                SELECT requested.*,series.id AS resolved_series_id
+                FROM requested JOIN market.series AS series
+                  ON series.instrument_id=requested.instrument_id
+                 AND series.fact_type=requested.fact_type
+                 AND (requested.series_id IS NULL OR series.id=requested.series_id)
+                ORDER BY requested.root_id,series.id LIMIT :routing_limit
+            ), routing AS MATERIALIZED (
+                SELECT count(*)::bigint AS resolved_count FROM resolved
+            ), scopes AS MATERIALIZED (
+                SELECT resolved_series_id,fact_type,source_id,range_start,range_end,include_end,
+                       max(root_commit) AS max_root_commit,max(known_at) AS max_known_at
+                FROM resolved CROSS JOIN routing
+                WHERE routing.resolved_count<=:max_routing
+                  AND (range_start<range_end OR include_end)
+                GROUP BY resolved_series_id,fact_type,source_id,range_start,range_end,include_end
+            ), routed_sources AS MATERIALIZED (
+                SELECT scopes.resolved_series_id,scopes.fact_type,
+                       scopes.source_id AS scope_source_id,scopes.range_start,scopes.range_end,
+                       scopes.include_end,source.id,source.source_id,source.market_commit_seq,
+                       source.known_at,source.observation_time,source.observation_key,source.revision
+                FROM scopes CROSS JOIN LATERAL market.read_fact_headers_in_range(
+                    scopes.resolved_series_id,scopes.range_start,
+                    scopes.range_end + CASE WHEN scopes.include_end THEN interval '1 microsecond'
+                                             ELSE interval '0 microseconds' END
+                ) AS source
+                WHERE source.fact_type=scopes.fact_type
+                  AND (scopes.source_id IS NULL OR source.source_id=scopes.source_id)
+                  AND source.market_commit_seq<=scopes.max_root_commit
+                  AND source.known_at<=scopes.max_known_at
+            ), candidates AS MATERIALIZED (
+                SELECT resolved.root_id,source.id,source.resolved_series_id,
+                       source.observation_key,source.revision
+                FROM resolved JOIN routed_sources AS source
+                  ON source.resolved_series_id=resolved.resolved_series_id
+                 AND source.fact_type=resolved.fact_type
+                 AND source.scope_source_id IS NOT DISTINCT FROM resolved.source_id
+                 AND source.range_start=resolved.range_start AND source.range_end=resolved.range_end
+                 AND source.include_end=resolved.include_end
+                 AND source.market_commit_seq<=resolved.root_commit
+                 AND source.known_at<=resolved.known_at
+                ORDER BY resolved.root_id,source.resolved_series_id,
+                         source.observation_key,source.revision LIMIT :limit
+            )
+            SELECT candidates.root_id,candidates.id,false AS metadata,routing.resolved_count,
+                   candidates.resolved_series_id,candidates.observation_key,candidates.revision
+            FROM candidates CROSS JOIN routing
+            UNION ALL
+            SELECT NULL::text,NULL::text,true AS metadata,routing.resolved_count,
+                   NULL::bigint,NULL::text,NULL::bigint FROM routing
+            ORDER BY metadata,root_id,resolved_series_id,observation_key,revision
+        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1,
+                 "routing_limit": max_rows + 1, "max_routing": max_rows}).all()
+        metadata = [row for row in routed if row[2] is True]
+        if len(metadata) != 1:
+            raise RuntimeError("canonical_window_routing_metadata_invalid")
+        if metadata[0][3] > max_rows:
+            raise RuntimeError("canonical_window_routing_budget_exceeded: reduce archive page size")
+        found = [(row[0], row[1]) for row in routed if not row[2]]
         count += len(found)
         if count > max_rows:
             raise RuntimeError("canonical_window_source_budget_exceeded: reduce archive page size")
@@ -118,14 +287,10 @@ def collect_source_history_archive_refs(session, *, rows, object_store):
     return references
 
 
-def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
-    """Size the bounded identity set before transferring hot JSON/decoding cold.
-
-    Conservatively charge whole cold pages because hydration decodes those
-    pages. An oversized source closure fails before loading its documents.
-    """
+def _measure_canonical_dependency_rows(session, identities, *, max_logical_bytes, check_budget=None):
+    """Charge the same hot documents and complete cold pages as hydration."""
     if not identities:
-        return {}
+        return 0
     logical_bytes = 0
     cold_pages = {}
     for offset in range(0, len(identities), 1000):
@@ -155,10 +320,135 @@ def read_canonical_dependency_rows(session, identities, *, reader, max_logical_b
         if logical_bytes > max_logical_bytes:
             raise CanonicalSourceByteBudgetExceeded(
                 logical_bytes=logical_bytes, max_logical_bytes=max_logical_bytes)
+    return logical_bytes
+
+
+def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
+    """Size the bounded identity set before transferring hot JSON/decoding cold.
+
+    Conservatively charge whole cold pages because hydration decodes those
+    pages. An oversized source closure fails before loading its documents.
+    """
+    if not identities:
+        return {}
+    _measure_canonical_dependency_rows(
+        session, identities, max_logical_bytes=max_logical_bytes, check_budget=check_budget,
+    )
     return reader.read_rows_by_ids(session, identities)
 
 
-def verify_canonical_source_placements(session, dependencies, *, objects=None, check_budget=None):
+def _checkpoint_source_groups(session, identities, max_objects, check_budget):
+    """Locate exact identities without decoding payloads; one cold page per group."""
+    groups, manifests = defaultdict(list), {}
+    for offset in range(0, len(identities), 1000):
+        if check_budget is not None:
+            check_budget()
+        batch = identities[offset:offset + 1000]
+        locations = session.execute(text(
+            "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
+        ), {"ids": batch}).mappings().all()
+        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+            raise RuntimeError("canonical_checkpoint_source_identity_coverage_invalid")
+        rows = session.execute(text("""
+            SELECT source.id AS requested_id, hot.id AS hot_id, manifests.*
+            FROM market.fact_versions AS source
+            LEFT JOIN market.fact_hot_payloads AS hot
+              ON hot.storage_day=source.storage_day AND hot.id=source.id
+            LEFT JOIN market.fact_archive_manifests AS manifests
+              ON hot.id IS NULL AND manifests.storage_day=source.storage_day
+             AND (manifests.first_commit_seq,manifests.first_id)<=(source.market_commit_seq,source.id)
+             AND (manifests.last_commit_seq,manifests.last_id)>=(source.market_commit_seq,source.id)
+            WHERE source.id=ANY(:ids) AND source.storage_day=ANY(:days)
+            ORDER BY source.id,manifests.page_ordinal LIMIT :limit
+        """), {"ids": batch, "days": sorted({row["storage_day"] for row in locations}),
+               "limit": len(batch) + 1}).mappings().all()
+        if len(rows) != len(batch) or {row["requested_id"] for row in rows} != set(batch):
+            raise RuntimeError("canonical_checkpoint_source_archive_coverage_invalid")
+        for row in rows:
+            if row["hot_id"] is not None:
+                groups[None].append(row["requested_id"])
+                continue
+            if row["id"] is None:
+                raise RuntimeError("canonical_checkpoint_source_archive_coverage_invalid")
+            manifest = _catalog_manifest(row)
+            prior = manifests.setdefault(manifest.manifest_id, manifest)
+            if len(manifests) > max_objects:
+                raise RuntimeError("canonical_checkpoint_source_object_budget_exceeded")
+            if prior != manifest:
+                raise RuntimeError("canonical_checkpoint_source_archive_catalog_conflict")
+            groups[manifest.manifest_id].append(row["requested_id"])
+    return groups, manifests
+
+
+def read_checkpoint_dependency_rows(session, identities, *, reader, byte_verifier,
+                                    max_logical_bytes, max_objects, check_budget=None,
+                                    evidence_cache=None):
+    """Bound retained selected rows plus one cold decode, not all backing pages.
+
+    Only checkpoint admission uses this path. The caller retains its exact
+    causal selection and lifecycle fence. Every backing object joins the same
+    cumulative verification count/byte budget as raw/checkpoint dependencies.
+    No page, identity or integrity check is skipped to fit the working set.
+    """
+    identities = sorted(set(identities))
+    if not identities:
+        return {}
+    groups, manifests = _checkpoint_source_groups(session, identities, max_objects, check_budget)
+    result, retained_bytes = {}, 0
+    for manifest_id, batch in groups.items():
+        if check_budget is not None:
+            check_budget()
+        remaining = max_logical_bytes - retained_bytes
+        if manifest_id is not None:
+            manifest = manifests[manifest_id]
+            if manifest.logical_byte_count > remaining:
+                raise CanonicalSourceByteBudgetExceeded(
+                    logical_bytes=retained_bytes + manifest.logical_byte_count,
+                    max_logical_bytes=max_logical_bytes)
+            byte_verifier.verify(manifest.object_key, manifest.object_sha256,
+                                 expected_bytes=manifest.byte_count)
+        selected = None
+        if manifest_id is not None and evidence_cache is not None:
+            selected = evidence_cache.get(manifest, batch)
+            if selected is not None:
+                # Reapply the complete page charge and current header/contract
+                # proof. Dynamic contracts for unselected series are part of
+                # the full-page proof too; only Parquet decode is reused.
+                _measure_canonical_dependency_rows(
+                    session, batch, max_logical_bytes=remaining, check_budget=check_budget,
+                )
+                ensure_payload_contracts(session, [
+                    contract for bounds in manifest.series
+                    for contract in bounds.payload_contracts
+                ])
+                reader.verify_cached_rows_by_ids(session, selected)
+        if selected is None:
+            # Recheck current placement and its whole-page charge immediately
+            # before hydration. The common reader validates every cold row and
+            # envelope even though only selected rows are retained.
+            selected = read_canonical_dependency_rows(
+                session, batch, reader=reader, max_logical_bytes=remaining,
+                check_budget=check_budget,
+            )
+        if set(selected) != set(batch):
+            raise RuntimeError("canonical_checkpoint_source_identity_coverage_invalid")
+        for identity, row in selected.items():
+            if check_budget is not None:
+                check_budget()
+            # Match the existing conservative hot-document multiplier. Only
+            # selected rows survive a group; full decoded pages stay in reader.
+            retained_bytes += 6 * len(json.dumps(row, default=str).encode("utf-8"))
+            if retained_bytes > max_logical_bytes:
+                raise CanonicalSourceByteBudgetExceeded(
+                    logical_bytes=retained_bytes, max_logical_bytes=max_logical_bytes)
+            result[identity] = row
+        if manifest_id is not None and evidence_cache is not None:
+            evidence_cache.remember(manifest, selected)
+    return result
+
+
+def verify_canonical_source_placements(session, dependencies, *, objects=None, check_budget=None,
+                                       handoff=None, manifest_id=None):
     """Recheck exact source headers and cold bytes while lifecycle-fenced.
 
     The returned hash is ephemeral: compare it across the destructive handoff,
@@ -174,29 +464,51 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
         if check_budget is not None:
             check_budget()
         batch = identities[offset:offset + 1000]
+        # Permanent identities route the lookup; actual headers, hashes and
+        # current hot/cold placement remain independently checked below.
+        locations = session.execute(text(
+            "SELECT id,storage_day FROM market.fact_identities WHERE id=ANY(:ids)"
+        ), {"ids": batch}).mappings().all()
+        if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+            raise RuntimeError("canonical_source_dependency_missing")
+        location_days = {row["id"]: row["storage_day"] for row in locations}
+        days = sorted(set(location_days.values()))
+        if check_budget is not None:
+            check_budget()
         headers = session.execute(text("""
             SELECT versions.id, versions.row_hash, versions.storage_day,
                    hot.id IS NOT NULL AS hot_present
+            """ + (", versions.market_commit_seq " if handoff is not None else "")
+                   + (", versions.tableoid::bigint AS _handoff_oid,"
+                      "hot.tableoid::bigint AS _handoff_hot_oid "
+                      if handoff is not None else "") + """
             FROM market.fact_versions AS versions
             LEFT JOIN market.fact_hot_payloads AS hot
               ON hot.storage_day=versions.storage_day AND hot.id=versions.id
-            WHERE versions.id=ANY(:ids) ORDER BY versions.id
-        """), {"ids": batch}).mappings().all()
-        if {item["id"] for item in headers} != set(batch):
+             AND hot.storage_day=ANY(:days)
+            WHERE versions.id=ANY(:ids) AND versions.storage_day=ANY(:days)
+            ORDER BY versions.id
+        """), {"ids": batch, "days": days}).mappings().all()
+        if ({item["id"] for item in headers} != set(batch)
+                or any(item["storage_day"] != location_days[item["id"]] for item in headers)):
             raise RuntimeError("canonical_source_dependency_missing")
         cold = [item["id"] for item in headers if not item["hot_present"]]
         pages = defaultdict(list)
+        matches = []
         if cold:
             matches = session.execute(text("""
                 SELECT source.id AS source_id, manifests.*
+                """ + (", manifests.descriptor::text AS _handoff_descriptor " if handoff is not None else "") + """
                 FROM market.fact_versions AS source
                 JOIN market.fact_retention_partitions AS partition
                   ON partition.storage_day=source.storage_day AND partition.state IN ('verified','reclaimed')
                 JOIN market.fact_archive_manifests AS manifests ON manifests.storage_day=source.storage_day
                   AND (manifests.first_commit_seq,manifests.first_id)<=(source.market_commit_seq,source.id)
                   AND (manifests.last_commit_seq,manifests.last_id)>=(source.market_commit_seq,source.id)
-                WHERE source.id=ANY(:ids) ORDER BY source.id,manifests.page_ordinal LIMIT :limit
-            """), {"ids": cold, "limit": len(cold) + 1}).mappings().all()
+                WHERE source.id=ANY(:ids) AND source.storage_day=ANY(:days)
+                ORDER BY source.id,manifests.page_ordinal LIMIT :limit
+            """), {"ids": cold, "days": sorted({row["storage_day"] for row in headers if not row["hot_present"]}),
+                    "limit": len(cold) + 1}).mappings().all()
             if len(matches) != len(cold):
                 raise RuntimeError("canonical_source_dependency_archive_coverage_invalid")
             for item in matches:
@@ -216,4 +528,6 @@ def verify_canonical_source_placements(session, dependencies, *, objects=None, c
                     objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
                 placement.update(tier="cold", manifest_id=manifest.manifest_id, manifest_hash=manifest.manifest_hash)
             placements.append(placement)
+        if handoff is not None:
+            handoff.capture_sources(session, manifest_id, headers, matches)
     return archive_evidence_hash({"placements": placements})

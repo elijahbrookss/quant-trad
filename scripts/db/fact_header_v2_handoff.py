@@ -30,6 +30,7 @@ from scripts.db import archive_reference_v2_placement as reference_move
 from scripts.db import archive_root_v2_copy as archives
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
 from scripts.db import fact_header_v2_references as references, raw_mapping_v2_copy as raw
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
 from scripts.db.fact_header_v2_capture import LOCK, SCHEMA, migration_step, capture_remaining_seconds, _bounded_step
 
 logger = logging.getLogger(__name__)
@@ -235,8 +236,7 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
     count = target_count = verified["verified_header_rows"]
     # Verification allowed ordinary reads. Only the transactional rename
     # phase takes an exclusive fence; a busy reader refuses this handoff.
-    switching = (copy.SOURCE, "market.fact_hot_payloads",
-                 "market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies",
+    switching = (copy.SOURCE, *SOURCE_REFERENCE_COLUMNS,
                  *(SCHEMA+"."+name for name in copy.TABLE_NAMES))
     if raw_mapping:
         switching += (raw.SOURCE, raw.TARGET)
@@ -246,9 +246,8 @@ def _switch_verified_tables(conn, verified, *, prevalidated, raw_mapping, eviden
         FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass
           AND conparentid=0 ORDER BY conrelid,conname
     """)).mappings().all()
-    owners = {"market.fact_hot_payloads","market.fact_archive_material_aliases",
-              "market.fact_archive_canonical_dependencies"}
-    if len(incoming)!=3 or {row["relation"] for row in incoming}!=owners:
+    owners = set(SOURCE_REFERENCE_COLUMNS)
+    if len(incoming) != len(owners) or {row["relation"] for row in incoming} != owners:
         raise RuntimeError("fact_header_handoff_unexpected_references")
     conn.exec_driver_sql("LOCK TABLE "+",".join(sorted(owners))+" IN ACCESS EXCLUSIVE MODE NOWAIT")
     children = conn.execute(text("""
@@ -385,9 +384,8 @@ def stage_forward_tables(conn, *, operation_sha256, end_day, evidence, timeout_s
         incoming = conn.execute(text("SELECT conrelid::regclass::text AS relation,conname "
             "FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass "
             "AND conparentid=0 ORDER BY conrelid,conname")).mappings().all()
-        owners = {references.PARENT, "market.fact_archive_material_aliases",
-                  "market.fact_archive_canonical_dependencies"}
-        if len(incoming) != 3 or {row["relation"] for row in incoming} != owners:
+        owners = set(SOURCE_REFERENCE_COLUMNS)
+        if len(incoming) != len(owners) or {row["relation"] for row in incoming} != owners:
             raise RuntimeError("fact_header_forward_reference_inventory_changed")
         # Forward archive capture has its own original owner and journals.
         # It may close only under the matching live inventory, never by borrowing

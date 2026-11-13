@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from portal.backend.db.execution_control import owned_connection_cancel
+from .fact_archive_generation import material_alias_projection
 from core.execution_control import (
     consume_execution_json, consume_execution_resource, current_execution_control,
     execution_checkpoint, measure_execution_stage,
@@ -64,6 +65,7 @@ from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION,
     get_fact_contract,
     get_fact_payload_schema,
+    supported_fact_contracts,
 )
 from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
@@ -463,6 +465,7 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
         "derivatives.funding_rate.v1",
         "market.reference_price.v1",
         "market.reserve_balance.v1",
+        "derivatives.liquidation_volume.v1",
         "market.trade.v1",
         "market.trade_flow.v1",
         "market.trade_flow_feature.v1",
@@ -598,7 +601,7 @@ def _load_lineage_material_rows(
             raise ValueError(f"market_dataset_provenance_key_invalid: fact_type={fact_type} evidence_key={evidence_key}")
         base_params["evidence_key"] = str(evidence_key)
         selection = (
-            """
+            f"""
             SELECT versions.id, hot.provenance -> :evidence_key
                 ->> 'legacy_material_hash' AS lineage_material_hash
             FROM market.fact_versions AS versions
@@ -609,7 +612,7 @@ def _load_lineage_material_rows(
                   ->> 'legacy_material_hash' = ANY(:material_hashes)
             UNION ALL
             SELECT aliases.fact_version_id AS id, aliases.material_hash AS lineage_material_hash
-            FROM market.fact_archive_material_aliases AS aliases
+            FROM {material_alias_projection("aliases")}
             JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
             JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
               AND manifest.storage_day=versions.storage_day
@@ -1429,10 +1432,7 @@ class PostgresMarketDataRepository:
                            CASE WHEN series.fact_type = 'derivatives.funding_rate'
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS funding_rate_count,
-                           CASE WHEN series.fact_type IN (
-                                      'market.reference_price',
-                                      'market.reserve_balance'
-                                  )
+                           CASE WHEN series.fact_type = ANY(:numeric_types)
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS numeric_fact_count,
                            CASE WHEN series.fact_type = 'market.trade'
@@ -1495,7 +1495,9 @@ class PostgresMarketDataRepository:
                              series.timeframe_seconds NULLS FIRST, series.id
                     """
                 ),
-                {**params, "feature_types": list(feature_types)},
+                {**params, "feature_types": list(feature_types),
+                 "numeric_types": [contract.fact_type for contract in supported_fact_contracts()
+                                   if contract.uses_exact_numeric_storage]},
             ).mappings().all()
         return [dict(row) for row in rows]
 
@@ -2657,6 +2659,7 @@ class PostgresMarketDataRepository:
         storage_day = None
         from .fact_references import lock_canonical_raw_references
 
+        market_storage_lifecycle_repository.acquire_publication_lock(session)
         session.execute(
             text("SELECT pg_advisory_xact_lock(:series_id)"),
             {"series_id": series_id},
@@ -3820,11 +3823,6 @@ class PostgresMarketDataRepository:
                     source_identity_keys=source_identity_keys,
                 )
             )
-        if source_identity_keys:
-            raise ValueError(
-                "market_data_source_binding_unsupported: exact source filtering "
-                f"is not implemented for fact_type={fact_type}"
-            )
         if fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE}:
             from .market_structure import market_structure_repository
 
@@ -3836,6 +3834,7 @@ class PostgresMarketDataRepository:
                         end=end,
                         as_of_commit_seq=as_of_commit_seq,
                         known_at_lte=known_at_lte,
+                        source_identity_keys=source_identity_keys,
                     )
                 )
             timeframe = identity.get("timeframe_seconds")
@@ -3851,7 +3850,13 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
+            )
+        if source_identity_keys:
+            raise ValueError(
+                "market_data_source_binding_unsupported: exact source filtering "
+                f"is not implemented for fact_type={fact_type}"
             )
         if fact_type in {
             "market.bbo",

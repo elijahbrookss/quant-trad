@@ -12,7 +12,8 @@ def limits():
     return operation.OperationLimits(30,120,30,60,1024,64,1,1024,1,1)
 
 
-def test_background_closes_sql_tail_before_bounded_identity_capture():
+@pytest.mark.parametrize("catalogs", [operation._LEGACY_CATALOGS, operation._CATALOGS])
+def test_background_closes_sql_tail_before_bounded_identity_capture(catalogs):
     calls=[]
     replies=iter([
         dict(outcome="raw_relocation_required",phase="raw_relocation_required"),
@@ -27,7 +28,7 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
         calls.append((op,kw))
         if op=="prepare_step":return dict(result=dict(committed=True))
         if op=="sql_copy":return dict(result=next(replies))
-        if op=="inspect_references":return dict(result=dict(references=[dict(relation="market.ref",prepared=False,validated=False)],catalogs=list(operation._CATALOGS),next_after=None))
+        if op=="inspect_references":return dict(result=dict(references=[dict(relation="market.ref",prepared=False,validated=False)],catalogs=list(catalogs),next_after=None))
         if op=="archive_copy":
             name=next(family);proved.add(name)
             return dict(result=dict(family=name,baseline_complete=True))
@@ -40,8 +41,13 @@ def test_background_closes_sql_tail_before_bounded_identity_capture():
     assert sum(op=='sql_copy' for op,_ in calls[:identity_at])==6
     assert not any(op in {'inspect_references','archive_copy','reprove'} for op,_ in calls[:identity_at])
     steps=[kw['step'] for op,kw in calls if op=='prepare_step']
-    assert steps==['catalog_history','raw_history','identity_history','identity_order','identity_capture',
-                   'reference_prepare','reference_validate','reference_adopt','catalog_history','catalog_history']
+    assert steps == [
+        'catalog_history', 'raw_history', 'identity_history', 'identity_order',
+        'identity_capture', 'reference_prepare', 'reference_validate',
+        'reference_adopt', *(['catalog_history'] * len(catalogs)),
+    ]
+    assert [kw['relation'] for op,kw in calls
+            if op=='prepare_step' and kw['step']=='catalog_history'][-len(catalogs):] == list(catalogs)
     assert all(kw['max_duration_seconds']==30 for op,kw in calls if op=='prepare_step')
 
 
@@ -104,6 +110,38 @@ def test_background_refuses_ambiguous_reference_progress_before_schema_steps(fla
         pytest.fail("ambiguous native progress must not dispatch a schema step")
     with pytest.raises(RuntimeError, match="reference_page_invalid"):
         operation.prepare_background(exchange, preparation_seconds=30, forward=True)
+
+
+@pytest.mark.parametrize("catalogs", [
+    ("market.fact_archive_material_aliases",),
+    (*operation._CATALOGS, "market.unowned"),
+])
+def test_background_refuses_partial_or_unknown_catalog_protocol(catalogs):
+    def exchange(op, **kw):
+        if op == "sql_copy":
+            return dict(result=dict(outcome="both_tails_observed_empty", phase="catch_up"))
+        if op == "inspect_references":
+            return dict(result=dict(references=[], catalogs=list(catalogs), next_after=None))
+        pytest.fail("invalid catalog protocol must not dispatch a schema step")
+    with pytest.raises(RuntimeError, match="reference_page_invalid"):
+        operation.prepare_background(exchange, preparation_seconds=30, forward=True)
+
+
+def test_background_refuses_catalog_protocol_change_between_pages():
+    calls = []
+    def exchange(op, **kw):
+        calls.append((op, kw))
+        if op == "sql_copy":
+            return dict(result=dict(outcome="both_tails_observed_empty", phase="catch_up"))
+        if op == "inspect_references":
+            if kw["after"] is None:
+                return dict(result=dict(references=[dict(relation="market.a", prepared=True,
+                    validated=True)], catalogs=list(operation._LEGACY_CATALOGS), next_after="market.a"))
+            return dict(result=dict(references=[], catalogs=list(operation._CATALOGS), next_after=None))
+        pytest.fail("catalog protocol change must not dispatch a schema step")
+    with pytest.raises(RuntimeError, match="reference_page_invalid"):
+        operation.prepare_background(exchange, preparation_seconds=30, forward=True)
+    assert not any(op == "prepare_step" for op, _ in calls)
 
 
 def test_background_tail_expiry_never_attempts_identity_capture():

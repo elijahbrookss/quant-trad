@@ -1,0 +1,154 @@
+name: Storage Metrics Qualification
+
+# Focused disposable proof; the full required release matrix remains authoritative.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feature/**', 'hotfix/**']
+    paths:
+      - '.github/workflows/storage-metrics.yaml'
+      - '.gitignore'
+      - '.dockerignore'
+      - 'docker/docker-compose*.yml'
+      - 'tests/test_storage_trends_*.py'
+      - 'portal/backend/controller/storage_management.py'
+      - 'portal/backend/db/session.py'
+      - 'portal/backend/db/market_storage_models.py'
+      - 'src/core/settings.py'
+      - 'config/defaults.yaml'
+      - 'portal/backend/db/storage_metrics_schema.py'
+      - 'portal/backend/service/storage/metrics.py'
+      - 'scripts/db/*storage_metrics*'
+      - 'scripts/ci/qualify_storage_metrics_grafana.py'
+      - 'scripts/ci/qualify_storage_trends_ui.py'
+      - 'portal/frontend/**'
+      - 'docker/grafana/storage-metrics/**'
+      - 'tests/test_portal/test_storage_metrics.py'
+      - 'tests/test_portal/test_storage_retention_observability_db.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-metrics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  storage-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qualify bounded storage queries with disposable PostgreSQL
+        env:
+          QT_DISABLE_DOTENV: '1'
+        run: |
+          ./scripts/ci/run_test_suite.sh db tests/test_portal/test_storage_metrics.py tests/test_portal/test_storage_retention_observability_db.py
+
+  storage-grafana:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:15.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-storage-ci-postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 24
+      grafana:
+        image: grafana/grafana:13.2.0
+        env:
+          GF_SECURITY_ADMIN_USER: admin
+          GF_SECURITY_ADMIN_PASSWORD: synthetic-storage-ci-grafana
+          GF_PLUGINS_PREINSTALL_SYNC: 'grafana-postgresql-datasource@13.0.4'
+          GF_PLUGINS_PREINSTALL_AUTO_UPDATE: 'false'
+          GF_USERS_ALLOW_SIGN_UP: 'false'
+          GF_ANALYTICS_REPORTING_ENABLED: 'false'
+          GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+        ports:
+          - 3000:3000
+        options: >-
+          --health-cmd "wget -q -O - http://127.0.0.1:3000/api/health"
+          --health-interval 5s --health-timeout 5s --health-retries 24
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated proof dependencies
+        run: python -m pip install psycopg2-binary==2.9.10 PyYAML==6.0.2
+      - name: Prepare standard statistics extension on the owned PostgreSQL service
+        env:
+          PG_SERVICE_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG_SERVICE_CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET shared_preload_libraries='pg_stat_statements'" \
+            -c "ALTER SYSTEM SET compute_query_id='on'"
+          docker restart "$PG_SERVICE_CONTAINER" >/dev/null
+          for attempt in $(seq 1 60); do
+            if docker exec "$PG_SERVICE_CONTAINER" pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+              ready="$(docker exec "$PG_SERVICE_CONTAINER" psql -X -qAt -U postgres -d postgres \
+                -c "SELECT 'pg_stat_statements'=ANY(string_to_array(replace(current_setting('shared_preload_libraries'),' ',''),',')) AND current_setting('compute_query_id')='on'" 2>/dev/null || true)"
+              if test "$ready" = t; then exit 0; fi
+            fi
+            sleep 1
+          done
+          echo owned_postgres_statistics_preload_unavailable >&2
+          exit 1
+      - name: Prove restricted pooled Grafana queries and cancellation
+        env:
+          PG_DSN: postgresql://postgres:synthetic-storage-ci-postgres@127.0.0.1:5432/postgres
+          QT_TEST_GRAFANA_PASSWORD: synthetic-storage-ci-grafana
+        run: >-
+          python scripts/ci/qualify_storage_metrics_grafana.py --confirm-disposable
+          --grafana-url http://127.0.0.1:3000 --grafana-postgres-host postgres:5432
+
+  storage-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: portal/frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the exact frontend source
+        working-directory: portal/frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Install isolated hosted browser qualification tools
+        run: |
+          python -m pip install playwright==1.56.0
+          python -m playwright install --with-deps chromium
+      - name: Qualify synthetic desktop and mobile Storage views
+        run: >-
+          python scripts/ci/qualify_storage_trends_ui.py --dist portal/frontend/dist
+          --artifacts "$RUNNER_TEMP/storage-trends-ui" --source-revision "$GITHUB_SHA"
+          --confirm-synthetic
+      - name: Preserve synthetic browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-trends-ui-${{ github.sha }}
+          path: ${{ runner.temp }}/storage-trends-ui/
+          retention-days: 7
+          if-no-files-found: warn

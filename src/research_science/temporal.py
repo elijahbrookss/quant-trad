@@ -8,7 +8,70 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .study import TemporalJoinSpec, stable_hash
+from .hashing import stable_hash
+
+def _required(value: Any, *, field: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field} is required")
+    return normalized
+
+
+@dataclass(frozen=True)
+class TemporalJoinSpec:
+    """One deterministic contextual fact join against a decision clock."""
+
+    left_fact_key: str
+    right_fact_key: str
+    output_key: str
+    join_type: str = "as_of"
+    decision_clock: str = "decision_time"
+    require_known_at_lte_decision: bool = True
+    require_sample_time_lte_decision: bool = True
+    missing_policy: str = "reject_frame"
+    join_hash: str = ""
+
+    def __post_init__(self) -> None:
+        for name in ("left_fact_key", "right_fact_key", "output_key"):
+            object.__setattr__(
+                self,
+                name,
+                _required(getattr(self, name), field=f"temporal_join.{name}"),
+            )
+        if str(self.join_type or "").strip().lower() != "as_of":
+            raise ValueError("temporal_join.join_type is unsupported")
+        object.__setattr__(self, "join_type", "as_of")
+        if str(self.decision_clock or "").strip().lower() != "decision_time":
+            raise ValueError("temporal_join.decision_clock is unsupported")
+        object.__setattr__(self, "decision_clock", "decision_time")
+        if self.require_known_at_lte_decision is not True:
+            raise ValueError("temporal join must enforce known_at causality")
+        if self.require_sample_time_lte_decision is not True:
+            raise ValueError("temporal join must enforce sample-time causality")
+        missing = str(self.missing_policy or "").strip().lower()
+        if missing not in {"reject_frame", "exclude_frame", "null"}:
+            raise ValueError("temporal_join.missing_policy is invalid")
+        object.__setattr__(self, "missing_policy", missing)
+        expected = stable_hash(self._material())
+        if self.join_hash and self.join_hash != expected:
+            raise ValueError("temporal_join_hash_mismatch")
+        object.__setattr__(self, "join_hash", expected)
+
+    def _material(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in asdict(self).items()
+            if key != "join_hash"
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self._material(), "join_hash": self.join_hash}
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> TemporalJoinSpec:
+        return cls(**dict(raw))
+
+
 
 
 def _utc(value: datetime, *, field: str) -> datetime:

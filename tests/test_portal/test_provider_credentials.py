@@ -61,3 +61,10 @@ def test_coinbase_public_instrument_validation_does_not_require_credentials(monk
     assert valid is True
     assert errors == {}
     assert normalized == {"provider_id": "COINBASE", "venue_id": "COINBASE_DIRECT"}
+
+
+def test_coinalyze_credential_schema_is_registered_without_secret_access():
+    schema = provider_service.credential_schema("COINALYZE", None)
+    assert schema["venue_id"] == "COINALYZE_AGGREGATE"
+    assert schema["required"] == ["COINALYZE_API_KEY"]
+    assert schema["secrets_are_returned"] is False

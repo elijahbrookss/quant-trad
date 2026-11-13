@@ -357,3 +357,262 @@ python3() { printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         assert result.returncode!=0 and 'source-only storage fence' in result.stderr
         assert 'COMPOSE_REACHED' not in result.stdout
     assert private.exists()
+
+
+@pytest.mark.parametrize("hold", ["valid", "corrupt", "symlink"])
+def test_routine_entry_refuses_storage_hold_before_package_or_runtime(tmp_path, hold):
+    state=tmp_path/"state"
+    state.mkdir()
+    marker=state/"storage-handoff.json"
+    if hold=="symlink": marker.symlink_to(state/"missing")
+    else: marker.write_text("{}" if hold=="valid" else "broken")
+    result=shell(tmp_path, "promote_routine " + "a"*40 + " --package /nonexistent.zip")
+    assert result.returncode != 0
+    assert "storage handoff hold" in result.stderr
+
+
+def test_routine_image_reuse_still_marks_activation_before_up(tmp_path):
+    state=tmp_path/"state"
+    state.mkdir()
+    (state/"promotion.env").write_text("activation_started=false\n")
+    result=shell(tmp_path, r'''
+routine_active=true
+promotion_in_progress=true
+reuse_release_images=true
+require_runtime() { :; }
+require_no_storage_handoff() { :; }
+require_no_alert_preview() { :; }
+select_release() { QT_RELEASE_REVISION=fixture; QT_SOURCE_TREE_HASH=fixture; }
+validate_storage_root() { :; }
+promotion_value() { printf previous; }
+python3() { :; }
+compose() {
+  if test "$1" = config && test "${2:-}" = --format; then echo '{}'; fi
+  if test "$1" = up; then
+    grep -q 'activation_started=true' "$state_root/promotion.env" || exit 90
+    echo ACTIVATION_RECORDED
+    return 19
+  fi
+}
+(deploy_release fixture) &
+child=$!
+if wait "$child"; then exit 91; fi
+''')
+    assert result.returncode == 0, result.stderr
+    assert "ACTIVATION_RECORDED" in result.stdout
+
+
+def test_routine_recovery_uses_frozen_old_images_without_routine_preflight(tmp_path):
+    state=tmp_path/"state"
+    state.mkdir()
+    (state/"promotion.env").write_text(f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\n")
+    (state/"recovery.compose.json").write_text('{}')
+    result=shell(tmp_path, r'''
+routine_active=true
+select_release() { :; }
+deploy_release() {
+  test "$routine_active" = false || exit 90
+  test "$reuse_release_images" = true || exit 91
+  echo FROZEN_RECOVERY
+}
+recover_promotion
+''')
+    assert result.returncode==0, result.stderr
+    assert "FROZEN_RECOVERY" in result.stdout
+
+
+
+def test_unknown_post_rollout_compatibility_blocks_automatic_old_image_recovery(tmp_path):
+    state=tmp_path/"state";state.mkdir()
+    (state/"promotion.env").write_text(f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\ncompatibility_lost=true\n")
+    result=shell(tmp_path, "select_release() { echo INCORRECT_CHECKOUT; }; recover_promotion")
+    assert result.returncode != 0
+    assert "compatibility is unknown" in result.stderr
+    assert "INCORRECT_CHECKOUT" not in result.stdout
+    assert (state/"promotion.env").exists()
+
+
+
+@pytest.mark.parametrize("fault", ["probe_failed", "probe_timed_out", "drift", "baseline_changed", None])
+def test_interrupted_routine_recovery_requires_current_compatible_schema(tmp_path,fault):
+    state=tmp_path/"state";state.mkdir()
+    baseline=state/"routine-schema.fixture";baseline.write_text('qualified schema\n')
+    baseline_hash=hashlib.sha256(baseline.read_bytes()).hexdigest()
+    (state/"promotion.env").write_text(
+        f"previous_revision={'a'*40}\ncandidate_revision={'b'*40}\nactivation_started=true\n"
+        f"routine_promotion=true\nroutine_schema_path={baseline}\nroutine_schema_sha256={baseline_hash}\n")
+    (state/"recovery.compose.json").write_text('{}')
+    if fault=="baseline_changed":baseline.write_text('tampered')
+    result=shell(tmp_path,r'''
+capture_routine_schema() {
+  echo PROBED
+  if test "$FAULT" = probe_failed; then return 19; fi
+  if test "$FAULT" = probe_timed_out; then return 124; fi
+  if test "$FAULT" = drift; then printf 'different schema\n' >"$1"; else printf 'qualified schema\n' >"$1"; fi
+}
+unset QT_RELEASE_REVISION QT_SOURCE_TREE_HASH
+compute_release_material() { QT_RELEASE_REVISION=current; QT_SOURCE_TREE_HASH=current_hash; echo SOURCE_READ; }
+routine_configuration() {
+  test "$QT_RELEASE_REVISION" = current && test "$QT_SOURCE_TREE_HASH" = current_hash
+  test "$1" = admit && test "$3" = without-running
+  echo CONFIGURATION_CHECKED
+}
+select_release() { echo CHECKOUT_RESTORED; }
+deploy_release() { echo FROZEN_RECOVERY; }
+recover_promotion
+''',env={"FAULT":fault or "none"})
+    if fault:
+        assert result.returncode != 0
+        assert "FROZEN_RECOVERY" not in result.stdout and "CHECKOUT_RESTORED" not in result.stdout
+        assert (state/"promotion.env").exists()
+        if fault != "baseline_changed":assert "compatibility_lost=true" in (state/"promotion.env").read_text()
+    else:
+        assert result.returncode==0,result.stderr
+        assert "PROBED" in result.stdout and "FROZEN_RECOVERY" in result.stdout
+        assert result.stdout.index("SOURCE_READ") < result.stdout.index("CONFIGURATION_CHECKED") < result.stdout.index("CHECKOUT_RESTORED")
+        assert not (state/"promotion.env").exists()
+
+
+def test_routine_post_probe_failure_durably_marks_unknown_compatibility(tmp_path):
+    state=tmp_path/"state";state.mkdir()
+    (state/"promotion.env").write_text('activation_started=false\n')
+    result=shell(tmp_path,r'''
+routine_active=true
+promotion_in_progress=true
+require_runtime() { :; }
+require_no_storage_handoff() { :; }
+require_no_alert_preview() { :; }
+select_release() { QT_RELEASE_REVISION=fixture; QT_SOURCE_TREE_HASH=fixture; }
+validate_storage_root() { :; }
+promotion_value() { printf previous; }
+python3() { :; }
+compose() { if test "$1" = config && test "${2:-}" = --format; then echo '{}'; fi; }
+verify_initializer() { :; }
+verify_release_image() { :; }
+recorded_storage_layout() { :; }
+capture_routine_schema() { return 19; }
+record_release() { echo INCORRECT_SUCCESS; }
+(deploy_release fixture) &
+child=$!
+if wait "$child"; then exit 91; fi
+''')
+    assert result.returncode==0,result.stderr
+    assert "INCORRECT_SUCCESS" not in result.stdout
+    assert 'compatibility_lost=true' in (state/"promotion.env").read_text()
+
+
+
+def test_schema_capture_bounds_docker_exec_without_calling_unbounded_docker(tmp_path):
+    result=shell(tmp_path,r'''
+repo_root="$PROBE_ROOT"
+mkdir -p "$state_root"
+storage_overlay_for() { :; }
+timeout() { printf 'TIMEOUT:%s\n' "$@" >&2; return 124; }
+docker() { echo INCORRECT_UNBOUNDED_DOCKER; return 91; }
+if capture_routine_schema "$state_root/probe.json"; then exit 92; fi
+''',env={"PROBE_ROOT":str(ROOT)})
+    assert result.returncode==0,result.stderr
+    assert 'TIMEOUT:--kill-after=5s' in result.stderr and 'TIMEOUT:30s' in result.stderr
+    assert 'INCORRECT_UNBOUNDED_DOCKER' not in result.stdout
+
+
+def test_late_routine_configuration_drift_refuses_before_activation(tmp_path):
+    state=tmp_path/'state';state.mkdir()
+    marker=state/'promotion.env';marker.write_text('activation_started=false\n')
+    result=shell(tmp_path,r'''
+routine_active=true
+promotion_in_progress=true
+require_runtime() { :; }
+require_no_storage_handoff() { :; }
+require_no_alert_preview() { :; }
+select_release() { QT_RELEASE_REVISION=fixture; QT_SOURCE_TREE_HASH=fixture; }
+validate_storage_root() { :; }
+promotion_value() { printf previous; }
+python3() { :; }
+compose() {
+  if test "$1" = up; then echo INCORRECT_REPLACEMENT; fi
+  if test "$1" = config && test "${2:-}" = --format; then echo '{}'; fi
+}
+routine_configuration() { echo CONFIGURATION_REFUSED; return 19; }
+record_release() { echo INCORRECT_SUCCESS; }
+(deploy_release fixture) &
+child=$!
+if wait "$child"; then exit 91; fi
+''')
+    assert result.returncode==0,result.stderr
+    assert 'CONFIGURATION_REFUSED' in result.stdout
+    assert 'INCORRECT_REPLACEMENT' not in result.stdout and 'INCORRECT_SUCCESS' not in result.stdout
+    assert marker.read_text()=='activation_started=false\n'
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+@pytest.mark.parametrize("enabled,frozen,expected", [("false", False, False), ("true", False, True), ("true", True, False)])
+def test_clock_overlay_is_explicit_and_never_appended_to_frozen_recovery(tmp_path, enabled, frozen, expected, candidate):
+    private = tmp_path / "private.env"
+    private.write_text(f"QT_CLOCK_HEALTH_ENABLED={enabled}\n")
+    overlay = tmp_path / "docker/docker-compose.clock-health.yml"
+    overlay.parent.mkdir()
+    overlay.write_text("services: {}\n")
+    (overlay.parent / "docker-compose.server.yml").write_text("services: {}\n")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    docker = binary / "docker"
+    docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    docker.chmod(0o700)
+    invocation = 'compose_from_repo_root "$repo_root" "" config' if candidate else "compose config"
+    result = shell(tmp_path, f"""
+repo_root="$FIXTURE_ROOT"
+recovery_config_frozen={str(frozen).lower()}
+recorded_storage_layout() {{ printf 'directory'; }}
+docker() {{ printf '%s\\n' "$@"; }}
+state_value() {{ printf '%040d' 0; }}
+git() {{ if test \"$3\" = cat-file; then return 0; fi; printf '%040d' 0; }}
+python3() {{ printf '%064d' 0; }}
+{invocation}
+""", env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private), "PATH": str(binary) + os.pathsep + os.environ["PATH"]})
+    assert result.returncode == 0, result.stderr
+    assert (str(overlay) in result.stdout.splitlines()) == (expected or (candidate and enabled == "true"))
+
+
+@pytest.mark.parametrize("enabled,reason", [("true", "not supported by this checkout"), ("maybe", "must be true or false")])
+def test_clock_overlay_refuses_unknown_flag_or_missing_candidate_support(tmp_path, enabled, reason):
+    private = tmp_path / "private.env"
+    private.write_text(f"QT_CLOCK_HEALTH_ENABLED={enabled}\n")
+    result = shell(tmp_path, 'repo_root="$FIXTURE_ROOT"; docker() { echo INCORRECT_DOCKER; }; compose config',
+                   env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private)})
+    assert result.returncode != 0
+    assert reason in result.stderr
+    assert "INCORRECT_DOCKER" not in result.stdout
+
+
+def test_clock_enable_refuses_baseline_without_persistent_rule_cleanup(tmp_path):
+    private = tmp_path / "private.env"
+    private.write_text("QT_CLOCK_HEALTH_ENABLED=true\n")
+    overlay = tmp_path / "docker/docker-compose.clock-health.yml"
+    overlay.parent.mkdir()
+    overlay.write_text("services: {}\n")
+    result = shell(tmp_path, '''
+repo_root="$FIXTURE_ROOT"
+state_value() { printf '%040d' 0; }
+git() { return 1; }
+docker() { echo INCORRECT_DOCKER; }
+compose config
+''', env={"FIXTURE_ROOT": str(tmp_path), "QT_SINGLE_NODE_ENV_FILE": str(private)})
+    assert result.returncode != 0
+    assert "clock-disabled baseline" in result.stderr
+    assert "INCORRECT_DOCKER" not in result.stdout
+
+
+def test_apply_alerts_recreates_only_existing_monitoring_services(tmp_path):
+    result = shell(tmp_path, '''
+require_no_alert_preview() { :; }
+require_runtime() { :; }
+compute_release_material() { QT_RELEASE_REVISION=fixture; }
+state_value() { printf fixture; }
+compose() { printf '%s\\n' "$@"; }
+apply_alerting_configuration
+''')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines().count("alloy") == 2
+    assert result.stdout.splitlines().count("grafana") == 2
+    assert "backend" not in result.stdout and "market-data-collector" not in result.stdout

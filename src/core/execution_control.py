@@ -42,22 +42,46 @@ class ExecutionControl:
         self._limits: dict[str, int] = {}
         self._used: dict[str, int] = {}
         self._stage_seconds: dict[str, float] = {}
+        self._stage_outcomes: dict[str, dict[str, int]] = {}
+        self._observed_sizes: dict[str, int | None] = {}
 
     @property
     def stop_requested(self) -> bool:
         with self._lock:
             return self._error is not None
 
-    def record_time(self, stage: str, seconds: float) -> None:
+    def record_time(self, stage: str, seconds: float, *, error: BaseException | None = None) -> None:
         with self._lock:
             self._stage_seconds[stage] = self._stage_seconds.get(stage, 0.0) + seconds
+            outcomes = self._stage_outcomes.setdefault(stage, {
+                "completed": 0, "failed": 0, "cancelled": 0, "budget_exceeded": 0,
+            })
+            outcomes[execution_outcome(error)] += 1
+
+    def observe_size(self, name: str, size: int | None) -> None:
+        """Latest known structural size; None means unavailable, never zero."""
+        if size is not None and (type(size) is not int or size < 0):
+            raise ValueError("execution_observed_size_invalid")
+        with self._lock:
+            self._observed_sizes[name] = size
 
     def snapshot(self) -> dict:
         with self._lock:
             return {"schema_version": "research_execution_metrics.v1",
                     "elapsed_seconds": round(monotonic() - self._started, 6),
                     "limits": dict(self._limits), "consumed": dict(self._used),
-                    "stage_seconds": {name: round(value, 6) for name, value in self._stage_seconds.items()}}
+                    "stage_seconds": {name: round(value, 6) for name, value in self._stage_seconds.items()},
+                    "stage_outcomes": {name: dict(value) for name, value in self._stage_outcomes.items()},
+                    "observed_sizes": dict(self._observed_sizes)}
+
+    def try_snapshot(self) -> dict | None:
+        """Diagnostic-only snapshot; never wait behind an interrupt callback."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self.snapshot()
+        finally:
+            self._lock.release()
 
     def limit(self, *, seconds: float, **resources: int) -> None:
         if not math.isfinite(seconds) or seconds <= 0:
@@ -174,6 +198,24 @@ def consume_execution_json(resource: str, value: object) -> None:
     control.consume(resource, size)
 
 
+def execution_outcome(error: BaseException | None) -> str:
+    """Execution outcome, independent of a scientific result's status/labels."""
+    if error is None:
+        return "completed"
+    if isinstance(error, ExecutionCancelledError):
+        return "cancelled"
+    if isinstance(error, ExecutionBudgetExceededError):
+        return "budget_exceeded"
+    return "failed"
+
+
+def observe_execution_size(name: str, size: int | None) -> None:
+    """Use only already-known counts; do not traverse/serialize inputs for metrics."""
+    control = _CURRENT.get()
+    if control is not None:
+        control.observe_size(name, size)
+
+
 @contextmanager
 def measure_execution_stage(stage: str) -> Iterator[None]:
     control = _CURRENT.get()
@@ -182,10 +224,14 @@ def measure_execution_stage(stage: str) -> Iterator[None]:
         return
     control.check()
     started = monotonic()
+    error = None
     try:
         yield
+    except BaseException as caught:
+        error = caught
+        raise
     finally:
-        control.record_time(stage, monotonic() - started)
+        control.record_time(stage, monotonic() - started, error=error)
 
 
 def measured_execution(stage: str):

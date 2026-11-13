@@ -244,6 +244,8 @@ def assert_fact_identity_references(conn, *, allow_missing_canonical_dependencie
         ("fact_hot_payloads", "id"),
         ("fact_archive_material_aliases", "fact_version_id"),
         ("fact_archive_canonical_dependencies", "fact_version_id"),
+        ("fact_archive_prepared_material_aliases", "fact_version_id"),
+        ("fact_archive_prepared_canonical_dependencies", "fact_version_id"),
     ):
         relation = "market." + table
         if allow_missing_canonical_dependencies and table == "fact_archive_canonical_dependencies":

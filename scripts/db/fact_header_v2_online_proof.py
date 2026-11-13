@@ -18,6 +18,7 @@ from sqlalchemy import text
 from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as raw
 from scripts.db import fact_header_v2_placement as physical
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission
+from scripts.db.fact_header_v2_contract import SOURCE_REFERENCE_COLUMNS
 from scripts.db.fact_header_v2_capture import SCHEMA, migration_step
 
 logger = logging.getLogger(__name__)
@@ -235,8 +236,7 @@ def verified_copy(conn, *, timeout_seconds=30):
     """
     started = monotonic()
     with migration_step(conn, timeout_seconds):
-        relations = (headers.SOURCE, raw.SOURCE, "market.fact_hot_payloads",
-                     "market.fact_archive_material_aliases", "market.fact_archive_canonical_dependencies",
+        relations = (headers.SOURCE, raw.SOURCE, *SOURCE_REFERENCE_COLUMNS,
                      *(SCHEMA + "." + name for name in ROLES),
                      headers.STATE, raw.STATE, headers.QUEUE, raw.QUEUE, SCHEMA + ".capture", STATE)
         conn.exec_driver_sql("LOCK TABLE " + ",".join(relations) +

@@ -1,0 +1,295 @@
+{
+  "schema_version": "research_check_payload.v2",
+  "definition": {
+    "schema_version": "research.check_definition.v1",
+    "definition_id": "raw_forward_outcome",
+    "definition_version": "2+fb10ea90fead3a43",
+    "evaluator_id": "raw_forward_outcome",
+    "evaluator_version": "2",
+    "request_schema_version": "research.check_request.v2",
+    "result_schema_version": "research.check_result.v2",
+    "material_rules": {
+      "family": "raw_forward_outcome",
+      "compatibility_source": "research_check_result.v1",
+      "event_ownership": "check",
+      "registered_definition": {
+        "definition_id": "raw_forward_outcome",
+        "definition_version": "2",
+        "definition_hash": "96d0fc9b5653840da5f2eff407b45f059c6921efea0f36c8704870f3dd94bbe0"
+      },
+      "inputs": [],
+      "indicator": {},
+      "detector": {
+        "type": "raw_condition",
+        "field": "close",
+        "operator": "gt",
+        "value": 1
+      },
+      "outcomes": {
+        "forward_bars": [
+          1
+        ]
+      },
+      "statistics": {},
+      "assertions": [],
+      "gap_policy": "reject",
+      "gap_rewarm_bars": 0,
+      "resolved_indicator_graph": [],
+      "resolved_indicator_graph_hash": "cd1a761221a8ba1c9e91de3b7488154ff0a67dadcf4ebaabdcb16ed004357d87"
+    },
+    "definition_hash": "50d4bedfd18f9f738b06e821c82c8ed8e2c617b37e5f36b4dae79c3276f90ed8"
+  },
+  "request": {
+    "schema_version": "research.check_request.v2",
+    "mode": "evidence",
+    "definition_id": "raw_forward_outcome",
+    "definition_version": "2+fb10ea90fead3a43",
+    "definition_hash": "50d4bedfd18f9f738b06e821c82c8ed8e2c617b37e5f36b4dae79c3276f90ed8",
+    "scope": {
+      "instrument_id": "instrument-1",
+      "timeframe": "1h",
+      "start": "2026-01-01T00:00:00Z",
+      "end": "2026-01-02T00:00:00Z"
+    },
+    "parameters": {
+      "detector": {
+        "type": "raw_condition",
+        "field": "close",
+        "operator": "gt",
+        "value": 1
+      },
+      "outcomes": {
+        "forward_bars": [
+          1
+        ]
+      },
+      "statistics": {},
+      "assertions": [],
+      "inputs": [],
+      "gap_policy": "reject",
+      "gap_rewarm_bars": 0
+    },
+    "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "immutable_run_evidence": null,
+    "request_hash": "1aa5697af7c3a0c629d14605064fcad21aca656507c56cef3473c650dcf4ce18"
+  },
+  "plan": {
+    "schema_version": "research.check_plan.v2",
+    "request_hash": "1aa5697af7c3a0c629d14605064fcad21aca656507c56cef3473c650dcf4ce18",
+    "market_data_requirements": [
+      {
+        "alias": "primary_bars",
+        "consumer_id": "check",
+        "instrument_id": "instrument-1",
+        "fact_type": "candle.ohlcv",
+        "contract_version": "candle.ohlcv.v1",
+        "timeframe_seconds": 3600,
+        "dimensions": {},
+        "alignment": "exact_interval",
+        "max_staleness_seconds": null,
+        "known_at_required": true,
+        "required_fields": [
+          "open",
+          "high",
+          "low",
+          "close",
+          "known_at"
+        ],
+        "series_required": true,
+        "frame_missing_policy": "indicator_owned",
+        "source_policy": {
+          "mode": "exact"
+        },
+        "required_start": "2025-12-31T10:00:00.000000Z",
+        "required_end": "2026-01-02T01:00:00.000000Z"
+      }
+    ],
+    "indicator_graph": [],
+    "evaluation_range": {
+      "start": "2026-01-01T00:00:00.000000Z",
+      "end_exclusive": "2026-01-02T00:00:00.000000Z"
+    },
+    "materialization_range": {
+      "start": "2025-12-31T10:00:00.000000Z",
+      "end_exclusive": "2026-01-02T01:00:00.000000Z",
+      "as_of_commit_seq": 7
+    },
+    "warmup": {
+      "bars": 14,
+      "seconds": 50400,
+      "timeframe_seconds": 3600
+    },
+    "outcome_tail": {
+      "horizons": [
+        1
+      ],
+      "required_horizons": [
+        1
+      ],
+      "bars": 1,
+      "seconds": 3600,
+      "horizon_kind": "bars",
+      "entry_lag_bars": 0,
+      "invalidation_max_bars": 0
+    },
+    "gap_policy": "reject",
+    "execution": {
+      "input_kind": "market_data",
+      "indicator_ids": [],
+      "warmup_floor_bars": 14,
+      "feature_lookback_bars": 0,
+      "feature_windows_seconds_by_alias": {},
+      "outcome_horizons": [
+        1
+      ],
+      "required_outcome_horizons": [
+        1
+      ],
+      "horizon_kind": "bars",
+      "entry_lag_bars": 0,
+      "invalidation_max_bars": 0
+    },
+    "missing_coverage": [],
+    "quality_evidence": [],
+    "plan_hash": "a27a0b4ea752b9c5b9043bb4b7d620b0e13297284bdffa972f1aa236cfa38208"
+  },
+  "evidence": {
+    "schema_version": "research.check_evidence_binding.v2",
+    "definition_hash": "50d4bedfd18f9f738b06e821c82c8ed8e2c617b37e5f36b4dae79c3276f90ed8",
+    "request_hash": "1aa5697af7c3a0c629d14605064fcad21aca656507c56cef3473c650dcf4ce18",
+    "plan_hash": "a27a0b4ea752b9c5b9043bb4b7d620b0e13297284bdffa972f1aa236cfa38208",
+    "code_revision": "revision-1",
+    "evidence_kind": "frozen_market_data",
+    "input_binding": {
+      "schema_version": "frozen_market_data_read_binding.v1",
+      "dataset_contract_version": "market_dataset.v1",
+      "dataset_id": "mds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "dataset_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "max_commit_seq": 7,
+      "known_at_semantics": "causal_known_at_lte_decision.v1",
+      "subjects": [
+        {
+          "instrument_id": "instrument-1",
+          "snapshot": {
+            "id": "instrument-1",
+            "symbol": "TEST"
+          },
+          "snapshot_hash": "03647a33b7d3720f7a3cceb58b955300ed26eea932430c0ed569eff32e0c642b"
+        }
+      ],
+      "series": [
+        {
+          "alias": "primary_bars",
+          "series_id": 1,
+          "identity_key": "series-1",
+          "instrument_id": "instrument-1",
+          "fact_type": "candle.ohlcv",
+          "contract_version": "candle.ohlcv.v1",
+          "timeframe_seconds": 3600,
+          "range_start": "2025-12-31T10:00:00.000000Z",
+          "range_end": "2026-01-02T01:00:00.000000Z",
+          "row_count": 39,
+          "max_commit_seq": 7,
+          "material_hash": "material",
+          "provenance_hash": "provenance",
+          "quality_hash": "quality",
+          "source_summary": {
+            "counts": {
+              "source-a": 39
+            },
+            "sources": {
+              "source-a": {
+                "provider": "provider-a"
+              }
+            }
+          },
+          "requirement": {
+            "alias": "primary_bars",
+            "consumer_id": "check",
+            "instrument_id": "instrument-1",
+            "fact_type": "candle.ohlcv",
+            "contract_version": "candle.ohlcv.v1",
+            "timeframe_seconds": 3600,
+            "dimensions": {},
+            "alignment": "exact_interval",
+            "max_staleness_seconds": null,
+            "known_at_required": true,
+            "required_fields": [
+              "open",
+              "high",
+              "low",
+              "close",
+              "known_at"
+            ],
+            "series_required": true,
+            "frame_missing_policy": "indicator_owned",
+            "source_policy": {
+              "mode": "exact"
+            },
+            "required_start": "2025-12-31T10:00:00.000000Z",
+            "required_end": "2026-01-02T01:00:00.000000Z"
+          },
+          "source_binding": {
+            "mode": "exact",
+            "resolved_source_identity_keys": [
+              "source-a"
+            ],
+            "schema_version": "market_data_source_binding.v1",
+            "selection_rule": "latest_known_then_commit_seq_then_source_identity.v1",
+            "series_id": 1,
+            "source_summary": {
+              "counts": {
+                "source-a": 39
+              },
+              "sources": {
+                "source-a": {
+                  "provider": "provider-a"
+                }
+              }
+            },
+            "sources": {
+              "source-a": {
+                "provider": "provider-a"
+              }
+            }
+          },
+          "source_binding_hash": "3b83181c4ea57703d1465411eb13e9713bae112eaec2b199a70d4f4a8291306e"
+        }
+      ],
+      "recorded_gaps": [],
+      "quality": {
+        "status": "clean"
+      },
+      "provider_access": "disabled",
+      "provider_call_performed": false,
+      "binding_hash": "d230de5519115fab8f38c56fc032251bbad700c3ffc393efbf7fd4d0c77c15dd"
+    },
+    "indicator_graph_hash": "cd1a761221a8ba1c9e91de3b7488154ff0a67dadcf4ebaabdcb16ed004357d87",
+    "indicator_output_hash": "ed22c6d7bb91f9f93eb24ab86e80f25db39b2ab5e2582cf1bb858d615661fb95",
+    "fact_input_hash": "ba09424f34ecd4670ebb12303fc5f7732c0d4d0ad6e7e83fd0bd5c15033e4bb2",
+    "gap_transition_hash": "e970da7f74e3c5cfca67b5c72ce3b5f66eb03612e13c97bc11bd42226b4656fc",
+    "quality_hash": "161d37cc21b09861d57e00299fdf93c01a0ec6fa97c9631dc8bfa819f8552242",
+    "gaps_hash": "f314462ab1638320e4f781aee8eb5beaad414036c33b6c3f853ed85654dd7c10",
+    "input_hash": "8a4128cb8dc19fc0316dc2f92f76602de6cccfa77e1a0e6223412f9df26305c0",
+    "evidence_hash": "60aed2cad56a2486d106e51e01ff8e1bce59e874330a6a8c6d57f0652d724696"
+  },
+  "result": {
+    "schema_version": "research.check_result.v2",
+    "definition_hash": "50d4bedfd18f9f738b06e821c82c8ed8e2c617b37e5f36b4dae79c3276f90ed8",
+    "request_hash": "1aa5697af7c3a0c629d14605064fcad21aca656507c56cef3473c650dcf4ce18",
+    "plan_hash": "a27a0b4ea752b9c5b9043bb4b7d620b0e13297284bdffa972f1aa236cfa38208",
+    "evidence_hash": "60aed2cad56a2486d106e51e01ff8e1bce59e874330a6a8c6d57f0652d724696",
+    "evaluator_id": "raw_forward_outcome",
+    "evaluator_version": "2",
+    "result": {
+      "assertions": [],
+      "execution_authority": false,
+      "promotion_authority": false,
+      "sample_count": 3,
+      "schema_version": "research_check_result.v1",
+      "status": "completed",
+      "verdict": null
+    },
+    "result_hash": "54b59f182c854a2278ffb03dc9b168087e270a5ffb627949f247401827aa4a8b"
+  }
+}

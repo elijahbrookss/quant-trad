@@ -21,6 +21,18 @@ _NON_MATERIAL_CONFIG_KEYS = {
     "warnings",
 }
 _LIFECYCLE_OWNED_RUN_FIELDS = frozenset({"status", "started_at", "ended_at"})
+_REPORT_PROJECTION_KEYS = (
+    "backtest_warmup_bars",
+    "backtest_warmup_evidence",
+    "date_range",
+    "expected_candle_series",
+    "indicator_source_diagnostics",
+    "report_warnings",
+    "risk_settings",
+    "runtime_warnings",
+    "strategies",
+    "wallet_start",
+)
 
 
 def _timestamp_iso(value: Any) -> Optional[str]:
@@ -59,7 +71,9 @@ def _material_config_payload(value: Any) -> Any:
     return _json_safe(value)
 
 
-def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
+def upsert_bot_run(
+    payload: Dict[str, Any], *, preserve_admitted_config: bool = False
+) -> Dict[str, Any]:
     """Insert or update non-lifecycle run identity, provenance, and report data."""
 
     if not db.available:
@@ -99,7 +113,27 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
         if payload.get("summary") is not None:
             record.summary = dict(_json_safe(payload.get("summary") or {}))
-        if payload.get("config_snapshot") is not None:
+        # A report projection is not a replacement for the admitted start request.
+        # Keep the original configuration and both identity hashes together. This
+        # applies only at the explicitly marked report gateway; startup and legacy
+        # records without an admitted envelope retain their existing behavior.
+        admitted = record.config_snapshot or {}
+        preserve_config = (
+            preserve_admitted_config
+            and isinstance(admitted, dict)
+            and isinstance(admitted.get("bot"), dict)
+            and isinstance(admitted.get("start_request"), dict)
+        )
+        projection = payload.get("config_snapshot")
+        if preserve_config and isinstance(projection, dict):
+            additions = {
+                key: projection[key]
+                for key in _REPORT_PROJECTION_KEYS
+                if key in projection and key not in admitted
+            }
+            if additions:
+                record.config_snapshot = {**admitted, **_json_safe(additions)}
+        elif projection is not None and not preserve_config:
             record.config_snapshot = dict(_json_safe(payload.get("config_snapshot") or {}))
             record.config_hash = (
                 str(payload.get("config_hash") or "").strip()
@@ -119,6 +153,8 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             "runtime_image",
             "storage_schema_version",
         ):
+            if preserve_config and field in {"config_hash", "material_config_hash"}:
+                continue
             if payload.get(field) not in (None, ""):
                 setattr(record, field, str(payload.get(field)).strip())
         record.updated_at = now

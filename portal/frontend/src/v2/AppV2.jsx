@@ -1,11 +1,13 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
-import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { Activity, HardDrive, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react'
+import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
+import { Activity, HardDrive, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings, BookOpen, Radio } from 'lucide-react'
 import { ChartStateProvider } from '../contexts/ChartStateContext.jsx'
 import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from '../contexts/AccentColorContext.jsx'
 import { pingApi } from '../adapters/health.adapter.js'
 import { RoomLoadingFrame } from './components/RoomLoadingFrame.jsx'
+
+const StudiesRoom = lazy(() => import('./rooms/StudiesRoom.jsx').then(module => ({ default: module.StudiesRoom })))
 
 const StorageRoom = lazy(() => import('./rooms/StorageRoom.jsx').then((module) => ({ default: module.StorageRoom })))
 
@@ -31,7 +33,7 @@ const GlobalSettingsModal = lazy(() =>
 const SIDEBAR_STORAGE_KEY = 'quanttrad.operator.sidebar.collapsed'
 const ROOMS = [
   { id: 'overview', label: 'Overview', to: '/overview', icon: LayoutDashboard },
-  { id: 'operations', label: 'Operations', to: '/operations', icon: Activity },
+  { id: 'studies', label: 'Studies', to: '/studies', icon: BookOpen },
 ]
 
 function initialSidebarCollapsed() {
@@ -40,6 +42,18 @@ function initialSidebarCollapsed() {
   } catch {
     return false
   }
+}
+
+function LegacyOperations() {
+  const [params] = useSearchParams()
+  const tab = params.get('tab')
+  const target = tab === 'research' ? '/studies' : ['market', 'data-plane', 'collectors', 'market-data'].includes(tab) ? '/collectors' : '/bot-runs'
+  return <Navigate to={target + (target === '/bot-runs' && params.get('view') === 'history' ? '?view=history' : '')} replace />
+}
+
+function SecondaryNav() {
+  const location = useLocation()
+  return <nav className="qt2-secondary-nav" aria-label="Secondary"><NavLink to="/bot-runs" className={({ isActive }) => 'qt2-roomnav-btn ' + (isActive || location.pathname.startsWith('/operations/runs/') ? 'is-active' : '')}><Activity size={18} /><span>Bot runs</span></NavLink><NavLink to="/collectors" className={({ isActive }) => 'qt2-roomnav-btn ' + (isActive || location.pathname.startsWith('/operations/market/') ? 'is-active' : '')}><Radio size={18} /><span>Collectors</span></NavLink></nav>
 }
 
 function StatusPill() {
@@ -81,6 +95,7 @@ function StatusPill() {
 }
 
 function RoomNav({ collapsed }) {
+  const location = useLocation()
   return (
     <nav className="qt2-roomnav" aria-label="Primary">
       {ROOMS.map((room) => {
@@ -89,7 +104,7 @@ function RoomNav({ collapsed }) {
           <NavLink
             key={room.id}
             to={room.to}
-            className={({ isActive }) => "qt2-roomnav-btn " + (isActive ? "is-active" : "")}
+            className={({ isActive }) => "qt2-roomnav-btn " + (isActive || (room.id === 'studies' && location.pathname.startsWith('/operations/research/')) ? "is-active" : "")}
             title={collapsed ? room.label : undefined}
           >
             <Icon size={18} aria-hidden="true" />
@@ -134,23 +149,16 @@ function AppV2Shell() {
           <span className="qt2-brand-mark">QT</span>
           <div>
             <div className="qt2-brand-title">QuantTrad</div>
-            <div className="qt2-brand-kicker">Operator console</div>
+            <div className="qt2-brand-kicker">Research</div>
           </div>
         </div>
-        <RoomNav collapsed={sidebarCollapsed} />
+        <RoomNav collapsed={sidebarCollapsed} /><SecondaryNav />
         <div className="qt2-sidebar-foot">
-          <NavLink to="/settings/storage" className="qt2-sidebar-toggle" title="Storage settings"><HardDrive size={17} /><span>Storage</span></NavLink>
           <StatusPill />
-          <button
-            type="button"
-            className="qt2-sidebar-toggle"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="Open appearance settings"
-            title="Appearance settings"
-          >
-            <Settings size={17} />
-            <span>Appearance</span>
-          </button>
+          <details className="qt2-settings-menu"><summary aria-label="Settings"><Settings size={17} /><span>Settings</span></summary><div>
+            <NavLink to="/settings/storage" onClick={event => event.currentTarget.closest('details').removeAttribute('open')}><HardDrive size={17} /><span>Storage</span></NavLink>
+            <button type="button" onClick={event => { event.currentTarget.closest('details').removeAttribute('open'); setSettingsOpen(true) }} aria-label="Open appearance settings"><Settings size={17} /><span>Appearance</span></button>
+          </div></details>
           <button
             type="button"
             className="qt2-sidebar-toggle"
@@ -170,7 +178,11 @@ function AppV2Shell() {
           <Route path="/" element={<Navigate to="/overview" replace />} />
           <Route path="/settings/storage" element={<Suspense fallback={<RoomFallback label="Storage" />}><StorageRoom /></Suspense>} />
           <Route path="/overview" element={<Suspense fallback={<RoomFallback label="Overview" />}><OverviewRoom /></Suspense>} />
-          <Route path="/operations" element={<Suspense fallback={<RoomFallback label="Operations" />}><OperationsRoom /></Suspense>} />
+          <Route path="/studies" element={<Suspense fallback={<RoomFallback label="Studies" />}><StudiesRoom /></Suspense>} />
+          <Route path="/studies/:itemId" element={<Suspense fallback={<RoomFallback label="Study" />}><ResearchEvidenceRoom /></Suspense>} />
+          <Route path="/bot-runs" element={<Suspense fallback={<RoomFallback label="Bot runs" />}><OperationsRoom domain="runs" /></Suspense>} />
+          <Route path="/collectors" element={<Suspense fallback={<RoomFallback label="Collectors" />}><OperationsRoom domain="market" /></Suspense>} />
+          <Route path="/operations" element={<LegacyOperations />} />
           <Route path="/operations/runs/:runId" element={<Suspense fallback={<RoomFallback label="BotLens" />}><BotLensRoom /></Suspense>} />
           <Route path="/operations/market/:collectorKind/:collectorId" element={<Suspense fallback={<RoomFallback label="collector operations" />}><CollectorLensRoom /></Suspense>} />
           <Route path="/operations/research/:itemId" element={<Suspense fallback={<RoomFallback label="research evidence" />}><ResearchEvidenceRoom /></Suspense>} />
@@ -178,10 +190,10 @@ function AppV2Shell() {
           <Route path="/fleet" element={<Navigate to="/operations" replace />} />
           <Route path="/fleet/bots/:botId" element={<Navigate to="/operations?tab=definitions" replace />} />
           <Route path="/studio/*" element={<Navigate to="/overview" replace />} />
-          <Route path="/research/*" element={<Navigate to="/operations?tab=research" replace />} />
-          <Route path="/memory/*" element={<Navigate to="/operations?tab=research" replace />} />
+          <Route path="/research/*" element={<Navigate to="/studies" replace />} />
+          <Route path="/memory/*" element={<Navigate to="/studies" replace />} />
           <Route path="/vault/*" element={<Navigate to="/overview" replace />} />
-          <Route path="/reports/*" element={<Navigate to="/operations?tab=runs" replace />} />
+          <Route path="/reports/*" element={<Navigate to="/bot-runs" replace />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
       </main>

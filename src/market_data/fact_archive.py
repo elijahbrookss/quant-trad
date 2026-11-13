@@ -19,7 +19,8 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
-from typing import Any
+from time import perf_counter
+from typing import Any, Callable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -309,15 +310,57 @@ def _hash_handle(handle, *, max_bytes: int) -> tuple[str, int]:
     return digest.hexdigest(), byte_count
 
 
+def _timed_archive_phase(phase_observer, phase, operation):
+    started = perf_counter()
+    try:
+        result = operation()
+    except BaseException:
+        if phase_observer is not None:
+            phase_observer(phase, perf_counter() - started, "failed")
+        raise
+    if phase_observer is not None:
+        phase_observer(phase, perf_counter() - started, "completed")
+    return result
+
+
 def verify_canonical_fact_archive_rows(
     rows: Iterable[Mapping[str, Any]], *, expected: FactArchiveManifest,
     limits: FactArchiveLimits = FactArchiveLimits(),
+    archived_rows: Iterable[Mapping[str, Any]] | None = None,
 ) -> None:
     """Prove a source page equals a separately verified object's full contents.
 
     This checks completeness and exact fields, not the object's bytes. Callers
     must also use read_canonical_fact_archive before committing admission.
     """
+    if archived_rows is not None:
+        missing = object()
+        source_count = 0
+        source = iter(rows)
+        archived = iter(archived_rows)
+        while True:
+            execution_checkpoint()
+            source_row = next(source, missing)
+            archived_row = next(archived, missing)
+            if source_row is missing or archived_row is missing:
+                if source_row is archived_row is missing:
+                    break
+                raise RuntimeError(
+                    f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}"
+                )
+            if source_row != archived_row:
+                raise RuntimeError(
+                    f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}"
+                )
+            source_count += 1
+            if source_count > limits.max_rows:
+                raise ValueError("canonical_archive_limit_exceeded: source row count")
+        if source_count != expected.row_count:
+            raise RuntimeError(
+                f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}"
+            )
+        return
+
     contents = _Contents(limits)
     for row in rows:
         contents.add(row)
@@ -477,6 +520,8 @@ def _read_canonical_fact_archive_handle(source, *, expected, limits, tier, decod
 def encode_canonical_fact_archive(
     rows: Iterable[Mapping[str, Any]], *, temporary_directory: Path,
     limits: FactArchiveLimits = FactArchiveLimits(),
+    phase_observer: Callable[[str, float, str], None] | None = None,
+    decoded_page: CanonicalArchiveReadPage | None = None,
 ) -> EncodedFactArchive:
     """Encode a strictly commit/ID-ordered bounded page; never truncate a page."""
     root = Path(temporary_directory)
@@ -487,48 +532,71 @@ def encode_canonical_fact_archive(
     path = Path(name)
     contents = _Contents(limits)
     try:
-        with pq.ParquetWriter(path, _schema(), compression="zstd", use_dictionary=True,
-                              write_statistics=True, data_page_version="2.0", write_page_checksum=True) as writer:
-            batch = []
-            for source in rows:
-                row = dict(source)
-                contents.add(row)
-                for column in _JSON_COLUMNS:
-                    row[column] = _json_bytes(row[column]).decode("utf-8")
-                batch.append(row)
-                if len(batch) == limits.row_group_size:
+        def encode_compress():
+            with pq.ParquetWriter(path, _schema(), compression="zstd", use_dictionary=True,
+                                  write_statistics=True, data_page_version="2.0", write_page_checksum=True) as writer:
+                batch = []
+                for source in rows:
+                    row = dict(source)
+                    contents.add(row)
+                    for column in _JSON_COLUMNS:
+                        row[column] = _json_bytes(row[column]).decode("utf-8")
+                    batch.append(row)
+                    if len(batch) == limits.row_group_size:
+                        writer.write_table(pa.Table.from_pylist(batch, schema=_schema()))
+                        batch.clear()
+                if batch:
                     writer.write_table(pa.Table.from_pylist(batch, schema=_schema()))
-                    batch.clear()
-            if batch:
-                writer.write_table(pa.Table.from_pylist(batch, schema=_schema()))
-        with path.open("rb") as handle:
-            os.fsync(handle.fileno())
-            sha256, byte_count = _hash_handle(handle, max_bytes=limits.max_file_bytes)
-        manifest = contents.manifest(sha256=sha256, byte_count=byte_count)
-        read_canonical_fact_archive(path, expected=manifest, limits=limits)
+        _timed_archive_phase(phase_observer, "archive_encode_compress", encode_compress)
+
+        def fsync_hash():
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+                sha256, byte_count = _hash_handle(handle, max_bytes=limits.max_file_bytes)
+            return contents.manifest(sha256=sha256, byte_count=byte_count)
+        manifest = _timed_archive_phase(phase_observer, "archive_staging_fsync_hash", fsync_hash)
+        _timed_archive_phase(
+            phase_observer, "archive_staging_readback",
+            lambda: read_canonical_fact_archive(
+                path, expected=manifest, limits=limits, decoded_page=decoded_page,
+            ),
+        )
         return EncodedFactArchive(path=path, manifest=manifest)
     except BaseException:
         path.unlink(missing_ok=True)
         raise
 
-
 def publish_canonical_fact_archive(
     rows: Iterable[Mapping[str, Any]], *, object_store: RawArchiveObjectStore,
     temporary_directory: Path, limits: FactArchiveLimits = FactArchiveLimits(),
+    phase_observer: Callable[[str, float, str], None] | None = None,
+    decoded_page: CanonicalArchiveReadPage | None = None,
 ) -> FactArchiveManifest:
     """Acknowledge verified bytes only; the caller must commit the manifest before retention."""
-    encoded = encode_canonical_fact_archive(rows, temporary_directory=temporary_directory, limits=limits)
+    encoded = encode_canonical_fact_archive(
+        rows, temporary_directory=temporary_directory, limits=limits,
+        phase_observer=phase_observer, decoded_page=decoded_page,
+    )
     try:
         manifest = encoded.manifest
-        acknowledgement = object_store.put_verified(
-            object_key=manifest.object_key, source_path=encoded.path,
-            expected_sha256=manifest.object_sha256,
+        acknowledgement = _timed_archive_phase(
+            phase_observer, "archive_object_publish",
+            lambda: object_store.put_verified(
+                object_key=manifest.object_key, source_path=encoded.path,
+                expected_sha256=manifest.object_sha256,
+            ),
         )
         if (acknowledgement.object_key, acknowledgement.sha256, acknowledgement.byte_count) != (
             manifest.object_key, manifest.object_sha256, manifest.byte_count,
         ):
             raise RuntimeError("canonical_archive_acknowledgement_mismatch")
-        read_canonical_fact_archive(object_store.local_path(manifest.object_key), expected=manifest, limits=limits)
+        _timed_archive_phase(
+            phase_observer, "archive_publish_readback",
+            lambda: read_canonical_fact_archive(
+                object_store.local_path(manifest.object_key), expected=manifest, limits=limits,
+                decoded_page=decoded_page,
+            ),
+        )
         return manifest
     finally:
         encoded.path.unlink(missing_ok=True)

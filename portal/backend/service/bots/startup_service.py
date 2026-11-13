@@ -74,6 +74,7 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "execution_behavior",
         "economic_claim_intent",
         "execution_assumptions",
+        "simulation_fee_schedules",
         "resolved_execution_context_bundle",
         "execution_book_tape_bundle",
         "passive_queue_policy",
@@ -435,6 +436,8 @@ class BotStartupOrchestrator:
         start_request_overrides["economic_claim_intent"] = ctx.bot_record.get("economic_claim_intent")
         if isinstance(ctx.bot_record.get("execution_assumptions"), Mapping):
             start_request_overrides["execution_assumptions"] = dict(ctx.bot_record["execution_assumptions"])
+        if isinstance(ctx.bot_record.get("simulation_fee_schedules"), Mapping):
+            start_request_overrides["simulation_fee_schedules"] = dict(ctx.bot_record["simulation_fee_schedules"])
         if isinstance(ctx.bot_record.get("execution_book_tape_bundle"), Mapping):
             start_request_overrides["execution_book_tape_bundle"] = dict(
                 ctx.bot_record["execution_book_tape_bundle"]
@@ -473,6 +476,8 @@ class BotStartupOrchestrator:
                     "execution_behavior": execution_behavior,
                     "economic_claim_intent": ctx.bot_record.get("economic_claim_intent"),
                     "execution_assumptions": dict(ctx.bot_record.get("execution_assumptions") or {}),
+                    **({"simulation_fee_schedules": dict(ctx.bot_record["simulation_fee_schedules"])}
+                       if ctx.bot_record.get("simulation_fee_schedules") is not None else {}),
                     "resolved_execution_context_bundle": dict(
                         ctx.bot_record.get("resolved_execution_context_bundle") or {}
                     ),

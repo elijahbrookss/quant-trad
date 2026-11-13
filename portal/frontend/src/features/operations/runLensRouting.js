@@ -1,5 +1,6 @@
 export function safeRunLensOrigin(value) {
   if (value === '/overview') return value
+  if (/^\/(studies(?:[/?]|$)|bot-runs(?:[/?]|$))/.test(String(value || ''))) return value
   if (String(value || '').startsWith('/operations')) return value
   return '/operations?tab=runs'
 }
