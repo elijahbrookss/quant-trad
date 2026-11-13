@@ -29,6 +29,7 @@ code_paths:
   - tests/integration/runtime/test_canonical_order_lifecycle.py
   - tests/integration/runtime/test_persisted_runtime_correctness.py
   - tests/integration/runtime/test_canonical_execution_evidence_boundary.py
+  - tests/integration/runtime/test_canonical_execution_evidence_boundary_db.py
 ---
 # Durable Canonical Order Lifecycle
 
