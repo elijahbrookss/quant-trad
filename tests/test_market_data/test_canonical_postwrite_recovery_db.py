@@ -33,6 +33,7 @@ from scripts.db.canonical_cold_database_fence import close_database_fence, reope
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
+from scripts.db.canonical_cold_recovery_archive_transport import stage_encrypted_archive_suffix, verify_named_archive_closure
 from scripts.db.canonical_cold_recovery_wal_transfer import stage_final_wal, verify_final_wal
 from scripts.db.canonical_cold_recovery_suffix import (
     capture_final_archive_suffix, prepare_archive_baseline, verify_final_archive_suffix,
@@ -200,12 +201,9 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     baseline_inventory = prepare_archive_baseline(
         receipt, prestaged, expected_receipt_sha256=receipt_hash, max_objects=100,
     )
-    suffix_repo = tmp_path / "suffix-restic"
-
-    def restic_suffix(*args):
-        return worker._run([str(worker.restic), "--repo", str(suffix_repo), "--no-cache", "--json", *args])
-
-    restic_suffix("init")
+    suffix_key = worker.config.archive_key_path.with_name("suffix-key")
+    suffix_key.touch(mode=0o600)
+    suffix_key.write_text(secrets.token_hex(32))
 
     # Provider intake and its archive are newer than the prestaged baseline.
     record = _later_trade(structures, tmp_path, claim, baseline_raw, trade_id="original-at-anchor")
@@ -258,23 +256,24 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                 assert wal_transfer["encrypted_bytes"] > 0
                 stage = tmp_path / "archive-suffix"
                 stage.mkdir(mode=0o700)
+                archive_limits = TransferLimits(seconds=55, bytes=16 * 1024**2, files=100, reserve_bytes=16 * 1024**2)
+                archive_wal_options = {key: value for key, value in wal_options.items() if key != "receiving"}
+                archive_wal_options["limits"] = wal_limits
                 with archive_namespace(objects.root, exclusive=True) as check_archive:
                     with pytest.raises(RuntimeError, match="suffix_budget_exceeded"):
                         capture_final_archive_suffix(
                             fence, anchor, baseline_inventory, source_root=objects.root, stage=stage,
                             max_objects=100, max_suffix_bytes=0, check_archive=check_archive,
                         )
-                    evidence = capture_final_archive_suffix(
-                        fence, anchor, baseline_inventory, source_root=objects.root, stage=stage,
-                        max_objects=100, max_suffix_bytes=16*1024**2, check_archive=check_archive,
+                    archive_transfer = stage_encrypted_archive_suffix(
+                        fence=fence, baseline=baseline_inventory, source_root=objects.root, plaintext_stage=stage,
+                        receiving=copied, wal_options=archive_wal_options, expected_wal_sha256=wal_transfer["wal_transfer_sha256"],
+                        restic=worker.restic, encryption_key=suffix_key, max_objects=100,
+                        max_plaintext_bytes=16 * 1024**2, limits=archive_limits, check_archive=check_archive,
                     )
+                evidence = archive_transfer["archive"]
                 assert evidence["archive_objects"] == 1
-                summaries = [entry for line in restic_suffix(
-                    "--quiet", "backup", "--files-from-raw", str(stage / "files.list"),
-                ).splitlines() if (entry := json.loads(line))["message_type"] == "summary"]
-                assert len(summaries) == 1
-                suffix_snapshot = summaries[0]["snapshot_id"]
-                evidence["archive_snapshot"] = suffix_snapshot
+                suffix_snapshot = evidence["archive_snapshot"]
                 stage.rename(tmp_path / "unavailable-suffix")
                 fence.assert_quiet(retained)
         finally:
@@ -339,11 +338,7 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
         receipt, baseline_restore, expected_receipt_sha256=receipt_hash, max_objects=100,
     )
     suffix_restore = tmp_path / "suffix-restored"
-    restored_suffix_repo = tmp_path / "suffix-repository-independent"
-    shutil.copytree(suffix_repo, restored_suffix_repo)
-    suffix_repo.rename(tmp_path / "suffix-repository-unavailable")
-    suffix_repo = restored_suffix_repo
-    restic_suffix("restore", suffix_snapshot, "--target", str(suffix_restore))
+    suffix_restore.mkdir(mode=0o700)
     objects.root.rename(tmp_path / "original-objects")
     (restore_root / "start").write_text("old layout exact archive anchor\n")
     restored_url = engine.url.set(host="restored")
@@ -370,6 +365,29 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     restored = Database(restored_url.render_as_string(hide_password=False))
     try:
         assert restored.ensure_schema(), str(restored.last_error)
+        closure_args = dict(receiving=copied, baseline=restored_baseline, wal_options=archive_wal_options,
+            expected_wal_sha256=wal_transfer["wal_transfer_sha256"], native_named=handoff,
+            native_named_sha256=handoff["verification_sha256"], archive_transfer_sha256=archive_transfer["archive_transfer_sha256"],
+            archive_restore=suffix_restore, restic=worker.restic, decryption_key=suffix_key,
+            max_objects=100, limits=archive_limits)
+        with restored._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            with pytest.raises(RuntimeError, match="native_named_mismatch"):
+                verify_named_archive_closure(conn, **{**closure_args, "native_named_sha256": "a" * 64})
+            config = copied / "final-archive" / "restic" / "config"
+            hidden = copied / "unavailable-restic-config"
+            config.rename(hidden)
+            damaged = hidden.read_bytes()
+            try:
+                config.write_bytes(bytes([damaged[0] ^ 0xff]) + damaged[1:])
+                with pytest.raises(RuntimeError, match="ciphertext_changed"):
+                    verify_named_archive_closure(conn, **closure_args)
+            finally:
+                hidden.replace(config)
+            closure = verify_named_archive_closure(conn, **closure_args)
+        assert closure["coverage"]["final_objects"] == 2
+        assert closure["coverage"]["verified_suffix_objects"] == 1
+        print(f"QT_FINAL_ARCHIVE files={evidence['encrypted_files']} bytes={evidence['encrypted_bytes']} objects={evidence['archive_objects']}")
         with restored.session() as session:
             assert _snapshot_layout(session) == baseline["storage_layout"]
             assert session.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
