@@ -1318,7 +1318,11 @@ including historical tables/indexes and unchanged frozen rows, exact archive
 hashes, exclusion of later database writes, rejection of incorrect keys and
 preservation of complete backups after forced database and archive backup-process
 crashes, and recovery after native baseline/dependency-chain expiration and
-archive pruning. This proves native tool behavior; QT publication and retention
-coordination still require implementation and application-level acceptance.
-Small-fixture duration and compressed-byte ratios must not be extrapolated to
-the growing production database.
+archive pruning. The chosen endpoint is restored from copies of both encrypted
+repositories with the original database, archive, repository and credential
+paths unavailable. The runner remaps the restored tablespaces and checks every
+recovered archive against the database at that endpoint. The copies and restore
+use the same disposable host. A production off-host handoff still needs the
+designated independent target, transfer integrity, separately retrievable keys,
+measured capacity and full QT application validation. The fixture timings and
+compression ratios apply to the fixture data.

@@ -95,6 +95,11 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
                 detail = detail.replace(secret, "[redacted]")
             raise RuntimeError("disposable_postmaster_start_failed:" + detail) from exc
 
+    def stop(cluster):
+        run([pg_bin / "pg_ctl", "-D", cluster, "-w", "-t", "40", "-m", "fast", "stop"],
+            timeout=50)
+        live_clusters.remove(cluster)
+
     def capture(backup_type, *, phase=None):
         phase = phase or backup_type
         run([*br, "--type=" + backup_type, "backup"], name=phase + "_database_seconds")
@@ -236,11 +241,54 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
                                   capture_output=True, text=True, timeout=30)
         assert rejected.returncode != 0
         report["wrong_archive_key_refused"] = True
-        run([*br, "--pg1-path=" + str(restored), "--tablespace-map-all=" + str(restored_history),
-             "--set=" + incremental["database"]["label"], "--type=immediate",
-             "--target-action=promote", "--archive-mode=off", "restore"],
-            name="database_restore_seconds")
-        start(restored, restore_socket, restore=True)
+        # Freeze the disposable repositories. With the original paths absent,
+        # successful restart must use the copied backup and WAL.
+        stop(source)
+        copied = root / "copied-pair"
+        copied.mkdir(mode=0o700)
+        copied_repo, copied_archive_repo = copied / "database", copied / "archives"
+        copy_started = time.monotonic()
+        shutil.copytree(repo, copied_repo)
+        shutil.copytree(archive_repo, copied_archive_repo)
+        timings["repository_copy_seconds"] = round(time.monotonic() - copy_started, 3)
+        # Retrieve the fixture's keys outside the exported repository directory.
+        recovered_access = root / "recovered-access"
+        recovered_access.mkdir(mode=0o700)
+        copied_config = recovered_access / "pgbackrest.conf"
+        copied_password_file = recovered_access / "archive-key"
+        for path, content in (
+            (copied_config, config.read_text().replace(str(repo), str(copied_repo))),
+            (copied_password_file, archive_key),
+        ):
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+                output.write(content)
+        copied_br = [pgbackrest, "--config=" + str(copied_config), "--stanza=qt",
+                     "--lock-path=" + str(copied), "--log-level-file=off"]
+        copied_rs = [restic, "--repo", copied_archive_repo, "--password-file", copied_password_file,
+                     "--cache-dir", copied / "cache", "--json"]
+        isolated_originals = []
+        try:
+            for original in (repo, archive_repo, config, password_file, source, history, objects):
+                hidden = root / (original.name + ".offline")
+                original.rename(hidden)
+                isolated_originals.append((original, hidden))
+            run([*copied_br, "--pg1-path=" + str(restored),
+                 "--tablespace-map-all=" + str(restored_history),
+                 "--set=" + incremental["database"]["label"], "--type=immediate",
+                 "--target-action=promote", "--archive-mode=off", "restore"],
+                name="database_restore_seconds")
+            start(restored, restore_socket, restore=True)
+            restore_command = sql("SHOW restore_command", target_socket=restore_socket)
+            assert str(copied_config) in restore_command and str(config) not in restore_command
+            restore_files = root / "restored-archives"
+            run([*copied_rs, "restore", incremental["archive_snapshot"], "--target", restore_files],
+                name="archive_restore_seconds")
+            run([*copied_rs, "check", "--read-data"], name="archive_integrity_seconds")
+            assert not any(original.exists() for original, _ in isolated_originals)
+        finally:
+            for original, hidden in reversed(isolated_originals):
+                hidden.rename(original)
+        start(source, socket)
         if require_timescale:
             assert sql("SELECT sum(value) FROM extension_probe",
                        target_socket=restore_socket) == "3"
@@ -263,16 +311,12 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
         assert sql("SELECT c.reltablespace=t.oid FROM pg_class c, pg_tablespace t "
                    "WHERE c.oid='historical_pkey'::regclass AND t.spcname='history'",
                    target_socket=restore_socket) == "t"
-        restore_files = root / "restored-archives"
-        run([*rs, "restore", incremental["archive_snapshot"], "--target", restore_files],
-            name="archive_restore_seconds")
         recovered_objects = restore_files / "objects"
         for row in sql("SELECT name||':'||sha256 FROM archive_refs ORDER BY name",
                        target_socket=restore_socket).splitlines():
             name, expected_hash = row.split(":")
             assert hashlib.sha256((recovered_objects / name).read_bytes()).hexdigest() == expected_hash
-        run([*rs, "check", "--read-data"], name="archive_integrity_seconds")
-        # Restore reads immutable source repository; source remains independently writable.
+        report["restored_copied_repositories_with_original_paths_offline"] = True
         assert sql("SELECT count(*) FROM observations") == "20101"
         # Rotate only after a complete replacement database+archive pair.
         # Native tools must retain the new baseline and its archive snapshot.
@@ -314,6 +358,7 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
             elapsed_seconds=round(time.monotonic() - started, 3),
             limitations=["synthetic PostgreSQL fixture, not QT application acceptance",
                          *([] if require_timescale else ["no Timescale extension compatibility claim"]),
+                         "same-host fixture, no off-host transport or failure-domain claim",
                          "no production timing/capacity extrapolation",
                          "QT paired-publication/retention orchestration and key escrow not yet qualified"],
         )
