@@ -1326,3 +1326,30 @@ use the same disposable host. A production off-host handoff still needs the
 designated independent target, transfer integrity, separately retrievable keys,
 measured capacity and full QT application validation. The fixture timings and
 compression ratios apply to the fixture data.
+
+## Earlier recovery formats and provider spool replay
+
+The encrypted pair is identified by `qt.encrypted_recovery_pair.v1`. Use
+`verify_canonical_recovery_archive.py --receipt <complete.json> --restore-target <restic-restore-root>`
+after restoring the named snapshot. The named database backup and its immediate
+consistent endpoint require a separate physical restore. The legacy logical
+copy is identified by `qt.local_recovery_copy.v1`. Use
+`verify_canonical_recovery_archive.py --logical-copy <generation-directory>`
+to verify its matching owner and completion records, custom-format dump,
+inventory digest, and archive files before the isolated SQL restore. The copy
+checker verifies supplied bytes against their receipt. Use independently
+retained receipt hashes to establish which recovery generation was intended.
+
+The native logical-copy fixture uses a real pre-intake QT dump and a blank
+TimescaleDB restore target. It retains the provider spool before the original
+collector acknowledges and discards it. The restored collector ingests the
+copied spool through its normal recovery path even with a later database's
+acknowledgement sidecar present. The restored raw record, mapping, manifest,
+archive object hash and provider payload match, and replaying the same spool
+again leaves them unchanged. The restored canonical fact has new
+`accepted_at` and `known_at` timestamps. Exact rollback after acknowledged
+writes therefore needs a separately retained and tested delta that preserves
+the accepted fact versions, commit order, lineage, and required derived and
+operational state. Normal raw spool retention alone ends at acknowledgement.
+This fixture uses a scripted trade and the v2 database layout. It verifies
+native replay and custody for that trade.

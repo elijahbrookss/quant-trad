@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scripts.automation.verify_canonical_recovery_archive import verify_archive
+from scripts.automation.verify_canonical_recovery_archive import verify_archive, verify_logical_copy
 
 
 def _restored_archive(tmp_path, *, object_key="subdir/segment"):
@@ -84,3 +84,68 @@ def test_rejects_paths_other_than_exact_relative_archive_keys(tmp_path, object_k
     root, receipt, _, _ = _restored_archive(tmp_path, object_key=object_key)
     with pytest.raises(ValueError, match="invalid recovery path"):
         verify_archive(receipt, root)
+
+
+@pytest.fixture
+def logical_copy(tmp_path):
+    identity = {
+        "schema_version": "qt.local_recovery_copy.v1",
+        "database_identity": "1234/5678",
+        "filesystem_uuid": "source-fixture-hdd",
+        "name": "copy_" + "a" * 32,
+    }
+    archive = tmp_path / "objects" / "archive"
+    archive.parent.mkdir()
+    archive.write_bytes(b"fixture archive")
+    inventory = tmp_path / "objects.jsonl"
+    inventory.write_bytes(json.dumps({
+        "object_key": "archive",
+        "bytes": archive.stat().st_size,
+        "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+    }).encode() + b"\n")
+    dump = tmp_path / "database.dump"
+    dump.write_bytes(b"PGDMP logical fixture header")
+    (tmp_path / "owner.json").write_text(json.dumps(identity))
+    (tmp_path / "complete.json").write_text(json.dumps(identity | {
+        "database": {"bytes": dump.stat().st_size, "sha256": hashlib.sha256(dump.read_bytes()).hexdigest()},
+        "archive_objects": 1,
+        "archive_bytes": archive.stat().st_size,
+        "inventory_sha256": hashlib.sha256(inventory.read_bytes()).hexdigest(),
+    }))
+    return tmp_path
+
+
+def test_logical_copy_checks_dump_and_archive_inventory(logical_copy):
+    result = verify_logical_copy(logical_copy)
+    assert result["schema_version"] == "qt.local_recovery_copy.v1"
+    assert result["database_dump_bytes"] == (logical_copy / "database.dump").stat().st_size
+    assert result["verified_archive_objects"] == 1
+
+
+@pytest.mark.parametrize(("broken_file", "reason"), [
+    ("objects/archive", "archive object failed size or hash"),
+    ("owner.json", "mismatched logical-copy"),
+])
+def test_logical_copy_refuses_changed_custody_bytes(logical_copy, broken_file, reason):
+    path = logical_copy / broken_file
+    path.write_bytes(b"{}" if path.suffix == ".json" else b"x" * path.stat().st_size)
+    with pytest.raises(ValueError, match=reason):
+        verify_logical_copy(logical_copy)
+
+
+def test_logical_copy_checks_database_hash_and_format(logical_copy):
+    dump = logical_copy / "database.dump"
+    dump.write_bytes(b"PGDMP" + b"X" * (dump.stat().st_size - 5))
+    with pytest.raises(ValueError, match="database file digest or size mismatch"):
+        verify_logical_copy(logical_copy)
+    dump.write_bytes(b"PGSQL" + dump.read_bytes()[5:])
+    with pytest.raises(ValueError, match="not a PostgreSQL custom-format dump"):
+        verify_logical_copy(logical_copy)
+
+
+def test_logical_copy_refuses_physical_pair_receipt(logical_copy):
+    receipt = logical_copy / "complete.json"
+    data = json.loads(receipt.read_text()) | {"schema_version": "qt.encrypted_recovery_pair.v1"}
+    receipt.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="unrecognized or mismatched logical-copy"):
+        verify_logical_copy(logical_copy)
