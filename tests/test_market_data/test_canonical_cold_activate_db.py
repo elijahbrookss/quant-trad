@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.pool import NullPool
 
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
@@ -33,7 +33,7 @@ from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_commit_outcome import observe_activation_transaction, prepare_activation_transaction
-from scripts.db.canonical_cold_database_fence import _database, close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_database_fence import _database, close_database_fence, reopen_database_fence, retain_read_session
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
@@ -61,6 +61,30 @@ def _fence_connections(storage):
             quoted = admin.dialect.identifier_preparer.quote_identifier(engine.url.database)
             admin.exec_driver_sql(f"ALTER DATABASE {quoted} ALLOW_CONNECTIONS true")
         control.dispose()
+
+
+def test_retained_reader_requires_native_transactions_and_writer_role(storage):
+    engine = storage.database._engine
+    autocommit = create_engine(engine.url, poolclass=NullPool, isolation_level="AUTOCOMMIT",
+                               connect_args={"options": "-c default_transaction_read_only=on"})
+    try:
+        with _fence_connections(storage) as (writer, control), autocommit.connect() as auto, engine.connect() as wrong_role:
+            with writer.begin():
+                database = _database(writer, engine.url.database)
+            with ExitStack() as stack:
+                with pytest.raises(ValueError, match="fence_invalid_reader"):
+                    retain_read_session(auto, writer=writer, control=control, expected_database=database, stack=stack)
+            for target, admin in ((auto, control), (writer, auto)):
+                with pytest.raises(ValueError, match="fence_invalid_control"):
+                    close_database_fence(target, admin, expected_database=database, timeout_seconds=30,
+                                         record=lambda *args: pytest.fail("autocommit must fail before the fence"))
+            with wrong_role.begin():
+                wrong_role.exec_driver_sql("SET ROLE pg_read_all_data")
+            with ExitStack() as stack:
+                with pytest.raises(RuntimeError, match="fence_reader_role_changed"):
+                    retain_read_session(wrong_role, writer=writer, control=control, expected_database=database, stack=stack)
+    finally:
+        autocommit.dispose()
 
 
 @pytest.mark.parametrize("committed", (False, True))
@@ -254,13 +278,15 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=owner_path)
 
 
-@pytest.mark.parametrize("lose_commit_reply", (False, True))
-def test_fenced_activation_moves_native_raw_index(storage, tmp_path, monkeypatch, native_raw_index_target, lose_commit_reply):
+@pytest.mark.parametrize(("lose_commit_reply", "retain_reader"), ((False, False), (True, False), (True, True)))
+def test_fenced_activation_moves_native_raw_index(storage, tmp_path, monkeypatch, native_raw_index_target,
+                                                lose_commit_reply, retain_reader):
     _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=True, native_raw_index=native_raw_index_target,
-                               lose_commit_reply=lose_commit_reply)
+                               lose_commit_reply=lose_commit_reply, retain_reader=retain_reader)
 
 
-def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, native_raw_index=None, lose_commit_reply=False):
+def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, native_raw_index=None, lose_commit_reply=False,
+                               retain_reader=False):
     native = native_raw_index is not None
     raw_scope = native_raw_index if native else _stub_raw_index_case(monkeypatch)
     engine = storage.database._engine
@@ -492,6 +518,28 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
                     assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
                 phases.clear()
+            if retain_reader:
+                def lose_writer_before_commit(connection, _result):
+                    assert connection is retained
+                    with pytest.raises(DBAPIError, match="read-only transaction"):
+                        with standby.begin_nested():
+                            standby.exec_driver_sql("CREATE TABLE market.unapproved_writer (id int)")
+                    retained.invalidate()
+                    raise ConnectionError("fixture writer lost before commit")
+
+                with engine.connect() as standby:
+                    with pytest.raises(ConnectionError, match="fixture writer lost before commit"):
+                        run_fenced_transition(
+                            retained, control, **{**owner, "verify_candidate": lose_writer_before_commit},
+                            verified_objects=verified, read_connection=standby,
+                        )
+                    assert events["database_reopened"]["outcome"] == "original"
+                    assert events["login_opening"]["backend_pid"] == events["database_fenced"]["retained_reader"]["backend_pid"]
+                    with standby.begin():
+                        assert activation.read_activation_outcome(standby, **outcome_arguments) == "original"
+                with retained.begin():
+                    assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
+                phases.clear()
             reopened = []
 
             @contextmanager
@@ -509,10 +557,11 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
 
             def verify_started(activation_result, _services):
                 assert activation_result["source_commit_seq"] == latest_commit
-                with retained.begin():
-                    assert retained.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+                active = reader if retained.invalidated else retained
+                with active.begin():
+                    assert active.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
                     assert activation.read_activation_outcome(
-                        retained, **outcome_arguments, require_identity_retired=True,
+                        active, **outcome_arguments, require_identity_retired=True,
                     ) == "committed"
                 return {"ready": True}
 
@@ -521,13 +570,19 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 return provider_boundary(connection, commit_seq)
 
             package["max_outage_seconds"] = 60
-            with monkeypatch.context() as patch:
+            with monkeypatch.context() as patch, ExitStack() as connections:
+                reader = connections.enter_context(engine.connect()) if retain_reader else None
+
+                def restarted(_services, *, connection=None):
+                    assert connection is (reader if retain_reader else None)
+                    return "d" * 64
+
                 patch.setattr(canonical_cold_execute, "load_approved_package", lambda *args, **kwargs: package)
                 patch.setattr(canonical_cold_execute, "read_approved_candidate_witness", lambda *args: candidate_witness)
                 patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
                 patch.setattr(canonical_cold_execute, "bind_approved_collector_checks",
                               lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
-                                                       bound_provider, lambda _: "d" * 64, None))
+                                                       bound_provider, restarted, None))
                 patch.setattr(canonical_cold_execute, "bind_approved_recovery_checks",
                               lambda **kwargs: kwargs["verify_site_restore"])
                 def execute_once():
@@ -537,40 +592,52 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                         preflight_seconds=60, outage_seconds=60, provider_receipt_root=tmp_path,
                         verify_recovery_boundary=recovery_boundary, verify_candidate=verify_candidate,
                         verify_candidate_prestart=verify_started, verify_candidate_ready=verify_started,
-                        verify_original_ready=lambda _: pytest.fail("unexpected rollback"),
+                        verify_original_ready=lambda _: pytest.fail("unexpected rollback"), read_connection=reader,
                     )
 
+                completed = None
                 if lose_commit_reply:
                     actual_commit = engine.dialect.do_commit
+                    lost_replies = []
 
                     def commit_without_reply(connection):
                         actual_commit(connection)
-                        if phases[-1:] == ["activation_precommit_verified"]:
+                        if not lost_replies and phases[-1:] == ["activation_precommit_verified"]:
+                            lost_replies.append(True)
                             retained.invalidate()
                             raise ConnectionError("fixture activation COMMIT reply lost")
 
                     with monkeypatch.context() as driver:
                         driver.setattr(engine.dialect, "do_commit", commit_without_reply)
-                        with pytest.raises(ConnectionError, match="fixture activation COMMIT reply lost"):
-                            execute_once()
-                    journal = events["activation_precommit_verified"]
-                    source = events["database_fenced"]
-                    observed = observe_activation_transaction(
-                        control, database={**source["database"], "allow_connections": False}, backend_pid=source["backend_pid"],
-                        transaction=events["activation_committing"]["transaction"], precommit=journal["wal_before_commit"],
-                    )
-                    assert observed["transaction_status"] == "committed" and not observed["source_backend_present"]
-                    assert not reopened
-                    with pytest.raises(OperationalError, match="not currently accepting connections"):
-                        engine.connect()
-                    result = verified_candidate[-1]
+                        if retain_reader:
+                            completed = execute_once()
+                        else:
+                            with pytest.raises(ConnectionError, match="fixture activation COMMIT reply lost"):
+                                execute_once()
+                    assert lost_replies == [True]
+                    if retain_reader:
+                        assert events["login_opening"]["backend_pid"] == events["database_fenced"]["retained_reader"]["backend_pid"]
+                    else:
+                        journal = events["activation_precommit_verified"]
+                        source = events["database_fenced"]
+                        observed = observe_activation_transaction(
+                            control, database={**source["database"], "allow_connections": False}, backend_pid=source["backend_pid"],
+                            transaction=events["activation_committing"]["transaction"], precommit=journal["wal_before_commit"],
+                        )
+                        assert observed["transaction_status"] == "committed" and not observed["source_backend_present"]
+                        assert not reopened
+                        with pytest.raises(OperationalError, match="not currently accepting connections"):
+                            engine.connect()
                 else:
                     completed = execute_once()
+                if completed is not None:
                     assert reopened == [True] and completed["runtime"] == {"ready": True, "collector_restart_sha256": "d" * 64}
                     result = completed["activation"]
+                else:
+                    result = verified_candidate[-1]
         expected_phases = ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                            "accepted", "activation_precommit_verified"]
-        if not lose_commit_reply:
+        if not lose_commit_reply or retain_reader:
             expected_phases += ["activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
             assert events["activation_precommit_verified"] == events["activation_verified"]
         assert phases == expected_phases

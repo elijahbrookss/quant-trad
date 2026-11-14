@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from time import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -262,6 +263,7 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
 
         def __init__(self):
             self.transaction = False
+            self.connection = SimpleNamespace(driver_connection=SimpleNamespace(autocommit=False))
 
         def in_transaction(self):
             return self.transaction

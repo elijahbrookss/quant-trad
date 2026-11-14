@@ -17,6 +17,7 @@ from scripts.automation import storage_host_boundary as host
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
 from scripts.db.canonical_cold_collector_drain import InactiveLevel2, CollectorDrainLimits, capture_collector_tail, verify_collector_drain
 from scripts.db.canonical_cold_collector_restart import CollectorRestartPending, verify_collector_restart
+from scripts.db.canonical_cold_database_fence import _database, _same_database
 from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope
 
 
@@ -122,23 +123,28 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
         drained = evidence, record["sha256"]
         return record["sha256"]
 
-    def verify_restarted(services):
+    def verify_restarted(services, *, connection=None):
         if drained is None:
             raise RuntimeError("canonical_cold_collector_execution_drain_unobserved")
         collector = services["market-data-collector"]
         if collector["running"] is not True or not collector["started_at"]:
             raise RuntimeError("canonical_cold_collector_execution_new_runtime_unconfirmed")
         started = datetime.fromisoformat(collector["started_at"])
+        reader = conn if connection is None else connection
         last_pending = None
         while True:
             try:
                 assert_roots()
-                with conn.begin():
-                    conn.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                with reader.begin():
+                    reader.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                     milliseconds = max(1, min(15_000, int(check() * 1_000)))
-                    conn.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(milliseconds)})
+                    reader.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(milliseconds)})
+                    if connection is not None:
+                        observed = _database(reader, target["database"])
+                        if not _same_database(observed, target) or not observed["allow_connections"]:
+                            raise RuntimeError("canonical_cold_collector_execution_source_changed")
                     evidence = verify_collector_restart(
-                        conn, drained=drained[0], started_at=started, store=store, limits=limits, check=check, spool_root=spool,
+                        reader, drained=drained[0], started_at=started, store=store, limits=limits, check=check, spool_root=spool,
                     )
                 return seal("restarted", {**evidence, "execution_drained_sha256": drained[1]})["sha256"]
             except CollectorRestartPending as pending:

@@ -4,7 +4,7 @@ import re
 
 from sqlalchemy import text
 
-from scripts.db.canonical_cold_database_fence import _database
+from scripts.db.canonical_cold_database_fence import _database, native_transaction_mode
 
 
 _LSN = re.compile(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}")
@@ -33,10 +33,10 @@ def prepare_activation_transaction(conn, fence):
     return dict(row)
 
 
-def observe_activation_transaction(control, *, database, backend_pid, transaction, precommit=None, timeout_seconds=10):
+def observe_activation_transaction(control, *, database, backend_pid, transaction, precommit=None, timeout_seconds=10,
+                                   reader=None):
     """Read a recent source XID on the control database without admitting target logins."""
-    if (control.closed or control.invalidated or control.in_transaction()
-            or control.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
+    if (not native_transaction_mode(control) or control.in_transaction()
             or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60
             or not isinstance(database, dict) or set(database) != {
                 "system_identifier", "database_oid", "database", "allow_connections", "postmaster_started_at",
@@ -64,6 +64,8 @@ def observe_activation_transaction(control, *, database, backend_pid, transactio
                 raise RuntimeError("canonical_cold_activation_transaction_source_changed")
 
         assert_source()
+        if reader is not None:
+            reader.assert_held(database)
         status = control.scalar(text("SELECT pg_xact_status(CAST(:xid AS xid8))"), {"xid": transaction["xid"]})
         if status not in ("in progress", "aborted", "committed", None):
             raise RuntimeError("canonical_cold_activation_transaction_status_invalid")
@@ -77,13 +79,18 @@ def observe_activation_transaction(control, *, database, backend_pid, transactio
             raise RuntimeError("canonical_cold_activation_transaction_wal_changed")
         control.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
         backends = control.execute(text("""
-            SELECT pid FROM pg_stat_activity
+            SELECT pid,backend_start FROM pg_stat_activity
             WHERE datid=:oid AND backend_type IS DISTINCT FROM 'autovacuum worker'
-            ORDER BY pid LIMIT 2
-        """), {"oid": database["database_oid"]}).scalars().all()
+            ORDER BY pid LIMIT 3
+        """), {"oid": database["database_oid"]}).tuples().all()
+        if reader is not None:
+            identity = (reader.backend_pid, reader.backend_start)
+            if identity not in backends:
+                raise RuntimeError("canonical_cold_activation_transaction_reader_missing")
+            backends = [backend for backend in backends if backend != identity]
         prepared = control.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_prepared_xacts WHERE database=:db)"),
                                   {"db": database["database"]})
-        if prepared or any(pid != backend_pid for pid in backends):
+        if prepared or any(pid != backend_pid for pid, _ in backends):
             raise RuntimeError("canonical_cold_activation_transaction_publishers_changed")
         assert_source()
     return {"xid": transaction["xid"], "transaction_status": status or "unknown",

@@ -1,5 +1,6 @@
 """Run the host and database owners for a single approved cold-storage cutover."""
 
+from contextlib import ExitStack
 from functools import partial
 from time import monotonic, time
 
@@ -14,7 +15,7 @@ from scripts.automation.canonical_cold_recovery_checks import bind_approved_reco
 from scripts.db.canonical_cold_activate import (
     assert_original_identity_registry, raw_index_placement_scope, read_original_watermark, verify_mounted_candidate,
 )
-from scripts.db.canonical_cold_database_fence import _database
+from scripts.db.canonical_cold_database_fence import _database, native_transaction_mode, retain_read_session
 from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_transition import run_fenced_transition
@@ -43,7 +44,7 @@ def _read_open_original(conn, control, *, package, timeout_seconds):
 def execute_approved_cutover(
     conn, control, *, state_root, inventory, package_path, approved_package_hash, receipts, store, limits,
     preflight_seconds, outage_seconds, provider_receipt_root, verify_recovery_boundary,
-    verify_candidate, verify_candidate_prestart, verify_candidate_ready, verify_original_ready,
+    verify_candidate, verify_candidate_prestart, verify_candidate_ready, verify_original_ready, read_connection=None,
 ):
     """Check exact assets before taking the host hold and dispatching any stops.
 
@@ -51,6 +52,10 @@ def execute_approved_cutover(
     Capture the provider tail while collection is still running under host
     exclusion and give that same observation to the final drained-boundary
     check. Only a journaled original SQL outcome can restart the old fleet.
+    The optional pre-opened target connection provides a read-only observer
+    if the writer connection drops while the host owner is still running.
+    Application readiness callbacks use service endpoints or open their own
+    target connection once the login gate has reopened.
     """
     callbacks = (
         verify_recovery_boundary, verify_candidate,
@@ -59,8 +64,7 @@ def execute_approved_cutover(
     if (not all(callable(callback) for callback in callbacks) or not isinstance(limits, ArchiveVerificationLimits)
             or any(type(seconds) is not int or not 1 <= seconds <= MAX_MIGRATION_SECONDS
                    for seconds in (preflight_seconds, outage_seconds))
-            or conn is control or any(session.closed or session.invalidated or session.in_transaction()
-                                      or session.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
+            or conn is control or any(not native_transaction_mode(session) or session.in_transaction()
                                       for session in (conn, control))):
         raise ValueError("canonical_cold_execute_invalid_owner")
 
@@ -94,6 +98,11 @@ def execute_approved_cutover(
         with _bounded_step(conn, preflight_seconds):
             original = _read_open_original(conn, control, package=package, timeout_seconds=preflight_seconds)
             verified = verify_mounted_candidate(conn, audit=audit, store=store, limits=limits, check_budget=check_preflight)
+    if read_connection is not None:
+        with ExitStack() as stack:
+            reader = retain_read_session(read_connection, writer=conn, control=control,
+                                         expected_database=scope["target_database"], stack=stack)
+            reader.assert_held(original["database"])
     check_preflight()
 
     provider_tail = None
@@ -133,6 +142,7 @@ def execute_approved_cutover(
                 host_remaining=remaining, verify_provider_boundary=verify_drained,
                 verify_recovery_boundary=recovery_check, record=record_phase,
                 verify_candidate=verify_candidate, candidate_witness=witness, verified_objects=verified,
+                read_connection=read_connection,
             )
         except Exception as error:
             if database_phase is None:
@@ -167,7 +177,8 @@ def execute_approved_cutover(
             application = verify_candidate_ready(activation, services)
             if not isinstance(application, dict) or application.get("ready") is not True:
                 return application
-            return {**application, "collector_restart_sha256": verify_provider_restart(services)}
+            alternate = {"connection": read_connection} if conn.closed or conn.invalidated else {}
+            return {**application, "collector_restart_sha256": verify_provider_restart(services, **alternate)}
 
         runtime = resume(
             verify_started,

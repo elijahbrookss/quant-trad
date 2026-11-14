@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+from dataclasses import replace
 from datetime import date
 from functools import partial
 import logging
@@ -17,8 +19,10 @@ from scripts.db.canonical_cold_activate import (
     activate_cold_storage, assert_original_identity_registry, raw_index_placement_scope, read_activation_outcome,
     read_original_watermark, verify_mounted_candidate,
 )
-from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
-from scripts.db.canonical_cold_commit_outcome import prepare_activation_transaction
+from scripts.db.canonical_cold_database_fence import (
+    close_database_fence, native_transaction_mode, reopen_database_fence, retain_read_session,
+)
+from scripts.db.canonical_cold_commit_outcome import observe_activation_transaction, prepare_activation_transaction
 from scripts.db.canonical_cold_identity_rebuild import finalize_identity_suffix
 from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
@@ -32,7 +36,7 @@ logger = logging.getLogger(__name__)
 def run_fenced_transition(
     conn, control, *, package, approved_package_hash, receipts, store, limits, timeout_seconds,
     assert_host_held, host_remaining, verify_provider_boundary, verify_recovery_boundary, record,
-    verify_candidate, candidate_witness, verified_objects=None,
+    verify_candidate, candidate_witness, verified_objects=None, read_connection=None,
 ):
     """Check the candidate inside the transaction before making DDL durable.
 
@@ -48,7 +52,8 @@ def run_fenced_transition(
     It receives the existing archive ownership check for suffix capture.
     """
     if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS
-            or not isinstance(limits, ArchiveVerificationLimits)
+            or not isinstance(limits, ArchiveVerificationLimits) or conn is control
+            or any(not native_transaction_mode(session) or session.in_transaction() for session in (conn, control))
             or not all(callable(callback) for callback in (
                 assert_host_held, host_remaining, verify_provider_boundary, verify_recovery_boundary, record, verify_candidate,
             ))):
@@ -73,6 +78,8 @@ def run_fenced_transition(
     # can still prove that the original relations and exact watermark survived.
     source_commit = None
     execution_hash = None
+    transaction = None
+    precommit = None
 
     def original_outcome(connection):
         commit = current_original_watermark(connection)
@@ -89,7 +96,8 @@ def run_fenced_transition(
         return left
 
     assert_host_held()
-    with archive_namespace(store.root, exclusive=True) as check_archive:
+    with ExitStack() as stack:
+        check_archive = stack.enter_context(archive_namespace(store.root, exclusive=True))
         check_archive()
         with conn.begin():
             with _bounded_step(conn, remaining_seconds()):
@@ -106,8 +114,11 @@ def run_fenced_transition(
                     raise RuntimeError("canonical_cold_transition_archive_verification_scope_changed")
         check_archive()
         assert_host_held()
+        reader = None if read_connection is None else retain_read_session(
+            read_connection, writer=conn, control=control, expected_database=expected_database, stack=stack,
+        )
         fence = close_database_fence(
-            conn, control, expected_database=expected_database, timeout_seconds=remaining_seconds(), record=record,
+            conn, control, expected_database=expected_database, timeout_seconds=remaining_seconds(), record=record, reader=reader,
         )
         assert_host_held()
         try:
@@ -173,24 +184,46 @@ def run_fenced_transition(
                                  "wal_before_commit": final_tx["wal"]}
                     record("activation_precommit_verified", precommit)
         except Exception as error:
-            # Prove the original outcome on the same live connection. A
-            # disconnection, different result or expired budget leaves the hold
-            # for its operator, with no reconnect or guessed rollback.
-            if conn.closed or conn.invalidated:
-                error.add_note("The retained SQL connection was lost. Inspect the held activation from the control database.")
-                raise
+            recovered_commit = False
             try:
                 assert_host_held()
-                with conn.begin():
-                    with _bounded_step(conn, remaining_seconds()):
+                check_archive()
+                if conn.closed or conn.invalidated:
+                    if reader is None or transaction is None:
+                        raise RuntimeError("canonical_cold_transition_no_retained_reader")
+                    observation = observe_activation_transaction(
+                        control, database=fence.database, backend_pid=fence.backend_pid, transaction=transaction,
+                        precommit=None if precommit is None else precommit["wal_before_commit"],
+                        timeout_seconds=min(5, remaining_seconds()), reader=reader,
+                    )
+                    status = observation["transaction_status"]
+                    if (observation["source_backend_present"] or status not in ("aborted", "committed")
+                            or (status == "committed" and (precommit is None or not observation["commit_flushed"]))):
+                        raise RuntimeError("canonical_cold_transition_retained_reader_outcome_unproven")
+                    conn = reader.connection
+                    fence = replace(fence, connection=conn, backend_pid=reader.backend_pid, reader=None)
+                    # The existing transaction is still server-enforced read only.
+                    fence.assert_quiet(conn)
+                    read_outcome = retired_outcome if status == "committed" else original_outcome
+                    expected = "committed" if status == "committed" else "original"
+                    if read_outcome(conn) != expected:
+                        raise RuntimeError("canonical_cold_transition_retained_reader_certificate_changed")
+                    reader.transaction.commit()
+                    recovered_commit = status == "committed"
+                    logger.warning("canonical_cold_transition_commit_reply_reconciled | xid=%s status=%s",
+                                   transaction["xid"], status)
+                else:
+                    with conn.begin(), _bounded_step(conn, remaining_seconds()):
                         fence.assert_quiet(conn)
                         original_outcome(conn)
-                record("activation_rolled_back", {"execution_hash": execution_hash, "source_commit_seq": source_commit})
-                reopen_database_fence(fence, control, expected_outcome="original", read_outcome=original_outcome, record=record)
+                if not recovered_commit:
+                    record("activation_rolled_back", {"execution_hash": execution_hash, "source_commit_seq": source_commit})
+                    reopen_database_fence(fence, control, expected_outcome="original", read_outcome=original_outcome, record=record)
             except Exception as recovery_error:
-                error.add_note(f"Original SQL restart needs reconciliation ({type(recovery_error).__name__}).")
+                error.add_note(f"The held activation needs reconciliation ({type(recovery_error).__name__}).")
                 logger.error("canonical_cold_transition_recovery_unresolved | error=%s", type(recovery_error).__name__)
-            raise
+            if not recovered_commit:
+                raise
         assert_host_held()
         with conn.begin():
             with _bounded_step(conn, remaining_seconds()):
