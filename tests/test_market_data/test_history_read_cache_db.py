@@ -1,6 +1,7 @@
 """Real transaction/ownership tests, using only the isolated test database."""
 from dataclasses import replace
 import hashlib
+from datetime import UTC, datetime
 from threading import Thread, Event
 from time import monotonic
 
@@ -11,6 +12,8 @@ from core.execution_control import ExecutionControl
 from core.settings import get_settings
 from core.storage_mounts import FilesystemEvidence, StorageMountError
 from core.storage_targets import StorageTarget
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
+from portal.backend.db.market_storage_models import MarketFactStorageStateRecord
 from portal.backend.db.storage_target_models import StorageTargetRecord
 from portal.backend.service.storage.history_policy import configured_history_read_cache
 from portal.backend.service.research import execution_limits
@@ -33,6 +36,9 @@ def configured(service,tmp_path,monkeypatch):
         storage=replace(settings.storage,history_cache_bytes=1024**2,history_cache_min_free_bytes=100)))
     monkeypatch.setattr(database_module,"db",service.database)
     with service.database.session() as session:
+        conn = session.connection()
+        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS market")
+        MarketFactStorageStateRecord.__table__.create(conn)
         session.get(StorageTargetRecord,"ssd").root=str(tmp_path)
     evidence=FilesystemEvidence(path=str(tmp_path),device_id="fixture-device",filesystem_uuid="uuid-ssd",
         total_bytes=10**7,available_bytes=9*10**6,used_bytes=10**6,read_only=False)
@@ -70,6 +76,27 @@ def test_cache_fill_excludes_new_maintenance(configured):
             assert not peer.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))"))
     with service.database.session() as peer:
         assert peer.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))"))
+
+
+def test_cold_cache_never_allocates_into_live_ssd_headroom(configured, monkeypatch):
+    import core.storage_mounts as mounts
+
+    service, _, source, digest = configured
+    with service.database.session() as session:
+        session.add(MarketFactStorageStateRecord(
+            layout_version=COLD_HISTORY_LAYOUT_VERSION, state="ready", completed_at=datetime.now(UTC),
+        ))
+    original = mounts.require_configured_working_mount()
+    evidence = replace(original, used_bytes=6_000_000, available_bytes=4_000_000)
+    monkeypatch.setattr(mounts, "require_configured_working_mount", lambda *args, **kwargs: evidence)
+    cache = configured_history_read_cache()
+    with cache.open_copy(source, digest=digest, size=source.stat().st_size) as handle:
+        assert handle is None
+    assert not list(cache.root.iterdir())
+
+    evidence = replace(original, used_bytes=5_000_000, available_bytes=5_000_000)
+    with cache.open_copy(source, digest=digest, size=source.stat().st_size) as handle:
+        assert handle.read() == source.read_bytes()
 
 
 def test_cache_fills_beside_read_only_registered_target(configured, monkeypatch):

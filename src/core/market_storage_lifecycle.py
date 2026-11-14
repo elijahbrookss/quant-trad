@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 
 MARKET_STORAGE_LIFECYCLE_POLICY_VERSION = "market.storage_lifecycle.v1"
+COLD_OPTIONAL_SSD_MAX_USED_PERCENT = 60
 
 # Retired family-table chunk controls must not operate on the generalized
 # schema. Canonical retention owns complete daily hot-payload partitions.

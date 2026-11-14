@@ -2,6 +2,7 @@
 from dataclasses import replace
 from pathlib import Path
 
+from core.market_storage_lifecycle import COLD_OPTIONAL_SSD_MAX_USED_PERCENT
 from core.storage_targets import StoragePolicy
 from portal.backend.db.storage_target_models import StoragePolicyRecord
 from portal.backend.service.storage_management import StorageConflict, _target
@@ -66,6 +67,7 @@ def configured_history_read_cache():
     from core.settings import get_settings
     from core.storage_mounts import configured_working_root, require_configured_working_mount, StorageMountError
     from market_data.history_read_cache import CanonicalArchiveReadCache, CacheBypass, HistoryCacheLimits
+    from .repos.cold_history import cold_layout_active
     import os
 
     settings = get_settings().storage
@@ -124,6 +126,7 @@ def configured_history_read_cache():
             floor = max(settings.history_cache_min_free_bytes,
                         (evidence.total_bytes * saved.reserve_percent + 99) // 100
                         + record.reserved_bytes + record.auxiliary_reserved_bytes)
+            cold_authoritative = cold_layout_active(owner)
 
             def capacity(additional):
                 execution_checkpoint()
@@ -141,6 +144,10 @@ def configured_history_read_cache():
                 if current.filesystem_uuid != evidence.filesystem_uuid:
                     raise RuntimeError("history_cache_admission_filesystem_changed")
                 available = current.available_bytes - floor
+                if cold_authoritative:
+                    allocatable = current.used_bytes + current.available_bytes
+                    remaining = (COLD_OPTIONAL_SSD_MAX_USED_PERCENT * allocatable - 1) // 100 - current.used_bytes
+                    available = min(available, remaining)
                 if additional and additional > available:
                     raise CacheBypass("collection_and_maintenance_headroom")
                 return available

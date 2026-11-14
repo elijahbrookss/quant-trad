@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from core.market_storage_lifecycle import COLD_OPTIONAL_SSD_MAX_USED_PERCENT
 from core.storage_mounts import configured_archive_root, require_configured_archive_mount
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.cold_history import ColdFactLocation, ColdHistoryReader, publish_cold_page
@@ -129,7 +130,7 @@ def require_cold_acquisition_headroom(session) -> None:
         raise RuntimeError("cold_fact_recent_target_missing")
     witness = recent.inspect(require_writable=False)
     usable = witness.used_bytes + witness.available_bytes
-    if usable <= 0 or witness.used_bytes * 100 >= usable * 60:
+    if usable <= 0 or witness.used_bytes * 100 >= usable * COLD_OPTIONAL_SSD_MAX_USED_PERCENT:
         raise RuntimeError("cold_fact_historical_acquisition_ssd_pressure")
 
 
