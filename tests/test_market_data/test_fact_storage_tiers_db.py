@@ -331,6 +331,7 @@ def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(s
     from portal.backend.service.storage import history_policy
     from portal.backend.service.storage.repos import cold_history
     from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+    from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
 
     archive = tmp_path / "archive"
     archive.mkdir()
@@ -346,6 +347,11 @@ def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(s
         for table in Base.metadata.sorted_tables:
             if table.schema == "market" and table.name in COLD_TABLE_NAMES:
                 table.create(session.connection(), checkfirst=True)
+        database_identity = session.scalar(text("""
+            SELECT c.system_identifier::text || '/' || d.oid::text
+            FROM pg_control_system() AS c CROSS JOIN pg_database AS d WHERE d.datname=current_database()
+        """))
+        _configure_fixture_catalog(session.connection(), database_identity, archive)
         session.execute(text("UPDATE market.fact_storage_state SET layout_version=:version"),
                         {"version": COLD_HISTORY_LAYOUT_VERSION})
         session.execute(text("""

@@ -21,7 +21,7 @@ from market_data.fact_archive import FactArchiveLimits, FactArchiveManifest
 from portal.backend.db.cold_history_models import (
     COLD_HISTORY_LAYOUT_VERSION, ColdBookSessionFactRecord, ColdFactLocatorRecord, ColdFactMaterialRecord,
     ColdFactPageRecord, ColdFactPageSeriesRecord,
-    ColdNormalizationSpecReferenceRecord, cold_page_is_visible,
+    ColdNormalizationSpecReferenceRecord, cold_page_is_visible, guard_cold_runtime_placement,
 )
 
 _pages = ColdFactPageRecord.__table__
@@ -138,6 +138,7 @@ def publish_cold_candle_rows(session, rows: Iterable[Mapping]) -> None:
     if saved is None or not saved.movement_enabled:
         raise RuntimeError("cold_fact_publish_storage_policy_disabled")
     policy = _archive_policy(session, saved, CanonicalFactRetentionPolicy(), root)
+    guard_cold_runtime_placement(session, locators=True)
     store = FilesystemRawArchiveObjectStore(root / "objects")
     repository = PostgresColdHistory(ColdHistoryReader(
         store, ensure_contracts=lambda contracts: ensure_payload_contracts(session, contracts),

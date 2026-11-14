@@ -15,6 +15,10 @@ COLD_LOCATOR_TABLE_NAMES = (
 COLD_CUSTODY_TABLE_NAMES = (
     "fact_archive_dependencies", "fact_archive_preparation_dependencies",
 )
+COLD_ARCHIVE_EVIDENCE_TABLE_NAMES = (
+    "fact_archive_material_aliases", "fact_archive_canonical_dependencies",
+    "fact_archive_prepared_material_aliases", "fact_archive_prepared_canonical_dependencies",
+)
 COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", "cold_fact_retired_days",
                     "cold_fact_pruned_days", *COLD_LOCATOR_TABLE_NAMES)
 COLD_HISTORY_LAYOUT_VERSION = "market.canonical_cold_history.v1"
@@ -53,26 +57,27 @@ def _assert_hdd_placement(conn, names, error):
             UNION ALL SELECT reltoastrelid, relname FROM tables WHERE reltoastrelid<>0
             UNION ALL SELECT x.indexrelid, tables.relname FROM tables
                 JOIN pg_index x ON x.indrelid IN (tables.oid, tables.reltoastrelid)
+        ), registered AS (
+            SELECT t.tablespace_oid
+            FROM public.portal_storage_header_tablespaces t
+            JOIN public.portal_storage_targets s ON s.id=t.target_id
+            WHERE s.medium='hdd' AND s.state='active' AND s.roles ? 'history'
+              AND t.database_identity=(
+                  SELECT control.system_identifier::text || '/' || db.oid::text
+                  FROM pg_control_system() AS control CROSS JOIN pg_database AS db
+                  WHERE db.datname=current_database()
+              )
         )
-        SELECT members.relname, c.relname AS member,
-               COALESCE(NULLIF(c.reltablespace,0), db.dattablespace) AS tablespace
+        SELECT members.relname, c.relpersistence,
+               COALESCE(NULLIF(c.reltablespace,0), db.dattablespace) IN (
+                    SELECT tablespace_oid FROM registered
+               ) AS in_history
         FROM members JOIN pg_class AS c USING(oid)
         CROSS JOIN pg_database AS db WHERE db.datname=current_database()
     """), {"names": list(names)}).mappings().all()
-    registered = set(conn.execute(text("""
-        SELECT t.tablespace_oid
-        FROM public.portal_storage_header_tablespaces t
-        JOIN public.portal_storage_targets s ON s.id=t.target_id
-        WHERE s.medium='hdd' AND s.state='active'
-          AND t.database_identity=(
-              SELECT control.system_identifier::text || '/' || db.oid::text
-              FROM pg_control_system() AS control CROSS JOIN pg_database AS db
-              WHERE db.datname=current_database()
-          )
-    """)).scalars())
     if (
         {row["relname"] for row in actual} != set(names)
-        or not registered or any(row["tablespace"] not in registered for row in actual)
+        or any(row["relpersistence"] != "p" or not row["in_history"] for row in actual)
     ):
         raise RuntimeError(error)
 
@@ -83,6 +88,31 @@ def assert_cold_history_placement(conn):
 
 def assert_cold_custody_catalog_placement(conn):
     _assert_hdd_placement(conn, COLD_CUSTODY_TABLE_NAMES, "cold_fact_custody_history_tablespace_required")
+
+
+def assert_cold_archive_evidence_placement(conn):
+    _assert_hdd_placement(conn, COLD_ARCHIVE_EVIDENCE_TABLE_NAMES,
+                          "cold_fact_archive_evidence_history_tablespace_required")
+
+
+def guard_cold_runtime_placement(conn, *, locators=False, archive_evidence=False):
+    """Keep the registered target and checked heaps stable through a cold write."""
+    tables = COLD_LOCATOR_TABLE_NAMES if locators else ()
+    if archive_evidence:
+        tables += (*COLD_CUSTODY_TABLE_NAMES, *COLD_ARCHIVE_EVIDENCE_TABLE_NAMES)
+    if not tables:
+        raise ValueError("cold_fact_runtime_placement_scope_required")
+    conn.execute(text("""
+        LOCK TABLE public.portal_storage_targets, public.portal_storage_header_tablespaces
+        IN SHARE MODE NOWAIT
+    """))
+    relations = ", ".join(f"ONLY market.{name}" for name in tables)
+    conn.execute(text(f"LOCK TABLE {relations} IN ACCESS SHARE MODE NOWAIT"))
+    if locators:
+        assert_cold_history_placement(conn)
+    if archive_evidence:
+        assert_cold_custody_catalog_placement(conn)
+        assert_cold_archive_evidence_placement(conn)
 
 
 class ColdFactPageRecord(Base):

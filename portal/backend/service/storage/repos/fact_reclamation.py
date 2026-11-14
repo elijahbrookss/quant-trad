@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from core.storage_mounts import require_configured_archive_mount
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
-from portal.backend.db.cold_history_models import assert_cold_history_immutability
+from portal.backend.db.cold_history_models import assert_cold_history_immutability, guard_cold_runtime_placement
 from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from .cold_history import cold_layout_active
@@ -293,6 +293,7 @@ class PostgresCanonicalFactReclamationRepository:
                     if header_oid is None:
                         raise RuntimeError(f"cold_fact_retirement_header_missing: storage_day={day}")
                     if execute:
+                        guard_cold_runtime_placement(session, locators=True, archive_evidence=True)
                         staged = stage_retirement_pages(session, self.archive, day)
                         if staged is not None:
                             return staged
@@ -386,6 +387,7 @@ class PostgresCanonicalFactReclamationRepository:
                 raise RuntimeError("cold_fact_retirement_layout_changed")
             header_size = 0
             if cold_layout:
+                guard_cold_runtime_placement(session, locators=True, archive_evidence=True)
                 for table in ("cold_fact_pages", "cold_fact_locators", "cold_fact_retired_days"):
                     session.execute(text(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT"))
                 assert_cold_history_immutability(session.connection())

@@ -111,10 +111,11 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
 
 def test_cold_daily_retirement_publishes_and_prunes_exactly(storage, tmp_path, monkeypatch):
     from portal.backend.db.cold_history_models import (
-        Base, COLD_HISTORY_LAYOUT_VERSION, COLD_IMMUTABILITY_TRIGGER, COLD_TABLE_NAMES,
+        Base, COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES,
     )
     from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
     from portal.backend.service.storage.repos.cold_retirement import prune_oldest_retired_identities
+    from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
 
     day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
     request = DatasetSeriesRequest(storage.series_id, BASE - timedelta(days=1), BASE + timedelta(days=1))
@@ -126,15 +127,22 @@ def test_cold_daily_retirement_publishes_and_prunes_exactly(storage, tmp_path, m
             if table.schema != "market" or table.name not in COLD_TABLE_NAMES:
                 continue
             table.create(session.connection(), checkfirst=True)
-            session.execute(text(f"""
-                CREATE TRIGGER {COLD_IMMUTABILITY_TRIGGER} BEFORE UPDATE OR DELETE OR TRUNCATE ON {table.fullname}
-                FOR EACH STATEMENT EXECUTE FUNCTION market.reject_immutable_mutation()
-            """))
-            session.execute(text(f"ALTER TABLE {table.fullname} ENABLE ALWAYS TRIGGER {COLD_IMMUTABILITY_TRIGGER}"))
+        database_identity = session.scalar(text("""
+            SELECT c.system_identifier::text || '/' || d.oid::text
+            FROM pg_control_system() AS c CROSS JOIN pg_database AS d WHERE d.datname=current_database()
+        """))
+        _configure_fixture_catalog(session.connection(), database_identity, tmp_path)
         prepare_cold_dependency_bindings(session.connection())
         session.execute(text("UPDATE market.fact_storage_state SET layout_version=:layout"),
                         {"layout": COLD_HISTORY_LAYOUT_VERSION})
     cold_storage = market_data.canonical_fact_storage_repository
+    with storage.database.session() as session:
+        session.execute(text("UPDATE public.portal_storage_targets SET roles='[]' WHERE id='activation-fixture'"))
+    with pytest.raises(RuntimeError, match="cold_fact_locator_history_tablespace_required"):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.cold_fact_pages")) == 0
+        session.execute(text("UPDATE public.portal_storage_targets SET roles='[\"history\"]' WHERE id='activation-fixture'"))
     assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "cold_page_admitted"
     with storage.database.session() as session:
         assert not cold_storage.cold_history(session).read_by_ids(session, identities, require_all=False)
@@ -151,6 +159,21 @@ def test_cold_daily_retirement_publishes_and_prunes_exactly(storage, tmp_path, m
     assert _physical(storage, day)["header_rows"] == len(identities)
     assert _physical(storage, day)["hot_rows"] == len(identities)
     assert archive.inspect_partition(day)["state"] == "verified"
+    original_placement = fact_reclamation.guard_cold_runtime_placement
+    placements = 0
+
+    def drift_before_handoff(session, **scope):
+        nonlocal placements
+        placements += 1
+        if placements == 2:
+            session.execute(text("UPDATE public.portal_storage_targets SET state='disabled' WHERE id='activation-fixture'"))
+        original_placement(session, **scope)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fact_reclamation, "guard_cold_runtime_placement", drift_before_handoff)
+        with pytest.raises(RuntimeError, match="cold_fact_locator_history_tablespace_required"):
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert placements == 2 and _physical(storage, day)["header_rows"] == len(identities)
     result = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert result["status"] == "partition_reclaimed" and result["reclaimed_header_bytes"] > 0
     assert _physical(storage, day)["header_rows"] == 0

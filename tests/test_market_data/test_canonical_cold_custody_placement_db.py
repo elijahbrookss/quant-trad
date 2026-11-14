@@ -4,7 +4,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
+from portal.backend.db.cold_history_models import (
+    COLD_ARCHIVE_EVIDENCE_TABLE_NAMES, COLD_CUSTODY_TABLE_NAMES, COLD_LOCATOR_TABLE_NAMES,
+    guard_cold_runtime_placement,
+)
 from portal.backend.db.storage_target_models import StorageHeaderTablespaceRecord, StorageTargetRecord
 from scripts.db.canonical_cold_custody_placement import (
     assert_custody_placement,
@@ -14,6 +17,48 @@ from scripts.db.canonical_cold_custody_placement import (
 from tests.test_market_data.test_canonical_cold_migration_db import local_catalog_server, prepared_database  # noqa: F401
 
 pytestmark = pytest.mark.db
+
+
+def test_runtime_placement_checks_archive_evidence_and_locator_indexes(prepared_database):
+    engine, tablespace, root = prepared_database
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE SCHEMA market")
+        StorageTargetRecord.__table__.create(conn)
+        StorageHeaderTablespaceRecord.__table__.create(conn)
+        conn.execute(StorageTargetRecord.__table__.insert(), {
+            "id": "fixture-hdd", "label": "Fixture history", "filesystem_uuid": "fixture-device",
+            "root": str(root), "medium": "hdd", "roles": ["history"],
+        })
+        conn.execute(text("""
+            INSERT INTO public.portal_storage_header_tablespaces (database_identity,target_id,tablespace_oid,binding)
+            SELECT control.system_identifier::text || '/' || db.oid::text,'fixture-hdd',space.oid,'{}'
+            FROM pg_control_system() AS control CROSS JOIN pg_database AS db CROSS JOIN pg_tablespace AS space
+            WHERE db.datname=current_database() AND space.spcname=:tablespace
+        """), {"tablespace": tablespace})
+        for table in (*COLD_LOCATOR_TABLE_NAMES, *COLD_CUSTODY_TABLE_NAMES, *COLD_ARCHIVE_EVIDENCE_TABLE_NAMES):
+            conn.exec_driver_sql(f"CREATE TABLE market.{table} (id int NOT NULL) TABLESPACE {tablespace}")
+            conn.exec_driver_sql(f"CREATE UNIQUE INDEX {table}_unique ON market.{table}(id) TABLESPACE {tablespace}")
+
+    with engine.begin() as conn:
+        guard_cold_runtime_placement(conn, locators=True, archive_evidence=True)
+        with engine.begin() as competing:
+            competing.exec_driver_sql("SET LOCAL lock_timeout='100ms'")
+            with pytest.raises(DBAPIError) as busy:
+                competing.exec_driver_sql("UPDATE public.portal_storage_targets SET state='disabled'")
+            assert busy.value.orig.pgcode == "55P03"
+
+    for table, error in (
+        ("cold_fact_locators", "cold_fact_locator_history_tablespace_required"),
+        ("fact_archive_dependencies", "cold_fact_custody_history_tablespace_required"),
+        ("fact_archive_prepared_canonical_dependencies", "cold_fact_archive_evidence_history_tablespace_required"),
+    ):
+        with pytest.raises(RuntimeError, match=error):
+            with engine.begin() as conn:
+                conn.exec_driver_sql(f"ALTER INDEX market.{table}_unique SET TABLESPACE pg_default")
+                guard_cold_runtime_placement(conn, locators=True, archive_evidence=True)
+
+    with engine.begin() as conn:
+        guard_cold_runtime_placement(conn, locators=True, archive_evidence=True)
 
 
 def test_native_custody_move_preserves_forks_and_fk_scope(prepared_database):
