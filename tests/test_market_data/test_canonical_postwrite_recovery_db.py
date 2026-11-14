@@ -1,6 +1,6 @@
 """Restore the activated cold layout at a real committed provider-write boundary."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import os
@@ -15,9 +15,12 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from core.storage_targets import StorageTarget
-from market_data.archive import FilesystemRawArchiveObjectStore, read_raw_archive_parquet
+from data_providers.streams.contracts import ProviderRawMessage
+from market_data.archive import DurableRawSpoolSegment, FilesystemRawArchiveObjectStore, read_raw_archive_parquet
 from market_data.archive_namespace import archive_namespace
 from market_data.contracts import DatasetSeriesRequest
+from market_data.fact_archive import archive_evidence_hash
+from market_data.structure import RawStreamRecord
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 from portal.backend.db.session import Database
@@ -27,13 +30,19 @@ from portal.backend.service.storage.incremental_recovery import (
 from portal.backend.service.storage.recovery_copies import _identity, _snapshot_layout
 from portal.backend.service.storage.repos import market_data, market_lifecycle, market_structure
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+from scripts.automation.canonical_cold_collector_checks import RECEIPT_VERSION as COLLECTOR_RECEIPT_VERSION
+from scripts.automation.canonical_cold_recovery_checks import PLAN_VERSION, bind_approved_recovery_checks
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits, stage_handoff, verify_staged_handoff
+from scripts.automation.storage_host_boundary import load_receipt, save_receipt
 from scripts.automation.verify_encrypted_recovery_handoff import verify_handoff
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
 from scripts.db.canonical_cold_recovery_archive_transport import stage_encrypted_archive_suffix, verify_named_archive_closure
+from scripts.db.canonical_cold_recovery_pending_spool import (
+    PendingSpoolScope, measure_pending_spool, measure_pending_spool_before_anchor, stage_pending_spool, verify_pending_spool,
+)
 from scripts.db.canonical_cold_recovery_wal_transfer import stage_final_wal, verify_final_wal
 from scripts.db.canonical_cold_recovery_suffix import (
     capture_final_archive_suffix, prepare_archive_baseline, verify_final_archive_suffix,
@@ -43,6 +52,7 @@ from tests.test_market_data.exact_deployed_reader import check_deployed_source_r
 from tests.test_market_data.test_canonical_recovery_spool_db import (
     _admitted_rows, _define_trade_stream, _native_recover, _seal_trade,
 )
+from tests.test_market_data.test_canonical_cold_provider_boundary_db import _definition, _messages
 from tests.test_market_data.test_fact_storage_tiers_db import _ingest, _placement, storage
 
 
@@ -204,6 +214,9 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     suffix_key = worker.config.archive_key_path.with_name("suffix-key")
     suffix_key.touch(mode=0o600)
     suffix_key.write_text(secrets.token_hex(32))
+    pending_key = worker.config.archive_key_path.with_name("pending-key")
+    pending_key.touch(mode=0o600)
+    pending_key.write_text(secrets.token_hex(32))
 
     # Provider intake and its archive are newer than the prestaged baseline.
     record = _later_trade(structures, tmp_path, claim, baseline_raw, trade_id="original-at-anchor")
@@ -215,6 +228,13 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series, start, end)])
     original_reader = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
     assert len(original_reader) == 2
+    pending_root = tmp_path / "pending-level2"
+    pending_root.mkdir(mode=0o700)
+    pending_scratch = tmp_path / "pending-scratch"
+    pending_scratch.mkdir(mode=0o700)
+    pending_scope, pending_records, failed_event = _pending_level2(storage, structures, pending_root)
+    pending_limits = TransferLimits(seconds=25, bytes=16 * 1024**2, files=100, reserve_bytes=16 * 1024**2)
+    source_commit = expected[0][-1].market_commit_seq
     target = {"system_identifier": system_identifier, "database_oid": int(database_oid),
               "database": engine.url.database}
     anchor_receipt = tmp_path / "anchor.json"
@@ -232,6 +252,11 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                 fence.assert_quiet(retained)
                 assert _snapshot_layout(retained) == baseline["storage_layout"]
                 assert retained.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
+                pending_inventory = dict(source=pending_root, scope=pending_scope, timeout_seconds=15, max_entries=64,
+                                         check_held=lambda: fence.assert_quiet(retained))
+                pending_before = measure_pending_spool_before_anchor(
+                    **pending_inventory, database_identity=identity, source_commit_seq=source_commit,
+                )
                 with pytest.raises(RuntimeError, match="original_authority_changed"):
                     create_original_recovery_anchor(
                         fence, control, expected_source_commit_seq=expected[0][-1].market_commit_seq + 1,
@@ -243,6 +268,8 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                 assert anchor["storage_layout"] == baseline["storage_layout"]
                 anchor_receipt.write_text(json.dumps(anchor, sort_keys=True))
                 anchor_hash = hashlib.sha256(anchor_receipt.read_bytes()).hexdigest()
+                pending_boundary = {"database_identity": identity, "source_commit_seq": source_commit, "anchor_sha256": anchor_hash}
+                pending_source = measure_pending_spool(**pending_inventory, boundary=pending_boundary)
                 wal_options = dict(receiving=copied, base_transfer_sha256=transfer["transfer_receipt_sha256"],
                     baseline=baseline_verification, baseline_verification_sha256=baseline_verification["verification_sha256"],
                     anchor_path=anchor_receipt, anchor_sha256=anchor_hash)
@@ -271,6 +298,13 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                         restic=worker.restic, encryption_key=suffix_key, max_objects=100,
                         max_plaintext_bytes=16 * 1024**2, limits=archive_limits, check_archive=check_archive,
                     )
+                    pending_transfer = stage_pending_spool(
+                        source=pending_root, receiving=copied, private_scratch=pending_scratch,
+                        scope=pending_scope, boundary=pending_boundary, restic=worker.restic, encryption_key=pending_key,
+                        limits=pending_limits, max_entries=64, check_held=lambda: (fence.check_clock(), check_archive()),
+                        pre_anchor=pending_before, expected_pre_anchor_sha256=pending_before["source_sha256"],
+                    )
+                assert pending_transfer["segments"] == pending_source["segments"] == pending_before["segments"]
                 evidence = archive_transfer["archive"]
                 assert evidence["archive_objects"] == 1
                 suffix_snapshot = evidence["archive_snapshot"]
@@ -337,7 +371,7 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     restored_baseline = prepare_archive_baseline(
         receipt, baseline_restore, expected_receipt_sha256=receipt_hash, max_objects=100,
     )
-    suffix_restore = tmp_path / "suffix-restored"
+    suffix_restore = restore_root / "suffix-restored"
     suffix_restore.mkdir(mode=0o700)
     objects.root.rename(tmp_path / "original-objects")
     (restore_root / "start").write_text("old layout exact archive anchor\n")
@@ -365,6 +399,20 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     restored = Database(restored_url.render_as_string(hide_password=False))
     try:
         assert restored.ensure_schema(), str(restored.last_error)
+        pending_root.rename(tmp_path / "original-pending-unavailable")
+        pending_restore = restore_root / "inactive-pending-restore"
+        pending_restore.mkdir(mode=0o700)
+        assert pending_restore.stat().st_dev != (tmp_path / "original-pending-unavailable").stat().st_dev
+        pending_verified = verify_pending_spool(receiving=copied, expected_transfer_sha256=pending_transfer["transfer_sha256"],
+            scope=pending_scope, boundary=pending_boundary, inactive_restore=pending_restore, restic=worker.restic,
+            decryption_key=pending_key, limits=pending_limits, max_entries=64,
+            expected_pre_anchor_sha256=pending_before["source_sha256"])
+        assert pending_verified["segments"] == pending_source["segments"]
+        forged_anchor = pending_boundary | {"anchor_sha256": "a" * 64}
+        with pytest.raises(RuntimeError, match="receipt_scope_changed"):
+            verify_pending_spool(receiving=copied, expected_transfer_sha256=pending_transfer["transfer_sha256"],
+                scope=pending_scope, boundary=forged_anchor, inactive_restore=pending_restore, restic=worker.restic,
+                decryption_key=pending_key, limits=pending_limits, max_entries=64)
         closure_args = dict(receiving=copied, baseline=restored_baseline, wal_options=archive_wal_options,
             expected_wal_sha256=wal_transfer["wal_transfer_sha256"], native_named=handoff,
             native_named_sha256=handoff["verification_sha256"], archive_transfer_sha256=archive_transfer["archive_transfer_sha256"],
@@ -387,10 +435,25 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
             closure = verify_named_archive_closure(conn, **closure_args)
         assert closure["coverage"]["final_objects"] == 2
         assert closure["coverage"]["verified_suffix_objects"] == 1
+        assert pending_verified["boundary"]["anchor_sha256"] == closure["anchor_sha256"] == anchor_hash
+        assert pending_verified["boundary"]["source_commit_seq"] == closure["source_commit_seq"]
+        assert pending_verified["pre_anchor_sha256"] == pending_before["source_sha256"]
+        _check_named_receipt_package(tmp_path, target, pending_before, pending_source, pending_verified, closure)
+        recovered_records = [record for descriptor in pending_verified["segments"]
+                             for record in DurableRawSpoolSegment.from_path(pending_restore / "spool" / descriptor["path"]).records()]
+        assert recovered_records == pending_records
+        print(f"QT_NAMED_PENDING_SPOOL files={pending_scope.sealed_files} bytes={pending_scope.sealed_bytes} frames={len(recovered_records)}")
         print(f"QT_FINAL_ARCHIVE files={evidence['encrypted_files']} bytes={evidence['encrypted_bytes']} objects={evidence['archive_objects']}")
         with restored.session() as session:
             assert _snapshot_layout(session) == baseline["storage_layout"]
             assert session.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
+            assert session.execute(text("""
+                SELECT definition_id,session_id,connection_epoch,event_type
+                FROM market.stream_session_events WHERE id=:event
+            """), {"event": failed_event}).one() == (pending_scope.definition_id, pending_scope.session_id, 1, "failed")
+            assert not session.scalar(text("""
+                SELECT EXISTS (SELECT 1 FROM market.raw_archive_record_mappings WHERE raw_record_id=ANY(:ids))
+            """), {"ids": [item.raw_record_id for item in recovered_records]})
             options = dict(max_objects=100, suffix_snapshot_id=suffix_snapshot)
             with pytest.raises(RuntimeError, match="suffix_binding_mismatch"):
                 verify_final_archive_suffix(
@@ -461,6 +524,61 @@ def _prepare_native_repository(engine, identity, tmp_path, monkeypatch):
             cursor.execute(sql.SQL("ALTER SYSTEM SET archive_command = {}").format(sql.Literal(archive_command)))
         conn.exec_driver_sql("SELECT pg_reload_conf()")
     return EncryptedRecoveryCopies(incremental=config, connection_url=engine.url, **limits)
+
+
+def _pending_level2(storage, structures, root):
+    product = "BIP-FIXTURE"
+    definition = _definition(storage, structures, "level2", product)
+    claim = structures.claim_stream(definition_id=definition, owner_id="named-pending-fixture", lease_seconds=60, bounded=True)
+    structures.append_session_event(claim, event_ordinal=0, connection_epoch=1, event_type="session_started",
+                                    occurred_at=datetime.now(UTC))
+    messages = list(_messages(claim, "level2", resumed=False, inject_gap=False))
+    records, total = [], 0
+    for ordinal, frames in enumerate((messages[:2], messages[2:])):
+        segment = DurableRawSpoolSegment(root=root, definition_id=definition, session_id=claim.session_id,
+                                         connection_epoch=1, segment_ordinal=ordinal)
+        for frame in frames:
+            message = ProviderRawMessage.build(provider=frame.provider, venue=frame.venue,
+                stream_session_id=claim.session_id, connection_epoch=1, receive_ordinal=frame.receive_ordinal,
+                received_at=frame.received_at, raw_frame=frame.raw_frame)
+            channel = json.loads(message.raw_frame)["channel"]
+            record = RawStreamRecord.from_provider_message(message, definition_id=definition,
+                spool_segment_id=segment.spool_segment_id, provider_product_id=product,
+                requested_channel="level2", observed_channel="level2" if channel == "l2_data" else channel)
+            segment.append(record)
+            records.append(record)
+        total += segment.seal().stat().st_size
+    failed = structures.append_session_event(claim, event_ordinal=1, connection_epoch=1, event_type="failed",
+        occurred_at=datetime.now(UTC), reason="fixture unavailable before sealed tail admission")
+    structures.release(claim)
+    scope = PendingSpoolScope(definition, claim.session_id, 1, claim.provider, claim.venue, product, "level2", 2, total)
+    return scope, records, failed
+
+
+def _check_named_receipt_package(tmp_path, target, before, source, received, closure):
+    """Validate the real receiver receipts offline, using the fixture's measured provider input."""
+    root = tmp_path / "independent-approval-fixture"
+    root.mkdir(mode=0o700)
+    scope_hash = archive_evidence_hash(before["scope"])
+    plan = {"schema": PLAN_VERSION, "pending_spool_scope_sha256": scope_hash,
+            **{key: closure[key] for key in ("base_transfer_sha256", "baseline_verification_sha256", "pair_receipt_sha256")}}
+    plan_path = root / "recovery-plan.json"
+    save_receipt(plan_path, plan, initial=True)
+    plan_hash = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+    package = {"source_commit_floor": closure["source_commit_seq"], "scope": {"target_database": target},
+               "artifacts": {"independent_recovery": {"filename": plan_path.name, "sha256": plan_hash}}}
+    drained = {"schema": COLLECTOR_RECEIPT_VERSION, "phase": "drained",
+               "evidence": {"source_commit_seq": closure["source_commit_seq"], "pending_spool": before}}
+    provider_hash = archive_evidence_hash(drained)
+    save_receipt(root / f"collector-drained-{provider_hash}.json", drained | {"sha256": provider_hash}, initial=True)
+    report = {"archive_closure": closure, "pending_spool_source": source, "pending_spool_verified": received}
+    binding = bind_approved_recovery_checks(package_path=root / "package.json", package=package, receipt_root=root,
+        verify_site_restore=lambda *_: report, expected_pending_scope_sha256=scope_hash)
+    digest = binding(None, None, closure["source_commit_seq"], provider_hash, lambda: 10, lambda: None)
+    published = load_receipt(root / f"independent-recovery-{digest}.json", max_bytes=4 * 1024**2)
+    assert published["sha256"] == digest
+    assert published["pending_spool_before_anchor_sha256"] == before["source_sha256"]
+    assert {key: published[key] for key in report} == report
 
 
 def _later_trade(structures, root, claim, record, *, trade_id="after-physical-endpoint"):
