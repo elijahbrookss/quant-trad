@@ -2162,6 +2162,7 @@ class PostgresMarketDataRepository:
         source_revision: Optional[str] = None,
         ingestion_run_id: Optional[str] = None,
         allow_corrections: bool = True,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         series_id = int(series_id)
         source_id = int(source_id)
@@ -2172,6 +2173,11 @@ class PostgresMarketDataRepository:
             raise ValueError("market_data_ingest_invalid: source_id must be positive")
         if not rows:
             raise ValueError("market_data_ingest_invalid: at least one candle is required")
+        if type(fill_missing_only) is not bool or (fill_missing_only and any(
+            fact.known_at != fact.accepted_at or fact.known_at_method != "platform_acceptance"
+            for fact in rows
+        )):
+            raise ValueError("market_data_ingest_invalid: gap-only candles require platform acceptance")
         duplicate_times = [
             current.open_time
             for previous, current in zip(rows, rows[1:])
@@ -2220,6 +2226,7 @@ class PostgresMarketDataRepository:
                     for fact in rows
                 ],
                 allow_corrections=bool(allow_corrections),
+                fill_missing_only=fill_missing_only,
             )
         except Exception as exc:
             self._fail_ingestion_run(run_id, exc)
@@ -2701,6 +2708,7 @@ class PostgresMarketDataRepository:
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
         require_same_source: bool = False,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         with db.session() as session:
             return self._ingest_canonical_rows_with_session(
@@ -2711,6 +2719,7 @@ class PostgresMarketDataRepository:
                 allow_corrections=allow_corrections,
                 collection_fence=collection_fence,
                 require_same_source=require_same_source,
+                fill_missing_only=fill_missing_only,
             )
 
     def _ingest_canonical_rows_with_session(
@@ -2723,6 +2732,7 @@ class PostgresMarketDataRepository:
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
         require_same_source: bool = False,
+        fill_missing_only: bool = False,
     ) -> IngestionOutcome:
         inserted_count = 0
         corrected_count = 0
@@ -2750,21 +2760,21 @@ class PostgresMarketDataRepository:
             source.provider.lower() == "coinbase" and source.source_kind == "historical_api"
             and rows and all(fact.fact_type == CANDLE_FACT_TYPE for fact in rows)
         )
+        if fill_missing_only and (not cold_active or not historical):
+            raise RuntimeError("market_data_gap_acquisition_requires_canonical_cold_coinbase")
         if cold_active and historical:
             from .cold_history import require_cold_acquisition_headroom
 
-            require_cold_acquisition_headroom(session)
             cold_cutoff = session.execute(text("""
                 SELECT clock_timestamp() - make_interval(days => (policy->>'recent_days')::integer)
                 FROM public.portal_storage_policy WHERE id=1
             """)).scalar_one_or_none()
             if cold_cutoff is None:
                 raise RuntimeError("cold_fact_publish_storage_policy_missing")
-            if any(fact.observation_time >= cold_cutoff for fact in rows):
-                # Mixed requests follow the live transaction until the
-                # acquisition owner has split their exact coverage scope.
-                cold_cutoff = None
-            else:
+            if fill_missing_only and any(fact.observation_time >= cold_cutoff for fact in rows):
+                raise RuntimeError("market_data_gap_acquisition_outside_cold_window")
+            if any(fact.observation_time < cold_cutoff for fact in rows):
+                require_cold_acquisition_headroom(session)
                 series_dimensions = session.execute(text(
                     "SELECT dimensions FROM market.series WHERE id=:series_id"
                 ), {"series_id": series_id}).scalar_one()
@@ -2777,7 +2787,7 @@ class PostgresMarketDataRepository:
         latest_by_key = {}
         if latest_identities:
             latest_headers = session.execute(text("""
-                SELECT id,observation_key,revision,row_hash,market_commit_seq,source_id
+                SELECT id,observation_key,revision,row_hash,material_hash,market_commit_seq,source_id
                 FROM market.fact_versions
                 WHERE id=ANY(:ids) AND storage_day=ANY(:days)
             """), {"ids": [row["id"] for row in latest_identities],
@@ -2798,6 +2808,8 @@ class PostgresMarketDataRepository:
         pending_rows = []
         pending_hashes = {key: row["row_hash"] for key, row in latest_by_key.items()}
         for fact in rows:
+            if fill_missing_only and fact.observation_key in latest_by_key:
+                continue
             if pending_hashes.get(fact.observation_key) != fact.row_hash:
                 pending_rows.append(fact)
                 pending_hashes[fact.observation_key] = fact.row_hash
@@ -2819,6 +2831,14 @@ class PostgresMarketDataRepository:
                         f"another source series_id={series_id} "
                         f"observation_key={fact.observation_key}"
                     )
+                if fill_missing_only:
+                    if str(latest["material_hash"]) != fact.material_hash:
+                        raise RuntimeError(
+                            "market_data_gap_acquisition_overlap_changed: "
+                            f"series_id={series_id} observation_key={fact.observation_key}"
+                        )
+                    noop_count += 1
+                    continue
                 if str(latest["row_hash"]) == fact.row_hash:
                     noop_count += 1
                     continue
@@ -2830,13 +2850,12 @@ class PostgresMarketDataRepository:
                         f"observation_key={fact.observation_key}"
                     )
             revision = 1 if latest is None else int(latest["revision"]) + 1
-            if cold_cutoff is not None:
-                # A key already holding a hot revision stays transactional
-                # until its hot authority retires. Cold-only heads can be
-                # advanced directly on HDD under the same series fence.
-                insert_cold = fact.observation_key not in hot_keys
-            else:
-                insert_cold = False
+            # A key with a hot head stays transactional until that authority
+            # retires. A single request can include eligible cold and hot keys.
+            insert_cold = (
+                cold_cutoff is not None and fact.observation_time < cold_cutoff
+                and fact.observation_key not in hot_keys
+            )
             if insert_cold:
                 commit_seq = int(session.scalar(text("SELECT nextval('market.fact_commit_seq')")))
                 record = CanonicalFactRecord(

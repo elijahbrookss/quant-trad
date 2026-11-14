@@ -382,6 +382,37 @@ def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(s
         assert session.execute(text("SELECT count(*) FROM market.cold_fact_locators WHERE series_id=:id"),
                                {"id": series_id}).scalar_one() == 2
 
+    old_start = start + timedelta(minutes=1)
+    recent_start = datetime.combine(storage.today - timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    mixed = [replace(fact, open_time=opened, close_time=opened + timedelta(minutes=1),
+                     known_at=opened + timedelta(minutes=1), accepted_at=recent_start + timedelta(minutes=1))
+             for opened in (old_start, recent_start)]
+    assert storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=mixed).inserted_count == 2
+    with storage.database.session() as session:
+        hot_times = session.execute(text("""
+            SELECT observation_time FROM market.fact_versions WHERE series_id=:id
+        """), {"id": series_id}).scalars().all()
+        cold_count = session.scalar(text("SELECT count(*) FROM market.cold_fact_locators WHERE series_id=:id"),
+                                    {"id": series_id})
+    assert hot_times == [recent_start]
+    assert cold_count == 3
+
+    acquired = datetime.combine(storage.today, datetime.min.time(), tzinfo=UTC)
+    missing = start - timedelta(minutes=1)
+    gap = replace(fact, open_time=missing, close_time=start, known_at=acquired, accepted_at=acquired,
+                  known_at_method="platform_acceptance")
+    overlap = replace(correction, known_at=acquired, accepted_at=acquired, known_at_method="platform_acceptance")
+    scope = {"series_id": series_id, "source_id": source_id, "fill_missing_only": True}
+    imported = storage.repo.ingest_candles(**scope, facts=[gap, overlap])
+    assert (imported.inserted_count, imported.corrected_count, imported.noop_count) == (1, 0, 1)
+    next_fetch = replace(gap, known_at=acquired + timedelta(seconds=1), accepted_at=acquired + timedelta(seconds=1))
+    assert storage.repo.ingest_candles(**scope, facts=[next_fetch]).noop_count == 1
+    with pytest.raises(RuntimeError, match="market_data_gap_acquisition_overlap_changed"):
+        storage.repo.ingest_candles(**scope, facts=[replace(overlap, close=107)])
+    assert storage.repo.read_candles(series_id=series_id, start=missing, end=start, known_at_lte=start) == []
+    current = storage.repo.read_candles(series_id=series_id, start=missing, end=start)
+    assert len(current) == 1 and current[0].fact.known_at == acquired
+
 
 def test_a_header_cannot_commit_without_its_payload(storage, monkeypatch):
     original_execute = None

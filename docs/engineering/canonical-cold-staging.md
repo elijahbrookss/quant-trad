@@ -68,7 +68,7 @@ The November 14 live PostgreSQL statistics estimated candles at **2.97% of legac
 | Provider reacquisition | Request budget is a lower bound. Measure complete windows/time, retries, product reach, and publication separately. Do work outside the writer fence. No standalone SSD credit for the provider leg. | Fresh observation uses its own run. Compare overlaps, disclose holes and preserve prior accepted versions. |
 | Rebuild disposable data | Delete or replace named full physical units only after validating inputs, deterministic transformation/output, and absence of custody. Track cache or index allocation independently. | Retain exact evidence for any derived result that is a canonical version or frozen input. Standalone projections and caches can be rebuilt from verified authority. |
 
-No existing accepted Coinbase datasets are approved for replacement-only retirement. Reacquisition is optional for measured gaps and must never be on the critical path for the writer fence.
+No existing accepted Coinbase datasets are approved for replacement-only retirement. After final qualification, explicitly request `fill_missing_only: true` on the canonical candle ingestion route for inventoried native Coinbase gaps outside the hot window. The series writer checks every returned key under its publication lock. Equal overlap is a no-op, and changed overlap fails the whole admitted batch for separate correction review. A new row becomes known at this acquisition's platform acceptance time and goes directly to the cold store. Frozen commit ceilings exclude these later rows. Plan provider work separately from the writer fence and keep any unresolved missing intervals explicit.
 
 ## Readback evidence before handoff
 

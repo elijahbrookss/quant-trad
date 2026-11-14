@@ -56,6 +56,7 @@ class CandleIngestionRequest(BaseModel):
     end: str
     timeframe: str
     source_revision: Optional[str] = None
+    fill_missing_only: bool = False
 
 
 class CandleDerivationRequest(BaseModel):
@@ -123,6 +124,7 @@ def ingest_candles(req: CandleIngestionRequest) -> Dict[str, Any]:
             end=_normalize_time(req.end),
             interval=req.timeframe,
             source_revision=req.source_revision,
+            **({"fill_missing_only": True} if req.fill_missing_only else {}),
         )
     except (KeyError, ValueError, RuntimeError) as exc:
         logger.warning(
