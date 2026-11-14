@@ -27,12 +27,19 @@ def _database(connection, name):
 
 def _other_publishers(conn):
     conn.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+    # Native autovacuum can enter a nonconnectable database. It maintains
+    # physical storage and statistics, and can't publish QT facts. DDL still
+    # has to acquire its usual relation locks within the cutover budget.
     return conn.execute(text("""
-        SELECT
-            (SELECT count(*) FROM pg_stat_activity
-             WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
-               AND pid<>pg_backend_pid()) AS other_backends,
-            (SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()) AS prepared_transactions
+        WITH other AS (
+            SELECT backend_type,count(*) AS count FROM pg_stat_activity
+            WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
+              AND pid<>pg_backend_pid() AND backend_type IS DISTINCT FROM 'autovacuum worker'
+            GROUP BY backend_type
+        )
+        SELECT (SELECT coalesce(sum(count),0) FROM other) AS other_backends,
+               (SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()) AS prepared_transactions,
+               (SELECT coalesce(jsonb_object_agg(coalesce(backend_type,'unknown'),count),'{}') FROM other) AS backend_types
     """)).one()
 
 
@@ -83,8 +90,10 @@ class DatabaseFence:
         OnlineController._require_job_environment(conn)
         if OnlineController._supported_builtin_catalog(conn) != self.jobs:
             raise RuntimeError("canonical_cold_database_fence_job_catalog_changed")
-        if _other_publishers(conn) != (0, 0):
-            raise RuntimeError("canonical_cold_database_fence_publishers_not_drained")
+        activity = _other_publishers(conn)
+        if activity.other_backends or activity.prepared_transactions:
+            raise RuntimeError("canonical_cold_database_fence_publishers_not_drained: "
+                               f"backend_types={activity.backend_types} prepared={activity.prepared_transactions}")
 
 
 def close_database_fence(conn, control, *, expected_database, timeout_seconds, record):
@@ -137,10 +146,10 @@ def close_database_fence(conn, control, *, expected_database, timeout_seconds, r
         with conn.begin():
             with _bounded_step(conn, timeout_seconds) as limit:
                 limit(deadline - monotonic())
-                remaining, prepared = _other_publishers(conn)
-                if prepared:
+                activity = _other_publishers(conn)
+                if activity.prepared_transactions:
                     raise RuntimeError("canonical_cold_database_fence_prepared_transactions")
-                if not remaining:
+                if not activity.other_backends:
                     fence.assert_quiet(conn)
                     break
         sleep(min(0.1, max(0, deadline - monotonic())))
