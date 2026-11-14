@@ -1377,3 +1377,26 @@ and any intervening non-collector writes. The provider-spool rehearsal above
 shows why ordinary provider replay does not supply those original clocks.
 An exact backward projection and a representative off-host restore remain
 unqualified.
+
+### Recover the original layout at the last accepted write
+
+The named-anchor rehearsal starts with an earlier native pair, admits and
+freezes a trade on the old layout, and closes application database logins and
+stops its qualified TimescaleDB jobs. With the original database connection
+still held, the control database writes a unique restore point and switches
+WAL. The fixture copies the encrypted repository, retrieves the anchor WAL
+segment, and restores to that named point on the exact original timeline. The
+isolated postmaster reads the copied WAL repository with separately supplied
+keys. The restored application database rejects login until the isolated
+control connection reopens it. The old layout and legacy partition, canonical
+ID and clocks, frozen read, and the exact raw record match. The selected
+endpoint excludes an additional trade written and archived after the anchor.
+
+The baseline pair in this fixture has an empty archive inventory. It verifies
+one post-baseline raw archive file by digest and reads it with the recovered
+catalog. A production anchor still needs complete and independently durable
+archive reachability at its database watermark, including all intervening
+archives, preserved frozen dependencies, and any pending spool required by
+the provider boundary. This also requires measured end-to-end transfer and
+restore on the intended storage. Publishing a PostgreSQL restore point alone
+does not establish the paired recovery endpoint.

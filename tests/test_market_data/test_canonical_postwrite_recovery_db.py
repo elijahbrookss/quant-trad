@@ -11,11 +11,13 @@ from time import monotonic, sleep
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import NullPool
 
 from core.storage_targets import StorageTarget
 from market_data.archive import FilesystemRawArchiveObjectStore, read_raw_archive_parquet
 from market_data.contracts import DatasetSeriesRequest
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
+from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 from portal.backend.db.session import Database
 from portal.backend.service.storage.incremental_recovery import (
     EncryptedRecoveryCopies, IncrementalRecoveryConfig, prepare_encrypted_repository,
@@ -24,11 +26,13 @@ from portal.backend.service.storage.recovery_copies import _identity, _snapshot_
 from portal.backend.service.storage.repos import market_data, market_lifecycle, market_structure
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.automation.verify_canonical_recovery_archive import verify_archive
+from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
 from tests.test_market_data import test_canonical_cold_activate_db as activation_fixture
 from tests.test_market_data.test_canonical_recovery_spool_db import (
     _admitted_rows, _define_trade_stream, _native_recover, _seal_trade,
 )
-from tests.test_market_data.test_fact_storage_tiers_db import storage
+from tests.test_market_data.test_fact_storage_tiers_db import _ingest, _placement, storage
 
 
 pytestmark = [
@@ -79,6 +83,196 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
     }
     assert all(older_frozen.values())
 
+    worker = _prepare_native_repository(engine, identity, tmp_path, monkeypatch)
+    with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
+        selected = worker.create(snapshot, objects=objects, keep_copies=1)
+    assert [point for _, _, point in worker.completed()] == [selected]
+    assert selected["storage_layout"]["layout_version"] == COLD_HISTORY_LAYOUT_VERSION
+    assert selected["archive_objects"] >= len(archive_keys) + 1
+    # This committed write is after the pinned database backup endpoint.
+    _later_trade(structures, root, claim, record)
+    assert len(_admitted_rows(storage.database, series)[0]) == 2
+
+    restore_root, copied, receipt = _copy_repository(worker, selected)
+    # Hold the original plaintext archive objects out of the runtime reader's path.
+    objects.root.rename(root / "original-objects")
+    _restore_database(worker, copied, selected, "--type=immediate")
+    restored_store = _restore_archives(worker, copied, selected, receipt, objects, tmp_path)
+    for key in archive_keys:
+        assert restored_store.local_path(key).is_file()
+    (restore_root / "start").write_text("committed cold recovery point\n")
+    url = engine.url.set(host="restored")
+    _wait_for_restored_cluster(url, expected_identity=identity)
+
+    restored = Database(url.render_as_string(hide_password=False))
+    try:
+        assert restored.ensure_schema(), str(restored.last_error)
+        for module in (market_data, market_structure, market_lifecycle):
+            monkeypatch.setattr(module, "db", restored)
+        reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: restored_store,
+                                                         read_cache_factory=lambda: None)
+        monkeypatch.setattr(market_data, "canonical_fact_storage_repository", reader)
+        monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", reader)
+        monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(restored_store.root.parent))
+        repository = market_data.PostgresMarketDataRepository()
+        assert _admitted_rows(restored, series) == expected
+        assert repository.read_facts(series_id=series, start=start, end=end) == current
+        assert repository.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series) == expected_frozen
+        for (dataset, older_series), records in older_frozen.items():
+            assert repository.read_dataset_fact_revisions(dataset_id=dataset, series_id=older_series) == records
+        with restored.session() as session:
+            assert _snapshot_layout(session) == selected["storage_layout"]
+            assert session.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
+        raw_id, _, key, digest = expected[1][0]
+        path = restored_store.local_path(key)
+        assert raw_id == record.raw_record_id
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        assert read_raw_archive_parquet(path) == [record]
+    finally:
+        restored._reset_engine()
+
+
+def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, tmp_path, monkeypatch):
+    assert os.getuid() == 70 and os.getenv("QT_STORAGE_DEMO") == "1"
+    engine = storage.database._engine
+    assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
+    legacy_day, legacy_end = storage.today - timedelta(days=2), storage.today - timedelta(days=1)
+    _placement(monkeypatch, legacy_day)
+    _ingest(storage)
+    with engine.begin() as conn:
+        identity = _identity(conn)[0]
+        system_identifier, database_oid = identity.split("/")
+        activation_fixture._attach_legacy_child(conn, legacy_day, legacy_end)
+    objects = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    structures, claim, series = _define_trade_stream(storage, monkeypatch)
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    worker = _prepare_native_repository(engine, identity, tmp_path, monkeypatch)
+    with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
+        baseline = worker.create(snapshot, objects=objects, keep_copies=2)
+    assert baseline["storage_layout"]["layout_version"] == FACT_STORAGE_LAYOUT_VERSION
+    assert baseline["archive_objects"] == 0 and _admitted_rows(storage.database, series) == ([], [])
+
+    # Provider intake and its archive are newer than the prestaged baseline.
+    _, record = _seal_trade(tmp_path, claim, trade_id="original-at-anchor")
+    _native_recover(structures, tmp_path)
+    expected = _admitted_rows(storage.database, series)
+    assert len(expected[0]) == len(expected[1]) == 1
+    raw_id, _, key, digest = expected[1][0]
+    assert raw_id == record.raw_record_id
+    start, end = record.received_at - timedelta(seconds=10), record.received_at + timedelta(seconds=10)
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series, start, end)])
+    original_reader = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
+    assert len(original_reader) == 1
+    target = {"system_identifier": system_identifier, "database_oid": int(database_oid),
+              "database": engine.url.database}
+
+    with activation_fixture._fence_connections(storage) as (retained, control):
+        events = []
+
+        def record_event(phase, evidence):
+            events.append(phase)
+
+        fence = close_database_fence(retained, control, expected_database=target, timeout_seconds=60,
+                                      record=record_event)
+        try:
+            with retained.begin():
+                fence.assert_quiet(retained)
+                assert _snapshot_layout(retained) == baseline["storage_layout"]
+                assert retained.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
+                with pytest.raises(RuntimeError, match="original_authority_changed"):
+                    create_original_recovery_anchor(
+                        fence, control, expected_source_commit_seq=expected[0][0].market_commit_seq + 1,
+                    )
+                anchor = create_original_recovery_anchor(
+                    fence, control, expected_source_commit_seq=expected[0][0].market_commit_seq,
+                )
+                assert anchor["database"]["allow_connections"] is False
+                assert anchor["storage_layout"] == baseline["storage_layout"]
+                # This fixture admits one exact post-baseline raw object. It
+                # has no full production archive-inventory/delta implication.
+                escrow = tmp_path / "archive-suffix"
+                copied_object = escrow / key
+                copied_object.parent.mkdir(parents=True)
+                shutil.copy2(objects.local_path(key), copied_object)
+                assert hashlib.sha256(copied_object.read_bytes()).hexdigest() == digest
+                fence.assert_quiet(retained)
+        finally:
+            reopen_database_fence(fence, control, expected_outcome="original",
+                read_outcome=lambda conn: (
+                    "original" if _snapshot_layout(conn) == baseline["storage_layout"] else "changed"
+                ), record=record_event)
+        assert events == ["login_closing", "jobs_stopping", "database_fenced",
+                          "login_opening", "jobs_restarting", "database_reopened"]
+
+    _later_trade(structures, tmp_path, claim, record)
+    assert len(_admitted_rows(storage.database, series)[0]) == 2
+    wal_name = anchor["wal_segment"]
+    deadline = monotonic() + 25
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        # Also archive transactions beyond the anchor to test exact stopping.
+        conn.execute(text("SELECT pg_switch_wal()"))
+        while not conn.scalar(text("""
+            SELECT left(last_archived_wal,8)=left(:wal,8) AND last_archived_wal>:wal
+            FROM pg_stat_archiver
+        """), {"wal": wal_name}):
+            assert monotonic() < deadline, "anchor and post-anchor WAL must be archived"
+            sleep(0.1)
+    restore_root, copied, receipt = _copy_repository(worker, baseline)
+    anchor_file = restore_root / "anchor-wal"
+    worker._run([str(worker.pgbackrest), "--no-config", "--stanza=qt",
+                 "--repo1-path=" + str(copied / "database"), "--repo1-cipher-type=aes-256-cbc",
+                 "--pg1-path=" + str(worker.config.pg_path),
+                 "--lock-path=" + str(copied.parent),
+                 "--log-level-file=off", "archive-get", wal_name, str(anchor_file)])
+    assert anchor_file.stat().st_size == 16 * 1024**2
+    assert verify_archive(receipt, _restore_archive_snapshot(worker, copied, baseline, tmp_path))[
+        "verified_archive_objects"
+    ] == 0
+    _restore_database(worker, copied, baseline, "--type=name", "--target=" + anchor["restore_name"],
+                      "--target-timeline=" + str(anchor["timeline"]))
+    objects.root.rename(tmp_path / "original-objects")
+    (restore_root / "start").write_text("old layout exact archive anchor\n")
+    restored_url = engine.url.set(host="restored")
+    control_url = restored_url.set(database="postgres")
+    _wait_for_restored_cluster(control_url)
+    probe = create_engine(restored_url, connect_args={"connect_timeout": 2}, poolclass=NullPool)
+    try:
+        with pytest.raises(OperationalError, match="not currently accepting connections"):
+            probe.connect()
+    finally:
+        probe.dispose()
+    control_engine = create_engine(control_url, poolclass=NullPool)
+    try:
+        with control_engine.begin() as control:
+            saved = control.execute(text("""
+                SELECT d.oid::bigint,d.datallowconn,c.system_identifier::text
+                FROM pg_database d CROSS JOIN pg_control_system() c WHERE d.datname=:name
+            """), {"name": target["database"]}).one()
+            assert tuple(saved) == (target["database_oid"], False, system_identifier)
+            quoted = control.dialect.identifier_preparer.quote_identifier(target["database"])
+            control.exec_driver_sql(f"ALTER DATABASE {quoted} ALLOW_CONNECTIONS true")
+    finally:
+        control_engine.dispose()
+    restored = Database(restored_url.render_as_string(hide_password=False))
+    try:
+        assert restored.ensure_schema(), str(restored.last_error)
+        with restored.session() as session:
+            assert _snapshot_layout(session) == baseline["storage_layout"]
+            assert session.scalar(text("SELECT market.fact_header_legacy_end_day()")) == legacy_end
+        assert _admitted_rows(restored, series) == expected
+        monkeypatch.setattr(market_data, "db", restored)
+        restored_store = FilesystemRawArchiveObjectStore(escrow, writable=False)
+        monkeypatch.setattr(market_data, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
+            object_store_factory=lambda: restored_store, read_cache_factory=lambda: None,
+        ))
+        repository = market_data.PostgresMarketDataRepository()
+        assert repository.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series) == original_reader
+        assert read_raw_archive_parquet(restored_store.local_path(key)) == [record]
+    finally:
+        restored._reset_engine()
+
+
+def _prepare_native_repository(engine, identity, tmp_path, monkeypatch):
     hdd = Path("/qt-history")
     udev = tmp_path / "backup-udev"
     udev.mkdir()
@@ -111,13 +305,10 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
         with conn.connection.driver_connection.cursor() as cursor:
             cursor.execute(sql.SQL("ALTER SYSTEM SET archive_command = {}").format(sql.Literal(archive_command)))
         conn.exec_driver_sql("SELECT pg_reload_conf()")
-    worker = EncryptedRecoveryCopies(incremental=config, connection_url=engine.url, **limits)
-    with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
-        selected = worker.create(snapshot, objects=objects, keep_copies=1)
-    assert [point for _, _, point in worker.completed()] == [selected]
-    assert selected["storage_layout"]["layout_version"] == COLD_HISTORY_LAYOUT_VERSION
-    assert selected["archive_objects"] >= len(archive_keys) + 1
-    # This committed write is after the pinned database backup endpoint.
+    return EncryptedRecoveryCopies(incremental=config, connection_url=engine.url, **limits)
+
+
+def _later_trade(structures, root, claim, record):
     late = structures.claim_stream(definition_id=claim.definition_id, owner_id="post-point-fixture",
                                    lease_seconds=60, bounded=True)
     structures.append_session_event(late, event_ordinal=0, connection_epoch=0, event_type="session_started",
@@ -125,8 +316,9 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
     structures.release(late)
     _seal_trade(root, late, trade_id="after-physical-endpoint")
     _native_recover(structures, root)
-    assert len(_admitted_rows(storage.database, series)[0]) == 2
 
+
+def _copy_repository(worker, selected):
     restore_root = Path("/qt-restore")
     assert not list(restore_root.iterdir())
     copied = restore_root / "repository"
@@ -135,61 +327,59 @@ def test_postwrite_pair_restores_exact_canonical_row_and_raw_archive(storage, tm
     shutil.copytree(worker.root / "archives", copied / "archives")
     receipt = copied / "complete.json"
     shutil.copy2(worker.root / selected["name"] / "complete.json", receipt)
-    # Hold the original plaintext archive objects out of the runtime reader's path.
-    objects.root.rename(root / "original-objects")
+    return restore_root, copied, receipt
+
+
+def _restore_database(worker, copied, selected, *recovery_target):
+    # The postmaster runs in a separate container without the client's
+    # pgBackRest environment. Supply the restored repository's key separately.
+    access = copied.parent / "recovered-access"
+    access.mkdir(mode=0o700)
+    settings = access / "pgbackrest.conf"
+    settings.touch(mode=0o600, exist_ok=False)
+    key = worker.config.database_key_path.read_text()
+    settings.write_text(
+        f"[global]\nrepo1-path={copied / 'database'}\nrepo1-cipher-type=aes-256-cbc\n"
+        f"repo1-cipher-pass={key}\nlock-path={access}\nlog-level-file=off\n"
+        "[qt]\npg1-path=/qt-restore/pgdata\n"
+    )
     worker._run(worker._br("--repo1-path=" + str(copied / "database"), "--pg1-path=/qt-restore/pgdata",
                 "--tablespace-map-all=/qt-restore/history", "--set=" + selected["database_label"],
-                "--type=immediate", "--target-action=promote", "--archive-mode=off", "restore"))
-    restored_archives = tmp_path / "restored-archives"
-    worker._run([str(worker.restic), "--repo", str(copied / "archives"), "--no-cache", "--json",
-                 "restore", selected["archive_snapshot"], "--target", str(restored_archives)])
+                f'--recovery-option=restore_command=/usr/local/bin/pgbackrest --config={settings} --stanza=qt archive-get %f "%p"',
+                *recovery_target, "--target-action=promote", "--archive-mode=off", "restore"))
+
+
+def _restore_archives(worker, copied, selected, receipt, objects, tmp_path):
+    restored_archives = _restore_archive_snapshot(worker, copied, selected, tmp_path)
     report = verify_archive(receipt, restored_archives)
     assert report["verified_archive_objects"] == selected["archive_objects"]
-    restored_store = FilesystemRawArchiveObjectStore(
+    return FilesystemRawArchiveObjectStore(
         restored_archives / str(objects.root).lstrip("/"), writable=False,
     )
-    for key in archive_keys:
-        assert restored_store.local_path(key).is_file()
-    (restore_root / "start").write_text("committed cold recovery point\n")
-    url = engine.url.set(host="restored")
+
+
+def _restore_archive_snapshot(worker, copied, selected, tmp_path):
+    restored = tmp_path / "restored-archives"
+    worker._run([str(worker.restic), "--repo", str(copied / "archives"), "--no-cache", "--json",
+                 "restore", selected["archive_snapshot"], "--target", str(restored)])
+    return restored
+
+
+def _wait_for_restored_cluster(url, *, expected_identity=None):
     probe = create_engine(url, connect_args={"connect_timeout": 2})
     deadline = monotonic() + 45
     try:
         while True:
             try:
                 with probe.connect() as conn:
-                    assert _identity(conn)[0] == identity
-                break
+                    if not conn.scalar(text("SELECT pg_is_in_recovery()")):
+                        if expected_identity is not None:
+                            assert _identity(conn)[0] == expected_identity
+                        return
             except OperationalError:
                 if monotonic() >= deadline:
                     raise
-                sleep(0.1)
+            assert monotonic() < deadline, "restored database did not promote by deadline"
+            sleep(0.1)
     finally:
         probe.dispose()
-
-    restored = Database(url.render_as_string(hide_password=False))
-    try:
-        assert restored.ensure_schema(), str(restored.last_error)
-        for module in (market_data, market_structure, market_lifecycle):
-            monkeypatch.setattr(module, "db", restored)
-        reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: restored_store,
-                                                         read_cache_factory=lambda: None)
-        monkeypatch.setattr(market_data, "canonical_fact_storage_repository", reader)
-        monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", reader)
-        monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(restored_store.root.parent))
-        repository = market_data.PostgresMarketDataRepository()
-        assert _admitted_rows(restored, series) == expected
-        assert repository.read_facts(series_id=series, start=start, end=end) == current
-        assert repository.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series) == expected_frozen
-        for (dataset, older_series), records in older_frozen.items():
-            assert repository.read_dataset_fact_revisions(dataset_id=dataset, series_id=older_series) == records
-        with restored.session() as session:
-            assert _snapshot_layout(session) == selected["storage_layout"]
-            assert session.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
-        raw_id, _, key, digest = expected[1][0]
-        path = restored_store.local_path(key)
-        assert raw_id == record.raw_record_id
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
-        assert read_raw_archive_parquet(path) == [record]
-    finally:
-        restored._reset_engine()
