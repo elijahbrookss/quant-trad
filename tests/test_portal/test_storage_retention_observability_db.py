@@ -72,7 +72,6 @@ def postgres(tmp_path, monkeypatch):
             MarketFactArchiveManifestRecord,
             MarketFactArchiveVerificationRecord,
             MarketFactStorageStateRecord,
-            ColdFactRetiredDayRecord,
         ):
             model.__table__.create(engine)
         monkeypatch.setattr(module, "get_settings", _settings)
@@ -257,14 +256,18 @@ def test_initial_handoff_removes_a_day_from_hot_backlog_without_altering_source_
             storage_day=day, state="sealed", expected_rows=10,
             source_bytes=100, sealed_at=now - timedelta(hours=1),
         ))
+        session.flush()
+        before = _snapshot(session, sampled_at=now)
+        assert before["backlog"]["eligible_partitions"] == 1
+        assert before["storage"]["physical_hot"]["source_bytes"] == 100
+
+        ColdFactRetiredDayRecord.__table__.create(session.connection())
         session.add(ColdFactRetiredDayRecord(
             storage_day=day, handoff_kind="initial", row_count=10,
             manifest_set_hash=HASH_A, protected_dataset_ranges=0, reclaimed_header_bytes=200,
         ))
         session.flush()
-        before = _snapshot(session, sampled_at=now)
-        assert before["backlog"]["eligible_partitions"] == 1
-        assert before["storage"]["physical_hot"]["source_bytes"] == 100
+        assert _snapshot(session, sampled_at=now) == before
 
         session.add(MarketFactStorageStateRecord(
             layout_version=COLD_HISTORY_LAYOUT_VERSION, state="ready", completed_at=now,

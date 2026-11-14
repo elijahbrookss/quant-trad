@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+import re
 
 from sqlalchemy import text
 
 from core.storage_mounts import require_configured_archive_mount
 from market_data.archive_verification import ArchiveVerificationBatch
 from market_data.fact_archive import archive_evidence_hash
-from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES
+from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES
 from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
 from portal.backend.db.fact_identity_schema import _partition_bound
 from portal.backend.db.fact_storage_schema import (
@@ -26,16 +27,17 @@ from portal.backend.service.storage.repos.cold_retirement import (
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db.canonical_cold_audit import _ensure_target, _plan
+from scripts.db.canonical_cold_custody_placement import assert_custody_placement
 from scripts.db.canonical_cold_identity_rebuild import swap_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase
-from scripts.db.canonical_cold_migration import PostgresMigrationSource
+from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
 from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 
-ACTIVATION_VERSION = "qt.canonical_cold_activate.v1"
+ACTIVATION_VERSION = "qt.canonical_cold_activate.v2"
 _PHYSICAL_GATES = {
     "independent_recovery", "provider_boundary", "replay_equivalence",
     "legacy_reference_review", "physical_capacity", "rollback_rehearsal",
-    "representative_performance", "candidate_release",
+    "representative_performance", "candidate_release", "custody_catalog_placement",
 }
 
 
@@ -58,6 +60,14 @@ def validate_execution_record(execution, *, expected_execution_hash):
         or not isinstance(execution.get("payload_children"), dict)
         or not isinstance(execution.get("target_database"), dict)
         or not isinstance(execution.get("source_database"), dict)
+        or type(execution.get("custody_target_id")) is not str
+        or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", execution["custody_target_id"])
+        or type(execution.get("custody_tablespace_oid")) is not int
+        or not 0 < execution["custody_tablespace_oid"] <= 4_294_967_295
+        or not isinstance(execution.get("custody_relation_oids"), dict)
+        or execution["custody_relation_oids"].keys() != set(COLD_CUSTODY_TABLE_NAMES)
+        or not all(type(oid) is int and 0 < oid <= 4_294_967_295
+                   for oid in execution["custody_relation_oids"].values())
     ):
         raise ValueError("canonical_cold_activation_incomplete_execution_record")
 
@@ -96,9 +106,10 @@ def _assert_source_authority_inventory(conn, cutoff, audit):
     """Refuse changed exact published generations before any source DDL."""
     # A concurrent archive writer may stage a page elsewhere but cannot
     # mutate the published scope once the lifecycle/SQL writers are fenced.
-    for table in ("fact_archive_active_generations", "fact_archive_manifests",
-                  "fact_archive_preparations", "fact_archive_verification_generations",
-                  "fact_archive_verifications"):
+    tables = {"fact_archive_active_generations", "fact_archive_manifests",
+              "fact_archive_preparations", "fact_archive_verification_generations",
+              "fact_archive_verifications", "fact_archive_catalog_batches", *PREPARED_CATALOG_TABLES.values()}
+    for table in sorted(tables):
         conn.execute(text(f'LOCK TABLE market."{table}" IN SHARE MODE NOWAIT'))
     rows = conn.execute(text("""
         SELECT * FROM market.fact_archive_manifests
@@ -186,6 +197,8 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         raise ValueError("canonical_cold_activation_invalid_statement_timeout")
     conn.execute(text("SELECT set_config('statement_timeout',:timeout,true)"), {"timeout": str(statement_timeout_ms)})
     conn.execute(text("SET LOCAL lock_timeout='500ms'"))
+    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))")):
+        raise RuntimeError("canonical_cold_activation_storage_management_busy")
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
                        {"name": _LIFECYCLE_LOCK_NAME}):
         raise RuntimeError("canonical_cold_activation_writer_fence_busy")
@@ -225,6 +238,15 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
     _assert_source_authority_inventory(conn, cutoff, audit)
     _assert_verified_archive(conn, verified_objects)
+    for table in COLD_CUSTODY_TABLE_NAMES:
+        conn.exec_driver_sql(f"LOCK TABLE ONLY market.{table} IN SHARE MODE NOWAIT")
+    conn.exec_driver_sql("LOCK TABLE public.portal_storage_targets, public.portal_storage_header_tablespaces "
+                         "IN SHARE MODE NOWAIT")
+    assert_custody_placement(
+        conn, expected_database=f"{target.system_identifier}/{target.oid}",
+        target_id=execution["custody_target_id"], expected_tablespace_oid=execution["custody_tablespace_oid"],
+        expected_relation_oids=execution["custody_relation_oids"],
+    )
     retention = _retention_sources(conn, cutoff, audit)
     payloads = _payload_children(conn, cutoff, execution["payload_children"], retention)
     if conn.scalar(text("""
@@ -271,6 +293,8 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         "verified_rows": audit["verified_rows"], "verified_pages": audit["verified_pages"],
         "retired_header_bytes": retired_header_bytes,
         "retired_payload_bytes": sum(payload_bytes.values()), "identity": identity_result,
+        "custody": {"target_id": execution["custody_target_id"], "tablespace_oid": execution["custody_tablespace_oid"],
+                    "relation_oids": execution["custody_relation_oids"]},
         "evidence": execution["evidence"],
     }
     written = conn.execute(text("""

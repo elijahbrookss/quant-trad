@@ -12,6 +12,9 @@ COLD_LOCATOR_TABLE_NAMES = (
     "cold_fact_locators", "cold_fact_materials", "cold_fact_normalization_specs",
     "cold_book_session_facts",
 )
+COLD_CUSTODY_TABLE_NAMES = (
+    "fact_archive_dependencies", "fact_archive_preparation_dependencies",
+)
 COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", "cold_fact_retired_days",
                     "cold_fact_pruned_days", *COLD_LOCATOR_TABLE_NAMES)
 COLD_HISTORY_LAYOUT_VERSION = "market.canonical_cold_history.v1"
@@ -30,7 +33,7 @@ def assert_cold_history_immutability(conn):
         raise RuntimeError("cold_fact_catalog_immutability_required")
 
 
-def assert_cold_history_placement(conn):
+def _assert_hdd_placement(conn, names, error):
     """Require durable history placement for the heap, TOAST, and every index."""
     actual = conn.execute(text("""
         WITH tables AS (
@@ -47,7 +50,7 @@ def assert_cold_history_placement(conn):
                COALESCE(NULLIF(c.reltablespace,0), db.dattablespace) AS tablespace
         FROM members JOIN pg_class AS c USING(oid)
         CROSS JOIN pg_database AS db WHERE db.datname=current_database()
-    """), {"names": list(COLD_LOCATOR_TABLE_NAMES)}).mappings().all()
+    """), {"names": list(names)}).mappings().all()
     registered = set(conn.execute(text("""
         SELECT t.tablespace_oid
         FROM public.portal_storage_header_tablespaces t
@@ -60,10 +63,18 @@ def assert_cold_history_placement(conn):
           )
     """)).scalars())
     if (
-        {row["relname"] for row in actual} != set(COLD_LOCATOR_TABLE_NAMES)
+        {row["relname"] for row in actual} != set(names)
         or not registered or any(row["tablespace"] not in registered for row in actual)
     ):
-        raise RuntimeError("cold_fact_locator_history_tablespace_required")
+        raise RuntimeError(error)
+
+
+def assert_cold_history_placement(conn):
+    _assert_hdd_placement(conn, COLD_LOCATOR_TABLE_NAMES, "cold_fact_locator_history_tablespace_required")
+
+
+def assert_cold_custody_catalog_placement(conn):
+    _assert_hdd_placement(conn, COLD_CUSTODY_TABLE_NAMES, "cold_fact_custody_history_tablespace_required")
 
 
 class ColdFactPageRecord(Base):

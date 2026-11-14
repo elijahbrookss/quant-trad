@@ -12,8 +12,8 @@ from sqlalchemy import text
 
 from core.settings import get_settings
 from core.storage_targets import StoragePolicy
-from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.service.provenance import source_revision
+from portal.backend.service.storage.repos.cold_history import cold_layout_active
 
 
 PARTITION_SCAN_LIMIT = 2048
@@ -22,23 +22,17 @@ STATEMENT_TIMEOUT_MS = 5000
 LOCK_TIMEOUT_MS = 250
 
 
-_PROJECTION_SQL = text("""
+_PROJECTION_TEMPLATE = """
 WITH clock AS (
     SELECT CAST(:sampled_at AS timestamptz) AS sampled_at,
            (CAST(:sampled_at AS timestamptz) AT TIME ZONE 'UTC')::date AS database_day
 ),
 partition_page AS (
-    SELECT source.storage_day,
-           CASE WHEN retired.storage_day IS NOT NULL THEN 'reclaimed' ELSE source.state END AS state,
+    SELECT source.storage_day,{partition_state} AS state,
            source.created_at,source.expected_rows,source.source_bytes,source.sealed_at,
            source.verified_at,source.reclaimed_at,source.reclaimed_bytes
     FROM market.fact_retention_partitions AS source
-    LEFT JOIN market.cold_fact_retired_days AS retired
-        ON retired.storage_day=source.storage_day AND retired.handoff_kind='initial'
-        AND EXISTS (
-            SELECT FROM market.fact_storage_state
-            WHERE layout_version=:cold_layout AND state='ready' AND completed_at IS NOT NULL
-        )
+    {retirement_join}
     ORDER BY source.storage_day
     LIMIT :partition_page_limit
 ),
@@ -123,7 +117,14 @@ SELECT
     (SELECT coalesce(sum(byte_count) FILTER (WHERE verified_at >= clock.sampled_at-interval '7 days'),0)::bigint FROM manifests) AS verify_7d
 FROM clock LEFT JOIN partitions ON true
 GROUP BY clock.sampled_at,clock.database_day
-""")
+"""
+
+_PROJECTION_SQL = text(_PROJECTION_TEMPLATE.format(partition_state="source.state", retirement_join=""))
+_COLD_PROJECTION_SQL = text(_PROJECTION_TEMPLATE.format(
+    partition_state="CASE WHEN retired.storage_day IS NOT NULL THEN 'reclaimed' ELSE source.state END",
+    retirement_join="""LEFT JOIN market.cold_fact_retired_days AS retired
+                       ON retired.storage_day=source.storage_day AND retired.handoff_kind='initial'""",
+))
 
 
 def _iso(value: Any) -> str | None:
@@ -272,9 +273,9 @@ class RetentionObservability:
                   "partition_page_limit": PARTITION_SCAN_LIMIT + 1,
                   "manifest_limit": MANIFEST_SCAN_LIMIT,
                   "manifest_page_limit": MANIFEST_SCAN_LIMIT + 1,
-                  "cold_layout": COLD_HISTORY_LAYOUT_VERSION,
                   "recent_days": policy.recent_days}
-        row = dict(session.execute(_PROJECTION_SQL, values).mappings().one())
+        statement = _COLD_PROJECTION_SQL if cold_layout_active(session) else _PROJECTION_SQL
+        row = dict(session.execute(statement, values).mappings().one())
         sampled_at = row["sampled_at"]
         if sampled_at.tzinfo is None:
             sampled_at = sampled_at.replace(tzinfo=UTC)

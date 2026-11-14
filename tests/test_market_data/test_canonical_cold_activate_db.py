@@ -11,7 +11,9 @@ from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.contracts import DatasetSeriesRequest
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.db import InstrumentRecord
-from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_IMMUTABILITY_TRIGGER, COLD_TABLE_NAMES
+from portal.backend.db.cold_history_models import (
+    COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION, COLD_IMMUTABILITY_TRIGGER, COLD_TABLE_NAMES,
+)
 from portal.backend.db.fact_identity_schema import assert_fact_identity_references, fact_header_partition_name
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, fact_partition_name
 from portal.backend.db.session import Database
@@ -168,6 +170,11 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
         """)).one()
         database_identity = f"{cluster}/{oid}"
         _configure_fixture_catalog(conn, database_identity, new_store.root)
+        custody_tablespace = conn.scalar(text("SELECT dattablespace::bigint FROM pg_database WHERE datname=current_database()"))
+        custody_oids = {
+            table: conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"), {"name": f"market.{table}"})
+            for table in COLD_CUSTODY_TABLE_NAMES
+        }
         payload_children = {
             fact_partition_name(day): conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
                                                   {"name": f"market.{fact_partition_name(day)}"})
@@ -198,6 +205,8 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
         "target_database": plan["database"], "source_database": plan["source_database"],
         "audit_set_hash": audit["audit_set_hash"], "source_commit_seq": latest_commit,
         "payload_children": payload_children,
+        "custody_target_id": "activation-fixture", "custody_tablespace_oid": custody_tablespace,
+        "custody_relation_oids": custody_oids,
     }
     expected_hash = archive_evidence_hash(execution)
     with engine.connect() as conn:
@@ -213,6 +222,15 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     path.write_bytes(original_bytes)
     with engine.connect() as conn:
         verified = activation.verify_mounted_candidate(conn, audit=audit, store=new_store, limits=ArchiveVerificationLimits())
+
+    changed_oids = dict(custody_oids, fact_archive_dependencies=custody_oids["fact_archive_dependencies"] + 1)
+    changed_execution = {**execution, "custody_relation_oids": changed_oids}
+    with pytest.raises(RuntimeError, match="canonical_custody_relation_oid_changed"):
+        with engine.begin() as conn:
+            activation.activate_cold_storage(
+                conn, execution=changed_execution, expected_execution_hash=archive_evidence_hash(changed_execution),
+                receipts=receipts, verified_objects=verified,
+            )
 
     with pytest.raises(RuntimeError, match="cold_identity_retained_cutover_parent_proof_mismatch"):
         with engine.begin() as conn:
@@ -237,6 +255,9 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     with engine.begin() as conn:
         switched = activation.activate_cold_storage(conn, verified_objects=verified, **transition)
         assert switched["cold_before_day"] == storage.today.isoformat()
+        assert switched["custody"] == {
+            "target_id": "activation-fixture", "tablespace_oid": custody_tablespace, "relation_oids": custody_oids,
+        }
         assert switched["verified_rows"] == 2
         assert switched["retired_header_bytes"] > 0 and switched["retired_payload_bytes"] > 0
         assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["new_oid"]

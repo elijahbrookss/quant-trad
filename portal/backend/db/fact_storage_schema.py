@@ -23,7 +23,7 @@ from .market_storage_models import MarketFactHotPayloadRecord
 from .market_data_models import MarketFactVersionRecord
 from .cold_history_models import (
     COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES,
-    assert_cold_history_immutability, assert_cold_history_placement,
+    assert_cold_custody_catalog_placement, assert_cold_history_immutability, assert_cold_history_placement,
 )
 
 logger = logging.getLogger(__name__)
@@ -449,6 +449,7 @@ def assert_fact_storage_contract(
             if not inspector.has_table(table, schema="market"):
                 raise RuntimeError(f"cold_fact_catalog_missing: relation=market.{table}")
         assert_cold_history_placement(conn)
+        assert_cold_custody_catalog_placement(conn)
         assert_cold_history_immutability(conn)
         if inspector.has_table("fact_versions_legacy", schema="market"):
             raise RuntimeError("cold_fact_legacy_header_still_serving")
