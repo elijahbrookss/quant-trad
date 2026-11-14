@@ -69,6 +69,7 @@ class CanonicalFactRetentionExecutor:
         self.cold_stage_admission = cold_stage_admission
         self._cursor = None
         self._retry_states = {}
+        self._prefer_cold_prune = True
         self._run_lock = Lock()
         self._archive = None
         self._archive_action = None
@@ -646,6 +647,25 @@ class CanonicalFactRetentionExecutor:
             check_budget()
             return deadline - monotonic()
 
+        def prune_one():
+            # Advance the other lane even when this attempt exhausts its time budget.
+            self._prefer_cold_prune = False
+            try:
+                cleanup = prune_oldest_retired_identities(self.repository.database, deadline=check_budget)
+            except MarketStorageLifecycleBusyError:
+                logger.info("canonical_cold_identity_cleanup_deferred | reason=lifecycle_busy")
+                return False
+            except Exception as exc:
+                sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
+                if sqlstate not in {"55P03", "57014"}:
+                    raise
+                logger.info("canonical_cold_identity_cleanup_deferred | sqlstate=%s", sqlstate)
+                return False
+            if cleanup is None:
+                return False
+            outcomes.append({**cleanup, "action": "prune_cold_identities"})
+            return True
+
         for _ in range(policy.max_steps_per_run):
             planning_started = perf_counter()
             planning_outcome = "failed"
@@ -671,24 +691,15 @@ class CanonicalFactRetentionExecutor:
                     "after_storage_day=%s",
                     planning_outcome, planning_elapsed, scans, cursor,
                 )
-            if plan.get("cold_layout") and not explicit_cursor:
+            cold_cleanup = plan.get("cold_layout") and not explicit_cursor
+            prune_attempted = cold_cleanup and self._prefer_cold_prune
+            if prune_attempted:
                 try:
-                    cleanup = prune_oldest_retired_identities(self.repository.database, deadline=check_budget)
-                except MarketStorageLifecycleBusyError:
-                    cleanup = None
-                    logger.info("canonical_cold_identity_cleanup_deferred | reason=lifecycle_busy")
+                    if prune_one():
+                        continue
                 except CanonicalRetentionBudgetExceeded as exc:
                     stop_reason = exc.stop_reason
                     break
-                except Exception as exc:
-                    sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
-                    if sqlstate not in {"55P03", "57014"}:
-                        raise
-                    cleanup = None
-                    logger.info("canonical_cold_identity_cleanup_deferred | sqlstate=%s", sqlstate)
-                if cleanup is not None:
-                    outcomes.append({**cleanup, "action": "prune_cold_identities"})
-                    continue
             candidates = [item for item in plan["actions"] if item["eligible"]]
             item = None
             if retry_day is not None and not retry_attempted:
@@ -724,6 +735,13 @@ class CanonicalFactRetentionExecutor:
                 next_day = plan["next_after_storage_day"]
                 cursor = date.fromisoformat(next_day) if next_day else None
                 if cursor is None:
+                    if cold_cleanup and not prune_attempted:
+                        try:
+                            if prune_one():
+                                continue
+                        except CanonicalRetentionBudgetExceeded as exc:
+                            stop_reason = exc.stop_reason
+                            break
                     stop_reason = "scan_complete"
                     if plan["actions"]:
                         waiting = {"active_or_future_storage_day", "hot_window_not_elapsed"}
@@ -732,6 +750,8 @@ class CanonicalFactRetentionExecutor:
                     break
                 continue
             item = item or candidates[0]
+            if cold_cleanup:
+                self._prefer_cold_prune = True
             day = date.fromisoformat(item["storage_day"])
             # Revisit this day's durable progress on success/budget suspension;
             # skip a failed/busy day this cycle so it cannot starve later days.

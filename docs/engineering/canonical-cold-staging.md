@@ -52,6 +52,8 @@ Separately, scan `--inverse-inventory` from the beginning through `inventory_sca
 
 Save every forward and inverse v2 receipt in one JSON array and run `python -m scripts.db.canonical_cold_receipts <audit-receipts.json>`. The validator checks the exact plan, database and checkpoint bindings, per-day seal and state, all sequential row/page cursors and counts, and equality of forward and inverse manifest inventories. The output includes the retired prefix's maximum observed commit, observed per-day totals, and the complete `audit_set_hash`. Pin that digest with the approved inputs and keep the original receipts. The final owner's fresh catalog comparison streams the `loaded_inventory_hash` over `[manifest_id, manifest_hash, row_count]` in ascending manifest ID order. The `inventory_hash` additionally binds the audited source days. Consolidation supplies evidence for the gated transition and does not perform activation.
 
+For a deployed archive worker with the selected-page action, inspect the next missing verification receipt before dispatching `verify_page`. Pin the storage day, page ordinal, manifest ID and hash, and the active preparation generation, ID and catalog commitment. A legacy page without an active pointer uses generation zero. The command uses the mounted policy limits and cannot retire the partition. On November 14 September 24 was still verifying pages and had 412 outstanding. After they pass, its separate whole-day check still needs a reviewed 1,043-page budget and measured cross-day dependency bytes. The replacement command does not change the running worker's limits. [Operator action](../../scripts/automation/canonical_retention_action.py)
+
 ## Data decisions
 
 | Inventory evidence | Disposition |
