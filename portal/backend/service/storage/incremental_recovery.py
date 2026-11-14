@@ -67,6 +67,45 @@ def _root_label(label):
     return label[:16]
 
 
+def _run_native(command, *, cwd, env, deadline, check, stdout_consumer=None):
+    """Bounded subprocess without exposing secret-bearing native diagnostics."""
+    check()
+    captured = {"out": bytearray(), "err": bytearray()}
+    with subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as process:
+        try:
+            with selectors.DefaultSelector() as streams:
+                streams.register(process.stdout, selectors.EVENT_READ, "out")
+                streams.register(process.stderr, selectors.EVENT_READ, "err")
+                while streams.get_map():
+                    check()
+                    for key, _ in streams.select(timeout=0.25):
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            streams.unregister(key.fileobj)
+                            continue
+                        if key.data == "out" and stdout_consumer is not None:
+                            stdout_consumer(chunk)
+                            continue
+                        captured[key.data].extend(chunk)
+                        if len(captured[key.data]) > 8*1024*1024:
+                            raise RuntimeError(
+                                f"incremental_tool_output_limit:{Path(command[0]).name}:stream={key.data}")
+            code = process.wait(timeout=max(0.01, deadline-monotonic()))
+            if code:
+                raise RuntimeError(f"incremental_tool_failed:{Path(command[0]).name}:exit={code}")
+        finally:
+            # Kill the owned group even if a child kept pipes open after the leader exited.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if process.poll() is None:
+                process.wait(timeout=10)
+    check()
+    return bytes(captured["out"])
+
+
 @dataclass(frozen=True)
 class IncrementalRecoveryConfig:
     pgbackrest: Path
@@ -196,45 +235,8 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
                 "--no-cache", "--json", "--quiet", *args]
 
     def _run(self, command, *, stdout_consumer=None):
-        """Bounded subprocess, no secret-bearing diagnostics or ambient config."""
-        self.check()
-        captured = {"out": bytearray(), "err": bytearray()}
-        with subprocess.Popen(command, cwd=self.root, env=self.env,
-                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, start_new_session=True) as process:
-            try:
-                with selectors.DefaultSelector() as streams:
-                    streams.register(process.stdout, selectors.EVENT_READ, "out")
-                    streams.register(process.stderr, selectors.EVENT_READ, "err")
-                    while streams.get_map():
-                        self.check()
-                        for key, _ in streams.select(timeout=0.25):
-                            chunk = os.read(key.fileobj.fileno(), 65536)
-                            if not chunk:
-                                streams.unregister(key.fileobj)
-                                continue
-                            if key.data == "out" and stdout_consumer is not None:
-                                stdout_consumer(chunk)
-                                continue
-                            captured[key.data].extend(chunk)
-                            if len(captured[key.data]) > 8*1024*1024:
-                                raise RuntimeError(
-                                    f"incremental_tool_output_limit:{Path(command[0]).name}:stream={key.data}")
-                code = process.wait(timeout=max(0.01, self.deadline-monotonic()))
-                if code:
-                    # Even native error output may include file contents or keys.
-                    raise RuntimeError(f"incremental_tool_failed:{Path(command[0]).name}:exit={code}")
-            finally:
-                # Kill the owned group even if its leader exited while a child
-                # kept pipes open. Never leave a writer beyond our deadline.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                if process.poll() is None:
-                    process.wait(timeout=10)
-        self.check()
-        return bytes(captured["out"])
+        return _run_native(command, cwd=self.root, env=self.env, deadline=self.deadline,
+                           check=self.check, stdout_consumer=stdout_consumer)
 
     def _native_snapshots(self):
         """Project native ownership metadata without retaining every archive path.

@@ -27,7 +27,7 @@ from portal.backend.service.storage.incremental_recovery import (
 from portal.backend.service.storage.recovery_copies import _identity, _snapshot_layout
 from portal.backend.service.storage.repos import market_data, market_lifecycle, market_structure
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
-from scripts.automation.verify_canonical_recovery_archive import verify_archive
+from scripts.automation.verify_encrypted_recovery_handoff import verify_handoff
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index
@@ -114,7 +114,16 @@ def _exercise_postwrite_pair(storage, tmp_path, monkeypatch, *, raw_scope=None, 
     # Hold the original plaintext archive objects out of the runtime reader's path.
     objects.root.rename(root / "original-objects")
     (_restore_database if restore_database is None else restore_database)(worker, copied, selected, "--type=immediate")
-    restored_store = _restore_archives(worker, copied, selected, receipt, objects, tmp_path)
+    restored_archives = tmp_path / "restored-verified-archive"
+    restored_archives.mkdir(mode=0o700)
+    handoff = verify_handoff(repository=copied, receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+        archive_restore=restored_archives, pgbackrest=worker.pgbackrest, restic=worker.restic,
+        database_key=worker.config.database_key_path, archive_key=worker.config.archive_key_path,
+        timeout_seconds=60, max_archive_bytes=64 * 1024**2, max_archive_objects=100,
+        wal_segment_bytes=16 * 1024**2, max_wal_segments=32)
+    assert handoff["verified_archive_objects"] == selected["archive_objects"]
+    assert handoff["archive_snapshot"] == selected["archive_snapshot"]
+    restored_store = FilesystemRawArchiveObjectStore(restored_archives / str(objects.root).lstrip("/"), writable=False)
     for key in archive_keys:
         assert restored_store.local_path(key).is_file()
     (restore_root / "start").write_text("committed cold recovery point\n")
@@ -268,14 +277,32 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
             assert monotonic() < deadline, "anchor and post-anchor WAL must be archived"
             sleep(0.1)
     restore_root, copied, receipt = _copy_repository(worker, baseline)
-    anchor_file = restore_root / "anchor-wal"
-    worker._run([str(worker.pgbackrest), "--no-config", "--stanza=qt",
-                 "--repo1-path=" + str(copied / "database"), "--repo1-cipher-type=aes-256-cbc",
-                 "--pg1-path=" + str(worker.config.pg_path),
-                 "--lock-path=" + str(copied.parent),
-                 "--log-level-file=off", "archive-get", wal_name, str(anchor_file)])
-    assert anchor_file.stat().st_size == 16 * 1024**2
-    baseline_restore = _restore_archive_snapshot(worker, copied, baseline, tmp_path)
+    _restore_database(worker, copied, baseline, "--type=name", "--target=" + anchor["restore_name"],
+                      "--target-timeline=" + str(anchor["timeline"]))
+    anchor_receipt = tmp_path / "anchor.json"
+    anchor_receipt.write_text(json.dumps(anchor, sort_keys=True))
+    baseline_restore = tmp_path / "baseline-verified-restore"
+    baseline_restore.mkdir(mode=0o700)
+    handoff_options = dict(repository=copied, receipt_sha256=receipt_hash, archive_restore=baseline_restore,
+        pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
+        archive_key=worker.config.archive_key_path, timeout_seconds=60, max_archive_bytes=64 * 1024**2,
+        max_archive_objects=100, wal_segment_bytes=16 * 1024**2, max_wal_segments=32,
+        anchor=anchor_receipt, anchor_sha256=hashlib.sha256(anchor_receipt.read_bytes()).hexdigest(),
+        isolated_pgdata=restore_root / "pgdata")
+    with pytest.raises(ValueError, match="evidence_hash_mismatch"):
+        verify_handoff(**{**handoff_options, "receipt_sha256": "a" * 64})
+    segment_dir = copied / "database" / "archive" / "qt" / "15-1" / wal_name[:16]
+    (archived_anchor,) = segment_dir.glob(wal_name + "-*")
+    withheld_anchor = archived_anchor.with_name("withheld-" + archived_anchor.name)
+    archived_anchor.rename(withheld_anchor)
+    try:
+        with pytest.raises(RuntimeError, match="wal_segment_missing_or_ambiguous"):
+            verify_handoff(**handoff_options)
+    finally:
+        withheld_anchor.rename(archived_anchor)
+    handoff = verify_handoff(**handoff_options)
+    assert handoff["wal_verified_through"] == wal_name
+    assert handoff["verified_archive_objects"] == baseline["archive_objects"]
     restored_baseline = prepare_archive_baseline(
         receipt, baseline_restore, expected_receipt_sha256=receipt_hash, max_objects=100,
     )
@@ -285,8 +312,6 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     suffix_repo.rename(tmp_path / "suffix-repository-unavailable")
     suffix_repo = restored_suffix_repo
     restic_suffix("restore", suffix_snapshot, "--target", str(suffix_restore))
-    _restore_database(worker, copied, baseline, "--type=name", "--target=" + anchor["restore_name"],
-                      "--target-timeline=" + str(anchor["timeline"]))
     objects.root.rename(tmp_path / "original-objects")
     (restore_root / "start").write_text("old layout exact archive anchor\n")
     restored_url = engine.url.set(host="restored")
@@ -433,22 +458,6 @@ def _restore_database(worker, copied, selected, *recovery_target):
                 "--tablespace-map-all=/qt-restore/history", "--set=" + selected["database_label"],
                 f'--recovery-option=restore_command=/usr/local/bin/pgbackrest --config={settings} --stanza=qt archive-get %f "%p"',
                 *recovery_target, "--target-action=promote", "--archive-mode=off", "restore"))
-
-
-def _restore_archives(worker, copied, selected, receipt, objects, tmp_path):
-    restored_archives = _restore_archive_snapshot(worker, copied, selected, tmp_path)
-    report = verify_archive(receipt, restored_archives)
-    assert report["verified_archive_objects"] == selected["archive_objects"]
-    return FilesystemRawArchiveObjectStore(
-        restored_archives / str(objects.root).lstrip("/"), writable=False,
-    )
-
-
-def _restore_archive_snapshot(worker, copied, selected, tmp_path):
-    restored = tmp_path / "restored-archives"
-    worker._run([str(worker.restic), "--repo", str(copied / "archives"), "--no-cache", "--json",
-                 "restore", selected["archive_snapshot"], "--target", str(restored)])
-    return restored
 
 
 def _wait_for_restored_cluster(url, *, expected_identity=None):
