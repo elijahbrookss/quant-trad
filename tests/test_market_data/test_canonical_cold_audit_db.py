@@ -13,6 +13,7 @@ from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_load import load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
+from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
 from tests.test_market_data.test_canonical_cold_migration_db import (  # noqa: F401
     _prepare, _published_generation, local_catalog_server, prepared_database,
@@ -81,16 +82,28 @@ def test_exact_source_prefix_and_inverse_inventory(candidate):
     assert plan["prefix"]["legacy_end_day"] == DAILY.isoformat()
     assert [item["child"] for item in plan["prefix"]["days"]] == ["fact_versions_legacy", fact_header_partition_name(DAILY)]
     assert not plan["activation_ready"]
+    receipts = [plan]
     for day in (DAY, DAILY):
         day_receipt = audit_candidate(engine, checkpoint, day=day, **kwargs)
+        receipts.append(day_receipt)
         assert day_receipt["prefix_hash"] == plan["prefix_hash"]
         assert day_receipt["day_batch"]["verified_rows"] == 2
         assert day_receipt["day_batch"]["day_scan_end_reached"]
-    inventory = audit_candidate(engine, checkpoint, inventory=True, **kwargs)["inverse_inventory_batch"]
+    receipts.append(audit_candidate(engine, checkpoint, inventory=True, **kwargs))
+    inventory = receipts[-1]["inverse_inventory_batch"]
     assert not inventory["inventory_scan_end_reached"]
-    final = audit_candidate(engine, checkpoint, inventory=True, after_manifest=inventory["last_verified_manifest"],
-                            **kwargs)["inverse_inventory_batch"]
+    receipts.append(audit_candidate(engine, checkpoint, inventory=True,
+                                    after_manifest=inventory["last_verified_manifest"], **kwargs))
+    final = receipts[-1]["inverse_inventory_batch"]
     assert final["inventory_scan_end_reached"] and final["verified_pages"] == 1
+    summary = validate_audit_receipts(reversed(receipts), target_identity=plan["database"],
+                                     source_identity=plan["source_database"], expected_prefix_hash=plan["prefix_hash"])
+    assert summary["verified_days"] == 2 and summary["verified_pages"] == 2 and summary["verified_rows"] == 4
+    assert summary["retired_prefix_max_commit_seq"] == 4
+    assert summary["days"][DAY.isoformat()]["source_retention_state"] == "sealed"
+    with engine.connect() as conn:
+        mounted = conn.execute(text("SELECT id,manifest_hash,row_count FROM market.cold_fact_pages ORDER BY id"))
+        assert manifest_inventory_hash(mounted) == summary["loaded_inventory_hash"]
     with pytest.raises(RuntimeError, match="prefix_splits_legacy_relation"):
         audit_candidate(engine, checkpoint, **(kwargs | {"cutoff": DAY}))
     with pytest.raises(RuntimeError, match="wrong_database"):

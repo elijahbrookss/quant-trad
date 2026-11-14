@@ -32,7 +32,7 @@ from scripts.db.canonical_cold_load import TargetDatabase
 from scripts.db.canonical_cold_migration import INITIAL, MigrationCheckpoint, PostgresMigrationSource
 
 
-AUDIT_VERSION = "qt.canonical_cold_candidate_audit.v1"
+AUDIT_VERSION = "qt.canonical_cold_candidate_audit.v2"
 GATES = ["all_batches_reconciled_under_writer_and_catalog_fence", "independent_paired_restore",
          "raw_and_l2_coverage_holds_and_replay", "frozen_and_as_of_runtime_parity",
          "retirement_dependencies_and_physical_space"]
@@ -249,8 +249,18 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
             raise ValueError(f"canonical_cold_audit_resume_ordinal_invalid: day={day}")
         if _source_rows(conn, day=day, after=INITIAL, through=None, limit=1):
             raise RuntimeError(f"canonical_cold_audit_checkpoint_missing_for_nonempty_day: day={day}")
+        retention = conn.execute(text("""SELECT state,sealed_at,expected_rows FROM market.fact_retention_partitions
+            WHERE storage_day=:day"""), {"day": day}).mappings().one_or_none()
+        if retention is not None and (retention["expected_rows"] or 0) != 0:
+            raise RuntimeError(f"canonical_cold_audit_empty_day_retention_disagrees: day={day}")
         return {"storage_day": day.isoformat(), "verified_pages": 0, "verified_rows": 0,
-                "source_day_empty": True, "day_scan_end_reached": True}
+                "source_day_empty": True, "day_scan_end_reached": True,
+                "source_retention_state": retention["state"] if retention else None,
+                "source_sealed_at": retention["sealed_at"].isoformat() if retention and retention["sealed_at"] else None,
+                "start_after_ordinal": -1, "last_verified_ordinal": -1,
+                "start_after_cursor": list(INITIAL), "last_cursor": list(INITIAL),
+                "expected_day_rows": 0, "expected_day_pages": 0, "expected_day_last_cursor": list(INITIAL),
+                "page_receipts": [], "manifest_hashes": [], "source_archive_authority_receipts": []}
     complete, total_rows, total_pages, final_seq, final_id = progress
     if not complete:
         raise RuntimeError(f"canonical_cold_audit_unfinished_checkpoint_day: day={day}")
@@ -272,7 +282,8 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
         after = prior.manifest.last_cursor
     reader = ColdHistoryReader(store, limits=FactArchiveLimits(**binding["limits"]),
                                ensure_contracts=lambda pairs: ensure_payload_contracts(conn, pairs))
-    current, count, page_hashes, authority_receipts = after_ordinal, 0, [], []
+    start_cursor = after
+    current, count, page_receipts, authority_receipts = after_ordinal, 0, [], []
     pages = checkpoint.iter_completed_pages(day=day, after_ordinal=after_ordinal)
     try:
         for page in islice(pages, max_pages):
@@ -284,7 +295,10 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
             count += page.manifest.row_count
             current = page.ordinal
             after = page.manifest.last_cursor
-            page_hashes.append(page.manifest.manifest_hash)
+            page_receipts.append({"ordinal": page.ordinal, "after": list(page.after),
+                "first_cursor": list(page.manifest.first_cursor), "last_cursor": list(after),
+                "manifest_id": page.manifest.manifest_id, "manifest_hash": page.manifest.manifest_hash,
+                "row_count": page.manifest.row_count, "reused": page.reused})
             if page.source_authority is not None:
                 authority_receipts.append({"ordinal": page.ordinal, "kind": page.source_authority["kind"],
                     "current_verification_hash": page.source_authority["verification_hash"],
@@ -297,12 +311,15 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
         raise RuntimeError(f"canonical_cold_audit_source_tail_changed: day={day}")
     if end_reached and after_ordinal == -1 and count != total_rows:
         raise RuntimeError(f"canonical_cold_audit_checkpoint_row_count_changed: day={day}")
-    if not end_reached and len(page_hashes) < max_pages and monotonic() < deadline:
+    if not end_reached and len(page_receipts) < max_pages and monotonic() < deadline:
         raise RuntimeError(f"canonical_cold_audit_checkpoint_page_missing: day={day} after_ordinal={current}")
-    return {"storage_day": day.isoformat(), "verified_rows": count, "verified_pages": len(page_hashes),
+    return {"storage_day": day.isoformat(), "verified_rows": count, "verified_pages": len(page_receipts),
             "start_after_ordinal": after_ordinal, "last_verified_ordinal": current, "last_cursor": list(after),
+            "source_retention_state": cohort.state, "source_sealed_at": cohort.sealed_at,
+            "start_after_cursor": list(start_cursor), "page_receipts": page_receipts,
             "expected_day_rows": total_rows, "expected_day_pages": total_pages,
-            "day_scan_end_reached": end_reached, "manifest_hashes": page_hashes,
+            "expected_day_last_cursor": [final_seq, final_id], "day_scan_end_reached": end_reached,
+            "manifest_hashes": [page["manifest_hash"] for page in page_receipts],
             "source_archive_authority_receipts": authority_receipts}
 
 
@@ -323,10 +340,12 @@ def _audit_inventory(conn, checkpoint, *, allowed_days, after_manifest, max_page
                 or FactArchiveManifest.from_dict(json.loads(record[2]), expected_hash=record[1]) != manifest
             ):
                 raise RuntimeError(f"canonical_cold_audit_unplanned_loaded_manifest: page={manifest.manifest_id}")
-            pages.append(manifest.manifest_id)
-    return {"start_after_manifest": after_manifest, "last_verified_manifest": pages[-1] if pages else after_manifest,
+            pages.append({"manifest_id": manifest.manifest_id, "manifest_hash": manifest.manifest_hash,
+                          "storage_day": record[0], "row_count": manifest.row_count})
+    ids = [page["manifest_id"] for page in pages]
+    return {"start_after_manifest": after_manifest, "last_verified_manifest": ids[-1] if ids else after_manifest,
             "verified_pages": len(pages), "inventory_scan_end_reached": len(pages) == len(loaded),
-            "manifest_ids": pages}
+            "manifest_ids": ids, "page_receipts": pages}
 
 
 def audit_candidate(engine, checkpoint, *, target, object_store, cutoff, day=None, inventory=False,
@@ -348,6 +367,7 @@ def audit_candidate(engine, checkpoint, *, target, object_store, cutoff, day=Non
         plan = _plan(conn, cutoff=cutoff, max_days=max_days)
         by_day = {record["day"]: record for record in plan["days"]}
         result = {"schema": AUDIT_VERSION, "database": identity, "prefix": plan,
+                  "source_database": binding["source"],
                   "checkpoint_binding_hash": archive_evidence_hash(binding),
                   "observed_at": conn.execute(text("SELECT clock_timestamp()")).scalar_one().isoformat(),
                   "prefix_hash": archive_evidence_hash(plan), "activation_ready": False,
