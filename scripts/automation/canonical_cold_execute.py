@@ -10,6 +10,7 @@ from market_data.archive_verification import ArchiveVerificationLimits
 from scripts.automation.canonical_cold_collector_checks import bind_approved_collector_checks
 from scripts.automation.canonical_cold_host_hold import hold_cold_cutover
 from scripts.automation.canonical_cold_package import load_approved_package, read_approved_candidate_witness
+from scripts.automation.canonical_cold_recovery_checks import bind_approved_recovery_checks
 from scripts.db.canonical_cold_activate import (
     assert_original_identity_registry, raw_index_placement_scope, read_original_watermark, verify_mounted_candidate,
 )
@@ -67,8 +68,12 @@ def execute_approved_cutover(
     if outage_seconds > package["max_outage_seconds"]:
         raise ValueError("canonical_cold_execute_outage_exceeds_approved_budget")
     witness = read_approved_candidate_witness(package_path, package)
-    capture_provider_tail, verify_provider_boundary = bind_approved_collector_checks(
+    capture_provider_tail, verify_provider_boundary, verify_provider_restart = bind_approved_collector_checks(
         conn, package_path=package_path, package=package, store=store, receipt_root=provider_receipt_root,
+    )
+    recovery_check = bind_approved_recovery_checks(
+        package_path=package_path, package=package, receipt_root=provider_receipt_root,
+        verify_site_restore=verify_recovery_boundary,
     )
     scope = package["scope"]
     audit = validate_audit_receipts(
@@ -126,7 +131,7 @@ def execute_approved_cutover(
                 conn, control, package=approved, approved_package_hash=approved_package_hash, receipts=receipts,
                 store=store, limits=limits, timeout_seconds=outage_seconds, assert_host_held=assert_held,
                 host_remaining=remaining, verify_provider_boundary=verify_drained,
-                verify_recovery_boundary=verify_recovery_boundary, record=record_phase,
+                verify_recovery_boundary=recovery_check, record=record_phase,
                 verify_candidate=verify_candidate, candidate_witness=witness, verified_objects=verified,
             )
         except Exception as error:
@@ -157,8 +162,15 @@ def execute_approved_cutover(
 
         if database_outcome != "committed":
             raise RuntimeError("canonical_cold_execute_committed_outcome_unverified")
+
+        def verify_started(services):
+            application = verify_candidate_ready(activation, services)
+            if not isinstance(application, dict) or application.get("ready") is not True:
+                return application
+            return {**application, "collector_restart_sha256": verify_provider_restart(services)}
+
         runtime = resume(
-            partial(verify_candidate_ready, activation),
+            verify_started,
             verify_before_start=partial(verify_candidate_prestart, activation),
         )
     return {"activation": activation, "runtime": runtime}

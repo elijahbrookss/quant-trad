@@ -22,6 +22,7 @@ from portal.backend.service.market.continuous_stream_collector import (
 from portal.backend.service.storage.repos import market_structure
 from scripts.db import canonical_cold_provider_boundary as boundary
 from scripts.db import canonical_cold_collector_drain as drain
+from scripts.db import canonical_cold_collector_restart as restart
 from tests.test_market_data.test_fact_storage_tiers_db import storage  # noqa: F401
 
 
@@ -42,7 +43,7 @@ def _definition(storage, structures, channel, product):
         status="fixture", base_currency="BTC", quote_currency="USD", provider_size_unit="base", contract_size=None,
         price_increment=None, base_increment=None, effective_at=now, received_at=now, provenance={"fixture": name})
     config = {"product_definition_version_id": product_version, "provider_size_unit": "base",
-              "base_currency": "BTC", "quote_currency": "USD"}
+              "base_currency": "BTC", "quote_currency": "USD", "runtime_policy": {"segment_max_seconds": 1}}
     if channel == "level2":
         for api_key, fact, schema in (("bbo_series_id", BBO_FACT_TYPE, BBO_FACT_VERSION),
                                       ("depth_series_id", DEPTH_FACT_TYPE, DEPTH_FACT_VERSION)):
@@ -70,7 +71,7 @@ def _messages(claim, channel, *, resumed, inject_gap):
             data = {"channel": "heartbeats", "events": [{"current_time": when, "heartbeat_counter": "1"}]}
         elif channel == "market_trades":
             data = {"channel": channel, "events": [{"type": "snapshot" if index == 2 else "update", "trades": [{
-                "trade_id": str((1000 if resumed else 0) + index), "product_id": claim.provider_product_id,
+                "trade_id": str(1000 * int(resumed) + index), "product_id": claim.provider_product_id,
                 "price": "100", "size": "2", "side": "BUY", "time": when}]}]}
         else:
             levels = [("bid", "99", "10"), ("offer", "101", "11")] if index == 2 else [("bid", "99", "12")]
@@ -84,12 +85,13 @@ def _messages(claim, channel, *, resumed, inject_gap):
 
 
 class ScriptedCoinbaseTransport(CoinbaseContinuousTransportAdapter):
-    def __init__(self, channel, *, inject_gap, resumed, received, stopped):
+    def __init__(self, channel, *, inject_gap, resumed, received, stopped, roll_live_segment=False):
         self.channel = channel
         self.inject_gap = inject_gap
         self.resumed = resumed
         self.received = received
         self.stopped = stopped
+        self.roll_live_segment = roll_live_segment
         self.claim = None
 
     def create_stream(self, claim):
@@ -104,6 +106,8 @@ class ScriptedCoinbaseTransport(CoinbaseContinuousTransportAdapter):
 
     async def raw_messages(self):
         for row in _messages(self.claim, self.channel, resumed=self.resumed, inject_gap=self.inject_gap):
+            if self.roll_live_segment and row.receive_ordinal == 4:
+                await asyncio.sleep(1.15)
             # Stop while the runtime consumes the invalidating frame. Its
             # finalizer still persists typed quality and the terminal receipt.
             if self.inject_gap and row.receive_ordinal == 4:
@@ -204,7 +208,59 @@ def test_native_provider_boundary_drain_and_restart(storage, tmp_path, monkeypat
             await asyncio.wait_for(received.wait(), timeout=10)
             stopped.set()
         second = await asyncio.wait_for(task, timeout=15)
-        return pre_stop, drained, snapshot("resumed"), first, second
+        resumed = snapshot("resumed")
+
+        started_at = datetime.now(UTC)
+        received, stopped = asyncio.Event(), asyncio.Event()
+        transport = ScriptedCoinbaseTransport(channel, inject_gap=False, resumed=2, received=received, stopped=stopped,
+                                              roll_live_segment=True)
+        task = asyncio.create_task(runtime.run(definition_id=definition_id, owner_id="fixture-live", stop_requested=stopped.is_set,
+            bounded_validation=True, storage_root=tmp_path, projection=projection, transport=transport))
+        await asyncio.wait_for(received.wait(), timeout=10)
+
+        def verify_live():
+            with storage.database._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                return restart.verify_collector_restart(
+                    conn, drained=verified_drain, started_at=started_at, store=store, limits=limits, check=lambda: None,
+                )
+
+        try:
+            deadline = asyncio.get_running_loop().time() + 10
+            while True:
+                if task.done():
+                    await task
+                    pytest.fail("live fixture collector exited")
+                try:
+                    verify_live()
+                except restart.CollectorRestartPending as error:
+                    if "poll_reconciliation_pending" in str(error):
+                        break
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise
+                else:
+                    pytest.fail("scheduled gap evidence was missing")
+                await asyncio.sleep(.05)
+            poll = verified_drain["polls"][0]
+            due = datetime.fromisoformat(poll["first_due_at_risk"])
+            storage.repo.record_gap_evidence(
+                series_id=poll["series_id"], source_id=poll["source_id"], start=due, end=due + timedelta(seconds=60),
+                classification="collection_schedule_missed", expected_count=1, observed_count=0,
+                evidence={"definition_id": poll["id"], "schema_version": "market_collection_gap.v1"},
+            )
+            operational = verify_live()
+            assert operational["drained_sha256"] == verified_drain["sha256"]
+            restored = operational["streams"][0]
+            assert restored["connection"]["session_id"] == transport.claim.session_id
+            assert set(restored["markers"]) == {"subscription", "heartbeat", "coverage_opened"}
+            assert restored["interruption"]["after"] < restored["interruption"]["before"]
+            assert restored["interruption"]["missing_events"] is None
+            assert bool(restored["checkpoint"]) == (channel == "level2")
+            assert operational["polls"][0]["occurrences"][0]["status"] == "missed"
+        finally:
+            stopped.set()
+            await asyncio.wait_for(task, timeout=15)
+        return pre_stop, drained, resumed, first, second
 
     pre_stop, drained, resumed, first, second = asyncio.run(run())
     output = boundary.validate(pre_stop, drained, resumed)

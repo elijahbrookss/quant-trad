@@ -454,10 +454,11 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 before_pause(lambda: 60)
 
                 def resume(ready, *, verify_before_start):
-                    for acceptance in (verify_before_start, ready):
-                        assert acceptance({}) == {"ready": True}
+                    assert verify_before_start({}) == {"ready": True}
+                    result = ready({})
+                    assert result == {"ready": True, "collector_restart_sha256": "d" * 64}
                     reopened.append(True)
-                    return {"ready": True}
+                    return result
 
                 yield package, lambda: None, record, lambda: 60, resume
 
@@ -480,7 +481,10 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 patch.setattr(canonical_cold_execute, "read_approved_candidate_witness", lambda *args: candidate_witness)
                 patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
                 patch.setattr(canonical_cold_execute, "bind_approved_collector_checks",
-                              lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt", bound_provider))
+                              lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
+                                                       bound_provider, lambda _: "d" * 64))
+                patch.setattr(canonical_cold_execute, "bind_approved_recovery_checks",
+                              lambda **kwargs: kwargs["verify_site_restore"])
                 completed = canonical_cold_execute.execute_approved_cutover(
                     retained, control, state_root=tmp_path, inventory={}, package_path=tmp_path / "fixture.json",
                     approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
@@ -488,7 +492,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                     verify_candidate=verify_candidate, verify_candidate_prestart=verify_started,
                     verify_candidate_ready=verify_started, verify_original_ready=lambda _: pytest.fail("unexpected rollback"),
                 )
-            assert reopened == [True] and completed["runtime"] == {"ready": True}
+            assert reopened == [True] and completed["runtime"] == {"ready": True, "collector_restart_sha256": "d" * 64}
             result = completed["activation"]
         assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                           "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]

@@ -1,12 +1,15 @@
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 
 import pytest
 
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
+from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
 from scripts.automation import canonical_cold_collector_checks as collectors
 from scripts.automation import canonical_cold_package as package
+from scripts.automation import canonical_cold_recovery_checks as recovery
 from scripts.automation.storage_host_boundary import digest, load_receipt
 from scripts.db.canonical_cold_witness import VERSION as WITNESS_VERSION
 
@@ -41,6 +44,9 @@ def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monke
         def exec_driver_sql(self, command):
             assert command == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
 
+        def execute(self, statement, params):
+            assert str(statement) == "SELECT set_config('statement_timeout', :ms, true)" and params == {"ms": "15000"}
+
     connection = Connection()
     store = object()
 
@@ -57,10 +63,21 @@ def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monke
 
     monkeypatch.setattr(collectors, "capture_collector_tail", capture)
     monkeypatch.setattr(collectors, "verify_collector_drain", verify)
-    capture_check, verify_check = collectors.bind_approved_collector_checks(
+    starts = []
+
+    def native_restart(target, *, drained, started_at, store, limits, check):
+        assert target is connection and drained["source_commit_seq"] == 45 and started_at.tzinfo is UTC
+        starts.append(started_at)
+        if len(starts) == 1:
+            raise collectors.CollectorRestartPending("scripted qualification")
+        return {"phase": "restarted", "source_commit_seq": 46}
+
+    monkeypatch.setattr(collectors, "verify_collector_restart", native_restart)
+    monkeypatch.setattr(collectors, "sleep", lambda _: None)
+    capture_check, verify_check, restarted_check = collectors.bind_approved_collector_checks(
         connection, package_path=tmp_path / "package.json", package=approved, store=store, receipt_root=receipts,
     )
-    before = capture_check(lambda: None)
+    before = capture_check(lambda: 20)
     with pytest.raises(RuntimeError, match="execution_tail_changed"):
         verify_check(connection, 45, {**before, "evidence": {"source_commit_seq": 42}})
     drained_hash = verify_check(connection, 45, before)
@@ -68,6 +85,11 @@ def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monke
     clear = load_receipt(receipts / f"collector-drained-{drained_hash}.json")
     assert clear["plan_sha256"] == before["plan_sha256"] == plan_hash
     assert clear["evidence"]["execution_pre_stop_sha256"] == before["sha256"]
+    start = datetime.now(UTC)
+    runtime = {"market-data-collector": {"running": True, "started_at": start.isoformat()}}
+    restarted_hash = restarted_check(runtime)
+    final = load_receipt(receipts / f"collector-restarted-{restarted_hash}.json")
+    assert starts == [start, start] and final["evidence"]["execution_drained_sha256"] == drained_hash
     spool.rename(tmp_path / "moved-spool")
     spool.mkdir()
     with pytest.raises(RuntimeError, match="execution_directory_changed"):
@@ -77,6 +99,54 @@ def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monke
         collectors.bind_approved_collector_checks(
             connection, package_path=tmp_path / "package.json", package=approved, store=store, receipt_root=receipts,
         )
+
+
+@pytest.mark.parametrize("pending", (False, True))
+def test_independent_report_binds_exact_approved_base_anchor_and_pending_bytes(tmp_path, pending):
+    root = tmp_path / "private-receipts"
+    root.mkdir(mode=0o700)
+    plan = {"schema": recovery.PLAN_VERSION, "base_transfer_sha256": "a" * 64,
+            "baseline_verification_sha256": "b" * 64, "pair_receipt_sha256": "c" * 64}
+    scope = {"definition_id": "fixture-level2", "session_id": "old", "sealed_files": 2}
+    plan["pending_spool_scope_sha256"] = digest(scope) if pending else None
+    path = tmp_path / "independent.json"
+    accepted = {"source_commit_floor": 40, "scope": {"target_database": {"system_identifier": "123", "database_oid": 42}},
+                "artifacts": {"independent_recovery": {"filename": path.name, "sha256": _write(path, json.dumps(plan).encode())}}}
+    boundary = {"database_identity": "123/42", "source_commit_seq": 45, "anchor_sha256": "d" * 64}
+    segments = [{"id": "first", "records_sha256": "1" * 64}, {"id": "second", "records_sha256": "2" * 64}]
+    archive = {
+        "schema": recovery._CLOSURE, **boundary, **{key: plan[key] for key in recovery._BASE_PINS},
+        "storage_layout": {"layout_version": FACT_STORAGE_LAYOUT_VERSION, "certificate_sha256": "6" * 64},
+        "restore_name": "qt_original_" + "d" * 32,
+        "wal_segment": "00000001000000000000000F", "replay_lsn": "0/F441",
+        "archive_transfer_sha256": "e" * 64, "native_named_sha256": "f" * 64, "wal_transfer_sha256": "1" * 64,
+        "coverage": {"archive_snapshot": "2" * 64, "final_inventory_sha256": "3" * 64, "final_objects": 20,
+                     "final_bytes": 30000, "baseline_objects_used": 19, "verified_suffix_objects": 1},
+    }
+    observed = {"schema": "qt.pending_raw_spool_source.v1", "scope": scope, "boundary": boundary, "segments": segments}
+    received = {"schema": "qt.pending_raw_spool_verified.v1", "scope": scope, "boundary": boundary, "segments": segments,
+                "transfer_sha256": "4" * 64, "snapshot": "5" * 64}
+    report = {"archive_closure": {**archive, "closure_sha256": digest(archive)},
+              "pending_spool_source": {**observed, "source_sha256": digest(observed)} if pending else None,
+              "pending_spool_verified": {**received, "verification_sha256": digest(received)} if pending else None}
+    checker = recovery.bind_approved_recovery_checks(
+        package_path=tmp_path / "package.json", package=accepted, receipt_root=root, verify_site_restore=lambda *args: report,
+    )
+    arguments = (None, None, 45, "f" * 64, lambda: 30, lambda: None)
+    certificate = checker(*arguments)
+    assert checker(*arguments) == certificate
+    proof = load_receipt(root / f"independent-recovery-{certificate}.json")
+    assert proof["source_commit_seq"] == 45 and proof["provider_boundary_sha256"] == "f" * 64
+    assert proof["archive_closure"] == report["archive_closure"]
+    changed = {**archive, "source_commit_seq": 46}
+    report["archive_closure"] = {**changed, "closure_sha256": digest(changed)}
+    with pytest.raises(RuntimeError, match="named_boundary_changed"):
+        checker(*arguments)
+    report["archive_closure"] = {**archive, "closure_sha256": digest(archive)}
+    changed = {**received, "segments": segments[:1]}
+    report["pending_spool_verified"] = {**changed, "verification_sha256": digest(changed)}
+    with pytest.raises(RuntimeError, match="pending_spool_boundary_changed|unapproved_pending_spool"):
+        checker(*arguments)
 
 
 @pytest.fixture

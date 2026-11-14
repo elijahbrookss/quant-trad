@@ -266,7 +266,8 @@ def verify_collector_drain(connection, *, before, source_commit_seq, spool_root,
         if (type(count) is not int or count != last or (not baseline_only and (
                 last_segment["event_ordinal"] <= stop["event_ordinal"] or last_segment["evidence"].get("terminal") is not True))):
             raise RuntimeError(f"canonical_cold_collector_drain_terminal_watermark_unconfirmed: {stream['id']}")
-        positions.append({"definition_id": stream["id"], "session_id": position["session_id"], "epoch": position["connection_epoch"],
+        positions.append({"definition_id": stream["id"], "definition": _stream_identity(stream),
+                          "session_id": position["session_id"], "epoch": position["connection_epoch"],
                           "channel": prior["channel"], "stop_id": stop["id"], "stop_hash": stop["evidence_hash"],
                           "stopped_at": stop["occurred_at"], "last_receive_ordinal": last, "segments": segments,
                           "tail_was_published_before_stop": baseline_only,

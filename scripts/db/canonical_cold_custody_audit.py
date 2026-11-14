@@ -89,7 +89,7 @@ def _fold(rows, *, name, limit, check, target=None):
     return {"count": count, "ordered_sha256": digest}
 
 
-def _raw_mappings(session, *, manifest, path, limits, check):
+def _raw_mappings(session, *, manifest, path, limits, check, observe=None):
     from market_data.archive import iter_raw_archive_parquet, read_raw_archive_content_fingerprint
     from sqlalchemy import text
 
@@ -120,6 +120,8 @@ def _raw_mappings(session, *, manifest, path, limits, check):
                     or (i == count - 1 and record.receive_ordinal != manifest["last_receive_ordinal"])):
                 raise RuntimeError(f"custody audit raw ordinal mismatch: {identity} row={i}")
             seen += 1
+            if observe is not None:
+                observe(record)
             yield row
 
     try:

@@ -1,8 +1,12 @@
 """Bind native collector evidence to the one reviewed cutover package."""
 
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+from time import sleep
+
+from sqlalchemy import text
 
 from core.storage_mounts import require_configured_working_mount
 from market_data.archive import RawArchiveReadLimits
@@ -11,6 +15,7 @@ from market_data.fact_archive import archive_evidence_hash
 from scripts.automation import storage_host_boundary as host
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
 from scripts.db.canonical_cold_collector_drain import CollectorDrainLimits, capture_collector_tail, verify_collector_drain
+from scripts.db.canonical_cold_collector_restart import CollectorRestartPending, verify_collector_restart
 
 
 PLAN_VERSION = "qt.canonical_cold_collector_plan.v1"
@@ -52,6 +57,7 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("canonical_cold_collector_receipts_require_private_directory")
     check = None
+    drained = None
 
     def assert_roots():
         if check is None:
@@ -87,6 +93,7 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
         return seal("pre_stop", evidence)
 
     def verify(target, source_commit, before):
+        nonlocal drained
         assert_roots()
         if (target is not conn or before.get("plan_sha256") != plan_hash or before.get("phase") != "pre_stop"
                 or archive_evidence_hash({key: item for key, item in before.items() if key != "sha256"}) != before.get("sha256")):
@@ -95,6 +102,35 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
             target, before=before["evidence"], source_commit_seq=source_commit, spool_root=spool,
             store=store, limits=limits, check=check,
         )
-        return seal("drained", {**evidence, "execution_pre_stop_sha256": before["sha256"]})["sha256"]
+        record = seal("drained", {**evidence, "execution_pre_stop_sha256": before["sha256"]})
+        drained = evidence, record["sha256"]
+        return record["sha256"]
 
-    return capture, verify
+    def verify_restarted(services):
+        if drained is None:
+            raise RuntimeError("canonical_cold_collector_execution_drain_unobserved")
+        collector = services["market-data-collector"]
+        if collector["running"] is not True or not collector["started_at"]:
+            raise RuntimeError("canonical_cold_collector_execution_new_runtime_unconfirmed")
+        started = datetime.fromisoformat(collector["started_at"])
+        last_pending = None
+        while True:
+            try:
+                assert_roots()
+                with conn.begin():
+                    conn.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    milliseconds = max(1, min(15_000, int(check() * 1_000)))
+                    conn.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(milliseconds)})
+                    evidence = verify_collector_restart(
+                        conn, drained=drained[0], started_at=started, store=store, limits=limits, check=check,
+                    )
+                return seal("restarted", {**evidence, "execution_drained_sha256": drained[1]})["sha256"]
+            except CollectorRestartPending as pending:
+                last_pending = pending
+            except TimeoutError as expired:
+                if last_pending is not None:
+                    expired.add_note(str(last_pending))
+                raise
+            sleep(.25)
+
+    return capture, verify, verify_restarted

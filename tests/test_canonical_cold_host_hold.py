@@ -240,9 +240,16 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
     def bind_provider(connection, *, package_path, package, store, receipt_root):
         assert connection is conn and package_path == arguments["package_path"]
         assert package is approved and receipt_root == root and not stopped
-        return capture, drained
+
+        def restarted(services):
+            assert services == {"running": True}
+            events.append("provider_restarted")
+            return "d" * 64
+
+        return capture, drained, restarted
 
     monkeypatch.setattr(execute, "bind_approved_collector_checks", bind_provider)
+    monkeypatch.setattr(execute, "bind_approved_recovery_checks", lambda **kwargs: kwargs["verify_site_restore"])
 
     def transition(target_conn, control_conn, *, record, verify_provider_boundary, assert_host_held,
                    verified_objects, candidate_witness, **kwargs):
@@ -302,8 +309,10 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
         )
 
     if scenario == "committed":
-        assert run() == {"activation": {"source_commit_seq": 24}, "runtime": {"ready": True}}
-        assert events == ["checksums", "stamps", "provider_tail", "provider_drained", "prestart", "candidate_ready"]
+        assert run() == {"activation": {"source_commit_seq": 24},
+                         "runtime": {"ready": True, "collector_restart_sha256": "d" * 64}}
+        assert events == ["checksums", "stamps", "provider_tail", "provider_drained", "prestart", "candidate_ready",
+                          "provider_restarted"]
     else:
         with pytest.raises(RuntimeError, match={"missing_tail": "provider_tail_missing",
                                                "wrong_control": "control_endpoint_changed"}.get(scenario, scenario)):
