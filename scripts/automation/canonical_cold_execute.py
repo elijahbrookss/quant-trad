@@ -68,12 +68,12 @@ def execute_approved_cutover(
     if outage_seconds > package["max_outage_seconds"]:
         raise ValueError("canonical_cold_execute_outage_exceeds_approved_budget")
     witness = read_approved_candidate_witness(package_path, package)
-    capture_provider_tail, verify_provider_boundary, verify_provider_restart = bind_approved_collector_checks(
+    capture_provider_tail, verify_provider_boundary, verify_provider_restart, pending_scope_sha256 = bind_approved_collector_checks(
         conn, package_path=package_path, package=package, store=store, receipt_root=provider_receipt_root,
     )
     recovery_check = bind_approved_recovery_checks(
         package_path=package_path, package=package, receipt_root=provider_receipt_root,
-        verify_site_restore=verify_recovery_boundary,
+        verify_site_restore=verify_recovery_boundary, expected_pending_scope_sha256=pending_scope_sha256,
     )
     scope = package["scope"]
     audit = validate_audit_receipts(

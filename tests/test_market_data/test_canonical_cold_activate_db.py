@@ -482,7 +482,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
                 patch.setattr(canonical_cold_execute, "bind_approved_collector_checks",
                               lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt",
-                                                       bound_provider, lambda _: "d" * 64))
+                                                       bound_provider, lambda _: "d" * 64, None))
                 patch.setattr(canonical_cold_execute, "bind_approved_recovery_checks",
                               lambda **kwargs: kwargs["verify_site_restore"])
                 completed = canonical_cold_execute.execute_approved_cutover(

@@ -1,6 +1,9 @@
 """Verify the first usable provider state after the approved collector restart."""
 
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+import os
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -13,6 +16,7 @@ from scripts.db.canonical_cold_collector_drain import (
     VERSION, CollectorDrainLimits, _CHANNEL_EVENTS, _EVENT_FIELDS, _manifest, _poll_identity, _roster, _sealed, _stream_identity,
 )
 from scripts.db.canonical_cold_custody_audit import _raw_mappings
+from scripts.db.canonical_cold_recovery_pending_spool import pending_spool_record_witness
 
 
 class CollectorRestartPending(RuntimeError):
@@ -194,7 +198,67 @@ def _poll_outages(conn, current, previous, *, started_at, budget, check):
     return outcomes
 
 
-def verify_collector_restart(conn, *, drained, started_at, store, limits, check):
+def verify_recovered_pending_spool(conn, *, pending, started_at, spool_root, files, limits, budget, check):
+    """Match the canonicalized recovery output to each independently preserved sealed segment."""
+    scope = pending["scope"]
+    segments = pending["segments"]
+    root = Path(spool_root)
+    for segment in segments:
+        check()
+        sealed = root / segment["path"]
+        if os.path.lexists(sealed) or os.path.lexists(sealed.with_suffix(".open")):
+            raise CollectorRestartPending(f"canonical_cold_collector_restart_pending_spool_not_released: {segment['segment_id']}")
+    rows = conn.execute(text(f"""
+        SELECT {_EVENT_FIELDS} FROM market.stream_session_events
+        WHERE definition_id=:id AND session_id=:session AND connection_epoch=:epoch
+          AND occurred_at>=:started AND event_type='book_segment_canonicalized'
+          AND evidence->>'spool_segment_id'=ANY(:segments)
+        ORDER BY event_ordinal DESC LIMIT :limit
+    """), {"id": scope["definition_id"], "session": scope["session_id"], "epoch": scope["connection_epoch"],
+           "started": started_at, "segments": [segment["segment_id"] for segment in segments],
+           "limit": budget["events"] + 1}).mappings().all()
+    budget["events"] -= len(rows)
+    if budget["events"] < 0:
+        raise RuntimeError("canonical_cold_collector_restart_event_budget_exceeded")
+    events = {}
+    for event in rows:
+        events.setdefault(event["evidence"]["spool_segment_id"], event)
+    verified = []
+    for segment in segments:
+        check()
+        event = events.get(segment["segment_id"])
+        if event is None:
+            raise CollectorRestartPending(f"canonical_cold_collector_restart_pending_spool_receipt_missing: {segment['segment_id']}")
+        manifest = _manifest(conn, event, definition_id=scope["definition_id"], event_kind="book_segment_canonicalized")
+        if (manifest["first_receive_ordinal"], manifest["last_receive_ordinal"], manifest["record_count"]) != (
+                segment["first_receive_ordinal"], segment["last_receive_ordinal"], segment["records"]):
+            raise RuntimeError(f"canonical_cold_collector_restart_pending_spool_positions_changed: {segment['segment_id']}")
+        budget["rows"] -= manifest["record_count"]
+        if budget["rows"] < 0 or manifest["record_count"] > limits.raw.max_rows:
+            raise RuntimeError("canonical_cold_collector_restart_raw_row_budget_exceeded")
+        obj = files.verify(manifest["object_key"], manifest["object_sha256"], expected_bytes=manifest["byte_count"])
+        witness = sha256()
+
+        def observe(record):
+            if (record.provider, record.venue, record.provider_product_id, record.requested_channel) != (
+                    scope["provider"], scope["venue"], scope["provider_product_id"], scope["requested_channel"]):
+                raise RuntimeError(f"canonical_cold_collector_restart_pending_spool_product_changed: {segment['segment_id']}")
+            witness.update(pending_spool_record_witness(
+                receive_ordinal=record.receive_ordinal, received_at=record.received_at, raw_record_id=record.raw_record_id,
+                raw_frame_sha256=record.raw_frame_sha256, observed_channel=record.observed_channel,
+            ))
+
+        mappings = _raw_mappings(conn, manifest=manifest, path=files.object_store.local_path(obj.object_key), limits=limits.raw,
+                                 check=check, observe=observe)
+        if witness.hexdigest() != segment["records_sha256"]:
+            raise RuntimeError(f"canonical_cold_collector_restart_pending_spool_records_changed: {segment['segment_id']}")
+        verified.append({"segment_id": segment["segment_id"], "records_sha256": segment["records_sha256"],
+                         "event_id": event["id"], "manifest_id": manifest["id"], "manifest_sha256": obj.object_sha256,
+                         "mappings": mappings})
+    return {"source_sha256": pending["source_sha256"], "segments": verified}
+
+
+def verify_collector_restart(conn, *, drained, started_at, store, limits, check, spool_root=None):
     """Bind current provider readiness and the precise paused poll window."""
     if (not isinstance(limits, CollectorDrainLimits) or drained.get("schema") != VERSION or drained.get("phase") != "drained"
             or archive_evidence_hash({key: item for key, item in drained.items() if key != "sha256"}) != drained.get("sha256")
@@ -212,6 +276,10 @@ def verify_collector_restart(conn, *, drained, started_at, store, limits, check)
                              poll_ids=tuple(x["id"] for x in drained["polls"]), check=check)
     files = ArchiveVerificationBatch(store, limits=limits.archive, check_budget=check)
     budget = {"events": limits.max_events, "rows": limits.max_raw_rows}
+    pending = drained.get("pending_spool")
+    recovered_pending = None if pending is None else verify_recovered_pending_spool(
+        conn, pending=pending, started_at=started_at, spool_root=spool_root, files=files, limits=limits, budget=budget, check=check,
+    )
     boundaries = []
     for definition, previous in zip(streams, drained["streams"], strict=True):
         check()
@@ -236,8 +304,7 @@ def verify_collector_restart(conn, *, drained, started_at, store, limits, check)
             raise RuntimeError(f"canonical_cold_collector_restart_provider_clock_changed: {definition['id']}")
         boundaries.append({"definition_id": definition["id"], "connection": dict(session), "markers": markers,
                            "manifests": manifests, "coverage": dict(coverage), "checkpoint": checkpoint,
-                           "interruption": {"classification": "unproven_provider_interval", "after": after, "before": before,
-                                            "missing_events": None}})
+                           "interruption": {**previous["interruption"], "before": before}})
     poll_outcomes = [
         {"id": current["id"], "occurrences": _poll_outages(conn, current, previous, started_at=started_at, budget=budget, check=check),
          "next_scheduled_at": current["next_scheduled_at"]}
@@ -246,4 +313,4 @@ def verify_collector_restart(conn, *, drained, started_at, store, limits, check)
     files.assert_unchanged()
     return _sealed({"phase": "restarted", "captured_at": now, "source_commit_seq": watermark,
                     "host_started_at": started_at.astimezone(UTC), "drained_sha256": drained["sha256"],
-                    "streams": boundaries, "polls": poll_outcomes})
+                    "streams": boundaries, "polls": poll_outcomes, "pending_spool_recovered": recovered_pending})

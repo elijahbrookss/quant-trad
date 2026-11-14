@@ -1,10 +1,11 @@
 """Prove the last accepted collector positions for an approved host shutdown."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import re
 
 from sqlalchemy import text
 
@@ -14,6 +15,7 @@ from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVe
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from scripts.db.canonical_cold_custody_audit import _raw_mappings
+from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope, measure_pending_spool_before_anchor
 
 
 VERSION = "qt.canonical_cold_collector_drain.v1"
@@ -37,6 +39,26 @@ class CollectorDrainLimits:
                     self.max_events, self.max_raw_rows, self.max_spool_entries,
                 ))):
             raise ValueError("canonical_cold_collector_drain_invalid_limits")
+
+
+@dataclass(frozen=True)
+class InactiveLevel2:
+    """An existing failed stream with an exact, separately recoverable sealed tail."""
+
+    scope: PendingSpoolScope
+    failed_event_id: str
+    failed_event_sha256: str
+    published_event_id: str
+    published_event_sha256: str
+
+    def __post_init__(self):
+        if (not isinstance(self.scope, PendingSpoolScope) or self.scope.requested_channel != "level2"
+                or any(not isinstance(value, str) or not 0 < len(value) <= 128
+                       for value in (self.failed_event_id, self.published_event_id))
+                or self.failed_event_id == self.published_event_id
+                or any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                       for value in (self.failed_event_sha256, self.published_event_sha256))):
+            raise ValueError("canonical_cold_collector_invalid_inactive_level2")
 
 
 def _encode(value):
@@ -112,16 +134,73 @@ def _manifest(connection, event, *, definition_id, event_kind):
     return row
 
 
-def capture_collector_tail(connection, *, stream_ids, poll_ids, check):
+def _inactive_tail(connection, definition, approved, *, now, check, captured=None):
+    scope = approved.scope
+    if (definition["owner_id"] is not None or (definition["id"], definition["provider"],
+            definition["venue"], definition["provider_product_id"]) !=
+            (scope.definition_id, scope.provider, scope.venue, scope.provider_product_id)
+            or tuple(definition["channels"]) != ("level2", "heartbeats")):
+        raise RuntimeError(f"canonical_cold_collector_inactive_definition_changed: {scope.definition_id}")
+    check()
+    events = connection.execute(text(f"""
+        SELECT {_EVENT_FIELDS},definition_id FROM market.stream_session_events WHERE id=ANY(:ids)
+    """), {"ids": [approved.failed_event_id, approved.published_event_id]}).mappings().all()
+    by_id = {row["id"]: row for row in events}
+    failure = by_id.get(approved.failed_event_id)
+    published = by_id.get(approved.published_event_id)
+    if (failure is None or published is None
+            or any((row["definition_id"], row["session_id"], row["connection_epoch"]) !=
+                   (scope.definition_id, scope.session_id, scope.connection_epoch) for row in events)
+            or failure["event_type"] != "failed" or failure["evidence_hash"] != approved.failed_event_sha256
+            or published["event_type"] != _CHANNEL_EVENTS["level2"]
+            or published["evidence_hash"] != approved.published_event_sha256
+            or published["event_ordinal"] >= failure["event_ordinal"]
+            or not published["occurred_at"] <= failure["occurred_at"] <= now):
+        raise RuntimeError(f"canonical_cold_collector_inactive_boundary_changed: {scope.definition_id}")
+    manifest = _manifest(connection, published, definition_id=scope.definition_id, event_kind=_CHANNEL_EVENTS["level2"])
+    check()
+    projection = connection.execute(text("""
+        SELECT session_id,connection_epoch,lifecycle,validity_interval_id,checkpoint_id,receive_ordinal,updated_at
+        FROM market.book_reconstruction_state WHERE series_id=:series AND definition_id=:definition
+    """), {"series": definition["series_id"], "definition": scope.definition_id}).mappings().one_or_none()
+    if (projection is None or (projection["session_id"], projection["connection_epoch"], projection["lifecycle"])
+            != (scope.session_id, scope.connection_epoch, "invalid")
+            or projection["receive_ordinal"] > manifest["last_receive_ordinal"]):
+        raise RuntimeError(f"canonical_cold_collector_inactive_projection_changed: {scope.definition_id}")
+    if captured is not None:
+        check()
+        # Only the actual stop window needs an event scan. The current
+        # per-series projection already binds the earlier inactive position.
+        advanced = connection.scalar(text("""
+            SELECT EXISTS(SELECT 1 FROM market.stream_session_events
+                WHERE definition_id=:definition AND occurred_at>=:captured
+                  AND event_type IN ('book_segment_canonicalized','connected','reconnected','spool_segment_recovered'))
+        """), {"definition": scope.definition_id, "captured": captured})
+        if advanced:
+            raise RuntimeError(f"canonical_cold_collector_inactive_session_advanced: {scope.definition_id}")
+    return failure, published, manifest, {**projection, "updated_at": _encode(projection["updated_at"])}
+
+
+def capture_collector_tail(connection, *, stream_ids, poll_ids, check, inactive_level2=None):
     """Read the live roster and last published position without pausing writers."""
     if (connection.scalar(text("SHOW transaction_read_only")) != "on"
             or connection.scalar(text("SHOW transaction_isolation")) != "repeatable read"):
         raise ValueError("canonical_cold_collector_tail_requires_readonly_snapshot")
     now = _timestamp(connection)
     streams, polls = _roster(connection, stream_ids=stream_ids, poll_ids=poll_ids, check=check)
+    inactive_id = None if inactive_level2 is None else inactive_level2.scope.definition_id
+    if inactive_id is not None and inactive_id not in stream_ids:
+        raise ValueError("canonical_cold_collector_inactive_definition_not_in_roster")
     tails = []
     for row in streams:
         check()
+        if row["id"] == inactive_id:
+            failure, published, manifest, projection = _inactive_tail(connection, row, inactive_level2, now=now, check=check)
+            tails.append({"definition": _stream_identity(row), "channel": "level2", "inactive": asdict(inactive_level2),
+                          "failed_at": failure["occurred_at"], "last_receive_ordinal": manifest["last_receive_ordinal"],
+                          "last_manifest_id": manifest["id"], "last_segment_event_id": published["id"],
+                          "projection": projection})
+            continue
         primary = [channel for channel in row["channels"] if channel != "heartbeats"]
         if (row["provider"].upper() != "COINBASE" or len(primary) != 1 or primary[0] not in _CHANNEL_EVENTS
                 or not row["owner_id"] or row["expires_at"] <= now):
@@ -177,7 +256,8 @@ def _assert_spool_drained(spool_root, *, max_entries, check):
     return count
 
 
-def verify_collector_drain(connection, *, before, source_commit_seq, spool_root, store, limits, check):
+def verify_collector_drain(connection, *, before, source_commit_seq, spool_root, store, limits, check,
+                           inactive_level2=None, database_identity=None):
     """Use native terminal events and exact archived positions at the writer fence."""
     if (not isinstance(limits, CollectorDrainLimits) or type(source_commit_seq) is not int
             or before.get("schema") != VERSION or before.get("phase") != "pre_stop"
@@ -192,7 +272,19 @@ def verify_collector_drain(connection, *, before, source_commit_seq, spool_root,
                              poll_ids=tuple(item["id"] for item in before["polls"]), check=check)
     if any(row["owner_id"] is not None for row in streams) or any(row["lease_owner"] is not None for row in polls):
         raise RuntimeError("canonical_cold_collector_drain_producer_lease_active")
-    spool_entries = _assert_spool_drained(spool_root, max_entries=limits.max_spool_entries, check=check)
+    inactive = [item["inactive"] for item in before["streams"] if "inactive" in item]
+    if inactive != ([] if inactive_level2 is None else [asdict(inactive_level2)]):
+        raise RuntimeError("canonical_cold_collector_drain_inactive_plan_changed")
+    spool_entries = None
+    pending_spool = None
+    if inactive_level2 is None:
+        spool_entries = _assert_spool_drained(spool_root, max_entries=limits.max_spool_entries, check=check)
+    else:
+        pending_spool = measure_pending_spool_before_anchor(
+            source=spool_root, scope=inactive_level2.scope, database_identity=database_identity,
+            source_commit_seq=source_commit_seq, timeout_seconds=min(600, max(1, int(check()))),
+            max_entries=limits.max_spool_entries, check_held=check,
+        )
     files = ArchiveVerificationBatch(store, limits=limits.archive, check_budget=check)
     positions = []
     remaining_events = limits.max_events
@@ -201,6 +293,34 @@ def verify_collector_drain(connection, *, before, source_commit_seq, spool_root,
         check()
         if _stream_identity(stream) != prior["definition"]:
             raise RuntimeError(f"canonical_cold_collector_drain_stream_definition_changed: {stream['id']}")
+        if "inactive" in prior:
+            failure, published, manifest, projection = _inactive_tail(
+                connection, stream, inactive_level2, now=now, check=check, captured=captured,
+            )
+            last = manifest["last_receive_ordinal"]
+            if (manifest["id"] != prior["last_manifest_id"] or last != prior["last_receive_ordinal"]
+                    or published["id"] != prior["last_segment_event_id"]
+                    or _encode(failure["occurred_at"]) != prior["failed_at"] or projection != prior["projection"]):
+                raise RuntimeError(f"canonical_cold_collector_drain_inactive_boundary_changed: {stream['id']}")
+            for segment in pending_spool["segments"]:
+                if (segment["first_receive_ordinal"] != last + 1
+                        or segment["last_receive_ordinal"] - segment["first_receive_ordinal"] + 1 != segment["records"]):
+                    raise RuntimeError(f"canonical_cold_collector_drain_pending_ordinal_gap: {segment['segment_id']}")
+                last = segment["last_receive_ordinal"]
+            remaining_rows -= manifest["record_count"] + sum(segment["records"] for segment in pending_spool["segments"])
+            if remaining_rows < 0 or manifest["record_count"] > limits.raw.max_rows:
+                raise RuntimeError("canonical_cold_collector_drain_raw_row_budget_exceeded")
+            obj = files.verify(manifest["object_key"], manifest["object_sha256"], expected_bytes=manifest["byte_count"])
+            exact = _raw_mappings(connection, manifest=manifest, path=store.local_path(obj.object_key), limits=limits.raw, check=check)
+            positions.append({"definition_id": stream["id"], "definition": prior["definition"],
+                              "channel": "level2", "session_id": failure["session_id"], "epoch": failure["connection_epoch"],
+                              "failure_id": failure["id"], "failure_hash": failure["evidence_hash"],
+                              "failed_at": failure["occurred_at"], "last_published_receive_ordinal": manifest["last_receive_ordinal"],
+                              "last_pending_receive_ordinal": last, "manifest": {"id": manifest["id"], "sha256": obj.object_sha256,
+                              "mappings": exact}, "interruption": {"classification": "pre_existing_provider_unavailable",
+                                  "after": pending_spool["segments"][-1]["last_received_at"], "before": None, "missing_events": None,
+                                  "after_basis": "last_preserved_raw_receipt", "previous_valid_book_end": None}})
+            continue
         position = prior["position"]
         scope = {"id": stream["id"], "session": position["session_id"], "previous": position["event_ordinal"],
                  "captured": captured, "kinds": list(_TAIL_EVENTS)}
@@ -284,4 +404,4 @@ def verify_collector_drain(connection, *, before, source_commit_seq, spool_root,
     check()
     return _sealed({"phase": "drained", "captured_at": now, "source_commit_seq": source_commit_seq,
                     "pre_stop_sha256": before["sha256"], "streams": positions, "polls": poll_boundaries,
-                    "spool_entries_examined": spool_entries})
+                    "spool_entries_examined": spool_entries, "pending_spool": pending_spool})

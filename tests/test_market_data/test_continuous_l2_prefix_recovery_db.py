@@ -1,6 +1,7 @@
 """The real collector resumes a bounded raw proof before admitting its first book."""
 
-from datetime import timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import json
 from types import SimpleNamespace
 
@@ -9,10 +10,14 @@ from sqlalchemy import text
 
 from data_providers.streams.coinbase import CoinbaseMessageParser
 from data_providers.streams.contracts import ProviderRawMessage
-from market_data.archive import DurableRawSpoolSegment
+from market_data.archive import DurableRawSpoolSegment, RawArchiveReadLimits
+from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from market_data.structure import RawStreamRecord
 from portal.backend.service.market import continuous_stream_collector as collector_module
 from portal.backend.service.storage.repos import fact_references
+from scripts.db.canonical_cold_collector_drain import CollectorDrainLimits, InactiveLevel2, capture_collector_tail, verify_collector_drain
+from scripts.db.canonical_cold_collector_restart import CollectorRestartPending, verify_recovered_pending_spool
+from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, storage
 
@@ -57,6 +62,11 @@ def _segment(fixture, *, claim, root, segment_ordinal, entries):
 def test_long_invalid_epoch_resumes_exact_prefix_before_acknowledging_spool(storage, tmp_path, monkeypatch):
     fixture = _raw_book_fixture(storage, tmp_path / "enrollment", monkeypatch, replay_features=True)
     fixture.structures.release(fixture.claim)
+    with storage.database._engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE market.stream_definitions SET channels='["level2","heartbeats"]'::jsonb,
+                   enabled=true,desired_state='running' WHERE id=:id
+        """), {"id": fixture.claim.definition_id})
     claim = fixture.structures.claim_stream(
         definition_id=fixture.claim.definition_id, owner_id="initial-worker", lease_seconds=600, bounded=True,
     )
@@ -72,12 +82,13 @@ def test_long_invalid_epoch_resumes_exact_prefix_before_acknowledging_spool(stor
             (3, "heartbeats", 1, None, []),
         ],
     )
+    event_writer = collector_module._SessionEventWriter(fixture.structures, claim)
     collector._finalize_level2_segment(
         claim=claim, checkpoint=collector_module._SegmentCheckpoint(
             initial, analysis, terminal=False, terminal_reason=None, closing_session_event_id=None,
         ),
         object_store=fixture.store, temporary_root=temporary_root,
-        event_writer=collector_module._SessionEventWriter(fixture.structures, claim),
+        event_writer=event_writer,
         states={}, counters={"manifests": 0, "quality_events": 0, **projection.counters()},
     )
     assert not initial.sealed_path.exists()
@@ -97,7 +108,67 @@ def test_long_invalid_epoch_resumes_exact_prefix_before_acknowledging_spool(stor
             (5, "l2_data", 2, "update", [("bid", "99", "12")]),
         ],
     )
+    failed_id = event_writer.append(
+        connection_epoch=1, event_type="failed", occurred_at=datetime.now(UTC),
+        reason="fixture interrupted before spool admission", evidence={"pending_segments": 1},
+    )
     fixture.structures.release(claim)
+    pending_scope = PendingSpoolScope(claim.definition_id, claim.session_id, 1, claim.provider, claim.venue,
+                                      claim.provider_product_id, "level2", 1, tail.sealed_path.stat().st_size)
+    archive_limits = ArchiveVerificationLimits(max_objects=16, max_bytes=16 * 1024**2)
+    limits = CollectorDrainLimits(archive_limits, RawArchiveReadLimits(max_rows=64), max_events=64,
+                                  max_raw_rows=128, max_spool_entries=64)
+    with storage.database._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        events = conn.execute(text("""
+            SELECT id,event_type,evidence_hash FROM market.stream_session_events
+            WHERE session_id=:session AND connection_epoch=1
+        """), {"session": claim.session_id}).mappings().all()
+        published, = [event for event in events if event["event_type"] == "book_segment_canonicalized"]
+        failure, = [event for event in events if event["id"] == failed_id]
+        approved = InactiveLevel2(pending_scope, failed_id, failure["evidence_hash"], published["id"], published["evidence_hash"])
+        identity = conn.scalar(text("""
+            SELECT system_identifier::text || '/' || oid::text
+            FROM pg_control_system() CROSS JOIN pg_database WHERE datname=current_database()
+        """))
+        with pytest.raises(RuntimeError, match="tail_stream_not_ready"):
+            capture_collector_tail(conn, stream_ids=(claim.definition_id,), poll_ids=(), check=lambda: 30)
+        with pytest.raises(RuntimeError, match="inactive_boundary_changed"):
+            capture_collector_tail(conn, stream_ids=(claim.definition_id,), poll_ids=(), check=lambda: 30,
+                                   inactive_level2=replace(approved, failed_event_sha256="f" * 64))
+        before = capture_collector_tail(conn, stream_ids=(claim.definition_id,), poll_ids=(), check=lambda: 30,
+                                      inactive_level2=approved)
+    with storage.database._engine.begin() as conn:
+        arguments = dict(before=before, source_commit_seq=before["source_commit_seq"], spool_root=spool_root,
+                         store=fixture.store, limits=limits, check=lambda: 30, database_identity=identity)
+        with pytest.raises(RuntimeError, match="inactive_plan_changed"):
+            verify_collector_drain(conn, **arguments)
+        unexpected = spool_root / "unapproved.open"
+        unexpected.write_bytes(b"unexpected fixture data")
+        try:
+            with pytest.raises(RuntimeError, match="pending_spool_unexpected_file"):
+                verify_collector_drain(conn, **arguments, inactive_level2=approved)
+        finally:
+            unexpected.unlink()
+        drained = verify_collector_drain(conn, **arguments, inactive_level2=approved)
+    pending = drained["pending_spool"]
+    assert pending["boundary"] == {"database_identity": identity, "source_commit_seq": before["source_commit_seq"]}
+    assert pending["segments"][0]["segment_id"] == tail.spool_segment_id
+    assert drained["streams"][0]["interruption"]["classification"] == "pre_existing_provider_unavailable"
+    started = datetime.now(UTC)
+
+    def verify_replayed(evidence=pending):
+        with storage.database._engine.begin() as conn:
+            files = ArchiveVerificationBatch(fixture.store, limits=archive_limits)
+            receipt = verify_recovered_pending_spool(
+                conn, pending=evidence, started_at=started, spool_root=spool_root, files=files, limits=limits,
+                budget={"events": 64, "rows": 128}, check=lambda: 30,
+            )
+            files.assert_unchanged()
+            return receipt
+
+    with pytest.raises(CollectorRestartPending, match="spool_not_released"):
+        verify_replayed()
 
     original = fact_references.lock_canonical_raw_references
     monkeypatch.setattr(fact_references, "lock_canonical_raw_references",
@@ -151,6 +222,13 @@ def test_long_invalid_epoch_resumes_exact_prefix_before_acknowledging_spool(stor
     resume()
 
     assert not tail.sealed_path.exists()
+    recovery = verify_replayed()
+    assert recovery["source_sha256"] == pending["source_sha256"]
+    recovered, = recovery["segments"]
+    assert recovered["segment_id"] == tail.spool_segment_id and recovered["mappings"]["count"] == len(tail_records)
+    wrong = {**pending, "segments": [{**pending["segments"][0], "records_sha256": "0" * 64}]}
+    with pytest.raises(RuntimeError, match="pending_spool_records_changed"):
+        verify_replayed(wrong)
     with storage.database.session() as session:
         roots = session.execute(text("""
             SELECT payload->>'event_type',provenance->'_qt_l2_evidence'->>'raw_record_id'

@@ -246,7 +246,7 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
             events.append("provider_restarted")
             return "d" * 64
 
-        return capture, drained, restarted
+        return capture, drained, restarted, None
 
     monkeypatch.setattr(execute, "bind_approved_collector_checks", bind_provider)
     monkeypatch.setattr(execute, "bind_approved_recovery_checks", lambda **kwargs: kwargs["verify_site_restore"])

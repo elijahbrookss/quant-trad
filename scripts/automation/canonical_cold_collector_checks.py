@@ -1,5 +1,6 @@
 """Bind native collector evidence to the one reviewed cutover package."""
 
+from dataclasses import asdict
 from datetime import datetime
 import json
 import os
@@ -14,11 +15,12 @@ from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.fact_archive import archive_evidence_hash
 from scripts.automation import storage_host_boundary as host
 from scripts.automation.canonical_cold_package import _hash_file, _pin, _unique_fields
-from scripts.db.canonical_cold_collector_drain import CollectorDrainLimits, capture_collector_tail, verify_collector_drain
+from scripts.db.canonical_cold_collector_drain import InactiveLevel2, CollectorDrainLimits, capture_collector_tail, verify_collector_drain
 from scripts.db.canonical_cold_collector_restart import CollectorRestartPending, verify_collector_restart
+from scripts.db.canonical_cold_recovery_pending_spool import PendingSpoolScope
 
 
-PLAN_VERSION = "qt.canonical_cold_collector_plan.v1"
+PLAN_VERSION = "qt.canonical_cold_collector_plan.v2"
 RECEIPT_VERSION = "qt.canonical_cold_collector_execution.v1"
 
 
@@ -37,12 +39,25 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
         raise RuntimeError("canonical_cold_collector_plan_digest_changed")
     plan = json.loads(content, object_pairs_hook=_unique_fields)
     if (not isinstance(plan, dict) or set(plan) != {
-            "schema", "stream_ids", "poll_ids", "spool_root", "limits", "rehearsal_sha256",
+            "schema", "stream_ids", "poll_ids", "spool_root", "limits", "rehearsal_sha256", "inactive_level2",
         } or plan["schema"] != PLAN_VERSION or not _pin(plan["rehearsal_sha256"])
             or not all(isinstance(plan[name], list) for name in ("stream_ids", "poll_ids"))
             or not isinstance(plan["spool_root"], str) or not isinstance(plan["limits"], dict)
             or set(plan["limits"]) != {"archive", "raw", "max_events", "max_raw_rows", "max_spool_entries"}):
         raise ValueError("canonical_cold_collector_plan_invalid")
+    inactive = plan["inactive_level2"]
+    inactive_level2 = None
+    if inactive is not None:
+        if (not isinstance(inactive, dict) or set(inactive) != {
+            "scope", "failed_event_id", "failed_event_sha256", "published_event_id", "published_event_sha256",
+        } or not isinstance(inactive["scope"], dict)):
+            raise ValueError("canonical_cold_collector_plan_invalid_inactive_scope")
+        inactive_level2 = InactiveLevel2(**{**inactive, "scope": PendingSpoolScope(**inactive["scope"])})
+        if inactive_level2.scope.definition_id not in plan["stream_ids"]:
+            raise ValueError("canonical_cold_collector_inactive_definition_not_in_roster")
+    pending_scope_sha256 = None if inactive_level2 is None else archive_evidence_hash(asdict(inactive_level2.scope))
+    target = package["scope"]["target_database"]
+    database_identity = f"{target['system_identifier']}/{target['database_oid']}"
     budgets = plan["limits"]
     limits = CollectorDrainLimits(
         archive=ArchiveVerificationLimits(**budgets["archive"]), raw=RawArchiveReadLimits(**budgets["raw"]),
@@ -89,6 +104,7 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
             conn.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             evidence = capture_collector_tail(
                 conn, stream_ids=tuple(plan["stream_ids"]), poll_ids=tuple(plan["poll_ids"]), check=check,
+                inactive_level2=inactive_level2,
             )
         return seal("pre_stop", evidence)
 
@@ -100,7 +116,7 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
             raise RuntimeError("canonical_cold_collector_execution_tail_changed")
         evidence = verify_collector_drain(
             target, before=before["evidence"], source_commit_seq=source_commit, spool_root=spool,
-            store=store, limits=limits, check=check,
+            store=store, limits=limits, check=check, inactive_level2=inactive_level2, database_identity=database_identity,
         )
         record = seal("drained", {**evidence, "execution_pre_stop_sha256": before["sha256"]})
         drained = evidence, record["sha256"]
@@ -122,7 +138,7 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
                     milliseconds = max(1, min(15_000, int(check() * 1_000)))
                     conn.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(milliseconds)})
                     evidence = verify_collector_restart(
-                        conn, drained=drained[0], started_at=started, store=store, limits=limits, check=check,
+                        conn, drained=drained[0], started_at=started, store=store, limits=limits, check=check, spool_root=spool,
                     )
                 return seal("restarted", {**evidence, "execution_drained_sha256": drained[1]})["sha256"]
             except CollectorRestartPending as pending:
@@ -133,4 +149,4 @@ def bind_approved_collector_checks(conn, *, package_path, package, store, receip
                 raise
             sleep(.25)
 
-    return capture, verify, verify_restarted
+    return capture, verify, verify_restarted, pending_scope_sha256
