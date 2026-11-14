@@ -6,7 +6,7 @@ always comes from the existing fenced reclaimer's fresh evidence checks.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, timedelta
 from math import isfinite
 import logging
@@ -19,7 +19,7 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.fact_archive import FactArchiveLimits
 from ..storage.repos.cold_retirement import prune_oldest_retired_identities
-from ..storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
+from ..storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository, SelectedVerificationPage
 from ..storage.repos.fact_reclamation import FactReclamationLimits, PostgresCanonicalFactReclamationRepository
 from ..storage.repos.fact_retention import (
     archive_admission_blockers, canonical_fact_retention_repository, require_hot_window_elapsed,
@@ -37,6 +37,7 @@ _PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_v
 _MAX_PAGE_PREREQUISITE_COMMITS = 64
 _SELECTED_SUCCESS = {
     "stage_page": "page_acknowledged",
+    "verify_page": "page_verified",
     "verify_partition": "partition_verified",
     "reclaim_partition": "partition_reclaimed",
 }
@@ -174,7 +175,7 @@ class CanonicalFactRetentionExecutor:
 
     def _execute_step(self, *, item, policy, storage_root, check_budget, remaining_seconds,
                       storage_policy_witness=None, prerequisite_commits=None,
-                      expected_verification_pages=None):
+                      expected_verification_pages=None, selected_verification_page=None):
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         reusable = action in {"stage_page", "verify_page"}
@@ -291,7 +292,9 @@ class CanonicalFactRetentionExecutor:
                 "prerequisite_commits": prerequisites,
             }
         if action == "verify_page":
-            return archive.verify_next_page(day)
+            if selected_verification_page is None:
+                return archive.verify_next_page(day)
+            return archive.verify_next_page(day, selected_page=selected_verification_page)
         if action == "verify_partition":
             return archive.verify_partition(
                 day, limits=verification, count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
@@ -358,7 +361,8 @@ class CanonicalFactRetentionExecutor:
 
     def run_selected(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
                      storage_day: date, expected_action: str, execute: bool = False,
-                     cancelled=None, progress=None, verification_pages: int | None = None):
+                     cancelled=None, progress=None, verification_pages: int | None = None,
+                     verification_page: SelectedVerificationPage | None = None):
         """Execute exactly one freshly planned private canary action.
 
         This is deliberately narrower than ``run``: it never advances a scan,
@@ -368,6 +372,8 @@ class CanonicalFactRetentionExecutor:
         """
         if (type(execute) is not bool or type(storage_day) is not date
                 or type(expected_action) is not str or expected_action not in _SELECTED_SUCCESS
+                or ((expected_action == "verify_page") != (verification_page is not None))
+                or (verification_page is not None and not isinstance(verification_page, SelectedVerificationPage))
                 or (verification_pages is not None and (
                     expected_action != "verify_partition" or type(verification_pages) is not int or verification_pages < 1
                 ))):
@@ -415,6 +421,11 @@ class CanonicalFactRetentionExecutor:
                 result["storage_policy"] = witness
             if verification_pages is not None:
                 result["expected_verification_pages"] = verification_pages
+            if verification_page is not None:
+                self.repository.check_selected_verification_page(
+                    storage_day, verification_page, statement_timeout_ms=policy.plan_statement_timeout_ms,
+                )
+                result["expected_verification_page"] = asdict(verification_page)
             return result
         if not self._run_lock.acquire(blocking=False):
             raise MarketStorageLifecycleBusyError("canonical_retention_worker_busy: retry later")
@@ -426,7 +437,7 @@ class CanonicalFactRetentionExecutor:
                 policy=policy, storage_root=storage_root, storage_day=storage_day,
                 expected_action=expected_action, cancelled=cancelled,
                 storage_policy_witness=witness, progress=progress,
-                verification_pages=verification_pages,
+                verification_pages=verification_pages, verification_page=verification_page,
             )
         finally:
             self._dispose_archive()
@@ -460,7 +471,8 @@ class CanonicalFactRetentionExecutor:
         return item
 
     def _run_selected(self, *, policy, storage_root, storage_day, expected_action,
-                      cancelled, storage_policy_witness=None, progress=None, verification_pages=None):
+                      cancelled, storage_policy_witness=None, progress=None, verification_pages=None,
+                      verification_page=None):
         started = monotonic()
         deadline = started + policy.max_run_seconds
 
@@ -514,6 +526,7 @@ class CanonicalFactRetentionExecutor:
                 check_budget=check_budget, remaining_seconds=remaining_run_seconds,
                 storage_policy_witness=storage_policy_witness, prerequisite_commits=[],
                 expected_verification_pages=item.get("page_count") if expected_action == "verify_partition" else None,
+                **({"selected_verification_page": verification_page} if verification_page is not None else {}),
             )
             if raw_outcome.get("status") != _SELECTED_SUCCESS[expected_action]:
                 status = "failed"
@@ -571,6 +584,8 @@ class CanonicalFactRetentionExecutor:
             result["storage_policy"] = storage_policy_witness
         if verification_pages is not None:
             result["expected_verification_pages"] = verification_pages
+        if verification_page is not None:
+            result["expected_verification_page"] = asdict(verification_page)
         observe(stage="finished", completed_steps=1, status=status,
                 storage_day=storage_day.isoformat(), action=expected_action)
         logger.info(

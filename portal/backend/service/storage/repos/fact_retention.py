@@ -19,7 +19,7 @@ from core.storage_mounts import (
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from ._shared import db
 from .cold_history import cold_layout_active
-from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash
+from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash, _unverified_page
 from .fact_reclamation import unproven_reclamation_fact_types
 
 
@@ -106,6 +106,13 @@ RETENTION_PAGE_COUNTS_QUERY = text("""
 class PostgresCanonicalFactRetentionRepository:
     def __init__(self, *, database=db):
         self.database = database
+
+    def check_selected_verification_page(self, day, page, *, statement_timeout_ms):
+        with self.database.session() as session:
+            session.execute(text("SET TRANSACTION READ ONLY"))
+            session.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                            {"value": str(statement_timeout_ms)})
+            _unverified_page(session, day, page)
 
     def _inventory(self, policy: CanonicalFactRetentionPolicy, *, after_storage_day: date | None):
         deadline = monotonic() + policy.max_plan_seconds

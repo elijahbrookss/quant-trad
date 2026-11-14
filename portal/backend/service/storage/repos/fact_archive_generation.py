@@ -717,7 +717,7 @@ class ArchiveGenerationCoordinator:
                     f"canonical_archive_supersession_not_monotone: catalog={catalog}"
                 )
 
-    def supersede_verified(self, *, day, preparation, verification_receipt: dict) -> dict:
+    def supersede_verified(self, *, day, preparation, verification_receipt: dict, verify_selected_page=None) -> dict:
         """Publish a complete monotone replacement and its receipt atomically.
 
         The old pointer remains authoritative until every membership, hold, and
@@ -725,6 +725,8 @@ class ArchiveGenerationCoordinator:
         """
         with self.database.session() as session:
             self.lock_day(session, day)
+            if verify_selected_page is not None:
+                verify_selected_page(session)
             if cold_layout_active(session):
                 guard_cold_runtime_placement(session, archive_evidence=True)
             target = session.execute(text(

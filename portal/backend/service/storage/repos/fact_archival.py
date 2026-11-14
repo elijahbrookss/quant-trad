@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 import hashlib
+import re
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 import logging
 from math import isfinite
@@ -134,12 +135,52 @@ _ARCHIVE_SOURCE_PAGE_QUERY = text(f"""
 """)
 
 _ARCHIVE_UNVERIFIED_PAGE_QUERY = text("""
-    SELECT pages.* FROM market.fact_archive_manifests AS pages
+    SELECT pages.*, active.generation AS selected_generation,
+           active.preparation_id AS selected_preparation_id, active.catalog_commitment AS selected_catalog_commitment
+    FROM market.fact_archive_manifests AS pages
     LEFT JOIN market.fact_archive_verifications AS proof
       ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+    LEFT JOIN market.fact_archive_active_generations AS active ON active.manifest_id=pages.id
     WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
     ORDER BY pages.page_ordinal LIMIT 1
 """)
+
+
+@dataclass(frozen=True)
+class SelectedVerificationPage:
+    page_ordinal: int
+    manifest_id: str
+    manifest_hash: str
+    generation: int
+    preparation_id: str | None = None
+    catalog_commitment: str | None = None
+
+    def __post_init__(self):
+        if (type(self.page_ordinal) is not int or not 0 <= self.page_ordinal <= 2**31 - 1
+                or type(self.generation) is not int or not 0 <= self.generation <= 2**31 - 1
+                or not isinstance(self.manifest_id, str) or re.fullmatch(r"cfa_[0-9a-f]{64}", self.manifest_id) is None
+                or not isinstance(self.manifest_hash, str) or re.fullmatch(r"[0-9a-f]{64}", self.manifest_hash) is None):
+            raise ValueError("canonical_archive_selected_page_invalid")
+        if self.generation == 0:
+            if self.preparation_id is not None or self.catalog_commitment is not None:
+                raise ValueError("canonical_archive_selected_legacy_generation_invalid")
+        elif (not isinstance(self.preparation_id, str) or re.fullmatch(r"fap_[0-9a-f]{48}", self.preparation_id) is None
+                or not isinstance(self.catalog_commitment, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.catalog_commitment) is None):
+            raise ValueError("canonical_archive_selected_generation_invalid")
+
+
+def _unverified_page(session, day, expected=None):
+    page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
+        "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
+    }).mappings().one_or_none()
+    if expected is not None and (page is None or (
+            page["page_ordinal"], page["id"], page["manifest_hash"], page["selected_generation"] or 0,
+            page["selected_preparation_id"], page["selected_catalog_commitment"],
+    ) != (expected.page_ordinal, expected.manifest_id, expected.manifest_hash, expected.generation,
+          expected.preparation_id, expected.catalog_commitment)):
+        raise RuntimeError(f"canonical_archive_selected_page_changed: storage_day={day}")
+    return page
 
 _ARCHIVE_SOURCE_ENVELOPES_QUERY = text(f"""
     SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
@@ -1553,7 +1594,7 @@ class PostgresCanonicalFactArchiveRepository:
         return {"storage_day": day, "status": "partition_verification_restarted",
                 "prior_manifest_set_hash": partition["manifest_set_hash"], "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION}
 
-    def verify_next_page(self, day: date) -> dict:
+    def verify_next_page(self, day: date, *, selected_page: SelectedVerificationPage | None = None) -> dict:
         """Deep-check one unverified page; commit its receipt only after all checks.
 
         The codec validates every full-row hash. Comparing every permanent
@@ -1568,9 +1609,7 @@ class PostgresCanonicalFactArchiveRepository:
             partition = self._lock(session, day)
             if partition["state"] != "sealed":
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
-                "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
-            }).mappings().one_or_none()
+            page = _unverified_page(session, day, selected_page)
             if page is None:
                 return {"storage_day": day, "status": "no_unverified_pages"}
             manifest = _catalog_manifest(page)
@@ -1742,6 +1781,8 @@ class PostgresCanonicalFactArchiveRepository:
                     page=plan["page"], operation=lambda: self._generation.supersede_verified(
                         day=day, preparation=ready,
                         verification_receipt=plan["receipt"],
+                        **({"verify_selected_page": lambda session: _unverified_page(session, day, selected_page)}
+                           if selected_page is not None else {}),
                     ),
                 )
             except BaseException:

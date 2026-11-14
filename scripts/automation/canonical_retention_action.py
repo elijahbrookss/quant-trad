@@ -26,6 +26,7 @@ from portal.backend.db import db  # noqa: E402
 from portal.backend.service.async_jobs import wait_for_database_ready  # noqa: E402
 from portal.backend.service.market.market_structure_service import DEFAULT_STORAGE_ROOT  # noqa: E402
 from portal.backend.service.storage.maintenance_runtime import storage_maintenance_runners  # noqa: E402
+from portal.backend.service.storage.repos.fact_archival import SelectedVerificationPage  # noqa: E402
 from portal.backend.service.storage.repos.query_diagnostic import write_receipt  # noqa: E402
 
 
@@ -39,10 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--storage-day", required=True, help="Exact UTC storage day (YYYY-MM-DD).")
     parser.add_argument(
-        "--expected-action", required=True, choices=("stage_page", "verify_partition", "reclaim_partition"),
+        "--expected-action", required=True, choices=("stage_page", "verify_page", "verify_partition", "reclaim_partition"),
     )
     parser.add_argument("--verification-pages", type=int,
         help="Exact reviewed page count and cap for one verify_partition action.")
+    parser.add_argument("--page-ordinal", type=int)
+    parser.add_argument("--manifest-id")
+    parser.add_argument("--manifest-hash")
+    parser.add_argument("--generation", type=int, help="0 for a legacy page with no active prepared generation.")
+    parser.add_argument("--preparation-id")
+    parser.add_argument("--catalog-commitment")
     parser.add_argument("--receipt", required=True, help="Private JSON receipt path.")
     parser.add_argument("--execute", action="store_true", help="Execute the one selected action.")
     return parser
@@ -55,6 +62,16 @@ def main(argv: list[str] | None = None) -> int:
         args.expected_action != "verify_partition" or not 1 <= args.verification_pages <= 100_000
     ):
         parser.error("--verification-pages requires verify_partition and a count of 1..100000")
+    page_fields = (args.page_ordinal, args.manifest_id, args.manifest_hash, args.generation,
+                   args.preparation_id, args.catalog_commitment)
+    page = None
+    if args.expected_action == "verify_page":
+        try:
+            page = SelectedVerificationPage(*page_fields)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif any(value is not None for value in page_fields):
+        parser.error("Exact page pins require verify_page.")
     try:
         storage_day = date.fromisoformat(args.storage_day)
     except ValueError as exc:
@@ -85,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         storage_root=DEFAULT_STORAGE_ROOT,
         execute=args.execute,
         verification_pages=args.verification_pages,
+        **({"verification_page": page} if page is not None else {}),
     )
     write_receipt(Path(args.receipt), result)
     print(json.dumps(result, sort_keys=True, default=str))
