@@ -12,10 +12,12 @@ from sqlalchemy.orm import Session
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy, MarketStorageLifecyclePolicy
 from core.storage_mounts import FilesystemEvidence
 from core.storage_targets import StoragePolicy, StorageTarget
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, ColdFactRetiredDayRecord
 from portal.backend.db.market_storage_models import (
     MarketFactArchiveManifestRecord,
     MarketFactArchiveVerificationRecord,
     MarketFactRetentionPartitionRecord,
+    MarketFactStorageStateRecord,
 )
 from portal.backend.db.storage_target_models import (
     StorageObjectLocationRecord,
@@ -69,6 +71,8 @@ def postgres(tmp_path, monkeypatch):
             MarketFactRetentionPartitionRecord,
             MarketFactArchiveManifestRecord,
             MarketFactArchiveVerificationRecord,
+            MarketFactStorageStateRecord,
+            ColdFactRetiredDayRecord,
         ):
             model.__table__.create(engine)
         monkeypatch.setattr(module, "get_settings", _settings)
@@ -242,6 +246,35 @@ def test_projection_preserves_nulls_and_separates_populated_storage_domains(post
     assert six_hours["verify"]["compressed_bytes"] == 120
     assert six_hours["reclaim"]["physical_hot_bytes"] == 280
     assert result["lifecycle"]["last_durable_advancement"]["stage"] == "archive_page_verified"
+
+
+def test_initial_handoff_removes_a_day_from_hot_backlog_without_altering_source_evidence(postgres):
+    engine, _ = postgres
+    now = datetime.now(UTC)
+    day = (now - timedelta(days=90)).date()
+    with Session(engine) as session, session.begin():
+        session.add(MarketFactRetentionPartitionRecord(
+            storage_day=day, state="sealed", expected_rows=10,
+            source_bytes=100, sealed_at=now - timedelta(hours=1),
+        ))
+        session.add(ColdFactRetiredDayRecord(
+            storage_day=day, handoff_kind="initial", row_count=10,
+            manifest_set_hash=HASH_A, protected_dataset_ranges=0, reclaimed_header_bytes=200,
+        ))
+        session.flush()
+        before = _snapshot(session, sampled_at=now)
+        assert before["backlog"]["eligible_partitions"] == 1
+        assert before["storage"]["physical_hot"]["source_bytes"] == 100
+
+        session.add(MarketFactStorageStateRecord(
+            layout_version=COLD_HISTORY_LAYOUT_VERSION, state="ready", completed_at=now,
+        ))
+        session.flush()
+        after = _snapshot(session, sampled_at=now)
+        assert after["backlog"]["eligible_partitions"] == 0
+        assert after["storage"]["physical_hot"]["source_bytes"] == 0
+        assert after["rates"]["windows"][0]["intake"]["estimated_source_bytes"] == 100
+        assert after["storage"]["filesystem_delta"]["state"] == "unavailable"
 
 
 def test_projection_reports_real_query_truncation_with_small_test_bounds(postgres, monkeypatch):

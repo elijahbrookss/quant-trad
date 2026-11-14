@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from core.settings import get_settings
 from core.storage_targets import StoragePolicy
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.service.provenance import source_revision
 
 
@@ -27,10 +28,18 @@ WITH clock AS (
            (CAST(:sampled_at AS timestamptz) AT TIME ZONE 'UTC')::date AS database_day
 ),
 partition_page AS (
-    SELECT storage_day,state,created_at,expected_rows,source_bytes,sealed_at,
-           verified_at,reclaimed_at,reclaimed_bytes
-    FROM market.fact_retention_partitions
-    ORDER BY storage_day
+    SELECT source.storage_day,
+           CASE WHEN retired.storage_day IS NOT NULL THEN 'reclaimed' ELSE source.state END AS state,
+           source.created_at,source.expected_rows,source.source_bytes,source.sealed_at,
+           source.verified_at,source.reclaimed_at,source.reclaimed_bytes
+    FROM market.fact_retention_partitions AS source
+    LEFT JOIN market.cold_fact_retired_days AS retired
+        ON retired.storage_day=source.storage_day AND retired.handoff_kind='initial'
+        AND EXISTS (
+            SELECT FROM market.fact_storage_state
+            WHERE layout_version=:cold_layout AND state='ready' AND completed_at IS NOT NULL
+        )
+    ORDER BY source.storage_day
     LIMIT :partition_page_limit
 ),
 partitions AS (
@@ -263,6 +272,7 @@ class RetentionObservability:
                   "partition_page_limit": PARTITION_SCAN_LIMIT + 1,
                   "manifest_limit": MANIFEST_SCAN_LIMIT,
                   "manifest_page_limit": MANIFEST_SCAN_LIMIT + 1,
+                  "cold_layout": COLD_HISTORY_LAYOUT_VERSION,
                   "recent_days": policy.recent_days}
         row = dict(session.execute(_PROJECTION_SQL, values).mappings().one())
         sampled_at = row["sampled_at"]
