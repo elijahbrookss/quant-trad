@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import json
 import os
@@ -9,7 +10,8 @@ import pytest
 from sqlalchemy import text
 
 from data_providers.streams.contracts import ProviderRawMessage
-from market_data.archive import FilesystemRawArchiveObjectStore
+from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveReadLimits
+from market_data.archive_verification import ArchiveVerificationLimits
 from market_data.contracts import SourceIdentity
 from market_data.fact_archive import archive_evidence_hash
 from market_data.market_state import BBO_FACT_TYPE, BBO_FACT_VERSION, DEPTH_FACT_TYPE, DEPTH_FACT_VERSION
@@ -19,6 +21,7 @@ from portal.backend.service.market.continuous_stream_collector import (
 )
 from portal.backend.service.storage.repos import market_structure
 from scripts.db import canonical_cold_provider_boundary as boundary
+from scripts.db import canonical_cold_collector_drain as drain
 from tests.test_market_data.test_fact_storage_tiers_db import storage  # noqa: F401
 
 
@@ -121,6 +124,15 @@ def test_native_provider_boundary_drain_and_restart(storage, tmp_path, monkeypat
     structures = market_structure.market_structure_repository
     product = "BIP-FIXTURE" if channel == "level2" else "BTC-FIXTURE"
     definition_id = _definition(storage, structures, channel, product)
+    with storage.database._engine.begin() as conn:
+        conn.execute(text("""UPDATE market.stream_definitions SET enabled=true,desired_state='running'
+            WHERE id=:id"""), {"id": definition_id})
+        conn.execute(text("""
+            INSERT INTO market.collection_definitions
+                (id,source_id,series_id,enabled,desired_state,poll_interval_seconds,next_scheduled_at,available_at)
+            SELECT 'fixture-scheduled-poll',source_id,series_id,true,'running',60,now(),now()
+            FROM market.stream_definitions WHERE id=:id
+        """), {"id": definition_id})
     if channel == "level2":
         prior = structures.claim_stream(definition_id=definition_id, owner_id="fixture-prior", lease_seconds=30, bounded=True)
         structures.record_quality_event(prior, connection_epoch=1, receive_ordinal=2, channel=channel,
@@ -129,6 +141,9 @@ def test_native_provider_boundary_drain_and_restart(storage, tmp_path, monkeypat
     runtime = ContinuousStreamRuntime(repository=structures)
     projection = CoinbaseMarketTradeProjectionAdapter() if channel == "market_trades" else CoinbaseLevel2BookProjectionAdapter()
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    limits = drain.CollectorDrainLimits(ArchiveVerificationLimits(max_objects=16, max_bytes=16 * 1024**2),
+                                       RawArchiveReadLimits(max_rows=64), max_events=64, max_raw_rows=64,
+                                       max_spool_entries=64)
 
     def snapshot(phase):
         with storage.database._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
@@ -143,9 +158,44 @@ def test_native_provider_boundary_drain_and_restart(storage, tmp_path, monkeypat
             bounded_validation=True, storage_root=tmp_path, projection=projection, transport=transport))
         await asyncio.wait_for(received.wait(), timeout=10)
         pre_stop = snapshot("pre_stop")
+        with storage.database._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            with pytest.raises(RuntimeError, match="approved_roster_changed"):
+                drain.capture_collector_tail(conn, stream_ids=(definition_id,), poll_ids=(), check=lambda: None)
+            collector_tail = drain.capture_collector_tail(
+                conn, stream_ids=(definition_id,), poll_ids=("fixture-scheduled-poll",), check=lambda: None,
+            )
         stopped.set()
         first = await asyncio.wait_for(task, timeout=15)
         drained = snapshot("drained")
+        with storage.database._engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            parameters = dict(before=collector_tail, source_commit_seq=drained["watermark"], spool_root=tmp_path / "spool",
+                              store=store, limits=limits, check=lambda: None)
+            assert collector_tail["source_commit_seq"] == pre_stop["watermark"]
+            with pytest.raises(RuntimeError, match="commit_boundary_changed"):
+                drain.verify_collector_drain(conn, **{**parameters, "source_commit_seq": drained["watermark"] + 1})
+            pending = tmp_path / "spool" / "pending.open"
+            pending.write_bytes(b"fixture")
+            with pytest.raises(RuntimeError, match="pending_spool"):
+                drain.verify_collector_drain(conn, **parameters)
+            pending.unlink()
+            with pytest.raises(RuntimeError, match="raw_row_budget_exceeded"):
+                drain.verify_collector_drain(conn, **{**parameters, "limits": replace(limits, max_raw_rows=3)})
+            manifest_path = store.local_path(drained["manifests"][-1]["object_key"])
+            original = manifest_path.read_bytes()
+            manifest_path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+            try:
+                with pytest.raises(RuntimeError, match="archive_verification_checksum_mismatch"):
+                    drain.verify_collector_drain(conn, **parameters)
+            finally:
+                manifest_path.write_bytes(original)
+            verified_drain = drain.verify_collector_drain(conn, **parameters)
+            assert verified_drain["pre_stop_sha256"] == collector_tail["sha256"]
+            assert verified_drain["streams"][0]["last_receive_ordinal"] == 4
+            assert verified_drain["streams"][0]["segments"][0]["mappings"]["count"] == 4
+            assert verified_drain["streams"][0]["interruption"]["missing_events"] is None
+            assert verified_drain["polls"][0]["first_due_at_risk"]
         received, stopped = asyncio.Event(), asyncio.Event()
         transport = ScriptedCoinbaseTransport(channel, inject_gap=channel == "level2", resumed=True, received=received, stopped=stopped)
         task = asyncio.create_task(runtime.run(definition_id=definition_id, owner_id="fixture-new", stop_requested=stopped.is_set,

@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_verification import ArchiveVerificationLimits
+from scripts.automation.canonical_cold_collector_checks import bind_approved_collector_checks
 from scripts.automation.canonical_cold_host_hold import hold_cold_cutover
 from scripts.automation.canonical_cold_package import load_approved_package, read_approved_candidate_witness
 from scripts.db.canonical_cold_activate import (
@@ -40,18 +41,18 @@ def _read_open_original(conn, control, *, package, timeout_seconds):
 
 def execute_approved_cutover(
     conn, control, *, state_root, inventory, package_path, approved_package_hash, receipts, store, limits,
-    preflight_seconds, outage_seconds, capture_provider_tail, verify_provider_boundary, verify_recovery_boundary,
+    preflight_seconds, outage_seconds, provider_receipt_root, verify_recovery_boundary,
     verify_candidate, verify_candidate_prestart, verify_candidate_ready, verify_original_ready,
 ):
     """Check exact assets before taking the host hold and dispatching any stops.
 
-    The site owner supplies provider, off-host recovery and application checks.
+    The site owner supplies off-host recovery and application checks.
     Capture the provider tail while collection is still running under host
     exclusion and give that same observation to the final drained-boundary
     check. Only a journaled original SQL outcome can restart the old fleet.
     """
     callbacks = (
-        capture_provider_tail, verify_provider_boundary, verify_recovery_boundary, verify_candidate,
+        verify_recovery_boundary, verify_candidate,
         verify_candidate_prestart, verify_candidate_ready, verify_original_ready,
     )
     if (not all(callable(callback) for callback in callbacks) or not isinstance(limits, ArchiveVerificationLimits)
@@ -66,6 +67,9 @@ def execute_approved_cutover(
     if outage_seconds > package["max_outage_seconds"]:
         raise ValueError("canonical_cold_execute_outage_exceeds_approved_budget")
     witness = read_approved_candidate_witness(package_path, package)
+    capture_provider_tail, verify_provider_boundary = bind_approved_collector_checks(
+        conn, package_path=package_path, package=package, store=store, receipt_root=provider_receipt_root,
+    )
     scope = package["scope"]
     audit = validate_audit_receipts(
         receipts, target_identity=scope["target_database"], source_identity=scope["source_database"],

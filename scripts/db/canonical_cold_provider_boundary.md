@@ -1,6 +1,6 @@
 # Rehearse the provider stop and restart boundary
 
-This fixture uses the real continuous stream runtime, Coinbase parser, durable spool, archive finalizer, and PostgreSQL repositories. It substitutes a finite scripted transport for the provider connection. The tests use a disposable database and temporary spool/archive roots. They stop two fixture streams only. Production boundary capture remains the operator procedure in the [cutover runbook](../../docs/engineering/canonical-cold-cutover-runbook.md).
+This fixture uses the real continuous stream runtime, Coinbase parser, durable spool, archive finalizer, and PostgreSQL repositories. It substitutes a finite scripted transport for the provider connection. The tests exercise both stream types and one scheduled polling definition per case on a disposable database with temporary spool and archive roots. The fixture also runs the approved drain checker against the same shutdown. [Cutover runbook](../../docs/engineering/canonical-cold-cutover-runbook.md)
 
 From a disposable DB test environment, set `QT_PROVIDER_BOUNDARY_FIXTURE_OUTPUT` to an existing directory to retain JSON receipts. Run the focused fixture using the standard database lane.
 
@@ -22,4 +22,6 @@ PYTHONPATH=src:. python -m scripts.db.canonical_cold_provider_boundary \
   --resumed /review/provider-fixtures/level2-resumed.json
 ```
 
-Actual deployment needs fresh live provider, WAL, lease, archive, and filesystem receipts under the approved outage plan. This fixture covers a planned disconnect between sessions and an injected subsequent anomaly. It does not exercise a capture bridge, live exchange behavior, simultaneous fleet interruption, missed polling schedules, or recovery of the historical BIP incident. The prior BIP evidence is a seeded test event.
+The approved drain checker records the exact current stream session and last published position, requires the supervisor stop and released producer leases, checks for pending raw spool files, and verifies the tail intervals against actual Parquet bytes and PostgreSQL mappings at the final commit. The scheduled polling receipt identifies the first due time at risk. Tests refuse an unlisted enabled poll, an incorrect final commit, and a remaining raw spool file.
+
+Actual deployment needs fresh provider, WAL, lease, archive, and filesystem receipts under the approved outage plan. The fixture covers a planned disconnect between sessions and an injected subsequent anomaly. The capture bridge, live exchange behavior, full fleet interruption, and actual missed polling schedules require separate qualification. The prior BIP evidence is a seeded test event.

@@ -479,11 +479,12 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 patch.setattr(canonical_cold_execute, "load_approved_package", lambda *args, **kwargs: package)
                 patch.setattr(canonical_cold_execute, "read_approved_candidate_witness", lambda *args: candidate_witness)
                 patch.setattr(canonical_cold_execute, "hold_cold_cutover", disposable_host)
+                patch.setattr(canonical_cold_execute, "bind_approved_collector_checks",
+                              lambda *args, **kwargs: (lambda _: b"fixture pre-stop spool receipt", bound_provider))
                 completed = canonical_cold_execute.execute_approved_cutover(
                     retained, control, state_root=tmp_path, inventory={}, package_path=tmp_path / "fixture.json",
                     approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
-                    preflight_seconds=60, outage_seconds=60, capture_provider_tail=lambda _: b"fixture pre-stop spool receipt",
-                    verify_provider_boundary=bound_provider, verify_recovery_boundary=recovery_boundary,
+                    preflight_seconds=60, outage_seconds=60, provider_receipt_root=tmp_path, verify_recovery_boundary=recovery_boundary,
                     verify_candidate=verify_candidate, verify_candidate_prestart=verify_started,
                     verify_candidate_ready=verify_started, verify_original_ready=lambda _: pytest.fail("unexpected rollback"),
                 )

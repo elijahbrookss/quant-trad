@@ -237,6 +237,13 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
         events.append("provider_drained")
         return "provider"
 
+    def bind_provider(connection, *, package_path, package, store, receipt_root):
+        assert connection is conn and package_path == arguments["package_path"]
+        assert package is approved and receipt_root == root and not stopped
+        return capture, drained
+
+    monkeypatch.setattr(execute, "bind_approved_collector_checks", bind_provider)
+
     def transition(target_conn, control_conn, *, record, verify_provider_boundary, assert_host_held,
                    verified_objects, candidate_witness, **kwargs):
         assert target_conn is conn and control_conn is control
@@ -289,7 +296,7 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
     def run():
         return execute.execute_approved_cutover(
             conn, control, **arguments, receipts=object(), store=object(), limits=ArchiveVerificationLimits(),
-            preflight_seconds=60, outage_seconds=1200, capture_provider_tail=capture, verify_provider_boundary=drained,
+            preflight_seconds=60, outage_seconds=1200, provider_receipt_root=root,
             verify_recovery_boundary=lambda *a: None, verify_candidate=lambda *a: None,
             verify_candidate_prestart=application, verify_candidate_ready=application, verify_original_ready=original,
         )

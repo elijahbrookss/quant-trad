@@ -1,11 +1,13 @@
+from contextlib import nullcontext
 from hashlib import sha256
 import json
 
 import pytest
 
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
+from scripts.automation import canonical_cold_collector_checks as collectors
 from scripts.automation import canonical_cold_package as package
-from scripts.automation.storage_host_boundary import digest
+from scripts.automation.storage_host_boundary import digest, load_receipt
 from scripts.db.canonical_cold_witness import VERSION as WITNESS_VERSION
 
 
@@ -13,6 +15,68 @@ def _write(path, content):
     path.write_bytes(content)
     path.chmod(0o600)
     return sha256(content).hexdigest()
+
+
+def test_approved_collector_plan_persists_both_boundary_receipts(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    receipts = tmp_path / "private-receipts"
+    spool.mkdir()
+    receipts.mkdir(mode=0o700)
+    plan = {
+        "schema": collectors.PLAN_VERSION, "stream_ids": ["fixture-feed"], "poll_ids": ["fixture-poll"],
+        "spool_root": str(spool), "limits": {
+            "archive": {"max_objects": 3, "max_bytes": 4096}, "raw": {"max_rows": 5}, "max_events": 5,
+            "max_raw_rows": 15, "max_spool_entries": 100,
+        }, "rehearsal_sha256": "f" * 64,
+    }
+    plan_path = tmp_path / "provider.json"
+    plan_hash = _write(plan_path, json.dumps(plan).encode())
+    approved = {"artifacts": {"provider_boundary": {"filename": plan_path.name, "sha256": plan_hash}}}
+    monkeypatch.setattr(collectors, "require_configured_working_mount", lambda path: None)
+
+    class Connection:
+        def begin(self):
+            return nullcontext()
+
+        def exec_driver_sql(self, command):
+            assert command == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+
+    connection = Connection()
+    store = object()
+
+    def capture(target, *, stream_ids, poll_ids, check):
+        assert target is connection and stream_ids == ("fixture-feed",) and poll_ids == ("fixture-poll",)
+        check()
+        return {"phase": "pre_stop", "source_commit_seq": 41}
+
+    def verify(target, *, before, source_commit_seq, spool_root, store, limits, check):
+        assert target is connection and before["source_commit_seq"] == 41 and source_commit_seq == 45
+        assert spool_root == spool and limits.max_raw_rows == 15
+        check()
+        return {"phase": "drained", "source_commit_seq": source_commit_seq}
+
+    monkeypatch.setattr(collectors, "capture_collector_tail", capture)
+    monkeypatch.setattr(collectors, "verify_collector_drain", verify)
+    capture_check, verify_check = collectors.bind_approved_collector_checks(
+        connection, package_path=tmp_path / "package.json", package=approved, store=store, receipt_root=receipts,
+    )
+    before = capture_check(lambda: None)
+    with pytest.raises(RuntimeError, match="execution_tail_changed"):
+        verify_check(connection, 45, {**before, "evidence": {"source_commit_seq": 42}})
+    drained_hash = verify_check(connection, 45, before)
+    assert verify_check(connection, 45, before) == drained_hash
+    clear = load_receipt(receipts / f"collector-drained-{drained_hash}.json")
+    assert clear["plan_sha256"] == before["plan_sha256"] == plan_hash
+    assert clear["evidence"]["execution_pre_stop_sha256"] == before["sha256"]
+    spool.rename(tmp_path / "moved-spool")
+    spool.mkdir()
+    with pytest.raises(RuntimeError, match="execution_directory_changed"):
+        verify_check(connection, 45, before)
+    _write(plan_path, b"{}")
+    with pytest.raises(RuntimeError, match="plan_digest_changed"):
+        collectors.bind_approved_collector_checks(
+            connection, package_path=tmp_path / "package.json", package=approved, store=store, receipt_root=receipts,
+        )
 
 
 @pytest.fixture
