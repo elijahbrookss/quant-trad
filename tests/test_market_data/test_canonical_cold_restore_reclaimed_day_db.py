@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -12,7 +12,7 @@ from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bin
 from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract, fact_partition_name
 from portal.backend.db.session import Database
-from portal.backend.service.storage.repos import market_data
+from portal.backend.service.storage.repos import market_data, market_structure
 from portal.backend.service.storage.repos.cold_retirement import prune_oldest_retired_identities
 from portal.backend.service.storage.repos.fact_archival import PostgresCanonicalFactArchiveRepository
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
@@ -21,6 +21,9 @@ from scripts.db.canonical_cold_database_fence import close_database_fence, reope
 from scripts.db.canonical_cold_restore_reclaimed_day import restore_reclaimed_header_day
 from scripts.db.canonical_cold_restore_references import capture_original_reference_bindings, restore_original_reference_bindings
 from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog, _fence_connections
+from tests.test_market_data.test_canonical_recovery_spool_db import (
+    _admitted_rows, _define_trade_stream, _native_recover, _seal_trade,
+)
 from tests.test_market_data.exact_deployed_reader import check_deployed_source_reader
 from tests.test_market_data.test_fact_derived_retention_db import _archive_day
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _ingest, _placement, storage  # noqa: F401
@@ -61,11 +64,32 @@ def test_restore_one_recurring_reclaimed_day_reuses_verified_payload_for_origina
     assert prune_oldest_retired_identities(storage.database, deadline=lambda: None)["day_complete"]
     assert storage.repo.read_fact_revisions(**selection) == original
 
+    # Roll back physical layout on the latest candidate database. The native
+    # collector's accepted raw/canonical state must survive untouched.
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setattr(market_structure, "canonical_fact_storage_repository",
+                        market_data.canonical_fact_storage_repository)
+    structures, claim, trade_series = _define_trade_stream(storage, monkeypatch)
+    segment, raw = _seal_trade(tmp_path, claim, trade_id="after-recurring-cold-retirement")
+    _native_recover(structures, tmp_path)
+    assert segment.ack_path.exists() and not segment.sealed_path.exists()
+    trade_records = _admitted_rows(storage.database, trade_series)
+    assert len(trade_records[0]) == len(trade_records[1]) == 1
+    assert trade_records[1][0].raw_record_id == raw.raw_record_id
+    trade_paths = {row.object_key: store.local_path(row.object_key).read_bytes() for row in trade_records[1]}
+    trade_scope = {"series_id": trade_series, "start": raw.received_at - timedelta(seconds=1),
+                   "end": datetime.now(UTC) + timedelta(seconds=1)}
+    trade_dataset = storage.repo.freeze_dataset([DatasetSeriesRequest(**trade_scope)])
+    trade_frozen = storage.repo.read_dataset_fact_revisions(dataset_id=trade_dataset.dataset_id, series_id=trade_series)
+    assert len(trade_frozen) == 1
+
     with _fence_connections(storage) as (conn, control):
         fence = close_database_fence(conn, control, expected_database=identity, timeout_seconds=60, record=lambda *_: None)
         args = {"fence": fence, "day": day, "store": store, "limits": archive.limits,
                 "object_limits": ArchiveVerificationLimits(), "expected_manifest_set_hash": retired["manifest_set_hash"]}
-        file = next(store.root.rglob("*.parquet"))
+        with conn.begin():
+            key = conn.scalar(text("SELECT object_key FROM market.fact_archive_manifests WHERE storage_day=:day"), {"day": day})
+        file = store.local_path(key)
         data = file.read_bytes()
         file.write_bytes(data + b"damaged")
         try:
@@ -103,6 +127,10 @@ def test_restore_one_recurring_reclaimed_day_reuses_verified_payload_for_origina
         monkeypatch.setattr(market_data, "db", restored)
         assert storage.repo.read_fact_revisions(**selection) == original
         assert storage.repo.read_dataset_fact_revisions(dataset_id=dataset.dataset_id, series_id=storage.series_id) == original
+        assert storage.repo.read_dataset_fact_revisions(dataset_id=trade_dataset.dataset_id, series_id=trade_series) == trade_frozen
+        assert _admitted_rows(restored, trade_series) == trade_records
+        assert all(store.local_path(key).read_bytes() == data for key, data in trade_paths.items())
         check_deployed_source_reader(restored._engine.url, store, dataset.dataset_id, storage.series_id, original)
+        check_deployed_source_reader(restored._engine.url, store, trade_dataset.dataset_id, trade_series, trade_frozen)
     finally:
         restored._reset_engine()
