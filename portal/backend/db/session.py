@@ -1565,11 +1565,12 @@ class Database:
         """Fail loud when an existing table does not match the current column contract."""
 
         inspector = inspect(conn)
+        market_tables = set(inspector.get_table_names(schema="market"))
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
             if (
                 schema_name == "market" and table.name in COLD_TABLE_NAMES
-                and not inspector.has_table(table.name, schema=schema_name)
+                and table.name not in market_tables
             ):
                 # Existing v2 installations can be used for rehearsal. The cold
                 # authority certificate requires all of these relations.
