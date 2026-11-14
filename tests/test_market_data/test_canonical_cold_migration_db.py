@@ -72,11 +72,12 @@ def local_catalog_server():
         if os.geteuid() == 0:
             os.chown(socket, account.pw_uid, account.pw_gid)
         subprocess.run([*command_prefix, str(bindir / "initdb"), "-D", str(data), "--no-locale",
-                        "--encoding=UTF8", "--auth-local=trust", "--auth-host=reject"],
+                        "--encoding=UTF8", "--auth-local=trust", "--auth-host=reject", "--no-sync"],
                        check=True, capture_output=True, text=True, timeout=120, env=environment)
         ctl = [*command_prefix, str(bindir / "pg_ctl"), "-D", str(data), "-w", "-t", "45"]
         log = root / "postgres.log"
-        options = f"-c listen_addresses= -c unix_socket_directories={socket} -c shared_buffers=16MB -c max_connections=10"
+        options = (f"-c listen_addresses= -c unix_socket_directories={socket} "
+                   "-c shared_buffers=16MB -c max_connections=10 -c fsync=off")
         try:
             subprocess.run([*ctl, "-l", str(log), "-o", options, "start"], check=True,
                            capture_output=True, text=True, timeout=60, env=environment)
