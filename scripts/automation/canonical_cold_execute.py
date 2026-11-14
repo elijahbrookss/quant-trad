@@ -19,6 +19,25 @@ from scripts.db.canonical_cold_transition import run_fenced_transition
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
+def _read_open_original(conn, control, *, package, timeout_seconds):
+    scope = package["scope"]
+    watermark = read_original_watermark(
+        conn, expected=scope["target_database"], expected_inventory=scope["loaded_inventory_hash"],
+    )
+    if watermark < package["source_commit_floor"]:
+        raise RuntimeError("canonical_cold_execute_source_behind_approved_floor")
+    target = _database(conn, scope["target_database"]["database"])
+    with control.begin():
+        control.exec_driver_sql("SET TRANSACTION READ ONLY")
+        with _bounded_step(control, timeout_seconds):
+            if (control.scalar(text("SELECT current_database()")) != "postgres" or not target["allow_connections"]
+                    or _database(control, target["database"]) != target):
+                raise RuntimeError("canonical_cold_execute_control_endpoint_changed")
+    assert_original_identity_registry(conn, scope=scope["identity_registry"])
+    assert_raw_mapping_index_placement(conn, **raw_index_placement_scope(scope), on_history=False)
+    return {"database": target, "source_commit_seq": watermark}
+
+
 def execute_approved_cutover(
     conn, control, *, state_root, inventory, package_path, approved_package_hash, receipts, store, limits,
     preflight_seconds, outage_seconds, capture_provider_tail, verify_provider_boundary, verify_recovery_boundary,
@@ -64,20 +83,7 @@ def execute_approved_cutover(
     with conn.begin():
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
         with _bounded_step(conn, preflight_seconds):
-            watermark = read_original_watermark(
-                conn, expected=scope["target_database"], expected_inventory=scope["loaded_inventory_hash"],
-            )
-            if watermark < package["source_commit_floor"]:
-                raise RuntimeError("canonical_cold_execute_source_behind_approved_floor")
-            target = _database(conn, scope["target_database"]["database"])
-            with control.begin():
-                control.exec_driver_sql("SET TRANSACTION READ ONLY")
-                with _bounded_step(control, preflight_seconds):
-                    if (control.scalar(text("SELECT current_database()")) != "postgres" or not target["allow_connections"]
-                            or _database(control, target["database"]) != target):
-                        raise RuntimeError("canonical_cold_execute_control_endpoint_changed")
-            assert_original_identity_registry(conn, scope=scope["identity_registry"])
-            assert_raw_mapping_index_placement(conn, **raw_index_placement_scope(scope), on_history=False)
+            original = _read_open_original(conn, control, package=package, timeout_seconds=preflight_seconds)
             verified = verify_mounted_candidate(conn, audit=audit, store=store, limits=limits, check_budget=check_preflight)
     check_preflight()
 
@@ -97,12 +103,15 @@ def execute_approved_cutover(
         state_root, inventory=inventory, package_path=package_path, approved_package_hash=approved_package_hash,
         outage_deadline=time() + outage_seconds, before_pause=before_pause,
     ) as (approved, assert_held, record, remaining, resume):
+        database_phase = None
         database_outcome = None
 
         def record_phase(phase, evidence):
-            nonlocal database_outcome
+            nonlocal database_phase, database_outcome
+            # Any attempted fence phase makes a pre-fence restart ineligible.
+            database_phase = phase
             record(phase, evidence)
-            if phase == "database_reopened":
+            if phase in ("database_reopened", "database_unchanged"):
                 database_outcome = evidence["outcome"]
 
         def verify_drained(target, watermark):
@@ -117,6 +126,23 @@ def execute_approved_cutover(
                 verify_candidate=verify_candidate, candidate_witness=witness, verified_objects=verified,
             )
         except Exception as error:
+            if database_phase is None:
+                try:
+                    assert_held()
+                    if any(session.closed or session.invalidated or session.in_transaction()
+                           for session in (conn, control)):
+                        raise RuntimeError("canonical_cold_execute_original_connection_lost")
+                    seconds = min(10, int(remaining()))
+                    with conn.begin():
+                        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                        with _bounded_step(conn, seconds):
+                            untouched = _read_open_original(conn, control, package=approved, timeout_seconds=seconds)
+                    if (untouched["database"] != original["database"]
+                            or untouched["source_commit_seq"] < original["source_commit_seq"]):
+                        raise RuntimeError("canonical_cold_execute_original_changed")
+                    record_phase("database_unchanged", {"outcome": "original", **untouched})
+                except Exception as proof_error:
+                    error.add_note(f"The original runtime remains held ({type(proof_error).__name__}).")
             if database_outcome == "original":
                 try:
                     resume(verify_original_ready)

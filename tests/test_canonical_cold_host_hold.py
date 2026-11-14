@@ -149,7 +149,9 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
     assert compatible_release_floor(root / hold.COMPLETION) == floor
 
 
-@pytest.mark.parametrize("scenario", ("committed", "original", "uncertain", "missing_tail", "wrong_control", "changed_object"))
+@pytest.mark.parametrize("scenario", (
+    "committed", "original", "uncertain", "unchanged", "changed_postmaster", "missing_tail", "wrong_control", "changed_object",
+))
 def test_execute_coordinates_one_approved_host_and_database_transition(authorized_hold, monkeypatch, scenario):
     arguments, stopped = authorized_hold
     arguments = {key: value for key, value in arguments.items() if key != "outage_deadline"}
@@ -178,7 +180,8 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
                 self.transaction = False
 
         def exec_driver_sql(self, command):
-            assert self.transaction and command == "SET TRANSACTION READ ONLY" and not stopped
+            assert self.transaction and command == "SET TRANSACTION READ ONLY"
+            assert not stopped or scenario in {"unchanged", "changed_postmaster"}
 
         def scalar(self, query):
             assert str(query) == "SELECT current_database()"
@@ -189,13 +192,18 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
     target = {**bound, "allow_connections": True}
     scope = {"target_database": bound, "source_database": {}, "audit_set_hash": "a", "loaded_inventory_hash": "b",
              "identity_registry": {}}
-    approved = {"max_outage_seconds": 1200, "source_commit_floor": 20, "scope": scope}
+    approved = {"max_outage_seconds": 1200, "source_commit_floor": 20, "scope": scope,
+                "approved_inventory_hash": host.digest(arguments["inventory"])}
     monkeypatch.setattr(execute, "load_approved_package", lambda *a, **kw: approved)
+    monkeypatch.setattr(hold, "load_approved_package", lambda *a, **kw: approved)
     monkeypatch.setattr(execute, "read_approved_candidate_witness", lambda *a: b"approved")
     monkeypatch.setattr(execute, "validate_audit_receipts", lambda *a, **kw: scope)
     monkeypatch.setattr(execute, "_bounded_step", lambda *_: nullcontext())
     monkeypatch.setattr(execute, "read_original_watermark", lambda *a, **kw: 20)
-    monkeypatch.setattr(execute, "_database", lambda *a: target)
+    def database(*_):
+        return {**target, "postmaster_started_at": "new"} if stopped and scenario == "changed_postmaster" else target
+
+    monkeypatch.setattr(execute, "_database", database)
     monkeypatch.setattr(execute, "assert_original_identity_registry", lambda *a, **kw: None)
     monkeypatch.setattr(execute, "raw_index_placement_scope", lambda *a: {})
     monkeypatch.setattr(execute, "assert_raw_mapping_index_placement", lambda *a, **kw: None)
@@ -235,6 +243,8 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
         assert verified_objects is verified and candidate_witness == b"approved"
         assert_host_held()
         assert stopped == list(hold.PAUSE_ORDER)
+        if scenario in {"unchanged", "changed_postmaster"}:
+            raise RuntimeError(scenario)
         for phase in ("login_closing", "jobs_stopping", "database_fenced"):
             record(phase, {})
         assert verify_provider_boundary(conn, 24) == "provider"
@@ -254,8 +264,10 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
     monkeypatch.setattr(execute, "run_fenced_transition", transition)
 
     def restart(*args, **kwargs):
-        assert host.load_receipt(journal)["phase"] == "database_reopened"
-        assert (kwargs["model"] is None) is (scenario == "original")
+        assert host.load_receipt(journal)["phase"] == (
+            "database_unchanged" if scenario == "unchanged" else "database_reopened"
+        )
+        assert (kwargs["model"] is None) is (scenario in {"original", "unchanged"})
         if scenario == "committed":
             assert kwargs["verify_before_start"]({"before": True}) == {"ready": True}
         else:
@@ -289,13 +301,17 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
         with pytest.raises(RuntimeError, match={"missing_tail": "provider_tail_missing",
                                                "wrong_control": "control_endpoint_changed"}.get(scenario, scenario)):
             run()
-    if scenario in {"original", "committed"}:
+    if scenario in {"original", "unchanged", "committed"}:
         assert not journal.exists()
-        assert host.load_receipt(root / hold.COMPLETION)["runtime_evidence"]["outcome"] == scenario
-        if scenario == "original":
+        expected = "committed" if scenario == "committed" else "original"
+        assert host.load_receipt(root / hold.COMPLETION)["runtime_evidence"]["outcome"] == expected
+        if scenario != "committed":
             assert events[-1] == "original_ready"
     elif scenario == "uncertain":
         assert host.load_receipt(journal)["phase"] == "database_fenced"
         assert events == ["checksums", "stamps", "provider_tail", "provider_drained"]
+    elif scenario == "changed_postmaster":
+        assert host.load_receipt(journal)["phase"] == "writers_stopped"
+        assert events == ["checksums", "stamps", "provider_tail"]
     else:
         assert not stopped and not journal.exists()

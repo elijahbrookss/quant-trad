@@ -25,6 +25,7 @@ VERSION = "qt.canonical_cold_host_hold.v1"
 PAUSE_ORDER = ("frontend", "frontend-v2", "pgadmin", "grafana", "docker-stats", "backend",
                "storage-maintenance", "market-data-collector")
 _DATABASE_PREVIOUS = {
+    "database_unchanged": {"writers_stopped"},
     "login_closing": {"writers_stopped"}, "jobs_stopping": {"login_closing"},
     "database_fenced": {"jobs_stopping"}, "activation_committing": {"database_fenced"},
     "activation_verified": {"activation_committing"},
@@ -130,8 +131,10 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
             if not callable(verify_ready):
                 raise ValueError("canonical_cold_host_hold_acceptance_required")
             assert_held()
-            outcome = state.get("database_evidence", {}).get("database_reopened", {}).get("outcome")
-            if state["phase"] != "database_reopened" or outcome not in ("original", "committed"):
+            phase = state["phase"]
+            outcome = state.get("database_evidence", {}).get(phase, {}).get("outcome")
+            allowed = {"database_unchanged": {"original"}, "database_reopened": {"original", "committed"}}
+            if outcome not in allowed.get(phase, ()):
                 raise RuntimeError("canonical_cold_host_hold_database_outcome_unverified")
 
             def record_runtime(phase, evidence):
