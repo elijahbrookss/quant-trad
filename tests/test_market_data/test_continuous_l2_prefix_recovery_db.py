@@ -231,11 +231,16 @@ def test_long_invalid_epoch_resumes_exact_prefix_before_acknowledging_spool(stor
         verify_replayed(wrong)
     with storage.database.session() as session:
         roots = session.execute(text("""
-            SELECT payload->>'event_type',provenance->'_qt_l2_evidence'->>'raw_record_id'
-            FROM market.fact_hot_payloads WHERE series_id=:id
-            ORDER BY observation_time
+            SELECT p.payload->>'event_type' AS event_type,p.provenance->'_qt_l2_evidence'->>'raw_record_id' AS raw_id,
+                   h.known_at,h.accepted_at
+            FROM market.fact_hot_payloads AS p JOIN market.fact_versions AS h USING (storage_day,id)
+            WHERE p.series_id=:id ORDER BY p.observation_time
         """), {"id": fixture.series_id}).all()
-        assert roots == [("snapshot", tail_records[0].raw_record_id), ("update", tail_records[1].raw_record_id)]
+        assert [(row.event_type, row.raw_id) for row in roots] == [
+            ("snapshot", tail_records[0].raw_record_id), ("update", tail_records[1].raw_record_id),
+        ]
+        assert all(row.known_at == row.accepted_at >= started > raw.received_at
+                   for row, raw in zip(roots, tail_records, strict=True))
         assert session.scalar(text("""
             SELECT count(*) FROM market.stream_session_events
             WHERE session_id=:id AND event_type='collector_restart_recovery_completed'
