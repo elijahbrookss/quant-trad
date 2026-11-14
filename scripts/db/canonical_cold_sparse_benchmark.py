@@ -1,4 +1,4 @@
-"""Compare native full-page and experimental verified exact-ID reads on 10k rows."""
+"""Compare full and admitted-ordinal canonical reads on the same 10k-row page."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,6 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.cold_history import ColdFactLocation, ColdHistoryReader, publish_cold_page
 from market_data.fact_archive import archive_evidence_hash
 from scripts.db.canonical_cold_scale import _row, _stats
-from scripts.db.canonical_cold_sparse_probe import AdmittedLocator, read_admitted_rows
 
 
 def _time(operation):
@@ -25,7 +24,7 @@ def _time(operation):
     start = perf_counter()
     with controlled_execution(control):
         result = operation()
-    return result, perf_counter() - start, control.snapshot()["consumed"].get("archive_source_bytes", 0)
+    return result, perf_counter() - start, control.snapshot()["consumed"]
 
 
 def run(*, probes=16):
@@ -38,26 +37,26 @@ def run(*, probes=16):
         reader = ColdHistoryReader(store)
         if reader.read_page(manifest) != tuple(expected):
             raise RuntimeError("sparse benchmark prior full admission with fixture rows differs")
-        insertion = {"schema": "qt.cold_sparse_benchmark_fixture.v1", "fixture": "cold-scale.v1", "result_count": probes, "page_rows": count}
+        insertion = {"schema": "qt.cold_sparse_benchmark_fixture.v2", "fixture": "cold-scale.v1",
+                     "result_count": probes, "page_rows": count}
         digest = sha256()
-        records = {label: {"seconds": [], "read_bytes": [], "decoded_rows": []} for label in ("native", "sparse")}
+        records = {label: {"seconds": [], "read_bytes": [], "decoded_rows": []} for label in ("full", "admitted")}
         offsets = Random(1729).sample(range(count), probes)
         for sequence, offset in enumerate(offsets):
             row = expected[offset]
             location = ColdFactLocation(manifest, offset)
-            locator = AdmittedLocator(row["id"], location, row["series_id"], sha256(row["observation_key"].encode()).digest(),
-                                      row["revision"], row["market_commit_seq"], row["row_hash"])
+            locator = {row["id"]: location}
             operations = {
-                "native": lambda: (reader.read_by_ids({row["id"]: location}), count),
-                "sparse": lambda: read_admitted_rows(store.local_path(manifest.object_key), claims=[locator]),
+                "full": lambda: reader.read_by_ids(locator),
+                "admitted": lambda: reader.read_admitted_by_ids(locator),
             }
             for label in (tuple(operations) if sequence % 2 == 0 else tuple(reversed(operations))):
-                (result, decoded), elapsed, bytes_read = _time(operations[label])
+                result, elapsed, resources = _time(operations[label])
                 if result != {row["id"]: row}:
                     raise RuntimeError("sparse benchmark exact output differs")
                 records[label]["seconds"].append(elapsed)
-                records[label]["read_bytes"].append(bytes_read)
-                records[label]["decoded_rows"].append(decoded)
+                records[label]["read_bytes"].append(resources["archive_source_bytes"])
+                records[label]["decoded_rows"].append(resources["archive_decoded_rows"])
             digest.update(bytes.fromhex(archive_evidence_hash({"row": row})))
         return insertion | {"object_sha256": manifest.object_sha256, "source_file_bytes": manifest.byte_count,
             "ordered_exact_sha256": digest.hexdigest(), "probe_ordinals": offsets,

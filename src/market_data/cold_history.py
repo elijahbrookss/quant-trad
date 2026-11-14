@@ -24,6 +24,7 @@ from .fact_archive import (
     FactArchiveManifest,
     _json_bytes,
     publish_canonical_fact_archive,
+    read_admitted_canonical_fact_rows,
     read_canonical_fact_archive,
 )
 
@@ -130,13 +131,16 @@ class ColdHistoryReader:
         self.cache = cache
         self.ensure_contracts = ensure_contracts
 
-    def read_page(self, manifest: FactArchiveManifest) -> tuple[dict[str, Any], ...]:
-        """Return every revision in original page order after verifying the complete object."""
+    def _validate_contracts(self, manifest):
         execution_checkpoint()
         if self.ensure_contracts is not None:
             self.ensure_contracts(sorted({
                 contract for bounds in manifest.series for contract in bounds.payload_contracts
             }))
+
+    def read_page(self, manifest: FactArchiveManifest) -> tuple[dict[str, Any], ...]:
+        """Return every revision in original page order after verifying the complete object."""
+        self._validate_contracts(manifest)
         return read_canonical_fact_archive(
             self.object_store.local_path(manifest.object_key),
             expected=manifest,
@@ -168,7 +172,14 @@ class ColdHistoryReader:
                         yield row
 
     def read_by_ids(self, locators: Mapping[str, ColdFactLocation]) -> dict[str, dict[str, Any]]:
-        """Verify one page per exact lookup group and require every claimed ordinal to match."""
+        """Verify whole pages before resolving IDs for audit or retirement evidence."""
+        return self._read_locations(locators, admitted=False)
+
+    def read_admitted_by_ids(self, locators: Mapping[str, ColdFactLocation]) -> dict[str, dict[str, Any]]:
+        """Resolve visible SQL locations from pages that passed whole-page admission."""
+        return self._read_locations(locators, admitted=True)
+
+    def _read_locations(self, locators, *, admitted):
         pages = {}
         groups = defaultdict(list)
         for fact_id, location in locators.items():
@@ -181,7 +192,15 @@ class ColdHistoryReader:
 
         result = {}
         for manifest_id, requests in groups.items():
-            rows = self.read_page(pages[manifest_id])
+            manifest = pages[manifest_id]
+            if admitted:
+                self._validate_contracts(manifest)
+                rows = read_admitted_canonical_fact_rows(
+                    self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+                    cache=self.cache, ordinals=[ordinal for _, ordinal in requests],
+                )
+            else:
+                rows = self.read_page(manifest)
             for fact_id, ordinal in requests:
                 execution_checkpoint()
                 row = rows[ordinal]

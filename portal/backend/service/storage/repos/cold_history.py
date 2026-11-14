@@ -40,6 +40,19 @@ def _key_digest(key: str) -> bytes:
     return sha256(key.encode("utf-8")).digest()
 
 
+def _locator_witness(claim):
+    return (claim["series_id"], bytes(claim["key_digest"]), claim["revision"],
+            claim["market_commit_seq"], bytes(claim["row_hash"]).hex())
+
+
+def _verify_locator(row, witness, *, key_lookup=False):
+    if row["row_hash"] != witness[-1]:
+        raise RuntimeError(f"cold_fact_locator_hash_mismatch: fact_version_id={row['id']}")
+    if (row["series_id"], _key_digest(row["observation_key"]), row["revision"], row["market_commit_seq"]) != witness[:-1]:
+        reason = "cold_fact_key_locator_mismatch" if key_lookup else "cold_fact_locator_mismatch"
+        raise RuntimeError(f"{reason}: fact_version_id={row['id']}")
+
+
 def _material_records(rows):
     material = []
     specs = []
@@ -325,25 +338,26 @@ class PostgresColdHistory:
         finally:
             pages.close()
 
-    def placement_claims(self, session, ids: Sequence[str], *, require_all=True):
-        """Resolve manifest, ordinal and certified row hash without loading payloads."""
+    def _location_rows(self, session, ids, *, require_all):
         ids = sorted(set(ids))
-        claims = {}
         for offset in range(0, len(ids), _BATCH_SIZE):
             batch = ids[offset:offset + _BATCH_SIZE]
             found = session.execute(
-                select(_pages, _locators.c.id.label("requested_id"), _locators.c.ordinal, _locators.c.row_hash)
+                select(_pages, _locators.c.id.label("requested_id"), _locators.c.ordinal, _locators.c.row_hash,
+                       _locators.c.series_id, _locators.c.key_digest, _locators.c.revision, _locators.c.market_commit_seq)
                 .join(_locators, _locators.c.page_id == _pages.c.id)
                 .where(_locators.c.id.in_(batch), _PAGE_VISIBILITY)
-            ).mappings()
-            batch_claims = {
-                row["requested_id"]: (ColdFactLocation(_manifest(row), row["ordinal"]), bytes(row["row_hash"]).hex())
-                for row in found
-            }
-            if require_all and batch_claims.keys() != set(batch):
+            ).mappings().all()
+            if require_all and {row["requested_id"] for row in found} != set(batch):
                 raise RuntimeError("cold_fact_exact_identity_missing")
-            claims.update(batch_claims)
-        return claims
+            yield from found
+
+    def placement_claims(self, session, ids: Sequence[str], *, require_all=True):
+        """Resolve manifest, ordinal and certified row hash without loading payloads."""
+        return {
+            row["requested_id"]: (ColdFactLocation(_manifest(row), row["ordinal"]), bytes(row["row_hash"]).hex())
+            for row in self._location_rows(session, ids, require_all=require_all)
+        }
 
     def locations_by_ids(self, session, ids: Sequence[str], *, require_all=True):
         return {identity: location for identity, (location, _) in self.placement_claims(
@@ -351,11 +365,14 @@ class PostgresColdHistory:
         ).items()}
 
     def read_by_ids(self, session, ids: Sequence[str], *, require_all=True):
-        claims = self.placement_claims(session, ids, require_all=require_all)
-        rows = self.reader.read_by_ids({identity: location for identity, (location, _) in claims.items()})
+        locations, witnesses = {}, {}
+        for claim in self._location_rows(session, ids, require_all=require_all):
+            identity = claim["requested_id"]
+            locations[identity] = ColdFactLocation(_manifest(claim), claim["ordinal"])
+            witnesses[identity] = _locator_witness(claim)
+        rows = self.reader.read_admitted_by_ids(locations)
         for identity, row in rows.items():
-            if row["row_hash"] != claims[identity][1]:
-                raise RuntimeError(f"cold_fact_locator_hash_mismatch: fact_version_id={identity}")
+            _verify_locator(row, witnesses[identity])
         return rows
 
     def material_candidates(
@@ -480,9 +497,11 @@ class PostgresColdHistory:
         for offset in range(0, len(digests), _BATCH_SIZE):
             batch = digests[offset:offset + _BATCH_SIZE]
             found = session.execute(text(f"""
-                SELECT page.*, head.fact_id, head.ordinal, head.key_digest, head.revision
+                SELECT page.*, head.fact_id, head.ordinal, head.series_id, head.key_digest,
+                       head.revision, head.market_commit_seq, head.row_hash
                 FROM (
-                    SELECT l.key_digest, l.id AS fact_id, l.page_id, l.ordinal, l.revision,
+                    SELECT l.key_digest, l.id AS fact_id, l.page_id, l.ordinal, l.series_id,
+                        l.revision, l.market_commit_seq, l.row_hash,
                         rank() OVER (PARTITION BY l.key_digest ORDER BY l.revision DESC) AS head_rank
                     FROM market.cold_fact_locators l
                     JOIN market.cold_fact_pages visible ON visible.id=l.page_id
@@ -500,15 +519,11 @@ class PostgresColdHistory:
                 manifests = {location.manifest.manifest_id: location.manifest for location in locations.values()}
                 for manifest in manifests.values():
                     page_admission(manifest)
-            decoded = self.reader.read_by_ids(locations)
+            decoded = self.reader.read_admitted_by_ids(locations)
             for candidate in found:
                 row = decoded[candidate["fact_id"]]
                 digest = bytes(candidate["key_digest"])
-                if (
-                    row["series_id"] != series_id or _key_digest(row["observation_key"]) != digest
-                    or row["revision"] != candidate["revision"]
-                ):
-                    raise RuntimeError(f"cold_fact_key_locator_mismatch: fact_version_id={row['id']}")
+                _verify_locator(row, _locator_witness(candidate), key_lookup=True)
                 exact_keys = keys_by_digest[digest]
                 if len(exact_keys) != 1 or row["observation_key"] not in exact_keys:
                     # There is no safe absence/no-op decision without proving

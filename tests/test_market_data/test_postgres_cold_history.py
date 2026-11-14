@@ -11,10 +11,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from core.execution_control import ExecutionControl, controlled_execution
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.canonical_storage import record_from_storage_row, record_to_storage_row
 from market_data.cold_history import ColdHistoryReader, publish_cold_page
 from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
+from market_data.fact_archive import FactArchiveLimits
 from portal.backend.db.cold_history_models import Base, COLD_TABLE_NAMES
 from portal.backend.service.storage.repos.cold_history import PostgresColdHistory, cold_layout_active
 from portal.backend.service.storage.repos import fact_dependencies
@@ -100,6 +102,35 @@ def test_postgres_admission_is_exact_atomic_and_idempotent(database, tmp_path):
             repository.admit(database, new_page)
             raise RuntimeError("test interrupted")
     assert repository.read_by_ids(database, [unrelated["id"]], require_all=False) == {}
+
+
+def test_serving_exact_id_and_key_head_verify_catalog_and_only_decode_selected_group(database, tmp_path):
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    limits = FactArchiveLimits(row_group_size=2)
+    revisions = [_row(revision=index, commit=index) for index in range(1, 8)]
+    last = revisions[-1]
+    page = publish_cold_page(revisions, object_store=store, temporary_directory=tmp_path, limits=limits)
+    repo = PostgresColdHistory(ColdHistoryReader(store, limits=limits))
+    control = ExecutionControl()
+    with controlled_execution(control):
+        repo.admit(database, page)
+    assert control.snapshot()["consumed"]["archive_decoded_rows"] == 7
+    for lookup in (lambda: repo.read_by_ids(database, [last["id"]]),
+                   lambda: repo.latest_for_keys(database, series_id=1, keys=[last["observation_key"]])):
+        control = ExecutionControl()
+        with controlled_execution(control):
+            assert tuple(lookup().values()) == (last,)
+        assert control.snapshot()["consumed"]["archive_decoded_rows"] == 1
+    for column, value in (("market_commit_seq", 999), ("series_id", 2), ("key_digest", b"x" * 32),
+                          ("row_hash", bytes.fromhex("f" * 64)), ("revision", 99)):
+        nested = database.begin_nested()
+        try:
+            database.execute(text(f"UPDATE market.cold_fact_locators SET {column}=:value WHERE id=:id"),
+                             {"value": value, "id": last["id"]})
+            with pytest.raises(RuntimeError, match="cold_fact_locator.*mismatch"):
+                repo.read_by_ids(database, [last["id"]])
+        finally:
+            nested.rollback()
 
 
 def test_catalog_witnesses_preserve_exact_material_and_causal_scope(database, tmp_path):

@@ -241,8 +241,16 @@ class CanonicalArchiveReadCache:
                         self._remove(directory, name)
                         raise CacheBypass("cached_size_mismatch")
                     self._check_namespace(directory)
+                    # Exact readers certify a stable byte-bearing inode. Touch
+                    # LRU time only when no shared reader can observe the change.
+                    # The directory lock prevents an eviction during conversion.
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        os.utime(fd, None)
                     fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                    os.utime(fd, None)
                     handle = os.fdopen(fd, "rb")
                 except BaseException:
                     if fd is not None:

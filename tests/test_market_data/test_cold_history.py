@@ -1,8 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import date, timedelta
+from io import BytesIO
+import os
 
 import pytest
 
+from core.execution_control import ExecutionBudgetExceededError, ExecutionControl, controlled_execution
+from market_data import fact_archive
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.canonical_storage import record_from_storage_row, record_to_storage_row
 from market_data.cold_history import ColdFactLocation, ColdHistoryReader, publish_cold_page, select_fact_rows
@@ -35,6 +40,77 @@ def test_cold_page_exact_readback_and_lookup(store, tmp_path):
         reader.read_by_ids({rows[1]["id"]: ColdFactLocation(manifest, 0)})
     with pytest.raises(ValueError, match="canonical_cold_ordinal_invalid"):
         ColdFactLocation(manifest, 3)
+
+
+def test_admitted_exact_read_only_decodes_selected_groups_and_preserves_full_verification(store, tmp_path):
+    limits = FactArchiveLimits(max_rows=32, row_group_size=7)
+    rows = [_row(revision=ordinal + 1, commit=ordinal + 1) for ordinal in range(22)]
+    manifest = publish_cold_page(rows, object_store=store, temporary_directory=tmp_path, limits=limits)
+    reader = ColdHistoryReader(store, limits=limits)
+    locators = {rows[index]["id"]: ColdFactLocation(manifest, index) for index in (0, 2, 21)}
+    expected = {rows[index]["id"]: rows[index] for index in (0, 2, 21)}
+    selective, full = ExecutionControl(), ExecutionControl()
+    with controlled_execution(selective):
+        assert reader.read_admitted_by_ids(locators) == expected
+    sparse_counts = selective.snapshot()["consumed"]
+    assert sparse_counts["archive_decoded_rows"] == 8
+    assert sparse_counts["archive_decoded_row_groups"] == 2
+    assert sparse_counts["archive_source_bytes"] >= manifest.byte_count
+    assert sparse_counts["input_rows"] == len(locators)
+    with controlled_execution(full):
+        assert reader.read_by_ids(locators) == expected
+    assert full.snapshot()["consumed"]["archive_decoded_rows"] == len(rows)
+
+    fallback = ExecutionControl()
+    with controlled_execution(fallback):
+        # The existing whole-page reader handles archive pages authored with
+        # wider groups without expanding the fast path's decode bound.
+        assert ColdHistoryReader(store, limits=replace(limits, row_group_size=4)).read_admitted_by_ids(locators) == expected
+    assert fallback.snapshot()["consumed"]["archive_decoded_rows"] == len(rows)
+
+    budget = ExecutionControl()
+    budget.limit(seconds=10, archive_decoded_rows=6)
+    with pytest.raises(ExecutionBudgetExceededError, match="archive_decoded_rows"), controlled_execution(budget):
+        reader.read_admitted_by_ids(locators)
+
+
+def test_admitted_exact_read_rejects_unselected_damage_and_path_replacement(store, tmp_path, monkeypatch):
+    limits = FactArchiveLimits(max_rows=32, row_group_size=7)
+    rows = [_row(revision=index + 1, commit=index + 1) for index in range(22)]
+    manifest = publish_cold_page(rows, object_store=store, temporary_directory=tmp_path, limits=limits)
+    path = store.local_path(manifest.object_key)
+    initial = path.read_bytes()
+    locators = {rows[-1]["id"]: ColdFactLocation(manifest, len(rows) - 1)}
+    reader = ColdHistoryReader(store, limits=limits)
+    damaged = bytearray(initial)
+    damaged[12] ^= 1
+    path.write_bytes(damaged)
+    with pytest.raises(ArchiveChecksumMismatch, match="checksum_mismatch"):
+        reader.read_admitted_by_ids(locators)
+    path.write_bytes(initial)
+    original_hash = fact_archive._hash_handle
+
+    def replace_after_hash(handle, *, max_bytes):
+        verified = original_hash(handle, max_bytes=max_bytes)
+        replacement = path.with_suffix(".replacement")
+        replacement.write_bytes(initial)
+        os.replace(replacement, path)
+        return verified
+
+    monkeypatch.setattr(fact_archive, "_hash_handle", replace_after_hash)
+    with pytest.raises(ArchiveChecksumMismatch, match="changed_during_read"):
+        reader.read_admitted_by_ids(locators)
+
+
+def test_archive_byte_budget_includes_decoder_threads():
+    control = ExecutionControl()
+    control.limit(seconds=10, archive_read_bytes=3)
+    with pytest.raises(ExecutionBudgetExceededError, match="used=4 limit=3"), controlled_execution(control):
+        with fact_archive._MeteredArchiveFile(BytesIO(b"abcd"), tier="source") as handle:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                assert executor.submit(handle.read, 2).result() == b"ab"
+                assert control.snapshot()["consumed"]["archive_source_bytes"] == 2
+                executor.submit(handle.read, 2).result()
 
 
 def test_range_prunes_only_impossible_pages_and_fails_when_selected_bytes_are_missing(store, tmp_path):
