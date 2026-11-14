@@ -688,6 +688,9 @@ require_no_alert_preview() {
 }
 
 show_release() {
+  if test -e "$state_root/canonical-cold-hold.json" || test -L "$state_root/canonical-cold-hold.json"; then
+    echo "Canonical cold cutover hold is active. Reconcile its database and runtime outcome before deployment."
+  fi
   if storage_online_pending; then
     echo "Storage online receipts retained; deployment admission checks the terminal handoff."
     echo "Receipt presence alone does not confirm migration or fleet health."
@@ -1032,6 +1035,9 @@ storage_online_pending() {
 
 # Presence alone is a hold: corrupt/partial state must never permit a restart.
 require_no_storage_handoff() {
+  if test -e "$state_root/canonical-cold-hold.json" || test -L "$state_root/canonical-cold-hold.json"; then
+    die "canonical cold cutover hold is active; reconcile the exact database and runtime outcome"
+  fi
   if storage_online_pending; then
     PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$state_root" "$env_file" "$repo_root" "${action:-}" "${1:-}" <<'PY' || die "storage online intent is unresolved; preserve receipts and reconcile the database, mounts and runtime before resuming server operations"
 import sys

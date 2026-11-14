@@ -137,9 +137,10 @@ a remotely exposed deployment, or a change that expands credential reach.
 **What QT promises:** durable state has one authority and destructive recovery
 is verified.
 
-PostgreSQL is the sole durable application-data authority. Destructive archive
-or recovery operations require explicit bounds and must be rehearsed against
-isolated, disposable resources before their procedure is trusted.
+PostgreSQL owns operational state and commits canonical storage publications.
+Canonical history can live in the verified immutable objects named by those
+commits. Destructive archive or recovery operations require explicit bounds and
+a rehearsal against isolated, disposable resources.
 
 If this promise fails, QT can split its durable truth, lose recoverability, or
 delete data without a reliable restoration path.
@@ -148,6 +149,7 @@ Supporting rules:
 
 - [One PostgreSQL persistence boundary](architecture/decisions/0009-use-one-postgres-persistence-boundary-and-retained-event-ledger.md)
 - [Tiered archive and recovery boundary](architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
+- [Authoritative cold history](architecture/decisions/0085-authoritative-cold-canonical-history.md)
 
 QT normally checks these rules with schema-boundary validation, isolated
 database integration, and an occasional separately authorized recovery

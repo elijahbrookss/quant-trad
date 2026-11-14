@@ -28,12 +28,13 @@ from portal.backend.service.storage.repos.market_data import PostgresMarketDataR
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db.canonical_cold_audit import _ensure_target, _plan
 from scripts.db.canonical_cold_custody_placement import assert_custody_placement
+from scripts.db.canonical_cold_database_fence import DatabaseFence
 from scripts.db.canonical_cold_identity_rebuild import swap_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase
 from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
 from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 
-ACTIVATION_VERSION = "qt.canonical_cold_activate.v2"
+ACTIVATION_VERSION = "qt.canonical_cold_activate.v3"
 _PHYSICAL_GATES = {
     "independent_recovery", "provider_boundary", "replay_equivalence",
     "legacy_reference_review", "physical_capacity", "rollback_rehearsal",
@@ -51,10 +52,17 @@ def validate_execution_record(execution, *, expected_execution_hash):
         raise ValueError("canonical_cold_activation_execution_hash_mismatch")
     if (
         not isinstance(execution, dict) or execution.get("schema") != ACTIVATION_VERSION
+        or execution.keys() != {
+            "schema", "approved_package_hash", "evidence", "source_database", "target_database",
+            "audit_set_hash", "loaded_inventory_hash", "source_commit_seq", "payload_children",
+            "custody_target_id", "custody_tablespace_oid", "custody_relation_oids",
+        }
         or not isinstance(execution.get("evidence"), dict)
+        or not _valid_digest(execution.get("approved_package_hash"))
         or set(execution["evidence"]) != _PHYSICAL_GATES
         or not all(_valid_digest(digest) for digest in execution["evidence"].values())
         or not _valid_digest(execution.get("audit_set_hash"))
+        or not _valid_digest(execution.get("loaded_inventory_hash"))
         or type(execution.get("source_commit_seq")) is not int
         or execution["source_commit_seq"] <= 0
         or not isinstance(execution.get("payload_children"), dict)
@@ -180,12 +188,13 @@ def _payload_children(conn, cutoff, planned, retention):
 
 
 def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts, verified_objects,
-                          statement_timeout_ms=900_000):
+                          database_fence, statement_timeout_ms=900_000):
     """Perform one all-or-nothing authority change on the already fenced target."""
     validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
     audit = validate_audit_receipts(receipts, target_identity=execution["target_database"],
                                    source_identity=execution["source_database"])
-    if audit["audit_set_hash"] != execution["audit_set_hash"] or not audit["verified_rows"]:
+    if (audit["audit_set_hash"] != execution["audit_set_hash"]
+            or audit["loaded_inventory_hash"] != execution["loaded_inventory_hash"] or not audit["verified_rows"]):
         raise RuntimeError("canonical_cold_activation_audit_set_mismatch")
     if (
         not conn.in_transaction()
@@ -193,10 +202,13 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         or conn.get_isolation_level() != "READ COMMITTED"
     ):
         raise RuntimeError("canonical_cold_activation_requires_transaction")
-    if type(statement_timeout_ms) is not int or statement_timeout_ms <= 0:
+    if not isinstance(database_fence, DatabaseFence):
+        raise ValueError("canonical_cold_activation_requires_live_database_fence")
+    if type(statement_timeout_ms) is not int or not 1 <= statement_timeout_ms <= 3_600_000:
         raise ValueError("canonical_cold_activation_invalid_statement_timeout")
     conn.execute(text("SELECT set_config('statement_timeout',:timeout,true)"), {"timeout": str(statement_timeout_ms)})
     conn.execute(text("SET LOCAL lock_timeout='500ms'"))
+    database_fence.assert_quiet(conn)
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))")):
         raise RuntimeError("canonical_cold_activation_storage_management_busy")
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
@@ -288,6 +300,8 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
     )
     result = {
         "execution_hash": expected_execution_hash, "audit_set_hash": audit["audit_set_hash"],
+        "loaded_inventory_hash": audit["loaded_inventory_hash"],
+        "approved_package_hash": execution["approved_package_hash"],
         "database": identity, "source_commit_seq": execution["source_commit_seq"],
         "cold_before_day": cutoff.isoformat(),
         "verified_rows": audit["verified_rows"], "verified_pages": audit["verified_pages"],
@@ -309,7 +323,41 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
     if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != execution["source_commit_seq"]:
         raise RuntimeError("canonical_cold_activation_authority_watermark_mismatch")
     verified_objects.assert_unchanged()
+    database_fence.assert_quiet(conn)
     return result
+
+
+def read_activation_outcome(conn, *, execution, expected_execution_hash):
+    """Reconcile durable SQL state for this exact operation on the pinned database."""
+    validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
+    expected = execution["target_database"]
+    identity = PostgresMigrationSource(conn.engine, expected_system_identifier=expected["system_identifier"])
+    if identity.identity(conn) != expected:
+        raise RuntimeError("canonical_cold_activation_outcome_wrong_database")
+    rows = conn.execute(text("""
+        SELECT layout_version,state,completed_at IS NOT NULL,evidence FROM market.fact_storage_state
+        ORDER BY layout_version LIMIT 2
+    """)).all()
+    if len(rows) != 1 or tuple(rows[0][1:3]) != ("ready", True):
+        raise RuntimeError("canonical_cold_activation_outcome_uncertain")
+    layout, _, _, evidence = rows[0]
+    if PostgresMarketDataRepository._current_commit_seq_with_session(conn) != execution["source_commit_seq"]:
+        raise RuntimeError("canonical_cold_activation_outcome_commit_boundary_changed")
+    if layout == FACT_STORAGE_LAYOUT_VERSION:
+        assert_fact_storage_contract(conn)
+        if _inventory_hash(conn) != execution["loaded_inventory_hash"]:
+            raise RuntimeError("canonical_cold_activation_original_boundary_changed")
+        return "original"
+    if (layout != COLD_HISTORY_LAYOUT_VERSION or not isinstance(evidence, dict)
+            or evidence.get("execution_hash") != expected_execution_hash
+            or evidence.get("audit_set_hash") != execution["audit_set_hash"]
+            or evidence.get("loaded_inventory_hash") != execution["loaded_inventory_hash"]
+            or evidence.get("approved_package_hash") != execution["approved_package_hash"]
+            or evidence.get("database") != expected
+            or evidence.get("source_commit_seq") != execution["source_commit_seq"]):
+        raise RuntimeError("canonical_cold_activation_outcome_uncertain")
+    assert_fact_storage_contract(conn)
+    return "committed"
 
 
 def _assert_verified_archive(conn, batch):

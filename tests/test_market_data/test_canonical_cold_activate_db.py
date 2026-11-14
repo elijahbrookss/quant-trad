@@ -1,9 +1,12 @@
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 import json
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import NullPool
 
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 from market_data.archive import FilesystemRawArchiveObjectStore
@@ -24,13 +27,32 @@ from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalF
 from scripts.db import canonical_cold_activate as activation
 from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_audit import audit_candidate
+from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
+from scripts.db.canonical_cold_transition import run_fenced_transition
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _ingest, _placement, storage
 
 pytestmark = pytest.mark.db
+
+
+@contextmanager
+def _fence_connections(storage):
+    engine = storage.database._engine
+    control = create_engine(engine.url.set(database="postgres"), poolclass=NullPool)
+    engine.dispose()
+    try:
+        with engine.connect() as conn, control.connect() as admin:
+            yield conn, admin
+    finally:
+        # Exact disposable test database only. Allow test teardown even when an
+        # assertion fails while the production-shaped SQL gate is closed.
+        with control.begin() as admin:
+            quoted = admin.dialect.identifier_preparer.quote_identifier(engine.url.database)
+            admin.exec_driver_sql(f"ALTER DATABASE {quoted} ALLOW_CONNECTIONS true")
+        control.dispose()
 
 
 def _configure_fixture_catalog(conn, database_identity, root):
@@ -125,7 +147,10 @@ def _create_retained_parent(conn):
                  {"binding": json.dumps(binding)})
 
 
-def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_reads(storage, tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner_path", [False, True])
+def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_reads(
+    storage, tmp_path, monkeypatch, owner_path,
+):
     engine = storage.database._engine
     legacy_day, daily_day = storage.today - timedelta(days=2), storage.today - timedelta(days=1)
     with storage.database.session() as session:
@@ -202,74 +227,55 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     # boundary and carry no qualification for any of those external gates.
     execution = {
         "schema": activation.ACTIVATION_VERSION, "evidence": {gate: "e" * 64 for gate in activation._PHYSICAL_GATES},
+        "approved_package_hash": "a" * 64,
         "target_database": plan["database"], "source_database": plan["source_database"],
         "audit_set_hash": audit["audit_set_hash"], "source_commit_seq": latest_commit,
+        "loaded_inventory_hash": audit["loaded_inventory_hash"],
         "payload_children": payload_children,
         "custody_target_id": "activation-fixture", "custody_tablespace_oid": custody_tablespace,
         "custody_relation_oids": custody_oids,
     }
-    expected_hash = archive_evidence_hash(execution)
-    with engine.connect() as conn:
-        verified = activation.verify_mounted_candidate(conn, audit=audit, store=new_store, limits=ArchiveVerificationLimits())
+    outcome_arguments = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
+    if owner_path:
+        phases = []
 
-    path = new_store.local_path(next(iter(verified.objects)))
-    original_bytes = path.read_bytes()
-    path.write_bytes(original_bytes + b"changed")
-    transition = {"execution": execution, "expected_execution_hash": expected_hash, "receipts": receipts}
-    with pytest.raises(RuntimeError, match="archive_verification_object_changed"):
-        with engine.begin() as conn:
-            activation.activate_cold_storage(conn, verified_objects=verified, **transition)
-    path.write_bytes(original_bytes)
-    with engine.connect() as conn:
-        verified = activation.verify_mounted_candidate(conn, audit=audit, store=new_store, limits=ArchiveVerificationLimits())
+        def provider_boundary(conn, commit_seq):
+            phases.append("provider")
+            assert not conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
+            assert commit_seq == latest_commit
 
-    changed_oids = dict(custody_oids, fact_archive_dependencies=custody_oids["fact_archive_dependencies"] + 1)
-    changed_execution = {**execution, "custody_relation_oids": changed_oids}
-    with pytest.raises(RuntimeError, match="canonical_custody_relation_oid_changed"):
-        with engine.begin() as conn:
-            activation.activate_cold_storage(
-                conn, execution=changed_execution, expected_execution_hash=archive_evidence_hash(changed_execution),
-                receipts=receipts, verified_objects=verified,
+        def verify_commit(conn, result):
+            phases.append("accepted")
+            assert activation.read_activation_outcome(conn, **outcome_arguments) == "committed"
+            assert result["source_commit_seq"] == latest_commit
+            assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
+
+        with _fence_connections(storage) as (retained, control):
+            def fail_provider_boundary(conn, commit_seq):
+                provider_boundary(conn, commit_seq)
+                raise RuntimeError("fixture provider proof incomplete")
+
+            with pytest.raises(RuntimeError, match="fixture provider proof incomplete"):
+                run_fenced_transition(
+                    retained, control, **outcome_arguments, receipts=receipts, store=new_store,
+                    limits=ArchiveVerificationLimits(), timeout_seconds=60,
+                    assert_host_held=lambda: None, verify_provider_boundary=fail_provider_boundary,
+                    record=lambda phase, evidence: phases.append(phase), verify_committed=verify_commit,
+                )
+            assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider",
+                              "activation_rolled_back", "login_opening", "jobs_restarting", "database_reopened"]
+            phases.clear()
+            run_fenced_transition(
+                retained, control, **outcome_arguments, receipts=receipts, store=new_store,
+                limits=ArchiveVerificationLimits(), timeout_seconds=60,
+                assert_host_held=lambda: None, verify_provider_boundary=provider_boundary,
+                record=lambda phase, evidence: phases.append(phase), verify_committed=verify_commit,
             )
-
-    with pytest.raises(RuntimeError, match="cold_identity_retained_cutover_parent_proof_mismatch"):
-        with engine.begin() as conn:
-            conn.execute(text(f"""
-                UPDATE {online.STATE} SET binding=jsonb_set(binding, ARRAY['source_oids',:source],
-                    to_jsonb('market.fact_versions'::regclass::oid::bigint))
-            """), {"source": online.headers.SOURCE})
-            activation.activate_cold_storage(conn, verified_objects=verified, **transition)
-
-    with pytest.raises(RuntimeError, match="fixture interrupted after switch"):
-        with engine.begin() as conn:
-            activation.activate_cold_storage(conn, verified_objects=verified, **transition)
-            raise RuntimeError("fixture interrupted after switch")
-    with engine.connect() as conn:
-        assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == FACT_STORAGE_LAYOUT_VERSION
-        assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
-        assert conn.scalar(text(f"SELECT '{STAGED}'::regclass::oid")) == identity["new_oid"]
-        assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
-        assert_fact_identity_references(conn)
-        assert conn.scalar(text("SELECT count(*) FROM market.cold_fact_retired_days")) == 0
-
-    with engine.begin() as conn:
-        switched = activation.activate_cold_storage(conn, verified_objects=verified, **transition)
-        assert switched["cold_before_day"] == storage.today.isoformat()
-        assert switched["custody"] == {
-            "target_id": "activation-fixture", "tablespace_oid": custody_tablespace, "relation_oids": custody_oids,
-        }
-        assert switched["verified_rows"] == 2
-        assert switched["retired_header_bytes"] > 0 and switched["retired_payload_bytes"] > 0
-        assert conn.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["new_oid"]
-        assert conn.scalar(text(f"SELECT '{PREVIOUS}'::regclass::oid")) == identity["old_oid"]
-        assert "qt_fact_header_cutover_v2.fact_versions" in switched["identity"]["rebound_foreign_keys"]
-        assert conn.scalar(text(f"SELECT count(*) FROM {SOURCE}")) == 1
-        assert conn.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == COLD_HISTORY_LAYOUT_VERSION
-        assert conn.execute(text("""
-            SELECT storage_day,state FROM market.fact_retention_partitions WHERE storage_day<:cutoff ORDER BY storage_day
-        """), {"cutoff": storage.today}).all() == [(legacy_day, "sealed"), (daily_day, "sealed")]
-        for relation in ("fact_versions_legacy", fact_header_partition_name(daily_day), *payload_children):
-            assert conn.scalar(text("SELECT to_regclass(:name) IS NULL"), {"name": f"market.{relation}"})
+        assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "activation_committing",
+                          "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
+    else:
+        _exercise_fence_failures(storage, new_store, audit, outcome_arguments, receipts,
+                                 identity, (legacy_day, daily_day))
 
     restarted = Database(storage.dsn)
     try:
@@ -296,3 +302,94 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
         }
     finally:
         restarted._reset_engine()
+
+
+def _exercise_fence_failures(storage, new_store, audit, outcome_arguments, receipts, identity, days):
+    execution = outcome_arguments["execution"]
+    engine = storage.database._engine
+    custody_oids = execution["custody_relation_oids"]
+    legacy_day, daily_day = days
+    with engine.connect() as conn:
+        verified = activation.verify_mounted_candidate(conn, audit=audit, store=new_store, limits=ArchiveVerificationLimits())
+    path = new_store.local_path(next(iter(verified.objects)))
+    original_bytes = path.read_bytes()
+    stages = []
+    with _fence_connections(storage) as (retained, control):
+        fence = close_database_fence(
+            retained, control, expected_database=execution["target_database"], timeout_seconds=120,
+            record=lambda phase, evidence: stages.append((phase, evidence)),
+        )
+        assert [stage for stage, _ in stages] == ["login_closing", "jobs_stopping", "database_fenced"]
+        with pytest.raises(OperationalError, match="not currently accepting connections"):
+            create_engine(engine.url, poolclass=NullPool).connect()
+
+        transition = {**outcome_arguments, "receipts": receipts, "database_fence": fence}
+        path.write_bytes(original_bytes + b"changed")
+        with pytest.raises(RuntimeError, match="archive_verification_object_changed"):
+            with retained.begin():
+                activation.activate_cold_storage(retained, verified_objects=verified, **transition)
+        path.write_bytes(original_bytes)
+        with retained.begin():
+            verified = activation.verify_mounted_candidate(
+                retained, audit=audit, store=new_store, limits=ArchiveVerificationLimits(),
+            )
+
+        changed_oids = dict(custody_oids, fact_archive_dependencies=custody_oids["fact_archive_dependencies"] + 1)
+        changed_execution = {**execution, "custody_relation_oids": changed_oids}
+        with pytest.raises(RuntimeError, match="canonical_custody_relation_oid_changed"):
+            with retained.begin():
+                activation.activate_cold_storage(
+                    retained, execution=changed_execution, expected_execution_hash=archive_evidence_hash(changed_execution),
+                    receipts=receipts, verified_objects=verified, database_fence=fence,
+                )
+
+        with pytest.raises(RuntimeError, match="cold_identity_retained_cutover_parent_proof_mismatch"):
+            with retained.begin():
+                retained.execute(text(f"""
+                    UPDATE {online.STATE} SET binding=jsonb_set(binding, ARRAY['source_oids',:source],
+                        to_jsonb('market.fact_versions'::regclass::oid::bigint))
+                """), {"source": online.headers.SOURCE})
+                activation.activate_cold_storage(retained, verified_objects=verified, **transition)
+
+        with pytest.raises(RuntimeError, match="fixture interrupted after switch"):
+            with retained.begin():
+                activation.activate_cold_storage(retained, verified_objects=verified, **transition)
+                raise RuntimeError("fixture interrupted after switch")
+        with retained.begin():
+            assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
+            assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
+            assert retained.scalar(text(f"SELECT '{STAGED}'::regclass::oid")) == identity["new_oid"]
+            assert retained.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
+            assert_fact_identity_references(retained)
+            assert retained.scalar(text("SELECT count(*) FROM market.cold_fact_retired_days")) == 0
+
+        with retained.begin():
+            switched = activation.activate_cold_storage(retained, verified_objects=verified, **transition)
+            assert switched["cold_before_day"] == storage.today.isoformat()
+            assert switched["custody"] == {
+                "target_id": "activation-fixture", "tablespace_oid": execution["custody_tablespace_oid"],
+                "relation_oids": custody_oids,
+            }
+            assert switched["verified_rows"] == 2
+            assert switched["retired_header_bytes"] > 0 and switched["retired_payload_bytes"] > 0
+            assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["new_oid"]
+            assert retained.scalar(text(f"SELECT '{PREVIOUS}'::regclass::oid")) == identity["old_oid"]
+            assert "qt_fact_header_cutover_v2.fact_versions" in switched["identity"]["rebound_foreign_keys"]
+            assert retained.scalar(text(f"SELECT count(*) FROM {SOURCE}")) == 1
+            assert retained.scalar(text("SELECT layout_version FROM market.fact_storage_state")) == COLD_HISTORY_LAYOUT_VERSION
+            assert retained.execute(text("""
+                SELECT storage_day,state FROM market.fact_retention_partitions WHERE storage_day<:cutoff ORDER BY storage_day
+            """), {"cutoff": storage.today}).all() == [(legacy_day, "sealed"), (daily_day, "sealed")]
+            for relation in ("fact_versions_legacy", fact_header_partition_name(daily_day), *execution["payload_children"]):
+                assert retained.scalar(text("SELECT to_regclass(:name) IS NULL"), {"name": f"market.{relation}"})
+
+        with pytest.raises(RuntimeError, match="canonical_cold_database_fence_release_outcome_changed"):
+            reopen_database_fence(
+                fence, control, expected_outcome="original", record=lambda *args: pytest.fail("reopened mismatched outcome"),
+                read_outcome=lambda conn: activation.read_activation_outcome(conn, **outcome_arguments),
+            )
+        reopen_database_fence(
+            fence, control, expected_outcome="committed", record=lambda phase, evidence: stages.append((phase, evidence)),
+            read_outcome=lambda conn: activation.read_activation_outcome(conn, **outcome_arguments),
+        )
+        assert [stage for stage, _ in stages[3:]] == ["login_opening", "jobs_restarting", "database_reopened"]
