@@ -1486,7 +1486,40 @@ class PostgresMarketDataRepository:
             "market.derivative_state",
             "market.market_response",
         )
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
+            canonical_rows = """
+                SELECT versions.observation_key AS observation_identity
+                FROM market.fact_versions AS versions WHERE versions.series_id=series.id
+            """
+            cold_bounds = ""
+            bounds_columns = "bounds.first_fact_time, bounds.last_fact_time, COALESCE(bounds.max_commit_seq, 0) AS max_commit_seq"
+            if cold_layout_active(session):
+                # Use the existing HDD key index. Count revisions from both
+                # owners, grouping the same observation across corrections.
+                canonical_rows = f"""
+                    SELECT sha256(convert_to(versions.observation_key,'UTF8')) AS observation_identity
+                    FROM market.fact_versions AS versions WHERE versions.series_id=series.id
+                    UNION ALL
+                    SELECT loc.key_digest AS observation_identity
+                    FROM market.cold_fact_locators AS loc
+                    JOIN market.cold_fact_pages AS page ON page.id=loc.page_id
+                    WHERE loc.series_id=series.id AND {cold_page_is_visible("page")}
+                """
+                cold_bounds = f"""
+                    LEFT JOIN LATERAL (
+                        SELECT min(scope.first_observation_at) AS first_fact_time,
+                               max(scope.last_observation_at) AS last_fact_time,
+                               max(scope.last_commit_seq) AS max_commit_seq
+                        FROM market.cold_fact_page_series AS scope
+                        JOIN market.cold_fact_pages AS page ON page.id=scope.page_id
+                        WHERE scope.series_id=series.id AND {cold_page_is_visible("page")}
+                    ) AS history ON TRUE
+                """
+                bounds_columns = """
+                    LEAST(bounds.first_fact_time, history.first_fact_time) AS first_fact_time,
+                    GREATEST(bounds.last_fact_time, history.last_fact_time) AS last_fact_time,
+                    COALESCE(GREATEST(bounds.max_commit_seq, history.max_commit_seq),0) AS max_commit_seq
+                """
             rows = session.execute(
                 text(
                     f"""
@@ -1522,9 +1555,7 @@ class PostgresMarketDataRepository:
                                   )
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS feature_count,
-                           bounds.first_fact_time,
-                           bounds.last_fact_time,
-                           COALESCE(bounds.max_commit_seq, 0) AS max_commit_seq
+                           {bounds_columns}
                     FROM market.series AS series
                     LEFT JOIN LATERAL (
                         -- Count through the narrow observation/revision key so
@@ -1535,9 +1566,8 @@ class PostgresMarketDataRepository:
                                count(*) AS fact_count
                         FROM (
                             SELECT count(*) AS version_count
-                            FROM market.fact_versions AS versions
-                            WHERE versions.series_id = series.id
-                            GROUP BY versions.observation_key
+                            FROM ({canonical_rows}) AS accepted_versions
+                            GROUP BY observation_identity
                         ) AS observation_versions
                     ) AS canonical ON TRUE
                     LEFT JOIN LATERAL (
@@ -1565,6 +1595,7 @@ class PostgresMarketDataRepository:
                                    LIMIT 1
                                ) AS max_commit_seq
                     ) AS bounds ON TRUE
+                    {cold_bounds}
                     {where_sql}
                     ORDER BY series.instrument_id, series.fact_type,
                              series.timeframe_seconds NULLS FIRST, series.id
