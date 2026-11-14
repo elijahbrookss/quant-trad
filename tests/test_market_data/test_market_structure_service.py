@@ -109,7 +109,7 @@ def test_pair_materialization_does_not_execute_book_replay_locals(monkeypatch):
     repository = SimpleNamespace(cross_stream_input_commit_seq=lambda **_: 7,
         read_bbo_features=lambda **_: (),
         ingest_market_state_features=lambda **_: SimpleNamespace(inserted_count=0, noop_count=0, max_commit_seq=7))
-    monkeypatch.setattr(market_structure_module, "market_data_repo", SimpleNamespace(list_series=lambda **_: []))
+    monkeypatch.setattr(market_structure_module, "market_data_repo", SimpleNamespace(list_series_metadata=lambda **_: []))
     service = MarketStructureService(repository=repository)
     monkeypatch.setattr(service, "configure_pair", lambda **_: {"pair_id": pair.pair_id, "mapping_id": "mapping",
         "series": [{"product_id": pair.futures_product_id, "bbo_series_id": 1,

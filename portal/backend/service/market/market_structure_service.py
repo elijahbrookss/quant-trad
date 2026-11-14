@@ -979,7 +979,7 @@ class MarketStructureService:
         futures = series_by_product[pair.futures_product_id]
         spot = series_by_product[pair.spot_product_id]
 
-        source_series = market_data_repo.list_series(
+        source_series = market_data_repo.list_series_metadata(
             instrument_id=pair.futures_instrument_id
         )
         oi_series = [

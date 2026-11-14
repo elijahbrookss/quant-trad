@@ -269,7 +269,7 @@ class MarketNormalizationService:
             raise ValueError("market_normalization_materialize_invalid: causal range")
         spec = self.repository.get_spec(spec_id)
         series_rows = {
-            int(row["id"]): row for row in self.store.list_series()
+            int(row["id"]): row for row in self.store.list_series_metadata()
         }
         source = series_rows.get(int(source_series_id))
         if source is None:
