@@ -11,14 +11,17 @@ from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.cold_history import ColdHistoryReader, publish_cold_page
 from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, SourceIdentity
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
-from portal.backend.db.fact_storage_schema import ensure_fact_payload_partition
+from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, ensure_fact_payload_partition
+from portal.backend.db.market_data_models import MarketDataIngestionRunRecord
 from portal.backend.db.session import Database
 from portal.backend.service.storage import history_policy
 from portal.backend.service.storage.repos import cold_history, market_data
 from portal.backend.service.storage.repos.fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM
+from scripts.db.canonical_cold_database_fence import close_database_fence
 from scripts.db.canonical_cold_migration import PostgresMigrationSource
+from scripts.db.canonical_cold_reverse_allocator import capture_allocator, synchronize_allocator
 from scripts.db.canonical_cold_reverse_projection import ReversePage, rematerialize_page
-from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog
+from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog, _fence_connections
 from tests.test_market_data.test_fact_storage_tiers_db import _placement, storage  # noqa: F401
 
 
@@ -61,12 +64,15 @@ def test_reverse_projection_rehydrates_verified_old_and_candidate_only_rows_unde
         known_at_method="platform_acceptance")
     old_db = Database(old_url.render_as_string(hide_password=False))
     try:
+        _placement(monkeypatch, old_day)
+        original_outcome = storage.repo.ingest_candles(
+            series_id=series, source_id=source_id, facts=[original], ingestion_run_id="older-reverse")
+        # With no active SQL connections or writers, clone one consistent v2
+        # checkpoint before candidate activation and any later accepted rows.
         engine.dispose()
         with admin.connect() as conn:
             conn.exec_driver_sql(f"CREATE DATABASE {old_name} TEMPLATE {engine.url.database}")
         assert old_db.ensure_schema(), str(old_db.last_error)
-        _placement(monkeypatch, old_day)
-        storage.repo.ingest_candles(series_id=series, source_id=source_id, facts=[original], ingestion_run_id="older-reverse")
         with engine.begin() as conn:
             record, = conn.execute(text(f"SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM} WHERE versions.series_id=:series"),
                                    {"series": series}).mappings().all()
@@ -88,12 +94,30 @@ def test_reverse_projection_rehydrates_verified_old_and_candidate_only_rows_unde
             descriptor, digest = conn.execute(text("SELECT descriptor,manifest_hash FROM market.cold_fact_pages")).one()
             from market_data.fact_archive import FactArchiveManifest
             candidate_page = FactArchiveManifest.from_dict(descriptor, expected_hash=digest)
-            runs = [dict(row) for row in conn.execute(text("SELECT * FROM market.ingestion_runs WHERE source_id=:source"),
-                                                     {"source": source_id}).mappings()]
+            runs = [dict(row) for row in conn.execute(text("SELECT * FROM market.ingestion_runs WHERE id=:id"),
+                                                     {"id": "candidate-only-reverse"}).mappings()]
             system_id = conn.scalar(text("SELECT system_identifier::text FROM pg_control_system()"))
+        with engine.connect() as conn:
+            txn = conn.begin()
+            conn.scalar(text("SELECT nextval('market.fact_commit_seq')"))
+            burned = conn.scalar(text("SELECT nextval('market.fact_commit_seq')"))
+            txn.rollback()  # The source still consumed both. Neither is an accepted fact.
         reader = ColdHistoryReader(FilesystemRawArchiveObjectStore(store.root, writable=False))
         with old_db._engine.begin() as conn:
             identity = PostgresMigrationSource(old_db._engine, expected_system_identifier=system_id).identity(conn)
+        with engine.begin() as conn:
+            source_identity = PostgresMigrationSource(engine, expected_system_identifier=system_id).identity(conn)
+
+        def retain(conn, control, expected):
+            return close_database_fence(conn, control, expected_database=expected, timeout_seconds=30,
+                                        record=lambda _phase, _evidence: None)
+
+        with _fence_connections(storage) as (conn, control):
+            source_fence = retain(conn, control, source_identity)
+            with conn.begin():
+                boundary = capture_allocator(conn, fence=source_fence, layout=COLD_HISTORY_LAYOUT_VERSION)
+                assert (boundary.visible_commit, boundary.last_value, boundary.is_called) == (outcome.max_commit_seq, burned, True)
+                assert boundary.next_value == burned + 1 > boundary.visible_commit + 1
         original_plan = ReversePage(original_page.manifest_hash, original_page.object_sha256, outcome.max_commit_seq,
                                     identity, {expected[0].fact_version_id: old_day})
         candidate_plan = ReversePage(candidate_page.manifest_hash, candidate_page.object_sha256, outcome.max_commit_seq, identity)
@@ -101,23 +125,52 @@ def test_reverse_projection_rehydrates_verified_old_and_candidate_only_rows_unde
         def project(conn, plan, page):
             return rematerialize_page(conn, plan=plan, manifest=page, reader=reader, expected_plan_hash=plan.plan_hash)
 
-        with old_db._engine.begin() as conn:
-            with pytest.raises(IntegrityError):
-                project(conn, candidate_plan, candidate_page)  # missing native ingestion run FK
-            assert conn.scalar(text("SELECT count(*) FROM market.fact_identities")) == 0
-            from portal.backend.db.market_data_models import MarketDataIngestionRunRecord
-            conn.execute(MarketDataIngestionRunRecord.__table__.insert(), runs)
-            assert project(conn, original_plan, original_page)["placement_mode"] == "original_storage_day"
-            candidate_result = project(conn, candidate_plan, candidate_page)
-            assert candidate_result["inserted"] == candidate_result["verified"] == 1
-            assert candidate_result["placement_mode"] == "candidate_acceptance_utc_day"
-            repeated = project(conn, candidate_plan, candidate_page)
-            assert repeated["inserted"] == 0 and repeated["stored_rows_sha256"] == candidate_result["stored_rows_sha256"]
-            assert conn.execute(text("SELECT storage_day,market_commit_seq FROM market.fact_versions ORDER BY market_commit_seq")).all() == [
-                (old_day, expected[0].market_commit_seq), (storage.today, expected[1].market_commit_seq)]
-            changed_day = replace(candidate_plan, original_storage_days={expected[1].fact_version_id: old_day})
-            with pytest.raises(InternalError, match="canonical_fact_identity_mismatch"):
-                project(conn, changed_day, candidate_page)
+        with _fence_connections(SimpleNamespace(database=old_db)) as (conn, control):
+            old_fence = retain(conn, control, identity)
+            with conn.begin():
+                baseline = capture_allocator(conn, fence=old_fence, layout=FACT_STORAGE_LAYOUT_VERSION)
+                assert baseline.visible_commit == original_outcome.max_commit_seq
+
+            def sync():
+                return synchronize_allocator(conn, fence=old_fence, candidate=boundary, baseline=baseline,
+                    expected_candidate_hash=boundary.sha256, expected_baseline_hash=baseline.sha256)
+
+            with conn.begin():
+                with pytest.raises(RuntimeError, match="accepted watermark differs"):
+                    sync()
+                with pytest.raises(IntegrityError):
+                    project(conn, candidate_plan, candidate_page)  # missing native ingestion run FK
+                assert conn.scalar(text("SELECT count(*) FROM market.fact_identities")) == 1
+                conn.execute(MarketDataIngestionRunRecord.__table__.insert(), runs)
+                assert project(conn, original_plan, original_page)["placement_mode"] == "original_storage_day"
+                candidate_result = project(conn, candidate_plan, candidate_page)
+                assert candidate_result["inserted"] == candidate_result["verified"] == 1
+                assert candidate_result["placement_mode"] == "candidate_acceptance_utc_day"
+                repeated = project(conn, candidate_plan, candidate_page)
+                assert repeated["inserted"] == 0 and repeated["stored_rows_sha256"] == candidate_result["stored_rows_sha256"]
+                assert conn.execute(text("SELECT storage_day,market_commit_seq FROM market.fact_versions ORDER BY market_commit_seq")).all() == [
+                    (old_day, expected[0].market_commit_seq), (storage.today, expected[1].market_commit_seq)]
+                changed_day = replace(candidate_plan, original_storage_days={expected[1].fact_version_id: old_day})
+                with pytest.raises(InternalError, match="canonical_fact_identity_mismatch"):
+                    project(conn, changed_day, candidate_page)
+
+            with pytest.raises(RuntimeError, match="fixture interruption"):
+                with conn.begin():
+                    assert sync()["changed"] is True
+                    raise RuntimeError("fixture interruption")
+            with conn.begin():
+                assert conn.exec_driver_sql("SELECT last_value,is_called FROM market.fact_commit_seq").one() == (
+                    baseline.last_value, baseline.is_called)
+                drift = conn.begin_nested()
+                conn.exec_driver_sql(f"ALTER SEQUENCE market.fact_commit_seq RESTART WITH {boundary.next_value - 1}")
+                assert conn.scalar(text("SELECT nextval('market.fact_commit_seq')")) == boundary.next_value - 1
+                with pytest.raises(RuntimeError, match="advanced independently"):
+                    sync()  # equal next number, but allocation consumed it from a different origin
+                drift.rollback()
+                assert sync()["changed"] is True
+            with conn.begin():
+                retry = sync()
+                assert retry["changed"] is False and retry["next_value"] == boundary.next_value
 
         old_db._reset_engine()
         assert old_db.ensure_schema(), str(old_db.last_error)
@@ -126,6 +179,14 @@ def test_reverse_projection_rehydrates_verified_old_and_candidate_only_rows_unde
         assert repository.read_fact_revisions(**selection) == expected
         assert repository.read_facts(**selection, as_of_commit_seq=expected[0].market_commit_seq) == expected[:1]
         assert repository.read_facts(**selection, known_at_lte=accepted) == expected[:1]
+        next_fact = replace(correction, open_time=start+timedelta(minutes=2), close_time=start+timedelta(minutes=3))
+        new = repository.ingest_candles(series_id=series, source_id=source_id, facts=[next_fact])
+        assert new.max_commit_seq == boundary.next_value
+        with _fence_connections(SimpleNamespace(database=old_db)) as (conn, control):
+            old_fence = retain(conn, control, identity)
+            with conn.begin():
+                with pytest.raises(RuntimeError, match="accepted watermark differs"):
+                    sync()
     finally:
         old_db._reset_engine()
         with admin.connect() as conn:
