@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 from subprocess import TimeoutExpired
 import stat
-from time import sleep
+from time import monotonic, sleep
 
 from scripts.automation import canonical_cold_host_inventory as inventory
 from scripts.automation import storage_host_boundary as host
@@ -334,6 +334,52 @@ def restart_runtime(state_root, *, source, model, admission, stopped_services, r
     record("runtime_verified", {"candidate_ids": dict(candidate_ids), "acceptance": evidence})
     observe()
     return evidence
+
+
+def observe_interrupted_start(state_root, *, source, model, admission, hold, timeout_seconds=30):
+    """Check a journaled start after process loss using its pinned container ID.
+
+    This observation resolves only the requested container's action. Overall
+    fleet and database acceptance still belong to a live maintenance owner.
+    """
+    if (hold.get("phase") != "runtime_dispatching" or hold.get("inventory_hash") != host.digest(source)
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60):
+        raise ValueError("canonical_cold_runtime_start_observation_scope")
+    pending = hold.get("runtime_evidence", {})
+    action = pending.get("action", "").split(":")
+    if len(action) != 2 or action[0] != "start" or action[1] not in (*REPLACE, "grafana", "pgadmin"):
+        raise ValueError("canonical_cold_runtime_start_not_journaled")
+    name = action[1]
+    candidate = pending.get("candidate_ids", {}).get(name)
+    identity = candidate or source["services"][name]["id"]
+    if not re.fullmatch(r"[0-9a-f]{64}", identity):
+        raise ValueError("canonical_cold_runtime_invalid_start_identity")
+    directory = Path(state_root)
+    marker = directory / "canonical-cold-hold.json"
+    if host.load_receipt(marker) != hold:
+        raise RuntimeError("canonical_cold_runtime_start_receipt_changed")
+    network = source["project"] + "_quanttrad"
+    with host.docker_deadline(monotonic() + timeout_seconds):
+        details, networks = host.preserved_client_observations([identity], [network])
+        if networks != {network: source["network_id"]}:
+            raise RuntimeError("canonical_cold_runtime_start_observed_network_changed")
+        current = details[identity]
+        state = inventory._state(current)
+        if candidate is None:
+            old = source["services"][name]
+            mounts = sorted(current["mounts"], key=lambda value: json.dumps(value, sort_keys=True))
+            if (current["image"] != old["image"] or host.database_contract(current) != old["configuration_sha256"]
+                    or host.digest(mounts) != old["mounts_sha256"]
+                    or host.digest(inventory._networks(current)) != old["networks_sha256"]):
+                raise RuntimeError("canonical_cold_runtime_start_observed_binding_changed")
+        else:
+            if model is None or admission is None or admission["wire_model_hash"] != host.digest(model):
+                raise RuntimeError("canonical_cold_runtime_start_observed_recipe_changed")
+            _candidate_observation(model, admission, source, name, {"id": identity, "image": current["image"]})
+    if host.load_receipt(marker) != hold:
+        raise RuntimeError("canonical_cold_runtime_start_receipt_changed")
+    status = "started" if _is_started(state, name) else "starting" if state["running"] else "unresolved"
+    return {"service": name, "container_id": identity, "status": status, "container": state}
 
 
 def _record_serving_release(state_root, *, source, admission, observed_at, record):

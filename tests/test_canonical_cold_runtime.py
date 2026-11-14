@@ -164,3 +164,22 @@ def test_runtime_release_record_removes_automatic_previous_image_and_preserves_l
     assert fields["previous_revision"] == "" and fields["current_revision"] == REVISION
     assert fields["storage_layout"] == "ssd-hdd-v1"
     assert sha256(path.read_bytes()).hexdigest() == journal[-1][1]["new_sha256"]
+
+
+def test_interrupted_start_can_be_observed_without_reissuing_the_request(host_scope, monkeypatch):
+    root, fake, parameters = host_scope
+    source = runtime.inventory.inspect_host_inventory(root, **parameters)
+    backend = fake["rows"]["backend"]
+    journal = {
+        "phase": "runtime_dispatching", "inventory_hash": runtime.host.digest(source),
+        "runtime_evidence": {"action": "start:backend", "candidate_ids": {}},
+    }
+    runtime.host.save_receipt(root / "canonical-cold-hold.json", journal, initial=True)
+    monkeypatch.setattr(runtime.host, "preserved_client_observations",
+                        lambda ids, names: ({ids[0]: backend}, {names[0]: source["network_id"]}))
+    assert runtime.observe_interrupted_start(root, source=source, model=None, admission=None, hold=journal)["status"] == "started"
+    _exit(backend, 0)
+    assert runtime.observe_interrupted_start(root, source=source, model=None, admission=None, hold=journal)["status"] == "unresolved"
+    backend["mounts"][0]["RW"] = False
+    with pytest.raises(RuntimeError, match="observed_binding_changed"):
+        runtime.observe_interrupted_start(root, source=source, model=None, admission=None, hold=journal)
