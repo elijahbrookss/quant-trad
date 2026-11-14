@@ -24,7 +24,9 @@ def test_level_two_startup_preserves_counters_after_last_hot_book_fact_retires(s
     store = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: book.store, read_cache_factory=lambda: None)
     monkeypatch.setattr(market_data, "canonical_fact_storage_repository", store)
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", store)
-    before = book.structures.archive_status(definition_id=book.claim.definition_id)["book_reconstruction"]
+    status = book.structures.archive_status(definition_id=book.claim.definition_id)
+    assert status["canonical_trade_count_status"] == {"state": "not_applicable"}
+    before = status["book_reconstruction"]
     assert (before["snapshot_count"], before["batch_count"]) == (1, 1)
     archive = PostgresCanonicalFactArchiveRepository(database=storage.database, object_store=book.store,
                                                        temporary_directory=tmp_path / "staging")

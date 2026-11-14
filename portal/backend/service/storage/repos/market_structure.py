@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import islice
 from typing import Any, Optional
+from urllib.parse import quote
 
 from sqlalchemy import text
 
@@ -73,6 +74,7 @@ from market_data.order_book import (
     L2SnapshotFact,
 )
 from market_data.structure import (
+    MARKET_TRADE_FACT_VERSION,
     MarketSide,
     MarketTradeFact,
     MarketTradeRecord,
@@ -86,6 +88,7 @@ from market_data.structure import (
 from market_data.stream_quality import normalize_stream_quality_classification
 
 from ._shared import db
+from .cold_history import cold_page_is_visible
 from .fact_dependencies import _cold_enabled
 from .market_data import market_data_repo
 from .market_lifecycle import market_storage_lifecycle_repository
@@ -471,9 +474,25 @@ def _matched_provider_trade_ids(session, scope, trade_ids):
     return found
 
 
-def _trade_flow_status_rows(session, series_ids):
+def _trade_flow_archive_status(session, series_ids):
+    if not series_ids:
+        return [], {"state": "not_applicable"}
+    if _cold_enabled(session) and session.scalar(text(f"""
+        SELECT EXISTS (
+            SELECT FROM market.cold_fact_page_series AS scope
+            JOIN market.cold_fact_pages AS page ON page.id=scope.page_id
+            WHERE scope.series_id=ANY(:series_ids) AND {cold_page_is_visible("page")}
+        )
+    """), {"series_ids": series_ids}):
+        return [], {"state": "unavailable", "reason": "exact_lifetime_aggregate_requires_cold_history_scan"}
     aggregates = {}
-    def fold(rows):
+    with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
+        WITH latest AS (
+            SELECT DISTINCT ON (series_id,observation_key) id
+            FROM market.fact_versions WHERE series_id=ANY(:series_ids) AND fact_type='market.trade_flow'
+            ORDER BY series_id,observation_key,revision DESC,market_commit_seq DESC
+        ) SELECT id FROM latest ORDER BY id
+    """), {"series_ids": list(series_ids)}) as rows:
         for row in rows:
             fact = decode_trade_flow_record(record_from_storage_row(row)).fact
             key = (row["series_id"], fact.interval_seconds)
@@ -485,24 +504,8 @@ def _trade_flow_status_rows(session, series_ids):
             summary["complete_bucket_count"] += int(fact.aggregate_complete)
             summary["incomplete_bucket_count"] += int(not fact.aggregate_complete)
             summary["latest_bucket_end"] = max(summary["latest_bucket_end"], fact.bucket_end)
-    if _cold_enabled(session):
-        from .candles import _EARLIEST_MARKET_TIME, _LATEST_MARKET_TIME
-
-        for series_id in series_ids:
-            fold(market_data_repo._iter_canonical_rows_with_session(
-                session, series_id=series_id, start=_EARLIEST_MARKET_TIME, end=_LATEST_MARKET_TIME,
-                as_of_commit_seq=None, known_at_lte=None, include_invalidated=True,
-            ))
-    else:
-        with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
-            WITH latest AS (
-                SELECT DISTINCT ON (series_id,observation_key) id
-                FROM market.fact_versions WHERE series_id=ANY(:series_ids) AND fact_type='market.trade_flow'
-                ORDER BY series_id,observation_key,revision DESC,market_commit_seq DESC
-            ) SELECT id FROM latest ORDER BY id
-        """), {"series_ids": list(series_ids)}) as rows:
-            fold(rows)
-    return sorted(aggregates.values(), key=lambda row: (row["interval_seconds"], row["series_id"]))
+    rows = sorted(aggregates.values(), key=lambda row: (row["interval_seconds"], row["series_id"]))
+    return rows, {"state": "complete"}
 
 def _book_position_from_material(value: Mapping[str, Any]) -> BookSourcePosition:
     return BookSourcePosition(
@@ -3542,25 +3545,19 @@ class PostgresMarketStructureRepository:
                 ),
                 {"definition_id": definition_id},
             ).mappings().all()
-            trade_count = int(
-                session.execute(
-                    text(
-                        """
-                        SELECT count(*) FROM market.market_trade_identities
-                        WHERE source_id = (
-                            SELECT source_id FROM market.stream_definitions
-                            WHERE id = :definition_id
-                        )
-                          AND provider_product_id = :product_id
-                        """
-                    ),
-                    {
-                        "definition_id": definition_id,
-                        "product_id": str(definition["provider_product_id"]),
+            trade_count_status = {"state": "not_applicable"}
+            if definition["contract_version"] == MARKET_TRADE_FACT_VERSION:
+                trade_count_status = {
+                    "state": "unavailable",
+                    "reason": "exact_lifetime_count_requires_history_scan",
+                    "recent_reconciliation": {
+                        "method": "POST",
+                        "path": "/api/market-data/market-structure/definitions/"
+                                f"{quote(definition_id, safe='')}/reconcile-recent",
+                        "max_trades": 1000,
                     },
-                ).scalar_one()
-            )
-            aggregates = _trade_flow_status_rows(session, aggregate_series_ids)
+                }
+            aggregates, aggregate_status = _trade_flow_archive_status(session, aggregate_series_ids)
             book_state = session.execute(
                 text(
                     """
@@ -3712,8 +3709,10 @@ class PostgresMarketStructureRepository:
             "archived_records": int(manifest["archived_records"]),
             "archive_mapping_lag_records": int(manifest["mapping_lag_records"]),
             "last_acknowledged_at": manifest["last_acknowledged_at"],
-            "canonical_trade_count": trade_count,
+            "canonical_trade_count": None,
+            "canonical_trade_count_status": trade_count_status,
             "trade_flow_aggregates": [dict(row) for row in aggregates],
+            "trade_flow_aggregate_status": aggregate_status,
             "book_reconstruction": book_reconstruction,
             "book_validity_intervals": [dict(row) for row in book_validity],
             "quality_counts": {str(row["classification"]): int(row["count"]) for row in quality},

@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
 from portal.backend.db.cold_retirement_schema import prepare_cold_dependency_bindings
@@ -26,6 +26,14 @@ def test_trade_reconciliation_uses_exact_canonical_scope_after_retirement(storag
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", reader)
 
     def verify():
+        archive_status = trade.structures.archive_status(definition_id=trade.claim.definition_id)
+        assert archive_status["canonical_trade_count"] is None
+        assert archive_status["canonical_trade_count_status"] == {
+            "state": "unavailable", "reason": "exact_lifetime_count_requires_history_scan",
+            "recent_reconciliation": {"method": "POST", "max_trades": 1000,
+                "path": f"/api/market-data/market-structure/definitions/{trade.claim.definition_id}/reconcile-recent"},
+        }
+        assert archive_status["trade_flow_aggregate_status"] == {"state": "not_applicable"}
         overlap = trade.structures.recent_trade_id_overlap(
             definition_id=trade.claim.definition_id, provider_trade_ids=["missing", "same-trade", "same-trade"],
         )
@@ -39,7 +47,15 @@ def test_trade_reconciliation_uses_exact_canonical_scope_after_retirement(storag
 
     with storage.database.session() as session:
         assert session.scalar(text("SELECT count(*) FROM market.market_trade_identities")) == 0
-    verify()
+
+    def reject_legacy_trade_reads(_conn, _cursor, statement, *_):
+        assert "market.market_trade_identities" not in statement
+
+    event.listen(storage.database._engine, "before_cursor_execute", reject_legacy_trade_reads)
+    try:
+        verify()
+    finally:
+        event.remove(storage.database._engine, "before_cursor_execute", reject_legacy_trade_reads)
 
     archive = PostgresCanonicalFactArchiveRepository(database=storage.database, object_store=trade.store,
                                                        temporary_directory=tmp_path / "staging")
