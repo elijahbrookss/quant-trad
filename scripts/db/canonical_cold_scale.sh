@@ -35,4 +35,9 @@ mkdir -m 700 "$root/socket" "$root/objects" "$root/staging" "$root/history"
 export PG_DSN="postgresql+psycopg2://qt_scale_fixture@/qt_bench_native_scale?host=$root/socket&port=55498"
 export QT_DISABLE_DOTENV=1 MARKET_STRUCTURE_STORAGE_ROOT="$root" QT_MARKET_DATA_EXPECTED_UUID=
 export PYTHONPATH=src:.
-python -m scripts.db.canonical_cold_scale --root "$root" "$@"
+if [ "${1:-}" = "--compact-directory" ]; then
+    shift
+    python -m scripts.db.canonical_cold_compact_directory "$@"
+else
+    python -m scripts.db.canonical_cold_scale --root "$root" "$@"
+fi
