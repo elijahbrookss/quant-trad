@@ -323,6 +323,66 @@ def test_candle_paging_summaries_and_causal_selection_survive_cooling(storage, t
         candle_repo.read_frozen_dataset_candles(**frozen_window)
 
 
+def test_direct_cold_historical_candle_ingest_is_retryable_and_freezes_exactly(storage, tmp_path, monkeypatch):
+    from market_data.archive import FilesystemRawArchiveObjectStore
+    from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, DatasetSeriesRequest
+    from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES
+    from portal.backend.db.models import Base
+    from portal.backend.service.storage import history_policy
+    from portal.backend.service.storage.repos import cold_history
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    monkeypatch.setattr(cold_history, "configured_archive_root", lambda: archive)
+    monkeypatch.setattr(cold_history, "require_cold_acquisition_headroom", lambda session: None)
+    monkeypatch.setattr(history_policy, "_read", lambda session: (SimpleNamespace(movement_enabled=True), None))
+    monkeypatch.setattr(history_policy, "_archive_policy", lambda session, saved, defaults, root: defaults)
+    monkeypatch.setattr(repository_module, "canonical_fact_storage_repository", PostgresCanonicalFactStorageRepository(
+        object_store_factory=lambda: FilesystemRawArchiveObjectStore(archive / "objects"),
+        read_cache_factory=lambda: None,
+    ))
+    with storage.database.session() as session:
+        for table in Base.metadata.sorted_tables:
+            if table.schema == "market" and table.name in COLD_TABLE_NAMES:
+                table.create(session.connection(), checkfirst=True)
+        session.execute(text("UPDATE market.fact_storage_state SET layout_version=:version"),
+                        {"version": COLD_HISTORY_LAYOUT_VERSION})
+        session.execute(text("""
+            INSERT INTO public.portal_storage_policy(id, revision, policy, updated_at)
+            VALUES (1,1,jsonb_build_object('recent_days', 14),clock_timestamp())
+        """))
+
+    series_id = storage.repo.register_series(instrument_id="storage-fixture", fact_type=CANDLE_FACT_TYPE,
+                                            timeframe_seconds=60, contract_version=CANDLE_FACT_VERSION)
+    source_id = storage.repo.register_source(SourceIdentity(
+        provider="COINBASE", venue="COINBASE_DIRECT", source_kind="historical_api", adapter_version="cold.fixture.v1",
+    ), lineage={"fixture": "direct-cold"})
+    start = datetime.combine(storage.today - timedelta(days=60), datetime.min.time(), tzinfo=UTC)
+    end = start + timedelta(minutes=1)
+    fact = CandleFact(open_time=start, close_time=end, open=100, high=110, low=90, close=101, volume=None,
+                      known_at=end, known_at_method="provider_close_time", accepted_at=end)
+    first = storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=[fact])
+    repeated = storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=[fact])
+    assert first.inserted_count == 1 and repeated.noop_count == 1
+    frozen = storage.repo.freeze_dataset([DatasetSeriesRequest(series_id, start, end)])
+    correction = replace(fact, close=108, known_at=end + timedelta(seconds=1), accepted_at=end + timedelta(seconds=1))
+    second = storage.repo.ingest_candles(series_id=series_id, source_id=source_id, facts=[correction])
+    assert second.corrected_count == 1
+    revisions = storage.repo.read_fact_revisions(series_id=series_id, start=start, end=end)
+    assert [row.revision for row in revisions] == [1, 2]
+    assert [row.market_commit_seq for row in revisions] == [first.max_commit_seq, second.max_commit_seq]
+    frozen_rows = storage.repo.read_dataset_series(dataset_id=frozen.dataset_id, series_id=series_id,
+                                                  start=start, end=end)
+    assert len(frozen_rows) == 1 and frozen_rows[0].fact.close == 101
+    with storage.database.session() as session:
+        for relation in ("fact_versions", "fact_hot_payloads", "fact_identities"):
+            assert session.execute(text(f"SELECT count(*) FROM market.{relation} WHERE series_id=:id"),
+                                   {"id": series_id}).scalar_one() == 0
+        assert session.execute(text("SELECT count(*) FROM market.cold_fact_locators WHERE series_id=:id"),
+                               {"id": series_id}).scalar_one() == 2
+
+
 def test_a_header_cannot_commit_without_its_payload(storage, monkeypatch):
     original_execute = None
     with pytest.raises(DBAPIError, match="fact_hot_payload_missing"):
