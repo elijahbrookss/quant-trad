@@ -70,6 +70,7 @@ from market_data.structure import (
     translate_coinbase_market_trade,
 )
 
+from ..storage.repos.fact_references import CanonicalBookPrefixBudgetExceeded
 from ..storage.repos.market_structure import (
     MarketTradeConflictError,
     PostgresMarketStructureRepository,
@@ -89,6 +90,9 @@ from .market_trade_quality import (
 
 
 logger = logging.getLogger(__name__)
+
+_BOOK_PREFIX_CHUNKS_PER_ATTEMPT = 4
+_BOOK_PREFIX_ATTEMPT_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -2156,8 +2160,7 @@ class ContinuousStreamRuntime:
             state.book_checkpoint_id = book_checkpoint.checkpoint_id
             checkpoint_ids.append(book_checkpoint.checkpoint_id)
 
-        ingest = self.repository.ingest_book_facts(
-            claim,
+        ingest_options = dict(
             snapshots=snapshots,
             batches=batches,
             validity_versions=validity_versions,
@@ -2174,6 +2177,39 @@ class ContinuousStreamRuntime:
             final_event_ordinal=final_position.event_ordinal,
             final_sequence_num=final_position.provider_sequence_num,
         )
+        try:
+            ingest = self.repository.ingest_book_facts(claim, **ingest_options)
+        except CanonicalBookPrefixBudgetExceeded as exc:
+            # The first valid snapshot may follow a long invalid/control-only
+            # epoch. Publish resumable raw custody before retrying the same
+            # canonical operation, leaving the local spool until it commits.
+            if len(exc.prefixes) != 1 or exc.prefixes[0]["connection_epoch"] != connection_epoch:
+                raise
+            prefix = exc.prefixes[0]
+            deadline = time.monotonic() + _BOOK_PREFIX_ATTEMPT_SECONDS
+
+            def check_budget():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("continuous_l2_raw_prefix_time_budget_exceeded")
+
+            for _ in range(_BOOK_PREFIX_CHUNKS_PER_ATTEMPT):
+                progress = self.repository.prepare_level2_raw_prefix(
+                    claim, prefix=prefix, object_store=object_store,
+                    temporary_directory=temporary_root, check_budget=check_budget,
+                )
+                if progress is None:
+                    break
+                logger.info(
+                    "continuous_l2_raw_prefix_verified | definition_id=%s session_id=%s epoch=%s "
+                    "first_receive_ordinal=%s last_receive_ordinal=%s required_receive_ordinal=%s",
+                    claim.definition_id, claim.session_id, connection_epoch, progress["first_receive_ordinal"],
+                    progress["last_receive_ordinal"], progress["required_receive_ordinal"],
+                )
+                if progress["last_receive_ordinal"] == prefix["receive_ordinal"]:
+                    break
+            else:
+                raise RuntimeError("continuous_l2_raw_prefix_pending: retry committed progress") from exc
+            ingest = self.repository.ingest_book_facts(claim, **ingest_options)
 
         bbo_facts = ()
         depth_facts = ()

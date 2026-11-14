@@ -2629,6 +2629,35 @@ class PostgresMarketStructureRepository:
             )
         return sorted(records, key=lambda record: record.fact.bucket_start)
 
+    def prepare_level2_raw_prefix(self, claim, *, prefix, object_store, temporary_directory, check_budget):
+        """Verify and commit one raw prefix interval under the current stream claim."""
+        from market_data.archive import RawArchiveReadLimits
+        from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+        from . import fact_references
+        from .fact_book_prefix import prepare_next_book_prefix_range
+        from .market_lifecycle import market_storage_lifecycle_repository
+
+        if ("level2" not in claim.channels or any(prefix.get(name) != getattr(claim, name)
+                for name in ("definition_id", "session_id", "provider_product_id"))):
+            raise ValueError("market_l2_prefix_claim_mismatch")
+        limits = ArchiveVerificationLimits(max_objects=5_000, max_bytes=1024**3)
+        with db.session() as session:
+            session.execute(text("SET LOCAL statement_timeout = '5s'"))
+            market_storage_lifecycle_repository.acquire_publication_lock(session)
+            check_budget()
+            progress = prepare_next_book_prefix_range(
+                session, prefix=prefix, object_store=object_store,
+                byte_verifier=ArchiveVerificationBatch(object_store, limits=limits, check_budget=check_budget),
+                limits=RawArchiveReadLimits(), max_mapping_rows=fact_references.RAW_REFERENCE_MAPPING_LIMIT,
+                max_objects=limits.max_objects, check_budget=check_budget, identity_spool_directory=temporary_directory,
+            )
+            # A stale worker may read and verify bytes but cannot persist a
+            # hold. Take the lease row for the final commit only, so this
+            # archive work does not prevent heartbeats.
+            self._require_fence(session, claim)
+            check_budget()
+        return progress
+
     def ingest_book_facts(
         self,
         claim: StreamClaim,
