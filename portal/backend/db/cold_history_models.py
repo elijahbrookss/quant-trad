@@ -1,7 +1,7 @@
 """PostgreSQL catalog for immutable canonical history and HDD lookup relations."""
 
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer,
+    BigInteger, Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer,
     LargeBinary, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -12,7 +12,7 @@ COLD_LOCATOR_TABLE_NAMES = (
     "cold_fact_locators", "cold_fact_materials", "cold_fact_normalization_specs",
     "cold_book_session_facts",
 )
-COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", *COLD_LOCATOR_TABLE_NAMES)
+COLD_TABLE_NAMES = ("cold_fact_pages", "cold_fact_page_series", "cold_fact_retired_days", *COLD_LOCATOR_TABLE_NAMES)
 COLD_HISTORY_LAYOUT_VERSION = "market.canonical_cold_history.v1"
 COLD_IMMUTABILITY_TRIGGER = "trg_cold_fact_immutable"
 
@@ -74,6 +74,8 @@ class ColdFactPageRecord(Base):
             "length(object_sha256) = 64 AND length(manifest_hash) = 64",
             name="ck_cold_page_hash_length",
         ),
+        Index("ix_cold_fact_pages_staged_day", "staged_storage_day",
+              postgresql_where=text("staged_storage_day IS NOT NULL")),
         {"schema": "market"},
     )
 
@@ -86,6 +88,19 @@ class ColdFactPageRecord(Base):
     first_commit_seq = Column(BigInteger, nullable=False)
     last_commit_seq = Column(BigInteger, nullable=False)
     descriptor = Column(JSONB, nullable=False)
+    staged_storage_day = Column(Date, nullable=True)
+
+
+class ColdFactRetiredDayRecord(Base):
+    """Publish staged pages when their verified source is retired."""
+
+    __tablename__ = "cold_fact_retired_days"
+    __table_args__ = {"schema": "market"}
+    storage_day = Column(Date, primary_key=True)
+    manifest_set_hash = Column(String(64), nullable=False)
+    row_count = Column(BigInteger, nullable=False)
+    reclaimed_header_bytes = Column(BigInteger, nullable=False)
+    protected_dataset_ranges = Column(BigInteger, nullable=False)
 
 
 class ColdFactPageSeriesRecord(Base):

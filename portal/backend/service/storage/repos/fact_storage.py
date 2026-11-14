@@ -373,29 +373,27 @@ class PostgresCanonicalFactStorageRepository:
             locations = session.execute(text(
                 "SELECT id,storage_day FROM market.fact_identities WHERE id = ANY(:fact_ids)"
             ), {"fact_ids": batch}).mappings().all()
-            found_hot = {row["id"] for row in locations}
-            if len(found_hot) != len(locations) or not found_hot.issubset(batch):
+            registered_hot = {row["id"] for row in locations}
+            if len(registered_hot) != len(locations) or not registered_hot.issubset(batch):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
-            missing = set(batch) - found_hot
-            if missing:
-                if cold is None:
-                    if not cold_layout_active(session):
-                        raise RuntimeError("canonical_selected_identity_coverage_invalid")
-                    cold = self.cold_history(session)
-                result.update(cold.read_by_ids(session, sorted(missing)))
-            if not found_hot:
-                continue
             # Resolve dates before issuing the header query. An ARRAY subquery
             # became an InitPlan on PG15 and did not prune unrelated partitions.
             rows = session.execute(text(f"""
                 SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
                 WHERE versions.id = ANY(:fact_ids)
                   AND versions.storage_day = ANY(:storage_days)
-            """), {"fact_ids": sorted(found_hot),
-                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all()
+            """), {"fact_ids": sorted(registered_hot),
+                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all() if locations else []
             found = {row["id"] for row in rows}
-            if found != found_hot or len(rows) != len(found):
+            if not found.issubset(registered_hot) or len(rows) != len(found):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
+            missing = set(batch) - found
+            if missing:
+                if cold is None:
+                    if not cold_layout_active(session):
+                        raise RuntimeError("canonical_selected_identity_coverage_invalid")
+                    cold = self.cold_history(session)
+                result.update(cold.read_by_ids(session, sorted(missing)))
             result.update((row["id"], row) for row in self.hydrate_rows(session, rows, _decoded_page=decoded_page))
         return result
 

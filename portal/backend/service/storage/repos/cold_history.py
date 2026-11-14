@@ -32,6 +32,17 @@ _book_sessions = ColdBookSessionFactRecord.__table__
 _BATCH_SIZE = 1000
 
 
+def cold_page_is_visible(alias):
+    """Alias is an internal identifier chosen by the repository."""
+    return f"""({alias}.staged_storage_day IS NULL OR EXISTS (
+        SELECT FROM market.cold_fact_retired_days AS retired
+        WHERE retired.storage_day={alias}.staged_storage_day
+    ))"""
+
+
+_PAGE_VISIBILITY = text(cold_page_is_visible("market.cold_fact_pages"))
+
+
 def _key_digest(key: str) -> bytes:
     return sha256(key.encode("utf-8")).digest()
 
@@ -166,7 +177,7 @@ class PostgresColdHistory:
     def __init__(self, reader: ColdHistoryReader):
         self.reader = reader
 
-    def admit(self, session, manifest: FactArchiveManifest) -> None:
+    def admit(self, session, manifest: FactArchiveManifest, *, staged_storage_day=None) -> None:
         """Verify current mounted bytes and publish one page in the caller's transaction."""
         rows = self.reader.read_page(manifest)
         # Roll back all of this page's SQL on a locator collision, even if a
@@ -179,13 +190,14 @@ class PostgresColdHistory:
                     row_count=manifest.row_count, byte_count=manifest.byte_count,
                     first_commit_seq=manifest.first_cursor[0],
                     last_commit_seq=manifest.last_cursor[0], descriptor=manifest.to_dict(),
+                    staged_storage_day=staged_storage_day,
                 ).on_conflict_do_nothing(index_elements=[_pages.c.id]).returning(_pages.c.id)
             ).scalar_one_or_none()
             if inserted is None:
                 existing = session.execute(select(_pages).where(
                     _pages.c.id == manifest.manifest_id
                 )).mappings().one()
-                if _manifest(existing) != manifest:
+                if _manifest(existing) != manifest or existing["staged_storage_day"] != staged_storage_day:
                     raise RuntimeError(f"cold_fact_page_publication_conflict: page_id={manifest.manifest_id}")
                 return
 
@@ -236,6 +248,7 @@ class PostgresColdHistory:
             _page_series.c.series_id == series_id,
             _page_series.c.first_observation_at < end,
             _page_series.c.last_observation_at >= start,
+            _PAGE_VISIBILITY,
         ).order_by(_pages.c.first_commit_seq, _pages.c.id)
         if as_of_commit_seq is not None:
             query = query.where(_pages.c.first_commit_seq <= as_of_commit_seq)
@@ -248,7 +261,7 @@ class PostgresColdHistory:
 
     def causal_window_pages(self, session, requests, *, max_candidates: int):
         """Resolve bounded candidate pages for one batch of declared source scopes."""
-        rows = session.execute(text("""
+        rows = session.execute(text(f"""
             SELECT requested.root_id, catalog.series_id AS requested_series_id, page.*
             FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
                 root_id text, instrument_id text, fact_type text, series_id bigint,
@@ -263,6 +276,7 @@ class PostgresColdHistory:
                 OR (requested.include_end AND catalog.first_observation_at=requested.range_end))
             JOIN market.cold_fact_pages AS page ON page.id=catalog.page_id
               AND page.first_commit_seq<=requested.root_commit
+              AND {cold_page_is_visible("page")}
             ORDER BY requested.root_id, catalog.series_id, page.first_commit_seq, page.id
             LIMIT :limit
         """), {"requests": json.dumps(requests), "limit": max_candidates + 1}).mappings().all()
@@ -296,6 +310,7 @@ class PostgresColdHistory:
                 AND scope.first_observation_at<:end
                 AND scope.{"first" if prefer_latest else "last"}_observation_at {edge} :cursor
                 AND (CAST(:commit AS bigint) IS NULL OR page.first_commit_seq<=:commit)
+                AND {cold_page_is_visible("page")}
             ORDER BY seek_bound {direction},page.id
         """), params, execution_options={"yield_per": 64}).mappings()
         try:
@@ -325,7 +340,7 @@ class PostgresColdHistory:
             found = session.execute(
                 select(_pages, _locators.c.id.label("requested_id"), _locators.c.ordinal, _locators.c.row_hash)
                 .join(_locators, _locators.c.page_id == _pages.c.id)
-                .where(_locators.c.id.in_(batch))
+                .where(_locators.c.id.in_(batch), _PAGE_VISIBILITY)
             ).mappings()
             batch_claims = {
                 row["requested_id"]: (ColdFactLocation(_manifest(row), row["ordinal"]), bytes(row["row_hash"]).hex())
@@ -367,10 +382,12 @@ class PostgresColdHistory:
                 legacy = and_(legacy, _materials.c.evidence_key_digest == _key_digest(evidence_key))
             branches.append(legacy)
         rows = session.execute(
-            select(_materials.c.fact_id, _materials.c.hash_digest).distinct().where(
+            select(_materials.c.fact_id, _materials.c.hash_digest).distinct()
+            .join(_locators, _locators.c.id == _materials.c.fact_id)
+            .join(_pages, _pages.c.id == _locators.c.page_id).where(
                 _materials.c.series_id.in_(series_ids),
                 _materials.c.hash_digest.in_(by_digest),
-                or_(*branches),
+                or_(*branches), _PAGE_VISIBILITY,
             ).order_by(_materials.c.fact_id, _materials.c.hash_digest).limit(max_candidates + 1)
         ).all()
         if len(rows) > max_candidates:
@@ -380,8 +397,11 @@ class PostgresColdHistory:
     def normalization_spec_ids(self, session, spec_id: str):
         """Stream cold Fact IDs carrying the requested normalization reference."""
         result = session.execute(
-            select(_normalization_specs.c.fact_id).where(
+            select(_normalization_specs.c.fact_id)
+            .join(_locators, _locators.c.id == _normalization_specs.c.fact_id)
+            .join(_pages, _pages.c.id == _locators.c.page_id).where(
                 _normalization_specs.c.spec_digest == _key_digest(spec_id),
+                _PAGE_VISIBILITY,
             ).order_by(_normalization_specs.c.fact_id), execution_options={"yield_per": 128},
         )
         try:
@@ -391,23 +411,29 @@ class PostgresColdHistory:
 
     def key_candidate_ids(self, session, *, series_id: int, key: str, max_candidates: int):
         """Find every revision ID claimed under a single observation key."""
-        result = session.execute(select(_locators.c.id).where(
+        result = session.execute(select(_locators.c.id).join(
+            _pages, _pages.c.id == _locators.c.page_id,
+        ).where(
             _locators.c.series_id == series_id,
             _locators.c.key_digest == _key_digest(key),
+            _PAGE_VISIBILITY,
         ).order_by(_locators.c.revision, _locators.c.id).limit(max_candidates + 1)).scalars().all()
         if len(result) > max_candidates:
             raise RuntimeError("cold_fact_key_candidate_budget_exceeded")
         return tuple(result)
 
     def commit_candidate_id(self, session, *, series_id: int, commit_seq: int):
-        return session.execute(select(_locators.c.id).where(
+        return session.execute(select(_locators.c.id).join(
+            _pages, _pages.c.id == _locators.c.page_id,
+        ).where(
             _locators.c.series_id == series_id,
             _locators.c.market_commit_seq == commit_seq,
+            _PAGE_VISIBILITY,
         ).limit(2)).scalar_one_or_none()
 
     def trade_source_ids(self, session, *, derived_series_id: int):
         """Distinct admitted cold source IDs for trade series of the same instrument."""
-        return session.execute(text("""
+        return session.execute(text(f"""
             SELECT DISTINCT source.value::bigint
             FROM market.series derived JOIN market.series trade
               ON trade.instrument_id=derived.instrument_id AND trade.fact_type='market.trade'
@@ -416,12 +442,16 @@ class PostgresColdHistory:
             CROSS JOIN LATERAL jsonb_array_elements(page.descriptor->'series') bounds(value)
             CROSS JOIN LATERAL jsonb_array_elements_text(bounds.value->'source_ids') source(value)
             WHERE derived.id=:series_id AND (bounds.value->>'series_id')::bigint=trade.id
+              AND {cold_page_is_visible("page")}
             ORDER BY 1 LIMIT 2
         """), {"series_id": derived_series_id}).scalars().all()
 
     def book_session_ids(self, session, *, definition_id: str, session_id: str):
-        result = session.execute(select(_book_sessions.c.fact_id).where(
+        result = session.execute(select(_book_sessions.c.fact_id)
+            .join(_locators, _locators.c.id == _book_sessions.c.fact_id)
+            .join(_pages, _pages.c.id == _locators.c.page_id).where(
             _book_sessions.c.session_digest == _book_session_digest(definition_id, session_id),
+            _PAGE_VISIBILITY,
         ).order_by(_book_sessions.c.market_commit_seq, _book_sessions.c.fact_id),
             execution_options={"yield_per": 128},
         )
@@ -439,13 +469,15 @@ class PostgresColdHistory:
         latest = {}
         for offset in range(0, len(digests), _BATCH_SIZE):
             batch = digests[offset:offset + _BATCH_SIZE]
-            found = session.execute(text("""
+            found = session.execute(text(f"""
                 SELECT page.*, head.fact_id, head.ordinal, head.key_digest, head.revision
                 FROM (
-                    SELECT key_digest, id AS fact_id, page_id, ordinal, revision,
-                        rank() OVER (PARTITION BY key_digest ORDER BY revision DESC) AS head_rank
-                    FROM market.cold_fact_locators
-                    WHERE series_id = :series_id AND key_digest = ANY(CAST(:digests AS bytea[]))
+                    SELECT l.key_digest, l.id AS fact_id, l.page_id, l.ordinal, l.revision,
+                        rank() OVER (PARTITION BY l.key_digest ORDER BY l.revision DESC) AS head_rank
+                    FROM market.cold_fact_locators l
+                    JOIN market.cold_fact_pages visible ON visible.id=l.page_id
+                    WHERE l.series_id=:series_id AND l.key_digest=ANY(CAST(:digests AS bytea[]))
+                      AND {cold_page_is_visible("visible")}
                 ) head JOIN market.cold_fact_pages page ON page.id = head.page_id
                 WHERE head_rank = 1
             """), {"series_id": series_id, "digests": batch}).mappings().all()

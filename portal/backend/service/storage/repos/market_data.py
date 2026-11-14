@@ -82,7 +82,7 @@ from ....db import db
 from ....db.fact_storage_schema import current_fact_storage_day
 
 from .market_lifecycle import market_storage_lifecycle_repository
-from .cold_history import cold_layout_active, publish_cold_candle_rows
+from .cold_history import cold_layout_active, cold_page_is_visible, publish_cold_candle_rows
 from .fact_storage import (
     CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM,
     CANONICAL_RANGE_ROW_FROM, CANONICAL_RANGE_HEADER_FROM,
@@ -1421,9 +1421,10 @@ class PostgresMarketDataRepository:
         )
         if not cold_layout_active(session):
             return hot
-        cold = session.execute(text(
-            "SELECT COALESCE(MAX(last_commit_seq), 0) FROM market.cold_fact_pages"
-        )).scalar_one()
+        cold = session.execute(text(f"""
+            SELECT COALESCE(MAX(last_commit_seq), 0) FROM market.cold_fact_pages AS page
+            WHERE {cold_page_is_visible("page")}
+        """)).scalar_one()
         return max(hot, int(cold))
 
     @staticmethod
@@ -1434,10 +1435,12 @@ class PostgresMarketDataRepository:
         ), {"series_id": series_id}).scalar_one()
         if not cold_layout_active(session):
             return int(hot)
-        cold = session.execute(text(
-            "SELECT COALESCE(MAX(last_commit_seq), 0) "
-            "FROM market.cold_fact_page_series WHERE series_id=:series_id"
-        ), {"series_id": series_id}).scalar_one()
+        cold = session.execute(text(f"""
+            SELECT COALESCE(MAX(bounds.last_commit_seq), 0)
+            FROM market.cold_fact_page_series AS bounds
+            JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+            WHERE bounds.series_id=:series_id AND {cold_page_is_visible("page")}
+        """), {"series_id": series_id}).scalar_one()
         return max(int(hot), int(cold))
 
     def list_series_metadata(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
@@ -2757,12 +2760,12 @@ class PostgresMarketDataRepository:
         cold_cutoff = None
         series_dimensions = {}
         historical = (
-            source.provider.lower() == "coinbase" and source.source_kind == "historical_api"
+            cold_active and source.provider.lower() == "coinbase" and source.source_kind == "historical_api"
             and rows and all(fact.fact_type == CANDLE_FACT_TYPE for fact in rows)
         )
-        if fill_missing_only and (not cold_active or not historical):
+        if fill_missing_only and not historical:
             raise RuntimeError("market_data_gap_acquisition_requires_canonical_cold_coinbase")
-        if cold_active and historical:
+        if historical:
             from .cold_history import require_cold_acquisition_headroom
 
             cold_cutoff = session.execute(text("""
@@ -2792,8 +2795,11 @@ class PostgresMarketDataRepository:
                 WHERE id=ANY(:ids) AND storage_day=ANY(:days)
             """), {"ids": [row["id"] for row in latest_identities],
                    "days": sorted({row["storage_day"] for row in latest_identities})}).mappings().all()
-            if (len(latest_headers) != len(latest_identities)
-                    or {row["id"] for row in latest_headers} != {row["id"] for row in latest_identities}):
+            expected_ids = {row["id"] for row in latest_identities}
+            header_ids = {row["id"] for row in latest_headers}
+            if len(header_ids) != len(latest_headers) or not header_ids.issubset(expected_ids):
+                raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
+            if not cold_active and header_ids != expected_ids:
                 raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
             latest_by_key = {row["observation_key"]: row for row in latest_headers}
         hot_keys = set(latest_by_key)
@@ -2802,6 +2808,11 @@ class PostgresMarketDataRepository:
             if missing:
                 cold = canonical_fact_storage_repository.cold_history(session)
                 latest_by_key.update(cold.latest_for_keys(session, series_id=series_id, keys=missing))
+            missing_ids = {row["id"] for row in latest_identities if row["observation_key"] not in hot_keys}
+            if missing_ids:
+                actual = cold.locations_by_ids(session, sorted(missing_ids), require_all=False)
+                if actual.keys() != missing_ids:
+                    raise RuntimeError(f"canonical_latest_identity_coverage_invalid: series_id={series_id}")
         # A true no-op creates no reference and must remain envelope-only,
         # including after cold movement. Acquire a deterministic manifest-lock
         # set for the genuine writes before inserting any of their payloads.

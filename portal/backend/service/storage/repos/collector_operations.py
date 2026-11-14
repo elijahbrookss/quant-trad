@@ -19,7 +19,7 @@ from market_data.collector_operations import (
 )
 
 from ....db import db
-from .cold_history import cold_layout_active, _manifest
+from .cold_history import _manifest, cold_layout_active, cold_page_is_visible
 from .fact_storage import canonical_fact_storage_repository
 from .market_lifecycle import market_storage_lifecycle_repository
 
@@ -150,11 +150,12 @@ WHERE EXISTS (
 
 
 def _collector_pages(session, *, series_ids, accepted_at=None):
-    rows = session.execute(text("""
+    rows = session.execute(text(f"""
         SELECT page.*, max(bounds.last_active_accepted_at) AS last_accepted_at
         FROM market.cold_fact_page_series AS bounds
         JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
         WHERE bounds.series_id=ANY(:series_ids) AND bounds.last_active_accepted_at IS NOT NULL
+          AND {cold_page_is_visible("page")}
           AND (CAST(:accepted_at AS timestamptz) IS NULL OR bounds.last_active_accepted_at>=:accepted_at)
         GROUP BY page.id
         ORDER BY last_accepted_at DESC, page.id
@@ -183,18 +184,23 @@ def _hot_fact_ids(session, identities):
     found = set()
     for offset in range(0, len(identities), 1000):
         found.update(session.execute(text("""
-            SELECT id FROM market.fact_identities WHERE id=ANY(:ids)
+            SELECT identity.id FROM market.fact_identities AS identity
+            WHERE identity.id=ANY(:ids) AND NOT EXISTS (
+                SELECT FROM market.cold_fact_retired_days AS retired
+                WHERE retired.storage_day=identity.storage_day
+            )
         """), {"ids": identities[offset:offset + 1000]}).scalars())
     return found
 
 
 def _merge_cold_telemetry(session, hot, series_ids):
-    bounds = session.execute(text("""
-        SELECT series_id, max(last_active_observation_at) AS last_observation_time,
-               max(last_active_accepted_at) AS last_accepted_at
-        FROM market.cold_fact_page_series
-        WHERE series_id=ANY(:series_ids)
-        GROUP BY series_id
+    bounds = session.execute(text(f"""
+        SELECT bounds.series_id, max(bounds.last_active_observation_at) AS last_observation_time,
+               max(bounds.last_active_accepted_at) AS last_accepted_at
+        FROM market.cold_fact_page_series AS bounds
+        JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+        WHERE bounds.series_id=ANY(:series_ids) AND {cold_page_is_visible("page")}
+        GROUP BY bounds.series_id
     """), {"series_ids": series_ids}).mappings()
     telemetry = {row["series_id"]: dict(row) for row in hot}
     for row in bounds:
@@ -246,9 +252,13 @@ def _hot_keys(session, series_id, keys):
     keys = sorted(keys)
     for offset in range(0, len(keys), 1000):
         result.update(session.execute(text("""
-            SELECT DISTINCT observation_key
-            FROM market.fact_identities
-            WHERE series_id=:series_id AND observation_key=ANY(:keys)
+            SELECT DISTINCT identity.observation_key
+            FROM market.fact_identities AS identity
+            WHERE identity.series_id=:series_id AND identity.observation_key=ANY(:keys)
+              AND NOT EXISTS (
+                  SELECT FROM market.cold_fact_retired_days AS retired
+                  WHERE retired.storage_day=identity.storage_day
+              )
         """), {"series_id": series_id, "keys": keys[offset:offset + 1000]}).scalars())
     return result
 

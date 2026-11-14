@@ -15,7 +15,7 @@ from sqlalchemy import text
 from data_providers.streams.coinbase import quiet_transport_witness
 from market_data.archive import read_raw_archive_parquet, raw_archive_content_fingerprint
 from market_data.range_evidence import utc, producer_range_evidence
-from .cold_history import cold_layout_active
+from .cold_history import cold_layout_active, cold_page_is_visible
 from .fact_lineage import _witness, BOOK_SCOPE_FIELDS
 
 MAX_OBJECTS = 256
@@ -349,7 +349,7 @@ def read_book_range_evidence(session, *, repository, series_id, start, end, wate
         # and copies still in the hot tier. Count the page's full rows and
         # bytes because integrity validation must decode the complete page.
         # Bound the SQL input as well as eventual decode work.
-        budget = session.execute(text("""
+        budget = session.execute(text(f"""
             SELECT count(*) AS pages, COALESCE(sum(row_count), 0) AS rows,
                    COALESCE(sum(byte_count), 0) AS bytes
             FROM (
@@ -359,6 +359,7 @@ def read_book_range_evidence(session, *, repository, series_id, start, end, wate
                 WHERE bounds.series_id=:series_id
                   AND bounds.first_observation_at<:end AND bounds.last_observation_at>=:start
                   AND page.first_commit_seq<=:watermark
+                  AND {cold_page_is_visible("page")}
                 LIMIT :limit
             ) bounded
         """), {"series_id": series_id, "start": start, "end": end, "watermark": watermark,

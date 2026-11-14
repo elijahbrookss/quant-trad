@@ -140,6 +140,53 @@ def test_catalog_witnesses_preserve_exact_material_and_causal_scope(database, tm
         fact_dependencies._cold_window_revisions(database, max_logical_bytes=page.logical_byte_count - 1, **scope)
 
 
+def test_staged_page_appears_only_after_retirement_receipt(database, tmp_path):
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    repository = PostgresColdHistory(ColdHistoryReader(store))
+    row, staged = _row(), _row(revision=2, commit=4)
+    visible_page = publish_cold_page([row], object_store=store, temporary_directory=tmp_path)
+    staged_page = publish_cold_page([staged], object_store=store, temporary_directory=tmp_path)
+    day = BASE.date()
+    repository.admit(database, visible_page)
+    repository.admit(database, staged_page, staged_storage_day=day)
+    repository.admit(database, staged_page, staged_storage_day=day)
+    with pytest.raises(RuntimeError, match="cold_fact_page_publication_conflict"):
+        repository.admit(database, staged_page)
+
+    scope = {"series_id": 1, "start": BASE, "end": BASE + timedelta(seconds=1)}
+    key = row["observation_key"]
+    assert list(repository.candidate_pages(database, **scope)) == [visible_page]
+    assert repository.read_by_ids(database, [staged["id"]], require_all=False) == {}
+    assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: row}
+    assert repository.key_candidate_ids(database, series_id=1, key=key, max_candidates=1) == (row["id"],)
+    assert repository.commit_candidate_id(database, series_id=1, commit_seq=4) is None
+    assert repository.material_candidates(
+        database, series_ids=[1], material_hashes=[staged["material_hash"]], include_legacy=False,
+    ) == ()
+
+    retirement = text("""
+        INSERT INTO market.cold_fact_retired_days
+            (storage_day, manifest_set_hash, row_count, reclaimed_header_bytes, protected_dataset_ranges)
+        VALUES (:day, :manifest_hash, 1, 0, 0)
+    """)
+    receipt = {"day": day, "manifest_hash": staged_page.manifest_hash}
+    with pytest.raises(RuntimeError, match="test interrupted"):
+        with database.begin_nested():
+            database.execute(retirement, receipt)
+            assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: staged}
+            raise RuntimeError("test interrupted")
+    assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: row}
+
+    database.execute(retirement, receipt)
+    assert list(repository.candidate_pages(database, **scope)) == [visible_page, staged_page]
+    assert repository.read_by_ids(database, [staged["id"]]) == {staged["id"]: staged}
+    assert repository.latest_for_keys(database, series_id=1, keys=[key]) == {key: staged}
+    assert repository.commit_candidate_id(database, series_id=1, commit_seq=4) == staged["id"]
+    assert repository.material_candidates(
+        database, series_ids=[1], material_hashes=[staged["material_hash"]], include_legacy=False,
+    ) == ((staged["id"], staged["material_hash"]),)
+
+
 def test_candle_seek_orders_exact_observations_and_obeys_frozen_watermark(database, tmp_path):
     database.execute(text("""
         CREATE TABLE market.fact_versions (series_id bigint, observation_time timestamptz, market_commit_seq bigint)

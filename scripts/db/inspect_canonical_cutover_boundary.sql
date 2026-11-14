@@ -14,8 +14,12 @@ SELECT EXISTS (
       AND completed_at IS NOT NULL
 )::text AS cold_authoritative \gset
 \if :cold_authoritative
-SELECT COALESCE(max(last_commit_seq), 0) AS cold_market_commit_seq
-FROM market.cold_fact_pages \gset
+SELECT COALESCE(max(page.last_commit_seq), 0) AS cold_market_commit_seq
+FROM market.cold_fact_pages AS page
+WHERE page.staged_storage_day IS NULL OR EXISTS (
+    SELECT FROM market.cold_fact_retired_days AS retired
+    WHERE retired.storage_day=page.staged_storage_day
+) \gset
 \else
 \set cold_market_commit_seq 0
 \endif

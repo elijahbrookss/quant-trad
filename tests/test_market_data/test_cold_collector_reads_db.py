@@ -20,7 +20,8 @@ def test_collectors_fetch_cold_latest_and_keep_active_revision_telemetry(databas
     database.execute(text("""
         UPDATE market.series SET instrument_id='fixture-' || id;
         CREATE TABLE market.fact_identities (
-            id text PRIMARY KEY, series_id bigint NOT NULL, observation_key text NOT NULL
+            id text PRIMARY KEY, series_id bigint NOT NULL, observation_key text NOT NULL,
+            storage_day date NOT NULL DEFAULT CURRENT_DATE
         )
     """))
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
@@ -59,7 +60,8 @@ def test_collectors_fetch_cold_latest_and_keep_active_revision_telemetry(databas
 def test_overlap_counts_one_recent_acceptance(database, tmp_path, monkeypatch):
     database.execute(text("""
         CREATE TABLE market.fact_identities (
-            id text PRIMARY KEY, series_id bigint NOT NULL, observation_key text NOT NULL
+            id text PRIMARY KEY, series_id bigint NOT NULL, observation_key text NOT NULL,
+            storage_day date NOT NULL DEFAULT CURRENT_DATE
         )
     """))
     original = record_from_storage_row(_row())
@@ -82,5 +84,11 @@ def test_overlap_counts_one_recent_acceptance(database, tmp_path, monkeypatch):
         INSERT INTO market.fact_identities VALUES (:id, :series_id, :observation_key)
     """), {name: new_row[name] for name in ("id", "series_id", "observation_key")})
     assert list(collector_operations._merge_cold_telemetry(database, [hot_row], [1])) == [hot_row]
-    database.execute(text("DELETE FROM market.fact_identities"))
+    database.execute(text("""
+        INSERT INTO market.cold_fact_retired_days
+            (storage_day, manifest_set_hash, row_count, reclaimed_header_bytes, protected_dataset_ranges)
+        VALUES (CURRENT_DATE, :manifest_hash, 1, 0, 0)
+    """), {"manifest_hash": "a" * 64})
     assert list(collector_operations._merge_cold_telemetry(database, [], [1])) == [hot_row]
+    recent = collector_operations._merge_cold_recent(database, [], [1], 1)
+    assert [row["id"] for row in recent] == [new_row["id"]]
