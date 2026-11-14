@@ -6,6 +6,7 @@ import pytest
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES
 from scripts.automation import canonical_cold_package as package
 from scripts.automation.storage_host_boundary import digest
+from scripts.db.canonical_cold_witness import VERSION as WITNESS_VERSION
 
 
 def _write(path, content):
@@ -30,9 +31,18 @@ def artifacts(tmp_path):
         },
         "artifacts": {},
     }
+    common = {"expected_rows": 1, "expected_hash": "1" * 64, "max_rows": 2}
+    history = {**common, "series_id": 1, "known_at_lte": None,
+               "start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"}
+    witness = {"schema": WITNESS_VERSION, "max_archive_bytes": 1024**2, "cases": [
+        {**common, "name": "identity", "mode": "exact", "ids": ["fact-id"]},
+        {**history, "name": "frozen", "mode": "frozen_revisions", "dataset_id": "dataset", "dataset_hash": "2" * 64},
+        {**history, "name": "as-of", "mode": "as_of", "as_of_commit_seq": 1},
+    ]}
+    content = {"host_inventory": inventory, "candidate_transaction_witness": witness}
     for name in package._PHYSICAL_GATES | {"command_sheet", "host_inventory", "runtime_model"}:
         filename = f"{name}.json"
-        data = json.dumps(inventory if name == "host_inventory" else {"exact_fixture_evidence_for": name}).encode()
+        data = json.dumps(content.get(name, {"exact_fixture_evidence_for": name})).encode()
         manifest["artifacts"][name] = {"filename": filename, "sha256": _write(tmp_path / filename, data)}
     path = tmp_path / "approval.json"
     approved = _write(path, json.dumps(manifest).encode())
@@ -51,6 +61,8 @@ def test_only_current_boundary_fields_can_change_in_approved_scope(artifacts):
     assert execution["source_commit_seq"] == 105
     assert execution["evidence"]["provider_boundary"] == "c" * 64
     assert execution["evidence"]["independent_recovery"] == "d" * 64
+    witness = package.read_approved_candidate_witness(path, reviewed)
+    assert sha256(witness).hexdigest() == execution["evidence"]["candidate_transaction_witness"]
     assert execution["audit_set_hash"] == reviewed["scope"]["audit_set_hash"]
     assert len(execution_hash) == 64
     with pytest.raises(ValueError, match="final_boundary_missing"):
@@ -60,6 +72,12 @@ def test_only_current_boundary_fields_can_change_in_approved_scope(artifacts):
 
 def test_changed_evidence_or_inventory_refuses_the_package(artifacts):
     path, approved, inventory = artifacts
+    reviewed = package.load_approved_package(path, approved_package_hash=approved, inventory=inventory)
+    original_witness = package.read_approved_candidate_witness(path, reviewed)
+    _write(path.with_name("candidate_transaction_witness.json"), b"changed witness")
+    with pytest.raises(RuntimeError, match="candidate_witness_changed"):
+        package.read_approved_candidate_witness(path, reviewed)
+    _write(path.with_name("candidate_transaction_witness.json"), original_witness)
     with pytest.raises(ValueError, match="approval_mismatch"):
         package.load_approved_package(path, approved_package_hash="e" * 64, inventory=inventory)
     with pytest.raises(ValueError, match="host_inventory_changed"):

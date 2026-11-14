@@ -3118,10 +3118,12 @@ class PostgresMarketDataRepository:
         include_invalidated: bool = False,
         causal_at_interval_close: bool = False,
         batch_rows: int = 512,
+        storage_repository: PostgresCanonicalFactStorageRepository | None = None,
     ) -> Iterable[Mapping[str, Any]]:
         if type(batch_rows) is not int or not 1 <= batch_rows <= 4096:
             raise ValueError("canonical_read_batch_rows_invalid: expected 1..4096")
         execution_checkpoint()
+        storage_repository = storage_repository or canonical_fact_storage_repository
         cold_active = cold_layout_active(session)
         selection_sql, params = PostgresMarketDataRepository._canonical_selection_sql(
             series_id=series_id, start=start, end=end,
@@ -3147,7 +3149,7 @@ class PostgresMarketDataRepository:
                 if rows is None:
                     break
                 execution_checkpoint()
-                hydrated = canonical_fact_storage_repository.hydrate_rows(session, list(rows))
+                hydrated = storage_repository.hydrate_rows(session, list(rows))
                 if not causal_at_interval_close and not cold_active:
                     yield from hydrated
                 else:
@@ -3157,7 +3159,7 @@ class PostgresMarketDataRepository:
                 control.unregister(result)
             result.close()
         if cold_active:
-            repository = canonical_fact_storage_repository.cold_history(session)
+            repository = storage_repository.cold_history(session)
             page_scope = dict(series_id=series_id, start=start, end=end, as_of_commit_seq=as_of_commit_seq)
             candidates = repository.candidate_pages(session, **page_scope)
             cold_rows = repository.reader.iter_range(

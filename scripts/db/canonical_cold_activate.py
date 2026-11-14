@@ -35,9 +35,10 @@ from scripts.db.canonical_cold_load import TargetDatabase
 from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
 from scripts.db.canonical_cold_receipts import manifest_inventory_hash, validate_audit_receipts
 
-ACTIVATION_VERSION = "qt.canonical_cold_activate.v3"
+ACTIVATION_VERSION = "qt.canonical_cold_activate.v4"
 _PHYSICAL_GATES = {
     "independent_recovery", "provider_boundary", "replay_equivalence",
+    "candidate_transaction_witness",
     "legacy_reference_review", "physical_capacity", "rollback_rehearsal",
     "representative_performance", "candidate_release", "custody_catalog_placement",
 }

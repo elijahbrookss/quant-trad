@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
+from hashlib import sha256
 import json
 
 import pytest
@@ -33,6 +34,7 @@ from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_transition import run_fenced_transition
+from scripts.db.canonical_cold_witness import measure_witnesses
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _ingest, _placement, storage
 
 pytestmark = pytest.mark.db
@@ -222,6 +224,22 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     receipts = [plan, *(audit_candidate(engine, checkpoint, day=day, **scope) for day in (legacy_day, daily_day)),
                 audit_candidate(engine, checkpoint, inventory=True, max_pages=4, **scope)]
     audit = validate_audit_receipts(receipts, target_identity=plan["database"], source_identity=plan["source_database"])
+    if owner_path:
+        current = storage.repo.read_facts(series_id=storage.series_id, start=start, end=end)[0]
+        retained_fact = storage.repo.read_facts(series_id=retained_series, start=start, end=end)[0]
+        time_range = {"series_id": storage.series_id, "start": start.isoformat(), "end": end.isoformat(),
+                      "known_at_lte": before[0].fact.known_at.isoformat(), "max_rows": 2}
+        cases = [
+            {"name": "retained and retired IDs", "mode": "exact", "max_rows": 3,
+             "ids": [retained_fact.fact_version_id, before[0].fact_version_id, current.fact_version_id]},
+            {"name": "frozen before correction", "mode": "frozen_revisions", **time_range,
+             "dataset_id": frozen.dataset_id, "dataset_hash": frozen.dataset_hash},
+            {"name": "as-of before correction", "mode": "as_of", **time_range, "as_of_commit_seq": frozen.max_commit_seq},
+        ]
+        with engine.begin() as conn:
+            witness = measure_witnesses(conn, cases, store=old_store, timeout_seconds=15, max_archive_bytes=1024**2)
+        assert [case["expected_rows"] for case in witness["cases"]] == [3, 1, 1]
+        candidate_witness = json.dumps(witness).encode()
     # The release caller supplies digests for independent recovery, provider
     # handoff and tested rollback. Synthetic digests here exercise the record
     # boundary and carry no qualification for any of those external gates.
@@ -235,6 +253,8 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
         "custody_target_id": "activation-fixture", "custody_tablespace_oid": custody_tablespace,
         "custody_relation_oids": custody_oids,
     }
+    if owner_path:
+        execution["evidence"]["candidate_transaction_witness"] = sha256(candidate_witness).hexdigest()
     outcome_arguments = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
     if owner_path:
         phases = []
@@ -244,7 +264,7 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             assert not conn.scalar(text("SELECT datallowconn FROM pg_database WHERE datname=current_database()"))
             assert commit_seq == latest_commit
 
-        def verify_commit(conn, result):
+        def verify_candidate(conn, result):
             phases.append("accepted")
             assert activation.read_activation_outcome(conn, **outcome_arguments) == "committed"
             assert result["source_commit_seq"] == latest_commit
@@ -255,22 +275,59 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
                 provider_boundary(conn, commit_seq)
                 raise RuntimeError("fixture provider proof incomplete")
 
+            with pytest.raises(ValueError, match="canonical_cold_witness_approved_digest_changed"):
+                run_fenced_transition(
+                    retained, control, **outcome_arguments, receipts=receipts, store=new_store,
+                    limits=ArchiveVerificationLimits(), timeout_seconds=60,
+                    assert_host_held=lambda: None, host_remaining=lambda: 60, verify_provider_boundary=provider_boundary,
+                    record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
+                    candidate_witness=candidate_witness + b" ",
+                )
+            assert not phases
+
             with pytest.raises(RuntimeError, match="fixture provider proof incomplete"):
                 run_fenced_transition(
                     retained, control, **outcome_arguments, receipts=receipts, store=new_store,
                     limits=ArchiveVerificationLimits(), timeout_seconds=60,
                     assert_host_held=lambda: None, host_remaining=lambda: 60,
                     verify_provider_boundary=fail_provider_boundary,
-                    record=lambda phase, evidence: phases.append(phase), verify_committed=verify_commit,
+                    record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
+                    candidate_witness=candidate_witness,
                 )
             assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider",
                               "activation_rolled_back", "login_opening", "jobs_restarting", "database_reopened"]
             phases.clear()
+            limits = ArchiveVerificationLimits()
+            with retained.begin():
+                verified = activation.verify_mounted_candidate(retained, audit=audit, store=new_store, limits=limits)
+
+            changed = {**witness, "cases": [dict(case) for case in witness["cases"]]}
+            changed["cases"][1]["expected_hash"] = "f" * 64
+            changed_witness = json.dumps(changed).encode()
+            rejected_execution = {**execution, "evidence": {**execution["evidence"],
+                "candidate_transaction_witness": sha256(changed_witness).hexdigest()}}
+
+            with pytest.raises(RuntimeError, match="canonical_cold_witness_content_changed: frozen before correction"):
+                run_fenced_transition(
+                    retained, control, execution=rejected_execution, expected_execution_hash=archive_evidence_hash(rejected_execution),
+                    receipts=receipts, store=new_store, limits=limits,
+                    timeout_seconds=60, assert_host_held=lambda: None, host_remaining=lambda: 60,
+                    verify_provider_boundary=provider_boundary, verified_objects=verified,
+                    record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
+                    candidate_witness=changed_witness,
+                )
+            assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "activation_committing",
+                              "activation_rolled_back", "login_opening", "jobs_restarting", "database_reopened"]
+            with retained.begin():
+                assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
+                assert retained.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
+            phases.clear()
             run_fenced_transition(
                 retained, control, **outcome_arguments, receipts=receipts, store=new_store,
-                limits=ArchiveVerificationLimits(), timeout_seconds=60,
+                limits=limits, timeout_seconds=60, verified_objects=verified,
                 assert_host_held=lambda: None, host_remaining=lambda: 60, verify_provider_boundary=provider_boundary,
-                record=lambda phase, evidence: phases.append(phase), verify_committed=verify_commit,
+                record=lambda phase, evidence: phases.append(phase), verify_candidate=verify_candidate,
+                candidate_witness=candidate_witness,
             )
         assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "activation_committing",
                           "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]

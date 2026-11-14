@@ -13,13 +13,15 @@ from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.fact_archive import archive_evidence_hash
 from scripts.automation import storage_host_boundary as host
 from scripts.db.canonical_cold_activate import ACTIVATION_VERSION, _PHYSICAL_GATES, validate_execution_record
+from scripts.db.canonical_cold_witness import MAX_WITNESS_BYTES, load_approved_witnesses
 
 
-VERSION = "qt.canonical_cold_approval_package.v2"
+VERSION = "qt.canonical_cold_approval_package.v3"
 _ARTIFACT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _MAX_ARTIFACT_BYTES = 128 * 1024**2
 _MAX_RUNTIME_BYTES = 524_288
+_PARSED_ARTIFACT_LIMITS = {"host_inventory": 65_536, "candidate_transaction_witness": MAX_WITNESS_BYTES}
 _SCOPE = {
     "source_database", "target_database", "audit_set_hash", "loaded_inventory_hash", "payload_children",
     "custody_target_id", "custody_tablespace_oid", "custody_relation_oids",
@@ -98,11 +100,13 @@ def load_approved_package(path, *, approved_package_hash, inventory):
                 or binding["filename"] in names or binding["filename"] == path.name or not _pin(binding["sha256"])):
             raise ValueError(f"canonical_cold_package_invalid_artifact_binding: {name}")
         names.add(binding["filename"])
-        digest, content = _hash_file(path.parent / binding["filename"], json_limit=65_536 if name == "host_inventory" else 0)
+        digest, content = _hash_file(path.parent / binding["filename"], json_limit=_PARSED_ARTIFACT_LIMITS.get(name, 0))
         if digest != binding["sha256"]:
             raise RuntimeError(f"canonical_cold_package_artifact_digest_changed: {name}")
         if name == "host_inventory" and json.loads(content, object_pairs_hook=_unique_fields) != inventory:
             raise RuntimeError("canonical_cold_package_saved_inventory_changed")
+        if name == "candidate_transaction_witness":
+            load_approved_witnesses(bytes(content), expected_sha256=digest)
     if _hash_file(path, json_limit=65_536)[0] != approved_package_hash:
         raise RuntimeError("canonical_cold_package_approval_changed")
     return package
@@ -117,6 +121,14 @@ def read_approved_runtime_model(package_path, package):
     if host.digest(model) != package["runtime_model_hash"]:
         raise RuntimeError("canonical_cold_package_runtime_model_changed")
     return model
+
+
+def read_approved_candidate_witness(package_path, package):
+    binding = package["artifacts"]["candidate_transaction_witness"]
+    digest, content = _hash_file(Path(package_path).parent / binding["filename"], json_limit=MAX_WITNESS_BYTES)
+    if digest != binding["sha256"]:
+        raise RuntimeError("canonical_cold_package_candidate_witness_changed")
+    return bytes(content)
 
 
 def bind_execution(package, *, approved_package_hash, source_commit_seq, provider_boundary, independent_recovery):
