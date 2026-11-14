@@ -15,23 +15,24 @@ from scripts.automation import storage_host_boundary as host
 from scripts.db.canonical_cold_activate import ACTIVATION_VERSION, _PHYSICAL_GATES, validate_execution_record
 
 
-VERSION = "qt.canonical_cold_approval_package.v1"
+VERSION = "qt.canonical_cold_approval_package.v2"
 _ARTIFACT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _MAX_ARTIFACT_BYTES = 128 * 1024**2
+_MAX_RUNTIME_BYTES = 524_288
 _SCOPE = {
     "source_database", "target_database", "audit_set_hash", "loaded_inventory_hash", "payload_children",
     "custody_target_id", "custody_tablespace_oid", "custody_relation_oids",
 }
 
 
-def _hash_file(path, *, read_json=False):
+def _hash_file(path, *, json_limit=0):
     digest = sha256()
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as file:
         before = os.fstat(file.fileno())
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_mode & 0o077
-                or not 0 < before.st_size <= (65_536 if read_json else _MAX_ARTIFACT_BYTES)):
+                or not 0 < before.st_size <= (json_limit or _MAX_ARTIFACT_BYTES)):
             raise RuntimeError("canonical_cold_package_invalid_private_artifact")
         size = 0
         content = bytearray()
@@ -40,7 +41,7 @@ def _hash_file(path, *, read_json=False):
             if size > before.st_size:
                 raise RuntimeError("canonical_cold_package_artifact_changed")
             digest.update(chunk)
-            if read_json:
+            if json_limit:
                 content.extend(chunk)
         after = os.fstat(file.fileno())
         observed = path.lstat()
@@ -72,19 +73,21 @@ def load_approved_package(path, *, approved_package_hash, inventory):
     path = Path(path)
     if not path.is_absolute() or path.resolve(strict=True) != path or not _pin(approved_package_hash):
         raise ValueError("canonical_cold_package_approval_mismatch")
-    digest, raw = _hash_file(path, read_json=True)
+    digest, raw = _hash_file(path, json_limit=65_536)
     if digest != approved_package_hash:
         raise ValueError("canonical_cold_package_approval_mismatch")
     package = json.loads(raw, object_pairs_hook=_unique_fields)
     if (not isinstance(package, dict) or set(package) != {
             "schema", "approved_inventory_hash", "source_commit_floor", "scope", "artifacts", "max_outage_seconds",
+            "runtime_model_hash",
         } or package["schema"] != VERSION or not _pin(package["approved_inventory_hash"])
             or type(package["source_commit_floor"]) is not int or package["source_commit_floor"] < 1
             or type(package["max_outage_seconds"]) is not int
             or not 1 <= package["max_outage_seconds"] <= MAX_MIGRATION_SECONDS
+            or not _pin(package["runtime_model_hash"])
             or not isinstance(package["scope"], dict) or package["scope"].keys() != _SCOPE
             or not isinstance(package["artifacts"], dict)
-            or package["artifacts"].keys() != _PHYSICAL_GATES | {"command_sheet", "host_inventory"}):
+            or package["artifacts"].keys() != _PHYSICAL_GATES | {"command_sheet", "host_inventory", "runtime_model"}):
         raise ValueError("canonical_cold_package_invalid_structure")
     if not isinstance(inventory, dict) or host.digest(inventory) != package["approved_inventory_hash"]:
         raise ValueError("canonical_cold_package_host_inventory_changed")
@@ -95,14 +98,25 @@ def load_approved_package(path, *, approved_package_hash, inventory):
                 or binding["filename"] in names or binding["filename"] == path.name or not _pin(binding["sha256"])):
             raise ValueError(f"canonical_cold_package_invalid_artifact_binding: {name}")
         names.add(binding["filename"])
-        digest, content = _hash_file(path.parent / binding["filename"], read_json=name == "host_inventory")
+        digest, content = _hash_file(path.parent / binding["filename"], json_limit=65_536 if name == "host_inventory" else 0)
         if digest != binding["sha256"]:
             raise RuntimeError(f"canonical_cold_package_artifact_digest_changed: {name}")
         if name == "host_inventory" and json.loads(content, object_pairs_hook=_unique_fields) != inventory:
             raise RuntimeError("canonical_cold_package_saved_inventory_changed")
-    if _hash_file(path, read_json=True)[0] != approved_package_hash:
+    if _hash_file(path, json_limit=65_536)[0] != approved_package_hash:
         raise RuntimeError("canonical_cold_package_approval_changed")
     return package
+
+
+def read_approved_runtime_model(package_path, package):
+    binding = package["artifacts"]["runtime_model"]
+    digest, content = _hash_file(Path(package_path).parent / binding["filename"], json_limit=_MAX_RUNTIME_BYTES)
+    if digest != binding["sha256"]:
+        raise RuntimeError("canonical_cold_package_runtime_model_changed")
+    model = json.loads(content, object_pairs_hook=_unique_fields)
+    if host.digest(model) != package["runtime_model_hash"]:
+        raise RuntimeError("canonical_cold_package_runtime_model_changed")
+    return model
 
 
 def bind_execution(package, *, approved_package_hash, source_commit_seq, provider_boundary, independent_recovery):

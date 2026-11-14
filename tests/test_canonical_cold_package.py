@@ -21,6 +21,7 @@ def artifacts(tmp_path):
     manifest = {
         "schema": package.VERSION, "source_commit_floor": 100, "max_outage_seconds": 1200,
         "approved_inventory_hash": digest(inventory),
+        "runtime_model_hash": digest({"exact_fixture_evidence_for": "runtime_model"}),
         "scope": {
             "source_database": identity, "target_database": identity,
             "audit_set_hash": "a" * 64, "loaded_inventory_hash": "b" * 64, "payload_children": {},
@@ -29,7 +30,7 @@ def artifacts(tmp_path):
         },
         "artifacts": {},
     }
-    for name in package._PHYSICAL_GATES | {"command_sheet", "host_inventory"}:
+    for name in package._PHYSICAL_GATES | {"command_sheet", "host_inventory", "runtime_model"}:
         filename = f"{name}.json"
         data = json.dumps(inventory if name == "host_inventory" else {"exact_fixture_evidence_for": name}).encode()
         manifest["artifacts"][name] = {"filename": filename, "sha256": _write(tmp_path / filename, data)}
@@ -41,6 +42,7 @@ def artifacts(tmp_path):
 def test_only_current_boundary_fields_can_change_in_approved_scope(artifacts):
     path, approved, inventory = artifacts
     reviewed = package.load_approved_package(path, approved_package_hash=approved, inventory=inventory)
+    assert package.read_approved_runtime_model(path, reviewed) == {"exact_fixture_evidence_for": "runtime_model"}
     execution, execution_hash = package.bind_execution(
         reviewed, approved_package_hash=approved, source_commit_seq=105,
         provider_boundary="c" * 64, independent_recovery="d" * 64,

@@ -17,7 +17,7 @@ from scripts.automation import storage_online_release as release
 SCHEMA = "qt.canonical_cold_host_inventory.v1"
 PROJECT = "quant-trad-single-node"
 SERVICE_ROSTER = tuple(sorted((*host.STOP, *host.PASSIVE, "storage-maintenance")))
-STOPPABLE_SERVICES = frozenset((*host.STOP, "storage-maintenance")) - {"initialize"}
+STOPPABLE_SERVICES = frozenset((*host.STOP, "storage-maintenance", "docker-stats")) - {"initialize"}
 _OPTIONAL_TERMINAL_SERVICES = {"loki", "alloy", "docker-events", "docker-stats", "frontend", "frontend-v2", "grafana", "pgadmin"}
 _APP_COMMANDS = {
     "backend": "portal.backend.run_backend",
@@ -99,12 +99,21 @@ def _bot_terminal(row, labels, state):
             and restart in ("", "no") and _clean_exit(state, range(256)))
 
 
-def _service_contract(row, service, revision, source_tree_hash, state, stopped):
+def _service_contract(row, service, revision, source_tree_hash, state, stopped, action, ready_to_start):
     config, mounts = row["config"], row["mounts"]
     restart = row["host"].get("RestartPolicy", {}).get("Name")
     if restart not in ("no", "unless-stopped"):
         raise RuntimeError(f"canonical_host_unexpected_restart_policy: service={service}")
-    if service == "initialize" or service in stopped or (service in _OPTIONAL_TERMINAL_SERVICES and not state["running"]):
+    if action == "create" or service in ready_to_start:
+        if state["status"] != "created" or state["pid"] != 0 or state["running"] or state["exit_code"] != 0:
+            raise RuntimeError(f"canonical_host_created_service_started: service={service}")
+    elif action == "start":
+        initial = state["status"] == "created" and not state["running"] and state["pid"] == 0 and state["exit_code"] == 0
+        live = state["status"] == "running" and state["running"] and state["pid"] > 0 and state["exit_code"] == 0
+        allowed_health = ("starting", "healthy") if service in _HEALTHCHECK_SERVICES else (None, "starting", "healthy")
+        if not (initial or _clean_exit(state) or live and state["health"] in allowed_health):
+            raise RuntimeError(f"canonical_host_service_start_failed: service={service}")
+    elif service == "initialize" or service in stopped or (service in _OPTIONAL_TERMINAL_SERVICES and not state["running"]):
         if not _clean_exit(state, (0,) if service == "initialize" else (0, 143)):
             raise RuntimeError(f"canonical_host_service_not_cleanly_stopped: service={service}")
     elif (not state["running"] or state["status"] != "running" or state["pid"] <= 0
@@ -152,7 +161,7 @@ def _networks(row):
             for name, details in host.database_networks(row).items()}
 
 
-def _snapshot(project, revision, source_tree_hash, stopped, worker_id):
+def _snapshot(project, revision, source_tree_hash, stopped, worker_id, *, replacements, missing, actions, ready_to_start):
     ids = host._inventory_ids(project, None)
     rows = host._inspection_rows(host.docker("inspect", "--format", _DETAILS, *sorted(ids)), ids)
     services, bots, wired = {}, {}, {}
@@ -172,9 +181,12 @@ def _snapshot(project, revision, source_tree_hash, stopped, worker_id):
                 raise RuntimeError("canonical_host_unknown_container_or_writer")
             bots[row["id"]] = host.digest({"id": row["id"], "image": row["image"], "state": state})
             continue
-        services[service] = _service_contract(row, service, revision, source_tree_hash, state, stopped)
+        service_revision, tree = replacements.get(service, (revision, source_tree_hash))
+        services[service] = _service_contract(
+            row, service, service_revision, tree, state, stopped, actions.get(service), ready_to_start,
+        )
         wired[service] = host.database_networks(row)
-    if set(services) != set(SERVICE_ROSTER):
+    if not set(SERVICE_ROSTER) - missing <= services.keys():
         raise RuntimeError("canonical_host_required_service_missing")
     network = f"{project}_quanttrad"
     network_id = host.docker("network", "inspect", "--format", "{{.Id}}", network).strip()
@@ -188,7 +200,8 @@ def _snapshot(project, revision, source_tree_hash, stopped, worker_id):
     return services, bots, network_id
 
 
-def _inspect(state_root, *, project, expected_source_revision, stopped, timeout_seconds):
+def _inspect(state_root, *, project, expected_source_revision, stopped, timeout_seconds,
+             replacements=None, missing=frozenset(), actions=None, retained_protection=None, ready_to_start=frozenset()):
     if project != PROJECT or not _matches(_REVISION, expected_source_revision):
         raise ValueError("canonical_host_project_or_release_invalid")
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
@@ -200,12 +213,18 @@ def _inspect(state_root, *, project, expected_source_revision, stopped, timeout_
     if not stat.S_ISDIR(ownership.st_mode) or ownership.st_uid != os.getuid() or ownership.st_mode & 0o022:
         raise RuntimeError("canonical_host_state_directory_not_owned")
     chain, worker_id = _terminal_chain(root, project, expected_source_revision)
+    snapshot_options = {
+        "replacements": replacements or {}, "missing": missing, "actions": actions or {}, "ready_to_start": ready_to_start,
+    }
     with host.docker_deadline(time.monotonic() + timeout_seconds):
-        first = _snapshot(project, expected_source_revision, chain["source_tree_hash"], stopped, worker_id)
+        first = _snapshot(project, expected_source_revision, chain["source_tree_hash"], stopped, worker_id,
+                          **snapshot_options)
         # Check peers outside the Compose project and network for writable
         # storage overlap or shared collector/database namespaces as well.
-        prior._admit_mount_writers(first[0], operator_id=first[0]["backend"]["id"])
-        if _snapshot(project, expected_source_revision, chain["source_tree_hash"], stopped, worker_id) != first:
+        prior._admit_mount_writers(first[0], operator_id=first[0]["tsdb"]["id"],
+                                   retained_protection=retained_protection)
+        if _snapshot(project, expected_source_revision, chain["source_tree_hash"], stopped, worker_id,
+                     **snapshot_options) != first:
             raise RuntimeError("canonical_host_container_inventory_changed")
     if _terminal_chain(root, project, expected_source_revision) != (chain, worker_id):
         raise RuntimeError("canonical_host_previous_release_changed")
@@ -226,6 +245,11 @@ def inspect_host_inventory(state_root, *, project, expected_source_revision, exp
     return observed
 
 
+def stable_host_inventory(value):
+    return {**value, "services": {name: {key: item for key, item in row.items() if key not in _STATE_KEYS}
+                                   for name, row in value["services"].items()}}
+
+
 def assert_host_inventory(state_root, *, expected, stopped_services=(), timeout_seconds=30):
     """Allow only the caller's exact requested clean stop subset on the same fleet."""
     stopped = frozenset(stopped_services)
@@ -234,11 +258,7 @@ def assert_host_inventory(state_root, *, expected, stopped_services=(), timeout_
     actual = _inspect(state_root, project=expected["project"], expected_source_revision=expected["source_revision"],
                       stopped=stopped, timeout_seconds=timeout_seconds)
 
-    def stable(value):
-        return {**value, "services": {name: {key: item for key, item in row.items() if key not in _STATE_KEYS}
-                                       for name, row in value["services"].items()}}
-
-    if stable(actual) != stable(expected):
+    if stable_host_inventory(actual) != stable_host_inventory(expected):
         raise RuntimeError("canonical_host_approved_inventory_changed")
     if any(not expected["services"][name]["running"] for name in stopped):
         raise ValueError("canonical_host_unexpected_stop_subset")

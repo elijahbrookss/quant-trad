@@ -191,7 +191,7 @@ def _valid_database_gate(value):
 
 
 
-def _admit_mount_writers(rows, *, operator_id):
+def _admit_mount_writers(rows, *, operator_id, retained_protection=None):
     """Reject unadmitted live Docker peers sharing source mounts or namespaces.
 
     This bounded observation supplements project/network admission. It does not
@@ -276,11 +276,20 @@ def _admit_mount_writers(rows, *, operator_id):
             identity = candidates.pop()
         raise RuntimeError("storage_online_namespace_alias_invalid")
 
+    protection_names = {"tsdb", "market-data-collector"} & rows.keys()
+    if "tsdb" not in protection_names or ("market-data-collector" not in protection_names and retained_protection is None):
+        raise RuntimeError("storage_online_writer_protection_binding_invalid")
     protected_namespaces = {namespace(rows[name]["id"], field)
-                            for name in ("tsdb", "market-data-collector")
+                            for name in protection_names
                             for field in ("network_mode", "pid_mode")}
-    protected = [path for name in ("tsdb", "market-data-collector")
+    protected = [path for name in protection_names
                  for path, _ in sources(first[rows[name]["id"]])]
+    if retained_protection is not None:
+        for value in retained_protection:
+            if (not isinstance(value, str) or not value.startswith("/")
+                    or str(PurePosixPath(value)) != value or ".." in PurePosixPath(value).parts):
+                raise RuntimeError("storage_online_writer_protection_binding_invalid")
+            protected.append(PurePosixPath(value))
     if not protected:
         raise RuntimeError("storage_online_writer_source_mounts_required")
     for identity, row in first.items():
