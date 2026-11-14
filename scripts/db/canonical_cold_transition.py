@@ -38,6 +38,7 @@ def run_fenced_transition(
     Supply the host-reviewed package. The provider callback runs on the held
     connection. The recovery callback can use the control database and must
     return a verified, separately retained receipt for that same watermark.
+    It receives the existing archive ownership check for suffix capture.
     """
     if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS
             or not isinstance(limits, ArchiveVerificationLimits)
@@ -104,7 +105,9 @@ def run_fenced_transition(
                     source_commit = current_original_watermark(conn)
                     provider_boundary = verify_provider_boundary(conn, source_commit)
                     fence.assert_quiet(conn)
-            recovery_boundary = verify_recovery_boundary(fence, control, source_commit, provider_boundary, remaining_seconds)
+            recovery_boundary = verify_recovery_boundary(
+                fence, control, source_commit, provider_boundary, remaining_seconds, check_archive,
+            )
             assert_host_held()
             check_archive()
             if conn.in_transaction() or control.in_transaction():

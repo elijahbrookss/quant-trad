@@ -102,9 +102,22 @@ def _inventory_hash(conn, *, objects=None):
         rows.close()
 
 
+def measure_mounted_inventory(conn, *, audit, store):
+    """Read the bound file count and logical size before hashing or stopping writers."""
+    require_configured_archive_mount(store.root, require_writable=True)
+    pages, size = conn.execute(text("""
+        SELECT count(*),coalesce(sum(byte_count),0) FROM market.cold_fact_pages
+    """)).one()
+    if pages != audit["verified_pages"] or _inventory_hash(conn) != audit["loaded_inventory_hash"]:
+        raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")
+    return {"objects": int(pages), "bytes": int(size), "inventory_hash": audit["loaded_inventory_hash"]}
+
+
 def verify_mounted_candidate(conn, *, audit, store, limits, check_budget=None):
     """Verify mounted bytes before the critical transaction; keep inode witnesses."""
-    require_configured_archive_mount(store.root, require_writable=True)
+    scope = measure_mounted_inventory(conn, audit=audit, store=store)
+    if scope["objects"] > limits.max_objects or scope["bytes"] > limits.max_bytes:
+        raise RuntimeError("canonical_cold_activation_inventory_exceeds_verified_budget")
     objects = ArchiveVerificationBatch(store, limits=limits, check_budget=check_budget)
     if _inventory_hash(conn, objects=objects) != audit["loaded_inventory_hash"]:
         raise RuntimeError("canonical_cold_activation_loaded_inventory_hash_mismatch")

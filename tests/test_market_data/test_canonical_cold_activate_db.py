@@ -277,10 +277,11 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             assert commit_seq == latest_commit
             return execution["evidence"]["provider_boundary"]
 
-        def recovery_boundary(fence, control, commit_seq, provider, remaining):
+        def recovery_boundary(fence, control, commit_seq, provider, remaining, check_archive):
             phases.append("recovery")
             assert commit_seq == latest_commit and provider == execution["evidence"]["provider_boundary"]
             assert remaining() > 0
+            check_archive()
             with control.begin():
                 assert control.scalar(text("SELECT current_database()")) == "postgres"
             with fence.connection.begin():
@@ -325,6 +326,11 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             phases.clear()
             limits = ArchiveVerificationLimits()
             with retained.begin():
+                scope = activation.measure_mounted_inventory(retained, audit=audit, store=new_store)
+                assert scope["objects"] == 2 and scope["bytes"] > 0
+                with pytest.raises(RuntimeError, match="inventory_exceeds_verified_budget"):
+                    activation.verify_mounted_candidate(retained, audit=audit, store=new_store,
+                                                        limits=ArchiveVerificationLimits(max_bytes=scope["bytes"] - 1))
                 verified = activation.verify_mounted_candidate(retained, audit=audit, store=new_store, limits=limits)
 
             changed = {**witness, "cases": [dict(case) for case in witness["cases"]]}
