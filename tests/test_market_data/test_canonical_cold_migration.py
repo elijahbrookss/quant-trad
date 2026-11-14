@@ -10,7 +10,7 @@ from scripts.db.canonical_cold_acceptance import (
     Disposition, ParityCase, acquisition_disposition, coinbase_gap_request_budget, verify_parity,
 )
 from scripts.db.canonical_cold_migration import (
-    Cohort, DOCS, MigrationCheckpoint, PostgresMigrationSource, stage,
+    Cohort, DOCS, MigrationCheckpoint, PostgresMigrationSource, SourcePage, stage,
 )
 from tests.test_market_data.test_canonical_fact_archive import _row
 
@@ -37,7 +37,7 @@ class DrySource:
 
     def existing(self, conn, day, ordinal):
         assert ordinal == 0
-        return self.manifest
+        return SourcePage(self.manifest, {"kind": "legacy_catalog"})
 
     def rows(self, conn, day, after, *, through, limits):
         rows = []

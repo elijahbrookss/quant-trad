@@ -7,14 +7,14 @@ from sqlalchemy import JSON, bindparam, text
 
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.fact_archive import publish_canonical_fact_archive
-from portal.backend.db.cold_history_models import COLD_IMMUTABILITY_TRIGGER
+from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_IMMUTABILITY_TRIGGER
 from portal.backend.db.fact_header_legacy_schema import install_fact_header_legacy_functions
 from portal.backend.db.fact_identity_schema import fact_header_partition_name
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_load import load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
-from tests.test_market_data.test_canonical_cold_migration_db import _prepare, prepared_database  # noqa: F401
+from tests.test_market_data.test_canonical_cold_migration_db import _prepare, _published_generation, prepared_database  # noqa: F401
 from tests.test_market_data.test_canonical_fact_archive import _row
 
 
@@ -61,9 +61,6 @@ def candidate(prepared_database, tmp_path):  # noqa: F811
         conn.execute(text("INSERT INTO market.fact_hot_payloads VALUES (:id,:day,:payload,:provenance,:quality)")
             .bindparams(*(bindparam(name, type_=JSON) for name in ("payload", "provenance", "quality"))),
             [row | {"day": DAILY} for row in later])
-        # Store the exact identity registry shape, with global duplicate guards.
-        conn.execute(text("""CREATE TABLE market.fact_identities (id text PRIMARY KEY,storage_day date,
-            series_id bigint,observation_key text,revision integer,UNIQUE(series_id,observation_key,revision))"""))
         conn.execute(text("INSERT INTO market.fact_identities SELECT id,storage_day,series_id,observation_key,revision FROM market.fact_versions"))
     checkpoint = MigrationCheckpoint(tmp_path / "audit-checkpoint.db")
     real_source = PostgresMigrationSource(engine, expected_system_identifier=target.system_identifier)
@@ -96,6 +93,11 @@ def test_exact_source_prefix_and_inverse_inventory(candidate):
         audit_candidate(engine, checkpoint, **(kwargs | {"cutoff": DAY}))
     with pytest.raises(RuntimeError, match="wrong_database"):
         audit_candidate(engine, checkpoint, **(kwargs | {"target": replace(kwargs["target"], oid=99)}))
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO market.fact_storage_state VALUES (:version,'ready',clock_timestamp())"),
+                     {"version": COLD_HISTORY_LAYOUT_VERSION})
+    with pytest.raises(RuntimeError, match="layout_already_active"):
+        audit_candidate(engine, checkpoint, day=DAY, **kwargs)
 
 
 def test_source_hash_and_head_mismatches_block_audit(candidate):
@@ -150,3 +152,15 @@ def test_missing_day_checkpoint_and_unplanned_loaded_page_are_detected(candidate
         audit_candidate(engine, checkpoint, day=DAILY, **kwargs)
     with pytest.raises(RuntimeError, match="unplanned_loaded_manifest"):
         audit_candidate(engine, checkpoint, inventory=True, max_pages=10, **kwargs)
+
+
+def test_generation_change_halts_final_audit_without_reencoding(candidate):
+    engine, checkpoint, kwargs = candidate
+    page = next(checkpoint.iter_completed_pages(day=DAY))
+    path = kwargs["object_store"].local_path(page.manifest.object_key)
+    before = path.read_bytes()
+    with engine.begin() as conn:
+        _published_generation(conn, page.manifest, _row())
+    with pytest.raises(RuntimeError, match="source_archive_authority_changed"):
+        audit_candidate(engine, checkpoint, day=DAY, **kwargs)
+    assert path.read_bytes() == before

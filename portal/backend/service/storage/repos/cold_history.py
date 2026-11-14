@@ -10,6 +10,7 @@ from pathlib import Path
 
 from sqlalchemy import and_, insert, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from core.storage_mounts import configured_archive_root, require_configured_archive_mount
@@ -94,7 +95,7 @@ def _manifest(row: Mapping) -> FactArchiveManifest:
 
 def cold_layout_active(session) -> bool:
     """Honor the catalog only after the explicit, approved authority change."""
-    if not isinstance(session, Session):
+    if not isinstance(session, (Session, Connection)):
         return False
     return bool(session.execute(text("""
         SELECT EXISTS (

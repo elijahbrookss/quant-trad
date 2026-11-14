@@ -1,5 +1,5 @@
 """Native PostgreSQL source and prepared-catalog smoke on a disposable database."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -12,8 +12,18 @@ from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import publish_canonical_fact_archive
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION, assert_cold_history_placement
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION
+from portal.backend.db.market_storage_models import (
+    MarketFactArchiveActiveGenerationRecord, MarketFactArchiveCatalogBatchRecord,
+    MarketFactArchivePreparationRecord, MarketFactArchivePreparedCanonicalDependencyRecord,
+    MarketFactArchivePreparedMaterialAliasRecord, MarketFactArchiveVerificationGenerationRecord,
+    MarketFactArchiveVerificationRecord,
+)
 from portal.backend.db.storage_target_models import StorageHeaderTablespaceRecord, StorageTargetRecord
 from portal.backend.service.storage.repos.cold_history import PostgresColdHistory, cold_layout_active
+from portal.backend.service.storage.repos.fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _receipt
+from portal.backend.service.storage.repos.fact_archive_generation import (
+    archive_preparation_id, catalog_batch_hash, catalog_commitment, catalog_root,
+)
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.prepare_canonical_cold_catalog import prepare_catalog
@@ -76,12 +86,19 @@ def _prepare(engine, rows, archived, tablespace, history_root):
         conn.execute(text("CREATE TABLE market.series (id bigint PRIMARY KEY, dimensions jsonb)"))
         conn.execute(text("""CREATE TABLE market.fact_hot_payloads (id text, storage_day date,
                           payload jsonb, provenance jsonb, quality jsonb)"""))
-        conn.execute(text("""CREATE TABLE market.fact_retention_partitions (storage_day date, state text,
+        conn.execute(text("""CREATE TABLE market.fact_retention_partitions (storage_day date PRIMARY KEY, state text,
                           sealed_at timestamptz, expected_rows bigint)"""))
-        conn.execute(text("""CREATE TABLE market.fact_archive_manifests (id text, storage_day date,
+        conn.execute(text("""CREATE TABLE market.fact_archive_manifests (id text PRIMARY KEY, storage_day date,
                           page_ordinal integer, object_key text, object_sha256 text, manifest_hash text,
                           row_count bigint, byte_count bigint, first_commit_seq bigint, first_id text,
                           last_commit_seq bigint, last_id text, descriptor jsonb)"""))
+        conn.execute(text("""CREATE TABLE market.fact_identities (id text PRIMARY KEY,storage_day date,
+            series_id bigint,observation_key text,revision integer,UNIQUE(series_id,observation_key,revision))"""))
+        for model in (MarketFactArchivePreparationRecord, MarketFactArchiveCatalogBatchRecord,
+                      MarketFactArchivePreparedMaterialAliasRecord, MarketFactArchivePreparedCanonicalDependencyRecord,
+                      MarketFactArchiveActiveGenerationRecord, MarketFactArchiveVerificationRecord,
+                      MarketFactArchiveVerificationGenerationRecord):
+            model.__table__.create(conn)
         conn.execute(text("""CREATE TABLE market.fact_storage_state (layout_version text PRIMARY KEY,
                           state text NOT NULL, completed_at timestamptz)"""))
         conn.execute(text("INSERT INTO market.fact_storage_state VALUES (:version,'ready',clock_timestamp())"),
@@ -130,13 +147,54 @@ def _prepare(engine, rows, archived, tablespace, history_root):
     return TargetDatabase(*target)
 
 
-def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_path):
+def _published_generation(conn, manifest, dependency):
+    preparation = archive_preparation_id(manifest.manifest_id, 1)
+    document = {"fact_version_id": dependency["id"], "row_hash": dependency["row_hash"]}
+    batch_hash = catalog_batch_hash(preparation_id=preparation, catalog_kind="canonical_dependencies",
+                                    ordinal=0, rows=[document])
+    commitment = catalog_commitment(manifest_id=manifest.manifest_id, preparation_id=preparation,
+        generation=1, alias_count=0, canonical_dependency_count=1, alias_batches=[], canonical_dependency_batches=[batch_hash])
+    conn.execute(MarketFactArchivePreparationRecord.__table__.insert(), {
+        "id": preparation, "manifest_id": manifest.manifest_id, "storage_day": DAY, "page_ordinal": 0,
+        "generation": 1, "state": "active", "fence": 1, "owner_token_hash": "a" * 64,
+        "lease_expires_at": datetime.now(UTC) + timedelta(hours=1), "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION,
+        "source_binding_hash": "b" * 64, "manifest_descriptor": manifest.to_dict(), "series_catalog": [],
+        "alias_count": 0, "canonical_dependency_count": 1, "alias_root": catalog_root([]),
+        "canonical_dependency_root": catalog_root([document]), "catalog_commitment": commitment,
+    })
+    conn.execute(text("""INSERT INTO market.fact_identities VALUES (:id,:day,:series_id,:observation_key,:revision)
+        ON CONFLICT (id) DO NOTHING"""),
+                 dependency | {"day": DAY})
+    conn.execute(MarketFactArchivePreparedCanonicalDependencyRecord.__table__.insert(),
+                 document | {"preparation_id": preparation, "batch_ordinal": 0})
+    conn.execute(MarketFactArchiveCatalogBatchRecord.__table__.insert(), {
+        "preparation_id": preparation, "catalog_kind": "canonical_dependencies", "batch_ordinal": 0,
+        "row_count": 1, "first_key": [dependency["id"]], "last_key": [dependency["id"]], "content_hash": batch_hash,
+    })
+    pointer = {"manifest_id": manifest.manifest_id, "preparation_id": preparation,
+               "generation": 1, "catalog_commitment": commitment}
+    conn.execute(MarketFactArchiveActiveGenerationRecord.__table__.insert(), pointer)
+    receipt = _receipt({"id": manifest.manifest_id, "manifest_hash": manifest.manifest_hash,
+                        "storage_day": DAY, "page_ordinal": 0}, "c" * 64)
+    conn.execute(MarketFactArchiveVerificationRecord.__table__.insert(), receipt)
+    conn.execute(MarketFactArchiveVerificationGenerationRecord.__table__.insert(), {
+        "manifest_id": manifest.manifest_id, "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION,
+        "preparation_id": preparation, "catalog_commitment": commitment,
+    })
+    return pointer, receipt
+
+
+@pytest.mark.parametrize("with_prepared_authority", [False, True])
+def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_path, with_prepared_authority):
     engine, tablespace, history_root = prepared_database
     rows = [_row(), _row(2), _row(3, state="invalidated"), _row(series_id=2, commit=4)]
     original, destination = [FilesystemRawArchiveObjectStore(tmp_path / name) for name in ("source", "stage")]
     archived = publish_canonical_fact_archive(rows[:2], object_store=original,
                                               temporary_directory=tmp_path, limits=LIMITS)
     target = _prepare(engine, rows, archived, tablespace, history_root)
+    if with_prepared_authority:
+        with engine.begin() as conn:
+            pointer, receipt = _published_generation(conn, archived, rows[0])
     checkpoint = MigrationCheckpoint(tmp_path / "progress.db")
     source = PostgresMigrationSource(engine, expected_system_identifier=target.system_identifier)
     kwargs = {"day": DAY, "source_store": original, "destination_store": destination,
@@ -144,6 +202,17 @@ def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_pa
     first = stage(source, checkpoint, **kwargs)
     assert first["rows"] == 2 and not first["cohort_complete"]
     assert stage(source, checkpoint, **kwargs)["cohort_complete"]
+    first, last = checkpoint.iter_completed_pages()
+    assert first.reused and first.manifest == archived
+    assert not last.reused and last.source_authority is None
+    if with_prepared_authority:
+        assert first.source_authority["kind"] == "prepared_generation"
+        assert first.source_authority["catalog_commitment"] == pointer["catalog_commitment"]
+        assert first.source_authority["verification_hash"] == receipt["verification_hash"]
+        assert first.source_authority["prepared_catalogs"]["canonical_dependencies"]["count"] == 1
+    else:
+        assert first.source_authority["kind"] == "legacy_catalog"
+        assert first.source_authority["verification_hash"] is None
     assert checkpoint.verify_completed_cohort(day=DAY, destination_store=destination, limits=LIMITS)["verified_rows"] == 4
 
     loading = {"target": target, "object_store": destination, "day": DAY}

@@ -22,9 +22,13 @@ from sqlalchemy import create_engine, text
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.canonical_storage import verify_archived_envelope
 from market_data.fact_archive import (
-    FactArchiveLimits, FactArchiveManifest,
+    FactArchiveLimits, FactArchiveManifest, archive_evidence_hash,
     publish_canonical_fact_archive, read_canonical_fact_archive,
     verify_canonical_fact_archive_rows,
+)
+from portal.backend.service.storage.repos.fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _receipt
+from portal.backend.service.storage.repos.fact_archive_generation import (
+    PREPARED_CATALOG_TABLES, catalog_batch_hash, catalog_commitment, catalog_root,
 )
 from portal.backend.service.storage.repos.fact_storage import (
     CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, _catalog_manifest, ensure_payload_contracts,
@@ -33,7 +37,7 @@ from portal.backend.service.storage.repos.fact_storage import (
 
 INITIAL = (0, "")
 DOCS = ("payload", "provenance", "quality")
-SCHEMA_VERSION = "qt.canonical_cold_migration.v1"
+SCHEMA_VERSION = "qt.canonical_cold_migration.v2"
 
 
 def _cursor(row):
@@ -50,12 +54,19 @@ class Cohort:
 
 
 @dataclass(frozen=True)
+class SourcePage:
+    manifest: FactArchiveManifest
+    authority: dict
+
+
+@dataclass(frozen=True)
 class StagedPage:
     source_day: date
     ordinal: int
     after: tuple[int, str]
     manifest: FactArchiveManifest
     reused: bool
+    source_authority: dict | None = None
 
 
 class MigrationCheckpoint:
@@ -100,6 +111,7 @@ class MigrationCheckpoint:
                 day TEXT NOT NULL REFERENCES cohorts(day), ordinal INTEGER NOT NULL CHECK (ordinal>=0),
                 after_seq INTEGER NOT NULL, after_id TEXT NOT NULL,
                 manifest_hash TEXT NOT NULL, manifest_id TEXT NOT NULL UNIQUE, descriptor TEXT NOT NULL,
+                source_authority TEXT,
                 reused INTEGER NOT NULL CHECK (reused IN (0,1)), PRIMARY KEY (day, ordinal)
             )""")
 
@@ -151,9 +163,11 @@ class MigrationCheckpoint:
                 )).rowcount
             if changed != 1:
                 raise RuntimeError(f"canonical_cold_migration_checkpoint_conflict: day={page.source_day}")
-            db.execute("INSERT INTO pages VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+            db.execute("INSERT INTO pages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                 page.source_day.isoformat(), page.ordinal, *page.after, manifest.manifest_hash,
-                manifest.manifest_id, json.dumps(manifest.to_dict(), sort_keys=True), page.reused,
+                manifest.manifest_id, json.dumps(manifest.to_dict(), sort_keys=True),
+                json.dumps(page.source_authority, sort_keys=True) if page.source_authority else None,
+                page.reused,
             ))
 
     def complete(self, day, *, ordinal, after):
@@ -170,11 +184,12 @@ class MigrationCheckpoint:
             records = db.execute("""SELECT pages.* FROM pages JOIN cohorts USING(day)
                 WHERE cohorts.completed=1 AND (? IS NULL OR day=?) AND ordinal>? ORDER BY day, ordinal""",
                 (day_value, day_value, after_ordinal))
-            for day_value, ordinal, after_seq, after_id, manifest_hash, identity, payload, reused in records:
+            for day_value, ordinal, after_seq, after_id, manifest_hash, identity, payload, authority, reused in records:
                 manifest = FactArchiveManifest.from_dict(json.loads(payload), expected_hash=manifest_hash)
                 if manifest.manifest_id != identity:
                     raise RuntimeError(f"canonical_cold_migration_manifest_binding_changed: id={identity}")
-                yield StagedPage(date.fromisoformat(day_value), ordinal, (after_seq, after_id), manifest, bool(reused))
+                yield StagedPage(date.fromisoformat(day_value), ordinal, (after_seq, after_id), manifest,
+                                 bool(reused), json.loads(authority) if authority else None)
 
     def verify_completed_cohort(self, *, day, destination_store, limits=FactArchiveLimits()):
         """Recheck current staged bytes and journal coverage before catalog preparation."""
@@ -240,7 +255,102 @@ class PostgresMigrationSource:
             WHERE storage_day=:day AND page_ordinal=:ordinal"""), {"day": day, "ordinal": ordinal}).mappings().one_or_none()
         if row is None:
             raise RuntimeError(f"canonical_cold_migration_archive_gap: day={day} ordinal={ordinal}")
-        return _catalog_manifest(row)
+        manifest = _catalog_manifest(row)
+        return SourcePage(manifest, PostgresMigrationSource.source_authority(conn, row))
+
+    @staticmethod
+    def source_authority(conn, page):
+        """Bind current published authority without creating a new proof receipt."""
+        published = conn.execute(text("""SELECT g.preparation_id,g.generation,g.catalog_commitment,
+                prep.manifest_id AS prepared_id,prep.storage_day AS prepared_day,
+                prep.page_ordinal AS prepared_ordinal,prep.generation AS prepared_generation,
+                prep.catalog_commitment AS prepared_commitment,prep.state AS prepared_state,
+                prep.manifest_descriptor AS prepared_descriptor,prep.source_binding_hash,
+                prep.alias_count,prep.canonical_dependency_count,prep.alias_root,prep.canonical_dependency_root
+            FROM market.fact_archive_active_generations g
+            LEFT JOIN market.fact_archive_preparations prep ON prep.id=g.preparation_id WHERE g.manifest_id=:id"""),
+            {"id": page["id"]}).mappings().one_or_none()
+        receipt = conn.execute(text("""SELECT manifest_id,verifier_version,manifest_hash,catalog_hash,verification_hash
+            FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version"""),
+            {"id": page["id"], "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+        binding = conn.execute(text("""SELECT preparation_id,catalog_commitment
+            FROM market.fact_archive_verification_generations
+            WHERE manifest_id=:id AND verifier_version=:version"""),
+            {"id": page["id"], "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+        authority = {"kind": "legacy_catalog", "manifest_id": page["id"], "manifest_hash": page["manifest_hash"]}
+        if published is not None:
+            if tuple(published[key] for key in ("prepared_id", "prepared_day", "prepared_ordinal", "prepared_generation",
+                                                "prepared_commitment", "prepared_state", "prepared_descriptor")) != (
+                page["id"], page["storage_day"], page["page_ordinal"], published["generation"],
+                published["catalog_commitment"], "active", page["descriptor"],
+            ):
+                raise RuntimeError(f"canonical_cold_migration_active_preparation_mismatch: id={page['id']}")
+            authority.update(kind="prepared_generation", preparation_id=published["preparation_id"],
+                             generation=published["generation"], catalog_commitment=published["catalog_commitment"],
+                             prepared_source_binding_hash=published["source_binding_hash"])
+            PostgresMigrationSource.verify_prepared_catalog(conn, page, published, authority)
+        if receipt is not None and dict(receipt) != _receipt(page, receipt["catalog_hash"]):
+            raise RuntimeError(f"canonical_cold_migration_current_receipt_mismatch: id={page['id']}")
+        expected_binding = ((published["preparation_id"], published["catalog_commitment"])
+                            if published is not None and receipt is not None else None)
+        seen_binding = (binding["preparation_id"], binding["catalog_commitment"]) if binding is not None else None
+        if seen_binding != expected_binding:
+            raise RuntimeError(f"canonical_cold_migration_current_generation_receipt_mismatch: id={page['id']}")
+        authority.update(verifier_version=FACT_ARCHIVE_VERIFIER_VERSION,
+                         verification_hash=receipt["verification_hash"] if receipt is not None else None)
+        return authority
+
+    @staticmethod
+    def verify_prepared_catalog(conn, page, prepared, authority):
+        # Reuse the current preparation's commitment algorithm. Limit SQL to
+        # one selected preparation and the deployed per-page catalog budgets.
+        preparation = prepared["preparation_id"]
+        roots = {}
+        commitments = {}
+        specifications = {
+            "aliases": ("fact_version_id,evidence_key,series_id,material_hash", "fact_version_id,evidence_key",
+                        prepared["alias_count"], prepared["alias_root"], page["row_count"]),
+            "canonical_dependencies": ("fact_version_id,row_hash", "fact_version_id",
+                                       prepared["canonical_dependency_count"], prepared["canonical_dependency_root"], 50_000),
+        }
+        for kind, (columns, order, expected_count, expected_root, max_rows) in specifications.items():
+            if not 0 <= expected_count <= max_rows:
+                raise RuntimeError(f"canonical_cold_migration_prepared_catalog_budget: id={page['id']} catalog={kind}")
+            rows = conn.execute(text(f"SELECT batch_ordinal,{columns} FROM market.{PREPARED_CATALOG_TABLES[kind]} "
+                f"WHERE preparation_id=:id ORDER BY {order} LIMIT :limit"),
+                {"id": preparation, "limit": expected_count + 1}).mappings().all()
+            projected = [{name: value for name, value in row.items() if name != "batch_ordinal"} for row in rows]
+            root = catalog_root(projected)
+            if len(rows) != expected_count or root != expected_root:
+                raise RuntimeError(f"canonical_cold_migration_prepared_catalog_root_mismatch: id={page['id']} catalog={kind}")
+            receipts = conn.execute(text("""SELECT batch_ordinal,row_count,first_key,last_key,content_hash
+                FROM market.fact_archive_catalog_batches WHERE preparation_id=:id AND catalog_kind=:kind
+                ORDER BY batch_ordinal LIMIT :limit"""),
+                {"id": preparation, "kind": kind, "limit": expected_count + 1}).mappings().all()
+            if (sum(item["row_count"] for item in receipts) != expected_count
+                    or any(item["batch_ordinal"] != ordinal for ordinal, item in enumerate(receipts))):
+                raise RuntimeError(f"canonical_cold_migration_prepared_catalog_receipts_mismatch: id={page['id']} catalog={kind}")
+            offset = 0
+            keys = order.split(",")
+            for ordinal, receipt in enumerate(receipts):
+                end = offset + receipt["row_count"]
+                batch = projected[offset:end]
+                if (not batch or any(row["batch_ordinal"] != ordinal for row in rows[offset:end])
+                        or [batch[0][key] for key in keys] != receipt["first_key"]
+                        or [batch[-1][key] for key in keys] != receipt["last_key"]
+                        or catalog_batch_hash(preparation_id=preparation, catalog_kind=kind, ordinal=ordinal,
+                                              rows=batch) != receipt["content_hash"]):
+                    raise RuntimeError(f"canonical_cold_migration_prepared_catalog_batch_mismatch: id={page['id']} catalog={kind}")
+                offset = end
+            roots[kind] = {"count": expected_count, "root": root}
+            commitments[kind] = [item["content_hash"] for item in receipts]
+        observed = catalog_commitment(manifest_id=page["id"], preparation_id=preparation,
+            generation=prepared["generation"], alias_count=prepared["alias_count"],
+            canonical_dependency_count=prepared["canonical_dependency_count"], alias_batches=commitments["aliases"],
+            canonical_dependency_batches=commitments["canonical_dependencies"])
+        if observed != authority["catalog_commitment"]:
+            raise RuntimeError(f"canonical_cold_migration_prepared_catalog_commitment_mismatch: id={page['id']}")
+        authority["prepared_catalogs"] = roots
 
     @staticmethod
     def rows(conn, day, after, *, through, limits):
@@ -314,7 +424,8 @@ def stage(source, checkpoint, *, day, source_store, destination_store, temporary
             if page_index == max_pages and count != current.expected_rows:
                 break
             archived = source.existing(conn, day, ordinal) if ordinal < prefix else None
-            rows = source.rows(conn, day, after, through=archived.last_cursor if archived else None, limits=limits)
+            rows = source.rows(conn, day, after, through=archived.manifest.last_cursor if archived else None,
+                               limits=limits)
         if not rows:
             if archived is not None:
                 raise RuntimeError(f"canonical_cold_migration_archive_source_missing: day={day} ordinal={ordinal}")
@@ -335,7 +446,7 @@ def stage(source, checkpoint, *, day, source_store, destination_store, temporary
                                                        temporary_directory=temporary_directory, limits=limits)
             verify_canonical_fact_archive_rows(rows, expected=manifest, limits=limits)
         else:
-            manifest = archived
+            manifest = archived.manifest
             source_path = source_store.local_path(manifest.object_key)
             decoded = read_canonical_fact_archive(source_path, expected=manifest, limits=limits)
             _compare_existing(rows, decoded, manifest=manifest, cohort=current, after=after, limits=limits)
@@ -345,7 +456,8 @@ def stage(source, checkpoint, *, day, source_store, destination_store, temporary
                 if (ack.object_key, ack.sha256, ack.byte_count) != (manifest.object_key, manifest.object_sha256, manifest.byte_count):
                     raise RuntimeError(f"canonical_cold_migration_upload_mismatch: id={manifest.manifest_id}")
                 read_canonical_fact_archive(destination_store.local_path(manifest.object_key), expected=manifest, limits=limits)
-        checkpoint.record(StagedPage(day, ordinal, after, manifest, archived is not None))
+        checkpoint.record(StagedPage(day, ordinal, after, manifest, archived is not None,
+                                     archived.authority if archived is not None else None))
     completed, rows, ordinal, seq, identity = checkpoint.progress(day)
     return {"schema": SCHEMA_VERSION, "storage_day": day.isoformat(), "rows": rows, "pages": ordinal,
             "last_cursor": [seq, identity], "cohort_complete": bool(completed), "expected_rows": cohort.expected_rows}

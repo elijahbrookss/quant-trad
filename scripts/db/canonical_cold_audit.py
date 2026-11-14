@@ -190,6 +190,20 @@ def _assert_retained_order(conn, *, rows, cutoff):
 
 def _audit_page(conn, reader, *, page, child_oid, cutoff):
     manifest = page.manifest
+    # New archive workers can acknowledge an equivalent or overlapping page
+    # after staging. Reused pages remain bound to their current generation;
+    # new pages without a captured authority must be reconciled explicitly.
+    published = conn.execute(text("""SELECT * FROM market.fact_archive_manifests
+        WHERE storage_day=:day AND (first_commit_seq,first_id)<=(:last_seq,:last_id)
+          AND (last_commit_seq,last_id)>=(:first_seq,:first_id) ORDER BY page_ordinal LIMIT 2"""),
+        {"day": page.source_day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
+         "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1]}).mappings().all()
+    if page.reused:
+        if (len(published) != 1 or published[0]["id"] != manifest.manifest_id or page.source_authority is None
+                or PostgresMigrationSource.source_authority(conn, published[0]) != page.source_authority):
+            raise RuntimeError(f"canonical_cold_audit_source_archive_authority_changed: page={manifest.manifest_id}")
+    elif published:
+        raise RuntimeError(f"canonical_cold_audit_new_overlapping_source_archive_page: page={manifest.manifest_id}")
     loaded = conn.execute(text("SELECT * FROM market.cold_fact_pages WHERE id=:id"),
                           {"id": manifest.manifest_id}).mappings().one_or_none()
     if loaded is None or _manifest(loaded) != manifest:
@@ -258,7 +272,7 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
         after = prior.manifest.last_cursor
     reader = ColdHistoryReader(store, limits=FactArchiveLimits(**binding["limits"]),
                                ensure_contracts=lambda pairs: ensure_payload_contracts(conn, pairs))
-    current, count, page_hashes = after_ordinal, 0, []
+    current, count, page_hashes, authority_receipts = after_ordinal, 0, [], []
     pages = checkpoint.iter_completed_pages(day=day, after_ordinal=after_ordinal)
     try:
         for page in islice(pages, max_pages):
@@ -271,6 +285,10 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
             current = page.ordinal
             after = page.manifest.last_cursor
             page_hashes.append(page.manifest.manifest_hash)
+            if page.source_authority is not None:
+                authority_receipts.append({"ordinal": page.ordinal, "kind": page.source_authority["kind"],
+                    "current_verification_hash": page.source_authority["verification_hash"],
+                    "authority_hash": archive_evidence_hash(page.source_authority)})
     finally:
         pages.close()
     end_reached = current + 1 == total_pages
@@ -284,7 +302,8 @@ def _audit_day(conn, checkpoint, binding, store, *, source, day, cutoff, child_o
     return {"storage_day": day.isoformat(), "verified_rows": count, "verified_pages": len(page_hashes),
             "start_after_ordinal": after_ordinal, "last_verified_ordinal": current, "last_cursor": list(after),
             "expected_day_rows": total_rows, "expected_day_pages": total_pages,
-            "day_scan_end_reached": end_reached, "manifest_hashes": page_hashes}
+            "day_scan_end_reached": end_reached, "manifest_hashes": page_hashes,
+            "source_archive_authority_receipts": authority_receipts}
 
 
 def _audit_inventory(conn, checkpoint, *, allowed_days, after_manifest, max_pages, deadline):
