@@ -13,9 +13,10 @@ services:
         while [ ! -f /qt-restore/restore-request ]; do sleep 1; done
         test ! -e /qt-history/source-volume
         test -z "$$(ls -A /qt-history/raw-index)"
-        label="$$(cat /qt-restore/restore-request)"
+        { read -r label; read -r tablespace; } < /qt-restore/restore-request
+        case "$$tablespace" in ''|*[!a-z0-9_]*) exit 1 ;; esac
         if pgbackrest --config=/qt-restore/recovered-access/pgbackrest.conf --stanza=qt \
-             --set="$$label" --tablespace-map-all=/qt-history/raw-index \
+             --set="$$label" --tablespace-map="$$tablespace=/qt-history/raw-index" \
              --type=immediate --target-action=promote --archive-mode=off \
              '--recovery-option=restore_command=/usr/local/bin/pgbackrest --config=/qt-restore/recovered-access/pgbackrest.conf --stanza=qt archive-get %f "%p"' \
              restore; then

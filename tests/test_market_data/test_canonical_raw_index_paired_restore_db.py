@@ -1,5 +1,6 @@
 """Recover the moved raw mapping PK from a paired copy at its original SQL path."""
 
+from functools import partial
 import os
 from pathlib import Path
 from time import monotonic, sleep
@@ -18,7 +19,7 @@ pytestmark = [
 ]
 
 
-def _restore_same_path(worker, copied, selected, *target):
+def _restore_same_path(worker, copied, selected, *target, tablespace):
     assert target == ("--type=immediate",)
     source = Path("/qt-history")
     restored = Path("/qt-restored-history")
@@ -29,7 +30,7 @@ def _restore_same_path(worker, copied, selected, *target):
     assert not (restored / "source-volume").exists()
     _restored_access(worker, copied)
     request = root / "restore-request.tmp"
-    request.write_text(selected["database_label"])
+    request.write_text(f"{selected['database_label']}\n{tablespace}\n")
     request.rename(root / "restore-request")
     deadline = monotonic() + 45
     while not (root / "restore-complete").is_file():
@@ -50,6 +51,11 @@ def test_paired_restore_keeps_raw_index_on_same_logical_path(storage, tmp_path, 
     monkeypatch.setenv("QT_TRANSITION_RAW_INDEX_TABLESPACE_DIRECTORY", str(location))
     scope = request.getfixturevalue("native_raw_index_target")
     with storage.database._engine.begin() as conn:
-        spaces = conn.scalars(text("SELECT oid::bigint FROM pg_tablespace WHERE spcname NOT IN ('pg_default','pg_global')"))
-        assert spaces.all() == [scope["tablespace_oid"]]
-    _exercise_postwrite_pair(storage, tmp_path, monkeypatch, raw_scope=scope, restore_database=_restore_same_path)
+        spaces = conn.execute(text("""
+            SELECT oid::bigint,spcname,pg_tablespace_location(oid) FROM pg_tablespace
+            WHERE spcname NOT IN ('pg_default','pg_global')
+        """)).all()
+        [(oid, tablespace, path)] = spaces
+        assert (oid, path) == (scope["tablespace_oid"], str(location))
+    _exercise_postwrite_pair(storage, tmp_path, monkeypatch, raw_scope=scope,
+                             restore_database=partial(_restore_same_path, tablespace=tablespace))
