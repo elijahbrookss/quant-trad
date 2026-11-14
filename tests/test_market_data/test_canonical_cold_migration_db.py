@@ -1,9 +1,16 @@
 """Native PostgreSQL source and prepared-catalog smoke on a disposable database."""
 from datetime import UTC, datetime, timedelta
+import os
+from pathlib import Path
+import pwd
+import shutil
+import subprocess
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import JSON, bindparam, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -27,7 +34,6 @@ from portal.backend.service.storage.repos.fact_archive_generation import (
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.prepare_canonical_cold_catalog import prepare_catalog
-from tests.test_market_data.migration_test_support import fresh_migration_database
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
 from tests.test_market_data.test_canonical_fact_archive import _row
 
@@ -35,29 +41,80 @@ from tests.test_market_data.test_canonical_fact_archive import _row
 pytestmark = pytest.mark.db
 
 
+@pytest.fixture(scope="module")
+def local_catalog_server():
+    """Give the catalog SQL and the test process the same filesystem view."""
+    if os.getenv("QT_DB_TEST_ISOLATED") != "1" or os.getenv("RUN_DB_TESTS") != "1":
+        raise RuntimeError("cold_catalog_tests_require_disposable_db_runner")
+    bindir = Path("/usr/lib/postgresql/15/bin")
+    pg_config = shutil.which("pg_config")
+    if not (bindir / "initdb").is_file() and pg_config is not None:
+        bindir = Path(subprocess.run([pg_config, "--bindir"], check=True, capture_output=True,
+                                     text=True, timeout=10).stdout.strip())
+    if not all((bindir / name).is_file() for name in ("initdb", "pg_ctl")):
+        raise RuntimeError("cold_catalog_tests_require_local_postgresql_server_tools")
+    command_prefix = []
+    account = pwd.getpwuid(os.geteuid())
+    if os.geteuid() == 0:
+        runuser = shutil.which("runuser")
+        if runuser is None:
+            raise RuntimeError("cold_catalog_tests_require_runuser_as_root")
+        account = pwd.getpwnam("postgres")
+        command_prefix = [runuser, "-u", account.pw_name, "--"]
+
+    environment = {"PATH": os.environ["PATH"], "LC_ALL": "C"}
+    with TemporaryDirectory(prefix="qt-cold-catalog-", dir="/tmp") as directory:
+        root = Path(directory)
+        if os.geteuid() == 0:
+            os.chown(root, account.pw_uid, account.pw_gid)
+        data, socket = root / "pgdata", root / "socket"
+        socket.mkdir(mode=0o700)
+        if os.geteuid() == 0:
+            os.chown(socket, account.pw_uid, account.pw_gid)
+        subprocess.run([*command_prefix, str(bindir / "initdb"), "-D", str(data), "--no-locale",
+                        "--encoding=UTF8", "--auth-local=trust", "--auth-host=reject"],
+                       check=True, capture_output=True, text=True, timeout=120, env=environment)
+        ctl = [*command_prefix, str(bindir / "pg_ctl"), "-D", str(data), "-w", "-t", "45"]
+        log = root / "postgres.log"
+        options = f"-c listen_addresses= -c unix_socket_directories={socket} -c shared_buffers=16MB -c max_connections=10"
+        try:
+            subprocess.run([*ctl, "-l", str(log), "-o", options, "start"], check=True,
+                           capture_output=True, text=True, timeout=60, env=environment)
+            url = URL.create("postgresql+psycopg2", username=account.pw_name,
+                             database="postgres", query={"host": str(socket)})
+            yield url, root, account
+        finally:
+            if (data / "postmaster.pid").exists():
+                subprocess.run([*ctl, "-m", "fast", "stop"], check=True,
+                               capture_output=True, text=True, timeout=60, env=environment)
+
+
 @pytest.fixture
-def prepared_database(tmp_path):
+def prepared_database(local_catalog_server):
+    url, server_root, account = local_catalog_server
+    database = f"qt_cold_{uuid4().hex[:16]}"
     tablespace = f"qt_cold_{uuid4().hex[:16]}"
-    root = tmp_path / "pg-history"
-    root.mkdir()
-    admin = None
+    root = server_root / tablespace
+    root.mkdir(mode=0o700)
+    if os.geteuid() == 0:
+        os.chown(root, account.pw_uid, account.pw_gid)
+    admin = create_engine(url, isolation_level="AUTOCOMMIT")
+    engine = create_engine(url.set(database=database))
     try:
-        with fresh_migration_database("canonical_cold", install_extensions=False) as dsn:
-            engine = create_engine(dsn)
-            try:
-                with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-                    conn.execute(text(f"CREATE TABLESPACE {tablespace} LOCATION :root"), {"root": str(root)})
-                admin = create_engine(engine.url.set(database="postgres"), isolation_level="AUTOCOMMIT")
-                yield engine, tablespace, root
-            finally:
-                engine.dispose()
+        with admin.connect() as conn:
+            conn.execute(text("SET statement_timeout = '15s'"))
+            conn.exec_driver_sql(f"CREATE DATABASE {database} TEMPLATE template0")
+            conn.execute(text(f"CREATE TABLESPACE {tablespace} LOCATION :root"), {"root": str(root)})
+        yield engine, tablespace, root
     finally:
-        if admin is not None:
-            try:
-                with admin.connect() as conn:
-                    conn.execute(text(f"DROP TABLESPACE {tablespace}"))
-            finally:
-                admin.dispose()
+        engine.dispose()
+        try:
+            with admin.connect() as conn:
+                conn.execute(text("SET statement_timeout = '15s'"))
+                conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)")
+                conn.exec_driver_sql(f"DROP TABLESPACE IF EXISTS {tablespace}")
+        finally:
+            admin.dispose()
 
 
 SOURCE_FIELDS = {"storage_day": "date", "series_id": "bigint", "source_id": "bigint",

@@ -14,7 +14,9 @@ from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_load import load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
-from tests.test_market_data.test_canonical_cold_migration_db import _prepare, _published_generation, prepared_database  # noqa: F401
+from tests.test_market_data.test_canonical_cold_migration_db import (  # noqa: F401
+    _prepare, _published_generation, local_catalog_server, prepared_database,
+)
 from tests.test_market_data.test_canonical_fact_archive import _row
 
 
