@@ -33,6 +33,7 @@ from scripts.db.canonical_cold_database_fence import close_database_fence, reope
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index
 from scripts.db.canonical_cold_recovery_anchor import create_original_recovery_anchor
+from scripts.db.canonical_cold_recovery_wal_transfer import stage_final_wal, verify_final_wal
 from scripts.db.canonical_cold_recovery_suffix import (
     capture_final_archive_suffix, prepare_archive_baseline, verify_final_archive_suffix,
 )
@@ -111,7 +112,7 @@ def _exercise_postwrite_pair(storage, tmp_path, monkeypatch, *, raw_scope=None, 
     _later_trade(structures, root, claim, record)
     assert len(_admitted_rows(storage.database, series)[0]) == 2
 
-    restore_root, copied, receipt = _copy_repository(worker, selected)
+    restore_root, copied, receipt, _ = _copy_repository(worker, selected)
     # Hold the original plaintext archive objects out of the runtime reader's path.
     objects.root.rename(root / "original-objects")
     (_restore_database if restore_database is None else restore_database)(worker, copied, selected, "--type=immediate")
@@ -188,10 +189,16 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     assert baseline_refs[0].raw_record_id == baseline_raw.raw_record_id
     original_receipt = worker.root / baseline["name"] / "complete.json"
     receipt_hash = hashlib.sha256(original_receipt.read_bytes()).hexdigest()
+    restore_root, copied, receipt, transfer = _copy_repository(worker, baseline)
     prestaged = tmp_path / "baseline-restic"
-    worker._run(worker._rs("restore", baseline["archive_snapshot"], "--target", str(prestaged)))
+    prestaged.mkdir(mode=0o700)
+    handoff_base = dict(repository=copied, receipt_sha256=receipt_hash, pgbackrest=worker.pgbackrest,
+        restic=worker.restic, database_key=worker.config.database_key_path, archive_key=worker.config.archive_key_path,
+        timeout_seconds=60, max_archive_bytes=64 * 1024**2, max_archive_objects=100,
+        wal_segment_bytes=16 * 1024**2, max_wal_segments=32)
+    baseline_verification = verify_handoff(**handoff_base, archive_restore=prestaged)
     baseline_inventory = prepare_archive_baseline(
-        original_receipt, prestaged, expected_receipt_sha256=receipt_hash, max_objects=100,
+        receipt, prestaged, expected_receipt_sha256=receipt_hash, max_objects=100,
     )
     suffix_repo = tmp_path / "suffix-restic"
 
@@ -212,6 +219,7 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
     assert len(original_reader) == 2
     target = {"system_identifier": system_identifier, "database_oid": int(database_oid),
               "database": engine.url.database}
+    anchor_receipt = tmp_path / "anchor.json"
 
     with activation_fixture._fence_connections(storage) as (retained, control):
         events = []
@@ -235,6 +243,19 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
                 )
                 assert anchor["database"]["allow_connections"] is False
                 assert anchor["storage_layout"] == baseline["storage_layout"]
+                anchor_receipt.write_text(json.dumps(anchor, sort_keys=True))
+                anchor_hash = hashlib.sha256(anchor_receipt.read_bytes()).hexdigest()
+                wal_options = dict(receiving=copied, base_transfer_sha256=transfer["transfer_receipt_sha256"],
+                    baseline=baseline_verification, baseline_verification_sha256=baseline_verification["verification_sha256"],
+                    anchor_path=anchor_receipt, anchor_sha256=anchor_hash)
+                transport = dict(fence=fence, control=control, source=worker.root, **wal_options)
+                with pytest.raises(ValueError, match="ciphertext_budget_exceeded"):
+                    stage_final_wal(**transport, limits=TransferLimits(seconds=25, bytes=1, files=32))
+                wal_limits = TransferLimits(seconds=25, bytes=64 * 1024**2, files=32, reserve_bytes=16 * 1024**2)
+                wal_transfer = stage_final_wal(**transport, limits=wal_limits)
+                assert stage_final_wal(**transport, limits=wal_limits) == wal_transfer
+                assert wal_transfer["wal_transferred_through"] == anchor["wal_segment"]
+                assert wal_transfer["encrypted_bytes"] > 0
                 stage = tmp_path / "archive-suffix"
                 stage.mkdir(mode=0o700)
                 with archive_namespace(objects.root, exclusive=True) as check_archive:
@@ -277,18 +298,28 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
         """), {"wal": wal_name}):
             assert monotonic() < deadline, "anchor and post-anchor WAL must be archived"
             sleep(0.1)
-    restore_root, copied, receipt = _copy_repository(worker, baseline)
+        beyond = conn.scalar(text("SELECT last_archived_wal FROM pg_stat_archiver"))
+    assert not list((copied / "database" / "archive" / "qt" / "15-1" / beyond[:16]).glob(beyond + "-*"))
+    assert verify_final_wal(**wal_options, expected_hash=wal_transfer["wal_transfer_sha256"], limits=wal_limits) == wal_transfer
+    with (copied / wal_transfer["files"][-1]["path"]).open("r+b") as cipher:
+        first_byte = cipher.read(1)
+        try:
+            cipher.seek(0)
+            cipher.write(bytes([first_byte[0] ^ 0xff]))
+            cipher.flush()
+            with pytest.raises(RuntimeError, match="receiving_ciphertext_changed"):
+                verify_final_wal(**wal_options, expected_hash=wal_transfer["wal_transfer_sha256"], limits=wal_limits)
+        finally:
+            cipher.seek(0)
+            cipher.write(first_byte)
+    print(f"QT_FINAL_WAL files={len(wal_transfer['files'])} bytes={wal_transfer['encrypted_bytes']}")
+
     _restore_database(worker, copied, baseline, "--type=name", "--target=" + anchor["restore_name"],
                       "--target-timeline=" + str(anchor["timeline"]))
-    anchor_receipt = tmp_path / "anchor.json"
-    anchor_receipt.write_text(json.dumps(anchor, sort_keys=True))
     baseline_restore = tmp_path / "baseline-verified-restore"
     baseline_restore.mkdir(mode=0o700)
-    handoff_options = dict(repository=copied, receipt_sha256=receipt_hash, archive_restore=baseline_restore,
-        pgbackrest=worker.pgbackrest, restic=worker.restic, database_key=worker.config.database_key_path,
-        archive_key=worker.config.archive_key_path, timeout_seconds=60, max_archive_bytes=64 * 1024**2,
-        max_archive_objects=100, wal_segment_bytes=16 * 1024**2, max_wal_segments=32,
-        anchor=anchor_receipt, anchor_sha256=hashlib.sha256(anchor_receipt.read_bytes()).hexdigest(),
+    handoff_options = dict(**handoff_base, archive_restore=baseline_restore,
+        anchor=anchor_receipt, anchor_sha256=anchor_hash,
         isolated_pgdata=restore_root / "pgdata")
     with pytest.raises(ValueError, match="evidence_hash_mismatch"):
         verify_handoff(**{**handoff_options, "receipt_sha256": "a" * 64})
@@ -456,7 +487,7 @@ def _copy_repository(worker, selected):
             handle.seek(0)
             handle.write(first)
     print(f"QT_PAIRED_TRANSFER files={transfer['encrypted_files']} bytes={transfer['encrypted_bytes']}")
-    return restore_root, copied, copied / "complete.json"
+    return restore_root, copied, copied / "complete.json", transfer
 
 
 def _restored_access(worker, copied):

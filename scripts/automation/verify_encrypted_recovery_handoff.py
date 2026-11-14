@@ -113,11 +113,11 @@ def _archive_filenames(database_repo, archive_id, segments, check):
                         raise ValueError("recovery_handoff_wal_archive_directory_outside_budget")
                     match = re.fullmatch(r"([0-9A-F]{24})-([0-9a-f]{40})(?:\.(?:zst|gz|bz2|lz4))?", entry.name)
                     if match:
-                        files.setdefault(match[1], []).append((match[2], entry.is_file(follow_symlinks=False)))
+                        files.setdefault(match[1], []).append((match[2], Path(entry.path), entry.is_file(follow_symlinks=False)))
         found = files.get(segment, [])
-        if len(found) != 1 or not found[0][1]:
+        if len(found) != 1 or not found[0][2]:
             raise RuntimeError(f"recovery_handoff_wal_segment_missing_or_ambiguous:{segment}")
-        yield segment, found[0][0]
+        yield segment, found[0][0], found[0][1]
 
 
 def _anchor_wal(path, expected_hash, receipt, stop):
@@ -232,7 +232,8 @@ def verify_handoff(*, repository, receipt_sha256, archive_restore, pgbackrest, r
         last = _anchor_wal(anchor, anchor_sha256, receipt, stop) if anchor is not None else stop
         segments = _wal_range(first, last, wal_segment_bytes, max_wal_segments)
         backup_segments = _wal_range(first, stop, wal_segment_bytes, max_wal_segments)
-        entries = list(_archive_filenames(database_repo, f"15-{database_id}", segments, check))
+        archive_id = f"15-{database_id}"
+        entries = [(segment, checksum) for segment, checksum, _ in _archive_filenames(database_repo, archive_id, segments, check)]
         verified_files = _verified_backup(run([*br, "--output=text", "--verbose",
                                                 "--set=" + receipt["database_label"], "verify"]),
                                           receipt["database_label"], database_id, len(backup_segments))
@@ -270,6 +271,7 @@ def verify_handoff(*, repository, receipt_sha256, archive_restore, pgbackrest, r
               "storage_layout": receipt["storage_layout"], "database_label": receipt["database_label"], "tools": tools,
               "archive_snapshot": receipt["archive_snapshot"], "database_chain": chain, "verified_backup_files": verified_files,
               "wal_start": first, "wal_backup_stop": stop, "wal_verified_through": last, "wal_segments": len(entries),
+              "wal_segment_bytes": wal_segment_bytes, "database_archive_id": archive_id,
               "wal_inventory_sha256": archive_evidence_hash(entries), "anchor_sha256": anchor_sha256, **archives}
     return report | {"verification_sha256": archive_evidence_hash(report)}
 
