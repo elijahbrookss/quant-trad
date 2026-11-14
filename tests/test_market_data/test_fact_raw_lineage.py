@@ -494,7 +494,7 @@ def test_bound_book_positions_remain_bounded_with_unbound_trade_witnesses(tmp_pa
     assert "EXISTS (SELECT 1 FROM jsonb_to_recordset" not in position_sql
 
 
-def test_bound_record_witnesses_prune_manifests_before_mapping_lookup(tmp_path):
+def test_bound_record_witnesses_seek_requested_keys_and_restrict_admitted_manifests(tmp_path):
     store, _, mappings, rows = _fixture(tmp_path)
     session = _Session(mappings)
     refs = resolve_canonical_raw_archive_refs(session, rows=rows, object_store=store,
@@ -505,7 +505,8 @@ def test_bound_record_witnesses_prune_manifests_before_mapping_lookup(tmp_path):
     assert params["bound_ids"] == ["raw-manifest"]
     assert "WITH requested_records AS MATERIALIZED" in record_sql
     assert "candidate_manifests AS MATERIALIZED" in record_sql
-    assert "JOIN requested_records AS records" in record_sql
+    assert "FROM requested_records AS records" in record_sql
+    assert "CROSS JOIN LATERAL" in record_sql and "OFFSET 0" in record_sql
     assert "JOIN candidate_manifests AS manifests" in record_sql
     assert "records.raw_record_id=mappings.raw_record_id" in record_sql
     assert "mappings.raw_record_id = ANY" not in record_sql
