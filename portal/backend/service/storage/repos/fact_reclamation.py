@@ -110,6 +110,7 @@ class FactReclamationLimits:
     statement_timeout_ms: int = 1000
     pinned_ranges_statement_timeout_ms: int = 1000
     max_handoff_seconds: int = 10
+    count_statement_timeout_ms: int | None = None
 
     def __post_init__(self):
         for field in ("statement_timeout_ms", "pinned_ranges_statement_timeout_ms",
@@ -121,6 +122,10 @@ class FactReclamationLimits:
                 raise ValueError(f"canonical_reclaim_limit_invalid: field={field}")
         if self.max_handoff_seconds > 60:
             raise ValueError("canonical_reclaim_limit_invalid: field=max_handoff_seconds")
+        if (self.count_statement_timeout_ms is not None
+                and (type(self.count_statement_timeout_ms) is not int
+                     or not 1 <= self.count_statement_timeout_ms <= 60_000)):
+            raise ValueError("canonical_reclaim_limit_invalid: field=count_statement_timeout_ms")
 
 
 class PostgresCanonicalFactReclamationRepository:
@@ -306,7 +311,9 @@ class PostgresCanonicalFactReclamationRepository:
             handoff = FactHandoffProof(check_budget=self.archive._check_budget) if execute and not already_reclaimed else None
             with objects.distinct_references():
                 evidence = self.archive._partition_evidence(session, partition, limits=verification_limits,
-                    objects=objects, handoff=handoff, retired=retired)
+                    objects=objects, handoff=handoff, retired=retired,
+                    count_statement_timeout_ms=self.limits.count_statement_timeout_ms,
+                    remaining_count_seconds=self.remaining_run_seconds)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             self._assert_archive_admission(objects)
@@ -347,6 +354,15 @@ class PostgresCanonicalFactReclamationRepository:
             check_budget()
             return self.limits.max_handoff_seconds - (monotonic() - started)
 
+        def remaining_count_seconds():
+            handoff_remaining = remaining_handoff_seconds()
+            if self.remaining_run_seconds is None:
+                return handoff_remaining
+            run_remaining = self.remaining_run_seconds()
+            if type(run_remaining) not in {int, float} or not isfinite(run_remaining) or run_remaining <= 0:
+                raise RuntimeError("canonical_archive_handoff_run_budget_exceeded")
+            return min(handoff_remaining, run_remaining)
+
         with self.archive.database.session() as session:
             self._timeouts(session)
             acquired = session.execute(text(
@@ -364,7 +380,9 @@ class PostgresCanonicalFactReclamationRepository:
             if self._relation(session, day) != relation_oid:
                 raise RuntimeError(f"canonical_reclaim_relation_changed: storage_day={day}")
             current = self.archive._partition_evidence(session, partition, limits=verification_limits,
-                check_budget=check_budget, handoff=handoff)
+                check_budget=check_budget, handoff=handoff,
+                count_statement_timeout_ms=self.limits.count_statement_timeout_ms,
+                remaining_count_seconds=remaining_count_seconds)
             if current["manifest_set_hash"] != evidence["manifest_set_hash"] or current["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
             if current["source_placement_hash"] != evidence["source_placement_hash"]:

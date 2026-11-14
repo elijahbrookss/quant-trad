@@ -28,9 +28,9 @@ from ..storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
 from ..storage.history_policy import saved_canonical_policy, require_saved_history_policy
 
 logger = logging.getLogger(__name__)
-# Exact full-partition counts are the only sealing statements with this larger
-# allowance. Each count remains bounded by the current run's remaining time.
-_SEAL_COUNT_STATEMENT_TIMEOUT_MS = 60_000
+# Exact full-partition counts have their own allowance. Each count remains
+# bounded by the current run and, during retirement, the exclusive handoff.
+_COUNT_STATEMENT_TIMEOUT_MS = 60_000
 
 _PAGE_PREREQUISITE_STATUSES = frozenset({"book_prefix_verified", "trade_prefix_verified"})
 _MAX_PAGE_PREREQUISITE_COMMITS = 64
@@ -260,7 +260,7 @@ class CanonicalFactRetentionExecutor:
             max_objects=policy.max_verification_objects, max_pages=policy.max_verification_pages)
         if action == "seal_partition":
             return {**archive.seal_partition(
-                day, count_statement_timeout_ms=_SEAL_COUNT_STATEMENT_TIMEOUT_MS,
+                day, count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
                 remaining_run_seconds=current_remaining_seconds,
             ), "status": "partition_sealed"}
         if action == "stage_page":
@@ -289,7 +289,10 @@ class CanonicalFactRetentionExecutor:
         if action == "verify_page":
             return archive.verify_next_page(day)
         if action == "verify_partition":
-            return archive.verify_partition(day, limits=verification)
+            return archive.verify_partition(
+                day, limits=verification, count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
+                remaining_run_seconds=current_remaining_seconds,
+            )
         if action == "restart_verification":
             return archive.restart_partition_verification(day)
         if action == "reclaim_partition":
@@ -299,6 +302,7 @@ class CanonicalFactRetentionExecutor:
                     pinned_ranges_statement_timeout_ms=min(
                         policy.pinned_ranges_statement_timeout_ms, timeout),
                     max_handoff_seconds=policy.max_handoff_seconds,
+                    count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
                 ), remaining_run_seconds=current_remaining_seconds)
             return reclaimer.reclaim_partition(day, eligible_before=date.fromisoformat(item["eligible_before"]),
                                                 execute=True, verification_limits=verification)

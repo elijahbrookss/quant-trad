@@ -709,21 +709,21 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError(f"canonical_archive_partition_unknown: storage_day={day}")
             return dict(row)
 
-    def _set_seal_timeout(self, session, timeout_ms, remaining_run_seconds):
+    def _set_archive_timeout(self, session, timeout_ms, remaining_run_seconds, *, phase):
         self._check_budget()
         if remaining_run_seconds is not None:
             remaining = remaining_run_seconds()
             if (type(remaining) not in {int, float} or not isfinite(remaining)
                     or int(remaining * 1000) <= 0):
-                raise RuntimeError("canonical_archive_seal_run_budget_exceeded")
+                raise RuntimeError(f"canonical_archive_{phase}_run_budget_exceeded")
             timeout_ms = min(timeout_ms, int(remaining * 1000))
         session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                         {"timeout": str(timeout_ms)})
         return timeout_ms
 
-    def _seal_source_count(self, session, day, *, relation, timeout_ms,
-                           remaining_run_seconds):
-        # Relation names are fixed by seal_partition, never supplied by a caller.
+    def _source_count(self, session, day, *, relation, timeout_ms,
+                      remaining_run_seconds, phase):
+        # Relation names are fixed by the archive methods.
         query = text(f"SELECT count(*) FROM market.{relation} WHERE storage_day=:day")
         if timeout_ms is None:
             return session.execute(query, {"day": day}).scalar_one()
@@ -735,21 +735,21 @@ class PostgresCanonicalFactArchiveRepository:
             # before releasing the savepoint or running any other statement.
             with session.begin_nested():
                 previous = session.execute(text("SHOW statement_timeout")).scalar_one()
-                effective_timeout = self._set_seal_timeout(
-                    session, timeout_ms, remaining_run_seconds,
+                effective_timeout = self._set_archive_timeout(
+                    session, timeout_ms, remaining_run_seconds, phase=phase,
                 )
                 count = session.execute(query, {"day": day}).scalar_one()
                 self._check_budget()
                 session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                                 {"timeout": previous})
-            logger.info("canonical_archive_seal_count | storage_day=%s source=%s "
+            logger.info("canonical_archive_%s_count | storage_day=%s source=%s "
                         "outcome=completed rows=%s timeout_ms=%s seconds=%.6f",
-                        day, relation, count, effective_timeout, perf_counter() - started)
+                        phase, day, relation, count, effective_timeout, perf_counter() - started)
             return count
         except BaseException:
-            logger.info("canonical_archive_seal_count | storage_day=%s source=%s "
+            logger.info("canonical_archive_%s_count | storage_day=%s source=%s "
                         "outcome=failed timeout_ms=%s seconds=%.6f",
-                        day, relation, effective_timeout, perf_counter() - started)
+                        phase, day, relation, effective_timeout, perf_counter() - started)
             raise
 
     def seal_partition(self, day: date, *, count_statement_timeout_ms: int | None = None,
@@ -774,22 +774,22 @@ class PostgresCanonicalFactArchiveRepository:
             """), {"relation": relation}).scalar_one()
             if not attached:
                 raise RuntimeError(f"canonical_archive_partition_not_attached: storage_day={day}")
-            count = self._seal_source_count(
+            count = self._source_count(
                 session, day, relation="fact_versions", timeout_ms=count_statement_timeout_ms,
-                remaining_run_seconds=remaining_run_seconds,
+                remaining_run_seconds=remaining_run_seconds, phase="seal",
             )
-            hot_count = self._seal_source_count(
+            hot_count = self._source_count(
                 session, day, relation="fact_hot_payloads", timeout_ms=count_statement_timeout_ms,
-                remaining_run_seconds=remaining_run_seconds,
+                remaining_run_seconds=remaining_run_seconds, phase="seal",
             )
             if count != hot_count:
                 raise RuntimeError(f"canonical_archive_source_incomplete: storage_day={day} expected={count} hot={hot_count}")
             if self.statement_timeout_ms is not None:
-                self._set_seal_timeout(session, self.statement_timeout_ms, remaining_run_seconds)
+                self._set_archive_timeout(session, self.statement_timeout_ms, remaining_run_seconds, phase="seal")
             source_bytes = session.execute(text("SELECT pg_total_relation_size(to_regclass(:relation))"),
                                            {"relation": relation}).scalar_one()
             if self.statement_timeout_ms is not None:
-                self._set_seal_timeout(session, self.statement_timeout_ms, remaining_run_seconds)
+                self._set_archive_timeout(session, self.statement_timeout_ms, remaining_run_seconds, phase="seal")
             result = session.execute(text("""
                 UPDATE market.fact_retention_partitions
                 SET state='sealed', sealed_at=clock_timestamp(), expected_rows=:count, source_bytes=:bytes
@@ -1775,7 +1775,8 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={expired}")
 
     def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None,
-                            handoff=None, retired=None):
+                            handoff=None, retired=None, count_statement_timeout_ms=None,
+                            remaining_count_seconds=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
         Supplying a byte verifier additionally checks every current cold object.
@@ -1895,9 +1896,11 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError("canonical_handoff_page_scope_changed")
         if check_budget is not None:
             check_budget()
-        count = retired["row_count"] if retired is not None else session.execute(text(
-            "SELECT count(*) FROM market.fact_versions WHERE storage_day=:day"
-        ), {"day": day}).scalar_one()
+        count = retired["row_count"] if retired is not None else self._source_count(
+            session, day, relation="fact_versions", timeout_ms=count_statement_timeout_ms,
+            remaining_run_seconds=remaining_count_seconds,
+            phase="handoff" if final_handoff else "partition_evidence",
+        )
         # Each verified interval equals its complete header range. Nonoverlap
         # plus equal total cardinality proves no headers were skipped between
         # pages, before the first, or after the last page.
@@ -1910,20 +1913,31 @@ class PostgresCanonicalFactArchiveRepository:
                 "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs),
                 "source_placement_hash": archive_evidence_hash({"pages": source_placements})}
 
-    def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits()) -> dict:
+    def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits(),
+                         count_statement_timeout_ms=None, remaining_run_seconds=None) -> dict:
         """Admit complete, currently readable cold coverage; retain all hot data.
 
         Expensive per-page decoding resumes via immutable receipts. This final
         bounded pass still rehashes current files; stale receipts cannot hide
         missing/corrupted bytes. Reclamation must repeat this fresh-byte gate.
         """
+        if (count_statement_timeout_ms is not None
+                and (type(count_statement_timeout_ms) is not int
+                     or not 1 <= count_statement_timeout_ms <= 60_000)):
+            raise ValueError("canonical_archive_verify_count_timeout_invalid")
+        if remaining_run_seconds is not None and not callable(remaining_run_seconds):
+            raise ValueError("canonical_archive_verify_remaining_budget_invalid")
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] not in {"sealed", "verified"}:
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
             objects = ArchiveVerificationBatch(self.object_store, limits=limits, check_budget=self.check_budget)
             with objects.distinct_references():
-                evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
+                evidence = self._partition_evidence(
+                    session, partition, limits=limits, objects=objects,
+                    count_statement_timeout_ms=count_statement_timeout_ms,
+                    remaining_count_seconds=remaining_run_seconds,
+                )
             if partition["state"] == "verified":
                 if partition["manifest_set_hash"] != evidence["manifest_set_hash"]:
                     raise RuntimeError(f"canonical_archive_partition_verification_changed: storage_day={day}")

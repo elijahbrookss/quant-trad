@@ -1311,6 +1311,7 @@ def test_final_handoff_policy_reaches_reclaimer_without_expanding_statement_boun
     assert seen[0]["limits"].max_handoff_seconds == seconds
     assert seen[0]["limits"].statement_timeout_ms == 1000
     assert seen[0]["limits"].pinned_ranges_statement_timeout_ms == 4321
+    assert seen[0]["limits"].count_statement_timeout_ms == 60_000
 
 
 @pytest.mark.parametrize("execution,pinned,remaining,expected", [

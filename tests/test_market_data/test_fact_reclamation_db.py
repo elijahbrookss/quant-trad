@@ -195,6 +195,48 @@ def test_cold_daily_retirement_publishes_and_prunes_exactly(storage, tmp_path, m
     assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
 
 
+def test_daily_reclaim_recounts_under_the_count_only_allowance(storage, tmp_path, monkeypatch):
+    day, archive, reclaimer = _prepare(storage, tmp_path, monkeypatch)
+    engine = storage.database._engine
+    count_timeouts = []
+    drop_timeouts = []
+    wrong_count = False
+
+    def slower_count(_conn, cursor, sql, params, *_):
+        if sql.startswith("SELECT count(*) FROM market.fact_versions WHERE storage_day="):
+            cursor.execute("SHOW statement_timeout")
+            count_timeouts.append(cursor.fetchone()[0])
+            count = "count(*) + (SELECT 0 FROM pg_sleep(1.1))"
+            if wrong_count and len(count_timeouts) == 4:
+                count += " + 1"
+            sql = sql.replace("count(*)", count, 1)
+        if sql.startswith('DROP TABLE market."fact_hot_payloads_'):
+            cursor.execute("SHOW statement_timeout")
+            drop_timeouts.append(cursor.fetchone()[0])
+        return sql, params
+
+    event.listen(engine, "before_cursor_execute", slower_count, retval=True)
+    try:
+        with pytest.raises(DBAPIError) as too_short:
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+        assert too_short.value.orig.pgcode == "57014"
+        assert archive.verify_partition(day, count_statement_timeout_ms=3000,
+                                        remaining_run_seconds=lambda: 10)["row_count"] == 3
+        reclaimer.limits = replace(reclaimer.limits, count_statement_timeout_ms=3000)
+        reclaimer.remaining_run_seconds = lambda: 20
+        wrong_count = True
+        with pytest.raises(RuntimeError, match="canonical_archive_source_coverage_mismatch"):
+            reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+        assert archive.inspect_partition(day)["state"] == "verified"
+        wrong_count = False
+        report = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+        assert report["status"] == "partition_reclaimed"
+    finally:
+        event.remove(engine, "before_cursor_execute", slower_count)
+    assert count_timeouts == ["1s", "3s", "3s", "3s", "3s", "3s"]
+    assert drop_timeouts == ["1s"]
+
+
 @pytest.mark.parametrize("page_rows", [1, 16])
 def test_reclamation_pin_audit_prefilter_preserves_gaps_cutoffs_and_binding_counts(storage, tmp_path, monkeypatch, page_rows):
     day = storage.today - timedelta(days=2)
