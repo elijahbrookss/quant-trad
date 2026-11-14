@@ -28,8 +28,9 @@ _DATABASE_PREVIOUS = {
     "database_unchanged": {"writers_stopped"},
     "login_closing": {"writers_stopped"}, "jobs_stopping": {"login_closing"},
     "database_fenced": {"jobs_stopping"}, "activation_committing": {"database_fenced"},
-    "activation_verified": {"activation_committing"},
-    "activation_rolled_back": {"database_fenced", "activation_committing"},
+    "activation_precommit_verified": {"activation_committing"},
+    "activation_verified": {"activation_precommit_verified"},
+    "activation_rolled_back": {"database_fenced", "activation_committing", "activation_precommit_verified"},
     "login_opening": {"activation_verified", "activation_rolled_back"},
     "jobs_restarting": {"login_opening"}, "database_reopened": {"jobs_restarting"},
 }

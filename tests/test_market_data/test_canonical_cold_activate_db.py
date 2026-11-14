@@ -32,7 +32,8 @@ from scripts.db import canonical_cold_activate as activation
 from scripts.db import canonical_cold_transition as transition_runner
 from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_audit import audit_candidate
-from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_commit_outcome import observe_activation_transaction, prepare_activation_transaction
+from scripts.db.canonical_cold_database_fence import _database, close_database_fence, reopen_database_fence
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
@@ -60,6 +61,45 @@ def _fence_connections(storage):
             quoted = admin.dialect.identifier_preparer.quote_identifier(engine.url.database)
             admin.exec_driver_sql(f"ALTER DATABASE {quoted} ALLOW_CONNECTIONS true")
         control.dispose()
+
+
+@pytest.mark.parametrize("committed", (False, True))
+def test_native_control_observes_lost_activation_connection_behind_closed_gate(storage, committed):
+    with _fence_connections(storage) as (conn, control):
+        with conn.begin():
+            database = _database(conn, storage.database._engine.url.database)
+        fence = close_database_fence(
+            conn, control, expected_database=database, timeout_seconds=30, record=lambda *args: None,
+        )
+        transaction = conn.begin()
+        identity = prepare_activation_transaction(conn, fence)
+        conn.exec_driver_sql("CREATE TABLE market.fixture_pending_cutover (value integer PRIMARY KEY)")
+        conn.exec_driver_sql("INSERT INTO market.fixture_pending_cutover VALUES (1)")
+        mark = conn.scalar(text("SELECT pg_current_wal_insert_lsn()::text")) if committed else None
+        arguments = {"database": fence.database, "backend_pid": fence.backend_pid, "transaction": identity,
+                     "precommit": mark}
+        active = observe_activation_transaction(control, **arguments)
+        assert active["transaction_status"] == "in progress" and active["source_backend_present"]
+        if committed:
+            transaction.commit()
+        # Invalidating the checked-out connection closes the actual backend.
+        # When it still owns a write transaction, the server must abort it.
+        conn.invalidate()
+        conn.close()
+        with pytest.raises(OperationalError):
+            storage.database._engine.connect()
+        result = observe_activation_transaction(control, **arguments)
+        assert result["transaction_status"] == ("committed" if committed else "aborted")
+        assert not result["source_backend_present"]
+        if committed and identity["fsync"] == "on":
+            assert result["commit_flushed"]
+        with pytest.raises(RuntimeError, match="transaction_source_changed"):
+            observe_activation_transaction(control, **{
+                **arguments, "database": {**fence.database, "postmaster_started_at": "unknown"},
+            })
+        if committed:
+            with pytest.raises(RuntimeError, match="missing_precommit_checks"):
+                observe_activation_transaction(control, **{**arguments, "precommit": None})
 
 
 def _configure_fixture_catalog(conn, database_identity, root):
@@ -214,11 +254,13 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=owner_path)
 
 
-def test_fenced_activation_moves_native_raw_index(storage, tmp_path, monkeypatch, native_raw_index_target):
-    _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=True, native_raw_index=native_raw_index_target)
+@pytest.mark.parametrize("lose_commit_reply", (False, True))
+def test_fenced_activation_moves_native_raw_index(storage, tmp_path, monkeypatch, native_raw_index_target, lose_commit_reply):
+    _exercise_exact_activation(storage, tmp_path, monkeypatch, owner_path=True, native_raw_index=native_raw_index_target,
+                               lose_commit_reply=lose_commit_reply)
 
 
-def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, native_raw_index=None):
+def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, native_raw_index=None, lose_commit_reply=False):
     native = native_raw_index is not None
     raw_scope = native_raw_index if native else _stub_raw_index_case(monkeypatch)
     engine = storage.database._engine
@@ -358,6 +400,8 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 fence.assert_quiet(fence.connection)
             return execution["evidence"]["independent_recovery"]
 
+        verified_candidate = []
+
         def verify_candidate(conn, result):
             phases.append("accepted")
             assert activation.read_activation_outcome(conn, **outcome_arguments) == "committed"
@@ -369,6 +413,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                 assert raw["before"]["tablespace_oid"] == 1663
                 assert raw["after"]["tablespace_oid"] == raw_scope["tablespace_oid"]
                 assert raw["after"]["index_oid"] == raw_scope["index_oid"]
+            verified_candidate.append(result)
 
         with _fence_connections(storage) as (retained, control):
             owner = dict(package=package, approved_package_hash=execution["approved_package_hash"],
@@ -485,19 +530,54 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
                                                        bound_provider, lambda _: "d" * 64, None))
                 patch.setattr(canonical_cold_execute, "bind_approved_recovery_checks",
                               lambda **kwargs: kwargs["verify_site_restore"])
-                completed = canonical_cold_execute.execute_approved_cutover(
-                    retained, control, state_root=tmp_path, inventory={}, package_path=tmp_path / "fixture.json",
-                    approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
-                    preflight_seconds=60, outage_seconds=60, provider_receipt_root=tmp_path, verify_recovery_boundary=recovery_boundary,
-                    verify_candidate=verify_candidate, verify_candidate_prestart=verify_started,
-                    verify_candidate_ready=verify_started, verify_original_ready=lambda _: pytest.fail("unexpected rollback"),
-                )
-            assert reopened == [True] and completed["runtime"] == {"ready": True, "collector_restart_sha256": "d" * 64}
-            result = completed["activation"]
-        assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
-                          "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
+                def execute_once():
+                    return canonical_cold_execute.execute_approved_cutover(
+                        retained, control, state_root=tmp_path, inventory={}, package_path=tmp_path / "fixture.json",
+                        approved_package_hash=execution["approved_package_hash"], receipts=receipts, store=new_store, limits=limits,
+                        preflight_seconds=60, outage_seconds=60, provider_receipt_root=tmp_path,
+                        verify_recovery_boundary=recovery_boundary, verify_candidate=verify_candidate,
+                        verify_candidate_prestart=verify_started, verify_candidate_ready=verify_started,
+                        verify_original_ready=lambda _: pytest.fail("unexpected rollback"),
+                    )
+
+                if lose_commit_reply:
+                    actual_commit = engine.dialect.do_commit
+
+                    def commit_without_reply(connection):
+                        actual_commit(connection)
+                        if phases[-1:] == ["activation_precommit_verified"]:
+                            retained.invalidate()
+                            raise ConnectionError("fixture activation COMMIT reply lost")
+
+                    with monkeypatch.context() as driver:
+                        driver.setattr(engine.dialect, "do_commit", commit_without_reply)
+                        with pytest.raises(ConnectionError, match="fixture activation COMMIT reply lost"):
+                            execute_once()
+                    journal = events["activation_precommit_verified"]
+                    source = events["database_fenced"]
+                    observed = observe_activation_transaction(
+                        control, database={**source["database"], "allow_connections": False}, backend_pid=source["backend_pid"],
+                        transaction=events["activation_committing"]["transaction"], precommit=journal["wal_before_commit"],
+                    )
+                    assert observed["transaction_status"] == "committed" and not observed["source_backend_present"]
+                    assert not reopened
+                    with pytest.raises(OperationalError, match="not currently accepting connections"):
+                        engine.connect()
+                    result = verified_candidate[-1]
+                else:
+                    completed = execute_once()
+                    assert reopened == [True] and completed["runtime"] == {"ready": True, "collector_restart_sha256": "d" * 64}
+                    result = completed["activation"]
+        expected_phases = ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
+                           "accepted", "activation_precommit_verified"]
+        if not lose_commit_reply:
+            expected_phases += ["activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
+            assert events["activation_precommit_verified"] == events["activation_verified"]
+        assert phases == expected_phases
+        precommit = events["activation_precommit_verified"]
         assert events["activation_committing"]["execution_hash"] == outcome_arguments["expected_execution_hash"]
-        assert events["activation_verified"]["identity_retirement"] == result["identity_retirement"]
+        assert events["activation_committing"]["transaction"]["xid"] == precommit["xid"]
+        assert precommit["identity_retirement"] == result["identity_retirement"]
         assert result["identity_retirement"]["verified_recovery_digest"] == execution["evidence"]["independent_recovery"]
         with engine.begin() as conn:
             assert conn.scalar(text(f"SELECT to_regclass('{PREVIOUS}') IS NULL"))
@@ -505,7 +585,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         if native:
             with engine.begin() as conn:
                 receipt_hash = conn.scalar(text("SELECT evidence->'raw_mapping_index'->>'receipt_hash' FROM market.fact_storage_state"))
-            assert events["activation_verified"]["raw_mapping_index_receipt_hash"] == receipt_hash
+            assert precommit["raw_mapping_index_receipt_hash"] == receipt_hash
     else:
         _exercise_fence_failures(storage, new_store, audit, outcome_arguments, receipts,
                                  identity, (legacy_day, daily_day))

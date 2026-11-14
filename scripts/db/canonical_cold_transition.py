@@ -7,6 +7,8 @@ from functools import partial
 import logging
 from time import monotonic
 
+from sqlalchemy import text
+
 from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
@@ -16,6 +18,7 @@ from scripts.db.canonical_cold_activate import (
     read_original_watermark, verify_mounted_candidate,
 )
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_commit_outcome import prepare_activation_transaction
 from scripts.db.canonical_cold_identity_rebuild import finalize_identity_suffix
 from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
@@ -127,10 +130,12 @@ def run_fenced_transition(
             )
             outcome = partial(read_activation_outcome, execution=execution, expected_execution_hash=execution_hash)
             retired_outcome = partial(outcome, require_identity_retired=True)
-            record("activation_committing", {"execution_hash": execution_hash, "source_commit_seq": source_commit,
-                                             "provider_boundary": provider_boundary, "independent_recovery": recovery_boundary})
             with conn.begin():
                 with _bounded_step(conn, remaining_seconds()):
+                    transaction = prepare_activation_transaction(conn, fence)
+                    record("activation_committing", {"execution_hash": execution_hash, "source_commit_seq": source_commit,
+                                                     "provider_boundary": provider_boundary,
+                                                     "independent_recovery": recovery_boundary, "transaction": transaction})
                     result = activate_cold_storage(
                         conn, execution=execution, expected_execution_hash=execution_hash,
                         receipts=receipts, verified_objects=verified_objects, database_fence=fence,
@@ -155,10 +160,25 @@ def run_fenced_transition(
                     check_archive()
                     assert_host_held()
                     remaining_seconds()
+                    raw_index = result["raw_mapping_index"]
+                    final_tx = conn.execute(text("""
+                        SELECT pg_current_xact_id_if_assigned()::text AS xid, current_setting('fsync') AS fsync,
+                               current_setting('synchronous_commit') AS synchronous_commit, pg_current_wal_insert_lsn()::text AS wal
+                    """)).mappings().one()
+                    if any(final_tx[key] != transaction[key] for key in ("xid", "fsync", "synchronous_commit")):
+                        raise RuntimeError("canonical_cold_transition_activation_transaction_changed")
+                    precommit = {"execution_hash": execution_hash, "xid": transaction["xid"], "witness_hash": witness_hash,
+                                 "raw_mapping_index_receipt_hash": raw_index and raw_index["receipt_hash"],
+                                 "identity_retirement": result["identity_retirement"],
+                                 "wal_before_commit": final_tx["wal"]}
+                    record("activation_precommit_verified", precommit)
         except Exception as error:
             # Prove the original outcome on the same live connection. A
             # disconnection, different result or expired budget leaves the hold
             # for its operator, with no reconnect or guessed rollback.
+            if conn.closed or conn.invalidated:
+                error.add_note("The retained SQL connection was lost. Inspect the held activation from the control database.")
+                raise
             try:
                 assert_host_held()
                 with conn.begin():
@@ -177,10 +197,7 @@ def run_fenced_transition(
                 fence.assert_quiet(conn)
                 if retired_outcome(conn) != "committed":
                     raise RuntimeError("canonical_cold_transition_commit_unconfirmed")
-        raw_index = result["raw_mapping_index"]
-        record("activation_verified", {"execution_hash": execution_hash, "witness_hash": witness_hash,
-                                       "raw_mapping_index_receipt_hash": raw_index and raw_index["receipt_hash"],
-                                       "identity_retirement": result["identity_retirement"]})
+        record("activation_verified", precommit)
         check_archive()
         assert_host_held()
         reopen_database_fence(fence, control, expected_outcome="committed", read_outcome=retired_outcome, record=record)

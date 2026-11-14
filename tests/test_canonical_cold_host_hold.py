@@ -1,4 +1,5 @@
 from contextlib import contextmanager, nullcontext
+import json
 import os
 from pathlib import Path
 from time import time
@@ -6,6 +7,7 @@ from time import time
 import pytest
 
 from market_data.archive_verification import ArchiveVerificationLimits
+from scripts.automation import canonical_cold_commit_observer as commit_observer
 from scripts.automation import canonical_cold_execute as execute
 from scripts.automation import canonical_cold_host_hold as hold
 from scripts.automation.canonical_cold_release_guard import compatible_release_floor
@@ -61,6 +63,100 @@ def test_hold_precedes_stops_and_stays_durable_after_process_owner_exits(authori
     with pytest.raises(RuntimeError, match="reconciliation_required"):
         with hold.hold_cold_cutover(**arguments):
             pytest.fail("replayed an already dispatched pause")
+
+
+def test_interrupted_activation_observes_only_reviewed_transaction(authorized_hold, monkeypatch):
+    arguments, stopped = authorized_hold
+    root = arguments["state_root"]
+    tx = {"xid": "583", "fsync": "on", "synchronous_commit": "local", "wal_before": "0/402"}
+    target = {"system_identifier": "11", "database_oid": 12, "database": "qt"}
+    database = {**target, "allow_connections": True, "postmaster_started_at": "1234.5"}
+    committing = {"execution_hash": "c" * 64, "source_commit_seq": 45, "provider_boundary": "d" * 64,
+                  "independent_recovery": "e" * 64, "transaction": tx}
+    precommit = {"execution_hash": "c" * 64, "xid": "583", "witness_hash": "f" * 64,
+                 "raw_mapping_index_receipt_hash": "5" * 64, "identity_retirement": {"done": True},
+                 "wal_before_commit": "0/456"}
+    with hold.hold_cold_cutover(**arguments) as (_, _, record, _, _):
+        for phase in ("login_closing", "jobs_stopping", "database_fenced"):
+            record(phase, {"database": database, "backend_pid": 9})
+        record("activation_committing", committing)
+        with pytest.raises(RuntimeError, match="phase_out_of_order"):
+            record("activation_verified", precommit)
+        record("activation_precommit_verified", precommit)
+
+    package = {"approved_inventory_hash": host.digest(arguments["inventory"])}
+    monkeypatch.setattr(commit_observer, "load_approved_package", lambda *a, **k: package)
+
+    def bind(value, **kwargs):
+        assert value is package and kwargs["source_commit_seq"] == 45
+        assert kwargs["provider_boundary"] == "d" * 64 and kwargs["independent_recovery"] == "e" * 64
+        return {"target_database": target, "source_commit_seq": 45}, committing["execution_hash"]
+
+    monkeypatch.setattr(commit_observer, "bind_execution", bind)
+    sightings = []
+
+    def host_observe(state_root, *, expected, stopped_services, timeout_seconds):
+        assert state_root == root and expected is arguments["inventory"] and stopped_services == stopped
+        assert 0 < timeout_seconds <= 30
+        sightings.append("host")
+
+    def sql_observe(control, *, database, backend_pid, transaction, precommit, timeout_seconds):
+        assert database == {**target, "allow_connections": False, "postmaster_started_at": "1234.5"}
+        assert backend_pid == 9 and transaction == tx and precommit == "0/456"
+        assert 0 < timeout_seconds <= 30
+        sightings.append("sql")
+        return {"xid": "583", "transaction_status": "committed", "commit_flushed": True}
+
+    monkeypatch.setattr(commit_observer, "assert_host_inventory", host_observe)
+    monkeypatch.setattr(commit_observer, "observe_activation_transaction", sql_observe)
+    supplied = {key: value for key, value in arguments.items() if key != "outage_deadline"}
+    snapshot = (root / hold.HOLD).read_bytes()
+    proof = commit_observer.observe_held_activation(object(), **supplied)
+    assert sightings == ["host", "sql", "host"]
+    assert proof["transaction_status"] == "committed" and proof["host_phase"] == "activation_precommit_verified"
+    assert (root / hold.HOLD).read_bytes() == snapshot
+    assert not (root / hold.COMPLETION).exists()
+
+    changed = host.load_receipt(root / hold.HOLD)
+    changed["database_evidence"]["activation_precommit_verified"]["xid"] = "999"
+    host.save_receipt(root / hold.HOLD, changed, initial=False)
+    with pytest.raises(RuntimeError, match="precommit_changed"):
+        commit_observer.observe_held_activation(object(), **supplied)
+
+
+def test_commit_observer_cli_connects_only_to_read_only_postgres(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "inventory.json"
+    inventory = {"project": "test-fixture"}
+    path.write_text(json.dumps(inventory))
+    path.chmod(0o600)
+    monkeypatch.setenv("PG_DSN", "postgresql://fixture:local@localhost/approved")
+    control = object()
+    disposed = []
+
+    class FixtureEngine:
+        def connect(self):
+            return nullcontext(control)
+
+        def dispose(self):
+            disposed.append(True)
+
+    def connect(url, **options):
+        assert url.database == "postgres" and url.host == "localhost"
+        assert options["hide_parameters"] is True
+        assert options["connect_args"] == {"connect_timeout": 5, "options": "-c default_transaction_read_only=on"}
+        return FixtureEngine()
+
+    def observe(connection, **options):
+        assert connection is control and options["inventory"] == inventory
+        assert options["approved_package_hash"] == "b" * 64 and options["state_root"] == tmp_path
+        return {"transaction_status": "aborted"}
+
+    monkeypatch.setattr(commit_observer, "create_engine", connect)
+    monkeypatch.setattr(commit_observer, "observe_held_activation", observe)
+    commit_observer.main(["--state-root", str(tmp_path), "--inventory", str(path), "--package", str(tmp_path / "approved.json"),
+                         "--approved-package-sha256", "b" * 64])
+    assert json.loads(capsys.readouterr().out) == {"transaction_status": "aborted"}
+    assert disposed == [True]
 
 
 def test_unqualified_package_does_not_interrupt_collection(authorized_hold, monkeypatch):
@@ -140,6 +236,8 @@ def test_completion_preserves_terminal_evidence_and_sets_correct_promotion_floor
     with hold.hold_cold_cutover(**arguments) as (_, _, record, _, resume):
         for phase in ("login_closing", "jobs_stopping", "database_fenced", "activation_committing"):
             record(phase, {})
+        if outcome == "committed":
+            record("activation_precommit_verified", {})
         record("activation_rolled_back" if outcome == "original" else "activation_verified", {})
         record("login_opening", {})
         record("jobs_restarting", {})
@@ -266,6 +364,7 @@ def test_execute_coordinates_one_approved_host_and_database_transition(authorize
             raise RuntimeError(scenario)
         if scenario == "committed":
             record("activation_committing", {})
+            record("activation_precommit_verified", {})
             record("activation_verified", {})
         else:
             record("activation_rolled_back", {})
