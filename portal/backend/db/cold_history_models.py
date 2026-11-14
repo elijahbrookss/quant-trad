@@ -21,6 +21,14 @@ COLD_HISTORY_LAYOUT_VERSION = "market.canonical_cold_history.v1"
 COLD_IMMUTABILITY_TRIGGER = "trg_cold_fact_immutable"
 
 
+def cold_page_is_visible(alias):
+    """Alias is an internal identifier chosen by the catalog reader."""
+    return f"""({alias}.staged_storage_day IS NULL OR EXISTS (
+        SELECT FROM market.cold_fact_retired_days AS retired
+        WHERE retired.storage_day={alias}.staged_storage_day
+    ))"""
+
+
 def assert_cold_history_immutability(conn):
     guarded = set(conn.execute(text("""
         SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

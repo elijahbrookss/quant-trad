@@ -21,7 +21,7 @@ from market_data.fact_archive import FactArchiveLimits, FactArchiveManifest
 from portal.backend.db.cold_history_models import (
     COLD_HISTORY_LAYOUT_VERSION, ColdBookSessionFactRecord, ColdFactLocatorRecord, ColdFactMaterialRecord,
     ColdFactPageRecord, ColdFactPageSeriesRecord,
-    ColdNormalizationSpecReferenceRecord,
+    ColdNormalizationSpecReferenceRecord, cold_page_is_visible,
 )
 
 _pages = ColdFactPageRecord.__table__
@@ -31,14 +31,6 @@ _materials = ColdFactMaterialRecord.__table__
 _normalization_specs = ColdNormalizationSpecReferenceRecord.__table__
 _book_sessions = ColdBookSessionFactRecord.__table__
 _BATCH_SIZE = 1000
-
-
-def cold_page_is_visible(alias):
-    """Alias is an internal identifier chosen by the repository."""
-    return f"""({alias}.staged_storage_day IS NULL OR EXISTS (
-        SELECT FROM market.cold_fact_retired_days AS retired
-        WHERE retired.storage_day={alias}.staged_storage_day
-    ))"""
 
 
 _PAGE_VISIBILITY = text(cold_page_is_visible("market.cold_fact_pages"))

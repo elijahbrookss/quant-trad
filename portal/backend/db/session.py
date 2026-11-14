@@ -36,7 +36,7 @@ from .models import (
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
 from . import execution_control as _execution_control  # noqa: F401 - scoped SQL hooks
-from .cold_history_models import COLD_TABLE_NAMES
+from .cold_history_models import COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES, cold_page_is_visible
 from .fact_storage_schema import (
     FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES, FACT_STORAGE_LAYOUT_VERSION,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
@@ -1394,13 +1394,28 @@ class Database:
                 "scripts/db/manual_migration_book_operational_rollups_v1.sql "
                 "with writers stopped before starting this code."
             )
+        authoritative_cold = conn.scalar(text("""
+            SELECT EXISTS (SELECT FROM market.fact_storage_state
+                WHERE layout_version=:layout AND state='ready' AND completed_at IS NOT NULL)
+        """), {"layout": COLD_HISTORY_LAYOUT_VERSION})
+        latest_commit = "COALESCE(latest.market_commit_seq, 0)"
+        cold_watermark = ""
+        if authoritative_cold:
+            cold_watermark = f"""
+                LEFT JOIN LATERAL (
+                    SELECT MAX(bounds.last_commit_seq) AS market_commit_seq
+                    FROM market.cold_fact_page_series AS bounds
+                    JOIN market.cold_fact_pages AS page ON page.id=bounds.page_id
+                    WHERE bounds.series_id=rollups.series_id AND {cold_page_is_visible("page")}
+                ) AS history ON TRUE
+            """
+            latest_commit = "COALESCE(GREATEST(latest.market_commit_seq, history.market_commit_seq), 0)"
         stale_fact = conn.execute(
             text(
-                """
+                f"""
                 SELECT rollups.series_id,
                        rollups.fact_high_water_commit_seq,
-                       COALESCE(latest.market_commit_seq, 0)
-                           AS latest_fact_commit_seq
+                       {latest_commit} AS latest_fact_commit_seq
                 FROM market.book_operational_rollups AS rollups
                 JOIN market.series AS series
                   ON series.id = rollups.series_id
@@ -1412,9 +1427,9 @@ class Database:
                     ORDER BY facts.market_commit_seq DESC
                     LIMIT 1
                 ) AS latest ON TRUE
+                {cold_watermark}
                 WHERE series.contract_version = 'market.l2_book.v1'
-                  AND COALESCE(latest.market_commit_seq, 0)
-                      <> rollups.fact_high_water_commit_seq
+                  AND {latest_commit} <> rollups.fact_high_water_commit_seq
                 ORDER BY rollups.series_id
                 LIMIT 1
                 """
