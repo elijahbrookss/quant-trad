@@ -116,6 +116,16 @@ executor, and refuses if the fresh plan selects another action or becomes
 ineligible. It does not run raw history/recovery work and cannot be used as a
 generic planner override.
 
+For an exceptional sealed day with complete page verification, the same private
+command accepts `--expected-action verify_partition`. Review the day and page
+count in a dry run and add `--verification-pages <exact count>` only if an
+explicit count is needed for this action. The executor checks the count against
+its fresh plan and rechecks the sealed day, page count, and current verification
+generation receipts under the existing day lock. Add `--execute` to commit the
+normal whole-day verification. The count applies only to the specified day and
+invocation. Whole-day byte and object limits, the run deadline, and the saved
+storage policy still apply. Retirement is a separate action.
+
 ## Consequences
 
 - This trades enforced immutable source authority and bounded relation/manifest

@@ -1914,7 +1914,8 @@ class PostgresCanonicalFactArchiveRepository:
                 "source_placement_hash": archive_evidence_hash({"pages": source_placements})}
 
     def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits(),
-                         count_statement_timeout_ms=None, remaining_run_seconds=None) -> dict:
+                         count_statement_timeout_ms=None, remaining_run_seconds=None,
+                         expected_page_count: int | None = None) -> dict:
         """Admit complete, currently readable cold coverage; retain all hot data.
 
         Expensive per-page decoding resumes via immutable receipts. This final
@@ -1927,10 +1928,37 @@ class PostgresCanonicalFactArchiveRepository:
             raise ValueError("canonical_archive_verify_count_timeout_invalid")
         if remaining_run_seconds is not None and not callable(remaining_run_seconds):
             raise ValueError("canonical_archive_verify_remaining_budget_invalid")
+        if expected_page_count is not None and (
+            type(expected_page_count) is not int or not 0 <= expected_page_count <= limits.max_pages
+        ):
+            raise ValueError("canonical_archive_verify_page_scope_invalid")
         with self.database.session() as session:
             partition = self._lock(session, day)
             if partition["state"] not in {"sealed", "verified"}:
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
+            if expected_page_count is not None:
+                observed = session.execute(text("""
+                    WITH selected AS MATERIALIZED (
+                        SELECT id,manifest_hash FROM market.fact_archive_manifests
+                        WHERE storage_day=:day LIMIT :limit
+                    )
+                    SELECT count(*), count(*) FILTER (
+                        WHERE verification.manifest_hash=selected.manifest_hash
+                          AND ((active.manifest_id IS NULL AND binding.manifest_id IS NULL)
+                            OR (active.manifest_id IS NOT NULL AND
+                                (active.preparation_id,active.catalog_commitment) =
+                                (binding.preparation_id,binding.catalog_commitment)))
+                    )
+                    FROM selected
+                    LEFT JOIN market.fact_archive_verifications verification
+                      ON verification.manifest_id=selected.id AND verification.verifier_version=:version
+                    LEFT JOIN market.fact_archive_active_generations active ON active.manifest_id=selected.id
+                    LEFT JOIN market.fact_archive_verification_generations binding
+                      ON binding.manifest_id=selected.id AND binding.verifier_version=:version
+                """), {"day": day, "limit": expected_page_count + 1,
+                         "version": FACT_ARCHIVE_VERIFIER_VERSION}).one()
+                if partition["state"] != "sealed" or tuple(observed) != (expected_page_count, expected_page_count):
+                    raise RuntimeError(f"canonical_archive_verify_page_scope_changed: storage_day={day}")
             objects = ArchiveVerificationBatch(self.object_store, limits=limits, check_budget=self.check_budget)
             with objects.distinct_references():
                 evidence = self._partition_evidence(
@@ -1938,6 +1966,8 @@ class PostgresCanonicalFactArchiveRepository:
                     count_statement_timeout_ms=count_statement_timeout_ms,
                     remaining_count_seconds=remaining_run_seconds,
                 )
+            if expected_page_count is not None and evidence["page_count"] != expected_page_count:
+                raise RuntimeError(f"canonical_archive_verify_page_scope_changed: storage_day={day}")
             if partition["state"] == "verified":
                 if partition["manifest_set_hash"] != evidence["manifest_set_hash"]:
                     raise RuntimeError(f"canonical_archive_partition_verification_changed: storage_day={day}")

@@ -39,15 +39,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--storage-day", required=True, help="Exact UTC storage day (YYYY-MM-DD).")
     parser.add_argument(
-        "--expected-action", required=True, choices=("stage_page", "reclaim_partition"),
+        "--expected-action", required=True, choices=("stage_page", "verify_partition", "reclaim_partition"),
     )
+    parser.add_argument("--verification-pages", type=int,
+        help="Exact reviewed page count and cap for one verify_partition action.")
     parser.add_argument("--receipt", required=True, help="Private JSON receipt path.")
     parser.add_argument("--execute", action="store_true", help="Execute the one selected action.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.verification_pages is not None and (
+        args.expected_action != "verify_partition" or not 1 <= args.verification_pages <= 100_000
+    ):
+        parser.error("--verification-pages requires verify_partition and a count of 1..100000")
     try:
         storage_day = date.fromisoformat(args.storage_day)
     except ValueError as exc:
@@ -77,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_action=args.expected_action,
         storage_root=DEFAULT_STORAGE_ROOT,
         execute=args.execute,
+        verification_pages=args.verification_pages,
     )
     write_receipt(Path(args.receipt), result)
     print(json.dumps(result, sort_keys=True, default=str))

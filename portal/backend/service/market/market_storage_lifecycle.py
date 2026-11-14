@@ -271,6 +271,7 @@ class MarketStorageLifecycleService:
         execute: bool = False,
         cancelled=None,
         progress=None,
+        verification_pages: int | None = None,
     ) -> dict[str, Any]:
         """Run one exact canonical action without raw/history/recovery work."""
         policy = self._canonical_policy(policy, storage_root)
@@ -282,6 +283,7 @@ class MarketStorageLifecycleService:
             execute=execute,
             cancelled=cancelled,
             progress=progress,
+            verification_pages=verification_pages,
         )
 
     def _plan_compactions(
