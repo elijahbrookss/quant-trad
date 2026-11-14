@@ -6,6 +6,7 @@ from functools import partial
 import logging
 from time import monotonic
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationLimits
 from scripts.db.canonical_cold_activate import (
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def run_fenced_transition(
     conn, control, *, execution, expected_execution_hash, receipts, store, limits,
-    timeout_seconds, assert_host_held, verify_provider_boundary, record, verify_committed,
+    timeout_seconds, assert_host_held, host_remaining, verify_provider_boundary, record, verify_committed,
 ):
     """Use one retained PostgreSQL session until acceptance and gate reopening.
 
@@ -29,13 +30,13 @@ def run_fenced_transition(
     durable host hold intact. The caller owns old-release restart, final service
     activation, and the independently qualified restore path.
     """
-    if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
+    if (type(timeout_seconds) is not int or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS
             or not isinstance(limits, ArchiveVerificationLimits)
             or not all(callable(callback) for callback in (
-                assert_host_held, verify_provider_boundary, record, verify_committed,
+                assert_host_held, host_remaining, verify_provider_boundary, record, verify_committed,
             ))):
         raise ValueError("canonical_cold_transition_invalid_boundaries")
-    deadline = monotonic() + timeout_seconds
+    deadline = monotonic() + min(timeout_seconds, host_remaining())
     validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
     outcome = partial(read_activation_outcome, execution=execution, expected_execution_hash=expected_execution_hash)
     expected_database = execution["target_database"]
@@ -47,7 +48,7 @@ def run_fenced_transition(
         raise RuntimeError("canonical_cold_transition_audit_changed")
 
     def remaining_seconds():
-        left = int(deadline - monotonic())
+        left = int(min(deadline - monotonic(), host_remaining()))
         if left < 1:
             raise TimeoutError("canonical_cold_transition_deadline")
         return left
@@ -80,7 +81,7 @@ def run_fenced_transition(
                     result = activate_cold_storage(
                         conn, execution=execution, expected_execution_hash=expected_execution_hash,
                         receipts=receipts, verified_objects=verified, database_fence=fence,
-                        statement_timeout_ms=remaining_seconds() * 1000,
+                        statement_timeout_ms=min(remaining_seconds(), MAX_MIGRATION_SECONDS) * 1000,
                     )
                     check_archive()
                     assert_host_held()

@@ -19,7 +19,8 @@ def artifacts(tmp_path):
     inventory = {"project": "fixture", "services": {}}
     identity = {"database": "qt_fixture", "database_oid": 22, "system_identifier": "13", "header_oid": 33}
     manifest = {
-        "schema": package.VERSION, "source_commit_floor": 100, "approved_inventory_hash": digest(inventory),
+        "schema": package.VERSION, "source_commit_floor": 100, "max_outage_seconds": 1200,
+        "approved_inventory_hash": digest(inventory),
         "scope": {
             "source_database": identity, "target_database": identity,
             "audit_set_hash": "a" * 64, "loaded_inventory_hash": "b" * 64, "payload_children": {},

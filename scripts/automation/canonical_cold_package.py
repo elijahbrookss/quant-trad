@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.fact_archive import archive_evidence_hash
 from scripts.automation import storage_host_boundary as host
 from scripts.db.canonical_cold_activate import ACTIVATION_VERSION, _PHYSICAL_GATES, validate_execution_record
@@ -76,9 +77,11 @@ def load_approved_package(path, *, approved_package_hash, inventory):
         raise ValueError("canonical_cold_package_approval_mismatch")
     package = json.loads(raw, object_pairs_hook=_unique_fields)
     if (not isinstance(package, dict) or set(package) != {
-            "schema", "approved_inventory_hash", "source_commit_floor", "scope", "artifacts",
+            "schema", "approved_inventory_hash", "source_commit_floor", "scope", "artifacts", "max_outage_seconds",
         } or package["schema"] != VERSION or not _pin(package["approved_inventory_hash"])
             or type(package["source_commit_floor"]) is not int or package["source_commit_floor"] < 1
+            or type(package["max_outage_seconds"]) is not int
+            or not 1 <= package["max_outage_seconds"] <= MAX_MIGRATION_SECONDS
             or not isinstance(package["scope"], dict) or package["scope"].keys() != _SCOPE
             or not isinstance(package["artifacts"], dict)
             or package["artifacts"].keys() != _PHYSICAL_GATES | {"command_sheet", "host_inventory"}):

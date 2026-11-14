@@ -259,7 +259,8 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
                 run_fenced_transition(
                     retained, control, **outcome_arguments, receipts=receipts, store=new_store,
                     limits=ArchiveVerificationLimits(), timeout_seconds=60,
-                    assert_host_held=lambda: None, verify_provider_boundary=fail_provider_boundary,
+                    assert_host_held=lambda: None, host_remaining=lambda: 60,
+                    verify_provider_boundary=fail_provider_boundary,
                     record=lambda phase, evidence: phases.append(phase), verify_committed=verify_commit,
                 )
             assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider",
@@ -268,7 +269,7 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
             run_fenced_transition(
                 retained, control, **outcome_arguments, receipts=receipts, store=new_store,
                 limits=ArchiveVerificationLimits(), timeout_seconds=60,
-                assert_host_held=lambda: None, verify_provider_boundary=provider_boundary,
+                assert_host_held=lambda: None, host_remaining=lambda: 60, verify_provider_boundary=provider_boundary,
                 record=lambda phase, evidence: phases.append(phase), verify_committed=verify_commit,
             )
         assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "activation_committing",

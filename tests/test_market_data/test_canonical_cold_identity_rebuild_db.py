@@ -1,10 +1,9 @@
+from contextlib import contextmanager
 from datetime import date
 import json
-import os
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from portal.backend.db.fact_identity_schema import (
@@ -15,6 +14,7 @@ from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_identity_rebuild import (
     PREVIOUS, SOURCE, STAGED, finalize_identity_suffix, prepare_identity_suffix, swap_identity_suffix,
 )
+from tests.test_market_data.migration_test_support import fresh_migration_database
 
 
 pytestmark = pytest.mark.db
@@ -24,13 +24,14 @@ RETAINED = f"{online.SCHEMA}.fact_versions"
 
 @pytest.fixture
 def identity_database():
-    dsn = os.environ.get("PG_DSN")
-    if not dsn:
-        pytest.skip("requires disposable cold catalog PostgreSQL")
-    url = make_url(dsn)
-    if url.host != "127.0.0.1" or url.database != "qt_cold_catalog_test":
-        pytest.skip("requires dedicated loopback fixture database")
-    engine = create_engine(url)
+    with fresh_migration_database("cold_identity", install_extensions=False) as dsn:
+        with _identity_database(dsn) as fixture:
+            yield fixture
+
+
+@contextmanager
+def _identity_database(dsn):
+    engine = create_engine(dsn)
     try:
         with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
             scope = conn.begin_nested()

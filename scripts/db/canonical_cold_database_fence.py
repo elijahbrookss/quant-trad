@@ -7,6 +7,7 @@ from time import monotonic, sleep
 
 from sqlalchemy import text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from scripts.automation.storage_online_controller import OnlineController
 from scripts.db.fact_header_v2_capture import _bounded_step
 
@@ -96,7 +97,8 @@ def close_database_fence(conn, control, *, expected_database, timeout_seconds, r
     if (conn is control or conn.in_transaction() or control.in_transaction()
             or conn.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
             or control.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
-            or not callable(record) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600
+            or not callable(record) or type(timeout_seconds) is not int
+            or not 1 <= timeout_seconds <= MAX_MIGRATION_SECONDS
             or expected_database.get("database") in (None, "postgres", "template0", "template1")):
         raise ValueError("canonical_cold_database_fence_invalid_control")
     deadline = monotonic() + timeout_seconds

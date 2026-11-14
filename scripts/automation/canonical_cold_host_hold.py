@@ -45,7 +45,7 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
     """
     state_root = Path(state_root)
     remaining = outage_deadline - time() if type(outage_deadline) in (int, float) else 0
-    if not _digest(approved_package_hash) or not isfinite(remaining) or not 0 < remaining <= 3600:
+    if not _digest(approved_package_hash) or not isfinite(remaining) or remaining <= 0:
         raise ValueError("canonical_cold_host_hold_invalid_package")
     stop_at = monotonic() + remaining
 
@@ -65,6 +65,8 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
         if os.path.lexists(path):
             raise RuntimeError("canonical_cold_host_hold_reconciliation_required")
         package = load_approved_package(package_path, approved_package_hash=approved_package_hash, inventory=inventory)
+        if remaining > package["max_outage_seconds"]:
+            raise ValueError("canonical_cold_host_hold_outage_exceeds_approved_budget")
         state = {
             "schema": VERSION, "phase": "pausing", "package_hash": approved_package_hash,
             "inventory_hash": package["approved_inventory_hash"], "project": inventory["project"],
@@ -77,6 +79,9 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
             check_deadline()
 
         observe(())
+        min_shutdown_time = (300 + 30) + (len(pause) - 1) * (60 + 30)
+        if check_deadline() < min_shutdown_time + 5:
+            raise TimeoutError("canonical_cold_host_hold_insufficient_shutdown_budget")
         host.save_receipt(path, state, initial=True)
         for name in pause:
             observe(state["stopped_services"])
@@ -109,5 +114,5 @@ def hold_cold_cutover(state_root, *, inventory, package_path, approved_package_h
             host.save_receipt(path, state, initial=False)
 
         assert_held()
-        yield package, assert_held, record_database_phase
+        yield package, assert_held, record_database_phase, check_deadline
         assert_held()

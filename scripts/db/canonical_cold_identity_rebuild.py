@@ -11,6 +11,7 @@ import re
 
 from sqlalchemy import text
 
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db import fact_header_v2_online_proof as online
 
@@ -52,7 +53,7 @@ def _oid(conn, relation):
 
 def _requires_database(conn, expected_database, cutoff, timeout):
     if (type(cutoff) is not date or not isinstance(expected_database, str)
-            or type(timeout) is not int or not 1 <= timeout <= 3_600_000):
+            or type(timeout) is not int or not 1 <= timeout <= MAX_MIGRATION_SECONDS * 1000):
         raise ValueError("cold_identity_invalid_cutover_parameters")
     conn.execute(text("SELECT set_config('statement_timeout',:timeout,true)"), {"timeout": str(timeout)})
     conn.execute(text("SET LOCAL lock_timeout='500ms'"))

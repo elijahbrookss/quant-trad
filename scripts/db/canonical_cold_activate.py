@@ -13,6 +13,7 @@ import re
 from sqlalchemy import text
 
 from core.storage_mounts import require_configured_archive_mount
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from market_data.archive_verification import ArchiveVerificationBatch
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.db.cold_history_models import COLD_CUSTODY_TABLE_NAMES, COLD_HISTORY_LAYOUT_VERSION, COLD_TABLE_NAMES
@@ -204,7 +205,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
         raise RuntimeError("canonical_cold_activation_requires_transaction")
     if not isinstance(database_fence, DatabaseFence):
         raise ValueError("canonical_cold_activation_requires_live_database_fence")
-    if type(statement_timeout_ms) is not int or not 1 <= statement_timeout_ms <= 3_600_000:
+    if type(statement_timeout_ms) is not int or not 1 <= statement_timeout_ms <= MAX_MIGRATION_SECONDS * 1000:
         raise ValueError("canonical_cold_activation_invalid_statement_timeout")
     conn.execute(text("SELECT set_config('statement_timeout',:timeout,true)"), {"timeout": str(statement_timeout_ms)})
     conn.execute(text("SET LOCAL lock_timeout='500ms'"))
