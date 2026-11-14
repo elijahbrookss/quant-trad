@@ -21,6 +21,7 @@ from scripts.db.canonical_cold_database_fence import close_database_fence, reope
 from scripts.db.canonical_cold_restore_reclaimed_day import restore_reclaimed_header_day
 from scripts.db.canonical_cold_restore_references import capture_original_reference_bindings, restore_original_reference_bindings
 from tests.test_market_data.test_canonical_cold_activate_db import _configure_fixture_catalog, _fence_connections
+from tests.test_market_data.exact_deployed_reader import check_deployed_source_reader
 from tests.test_market_data.test_fact_derived_retention_db import _archive_day
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _ingest, _placement, storage  # noqa: F401
 
@@ -102,5 +103,6 @@ def test_restore_one_recurring_reclaimed_day_reuses_verified_payload_for_origina
         monkeypatch.setattr(market_data, "db", restored)
         assert storage.repo.read_fact_revisions(**selection) == original
         assert storage.repo.read_dataset_fact_revisions(dataset_id=dataset.dataset_id, series_id=storage.series_id) == original
+        check_deployed_source_reader(restored._engine.url, store, dataset.dataset_id, storage.series_id, original)
     finally:
         restored._reset_engine()
