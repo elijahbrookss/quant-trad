@@ -249,6 +249,7 @@ class PostgresCanonicalFactRetentionRepository:
                 "hot_payload_bytes": row["hot_payload_bytes"],
                 "expected_rows": row["expected_rows"], "archived_rows": int(row["archived_rows"]),
                 "page_count": int(row["page_count"]), "verified_page_count": int(row["verified_page_count"]),
+                "manifest_set_hash": row.get("manifest_set_hash"),
             })
         if hot_pressure:
             actions.sort(key=lambda row: (row["action"] != "reclaim_partition", not row["eligible"], row["storage_day"]))

@@ -176,7 +176,8 @@ class CanonicalFactRetentionExecutor:
 
     def _execute_step(self, *, item, policy, storage_root, check_budget, remaining_seconds,
                       storage_policy_witness=None, prerequisite_commits=None,
-                      expected_verification_pages=None, selected_verification_page=None):
+                      expected_verification_pages=None, selected_verification_page=None,
+                      expected_manifest_set_hash=None):
         day = date.fromisoformat(item["storage_day"])
         action = item["action"]
         reusable = action in {"stage_page", "verify_page"}
@@ -314,8 +315,11 @@ class CanonicalFactRetentionExecutor:
                     max_handoff_seconds=policy.max_handoff_seconds,
                     count_statement_timeout_ms=_COUNT_STATEMENT_TIMEOUT_MS,
                 ), remaining_run_seconds=current_remaining_seconds, **stage_options)
+            reclaim_scope = ({"expected_page_count": expected_verification_pages,
+                              "expected_manifest_set_hash": expected_manifest_set_hash}
+                             if expected_manifest_set_hash is not None else {})
             return reclaimer.reclaim_partition(day, eligible_before=date.fromisoformat(item["eligible_before"]),
-                                                execute=True, verification_limits=verification)
+                                                execute=True, verification_limits=verification, **reclaim_scope)
         raise ValueError(f"canonical_retention_action_invalid: action={action}")
 
     def run(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
@@ -363,7 +367,8 @@ class CanonicalFactRetentionExecutor:
     def run_selected(self, *, policy: CanonicalFactRetentionPolicy, storage_root: Path,
                      storage_day: date, expected_action: str, execute: bool = False,
                      cancelled=None, progress=None, verification_pages: int | None = None,
-                     verification_page: SelectedVerificationPage | None = None):
+                     verification_page: SelectedVerificationPage | None = None,
+                     verification_bytes=None, verification_objects=None, manifest_set_hash=None):
         """Execute exactly one freshly planned private canary action.
 
         This is deliberately narrower than ``run``: it never advances a scan,
@@ -376,16 +381,35 @@ class CanonicalFactRetentionExecutor:
                 or ((expected_action == "verify_page") != (verification_page is not None))
                 or (verification_page is not None and not isinstance(verification_page, SelectedVerificationPage))
                 or (verification_pages is not None and (
-                    expected_action != "verify_partition" or type(verification_pages) is not int or verification_pages < 1
+                    expected_action not in {"verify_partition", "reclaim_partition"}
+                    or type(verification_pages) is not int or not 1 <= verification_pages <= 100_000
+                ))
+                or (any(value is not None for value in (verification_bytes, verification_objects))
+                    and verification_pages is None)
+                or ((expected_action == "reclaim_partition" and verification_pages is not None)
+                    != (manifest_set_hash is not None))
+                or (manifest_set_hash is not None and (
+                    not isinstance(manifest_set_hash, str) or len(manifest_set_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in manifest_set_hash)
                 ))):
             raise ValueError("canonical_retention_selected_request_invalid")
+        reviewed_limits = {}
         if verification_pages is not None:
-            policy = replace(policy, max_verification_pages=verification_pages)
+            reviewed_limits["max_verification_pages"] = verification_pages
+        if verification_bytes is not None:
+            reviewed_limits["max_verification_bytes"] = verification_bytes
+        if verification_objects is not None:
+            reviewed_limits["max_verification_objects"] = verification_objects
+        if reviewed_limits:
+            policy = replace(policy, **reviewed_limits)
         witness = None
         if self.use_saved_history_policy:
             policy, witness = saved_canonical_policy(
                 self.repository.database, policy=policy, storage_root=storage_root,
             )
+        effective_limits = {key: getattr(policy, key) for key in (
+            "max_verification_pages", "max_verification_bytes", "max_verification_objects",
+        )}
         if not policy.execution_enabled:
             return {
                 "schema_version": "market.canonical_retention_selected_run.v1",
@@ -406,7 +430,7 @@ class CanonicalFactRetentionExecutor:
             )
             item = self._selected_plan_item(
                 plan=plan, storage_day=storage_day, expected_action=expected_action,
-                verification_pages=verification_pages,
+                verification_pages=verification_pages, manifest_set_hash=manifest_set_hash,
             )
             result = {
                 "schema_version": "market.canonical_retention_selected_run.v1",
@@ -422,6 +446,9 @@ class CanonicalFactRetentionExecutor:
                 result["storage_policy"] = witness
             if verification_pages is not None:
                 result["expected_verification_pages"] = verification_pages
+                result["selected_verification_limits"] = effective_limits
+            if manifest_set_hash is not None:
+                result["expected_manifest_set_hash"] = manifest_set_hash
             if verification_page is not None:
                 self.repository.check_selected_verification_page(
                     storage_day, verification_page, statement_timeout_ms=policy.plan_statement_timeout_ms,
@@ -434,18 +461,23 @@ class CanonicalFactRetentionExecutor:
             # Selected canaries are an explicit operator boundary, not a
             # routine scheduler yield. They always start with fresh evidence.
             self._dispose_archive(reason="selected_action")
-            return self._run_selected(
+            result = self._run_selected(
                 policy=policy, storage_root=storage_root, storage_day=storage_day,
                 expected_action=expected_action, cancelled=cancelled,
                 storage_policy_witness=witness, progress=progress,
                 verification_pages=verification_pages, verification_page=verification_page,
+                manifest_set_hash=manifest_set_hash,
             )
+            if reviewed_limits:
+                result["selected_verification_limits"] = effective_limits
+            return result
         finally:
             self._dispose_archive()
             self._run_lock.release()
 
     @staticmethod
-    def _selected_plan_item(*, plan, storage_day, expected_action, verification_pages=None):
+    def _selected_plan_item(*, plan, storage_day, expected_action, verification_pages=None,
+                            manifest_set_hash=None):
         matches = [
             item for item in plan["actions"]
             if date.fromisoformat(item["storage_day"]) == storage_day
@@ -469,11 +501,13 @@ class CanonicalFactRetentionExecutor:
                 f"canonical_retention_selected_page_scope_changed: storage_day={storage_day} "
                 f"expected_pages={verification_pages} actual_pages={item.get('page_count')}"
             )
+        if manifest_set_hash is not None and item.get("manifest_set_hash") != manifest_set_hash:
+            raise RuntimeError(f"canonical_retention_selected_manifest_set_changed: storage_day={storage_day}")
         return item
 
     def _run_selected(self, *, policy, storage_root, storage_day, expected_action,
                       cancelled, storage_policy_witness=None, progress=None, verification_pages=None,
-                      verification_page=None):
+                      verification_page=None, manifest_set_hash=None):
         started = monotonic()
         deadline = started + policy.max_run_seconds
 
@@ -515,7 +549,7 @@ class CanonicalFactRetentionExecutor:
         check_budget()
         item = self._selected_plan_item(
             plan=plan, storage_day=storage_day, expected_action=expected_action,
-            verification_pages=verification_pages,
+            verification_pages=verification_pages, manifest_set_hash=manifest_set_hash,
         )
         observe(stage="executing", completed_steps=0, storage_day=storage_day.isoformat(),
                 action=expected_action)
@@ -526,8 +560,10 @@ class CanonicalFactRetentionExecutor:
                 item=item, policy=policy, storage_root=storage_root,
                 check_budget=check_budget, remaining_seconds=remaining_run_seconds,
                 storage_policy_witness=storage_policy_witness, prerequisite_commits=[],
-                expected_verification_pages=item.get("page_count") if expected_action == "verify_partition" else None,
+                expected_verification_pages=(item.get("page_count") if expected_action == "verify_partition"
+                                             else verification_pages),
                 **({"selected_verification_page": verification_page} if verification_page is not None else {}),
+                **({"expected_manifest_set_hash": manifest_set_hash} if manifest_set_hash is not None else {}),
             )
             if raw_outcome.get("status") != _SELECTED_SUCCESS[expected_action]:
                 status = "failed"
@@ -587,6 +623,8 @@ class CanonicalFactRetentionExecutor:
             result["expected_verification_pages"] = verification_pages
         if verification_page is not None:
             result["expected_verification_page"] = asdict(verification_page)
+        if manifest_set_hash is not None:
+            result["expected_manifest_set_hash"] = manifest_set_hash
         observe(stage="finished", completed_steps=1, status=status,
                 storage_day=storage_day.isoformat(), action=expected_action)
         logger.info(

@@ -237,7 +237,8 @@ class PostgresCanonicalFactReclamationRepository:
         return count, timeout
 
     def reclaim_partition(self, day: date, *, eligible_before: date, execute: bool = False,
-                          verification_limits: ArchiveVerificationLimits = ArchiveVerificationLimits()):
+                          verification_limits: ArchiveVerificationLimits = ArchiveVerificationLimits(),
+                          expected_page_count: int | None = None, expected_manifest_set_hash: str | None = None):
         """Recheck cold evidence; optionally DROP exactly one daily hot relation.
 
         Both instance enablement and explicit execution are required. Dry-run
@@ -248,22 +249,48 @@ class PostgresCanonicalFactReclamationRepository:
         """
         if type(day) is not date or type(eligible_before) is not date or type(execute) is not bool:
             raise ValueError("canonical_reclaim_request_invalid")
+        if ((expected_page_count is None) != (expected_manifest_set_hash is None)
+                or (expected_page_count is not None and (
+                    type(expected_page_count) is not int or not 1 <= expected_page_count <= verification_limits.max_pages
+                    or not isinstance(expected_manifest_set_hash, str) or len(expected_manifest_set_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in expected_manifest_set_hash)
+                ))):
+            raise ValueError("canonical_reclaim_selected_scope_invalid")
         if execute and not self.enabled:
             raise RuntimeError("canonical_reclaim_disabled: explicitly enable only after validated rollout")
         try:
             return self._reclaim_partition(day, eligible_before=eligible_before, execute=execute,
-                                           verification_limits=verification_limits)
+                                           verification_limits=verification_limits,
+                                           expected_page_count=expected_page_count,
+                                           expected_manifest_set_hash=expected_manifest_set_hash)
         except ColdStagePressure:
             raise
         except Exception:
             logger.exception("canonical_hot_partition_reclaim_failed | storage_day=%s execute=%s", day, execute)
             raise
 
-    def _reclaim_partition(self, day, *, eligible_before, execute, verification_limits):
+    @staticmethod
+    def _check_selected_scope(session, partition, expected_page_count, expected_manifest_set_hash):
+        if expected_page_count is None:
+            return
+        day = partition["storage_day"]
+        if partition["state"] != "verified" or partition["manifest_set_hash"] != expected_manifest_set_hash:
+            raise RuntimeError(f"canonical_reclaim_selected_manifest_set_changed: storage_day={day}")
+        count = session.scalar(text("""
+            SELECT count(*) FROM (
+                SELECT 1 FROM market.fact_archive_manifests WHERE storage_day=:day LIMIT :limit
+            ) selected
+        """), {"day": day, "limit": expected_page_count + 1})
+        if count != expected_page_count:
+            raise RuntimeError(f"canonical_reclaim_selected_page_scope_changed: storage_day={day}")
+
+    def _reclaim_partition(self, day, *, eligible_before, execute, verification_limits,
+                           expected_page_count=None, expected_manifest_set_hash=None):
         self._assert_archive_admission()
         with self.archive.database.session() as session:
             self._timeouts(session)
             partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
+            self._check_selected_scope(session, partition, expected_page_count, expected_manifest_set_hash)
             cold_layout = cold_layout_active(session)
             if cold_layout and session.scalar(text("""
                 SELECT EXISTS (SELECT FROM market.cold_fact_retired_days
@@ -377,6 +404,7 @@ class PostgresCanonicalFactReclamationRepository:
             # _lock's shared acquisition is reentrant on THIS connection's
             # already-owned exclusive fence, never a second-connection wait.
             partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
+            self._check_selected_scope(session, partition, expected_page_count, expected_manifest_set_hash)
             self._eligibility(session, partition, eligible_before=eligible_before)
             if partition["state"] == "reclaimed":
                 self._relation(session, day, reclaimed=True)

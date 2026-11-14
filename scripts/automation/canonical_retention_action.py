@@ -43,7 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-action", required=True, choices=("stage_page", "verify_page", "verify_partition", "reclaim_partition"),
     )
     parser.add_argument("--verification-pages", type=int,
-        help="Exact reviewed page count and cap for one verify_partition action.")
+        help="Exact reviewed page count and cap for one whole-day action.")
+    parser.add_argument("--verification-bytes", type=int, help="Maximum distinct archive bytes for the selected day.")
+    parser.add_argument("--verification-objects", type=int, help="Maximum distinct archive objects for the selected day.")
+    parser.add_argument("--manifest-set-hash", help="Current verified manifest-set hash for a reviewed reclaim_partition.")
     parser.add_argument("--page-ordinal", type=int)
     parser.add_argument("--manifest-id")
     parser.add_argument("--manifest-hash")
@@ -59,9 +62,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.verification_pages is not None and (
-        args.expected_action != "verify_partition" or not 1 <= args.verification_pages <= 100_000
+        args.expected_action not in {"verify_partition", "reclaim_partition"}
+        or not 1 <= args.verification_pages <= 100_000
     ):
-        parser.error("--verification-pages requires verify_partition and a count of 1..100000")
+        parser.error("--verification-pages requires a whole-day action and a count of 1..100000")
+    if (args.verification_bytes is not None or args.verification_objects is not None) and args.verification_pages is None:
+        parser.error("Byte and object allowances require the exact --verification-pages count.")
+    if args.verification_bytes is not None and not 1 <= args.verification_bytes <= 1024**4:
+        parser.error("--verification-bytes must be between 1 and 1 TiB.")
+    if args.verification_objects is not None and not 1 <= args.verification_objects <= 100_000:
+        parser.error("--verification-objects must be between 1 and 100000.")
+    if ((args.expected_action == "reclaim_partition" and args.verification_pages is not None)
+            != (args.manifest_set_hash is not None)):
+        parser.error("A reviewed reclaim_partition requires both --verification-pages and --manifest-set-hash.")
+    if args.manifest_set_hash is not None and (len(args.manifest_set_hash) != 64
+            or any(char not in "0123456789abcdef" for char in args.manifest_set_hash)):
+        parser.error("--manifest-set-hash must be a lowercase SHA-256.")
     page_fields = (args.page_ordinal, args.manifest_id, args.manifest_hash, args.generation,
                    args.preparation_id, args.catalog_commitment)
     page = None
@@ -98,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     verification = {}
     if args.verification_pages is not None:
         verification["verification_pages"] = args.verification_pages
+    if args.verification_bytes is not None:
+        verification["verification_bytes"] = args.verification_bytes
+    if args.verification_objects is not None:
+        verification["verification_objects"] = args.verification_objects
+    if args.manifest_set_hash is not None:
+        verification["manifest_set_hash"] = args.manifest_set_hash
     if page is not None:
         verification["verification_page"] = page
     result = runners["service"].run_canonical_action(
