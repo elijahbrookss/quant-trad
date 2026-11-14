@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import timedelta
+import json
 
 import pytest
 from sqlalchemy import text
@@ -19,6 +20,7 @@ from portal.backend.service.storage.repos.fact_archival import PostgresCanonical
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from scripts.db import canonical_cold_activate as activation
+from scripts.db import fact_header_v2_online_proof as online
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
@@ -82,23 +84,43 @@ def _attach_legacy_child(conn, legacy_day, end_day):
 
 
 def _create_retained_parent(conn):
-    conn.exec_driver_sql("CREATE SCHEMA qt_fact_header_cutover_v2")
-    conn.exec_driver_sql("""
-        CREATE TABLE qt_fact_header_cutover_v2.fact_versions (LIKE market.fact_versions)
+    retained = f"{online.SCHEMA}.fact_versions"
+    conn.exec_driver_sql(f"CREATE SCHEMA {online.SCHEMA}")
+    conn.exec_driver_sql(f"""
+        CREATE TABLE {retained} (LIKE market.fact_versions)
         PARTITION BY RANGE (storage_day)
     """)
-    conn.exec_driver_sql("""
-        ALTER TABLE qt_fact_header_cutover_v2.fact_versions
+    conn.exec_driver_sql(f"""
+        ALTER TABLE {retained}
         ADD CONSTRAINT fk_market_fact_identity_day FOREIGN KEY (id,storage_day)
         REFERENCES market.fact_identities(id,storage_day) ON DELETE RESTRICT
     """)
-    conn.exec_driver_sql("""
-        CREATE TRIGGER trg_retained_source_closed BEFORE INSERT ON qt_fact_header_cutover_v2.fact_versions
-        FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()
+    legacy_oid, raw_oid = conn.execute(text(f"""
+        SELECT 'market.fact_versions_legacy'::regclass::oid, '{online.raw.SOURCE}'::regclass::oid
+    """)).one()
+    binding = {
+        "source_oids": {online.headers.SOURCE: legacy_oid, online.raw.SOURCE: raw_oid},
+        "targets": {"fact_versions": online.headers._shape(conn, "fact_versions")},
+    }
+    bodies = online._bodies(binding)
+    for role in ("header", "truncate"):
+        function = f"{online.SCHEMA}.online_guard_{role}()"
+        conn.execute(text(f"CREATE FUNCTION {function} RETURNS trigger "
+                          "LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $qt$"
+                          + bodies[role] + "$qt$"))
+        conn.exec_driver_sql(f"REVOKE ALL ON FUNCTION {function} FROM PUBLIC")
+    conn.exec_driver_sql(f"""
+        CREATE TRIGGER {online.ROW_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE ON {retained}
+        FOR EACH ROW EXECUTE FUNCTION {online.SCHEMA}.online_guard_header()
     """)
-    conn.exec_driver_sql("""
-        ALTER TABLE qt_fact_header_cutover_v2.fact_versions ENABLE ALWAYS TRIGGER trg_retained_source_closed
+    conn.exec_driver_sql(f"ALTER TABLE {retained} ENABLE ALWAYS TRIGGER {online.ROW_TRIGGER}")
+    online._install_truncate(conn, retained)
+    conn.exec_driver_sql(f"""
+        CREATE TABLE {online.STATE}(id integer PRIMARY KEY CHECK(id=1), binding jsonb NOT NULL,
+                                    leaf_bindings jsonb NOT NULL DEFAULT '{{}}'::jsonb)
     """)
+    conn.execute(text(f"INSERT INTO {online.STATE}(id,binding) VALUES (1,CAST(:binding AS jsonb))"),
+                 {"binding": json.dumps(binding)})
 
 
 def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_reads(storage, tmp_path, monkeypatch):
@@ -191,6 +213,14 @@ def test_exact_activation_retires_legacy_and_daily_headers_and_preserves_frozen_
     path.write_bytes(original_bytes)
     with engine.connect() as conn:
         verified = activation.verify_mounted_candidate(conn, audit=audit, store=new_store, limits=ArchiveVerificationLimits())
+
+    with pytest.raises(RuntimeError, match="cold_identity_retained_cutover_parent_proof_mismatch"):
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+                UPDATE {online.STATE} SET binding=jsonb_set(binding, ARRAY['source_oids',:source],
+                    to_jsonb('market.fact_versions'::regclass::oid::bigint))
+            """), {"source": online.headers.SOURCE})
+            activation.activate_cold_storage(conn, verified_objects=verified, **transition)
 
     with pytest.raises(RuntimeError, match="fixture interrupted after switch"):
         with engine.begin() as conn:
