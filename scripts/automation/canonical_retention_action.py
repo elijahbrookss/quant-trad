@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from datetime import date
 import json
 import os
@@ -26,7 +27,9 @@ from portal.backend.db import db  # noqa: E402
 from portal.backend.service.async_jobs import wait_for_database_ready  # noqa: E402
 from portal.backend.service.market.market_structure_service import DEFAULT_STORAGE_ROOT  # noqa: E402
 from portal.backend.service.storage.maintenance_runtime import storage_maintenance_runners  # noqa: E402
-from portal.backend.service.storage.repos.fact_archival import SelectedVerificationPage  # noqa: E402
+from portal.backend.service.storage.repos.fact_archival import (  # noqa: E402
+    SelectedVerificationPage, validate_selected_verification_batch,
+)
 from portal.backend.service.storage.repos.query_diagnostic import write_receipt  # noqa: E402
 
 
@@ -53,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation", type=int, help="0 for a legacy page with no active prepared generation.")
     parser.add_argument("--preparation-id")
     parser.add_argument("--catalog-commitment")
+    parser.add_argument("--verification-batch", type=Path, help="Reviewed JSON array of contiguous verify_page pins.")
+    parser.add_argument("--verification-batch-sha256", help="Expected SHA-256 of the exact reviewed batch file.")
     parser.add_argument("--receipt", required=True, help="Private JSON receipt path.")
     parser.add_argument("--execute", action="store_true", help="Execute the one selected action.")
     return parser
@@ -80,13 +85,27 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--manifest-set-hash must be a lowercase SHA-256.")
     page_fields = (args.page_ordinal, args.manifest_id, args.manifest_hash, args.generation,
                    args.preparation_id, args.catalog_commitment)
-    page = None
+    page = batch = None
+    if (args.verification_batch is None) != (args.verification_batch_sha256 is None):
+        parser.error("A verification batch requires its exact SHA-256.")
     if args.expected_action == "verify_page":
         try:
-            page = SelectedVerificationPage(*page_fields)
-        except ValueError as exc:
+            if args.verification_batch is None:
+                page = SelectedVerificationPage(*page_fields)
+            elif any(value is not None for value in page_fields):
+                parser.error("A verification batch cannot be combined with single-page pins.")
+            else:
+                with args.verification_batch.open("rb") as handle:
+                    data = handle.read(65_537)
+                if len(data) > 65_536 or hashlib.sha256(data).hexdigest() != args.verification_batch_sha256:
+                    raise ValueError("canonical_archive_selected_batch_hash_or_size_invalid")
+                payload = json.loads(data)
+                if not isinstance(payload, list) or not 2 <= len(payload) <= 128:
+                    raise ValueError("canonical_archive_selected_batch_invalid")
+                batch = validate_selected_verification_batch(tuple(SelectedVerificationPage(**row) for row in payload))
+        except (OSError, TypeError, ValueError) as exc:
             parser.error(str(exc))
-    elif any(value is not None for value in page_fields):
+    elif args.verification_batch is not None or any(value is not None for value in page_fields):
         parser.error("Exact page pins require verify_page.")
     try:
         storage_day = date.fromisoformat(args.storage_day)
@@ -122,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         verification["manifest_set_hash"] = args.manifest_set_hash
     if page is not None:
         verification["verification_page"] = page
+    if batch is not None:
+        verification["verification_batch"] = batch
     result = runners["service"].run_canonical_action(
         policy=settings.market_data_lifecycle,
         storage_day=storage_day,
@@ -130,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         execute=args.execute,
         **verification,
     )
+    if batch is not None:
+        result["verification_batch_sha256"] = args.verification_batch_sha256
     write_receipt(Path(args.receipt), result)
     print(json.dumps(result, sort_keys=True, default=str))
     return 0 if result["status"] in {"completed", "dry_run"} else 1

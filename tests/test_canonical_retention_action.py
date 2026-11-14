@@ -1,4 +1,6 @@
 from datetime import date
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -50,4 +52,22 @@ def test_cli_requires_complete_exact_page_pin_before_runtime_admission(monkeypat
     for args in (["--expected-action", "verify_page", *page], ["--expected-action", "stage_page", *page]):
         with pytest.raises(SystemExit) as error:
             cli.main(common + args)
+        assert error.value.code == 2
+
+
+def test_cli_refuses_changed_or_discontinuous_reviewed_batch_before_admission(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "get_settings", lambda: pytest.fail("unexpected runtime admission"))
+    path = tmp_path / "batch.json"
+    payload = [
+        {"page_ordinal": ordinal, "manifest_id": "cfa_" + str(ordinal) * 64,
+         "manifest_hash": "a" * 64, "generation": 0}
+        for ordinal in (2, 4)
+    ]
+    data = json.dumps(payload).encode()
+    path.write_bytes(data)
+    arguments = ["--storage-day", "2026-09-24", "--expected-action", "verify_page",
+                 "--verification-batch", str(path), "--receipt", str(tmp_path / "unused")]
+    for digest in ("a" * 64, hashlib.sha256(data).hexdigest()):
+        with pytest.raises(SystemExit) as error:
+            cli.main(arguments + ["--verification-batch-sha256", digest])
         assert error.value.code == 2

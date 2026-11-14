@@ -19,7 +19,9 @@ from core.storage_mounts import (
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from ._shared import db
 from .cold_history import cold_layout_active
-from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash, _unverified_page
+from .fact_archival import (
+    FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash, _unverified_batch_suffix, _unverified_page,
+)
 from .fact_reclamation import unproven_reclamation_fact_types
 
 
@@ -113,6 +115,13 @@ class PostgresCanonicalFactRetentionRepository:
             session.execute(text("SELECT set_config('statement_timeout',:value,true)"),
                             {"value": str(statement_timeout_ms)})
             _unverified_page(session, day, page)
+
+    def selected_verification_batch_suffix(self, day, pages, *, statement_timeout_ms):
+        with self.database.session() as session:
+            session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            session.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                            {"value": str(statement_timeout_ms)})
+            return _unverified_batch_suffix(session, day, pages)
 
     def _inventory(self, policy: CanonicalFactRetentionPolicy, *, after_storage_day: date | None):
         deadline = monotonic() + policy.max_plan_seconds

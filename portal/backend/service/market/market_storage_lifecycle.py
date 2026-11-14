@@ -273,6 +273,7 @@ class MarketStorageLifecycleService:
         progress=None,
         verification_pages: int | None = None,
         verification_page=None,
+        verification_batch=None,
         verification_bytes: int | None = None,
         verification_objects: int | None = None,
         manifest_set_hash: str | None = None,
@@ -291,7 +292,7 @@ class MarketStorageLifecycleService:
             **({"verification_page": verification_page} if verification_page is not None else {}),
             **{key: value for key, value in (
                 ("verification_bytes", verification_bytes), ("verification_objects", verification_objects),
-                ("manifest_set_hash", manifest_set_hash),
+                ("manifest_set_hash", manifest_set_hash), ("verification_batch", verification_batch),
             ) if value is not None},
         )
 

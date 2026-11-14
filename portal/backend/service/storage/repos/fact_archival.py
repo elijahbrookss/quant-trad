@@ -170,17 +170,66 @@ class SelectedVerificationPage:
             raise ValueError("canonical_archive_selected_generation_invalid")
 
 
+def validate_selected_verification_batch(pages):
+    if (type(pages) is not tuple or not 2 <= len(pages) <= 128
+            or any(not isinstance(page, SelectedVerificationPage) for page in pages)
+            or any(right.page_ordinal != left.page_ordinal + 1 for left, right in zip(pages, pages[1:]))
+            or len({page.manifest_id for page in pages}) != len(pages)):
+        raise ValueError("canonical_archive_selected_batch_invalid: require 2 to 128 contiguous exact page pins")
+    return pages
+
+
 def _unverified_page(session, day, expected=None):
     page = session.execute(_ARCHIVE_UNVERIFIED_PAGE_QUERY, {
         "day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION,
     }).mappings().one_or_none()
-    if expected is not None and (page is None or (
-            page["page_ordinal"], page["id"], page["manifest_hash"], page["selected_generation"] or 0,
-            page["selected_preparation_id"], page["selected_catalog_commitment"],
-    ) != (expected.page_ordinal, expected.manifest_id, expected.manifest_hash, expected.generation,
-          expected.preparation_id, expected.catalog_commitment)):
+    if expected is not None and (page is None or _page_pin(page) != expected):
         raise RuntimeError(f"canonical_archive_selected_page_changed: storage_day={day}")
     return page
+
+
+def _page_pin(page):
+    return SelectedVerificationPage(page["page_ordinal"], page["id"], page["manifest_hash"],
+                                    page["selected_generation"] or 0, page["selected_preparation_id"],
+                                    page["selected_catalog_commitment"])
+
+
+def _unverified_batch_suffix(session, day, expected):
+    """Reconcile a reviewed batch with exact current receipts and the live cursor."""
+    rows = session.execute(text("""
+        SELECT pages.page_ordinal,pages.id,pages.manifest_hash,
+               active.generation AS selected_generation,active.preparation_id AS selected_preparation_id,
+               active.catalog_commitment AS selected_catalog_commitment,
+               proof.manifest_id IS NOT NULL AS has_receipt,
+               proof.manifest_hash=pages.manifest_hash AND (
+                   (active.manifest_id IS NULL AND binding.manifest_id IS NULL) OR
+                   (active.manifest_id IS NOT NULL AND
+                    (active.preparation_id,active.catalog_commitment)=(binding.preparation_id,binding.catalog_commitment))
+               ) AS receipt_current
+        FROM market.fact_archive_manifests AS pages
+        LEFT JOIN market.fact_archive_active_generations AS active ON active.manifest_id=pages.id
+        LEFT JOIN market.fact_archive_verifications AS proof
+          ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+        LEFT JOIN market.fact_archive_verification_generations AS binding
+          ON binding.manifest_id=pages.id AND binding.verifier_version=:version
+        WHERE pages.storage_day=:day AND pages.page_ordinal BETWEEN :first AND :last
+        ORDER BY pages.page_ordinal LIMIT :limit
+    """), {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION, "first": expected[0].page_ordinal,
+            "last": expected[-1].page_ordinal, "limit": len(expected)}).mappings().all()
+    changed = f"canonical_archive_selected_batch_changed: storage_day={day}"
+    if tuple(_page_pin(row) for row in rows) != expected:
+        raise RuntimeError(changed)
+    completed = 0
+    for index, row in enumerate(rows):
+        if row["has_receipt"]:
+            if completed != index or not row["receipt_current"]:
+                raise RuntimeError(changed)
+            completed += 1
+    pending = expected[completed:]
+    if pending:
+        _unverified_page(session, day, pending[0])
+    return pending
+
 
 _ARCHIVE_SOURCE_ENVELOPES_QUERY = text(f"""
     SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
