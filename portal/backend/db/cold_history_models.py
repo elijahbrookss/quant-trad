@@ -45,7 +45,7 @@ def assert_cold_history_immutability(conn):
         raise RuntimeError("cold_fact_catalog_immutability_required")
 
 
-def _assert_hdd_placement(conn, names, error):
+def _assert_hdd_placement(conn, names, error, *, target_id=None):
     """Require durable history placement for the heap, TOAST, and every index."""
     actual = conn.execute(text("""
         WITH tables AS (
@@ -62,6 +62,7 @@ def _assert_hdd_placement(conn, names, error):
             FROM public.portal_storage_header_tablespaces t
             JOIN public.portal_storage_targets s ON s.id=t.target_id
             WHERE s.medium='hdd' AND s.state='active' AND s.roles ? 'history'
+              AND (CAST(:target_id AS text) IS NULL OR s.id=:target_id)
               AND t.database_identity=(
                   SELECT control.system_identifier::text || '/' || db.oid::text
                   FROM pg_control_system() AS control CROSS JOIN pg_database AS db
@@ -74,7 +75,7 @@ def _assert_hdd_placement(conn, names, error):
                ) AS in_history
         FROM members JOIN pg_class AS c USING(oid)
         CROSS JOIN pg_database AS db WHERE db.datname=current_database()
-    """), {"names": list(names)}).mappings().all()
+    """), {"names": list(names), "target_id": target_id}).mappings().all()
     if (
         {row["relname"] for row in actual} != set(names)
         or any(row["relpersistence"] != "p" or not row["in_history"] for row in actual)
@@ -82,8 +83,9 @@ def _assert_hdd_placement(conn, names, error):
         raise RuntimeError(error)
 
 
-def assert_cold_history_placement(conn):
-    _assert_hdd_placement(conn, COLD_LOCATOR_TABLE_NAMES, "cold_fact_locator_history_tablespace_required")
+def assert_cold_history_placement(conn, *, target_id=None):
+    _assert_hdd_placement(conn, COLD_LOCATOR_TABLE_NAMES, "cold_fact_locator_history_tablespace_required",
+                          target_id=target_id)
 
 
 def assert_cold_custody_catalog_placement(conn):
@@ -95,7 +97,7 @@ def assert_cold_archive_evidence_placement(conn):
                           "cold_fact_archive_evidence_history_tablespace_required")
 
 
-def guard_cold_runtime_placement(conn, *, locators=False, archive_evidence=False):
+def guard_cold_runtime_placement(conn, *, locators=False, archive_evidence=False, locator_target_id=None):
     """Keep the registered target and checked heaps stable through a cold write."""
     tables = COLD_LOCATOR_TABLE_NAMES if locators else ()
     if archive_evidence:
@@ -109,7 +111,7 @@ def guard_cold_runtime_placement(conn, *, locators=False, archive_evidence=False
     relations = ", ".join(f"ONLY market.{name}" for name in tables)
     conn.execute(text(f"LOCK TABLE {relations} IN ACCESS SHARE MODE NOWAIT"))
     if locators:
-        assert_cold_history_placement(conn)
+        assert_cold_history_placement(conn, target_id=locator_target_id)
     if archive_evidence:
         assert_cold_custody_catalog_placement(conn)
         assert_cold_archive_evidence_placement(conn)

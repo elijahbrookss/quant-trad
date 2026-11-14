@@ -32,10 +32,15 @@ python -m scripts.db.canonical_cold_load \
   --target-system-identifier <target-system-id> \
   --target-database <target-name> --target-database-oid <target-oid> \
   --day 2026-09-28 --checkpoint /rehearsal/stage/progress.sqlite3 \
+  --pressure-limits /rehearsal/stage/reviewed-load-limits.json \
   --max-pages 1 --max-seconds 120
 ```
 
+Run in the PostgreSQL storage and process namespace with native filesystem identities and a compatible `pg_controldata`. The pressure file specifies `recent_target_id`, `history_target_id`, `min_recent_free_bytes`, `min_history_free_bytes`, `max_page_wal_bytes`, `max_page_history_bytes`, `max_page_recent_catalog_bytes`, `max_resident_wal_bytes`, `max_ready_wal_segments`, and `temp_file_limit_kib`. Use the actual two-device rehearsal and observed concurrent growth to set these limits. The free-space floors must leave room for other writers through cancellation and restart. Keep existing storage reservations in the budget. [WAL and filesystem pressure observations](../../scripts/db/canonical_cold_pressure.md)
+
 The loader validates each page's current mounted bytes through the serving codec, acquires a state-table lock and checks for an inactive cold layout before each admission transaction. It never changes that layout flag or source relations. Record `last_processed_ordinal`. On retry, reread the same page idempotently or provide `--after-ordinal` with the previously committed value. An end-of-checkpoint receipt only describes the batch traversal. The activation procedure must verify every page, loaded memberships, dependency holds and the final writer fence independently.
+
+If a page is deferred, exit code `75` returns the last committed ordinal and the pressure reason. The current page transaction rolls back. Correct the actual capacity or archiving condition and resume from that ordinal. The loader samples available bytes during the page, limits PostgreSQL query spill, and checks cluster-wide generated WAL separately from retained WAL and the queued archive segments. On a busy shared cluster the WAL delta includes other writers. A rejected transaction can still generate WAL. Recheck the pressure reading before retry. The sampling interval and cancellation lag still require measured runway.
 
 ## Verify the retiring prefix and prepared catalog
 

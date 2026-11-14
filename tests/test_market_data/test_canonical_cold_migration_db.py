@@ -1,11 +1,14 @@
 """Native PostgreSQL source and prepared-catalog smoke on a disposable database."""
 from datetime import UTC, datetime, timedelta
+from contextlib import contextmanager
+from dataclasses import replace
 import os
 from pathlib import Path
 import pwd
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -32,6 +35,8 @@ from portal.backend.service.storage.repos.fact_archive_generation import (
     archive_preparation_id, catalog_batch_hash, catalog_commitment, catalog_root,
 )
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
+from scripts.db import canonical_cold_load
+from scripts.db.canonical_cold_load_pressure import CatalogLoadLimits, LoadPressure, supervise_page
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.prepare_canonical_cold_catalog import prepare_catalog
 from tests.test_market_data.test_canonical_cold_migration import DAY, LIMITS
@@ -95,7 +100,8 @@ def prepared_database(local_catalog_server):
     url, server_root, account = local_catalog_server
     database = f"qt_cold_{uuid4().hex[:16]}"
     tablespace = f"qt_cold_{uuid4().hex[:16]}"
-    root = server_root / tablespace
+    devices_root = Path(os.environ.get("QT_COLD_LOAD_FIXTURE_HISTORY_ROOT", server_root))
+    root = devices_root / tablespace
     root.mkdir(mode=0o700)
     if os.geteuid() == 0:
         os.chown(root, account.pw_uid, account.pw_gid)
@@ -243,7 +249,7 @@ def _published_generation(conn, manifest, dependency):
 
 
 @pytest.mark.parametrize("with_prepared_authority", [False, True])
-def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_path, with_prepared_authority):
+def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_path, with_prepared_authority, monkeypatch):
     engine, tablespace, history_root = prepared_database
     rows = [_row(), _row(2), _row(3, state="invalidated"), _row(series_id=2, commit=4)]
     original, destination = [FilesystemRawArchiveObjectStore(tmp_path / name) for name in ("source", "stage")]
@@ -278,7 +284,23 @@ def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_pa
         load_checkpoint(engine, checkpoint, **(loading | {"target": TargetDatabase(target.system_identifier, "wrong", target.oid)}))
     with pytest.raises(RuntimeError, match="resume_page_not_admitted"):
         load_checkpoint(engine, checkpoint, after_ordinal=0, **loading)
-    assert load_checkpoint(engine, checkpoint, **loading)["last_processed_ordinal"] == 0
+    calls = []
+
+    @contextmanager
+    def measured_boundary(session, **_scope):
+        calls.append(session.scalar(text("SELECT count(*) FROM market.cold_fact_pages")))
+        yield
+        if calls == [0, 1]:
+            raise LoadPressure("test pressure after inserting the second page")
+
+    monkeypatch.setattr(canonical_cold_load, "supervise_page", measured_boundary)
+    caps = CatalogLoadLimits("fixture-ssd", "fixture-hdd", 1024, 1024, 1024, 1024, 1024, 1024, 0, 64)
+    stopped = load_checkpoint(engine, checkpoint, max_pages=2, pressure_limits=caps,
+                              pg_controldata=Path("/fixture/pg_controldata"), **loading)
+    assert stopped["last_processed_ordinal"] == 0
+    assert stopped["pages_processed"] == 1 and stopped["deferred_reason"] == "test pressure after inserting the second page"
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM market.cold_fact_pages")) == 1
     assert load_checkpoint(engine, checkpoint, **loading)["last_processed_ordinal"] == 0
     assert load_checkpoint(engine, checkpoint, after_ordinal=0, **loading)["checkpoint_end_reached"]
     with Session(engine) as session:
@@ -294,3 +316,44 @@ def test_native_pg_stages_and_resumes_inactive_catalog(prepared_database, tmp_pa
                      {"version": COLD_HISTORY_LAYOUT_VERSION})
     with pytest.raises(RuntimeError, match="layout_already_active"):
         load_checkpoint(engine, checkpoint, **loading)
+
+
+def test_supervised_load_admission_checks_native_paths_and_restores_transaction_limits(prepared_database, monkeypatch):
+    engine, tablespace, history_root = prepared_database
+    if "QT_COLD_LOAD_FIXTURE_HISTORY_ROOT" not in os.environ:
+        pytest.skip("requires an isolated second filesystem for the supervised loader")
+    server_root = Path(engine.url.query["host"]).parent
+    assert server_root.stat().st_dev != history_root.stat().st_dev
+    udev = server_root / "fixture-udev"
+    udev.mkdir()
+    for path, uuid in ((server_root, "fixture-recent"), (history_root, "fixture-history")):
+        device = path.stat().st_dev
+        (udev / f"b{os.major(device)}:{os.minor(device)}").write_text(f"E:ID_FS_UUID={uuid}\n")
+    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
+    with engine.begin() as conn:
+        StorageTargetRecord.__table__.create(conn)
+        StorageHeaderTablespaceRecord.__table__.create(conn)
+        for key, path, medium, role in (("fixture-recent", server_root, "ssd", "recent"),
+                                        ("fixture-history", history_root, "hdd", "history")):
+            conn.execute(StorageTargetRecord.__table__.insert(), {
+                "id": key, "label": key, "filesystem_uuid": key, "root": str(path), "medium": medium, "roles": [role],
+            })
+        conn.execute(text("""
+            INSERT INTO public.portal_storage_header_tablespaces(database_identity,target_id,tablespace_oid,binding)
+            SELECT control.system_identifier::text || '/' || d.oid::text,'fixture-history',s.oid,'{}'
+            FROM pg_control_system() control CROSS JOIN pg_database d CROSS JOIN pg_tablespace s
+            WHERE d.datname=current_database() AND s.spcname=:space
+        """), {"space": tablespace})
+    args = {"pg_controldata": Path("/usr/lib/postgresql/15/bin/pg_controldata"), "deadline": monotonic() + 20}
+    limits = CatalogLoadLimits("fixture-recent", "fixture-history", 1024, 1024, 32 << 20, 4 << 20, 4 << 20,
+                               1 << 30, 8, 64)
+    with Session(engine) as session:
+        original = session.scalar(text("SHOW temp_file_limit"))
+        with supervise_page(session, limits=limits, **args):
+            assert session.scalar(text("SHOW temp_file_limit")) == "64kB"
+            assert session.scalar(text("SHOW max_parallel_workers_per_gather")) == "0"
+        session.rollback()
+        assert session.scalar(text("SHOW temp_file_limit")) == original
+        with pytest.raises(LoadPressure, match="page_capacity: target=fixture-history"):
+            with supervise_page(session, limits=replace(limits, min_history_free_bytes=2**63 - 1), **args):
+                pytest.fail("admitted work without filesystem headroom")
