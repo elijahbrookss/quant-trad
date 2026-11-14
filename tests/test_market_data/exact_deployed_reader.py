@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 
-def check_deployed_source_reader(restored_url, objects, dataset_id, series, expected):
+def check_deployed_source_reader(restored_url, objects, dataset_id, series, expected, *, latest_only=False):
     """Opt-in check using Git-extracted deployed code and the isolated result."""
     path = os.environ.get("QT_EXACT_OLD_SOURCE_ROOT")
     if path is None:
@@ -37,7 +37,7 @@ def check_deployed_source_reader(restored_url, objects, dataset_id, series, expe
         "PYTHONDONTWRITEBYTECODE": "1",
         "LC_ALL": "C.UTF-8",
     }
-    parameters = (expected_hash, dataset_id, str(series))
+    parameters = (expected_hash, dataset_id, str(series), "latest" if latest_only else "revisions")
     result = subprocess.run([sys.executable, "-c", _EXACT_OLD_READER, *parameters],
                             stdin=subprocess.DEVNULL, capture_output=True, text=True,
                             cwd=source, env=env, timeout=45)
@@ -51,10 +51,14 @@ def check_deployed_source_reader(restored_url, objects, dataset_id, series, expe
         pytest.fail(f"exact deployed source check failed: {error}")
     report = json.loads(result.stdout)
     assert report.get("source_attested") is True
-    expected_rows = [[record.fact_version_id, record.market_commit_seq, record.row_hash,
-                      record.fact.accepted_at.isoformat(), record.fact.known_at.isoformat()]
-                     for record in expected]
-    if report["rows"] != expected_rows:
+    expected_rows = [[record.series_id, record.revision, record.market_commit_seq, record.ingestion_run_id,
+                      record.source_identity_key, record.canonical_material_hash, record.fact.to_dict()]
+                     for record in expected] if latest_only else [
+        [record.fact_version_id, record.market_commit_seq, record.row_hash,
+         record.fact.accepted_at.isoformat(), record.fact.known_at.isoformat()]
+        for record in expected
+    ]
+    if report["rows"] != json.loads(json.dumps(expected_rows, default=lambda value: value.isoformat())):
         pytest.fail("exact deployed source frozen rows differ")
     print("QT_EXACT_OLD_SOURCE_READY")
 
@@ -86,11 +90,16 @@ try:
         print(json.dumps({"error": safe_error}))
         sys.exit(3)
     repo = market_data.PostgresMarketDataRepository()
-    rows = repo.read_dataset_fact_revisions(dataset_id=sys.argv[2], series_id=int(sys.argv[3]))
-    print(json.dumps({"source_attested": True, "rows": [
-        [row.fact_version_id, row.market_commit_seq, row.row_hash,
-         row.fact.accepted_at.isoformat(), row.fact.known_at.isoformat()] for row in rows
-    ]}))
+    args = {"dataset_id": sys.argv[2], "series_id": int(sys.argv[3])}
+    if sys.argv[4] == "latest":
+        result = [[row.series_id, row.revision, row.market_commit_seq, row.ingestion_run_id,
+                   row.source_identity_key, row.canonical_material_hash, row.fact.to_dict()]
+                  for row in repo.read_dataset_series(**args)]
+    else:
+        result = [[row.fact_version_id, row.market_commit_seq, row.row_hash,
+                   row.fact.accepted_at.isoformat(), row.fact.known_at.isoformat()]
+                  for row in repo.read_dataset_fact_revisions(**args)]
+    print(json.dumps({"source_attested": True, "rows": result}, default=lambda value: value.isoformat()))
 except Exception as exc:
     print(json.dumps({"error": type(exc).__name__}))
     sys.exit(4)

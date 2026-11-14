@@ -204,37 +204,64 @@ def restore_candidate_only_pages(conn, *, fence, expected_database, expected_exe
                 or type(initial) is not int or not 0 < initial <= expected_source_commit
                 or PostgresMarketDataRepository._current_commit_seq_with_session(conn) != expected_source_commit):
             raise RuntimeError("reverse projection candidate authority changed")
-        pages = conn.execute(text("""
+        receipt, inserted = _candidate_page_receipt(
+            conn, reader=reader, expected_database=expected_database, execution_hash=expected_execution_hash,
+            source_commit=expected_source_commit, initial=initial, max_pages=max_pages, max_bytes=max_bytes,
+            check=lambda: (fence.check_clock(), check_archive()), write=True,
+        )
+        check_archive()
+        fence.assert_quiet(conn)
+    return receipt | {"inserted": inserted}
+
+
+def verify_candidate_only_pages(conn, *, reader, receipt, initial, check):
+    """Re-read the complete current page set and its exact SQL projection."""
+    observed, _ = _candidate_page_receipt(
+        conn, reader=reader, expected_database=receipt["target_database"], execution_hash=receipt["execution_hash"],
+        source_commit=receipt["source_commit"], initial=initial, max_pages=receipt["page_count"],
+        max_bytes=receipt["archive_bytes"], check=check, write=False,
+    )
+    if observed != {key: value for key, value in receipt.items() if key != "inserted"}:
+        raise RuntimeError("reverse projection candidate receipts differ from stored pages")
+    return observed["receipt_sha256"]
+
+
+def _candidate_page_receipt(conn, *, reader, expected_database, execution_hash, source_commit, initial,
+                            max_pages, max_bytes, check, write):
+    pages = conn.execute(text("""
             SELECT * FROM market.cold_fact_pages WHERE staged_storage_day IS NULL AND last_commit_seq>:initial
             ORDER BY first_commit_seq,id COLLATE "C" LIMIT :limit
-        """), {"initial": initial, "limit": max_pages + 1}).mappings().all()
-        if len(pages) > max_pages or sum(page["byte_count"] for page in pages) > max_bytes:
-            raise RuntimeError("reverse projection candidate page budget exceeded")
+    """), {"initial": initial, "limit": max_pages + 1}).mappings().all()
+    archive_bytes = sum(page["byte_count"] for page in pages)
+    if len(pages) > max_pages or archive_bytes > max_bytes:
+        raise RuntimeError("reverse projection candidate page budget exceeded")
 
-        digest = archive_evidence_hash({"schema": VERSION, "source_commit": expected_source_commit})
-        prior_commit, inserted, verified = initial, 0, 0
-        for page in pages:
-            fence.check_clock()
-            check_archive()
-            manifest = _manifest(page)
-            if not prior_commit < manifest.first_cursor[0] <= manifest.last_cursor[0] <= expected_source_commit:
-                raise RuntimeError("reverse projection candidate page commit range changed")
-            rows = _verified_page(conn, reader, manifest)
-            _assert_candidate_locators(conn, rows, manifest)
-            dated = [(row["accepted_at"].astimezone(UTC).date(), row) for row in rows]
+    digest = archive_evidence_hash({"schema": VERSION, "source_commit": source_commit})
+    prior_commit, inserted, verified = initial, 0, 0
+    for page in pages:
+        check()
+        manifest = _manifest(page)
+        if not prior_commit < manifest.first_cursor[0] <= manifest.last_cursor[0] <= source_commit:
+            raise RuntimeError("reverse projection candidate page commit range changed")
+        rows = _verified_page(conn, reader, manifest)
+        _assert_candidate_locators(conn, rows, manifest)
+        dated = [(row["accepted_at"].astimezone(UTC).date(), row) for row in rows]
+        if write:
             for day in sorted({day for day, _ in dated}):
                 ensure_fact_payload_partition(conn, day)
             inserted += _write_exact_page(conn, dated)
-            verified += len(dated)
-            prior_commit = manifest.last_cursor[0]
-            digest = archive_evidence_hash({"prior": digest, "manifest": manifest.manifest_hash,
-                                            "placement": [[day.isoformat(), row["id"]] for day, row in dated]})
-        check_archive()
-        fence.assert_quiet(conn)
-    receipt = {"schema": VERSION, "target_database": expected_database, "source_commit": expected_source_commit,
-               "execution_hash": expected_execution_hash, "page_count": len(pages), "row_count": verified,
-               "ordered_content_hash": digest}
-    return receipt | {"receipt_sha256": archive_evidence_hash(receipt), "inserted": inserted}
+        else:
+            for day, row in dated:
+                check()
+                _assert_exact(conn, day=day, row=row)
+        verified += len(dated)
+        prior_commit = manifest.last_cursor[0]
+        digest = archive_evidence_hash({"prior": digest, "manifest": manifest.manifest_hash,
+                                        "placement": [[day.isoformat(), row["id"]] for day, row in dated]})
+    receipt = {"schema": VERSION, "target_database": expected_database, "source_commit": source_commit,
+               "execution_hash": execution_hash, "page_count": len(pages), "row_count": verified,
+               "ordered_content_hash": digest, "archive_bytes": archive_bytes}
+    return receipt | {"receipt_sha256": archive_evidence_hash(receipt)}, inserted
 
 
 def _assert_candidate_locators(conn, rows, manifest):

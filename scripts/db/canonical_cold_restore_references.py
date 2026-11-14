@@ -65,7 +65,7 @@ def _require_disposable_fence(conn, fence):
         raise ValueError("canonical_cold_recovery_disposable_fence_required")
 
 
-def restore_original_reference_bindings(conn, *, fence, original, expected_hash, timeout_seconds=120):
+def restore_original_reference_bindings(conn, *, fence, original, expected_hash, donor=None, timeout_seconds=120):
     """Restore all four FK roots after exact header and identity recovery.
 
     The restored cold clone and old layout are from the same physical cluster
@@ -83,7 +83,12 @@ def restore_original_reference_bindings(conn, *, fence, original, expected_hash,
 
     with _bounded_step(conn, timeout_seconds):
         fence.assert_quiet(conn)
-        if _database_identity(conn) != original["database"]:
+        target = _database_identity(conn)
+        source = original["database"]
+        if donor is not None and (donor is conn or capture_original_reference_bindings(donor) != original):
+            raise RuntimeError("canonical_cold_recovery_reference_donor_changed")
+        keys = ("system_identifier", "header_oid") if donor is not None else tuple(target)
+        if any(target[key] != source[key] for key in keys):
             raise RuntimeError("canonical_cold_recovery_reference_database_changed")
         if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
                            {"name": _LIFECYCLE_LOCK_NAME}):
@@ -111,5 +116,5 @@ def restore_original_reference_bindings(conn, *, fence, original, expected_hash,
             raise RuntimeError("canonical_cold_recovery_reference_fk_names_changed")
         assert_fact_identity_references(conn)
         fence.assert_quiet(conn)
-    return {"version": VERSION, "database": original["database"], "original_hash": expected_hash,
+    return {"version": VERSION, "database": target, "original_database": source, "original_hash": expected_hash,
             "constraints": dict(original["constraints"]), "already_restored": already_restored}

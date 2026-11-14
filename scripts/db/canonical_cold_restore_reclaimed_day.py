@@ -13,7 +13,9 @@ from market_data.archive_verification import ArchiveVerificationBatch
 from market_data.cold_history import ColdHistoryReader
 from market_data.fact_archive import archive_evidence_hash
 from portal.backend.db.cold_history_models import COLD_HISTORY_LAYOUT_VERSION
-from portal.backend.db.fact_identity_schema import ensure_fact_header_partition, fact_header_partition_name
+from portal.backend.db.fact_identity_schema import (
+    _assert_header_partition, assert_fact_identity_contract, ensure_fact_header_partition, fact_header_partition_name,
+)
 from portal.backend.db.fact_storage_schema import assert_fact_storage_contract, fact_partition_name
 from portal.backend.db.market_data_models import MarketFactVersionRecord
 from portal.backend.service.storage.repos.cold_history import _manifest
@@ -22,7 +24,7 @@ from portal.backend.service.storage.repos.fact_storage import _catalog_manifest,
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db.canonical_cold_audit import _locators, _source_rows
 from scripts.db.canonical_cold_migration import INITIAL, PostgresMigrationSource, _compare_existing
-from scripts.db.canonical_cold_restore_references import _ready, _require_disposable_fence
+from scripts.db.canonical_cold_restore_references import _database_identity, _ready, _require_disposable_fence
 from scripts.db.fact_header_v2_capture import _bounded_step
 
 
@@ -42,7 +44,9 @@ def _cohort(conn, day):
             or conn.scalar(text("SELECT to_regclass(:name) IS NOT NULL"),
                            {"name": "market." + fact_partition_name(day)})):
         raise RuntimeError(f"canonical_cold_recovery_reclaimed_day_changed: {day}")
-    return boundary.row_count, boundary.manifest_set_hash
+    retention = conn.scalar(text("SELECT to_jsonb(p) FROM market.fact_retention_partitions p WHERE storage_day=:day"),
+                            {"day": day})
+    return boundary.row_count, boundary.manifest_set_hash, archive_evidence_hash(retention)
 
 
 def _page_rows(conn, reader, manifest, day, *, budget):
@@ -93,8 +97,14 @@ def restore_reclaimed_header_day(conn, *, fence, day, expected_manifest_set_hash
             raise RuntimeError("canonical_cold_recovery_reclaimed_lifecycle_busy")
         conn.exec_driver_sql("LOCK TABLE market.fact_storage_state IN SHARE MODE NOWAIT")
         _ready(conn, COLD_HISTORY_LAYOUT_VERSION)
-        assert_fact_storage_contract(conn)
-        expected_rows, manifest_set_hash = _cohort(conn, day)
+        # Restoring an initial legacy child and switching the certificate are
+        # separate fenced steps. Validate the header namespace without asking
+        # the normal serving startup to admit that temporary shape.
+        if not conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL")):
+            assert_fact_storage_contract(conn)
+        else:
+            assert_fact_identity_contract(conn)
+        expected_rows, manifest_set_hash, retention_hash = _cohort(conn, day)
         cohort = PostgresMigrationSource.cohort(conn, day)
         if manifest_set_hash != expected_manifest_set_hash:
             raise RuntimeError(f"canonical_cold_recovery_reclaimed_commitment_changed: {day}")
@@ -156,9 +166,11 @@ def restore_reclaimed_header_day(conn, *, fence, day, expected_manifest_set_hash
             conn.exec_driver_sql("SET CONSTRAINTS market.trg_require_fact_identity_header DEFERRED")
         budget.assert_unchanged()
         check_archive()
-        assert_fact_storage_contract(conn)
+        _assert_header_partition(conn, day)
+        oid = conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"), {"name": "market." + name})
         fence.assert_quiet(conn)
-    receipt = {"version": VERSION, "database": fence.database, "storage_day": day.isoformat(),
+    receipt = {"version": VERSION, "target_database": _database_identity(conn), "storage_day": day.isoformat(),
                "manifest_set_hash": manifest_set_hash, "ordered_content_hash": content_hash,
-               "row_count": expected_rows, "page_count": len(pages), "already_restored": exists}
-    return receipt | {"receipt_sha256": archive_evidence_hash(receipt)}
+               "row_count": expected_rows, "page_count": len(pages), "retention_sha256": retention_hash,
+               "header_oid": oid}
+    return receipt | {"receipt_sha256": archive_evidence_hash(receipt), "already_restored": exists}
