@@ -153,6 +153,15 @@ def test_restore_exact_legacy_headers_with_new_oid_keeps_cold_clone_fenced(legac
         with pytest.raises(RuntimeError, match="copy_budget_exceeded"):
             with conn.begin():
                 restore_legacy_headers(conn, donor, **(args | {"max_copy_bytes": 1}))
+        with pytest.raises(RuntimeError, match="extra_identity"):
+            with conn.begin():
+                conn.execute(text("ALTER TABLE market.fact_identities DISABLE TRIGGER trg_require_fact_identity_header"))
+                conn.execute(text("""
+                    INSERT INTO market.fact_identities(id,storage_day,series_id,observation_key,revision)
+                    VALUES ('orphan',:day,:series,'unrelated-pinned-fixture',1)
+                """), {"day": scope.legacy_days[0], "series": scope.storage.series_id})
+                conn.execute(text("ALTER TABLE market.fact_identities ENABLE ALWAYS TRIGGER trg_require_fact_identity_header"))
+                restore_legacy_headers(conn, donor, **args)
         with conn.begin():
             assert conn.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NULL"))
             assert conn.scalar(text("SELECT to_regnamespace('qt_cold_legacy_restore') IS NULL"))

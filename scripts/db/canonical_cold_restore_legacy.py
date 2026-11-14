@@ -20,6 +20,7 @@ from portal.backend.db.fact_header_legacy_schema import assert_fact_header_legac
 from portal.backend.db.fact_identity_schema import assert_fact_identity_contract
 from portal.backend.db.fact_storage_schema import FACT_STORAGE_LAYOUT_VERSION, assert_fact_storage_contract
 from portal.backend.db.market_data_models import MarketFactVersionRecord
+from portal.backend.service.storage.repos.fact_archival import _partition_manifest_set_hash
 from portal.backend.service.storage.repos.fact_storage import ensure_payload_contracts
 from portal.backend.service.storage.repos.market_data import PostgresMarketDataRepository
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
@@ -396,6 +397,7 @@ def restore_legacy_headers(target, donor, *, fence, donor_scope, expected_donor_
                 sum(authority is not None for _, authority in day_pages),
             ):
                 raise RuntimeError("canonical_cold_restore_legacy_donor_cohort_changed")
+            page_verifications = []
             for page, authority in day_pages:
                 pages += 1
                 if pages > max_pages:
@@ -409,8 +411,10 @@ def restore_legacy_headers(target, donor, *, fence, donor_scope, expected_donor_
                 archive_bytes += byte_count * (2 if authority is not None else 1)
                 if archive_bytes > max_archive_bytes:
                     raise RuntimeError("canonical_cold_restore_legacy_archive_budget_exceeded")
-                _compare_page(donor, target, source, old_reader, new_reader, cohort=cohort,
-                              header_oid=entry["child_oid"], page=page, authority=authority)
+                page_verifications.append(_compare_page(
+                    donor, target, source, old_reader, new_reader, cohort=cohort,
+                    header_oid=entry["child_oid"], page=page, authority=authority,
+                ))
                 row_ids = target.execute(text("""
                     SELECT id FROM market.cold_fact_locators WHERE page_id=:page ORDER BY ordinal LIMIT :limit
                 """), {"page": page["manifest_id"], "limit": page["row_count"] + 1}).scalars().all()
@@ -423,6 +427,13 @@ def restore_legacy_headers(target, donor, *, fence, donor_scope, expected_donor_
                 content = archive_evidence_hash({"previous": content, "manifest": page["manifest_hash"], "copy": digest})
             if _source_rows(donor, day=day, after=tuple(detail["last_cursor"]), through=None, limit=1):
                 raise RuntimeError("canonical_cold_restore_legacy_unaccounted_donor_rows")
+            if cohort.state in {"verified", "reclaimed"}:
+                expected = _partition_manifest_set_hash(day, cohort.expected_rows, page_verifications)
+                stored = donor.scalar(text("""
+                    SELECT manifest_set_hash FROM market.fact_retention_partitions WHERE storage_day=:day
+                """), {"day": day})
+                if any(item is None for item in page_verifications) or stored != expected:
+                    raise RuntimeError("canonical_cold_restore_legacy_donor_day_receipt_changed")
         _bound(donor, deadline)
         _bound(target, deadline)
         if donor.scalar(text(f"SELECT count(*) FROM ONLY {LEGACY}")) != rows or target.scalar(
@@ -441,6 +452,10 @@ def restore_legacy_headers(target, donor, *, fence, donor_scope, expected_donor_
               IS DISTINCT FROM (h.storage_day,h.series_id,h.observation_key,h.revision))
         """)):
             raise RuntimeError("canonical_cold_restore_legacy_identity_mismatch")
+        if target.scalar(text("""
+            SELECT count(*) FROM market.fact_identities WHERE storage_day<:end
+        """), {"end": date.fromisoformat(donor_scope["end_day"])}) != rows:
+            raise RuntimeError("canonical_cold_restore_legacy_extra_identity")
         check_archive()
         fence.assert_quiet(target)
     result = {"schema": VERSION, "target_database": identity, "donor_identity": donor_identity,
