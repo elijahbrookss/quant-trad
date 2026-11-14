@@ -105,7 +105,7 @@ def test_restored_old_cohort_preserves_exact_original_placement_and_cold_page_in
                     audit_candidate(engine, checkpoint, inventory=True, **audit_scope)]
         audit = validate_audit_receipts(receipts)
         with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
-            prepare_identity_suffix(conn, expected_database=f"{cluster}/{oid}", cutoff=audit_scope["cutoff"])
+            identity = prepare_identity_suffix(conn, expected_database=f"{cluster}/{oid}", cutoff=audit_scope["cutoff"])
         execution = {
             "schema": activation.ACTIVATION_VERSION, "evidence": {gate: "e" * 64 for gate in activation._PHYSICAL_GATES},
             "approved_package_hash": "a" * 64, "target_database": original_identity,
@@ -114,6 +114,7 @@ def test_restored_old_cohort_preserves_exact_original_placement_and_cold_page_in
             "payload_children": payload_children, "custody_target_id": "activation-fixture",
             "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids,
             "raw_mapping_index": _stub_raw_index_case(monkeypatch),
+            "identity_registry": {key: identity[key] for key in ("old_oid", "new_oid")},
         }
         outcome = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
         events = []

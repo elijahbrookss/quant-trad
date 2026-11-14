@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from functools import partial
 import logging
 from time import monotonic
@@ -11,9 +12,11 @@ from market_data.archive_namespace import archive_namespace
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from scripts.automation.canonical_cold_package import bind_execution
 from scripts.db.canonical_cold_activate import (
-    activate_cold_storage, raw_index_placement_scope, read_activation_outcome, read_original_watermark, verify_mounted_candidate,
+    activate_cold_storage, assert_original_identity_registry, raw_index_placement_scope, read_activation_outcome,
+    read_original_watermark, verify_mounted_candidate,
 )
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
+from scripts.db.canonical_cold_identity_rebuild import finalize_identity_suffix
 from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement
 from scripts.db.canonical_cold_receipts import validate_audit_receipts
 from scripts.db.canonical_cold_witness import check_witnesses, load_approved_witnesses
@@ -70,6 +73,7 @@ def run_fenced_transition(
 
     def original_outcome(connection):
         commit = current_original_watermark(connection)
+        assert_original_identity_registry(connection, scope=scope["identity_registry"])
         assert_raw_mapping_index_placement(connection, **raw_index_scope, on_history=False)
         if source_commit is not None and commit != source_commit:
             raise RuntimeError("canonical_cold_transition_original_boundary_changed")
@@ -88,6 +92,7 @@ def run_fenced_transition(
             with _bounded_step(conn, remaining_seconds()):
                 if current_original_watermark(conn) < package["source_commit_floor"]:
                     raise RuntimeError("canonical_cold_transition_source_behind_approved_floor")
+                assert_original_identity_registry(conn, scope=scope["identity_registry"])
                 assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
                 if verified_objects is None:
                     verified_objects = verify_mounted_candidate(
@@ -121,6 +126,7 @@ def run_fenced_transition(
                 provider_boundary=provider_boundary, independent_recovery=recovery_boundary,
             )
             outcome = partial(read_activation_outcome, execution=execution, expected_execution_hash=execution_hash)
+            retired_outcome = partial(outcome, require_identity_retired=True)
             record("activation_committing", {"execution_hash": execution_hash, "source_commit_seq": source_commit,
                                              "provider_boundary": provider_boundary, "independent_recovery": recovery_boundary})
             with conn.begin():
@@ -136,6 +142,14 @@ def run_fenced_transition(
                     verify_candidate(conn, result)
                     if outcome(conn) != "committed":
                         raise RuntimeError("canonical_cold_transition_candidate_changed_during_acceptance")
+                    identity = result["identity"]
+                    result["identity_retirement"] = finalize_identity_suffix(
+                        conn, expected_database=identity["database_identity"], cutoff=date.fromisoformat(result["cold_before_day"]),
+                        old_oid=identity["old_oid"], new_oid=identity["new_oid"], verified_recovery_digest=recovery_boundary,
+                        statement_timeout_ms=remaining_seconds() * 1000,
+                    )
+                    if retired_outcome(conn) != "committed":
+                        raise RuntimeError("canonical_cold_transition_candidate_changed_after_identity_retirement")
                     fence.assert_quiet(conn)
                     verified_objects.assert_unchanged()
                     check_archive()
@@ -161,13 +175,14 @@ def run_fenced_transition(
         with conn.begin():
             with _bounded_step(conn, remaining_seconds()):
                 fence.assert_quiet(conn)
-                if outcome(conn) != "committed":
+                if retired_outcome(conn) != "committed":
                     raise RuntimeError("canonical_cold_transition_commit_unconfirmed")
         raw_index = result["raw_mapping_index"]
         record("activation_verified", {"execution_hash": execution_hash, "witness_hash": witness_hash,
-                                       "raw_mapping_index_receipt_hash": raw_index and raw_index["receipt_hash"]})
+                                       "raw_mapping_index_receipt_hash": raw_index and raw_index["receipt_hash"],
+                                       "identity_retirement": result["identity_retirement"]})
         check_archive()
         assert_host_held()
-        reopen_database_fence(fence, control, expected_outcome="committed", read_outcome=outcome, record=record)
+        reopen_database_fence(fence, control, expected_outcome="committed", read_outcome=retired_outcome, record=record)
         assert_host_held()
         return result

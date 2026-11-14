@@ -103,7 +103,7 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
                 for name in map(fact_partition_name, migrating_days)
             }
         with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
-            prepare_identity_suffix(conn, expected_database=token, cutoff=cutoff)
+            identity = prepare_identity_suffix(conn, expected_database=token, cutoff=cutoff)
         target = TargetDatabase(cluster, target_identity["database"], target_identity["database_oid"])
         checkpoint = MigrationCheckpoint(tmp_path / "dated-checkpoint.sqlite")
         audit_scope = {"target": target, "object_store": candidate_store, "cutoff": cutoff}
@@ -128,7 +128,8 @@ def initially_dated_rollback_clone(storage, tmp_path, monkeypatch, request):
                      "source_commit_seq": source_commit, "loaded_inventory_hash": audit["loaded_inventory_hash"],
                      "payload_children": payload_children, "custody_target_id": "activation-fixture",
                      "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids,
-                     "raw_mapping_index": _stub_raw_index_case(monkeypatch)}
+                     "raw_mapping_index": _stub_raw_index_case(monkeypatch),
+                     "identity_registry": {key: identity[key] for key in ("old_oid", "new_oid")}}
         outcome = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
         with _fence_connections(storage) as (conn, control):
             with conn.begin():

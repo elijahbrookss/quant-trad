@@ -30,7 +30,7 @@ from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOC
 from scripts.db.canonical_cold_audit import _ensure_target, _plan
 from scripts.db.canonical_cold_custody_placement import assert_custody_placement
 from scripts.db.canonical_cold_database_fence import DatabaseFence
-from scripts.db.canonical_cold_identity_rebuild import swap_identity_suffix
+from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, SOURCE, STAGED, _SWAP_RECEIPT, _oid, swap_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase
 from scripts.db.canonical_cold_migration import PREPARED_CATALOG_TABLES, PostgresMigrationSource
 from scripts.db.canonical_cold_raw_index import assert_raw_mapping_index_placement, move_raw_mapping_index
@@ -45,7 +45,7 @@ _PHYSICAL_GATES = {
 }
 _EXECUTION_SCOPE = {
     "source_database", "target_database", "audit_set_hash", "loaded_inventory_hash", "payload_children",
-    "custody_target_id", "custody_tablespace_oid", "custody_relation_oids", "raw_mapping_index",
+    "custody_target_id", "custody_tablespace_oid", "custody_relation_oids", "raw_mapping_index", "identity_registry",
 }
 
 
@@ -64,6 +64,18 @@ def _valid_raw_index_scope(scope):
             and scope["table_oid"] != scope["index_oid"]
             and type(scope["max_copy_bytes"]) is int and 0 < scope["max_copy_bytes"] <= 2**63 - 1
             and type(scope["timeout_seconds"]) is int and 1 <= scope["timeout_seconds"] <= MAX_MIGRATION_SECONDS)
+
+
+def _valid_identity_registry(scope):
+    return (isinstance(scope, dict) and scope.keys() == {"old_oid", "new_oid"}
+            and all(type(oid) is int and 0 < oid <= 2**32 - 1 for oid in scope.values())
+            and scope["old_oid"] != scope["new_oid"])
+
+
+def assert_original_identity_registry(conn, *, scope):
+    if (not _valid_identity_registry(scope) or _oid(conn, SOURCE) != scope["old_oid"]
+            or _oid(conn, STAGED) != scope["new_oid"] or _oid(conn, PREVIOUS) is not None):
+        raise RuntimeError("canonical_cold_activation_original_identity_registry_changed")
 
 
 def raw_index_placement_scope(execution):
@@ -86,6 +98,8 @@ def validate_execution_record(execution, *, expected_execution_hash):
         raise ValueError("canonical_cold_activation_incomplete_execution_record")
     if not _valid_raw_index_scope(execution.get("raw_mapping_index")):
         raise ValueError("canonical_cold_activation_raw_index_scope_invalid")
+    if not _valid_identity_registry(execution.get("identity_registry")):
+        raise ValueError("canonical_cold_activation_identity_registry_scope_invalid")
     if (
         execution.keys() != _EXECUTION_SCOPE | {"schema", "approved_package_hash", "evidence", "source_commit_seq"}
         or not isinstance(execution.get("evidence"), dict)
@@ -264,6 +278,7 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
     )).all()
     if source_cert != [(FACT_STORAGE_LAYOUT_VERSION, "ready")]:
         raise RuntimeError("canonical_cold_activation_source_certificate_changed")
+    assert_original_identity_registry(conn, scope=execution["identity_registry"])
     lock_header_namespace(conn)
     conn.execute(text("LOCK TABLE ONLY market.fact_hot_payloads IN ACCESS EXCLUSIVE MODE NOWAIT"))
     conn.execute(text("LOCK TABLE market.fact_retention_partitions IN SHARE ROW EXCLUSIVE MODE NOWAIT"))
@@ -347,6 +362,8 @@ def activate_cold_storage(conn, *, execution, expected_execution_hash, receipts,
                                           if row["child"] == "fact_versions_legacy"), None),
         statement_timeout_ms=statement_timeout_ms,
     )
+    if any(identity_result[key] != oid for key, oid in execution["identity_registry"].items()):
+        raise RuntimeError("canonical_cold_activation_promoted_identity_registry_changed")
     result = {
         "execution_hash": expected_execution_hash, "audit_set_hash": audit["audit_set_hash"],
         "loaded_inventory_hash": audit["loaded_inventory_hash"],
@@ -418,7 +435,7 @@ def read_original_watermark(conn, *, expected, expected_inventory):
     return watermark
 
 
-def read_activation_outcome(conn, *, execution, expected_execution_hash):
+def read_activation_outcome(conn, *, execution, expected_execution_hash, require_identity_retired=False):
     """Reconcile durable SQL state for this exact operation on the pinned database."""
     validate_execution_record(execution, expected_execution_hash=expected_execution_hash)
     expected = execution["target_database"]
@@ -428,6 +445,7 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash):
         raise RuntimeError("canonical_cold_activation_outcome_commit_boundary_changed")
     if layout == FACT_STORAGE_LAYOUT_VERSION:
         _assert_original_inventory(conn, execution["loaded_inventory_hash"])
+        assert_original_identity_registry(conn, scope=execution["identity_registry"])
         assert_raw_mapping_index_placement(conn, **raw_index_scope, on_history=False)
         return "original"
     if (layout != COLD_HISTORY_LAYOUT_VERSION or not isinstance(evidence, dict)
@@ -440,6 +458,20 @@ def read_activation_outcome(conn, *, execution, expected_execution_hash):
         raise RuntimeError("canonical_cold_activation_outcome_uncertain")
     assert_fact_storage_contract(conn)
     verify_committed_raw_mapping_index(conn, scope=raw_index_scope, receipt=evidence.get("raw_mapping_index"))
+    if require_identity_retired:
+        identity = evidence["identity"]
+        approved_identity = execution["identity_registry"]
+        retired = conn.execute(text(f"""
+            SELECT database_identity,cutoff,old_oid,new_oid,recovery_digest,finalized_at IS NOT NULL
+            FROM {_SWAP_RECEIPT} WHERE singleton
+        """)).one_or_none()
+        expected_retirement = (
+            identity["database_identity"], date.fromisoformat(evidence["cold_before_day"]), approved_identity["old_oid"],
+            approved_identity["new_oid"], execution["evidence"]["independent_recovery"], True,
+        )
+        if (_oid(conn, PREVIOUS) is not None or _oid(conn, SOURCE) != approved_identity["new_oid"]
+                or any(identity[key] != oid for key, oid in approved_identity.items()) or retired != expected_retirement):
+            raise RuntimeError("canonical_cold_activation_old_identity_retirement_unconfirmed")
     return "committed"
 
 

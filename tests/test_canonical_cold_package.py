@@ -30,6 +30,7 @@ def artifacts(tmp_path):
             "custody_relation_oids": {name: index for index, name in enumerate(COLD_CUSTODY_TABLE_NAMES, 80)},
             "raw_mapping_index": {"target_id": "history", "tablespace_oid": 50, "table_oid": 90, "index_oid": 91,
                                   "max_copy_bytes": 1024**3, "timeout_seconds": 120},
+            "identity_registry": {"old_oid": 92, "new_oid": 93},
         },
         "artifacts": {},
     }
@@ -67,6 +68,7 @@ def test_only_current_boundary_fields_can_change_in_approved_scope(artifacts):
     assert sha256(witness).hexdigest() == execution["evidence"]["candidate_transaction_witness"]
     assert execution["audit_set_hash"] == reviewed["scope"]["audit_set_hash"]
     assert execution["raw_mapping_index"] == reviewed["scope"]["raw_mapping_index"]
+    assert execution["identity_registry"] == reviewed["scope"]["identity_registry"]
     assert len(execution_hash) == 64
     with pytest.raises(ValueError, match="final_boundary_missing"):
         package.bind_execution(reviewed, approved_package_hash=approved, source_commit_seq=99,
@@ -78,6 +80,10 @@ def test_only_current_boundary_fields_can_change_in_approved_scope(artifacts):
         with pytest.raises(ValueError, match="raw_index_scope_invalid"):
             package.bind_execution(unbound, approved_package_hash=approved, source_commit_seq=105,
                                    provider_boundary="c" * 64, independent_recovery="d" * 64)
+    unbound = {**reviewed, "scope": {**reviewed["scope"], "identity_registry": {"old_oid": 92, "new_oid": 92}}}
+    with pytest.raises(ValueError, match="identity_registry_scope_invalid"):
+        package.bind_execution(unbound, approved_package_hash=approved, source_commit_seq=105,
+                               provider_boundary="c" * 64, independent_recovery="d" * 64)
 
 
 def test_changed_evidence_or_inventory_refuses_the_package(artifacts):

@@ -21,7 +21,7 @@ from portal.backend.service.storage.repos.fact_reclamation import PostgresCanoni
 from scripts.db import canonical_cold_activate as activation
 from scripts.db.canonical_cold_audit import audit_candidate
 from scripts.db.canonical_cold_database_fence import close_database_fence, reopen_database_fence
-from scripts.db.canonical_cold_identity_rebuild import prepare_identity_suffix
+from scripts.db.canonical_cold_identity_rebuild import PREVIOUS, finalize_identity_suffix, prepare_identity_suffix
 from scripts.db.canonical_cold_load import TargetDatabase, load_checkpoint
 from scripts.db.canonical_cold_migration import MigrationCheckpoint, PostgresMigrationSource, stage
 from scripts.db.canonical_cold_raw_index import inspect_raw_mapping_index_member
@@ -123,7 +123,7 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
                 SELECT to_regclass(:name)::oid::bigint
             """), {"name": f"market.{payload}"})}
         with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn, conn.begin():
-            prepare_identity_suffix(conn, expected_database=token, cutoff=end)
+            identity = prepare_identity_suffix(conn, expected_database=token, cutoff=end)
         target = TargetDatabase(cluster, target_identity["database"], target_identity["database_oid"])
         checkpoint = MigrationCheckpoint(tmp_path / "legacy-checkpoint.sqlite")
         assert stage(source, checkpoint, day=day, source_store=old_store, destination_store=candidate_store,
@@ -145,7 +145,8 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
                      "source_database": target_identity, "audit_set_hash": audit["audit_set_hash"],
                      "source_commit_seq": source_commit, "loaded_inventory_hash": audit["loaded_inventory_hash"],
                      "payload_children": payload_children, "custody_target_id": "activation-fixture",
-                     "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids}
+                     "custody_tablespace_oid": custody_tablespace, "custody_relation_oids": custody_oids,
+                     "identity_registry": {key: identity[key] for key in ("old_oid", "new_oid")}}
         execution["raw_mapping_index"] = raw_scope if native_raw_index else _stub_raw_index_case(monkeypatch)
         outcome = {"execution": execution, "expected_execution_hash": archive_evidence_hash(execution)}
         with _fence_connections(storage) as (conn, control):
@@ -157,8 +158,14 @@ def legacy_rollback_clone(storage, tmp_path, monkeypatch, request):
             with conn.begin():
                 certificate = activation.activate_cold_storage(conn, **outcome, receipts=receipts,
                                                               verified_objects=verified, database_fence=fence)
+                if native_raw_index:
+                    finalize_identity_suffix(conn, expected_database=token, cutoff=end, **execution["identity_registry"],
+                                             verified_recovery_digest=execution["evidence"]["independent_recovery"])
+                    assert conn.scalar(text(f"SELECT to_regclass('{PREVIOUS}') IS NULL"))
             reopen_database_fence(fence, control, expected_outcome="committed", record=lambda *_: None,
-                                  read_outcome=lambda db: activation.read_activation_outcome(db, **outcome))
+                                  read_outcome=lambda db: activation.read_activation_outcome(
+                                      db, **outcome, require_identity_retired=native_raw_index,
+                                  ))
         yield SimpleNamespace(
             storage=storage, source=source, donor=donor, target_identity=target_identity, donor_identity=donor_identity,
             donor_scope=donor_scope, audit=audit, forward_receipts=[forward], candidate_store=candidate_store,

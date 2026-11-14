@@ -319,6 +319,7 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
         "custody_target_id": "activation-fixture", "custody_tablespace_oid": custody_tablespace,
         "custody_relation_oids": custody_oids,
         "raw_mapping_index": raw_scope,
+        "identity_registry": {key: identity[key] for key in ("old_oid", "new_oid")},
     }
     if owner_path:
         execution["evidence"]["candidate_transaction_witness"] = sha256(candidate_witness).hexdigest()
@@ -422,13 +423,37 @@ def _exercise_exact_activation(storage, tmp_path, monkeypatch, *, owner_path, na
             with retained.begin():
                 assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
                 assert retained.scalar(text("SELECT to_regclass('market.fact_versions_legacy') IS NOT NULL"))
+                assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
+                assert retained.scalar(text(f"SELECT '{STAGED}'::regclass::oid")) == identity["new_oid"]
                 if native:
                     assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
             phases.clear()
-            run_fenced_transition(retained, control, **owner, verified_objects=verified)
+
+            if native:
+                def fail_after_registry_drop(connection, **arguments):
+                    finalize_registry(connection, **arguments)
+                    assert connection.scalar(text(f"SELECT to_regclass('{PREVIOUS}') IS NULL"))
+                    raise RuntimeError("fixture interrupted after identity drop")
+
+                finalize_registry = transition_runner.finalize_identity_suffix
+                with monkeypatch.context() as patch:
+                    patch.setattr(transition_runner, "finalize_identity_suffix", fail_after_registry_drop)
+                    with pytest.raises(RuntimeError, match="fixture interrupted after identity drop"):
+                        run_fenced_transition(retained, control, **owner, verified_objects=verified)
+                with retained.begin():
+                    assert activation.read_activation_outcome(retained, **outcome_arguments) == "original"
+                    assert retained.scalar(text(f"SELECT '{SOURCE}'::regclass::oid")) == identity["old_oid"]
+                    assert inspect_raw_mapping_index_member(retained)["tablespace_oid"] == 1663
+                phases.clear()
+            result = run_fenced_transition(retained, control, **owner, verified_objects=verified)
         assert phases == ["login_closing", "jobs_stopping", "database_fenced", "provider", "recovery", "activation_committing",
                           "accepted", "activation_verified", "login_opening", "jobs_restarting", "database_reopened"]
         assert events["activation_committing"]["execution_hash"] == outcome_arguments["expected_execution_hash"]
+        assert events["activation_verified"]["identity_retirement"] == result["identity_retirement"]
+        assert result["identity_retirement"]["verified_recovery_digest"] == execution["evidence"]["independent_recovery"]
+        with engine.begin() as conn:
+            assert conn.scalar(text(f"SELECT to_regclass('{PREVIOUS}') IS NULL"))
+            assert activation.read_activation_outcome(conn, **outcome_arguments, require_identity_retired=True) == "committed"
         if native:
             with engine.begin() as conn:
                 receipt_hash = conn.scalar(text("SELECT evidence->'raw_mapping_index'->>'receipt_hash' FROM market.fact_storage_state"))
