@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import os
+import json
 from pathlib import Path
 import shutil
 
@@ -13,7 +14,7 @@ from market_data.archive import DurableRawSpoolSegment
 from market_data.structure import RawStreamRecord
 from scripts.automation.stage_encrypted_recovery_handoff import TransferLimits
 from scripts.db.canonical_cold_recovery_pending_spool import (
-    PendingSpoolScope, measure_pending_spool, stage_pending_spool, verify_pending_spool,
+    PendingSpoolScope, measure_pending_spool, measure_pending_spool_before_anchor, stage_pending_spool, verify_pending_spool,
 )
 
 
@@ -75,9 +76,31 @@ def test_two_pending_sealed_segments_survive_encrypted_isolated_transfer(tmp_pat
     assert not (receiving / ".pending-spool").exists()
     measured = measure_pending_spool(source=source, scope=scope, boundary=boundary, timeout_seconds=15,
                                      max_entries=128, check_held=check_held)
+    pre_anchor = measure_pending_spool_before_anchor(source=source, scope=scope,
+        database_identity=boundary["database_identity"], source_commit_seq=boundary["source_commit_seq"],
+        timeout_seconds=15, max_entries=128, check_held=check_held)
+    assert pre_anchor["boundary"] == {"database_identity": "12345/6789", "source_commit_seq": 42}
+    assert pre_anchor["segments"] == measured["segments"]
+    stage.update(pre_anchor=pre_anchor, expected_pre_anchor_sha256=pre_anchor["source_sha256"])
+    with pytest.raises(ValueError, match="pre_anchor_binding_changed"):
+        stage_pending_spool(**(stage | {"boundary": boundary | {"source_commit_seq": 43}}))
+    clean_native = early.sealed_path.read_bytes()
+    header, *records = clean_native.splitlines(keepends=True)
+    descriptor = json.loads(header)
+    changed_header = header.replace(descriptor["created_at"].encode(),
+                                    str(1 + int(descriptor["created_at"][:4])).encode() + descriptor["created_at"][4:].encode())
+    assert len(changed_header) == len(header) and changed_header != header
+    try:
+        early.sealed_path.write_bytes(changed_header + b"".join(records))
+        with pytest.raises(RuntimeError, match="pre_anchor_bytes_changed"):
+            stage_pending_spool(**stage)
+        assert not (receiving / "pending-spool").exists()
+    finally:
+        early.sealed_path.write_bytes(clean_native)
     staged = stage_pending_spool(**stage)
     assert {key: staged[key] for key in ("scope", "boundary", "segments")} == {
         key: measured[key] for key in ("scope", "boundary", "segments")}
+    assert staged["pre_anchor_sha256"] == pre_anchor["source_sha256"]
     assert stage_pending_spool(**stage) == staged
     held = False
     with pytest.raises(AssertionError):
@@ -92,7 +115,10 @@ def test_two_pending_sealed_segments_survive_encrypted_isolated_transfer(tmp_pat
     finally:
         first.write_bytes(clean)
 
-    receiver = dict(inactive_restore=inactive, expected_transfer_sha256=staged["transfer_sha256"], decryption_key=key, **common)
+    receiver = dict(inactive_restore=inactive, expected_transfer_sha256=staged["transfer_sha256"], decryption_key=key,
+                    expected_pre_anchor_sha256=pre_anchor["source_sha256"], **common)
+    with pytest.raises(RuntimeError, match="receipt_scope_changed"):
+        verify_pending_spool(**(receiver | {"expected_pre_anchor_sha256": "a" * 64}))
     with monkeypatch.context() as patch:
         patch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(inactive))
         with pytest.raises(ValueError, match="inactive_path_required"):
@@ -114,6 +140,7 @@ def test_two_pending_sealed_segments_survive_encrypted_isolated_transfer(tmp_pat
     verified = verify_pending_spool(**receiver)
     assert verified == verify_pending_spool(**receiver)
     assert verified["boundary"] == boundary
+    assert verified["pre_anchor_sha256"] == pre_anchor["source_sha256"]
     assert [item["first_receive_ordinal"] for item in verified["segments"]] == [650, 652]
     assert [item["last_receive_ordinal"] for item in verified["segments"]] == [651, 654]
     results = []

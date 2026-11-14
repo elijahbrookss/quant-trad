@@ -29,9 +29,11 @@ from scripts.db.canonical_cold_recovery_wal_transfer import _receiving_lock
 
 _VERSION = "qt.pending_raw_spool_transport.v1"
 _VERIFIED = "qt.pending_raw_spool_verified.v1"
+_SOURCE = "qt.pending_raw_spool_source.v1"
+_PRE_ANCHOR = "qt.pending_raw_spool_source_before_anchor.v1"
 _BUNDLE = "pending-spool"
 _FILE = re.compile(r"spool_[0-9a-f]{64}\.sealed")
-_BOUNDARY_FIELDS = {"database_identity", "source_commit_seq", "anchor_sha256"}
+_SOURCE_BOUNDARY_FIELDS = {"database_identity", "source_commit_seq"}
 
 
 @dataclass(frozen=True)
@@ -61,11 +63,12 @@ class PendingSpoolScope:
         return Path(_safe_component(self.definition_id), _safe_component(self.session_id), f"epoch={self.connection_epoch}")
 
 
-def _boundary(boundary):
-    if (not isinstance(boundary, dict) or boundary.keys() != _BOUNDARY_FIELDS
+def _boundary(boundary, *, anchored=True):
+    fields = _SOURCE_BOUNDARY_FIELDS | {"anchor_sha256"} if anchored else _SOURCE_BOUNDARY_FIELDS
+    if (not isinstance(boundary, dict) or boundary.keys() != fields
             or not re.fullmatch(r"[1-9][0-9]*/[1-9][0-9]*", str(boundary["database_identity"]))
             or type(boundary["source_commit_seq"]) is not int or boundary["source_commit_seq"] < 0
-            or not _sha256(boundary["anchor_sha256"])):
+            or (anchored and not _sha256(boundary["anchor_sha256"]))):
         raise ValueError("canonical_recovery_pending_spool_invalid_boundary")
     return dict(boundary)
 
@@ -123,6 +126,12 @@ def _read(path, expected, check):
     return b"".join(chunks)
 
 
+def pending_spool_record_witness(*, receive_ordinal, received_at, raw_record_id, raw_frame_sha256, observed_channel):
+    """Serialize the same raw identity and receive clocks for sealed and archived frames."""
+    material = [receive_ordinal, received_at.isoformat(), raw_record_id, raw_frame_sha256, observed_channel]
+    return (json.dumps(material, separators=(",", ":")) + "\n").encode()
+
+
 def _descriptor(relative, raw, scope, check):
     check()
     header, records = read_sealed_spool_bytes(raw)
@@ -146,9 +155,9 @@ def _descriptor(relative, raw, scope, check):
         if ((record.definition_id, record.session_id, record.connection_epoch) != source
                 or (record.provider, record.venue, record.provider_product_id, record.requested_channel) != stream):
             raise RuntimeError("canonical_recovery_pending_spool_record_scope_mismatch")
-        material = [record.receive_ordinal, record.received_at.isoformat(), record.raw_record_id,
-                    record.raw_frame_sha256, record.observed_channel]
-        rows.update((json.dumps(material, separators=(",", ":")) + "\n").encode())
+        rows.update(pending_spool_record_witness(receive_ordinal=record.receive_ordinal, received_at=record.received_at,
+            raw_record_id=record.raw_record_id, raw_frame_sha256=record.raw_frame_sha256,
+            observed_channel=record.observed_channel))
     return {"path": relative, "segment_id": segment_id, "segment_ordinal": ordinal, "bytes": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(), "created_at": created.astimezone(UTC).isoformat(),
             "records": len(records), "records_sha256": rows.hexdigest(),
@@ -186,10 +195,22 @@ def _roots_check(deadline, *roots):
 
 def measure_pending_spool(*, source, scope, boundary, timeout_seconds, max_entries, check_held):
     """Measure the exact sealed set from a held source without a copy or filesystem mutation."""
+    return _measure_source(source=source, scope=scope, boundary=_boundary(boundary), schema=_SOURCE,
+                           timeout_seconds=timeout_seconds, max_entries=max_entries, check_held=check_held)
+
+
+def measure_pending_spool_before_anchor(*, source, scope, database_identity, source_commit_seq,
+                                       timeout_seconds, max_entries, check_held):
+    """Measure held native spool bytes at a database and commit before a named anchor exists."""
+    boundary = _boundary({"database_identity": database_identity, "source_commit_seq": source_commit_seq}, anchored=False)
+    return _measure_source(source=source, scope=scope, boundary=boundary, schema=_PRE_ANCHOR,
+                           timeout_seconds=timeout_seconds, max_entries=max_entries, check_held=check_held)
+
+
+def _measure_source(*, source, scope, boundary, schema, timeout_seconds, max_entries, check_held):
     if (not isinstance(scope, PendingSpoolScope) or not callable(check_held) or type(max_entries) is not int
             or not 1 <= max_entries <= 1_000_000 or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 600):
         raise ValueError("canonical_recovery_pending_spool_invalid_limits")
-    boundary = _boundary(boundary)
     source = Path(source)
     if source.resolve(strict=True) != source or not source.is_dir():
         raise ValueError("canonical_recovery_pending_spool_invalid_source")
@@ -202,7 +223,7 @@ def measure_pending_spool(*, source, scope, boundary, timeout_seconds, max_entri
         check_held()
 
     check()
-    measured = {"schema": "qt.pending_raw_spool_source.v1", "scope": asdict(scope), "boundary": boundary,
+    measured = {"schema": schema, "scope": asdict(scope), "boundary": boundary,
                 "segments": _measure(source, scope, max_entries, check)}
     check()
     return measured | {"source_sha256": archive_evidence_hash(measured)}
@@ -217,12 +238,26 @@ def _report(path):
     return _bound_json(path, digest), digest
 
 
+def _pre_anchor_binding(pre_anchor, expected_hash, scope, boundary):
+    if pre_anchor is None and expected_hash is None:
+        return {}
+    if (not isinstance(pre_anchor, dict) or not _sha256(expected_hash)
+            or pre_anchor.keys() != {"schema", "scope", "boundary", "segments", "source_sha256"}
+            or pre_anchor["schema"] != _PRE_ANCHOR or pre_anchor["source_sha256"] != expected_hash
+            or archive_evidence_hash({key: value for key, value in pre_anchor.items() if key != "source_sha256"}) != expected_hash
+            or pre_anchor["scope"] != asdict(scope)
+            or pre_anchor["boundary"] != {key: boundary[key] for key in _SOURCE_BOUNDARY_FIELDS}):
+        raise ValueError("canonical_recovery_pending_spool_pre_anchor_binding_changed")
+    return {"pre_anchor_sha256": expected_hash}
+
+
 def stage_pending_spool(*, source, receiving, private_scratch, scope, boundary, restic, encryption_key,
-                        limits, max_entries, check_held):
+                        limits, max_entries, check_held, pre_anchor=None, expected_pre_anchor_sha256=None):
     """Preserve already sealed and unacknowledged source files under the caller's publisher hold."""
     if not isinstance(scope, PendingSpoolScope) or not callable(check_held) or type(max_entries) is not int or not 1 <= max_entries <= 1_000_000:
         raise ValueError("canonical_recovery_pending_spool_invalid_limits")
     boundary = _boundary(boundary)
+    binding = _pre_anchor_binding(pre_anchor, expected_pre_anchor_sha256, scope, boundary)
     source = Path(source)
     scratch, scratch_id = _private_root(private_scratch)
     receiving, receiver_id = _private_root(receiving)
@@ -244,6 +279,11 @@ def stage_pending_spool(*, source, receiving, private_scratch, scope, boundary, 
         if available < limits.reserve_bytes or free - available > limits.bytes:
             raise RuntimeError("canonical_recovery_pending_spool_receiving_capacity_exceeded")
 
+    def bind_segments(segments):
+        if binding and segments != pre_anchor["segments"]:
+            raise RuntimeError("canonical_recovery_pending_spool_pre_anchor_bytes_changed")
+        return {"schema": _VERSION, "scope": asdict(scope), "boundary": boundary, "segments": segments, **binding}
+
     with _receiving_lock(receiving):
         check()
         destination = receiving / _BUNDLE
@@ -251,8 +291,9 @@ def stage_pending_spool(*, source, receiving, private_scratch, scope, boundary, 
             published, identity = _private_root(destination)
             observed, digest = _report(published / "complete.json")
             segments = _measure(source, scope, max_entries, check)
-            fields = {"schema": _VERSION, "scope": asdict(scope), "boundary": boundary, "segments": segments}
+            fields = bind_segments(segments)
             if (identity[0] != receiver_id[0] or any(observed.get(key) != value for key, value in fields.items())
+                    or observed.get("pre_anchor_sha256") != expected_pre_anchor_sha256
                     or observed.get("ciphertext") != _encrypted_inventory(published / "restic", receiver_id[0], limits, check)):
                 raise RuntimeError("canonical_recovery_pending_spool_existing_bundle_changed")
             return observed | {"transfer_sha256": digest}
@@ -263,6 +304,7 @@ def stage_pending_spool(*, source, receiving, private_scratch, scope, boundary, 
             payload = Path(work) / "spool"
             payload.mkdir(mode=0o700)
             segments = _measure(source, scope, max_entries, check, write_to=payload)
+            fields = bind_segments(segments)
             pending = Path(unpublished) / "bundle"
             pending.mkdir(mode=0o700)
             repository = pending / "restic"
@@ -279,7 +321,7 @@ def stage_pending_spool(*, source, receiving, private_scratch, scope, boundary, 
                 raise RuntimeError("canonical_recovery_pending_spool_snapshot_invalid")
             if segments != _measure(source, scope, max_entries, check):
                 raise RuntimeError("canonical_recovery_pending_spool_source_changed")
-            report = {"schema": _VERSION, "scope": asdict(scope), "boundary": boundary, "segments": segments,
+            report = {**fields,
                       "snapshot": summaries[0]["snapshot_id"], "snapshot_spool_root": str(payload),
                       "ciphertext": _encrypted_inventory(repository, receiver_id[0], limits, check)}
             _json_write(pending / "complete.json", report)
@@ -293,7 +335,7 @@ def stage_pending_spool(*, source, receiving, private_scratch, scope, boundary, 
 
 
 def verify_pending_spool(*, receiving, expected_transfer_sha256, scope, boundary, inactive_restore,
-                         restic, decryption_key, limits, max_entries):
+                         restic, decryption_key, limits, max_entries, expected_pre_anchor_sha256=None):
     """Restore into a private inactive path and verify exact sealed bytes with no writes to a running spool."""
     if not isinstance(scope, PendingSpoolScope) or type(max_entries) is not int or not 1 <= max_entries <= 1_000_000:
         raise ValueError("canonical_recovery_pending_spool_invalid_limits")
@@ -309,8 +351,11 @@ def verify_pending_spool(*, receiving, expected_transfer_sha256, scope, boundary
     bundle, bundle_id = _private_root(receiving / _BUNDLE)
     repository, repo_id = _private_root(bundle / "restic")
     receipt = _bound_json(bundle / "complete.json", expected_transfer_sha256)
+    pre_anchor_sha256 = receipt.get("pre_anchor_sha256")
     if (bundle_id[0] != receiver_id[0] or repo_id[0] != receiver_id[0] or receipt.get("schema") != _VERSION
             or receipt.get("scope") != asdict(scope) or receipt.get("boundary") != _boundary(boundary)
+            or (pre_anchor_sha256 is not None and not _sha256(pre_anchor_sha256))
+            or (expected_pre_anchor_sha256 is not None and pre_anchor_sha256 != expected_pre_anchor_sha256)
             or not _sha256(receipt.get("snapshot"))):
         raise RuntimeError("canonical_recovery_pending_spool_receipt_scope_changed")
 
@@ -325,6 +370,8 @@ def verify_pending_spool(*, receiving, expected_transfer_sha256, scope, boundary
     result = {"schema": _VERIFIED, "boundary": receipt["boundary"], "scope": receipt["scope"],
               "transfer_sha256": expected_transfer_sha256, "snapshot": receipt["snapshot"],
               "segments": receipt["segments"]}
+    if pre_anchor_sha256 is not None:
+        result["pre_anchor_sha256"] = pre_anchor_sha256
     result["verification_sha256"] = archive_evidence_hash(result)
     marker = inactive_restore / "pending-spool-verification.json"
     destination = inactive_restore / "spool"
