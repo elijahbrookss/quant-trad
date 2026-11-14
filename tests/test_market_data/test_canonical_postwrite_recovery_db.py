@@ -494,7 +494,48 @@ def test_named_wal_anchor_restores_original_layout_at_fenced_endpoint(storage, t
         restored._reset_engine()
 
 
-def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, monkeypatch):
+@pytest.fixture
+def signed_named_tablespace(storage):
+    engine = storage.database._engine
+    assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
+    source_root = Path("/qt-history/signed-source-tablespace")
+    source_root.mkdir(mode=0o700)
+    source_path = source_root / "space"
+    source_path.mkdir(mode=0o700)
+    (source_root / "source-volume").write_text("signed source history\n")
+    admin = create_engine(engine.url.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    try:
+        with admin.connect() as conn:
+            conn.execute(text("CREATE TABLESPACE signed_history_fixture LOCATION :path"), {"path": str(source_path)})
+        with engine.begin() as conn:
+            conn.exec_driver_sql("ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE signed_history_fixture")
+            conn.exec_driver_sql("ALTER INDEX market.ix_market_raw_archive_mapping_segment SET TABLESPACE signed_history_fixture")
+        yield source_path
+    finally:
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("ALTER INDEX market.ix_market_raw_archive_mapping_segment SET TABLESPACE pg_default")
+                conn.exec_driver_sql("ALTER TABLE market.raw_archive_record_mappings SET TABLESPACE pg_default")
+            engine.dispose()
+            with admin.connect() as conn:
+                conn.exec_driver_sql("DROP TABLESPACE IF EXISTS signed_history_fixture")
+        finally:
+            admin.dispose()
+
+
+def _signed_tablespace_member(conn):
+    return conn.execute(text("""
+        SELECT s.oid::bigint,pg_tablespace_location(s.oid),heap.oid::bigint,idx.oid::bigint,
+               pg_relation_filepath(heap.oid),pg_relation_filepath(idx.oid)
+        FROM pg_tablespace s
+        JOIN pg_class heap ON heap.reltablespace=s.oid AND heap.oid='market.raw_archive_record_mappings'::regclass
+        JOIN pg_class idx ON idx.reltablespace=s.oid AND idx.oid='market.ix_market_raw_archive_mapping_segment'::regclass
+        JOIN pg_index def ON def.indexrelid=idx.oid AND def.indrelid=heap.oid AND def.indisvalid
+        WHERE s.spcname='signed_history_fixture'
+    """)).one()
+
+
+def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, monkeypatch, signed_named_tablespace):
     assert os.getenv("QT_STORAGE_DEMO") == "1" and os.getuid() == 70
     engine = storage.database._engine
     assert engine.url.host == "timescaledb" and engine.url.database.startswith("qt_migration_")
@@ -502,6 +543,8 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         identity = _identity(conn)[0]
         cluster, db_oid = identity.split("/")
         target = {"system_identifier": cluster, "database_oid": int(db_oid), "database": engine.url.database}
+        member = _signed_tablespace_member(conn)
+        assert member[1] == str(signed_named_tablespace)
     objects = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     structures, claim, series = _define_trade_stream(storage, monkeypatch)
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
@@ -542,8 +585,16 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
     receipts = tmp_path / "site-receipts"
     workspace = restore_root / "receiver-workspace"
     pgdata = workspace / "pgdata"
-    for path in (scratch, pending_root, receipts, workspace, pgdata):
+    history = restore_root / "receiver-history"
+    history_path = history / "space"
+    negative = restore_root / "receiver-negative"
+    negative_data = negative / "pgdata"
+    for path in (scratch, pending_root, receipts, workspace, pgdata, history, history_path, negative, negative_data):
         path.mkdir(mode=0o700)
+    (history / "receiver-volume").write_text("signed receiver history\n")
+    assert history.stat().st_dev != signed_named_tablespace.stat().st_dev
+    alias = history / "aliased-space"
+    alias.symlink_to(history_path)
     later_trade = _later_trade(structures, tmp_path, claim, first_trade, trade_id="coordinator-at-anchor")
     scope, records, _ = _pending_level2(storage, structures, pending_root)
     start = first_trade.received_at - timedelta(seconds=10)
@@ -581,6 +632,17 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
         with target_engine.begin() as conn:
             assert _snapshot_layout(conn) == pair["storage_layout"]
             assert conn.scalar(text("SELECT current_setting('server_version_num')::int / 10000")) == 15
+            restored = _signed_tablespace_member(conn)
+            assert tuple(restored) == (member[0], str(history_path), *member[2:])
+            assert conn.execute(text("""
+                SELECT raw_record_id FROM market.raw_archive_record_mappings
+                WHERE raw_record_id=ANY(:ids) ORDER BY raw_record_id
+            """), {"ids": [first_trade.raw_record_id, later_trade.raw_record_id]}).scalars().all() == sorted(
+                (first_trade.raw_record_id, later_trade.raw_record_id))
+        assert (history / "receiver-volume").read_text() == "signed receiver history\n"
+        assert (signed_named_tablespace.parent / "source-volume").read_text() == "signed source history\n"
+        assert not (history / "source-volume").exists()
+        assert not (signed_named_tablespace.parent / "receiver-volume").exists()
         source_prefix = Path(str(objects.root).lstrip("/"))
         final = receiving / "final-archive" / "complete.json"
         suffix_prefix = Path(json.loads(final.read_text())["archive"]["archive_source_root"].lstrip("/"))
@@ -605,7 +667,24 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
                  for frame in DurableRawSpoolSegment.from_path(restored_pending / segment["path"]).records()]
         assert exact == records
         return archive_evidence_hash({"layout": pair["storage_layout"], "frozen": frozen.dataset_id,
-                                      "pending": pending["verification_sha256"]})
+                                      "pending": pending["verification_sha256"], "tablespace": list(restored)})
+
+    receiver_options = dict(site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
+        restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
+        suffix_key=suffix_key, pending_key=pending_key, boot_isolated=boot_isolated,
+        verify_original_runtime=verify_original, timeout_seconds=100)
+
+    def qualify_receiver():
+        with pytest.raises(ValueError, match="directory_invalid"):
+            recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data,
+                               tablespaces={"signed_history_fixture": alias})
+        with pytest.raises(ValueError, match="native_manifest_scope_changed"):
+            recover_named_site(**receiver_options, workspace=negative, pgdata=negative_data, tablespaces={})
+        assert not any(negative_data.iterdir())
+        assert not (receiving / "named-recovery-response.json").exists()
+        assert not (restore_root / "start").exists()
+        return recover_named_site(**receiver_options, workspace=workspace, pgdata=pgdata,
+                                  tablespaces={"signed_history_fixture": history_path})
 
     with activation_fixture._fence_connections(storage) as (retained, control):
         fence = close_database_fence(retained, control, expected_database=target, timeout_seconds=110, record=lambda *_: None)
@@ -618,10 +697,7 @@ def test_signed_named_receiver_coordinates_fenced_recovery(storage, tmp_path, mo
             provider_hash = archive_evidence_hash(provider)
             save_receipt(receipts / f"collector-drained-{provider_hash}.json", provider | {"sha256": provider_hash}, initial=True)
             with ThreadPoolExecutor(max_workers=1) as threads, archive_namespace(objects.root, exclusive=True) as check_archive:
-                result = threads.submit(recover_named_site, site=site, signing_key=receiver_sign, pgbackrest=worker.pgbackrest,
-                    restic=worker.restic, database_key=worker.config.database_key_path, base_archive_key=worker.config.archive_key_path,
-                    suffix_key=suffix_key, pending_key=pending_key, workspace=workspace, pgdata=pgdata, tablespaces={},
-                    boot_isolated=boot_isolated, verify_original_runtime=verify_original, timeout_seconds=100)
+                result = threads.submit(qualify_receiver)
                 def remaining():
                     if result.done():
                         result.result()
